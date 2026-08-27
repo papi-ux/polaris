@@ -12,6 +12,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <unistd.h>
@@ -23,12 +24,14 @@
 #include <drm_fourcc.h>
 #include <spa/param/video/raw.h>
 
+#include "src/capture_generation.h"
 #include "src/config.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/pipewire_capture.h"
 #include "src/platform/linux/portal_capability.h"
 #include "src/platform/linux/portal_session.h"
 #include "src/platform/linux/session_media.h"
+#include "src/platform/linux/virtual_display.h"
 
 #ifdef POLARIS_BUILD_WAYLAND
   #include "src/platform/linux/kwingrab.h"
@@ -39,6 +42,34 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
+  bool portal_capture_backend_allowed_for_tests(std::string_view capture_backend);
+  bool portal_capture_generation_matches_for_tests(
+    const capture_generation::identity_t &cached,
+    const capture_generation::identity_t &requested
+  );
+}
+
+namespace platf {
+  std::string capture_backend_dispatch_for_tests(
+    std::string_view capture_backend,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  );
+
+  std::string exact_capture_backend_dispatch_for_tests(
+    std::string_view capture_backend,
+    bool exact_output_owned,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  );
 }
 
 TEST(PortalCapabilityPolicyTests, ExplicitCaptureSelectionWinsOverStreamModeDefault) {
@@ -101,74 +132,136 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayRequestsMonitorSourceDespiteHeadle
   EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "host_virtual_display"), 1u);
 }
 
+TEST(PortalGrabPolicyTests, EmptyModeSourcePolicyDoesNotReadMutableGlobalMode) {
+  const auto original_mode = config::video.linux_display.stream_mode;
+  config::video.linux_display.stream_mode = "host_virtual_display";
+  EXPECT_EQ(portal::capture_type_for_stream_display(true, false, ""), 2u);
+  config::video.linux_display.stream_mode = original_mode;
+}
+
+TEST(PortalGrabPolicyTests, ExplicitBackendDispatchNeverFallsThrough) {
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("wlr", false, false, true, false, false, false), "none");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("wlr", false, true, true, false, false, false), "wayland");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("portal", false, true, true, true, true, false), "portal");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("kms", false, true, true, false, true, false), "none");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("auto", false, true, true, true, true, false), "wayland");
+  EXPECT_EQ(platf::capture_backend_dispatch_for_tests("bogus", true, true, true, true, true, true), "none");
+}
+
+TEST(PortalGrabPolicyTests, ExactOwnedBackendMustBeConcrete) {
+  EXPECT_EQ(platf::exact_capture_backend_dispatch_for_tests("", true, false, false, true, false, false, false), "none");
+  EXPECT_EQ(platf::exact_capture_backend_dispatch_for_tests("auto", true, false, true, true, false, false, false), "none");
+  EXPECT_EQ(platf::exact_capture_backend_dispatch_for_tests("", false, false, false, true, false, false, false), "portal");
+}
+
+TEST(PortalGrabPolicyTests, PortalAcceptsOnlyPortalAuthority) {
+  for (const auto backend : {"", "auto", "portal", "kwin"}) {
+    EXPECT_TRUE(portal::portal_capture_backend_allowed_for_tests(backend)) << backend;
+  }
+  for (const auto backend : {"wlr", "kms", "drm", "x11", "nvfbc"}) {
+    EXPECT_FALSE(portal::portal_capture_backend_allowed_for_tests(backend)) << backend;
+  }
+}
+
+TEST(PortalGrabPolicyTests, CaptureCacheReuseRequiresTheWholeImmutableGeneration) {
+  const capture_generation::identity_t generation {
+    .generation_id = 42,
+    .exact_display_name = "DVI-I-1",
+    .requested_output_name = "DVI-I-1",
+    .stream_mode = "host_virtual_display",
+    .capture_backend = "portal",
+    .private_runtime = "",
+    .adapter_name = "/dev/dri/renderD128",
+    .headless_mode = true,
+    .use_cage_compositor = false,
+  };
+  EXPECT_TRUE(portal::portal_capture_generation_matches_for_tests(generation, generation));
+
+  std::vector<capture_generation::identity_t> mismatches(9, generation);
+  mismatches[0].generation_id = 43;
+  mismatches[1].exact_display_name = "DVI-I-2";
+  mismatches[2].requested_output_name = "HDMI-A-1";
+  mismatches[3].stream_mode = "desktop_display";
+  mismatches[4].capture_backend = "wlr";
+  mismatches[5].private_runtime = "gamescope";
+  mismatches[6].adapter_name = "/dev/dri/renderD129";
+  mismatches[7].headless_mode = false;
+  mismatches[8].use_cage_compositor = true;
+  for (const auto &mismatch : mismatches) {
+    EXPECT_FALSE(portal::portal_capture_generation_matches_for_tests(generation, mismatch));
+  }
+}
+
 #ifdef POLARIS_BUILD_WAYLAND
-TEST(PortalGrabPolicyTests, KwingrabPreferredForHostKdeModesIncludingVirtualDisplay) {
-  struct config_guard_t {
-    config::video_t::linux_display_t linux_display = config::video.linux_display;
-
-    ~config_guard_t() {
-      config::video.linux_display = linux_display;
-    }
-  } guard;
-
-  auto &ld = config::video.linux_display;
-
-  // Host KDE paths pin capture through kwingrab. host_virtual_display must be
-  // one of them: its EVDI output is composited by KWin, and kwingrab is the
-  // only path that can select that output by name — the portal picker cannot.
+TEST(PortalGrabPolicyTests, KwingrabPreferenceUsesImmutableGenerationPolicy) {
+  capture_generation::identity_t generation;
   for (const char *mode : {"desktop_display", "headless_dongle", "host_virtual_display"}) {
-    ld.stream_mode = mode;
-    EXPECT_TRUE(kwingrab::prefer_for_current_stream_mode()) << mode;
+    generation.stream_mode = mode;
+    EXPECT_TRUE(kwingrab::prefer_for_generation(generation)) << mode;
+  }
+  for (const char *mode : {"windowed_stream", "headless_stream", "gamescope_stream"}) {
+    generation.stream_mode = mode;
+    EXPECT_FALSE(kwingrab::prefer_for_generation(generation)) << mode;
   }
 
-  // Private compositor runtimes stay on gamescopegrab / portal / wlroots.
-  for (const char *mode : {"windowed_stream", "headless_stream", "gamescope_stream"}) {
-    ld.stream_mode = mode;
-    EXPECT_FALSE(kwingrab::prefer_for_current_stream_mode()) << mode;
+  generation.stream_mode.clear();
+  generation.use_cage_compositor = false;
+  generation.private_runtime.clear();
+  EXPECT_TRUE(kwingrab::prefer_for_generation(generation));
+  generation.private_runtime = "gamescope";
+  EXPECT_FALSE(kwingrab::prefer_for_generation(generation));
+  generation.private_runtime.clear();
+  generation.use_cage_compositor = true;
+  EXPECT_FALSE(kwingrab::prefer_for_generation(generation));
+}
+TEST(PortalGrabPolicyTests, KwingrabRequirementUsesImmutableGenerationPolicy) {
+  capture_generation::identity_t generation;
+  generation.stream_mode = "host_virtual_display";
+  EXPECT_TRUE(kwingrab::require_for_generation(generation));
+
+  for (const char *unrequired : {"desktop_display", "headless_dongle", "windowed_stream", ""}) {
+    generation.stream_mode = unrequired;
+    EXPECT_FALSE(kwingrab::require_for_generation(generation)) << unrequired;
   }
+}
+
+TEST(PortalGrabPolicyTests, KwingrabNamedOutputMissCannotFallback) {
+  EXPECT_TRUE(kwingrab::output_selection_can_fallback(""));
+  EXPECT_FALSE(kwingrab::output_selection_can_fallback("DVI-I-1"));
 }
 #endif
 
 namespace platf {
-  bool host_virtual_display_needs_portal();
+  bool host_virtual_display_needs_portal_for_backend(
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    virtual_display::backend_e backend
+  );
 }
 
-TEST(PortalGrabPolicyTests, HostVirtualDisplayIsKeptOffTheAutoWlrSource) {
-  // Companion to PR #351's kwingrab routing: even with the right kwingrab
-  // preference, host_virtual_display only reaches portal_grab (hence kwingrab)
-  // if reevaluate_capture_sources does NOT auto-select the direct WAYLAND/wlr
-  // source first — which binds the desktop wayland-0 (no wlr-export-dmabuf) and
-  // hard-fails every encoder. This guards the source-selection half of that fix.
-  struct config_guard_t {
-    config::video_t::linux_display_t linux_display = config::video.linux_display;
-    std::string capture = config::video.capture;
+TEST(PortalGrabPolicyTests, HostVirtualDisplayCaptureRoutingDependsOnBackend) {
+  using virtual_display::backend_e;
 
-    ~config_guard_t() {
-      config::video.linux_display = linux_display;
-      config::video.capture = capture;
+  for (const auto backend : {backend_e::EVDI, backend_e::KSCREEN_DOCTOR, backend_e::NONE}) {
+    EXPECT_TRUE(platf::host_virtual_display_needs_portal_for_backend(
+      "host_virtual_display", false, backend
+    ));
+  }
+
+  EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(
+    "host_virtual_display", false, backend_e::WAYLAND_WLR
+  )) << "a native wlroots headless output must be captured directly by name";
+
+  for (const auto backend : {backend_e::EVDI, backend_e::WAYLAND_WLR, backend_e::KSCREEN_DOCTOR, backend_e::NONE}) {
+    EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(
+      "host_virtual_display", true, backend
+    )) << "a cage compositor owns its own capture source";
+
+    for (const auto mode :
+         {"windowed_stream", "headless_stream", "gamescope_stream", "desktop_display", "headless_dongle", ""}) {
+      EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(mode, false, backend))
+        << mode;
     }
-  } guard;
-
-  auto &ld = config::video.linux_display;
-  config::video.capture.clear();  // the auto path is where the bug lived
-
-  // host_virtual_display composites through KWin (use_cage stays false): must
-  // be kept off the auto wlr source so PORTAL (→ kwingrab) is chosen.
-  ld.stream_mode = "host_virtual_display";
-  ld.use_cage_compositor = false;
-  EXPECT_TRUE(platf::host_virtual_display_needs_portal());
-
-  // A cage-compositor session (the booleans HVD never carries) streams through
-  // labwc's own wlr socket, not portal — must NOT be diverted.
-  ld.use_cage_compositor = true;
-  EXPECT_FALSE(platf::host_virtual_display_needs_portal());
-
-  // Every other mode keeps its existing source selection untouched.
-  ld.use_cage_compositor = false;
-  for (const char *mode :
-       {"windowed_stream", "headless_stream", "gamescope_stream", "desktop_display", "headless_dongle", ""}) {
-    ld.stream_mode = mode;
-    EXPECT_FALSE(platf::host_virtual_display_needs_portal()) << mode;
   }
 }
 
@@ -329,8 +422,11 @@ TEST(PortalGrabPolicyTests, TeardownCancellationCoversRemoteReopenAndRetryLoop) 
   EXPECT_NE(open_body.find("&out_fd_list,\n      cancellable,"), std::string::npos)
     << "OpenPipeWireRemote must receive the registered cancellable";
 
-  const auto ensure_begin = grab_source.find("static bool ensure_session_unlocked()");
-  const auto ensure_end = grab_source.find("static bool ensure_global_session()", ensure_begin);
+  const auto ensure_begin = grab_source.find("static bool ensure_session_unlocked(const capture_generation::identity_t &generation)");
+  const auto ensure_end = grab_source.find(
+    "static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(",
+    ensure_begin
+  );
   ASSERT_NE(ensure_begin, std::string::npos);
   ASSERT_NE(ensure_end, std::string::npos);
   const auto ensure_body = grab_source.substr(ensure_begin, ensure_end - ensure_begin);
@@ -419,7 +515,7 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   EXPECT_NE(grab.find("g_media_mu"), std::string::npos);
   EXPECT_EQ(grab.find("g_portal_mu"), std::string::npos);
   EXPECT_EQ(grab.find("g_capture_mtx"), std::string::npos);
-  EXPECT_NE(grab.find("ensure_session_unlocked()"), std::string::npos);
+  EXPECT_NE(grab.find("ensure_session_unlocked(generation)"), std::string::npos);
   EXPECT_NE(grab.find("Wait outside g_media_mu"), std::string::npos);
   EXPECT_NE(grab.find("pipewire_capture::capture_t"), std::string::npos);
   EXPECT_NE(grab.find("polaris-gamescope-force"), std::string::npos);
@@ -438,7 +534,7 @@ TEST(PortalGrabPolicyTests, EnsureGlobalCaptureLockContractAndUniqueTokens) {
   const auto fn_end = grab.find("class portal_display_t", fn_start);
   ASSERT_NE(fn_end, std::string::npos);
   const auto fn = grab.substr(fn_start, fn_end - fn_start);
-  EXPECT_NE(fn.find("ensure_session_unlocked()"), std::string::npos);
+  EXPECT_NE(fn.find("ensure_session_unlocked(generation)"), std::string::npos);
   EXPECT_NE(fn.find("Wait outside g_media_mu"), std::string::npos);
   auto stripped = fn;
   for (;;) {

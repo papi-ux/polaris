@@ -4859,6 +4859,17 @@ namespace proc {
 #endif
 
 #if defined(__linux__)
+  void apply_app_display_semantics(
+    const proc::ctx_t &app,
+    rtsp_stream::launch_session_t &launch_session
+  ) {
+    if (!app.desktop_mirror) {
+      return;
+    }
+    launch_session.mirror_desktop = true;
+    launch_session.virtual_display = false;
+  }
+
   bool streaming_launch_requests_private_family(
     bool headless_mode,
     bool use_cage_compositor,
@@ -6488,6 +6499,7 @@ namespace proc {
 #endif
 
     ++_session_generation;
+    capture_generation.generation_id = _session_generation;
 #ifdef __linux__
     _session_instance_id = generate_session_token();
     _session_used_cage_compositor = false;
@@ -6507,11 +6519,9 @@ namespace proc {
     allow_client_commands = app.allow_client_commands;
 
 #ifdef __linux__
-    // Session-scoped stream-mode override (/launch streamMode): apply the mode
-    // to the IN-MEMORY config for this session only. Nothing here persists to
-    // disk; terminate_impl restores the saved values after teardown, so the
-    // host default survives every launch. Without an override this block only
-    // snapshots current values and behavior is identical to before.
+    // Snapshot the host display policy before any session-scoped override.
+    // Final mode derivation is intentionally deferred until device/AI
+    // optimization has settled launch_session->virtual_display.
     {
       auto &linux_display = config::video.linux_display;
       this->initial_stream_mode = linux_display.stream_mode;
@@ -6522,39 +6532,7 @@ namespace proc {
       this->initial_use_cage_compositor = linux_display.use_cage_compositor;
       this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
       this->initial_auto_manage_displays = linux_display.auto_manage_displays;
-      const std::string session_mode = launch_session ? launch_session->stream_mode : std::string {};
-      if (!session_mode.empty() &&
-          !(launch_session && launch_session->mirror_desktop) &&
-          !stream_display_policy::selection_companion_state_matches(session_mode)) {
-        std::string mode_error;
-        if (stream_display_policy::apply_selection(session_mode, mode_error)) {
-          // Saved-state restore is armed only when a mode was actually applied,
-          // so a no-override session touches nothing at save or teardown.
-          this->initial_linux_display_saved = true;
-          BOOST_LOG(info) << "process: session stream mode override ["sv << session_mode
-                          << "] applied in-memory for this session; host default restored at teardown"sv;
-          platf::reevaluate_capture_sources();
-        } else {
-          BOOST_LOG(warning) << "process: session stream mode override ["sv << session_mode
-                             << "] rejected: "sv << mode_error << "; using the host default"sv;
-        }
-      }
     }
-    const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
-    const bool gamescope_stream_session =
-      config::video.linux_display.stream_mode == "gamescope_stream" ||
-      config::video.linux_display.private_runtime == "gamescope";
-    _session_used_gamescope_runtime = gamescope_stream_session;
-    // Set true when a Steam title or Big Picture is rewired to its own
-    // polaris-gamescope-session compositor.
-    bool nested_wsi_session = false;
-    // Private nested runtime: labwc cage and/or owned/attach gamescope.
-    const bool use_cage_compositor_for_session =
-      !mirror_desktop_session &&
-      (config::video.linux_display.use_cage_compositor || gamescope_stream_session);
-    const bool requested_headless_for_session =
-      !mirror_desktop_session &&
-      (config::video.linux_display.headless_mode || gamescope_stream_session);
 #endif
 
     this->initial_display = config::video.output_name;
@@ -6802,7 +6780,66 @@ namespace proc {
                       << (launch_session->enable_hdr ? "true"sv : "false"sv);
     }
 
+    if (resolved_optimization.virtual_display.has_value()) {
+      launch_session->virtual_display = *resolved_optimization.virtual_display;
+    }
+
 #ifdef __linux__
+    if (_app.desktop_mirror) {
+      if (!launch_session->mirror_desktop || launch_session->virtual_display) {
+        BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
+                        << _app.name << "]; ignoring virtual-display preference for this session"sv;
+      }
+      apply_app_display_semantics(_app, *launch_session);
+    }
+
+    // Apply the session display policy only after device/AI optimization has
+    // finalized virtual_display. This generation then owns runtime topology,
+    // capture policy, and the creation decision together.
+    const bool virtual_display_requested_before_mode =
+      launch_session->virtual_display ||
+      (_app.virtual_display && !launch_session->user_locked_virtual_display);
+    const std::string session_mode = stream_display_policy::effective_session_selection_for_launch(
+      launch_session ? std::string_view {launch_session->stream_mode} : std::string_view {},
+      launch_session && launch_session->mirror_desktop,
+      launch_session && launch_session->virtual_display,
+      _app.virtual_display,
+      launch_session && launch_session->user_locked_virtual_display,
+      resolved_optimization.virtual_display.has_value()
+    );
+    if (!session_mode.empty()) {
+      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
+    }
+    if (!session_mode.empty() &&
+        !stream_display_policy::selection_companion_state_matches(session_mode)) {
+      std::string mode_error;
+      if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+        this->initial_linux_display_saved = true;
+        BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
+                        << "] applied in-memory after optimization; host default restored at teardown"sv;
+        platf::reevaluate_capture_sources();
+      } else {
+        BOOST_LOG(warning) << "process: final session stream mode override ["sv << session_mode
+                           << "] rejected: "sv << mode_error << "; using the host default"sv;
+      }
+    }
+
+    const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
+    const bool gamescope_stream_session =
+      config::video.linux_display.stream_mode == "gamescope_stream" ||
+      config::video.linux_display.private_runtime == "gamescope";
+    _session_used_gamescope_runtime = gamescope_stream_session;
+    // Set true when a Steam title or Big Picture is rewired to its own
+    // polaris-gamescope-session compositor.
+    bool nested_wsi_session = false;
+    // Private nested runtime: labwc cage and/or owned/attach gamescope.
+    const bool use_cage_compositor_for_session =
+      !mirror_desktop_session &&
+      (config::video.linux_display.use_cage_compositor || gamescope_stream_session);
+    const bool requested_headless_for_session =
+      !mirror_desktop_session &&
+      (config::video.linux_display.headless_mode || gamescope_stream_session);
+
     // Portal is_hdr reads this file. Write from final enable_hdr only.
     // Never restart gamescope or rewrite from encoder probe. Session owns restart.
     {
@@ -6887,10 +6924,6 @@ namespace proc {
     );
 #endif
 
-    if (resolved_optimization.virtual_display.has_value()) {
-      launch_session->virtual_display = *resolved_optimization.virtual_display;
-    }
-
     if (resolved_optimization.target_bitrate_kbps.has_value()) {
       launch_session->target_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
       config::video.max_bitrate = *resolved_optimization.target_bitrate_kbps;
@@ -6938,9 +6971,8 @@ namespace proc {
     const bool using_headless_cage_runtime =
       requested_headless_for_session &&
       use_cage_compositor_for_session;
-    if (using_headless_cage_runtime && launch_session->virtual_display) {
+    if (using_headless_cage_runtime && virtual_display_requested_before_mode) {
       BOOST_LOG(info) << "session_optimization: normalized virtual_display from true to false for headless cage runtime"sv;
-      launch_session->virtual_display = false;
       stream_stats::update_runtime_display_warning(
         "Virtual display request skipped: the private stream runtime provides this session's display."
       );
@@ -7149,6 +7181,7 @@ namespace proc {
           // Set virtual_display to true when everything went fine
           this->virtual_display = true;
           this->display_name = platf::to_utf8(vdisplayName);
+          this->capture_generation.exact_display_name = this->display_name;
 
           // When using virtual display, we don't care which display user configured to use.
           // So we always set output_name to the newly created virtual display as a workaround for
@@ -7184,10 +7217,7 @@ namespace proc {
     const bool using_headless_cage =
       display_policy.requested_headless &&
       display_policy.uses_labwc();
-    const bool should_use_linux_virtual_display =
-      display_policy.use_host_virtual_display ||
-      launch_session->virtual_display ||
-      (!launch_session->user_locked_virtual_display && _app.virtual_display);
+    const bool should_use_linux_virtual_display = display_policy.use_host_virtual_display;
 
     if (
       !display_policy.uses_labwc() &&
@@ -7214,6 +7244,7 @@ namespace proc {
           launch_session->virtual_display = true;
           this->virtual_display = true;
           this->display_name = linux_vdisplay->output_name;
+          this->capture_generation.exact_display_name = this->display_name;
 
           BOOST_LOG(info) << "Virtual Display created: "sv << linux_vdisplay->output_name
                           << " ("sv << render_width << "x"sv << render_height
@@ -7221,8 +7252,13 @@ namespace proc {
                           << virtual_display::backend_name(linux_vdisplay->backend);
 
           // Set output_name to the newly created virtual display so the
-          // capture pipeline uses the correct output
-          config::video.output_name = display_device::map_display_name(this->display_name);
+          // capture pipeline uses the correct output. If platform mapping is
+          // unavailable, keep the connector name rather than falling back.
+          const auto mapped_output_name = display_device::map_display_name(this->display_name);
+          config::video.output_name = stream_display_policy::capture_output_name_for_virtual_display(
+            this->display_name,
+            mapped_output_name
+          );
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;
@@ -7293,6 +7329,23 @@ namespace proc {
       }
       linux_display::enable_streaming_display(render_width, render_height, target_fps);
     }
+
+    const auto generation_id = capture_generation.generation_id;
+    const auto exact_output_name = capture_generation.exact_display_name;
+    const auto configured_output_name = !config::video.output_name.empty() ?
+                                          config::video.output_name :
+                                          config::video.linux_display.streaming_output;
+    capture_generation = capture_generation::identity_t {
+      .generation_id = generation_id,
+      .exact_display_name = exact_output_name,
+      .requested_output_name = exact_output_name.empty() ? configured_output_name : exact_output_name,
+      .stream_mode = config::video.linux_display.stream_mode,
+      .capture_backend = config::video.capture,
+      .private_runtime = config::video.linux_display.private_runtime,
+      .adapter_name = config::video.adapter_name,
+      .headless_mode = config::video.linux_display.headless_mode,
+      .use_cage_compositor = config::video.linux_display.use_cage_compositor,
+    };
 #endif
 
     // Probe encoders again before streaming to ensure our chosen
@@ -7851,6 +7904,20 @@ namespace proc {
       };
       if (!private_runtime->start(start_params)) {
         return false;
+      }
+
+      if (private_runtime->backend_id() == stream_display_policy::k_runtime_labwc) {
+        capture_generation.private_wayland_socket = private_runtime->wayland_socket();
+        capture_generation.private_runtime_instance_id = _session_instance_id;
+        if (capture_generation.private_wayland_socket.empty() ||
+            stream_runtime::labwc::session_instance_id() != _session_instance_id) {
+          BOOST_LOG(error) << "session_manager: Private labwc generation identity was not published exactly"sv;
+          private_runtime->stop();
+          return false;
+        }
+      } else {
+        capture_generation.private_wayland_socket.clear();
+        capture_generation.private_runtime_instance_id.clear();
       }
 
       if (!reprobe_encoders_for_cage(strict_configured_encoder, save_successful_cache)) {
@@ -9267,16 +9334,23 @@ namespace proc {
       }
 #elif __linux__
     // Destroy Linux virtual display if one was created
-    bool used_linux_vdisplay = linux_vdisplay.has_value() && linux_vdisplay->active;
-    if (used_linux_vdisplay) {
-      virtual_display::destroy(*linux_vdisplay);
-      linux_vdisplay.reset();
-      BOOST_LOG(info) << "Linux Virtual Display removed successfully"sv;
+    const bool had_linux_vdisplay = linux_vdisplay.has_value();
+    if (had_linux_vdisplay) {
+      if (virtual_display::destroy(*linux_vdisplay)) {
+        linux_vdisplay.reset();
+        BOOST_LOG(info) << "Linux Virtual Display teardown verified"sv;
+      } else {
+        BOOST_LOG(error) << "Linux Virtual Display teardown not verified; retaining handle for retry"sv;
+      }
     }
 
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
-      if (used_linux_vdisplay) {
-        display_device::reset_persistence();
+      if (had_linux_vdisplay) {
+        if (!linux_vdisplay.has_value()) {
+          display_device::reset_persistence();
+        } else {
+          BOOST_LOG(error) << "Linux Virtual Display recovery remains pending; skipping unrelated display reconfiguration"sv;
+        }
       } else {
         display_device::revert_configuration();
       }
@@ -9328,6 +9402,7 @@ namespace proc {
     _app_name.clear();
     _app = {};
     display_name.clear();
+    capture_generation = {};
     initial_display.clear();
     initial_color_range = 0;
     initial_nvenc_tune = 0;
@@ -9939,7 +10014,7 @@ namespace proc {
    * Legacy versions of Sunshine/Apollo stored boolean and integer values as strings.
    * The following keys are converted:
    *   - Boolean keys: "exclude-global-prep-cmd", "elevated", "auto-detach", "wait-all",
-   *                     "use-app-identity", "per-client-app-identity", "virtual-display"
+   *                     "use-app-identity", "per-client-app-identity", "desktop-mirror", "virtual-display"
    *   - Integer keys: "exit-timeout"
    *
    * A migration version is stored in the file tree (under "version") so that future changes can be applied.
@@ -10028,6 +10103,7 @@ namespace proc {
         {"wait-all", true},
         {"use-app-identity", false},
         {"per-client-app-identity", false},
+        {"desktop-mirror", false},
         {"virtual-display", false},
         {"virtual-display-primary", false},
         {"terminate-on-pause", false}
@@ -10394,8 +10470,64 @@ namespace proc {
     }
   }
 
+  void migration_v6(nlohmann::json &fileTree) {
+    // The bundled Desktop app predates an explicit launch semantic. Preserve
+    // that exact legacy entry as a desktop mirror without inferring behavior
+    // from the display name alone: a user app is allowed to be named Desktop.
+    static const int this_version = 10;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    if (!fileTree.contains("apps") || !fileTree["apps"].is_array()) {
+      fileTree["version"] = this_version;
+      return;
+    }
+
+    for (auto &app : fileTree["apps"]) {
+      if (!app.is_object() || app.contains("desktop-mirror")) {
+        continue;
+      }
+
+      const auto name = json_string_member_or(app, "name");
+      const auto image_path = json_string_member_or(app, "image-path");
+      const auto source = json_string_member_or(app, "source", "manual");
+      const auto cmd = json_string_member_or(app, "cmd");
+      const auto steam_appid = json_string_member_or(app, "steam-appid");
+      const bool no_detached = !app.contains("detached") ||
+                               (app["detached"].is_array() && app["detached"].empty());
+      const bool no_prep = !app.contains("prep-cmd") ||
+                           (app["prep-cmd"].is_array() && app["prep-cmd"].empty());
+      const bool no_state = !app.contains("state-cmd") ||
+                            (app["state-cmd"].is_array() && app["state-cmd"].empty());
+      const bool virtual_display = app.contains("virtual-display") &&
+                                   coerce_json_bool(app["virtual-display"], false);
+      const bool client_commands = !app.contains("allow-client-commands") ||
+                                   coerce_json_bool(app["allow-client-commands"], true);
+
+      const bool exact_legacy_desktop =
+        name == "Desktop" &&
+        image_path == "desktop.png" &&
+        boost::iequals(source, "manual") &&
+        cmd.empty() &&
+        steam_appid.empty() &&
+        no_detached &&
+        no_prep &&
+        no_state &&
+        !virtual_display &&
+        !client_commands;
+      if (exact_legacy_desktop) {
+        app["desktop-mirror"] = true;
+        BOOST_LOG(info) << "Migrated the bundled legacy Desktop app to explicit desktop-mirror launch semantics.";
+      }
+    }
+
+    fileTree["version"] = this_version;
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 9;
+    int last_version = 10;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -10407,6 +10539,7 @@ namespace proc {
       migration_v3(fileTree);
       migration_v4(fileTree);
       migration_v5(fileTree);
+      migration_v6(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -10539,6 +10672,7 @@ namespace proc {
           ctx.wait_all = app_node.value("wait-all", true);
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           ctx.virtual_display = app_node.value("virtual-display", false);
+          ctx.desktop_mirror = app_node.value("desktop-mirror", false);
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);
@@ -10624,6 +10758,7 @@ namespace proc {
       ctx.name = "Desktop (fallback)";
       ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
       ctx.virtual_display = false;
+      ctx.desktop_mirror = true;
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;

@@ -8,7 +8,6 @@
 
 #include "kwingrab.h"
 
-#include "src/config.h"
 #include "src/logging.h"
 
 #include <algorithm>
@@ -230,24 +229,10 @@ namespace kwingrab {
             }
           }
           if (!output) {
-            // A requested output that is not in KWin's registry (e.g. a virtual
-            // display that failed to attach) silently streaming some other
-            // output is exactly the wrong-output bug this pinning exists to
-            // prevent — make the miss visible before falling back.
-            BOOST_LOG(warning) << "kwingrab: requested output ["sv << output_name
-                               << "] not found; falling back to configured/first output"sv;
-          }
-        }
-        if (!output) {
-          // Prefer config streaming_output when set (dongle path).
-          const auto &want = config::video.linux_display.streaming_output;
-          if (!want.empty()) {
-            for (const auto &[o, p] : outputs_) {
-              if (p->name == want) {
-                output = o;
-                params = p;
-                break;
-              }
+            BOOST_LOG(error) << "kwingrab: requested output ["sv << output_name
+                             << "] not found; refusing another output"sv;
+            if (!output_selection_can_fallback(output_name)) {
+              return -1;
             }
           }
         }
@@ -498,6 +483,10 @@ namespace kwingrab {
     return impl_->cast->source_;
   }
 
+  bool output_selection_can_fallback(std::string_view requested_output_name) {
+    return requested_output_name.empty();
+  }
+
   std::unique_ptr<session_t> start_output_session(std::string_view output_name) {
     auto session = std::make_unique<session_t>();
     session->impl_->cast = std::make_unique<screencast_t>();
@@ -514,28 +503,27 @@ namespace kwingrab {
     return session;
   }
 
-  bool prefer_for_current_stream_mode() {
-    const auto &mode = config::video.linux_display.stream_mode;
+  bool prefer_for_generation(const capture_generation::identity_t &generation) {
+    const auto &mode = generation.stream_mode;
     // Host KDE paths only. gamescope_stream / labwc private runtimes stay on
     // gamescopegrab / portal / wlroots — never kwingrab.
-    // host_virtual_display belongs here too: its EVDI output is composited by
-    // KWin, and only this path can pin capture to that output by name — the
-    // portal ScreenCast picker cannot select a specific monitor, so falling
-    // through to it captures whatever output the restore token last granted
-    // (observed live: the 7680x2160 primary desktop instead of DVI-I-1).
     if (mode == "desktop_display" || mode == "headless_dongle" ||
         mode == "host_virtual_display") {
       return true;
     }
     // Empty mode historically maps to desktop-ish host on some configs; only
-    // when not using a private runtime.
+    // when the immutable generation did not select a private runtime.
     if (mode.empty() &&
-        !config::video.linux_display.use_cage_compositor &&
-        config::video.linux_display.private_runtime != "gamescope" &&
-        config::video.linux_display.private_runtime != "labwc") {
+        !generation.use_cage_compositor &&
+        generation.private_runtime != "gamescope" &&
+        generation.private_runtime != "labwc") {
       return true;
     }
     return false;
+  }
+
+  bool require_for_generation(const capture_generation::identity_t &generation) {
+    return generation.stream_mode == "host_virtual_display";
   }
 
 }  // namespace kwingrab

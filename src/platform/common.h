@@ -745,6 +745,14 @@ namespace platf {
 
   // A list of names of displays accepted as display_name with the mem_type_e
   std::vector<std::string> display_names(mem_type_e hwdevice_type);
+#ifdef __linux__
+  // Session capture must enumerate through the immutable launch generation;
+  // global display configuration may change while a stream is reinitializing.
+  std::vector<std::string> display_names(
+    mem_type_e hwdevice_type,
+    const video::config_t &config
+  );
+#endif
 
   /**
    * @brief Check if GPUs/drivers have changed since the last call to this function.

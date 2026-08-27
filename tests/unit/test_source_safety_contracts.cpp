@@ -263,6 +263,821 @@ TEST(SourceSafetyContracts, UbuntuSnapshotInstallsMayDowngradeRunnerPackages) {
   EXPECT_EQ(count_exact(workflow, curl_dev_pin), 2u);
 }
 
+TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevaluationAndRestoresHostState) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto execute = source.find("int proc_t::execute_impl(");
+  const auto terminate = source.find("void proc_t::terminate_impl(", execute);
+  ASSERT_NE(execute, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  const auto launch = source.substr(execute, terminate - execute);
+
+  const auto derive = launch.find("effective_session_selection_for_launch(");
+  const auto apply = launch.find("stream_display_policy::apply_selection(session_mode");
+  const auto reevaluate = launch.find("platf::reevaluate_capture_sources()", apply);
+  ASSERT_NE(derive, std::string::npos);
+  ASSERT_NE(apply, std::string::npos);
+  ASSERT_NE(reevaluate, std::string::npos);
+  EXPECT_LT(derive, apply);
+  EXPECT_LT(apply, reevaluate);
+  EXPECT_NE(launch.find("_app.virtual_display", derive), std::string::npos);
+  EXPECT_NE(launch.find("launch_session->user_locked_virtual_display", derive), std::string::npos);
+  EXPECT_EQ(
+    launch.find("!(launch_session && launch_session->mirror_desktop)", derive),
+    std::string::npos
+  ) << "derived desktop_display must actually be applied for mirror sessions";
+
+  const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate);
+  ASSERT_NE(terminate_end, std::string::npos);
+  const auto teardown = source.substr(terminate, terminate_end - terminate);
+  EXPECT_NE(teardown.find("linux_display.stream_mode = initial_stream_mode"), std::string::npos);
+  EXPECT_NE(teardown.find("config::video.capture = initial_capture"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, LinuxVirtualDisplayCreationUsesOnlyTheEffectiveMode) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto decision = source.find("const bool should_use_linux_virtual_display");
+  const auto launch = source.find("if (", decision);
+  ASSERT_NE(decision, std::string::npos);
+  ASSERT_NE(launch, std::string::npos);
+  const auto body = source.substr(decision, launch - decision);
+
+  EXPECT_NE(body.find("display_policy.use_host_virtual_display"), std::string::npos);
+  EXPECT_EQ(body.find("launch_session->virtual_display"), std::string::npos);
+  EXPECT_EQ(body.find("_app.virtual_display"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayCreatedNameSurvivesMappingFailureBeforeCapture) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto created = source.find("Virtual Display created: ");
+  const auto terminate = source.find("void proc_t::terminate_impl(", created);
+  ASSERT_NE(created, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  const auto launch = source.substr(created, terminate - created);
+
+  const auto map = launch.find("display_device::map_display_name(this->display_name)");
+  const auto preserve = launch.find("capture_output_name_for_virtual_display(", map);
+  ASSERT_NE(map, std::string::npos);
+  ASSERT_NE(preserve, std::string::npos);
+  EXPECT_LT(map, preserve);
+  EXPECT_NE(launch.find("this->display_name", preserve), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto initial = source.find("const auto active_generation = capture_ctxs.front().config.capture_generation;");
+  const auto initial_end = source.find("display_wp = disp", initial);
+  ASSERT_NE(initial, std::string::npos);
+  ASSERT_NE(initial_end, std::string::npos);
+  const auto initial_body = source.substr(initial, initial_end - initial);
+  const auto initial_policy = initial_body.find("capture_fallback_allowed(");
+  const auto initial_reject = initial_body.find("return;", initial_policy);
+  const auto initial_refresh = initial_body.find("refresh_displays(");
+  ASSERT_NE(initial_policy, std::string::npos);
+  ASSERT_NE(initial_reject, std::string::npos);
+  ASSERT_NE(initial_refresh, std::string::npos);
+  EXPECT_LT(initial_policy, initial_reject);
+  EXPECT_LT(initial_reject, initial_refresh);
+
+  const auto reinit = source.find("while (capture_ctx_queue->running())", initial_end);
+  const auto reinit_end = source.find("display_wp = disp", reinit);
+  ASSERT_NE(reinit, std::string::npos);
+  ASSERT_NE(reinit_end, std::string::npos);
+  const auto reinit_body = source.substr(reinit, reinit_end - reinit);
+  const auto exact_branch = reinit_body.find("if (!exact_display_name.empty())");
+  const auto exact_reset = reinit_body.find("reset_display(", exact_branch);
+  const auto identity = reinit_body.find("exact_display_name", exact_reset);
+  const auto reinit_reject = reinit_body.find("return;", identity);
+  const auto fallback_refresh = reinit_body.find("refresh_displays(", reinit_reject);
+  ASSERT_NE(exact_branch, std::string::npos);
+  ASSERT_NE(exact_reset, std::string::npos);
+  ASSERT_NE(identity, std::string::npos);
+  ASSERT_NE(reinit_reject, std::string::npos);
+  ASSERT_NE(fallback_refresh, std::string::npos);
+  EXPECT_LT(exact_branch, exact_reset);
+  EXPECT_LT(exact_reset, identity);
+  EXPECT_LT(identity, reinit_reject);
+  EXPECT_LT(reinit_reject, fallback_refresh);
+
+  const auto generic_refresh = source.find(
+    "void refresh_displays(\n    platf::mem_type_e dev_type"
+  );
+  const auto capture_thread = source.find("void captureThread(", generic_refresh);
+  ASSERT_NE(generic_refresh, std::string::npos);
+  ASSERT_NE(capture_thread, std::string::npos);
+  const auto wrapper = source.substr(generic_refresh, capture_thread - generic_refresh);
+  EXPECT_NE(wrapper.find("if (!refresh_displays("), std::string::npos);
+  EXPECT_NE(
+    wrapper.find("current_display_index = display_names.empty() ? -1 : 0"),
+    std::string::npos
+  );
+}
+
+TEST(SourceSafetyContracts, ExactOutputProvenanceLivesInLaunchAndCaptureGenerations) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  std::ifstream process_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  std::ifstream process_header_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.h");
+  ASSERT_TRUE(process_input.is_open());
+  ASSERT_TRUE(process_header_input.is_open());
+  std::ostringstream process_contents;
+  std::ostringstream process_header_contents;
+  process_contents << process_input.rdbuf();
+  process_header_contents << process_header_input.rdbuf();
+  const auto process_source = process_contents.str();
+  const auto process_header = process_header_contents.str();
+
+  EXPECT_NE(process_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
+  EXPECT_EQ(process_header.find("std::string exact_display_name;"), std::string::npos);
+  const auto first_publish = process_source.find("this->capture_generation.exact_display_name = this->display_name;");
+  const auto second_publish = process_source.find(
+    "this->capture_generation.exact_display_name = this->display_name;",
+    first_publish + 1
+  );
+  const auto clear = process_source.find("capture_generation = {};", second_publish);
+  ASSERT_NE(first_publish, std::string::npos);
+  ASSERT_NE(second_publish, std::string::npos);
+  ASSERT_NE(clear, std::string::npos);
+
+  const auto sync_ctx = source.find("struct sync_session_ctx_t");
+  const auto sync_ctx_end = source.find("};", sync_ctx);
+  const auto async_ctx = source.find("struct capture_ctx_t");
+  const auto async_ctx_end = source.find("};", async_ctx);
+  ASSERT_NE(sync_ctx, std::string::npos);
+  ASSERT_NE(sync_ctx_end, std::string::npos);
+  ASSERT_NE(async_ctx, std::string::npos);
+  ASSERT_NE(async_ctx_end, std::string::npos);
+  EXPECT_NE(source.substr(sync_ctx, sync_ctx_end - sync_ctx).find("config_t config;"), std::string::npos);
+  EXPECT_NE(source.substr(async_ctx, async_ctx_end - async_ctx).find("config_t config;"), std::string::npos);
+  EXPECT_EQ(source.substr(sync_ctx, sync_ctx_end - sync_ctx).find("std::string exact_display_name;"), std::string::npos);
+  EXPECT_EQ(source.substr(async_ctx, async_ctx_end - async_ctx).find("std::string exact_display_name;"), std::string::npos);
+  const auto capture_admission = source.find(
+    "config.capture_generation = proc::proc.capture_generation;"
+  );
+  const auto async_entry = source.find("void capture_async(");
+  const auto async_publish = source.find("ref->capture_ctx_queue->raise(capture_ctx_t", async_entry);
+  const auto async_provenance = source.find("config,", async_publish);
+  const auto async_publish_end = source.find("});", async_publish);
+  const auto async_call = source.find("capture_async(", capture_admission);
+  const auto async_call_provenance = source.find("config,", async_call);
+  const auto async_call_end = source.find(");", async_call);
+  const auto sync_publish = source.find("ref->encode_session_ctx_queue.raise(sync_session_ctx_t", capture_admission);
+  const auto sync_provenance = source.find("config,", sync_publish);
+  const auto sync_publish_end = source.find("});", sync_publish);
+  ASSERT_NE(capture_admission, std::string::npos);
+  ASSERT_NE(async_entry, std::string::npos);
+  ASSERT_NE(async_publish, std::string::npos);
+  ASSERT_NE(async_provenance, std::string::npos);
+  ASSERT_NE(async_publish_end, std::string::npos);
+  ASSERT_NE(async_call, std::string::npos);
+  ASSERT_NE(async_call_provenance, std::string::npos);
+  ASSERT_NE(async_call_end, std::string::npos);
+  ASSERT_NE(sync_publish, std::string::npos);
+  ASSERT_NE(sync_provenance, std::string::npos);
+  ASSERT_NE(sync_publish_end, std::string::npos);
+  EXPECT_LT(async_provenance, async_publish_end);
+  EXPECT_LT(async_call_provenance, async_call_end);
+  EXPECT_LT(sync_provenance, sync_publish_end);
+
+  const auto async_begin = source.find("void captureThread(");
+  const auto sync_begin = source.find("encode_e encode_run_sync(", async_begin);
+  const auto sync_end = source.find("void captureThreadSync()", sync_begin);
+  ASSERT_NE(async_begin, std::string::npos);
+  ASSERT_NE(sync_begin, std::string::npos);
+  ASSERT_NE(sync_end, std::string::npos);
+
+  const auto async_body = source.substr(async_begin, sync_begin - async_begin);
+  const auto async_exact = async_body.find("const auto active_generation = capture_ctxs.front().config.capture_generation;");
+  const auto async_policy = async_body.find("display_switch_allowed_for_exact_capture(exact_display_name)");
+  const auto async_reinit_loop = async_body.find("while (capture_ctx_queue->running())", async_policy);
+  const auto async_exact_reopen = async_body.find("if (!exact_display_name.empty())", async_reinit_loop);
+  const auto async_reset = async_body.find("reset_display(", async_exact_reopen);
+  const auto async_identity = async_body.find("exact_display_name", async_reset);
+  const auto async_generic_refresh = async_body.find("refresh_displays(", async_identity);
+  ASSERT_NE(async_exact, std::string::npos);
+  ASSERT_NE(async_policy, std::string::npos);
+  ASSERT_NE(async_reinit_loop, std::string::npos);
+  ASSERT_NE(async_exact_reopen, std::string::npos);
+  ASSERT_NE(async_reset, std::string::npos);
+  ASSERT_NE(async_identity, std::string::npos);
+  ASSERT_NE(async_generic_refresh, std::string::npos);
+  EXPECT_LT(async_exact, async_policy);
+  EXPECT_LT(async_exact_reopen, async_reset);
+  EXPECT_LT(async_reset, async_identity);
+  EXPECT_LT(async_identity, async_generic_refresh);
+  EXPECT_EQ(
+    async_body.find("const auto exact_display_name = proc::proc.display_name"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    async_body.find("const auto exact_display_name = proc::proc.exact_display_name"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    async_body.find("!switch_display_event->peek() && !exact_display_name.empty()"),
+    std::string::npos
+  );
+
+  const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
+  const auto sync_exact = sync_body.find("const auto active_generation = synced_session_ctxs.front()->config.capture_generation;");
+  const auto sync_exact_branch = sync_body.find("if (!exact_display_name.empty())", sync_exact);
+  const auto sync_reset = sync_body.find("reset_display(", sync_exact_branch);
+  const auto sync_identity = sync_body.find("exact_display_name", sync_reset);
+  const auto sync_generic_refresh = sync_body.find("refresh_displays(", sync_identity);
+  const auto sync_policy = sync_body.find("display_switch_allowed_for_exact_capture(exact_display_name)");
+  ASSERT_NE(sync_exact, std::string::npos);
+  ASSERT_NE(sync_exact_branch, std::string::npos);
+  ASSERT_NE(sync_reset, std::string::npos);
+  ASSERT_NE(sync_identity, std::string::npos);
+  ASSERT_NE(sync_generic_refresh, std::string::npos);
+  ASSERT_NE(sync_policy, std::string::npos);
+  EXPECT_LT(sync_exact_branch, sync_reset);
+  EXPECT_LT(sync_reset, sync_identity);
+  EXPECT_LT(sync_identity, sync_generic_refresh);
+  EXPECT_EQ(
+    sync_body.find("const auto exact_display_name = proc::proc.display_name"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    sync_body.find("const auto exact_display_name = proc::proc.exact_display_name"),
+    std::string::npos
+  );
+}
+
+TEST(SourceSafetyContracts, CaptureGenerationMismatchIsRejectedBeforePublication) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/video.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto async_begin = source.find("void captureThread(");
+  const auto sync_begin = source.find("encode_e encode_run_sync(", async_begin);
+  const auto sync_end = source.find("void captureThreadSync()", sync_begin);
+  ASSERT_NE(async_begin, std::string::npos);
+  ASSERT_NE(sync_begin, std::string::npos);
+  ASSERT_NE(sync_end, std::string::npos);
+
+  const auto async_body = source.substr(async_begin, sync_begin - async_begin);
+  const auto async_match = async_body.find("capture_generations_match(");
+  const auto async_reject = async_body.find("incoming_capture_ctx->images->stop()", async_match);
+  const auto async_publish = async_body.find("capture_ctxs.emplace_back", async_reject);
+  ASSERT_NE(async_match, std::string::npos);
+  ASSERT_NE(async_reject, std::string::npos);
+  ASSERT_NE(async_publish, std::string::npos);
+  EXPECT_LT(async_match, async_reject);
+  EXPECT_LT(async_reject, async_publish);
+
+  const auto sync_body = source.substr(sync_begin, sync_end - sync_begin);
+  const auto sync_match = sync_body.find("capture_generations_match(");
+  const auto sync_reject = sync_body.find("incoming_sync_ctx->join_event->raise(true)", sync_match);
+  const auto sync_publish = sync_body.find("synced_session_ctxs.emplace_back", sync_reject);
+  ASSERT_NE(sync_match, std::string::npos);
+  ASSERT_NE(sync_reject, std::string::npos);
+  ASSERT_NE(sync_publish, std::string::npos);
+  EXPECT_LT(sync_match, sync_reject);
+  EXPECT_LT(sync_reject, sync_publish);
+}
+
+TEST(SourceSafetyContracts, CaptureGenerationIdentityIsOwnedFromLaunchThroughVideo) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream identity_in(root / "src/capture_generation.h");
+  std::ifstream process_header_in(root / "src/process.h");
+  std::ifstream process_in(root / "src/process.cpp");
+  std::ifstream video_header_in(root / "src/video.h");
+  std::ifstream video_in(root / "src/video.cpp");
+  ASSERT_TRUE(identity_in.is_open());
+  ASSERT_TRUE(process_header_in.is_open());
+  ASSERT_TRUE(process_in.is_open());
+  ASSERT_TRUE(video_header_in.is_open());
+  ASSERT_TRUE(video_in.is_open());
+
+  std::ostringstream identity_out, process_header_out, process_out, video_header_out, video_out;
+  identity_out << identity_in.rdbuf();
+  process_header_out << process_header_in.rdbuf();
+  process_out << process_in.rdbuf();
+  video_header_out << video_header_in.rdbuf();
+  video_out << video_in.rdbuf();
+  const auto identity = identity_out.str();
+  const auto process_header = process_header_out.str();
+  const auto process = process_out.str();
+  const auto video_header = video_header_out.str();
+  const auto video = video_out.str();
+
+  EXPECT_NE(identity.find("struct identity_t"), std::string::npos);
+  for (const auto field : {"generation_id", "exact_display_name", "requested_output_name", "stream_mode",
+                           "capture_backend", "private_runtime", "private_wayland_socket",
+                           "private_runtime_instance_id", "adapter_name",
+                           "headless_mode", "use_cage_compositor"}) {
+    EXPECT_NE(identity.find(field), std::string::npos) << field;
+  }
+  EXPECT_NE(process_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
+  EXPECT_EQ(process_header.find("std::string exact_display_name;"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation.generation_id = _session_generation;"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation = capture_generation::identity_t {"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation.private_wayland_socket = private_runtime->wayland_socket()"), std::string::npos);
+  EXPECT_NE(process.find("capture_generation.private_runtime_instance_id = _session_instance_id"), std::string::npos);
+  EXPECT_NE(video_header.find("capture_generation::identity_t capture_generation;"), std::string::npos);
+  EXPECT_NE(video.find("config.capture_generation = proc::proc.capture_generation;"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, PortalSourceSelectionAndPublicationUseOneCaptureGeneration) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream portal_in(root / "src/platform/linux/portal_grab.cpp");
+  std::ifstream kwin_header_in(root / "src/platform/linux/kwingrab.h");
+  ASSERT_TRUE(portal_in.is_open());
+  ASSERT_TRUE(kwin_header_in.is_open());
+  std::ostringstream portal_out, kwin_header_out;
+  portal_out << portal_in.rdbuf();
+  kwin_header_out << kwin_header_in.rdbuf();
+  const auto portal = portal_out.str();
+  const auto kwin_header = kwin_header_out.str();
+
+  const auto ensure = portal.find("static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(");
+  const auto display = portal.find("class portal_display_t", ensure);
+  ASSERT_NE(ensure, std::string::npos);
+  ASSERT_NE(display, std::string::npos);
+  const auto ensure_body = portal.substr(ensure, display - ensure);
+  EXPECT_NE(ensure_body.find("const capture_generation::identity_t &generation"), std::string::npos);
+  EXPECT_NE(ensure_body.find("g_media.generation == generation"), std::string::npos);
+  const auto first_publication = ensure_body.find("g_media.generation = generation");
+  const auto second_publication = ensure_body.find("g_media.generation = generation", first_publication + 1);
+  const auto third_publication = ensure_body.find("g_media.generation = generation", second_publication + 1);
+  const auto fourth_publication = ensure_body.find("g_media.generation = generation", third_publication + 1);
+  ASSERT_NE(first_publication, std::string::npos);
+  ASSERT_NE(second_publication, std::string::npos);
+  ASSERT_NE(third_publication, std::string::npos);
+  EXPECT_EQ(fourth_publication, std::string::npos);
+  EXPECT_NE(
+    ensure_body.find("g_media.capture != capture || g_media.generation != generation"),
+    std::string::npos
+  );
+  EXPECT_NE(ensure_body.find("ensure_session_unlocked(generation)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("kwingrab::prefer_for_generation(generation)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("kwingrab::require_for_generation(generation)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("start_output_session(generation.requested_output_name)"), std::string::npos);
+  for (const auto forbidden : {"config::video.adapter_name", "config::video.output_name",
+                               "config::video.capture", "config::video.linux_display"}) {
+    EXPECT_EQ(ensure_body.find(forbidden), std::string::npos) << forbidden;
+  }
+
+  const auto init = portal.find("init(platf::mem_type_e", display);
+  const auto capture = portal.find("capture(const push_captured_image_cb_t", init);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(capture, std::string::npos);
+  const auto init_body = portal.substr(init, capture - init);
+  const auto exact_validation = init_body.find("display_name != generation_.exact_display_name");
+  const auto requested_validation = init_body.find("generation_.requested_output_name != generation_.exact_display_name");
+  const auto exact_reject = init_body.find("return -1;", requested_validation);
+  const auto init_capture = init_body.find("ensure_global_capture(", exact_reject);
+  ASSERT_NE(exact_validation, std::string::npos);
+  ASSERT_NE(requested_validation, std::string::npos);
+  ASSERT_NE(exact_reject, std::string::npos);
+  ASSERT_NE(init_capture, std::string::npos);
+  EXPECT_LT(exact_validation, requested_validation);
+  EXPECT_LT(requested_validation, exact_reject);
+  EXPECT_LT(exact_reject, init_capture);
+  EXPECT_NE(init_body.find("generation_ = config.capture_generation;"), std::string::npos);
+  EXPECT_NE(init_body.find("generation_"), std::string::npos);
+  EXPECT_NE(kwin_header.find("prefer_for_generation(const capture_generation::identity_t &generation)"), std::string::npos);
+  EXPECT_NE(kwin_header.find("require_for_generation(const capture_generation::identity_t &generation)"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, LinuxBackendDispatchUsesCaptureGenerationAuthority) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/misc.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto planner = source.find("static display_backend_e choose_display_backend(");
+  const auto display = source.find("std::shared_ptr<display_t> display(", planner);
+  const auto display_end = source.find("class linux_deinit_t", display);
+  ASSERT_NE(planner, std::string::npos);
+  ASSERT_NE(display, std::string::npos);
+  ASSERT_NE(display_end, std::string::npos);
+  const auto planner_body = source.substr(planner, display - planner);
+  const auto display_body = source.substr(display, display_end - display);
+  EXPECT_NE(planner_body.find("exact_output_owned && (requested.empty() || requested == \"auto\")"), std::string::npos);
+  EXPECT_NE(planner_body.find("requested == \"wlr\""), std::string::npos);
+  EXPECT_NE(planner_body.find("requested == \"portal\""), std::string::npos);
+  const auto requested = display_body.find("config.capture_generation.capture_backend");
+  const auto exact_owned = display_body.find("config.capture_generation.exact_display_name.empty()", requested);
+  const auto choose = display_body.find("choose_display_backend(", exact_owned);
+  const auto dispatch = display_body.find("switch (backend)", choose);
+  ASSERT_NE(requested, std::string::npos);
+  ASSERT_NE(exact_owned, std::string::npos);
+  ASSERT_NE(choose, std::string::npos);
+  ASSERT_NE(dispatch, std::string::npos);
+  EXPECT_LT(requested, exact_owned);
+  EXPECT_LT(exact_owned, choose);
+  EXPECT_LT(choose, dispatch);
+  EXPECT_EQ(display_body.find("if (sources[source::"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, PortalRejectsForeignBackendBeforeMutationAndUsesPureMode) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream portal_in(root / "src/platform/linux/portal_grab.cpp");
+  std::ifstream session_in(root / "src/platform/linux/portal_session.cpp");
+  ASSERT_TRUE(portal_in.is_open());
+  ASSERT_TRUE(session_in.is_open());
+  std::ostringstream portal_out, session_out;
+  portal_out << portal_in.rdbuf();
+  session_out << session_in.rdbuf();
+  const auto portal = portal_out.str();
+  const auto session = session_out.str();
+
+  const auto policy = session.find("uint32_t capture_type_for_stream_display(");
+  const auto policy_end = session.find("// Helper: call a portal method", policy);
+  ASSERT_NE(policy, std::string::npos);
+  ASSERT_NE(policy_end, std::string::npos);
+  const auto policy_body = session.substr(policy, policy_end - policy);
+  EXPECT_NE(policy_body.find("const auto mode = stream_mode;"), std::string::npos);
+  EXPECT_EQ(policy_body.find("config::video"), std::string::npos);
+
+  const auto ensure = portal.find("static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(");
+  const auto transition = portal.find("std::lock_guard transition_lock", ensure);
+  const auto ensure_guard = portal.find("portal_capture_backend_allowed(generation.capture_backend)", ensure);
+  ASSERT_NE(ensure, std::string::npos);
+  ASSERT_NE(transition, std::string::npos);
+  ASSERT_NE(ensure_guard, std::string::npos);
+  EXPECT_LT(ensure_guard, transition);
+
+  const auto init = portal.find("init(platf::mem_type_e");
+  const auto init_guard = portal.find("portal_capture_backend_allowed(generation_.capture_backend)", init);
+  const auto exact_guard = portal.find("generation_.exact_display_name.empty()", init_guard);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(init_guard, std::string::npos);
+  ASSERT_NE(exact_guard, std::string::npos);
+  EXPECT_LT(init_guard, exact_guard);
+}
+
+TEST(SourceSafetyContracts, SwayVirtualOutputCreationIsRejectedBeforeMutation) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto wayland = source.find("namespace wayland_wlr");
+  const auto available = source.find("static bool is_available()", wayland);
+  const auto create = source.find("static std::optional<vdisplay_t> create(", available);
+  ASSERT_NE(wayland, std::string::npos);
+  ASSERT_NE(available, std::string::npos);
+  ASSERT_NE(create, std::string::npos);
+  const auto availability_body = source.substr(available, create - available);
+  const auto exact_capability = availability_body.find(
+    "wayland_compositor_supports_exact_output_creation(compositor)"
+  );
+  const auto reject = availability_body.find("return false", exact_capability);
+  ASSERT_NE(exact_capability, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  EXPECT_EQ(source.find("swaymsg -r create_output"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnotherOutputOrPortal) {
+  std::ifstream kwin_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/kwingrab.cpp");
+  ASSERT_TRUE(kwin_input.is_open());
+  std::ostringstream kwin_contents;
+  kwin_contents << kwin_input.rdbuf();
+  const auto kwin = kwin_contents.str();
+
+  const auto requested = kwin.find("if (!output_name.empty())");
+  const auto exact_policy = kwin.find("output_selection_can_fallback(output_name)", requested);
+  const auto reject = kwin.find("return -1;", exact_policy);
+  const auto configured_fallback = kwin.find("config::video.linux_display.streaming_output", requested);
+  const auto first_output_fallback = kwin.find("output = outputs_.begin()->first", reject);
+  ASSERT_NE(requested, std::string::npos);
+  ASSERT_NE(exact_policy, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  EXPECT_EQ(configured_fallback, std::string::npos);
+  ASSERT_NE(first_output_fallback, std::string::npos);
+  EXPECT_LT(exact_policy, reject);
+  EXPECT_LT(reject, first_output_fallback);
+
+  std::ifstream portal_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/portal_grab.cpp");
+  ASSERT_TRUE(portal_input.is_open());
+  std::ostringstream portal_contents;
+  portal_contents << portal_input.rdbuf();
+  const auto portal = portal_contents.str();
+
+  const auto compatible = portal.find("const auto compatible");
+  const auto identity = portal.find("g_media.generation == generation", compatible);
+  const auto reuse = portal.find("return g_media.capture;", identity);
+  const auto no_wayland = portal.find("#ifndef POLARIS_BUILD_WAYLAND", reuse);
+  const auto no_wayland_mode = portal.find("generation.stream_mode == \"host_virtual_display\"", no_wayland);
+  const auto no_wayland_reject = portal.find("return nullptr;", no_wayland_mode);
+  const auto wayland_guard = portal.find("#ifdef POLARIS_BUILD_WAYLAND", no_wayland_reject);
+  const auto kwin_start = portal.find(
+    "kwingrab::start_output_session(generation.requested_output_name)",
+    wayland_guard
+  );
+  const auto required = portal.find("kwingrab::require_for_generation(generation)", kwin_start);
+  const auto fail_closed = portal.find("return nullptr;", required);
+  const auto generic_portal = portal.find("ensure_session_unlocked(generation)", kwin_start);
+  ASSERT_NE(compatible, std::string::npos);
+  ASSERT_NE(identity, std::string::npos);
+  ASSERT_NE(reuse, std::string::npos);
+  ASSERT_NE(no_wayland, std::string::npos);
+  ASSERT_NE(no_wayland_mode, std::string::npos);
+  ASSERT_NE(no_wayland_reject, std::string::npos);
+  ASSERT_NE(wayland_guard, std::string::npos);
+  ASSERT_NE(kwin_start, std::string::npos);
+  ASSERT_NE(required, std::string::npos);
+  ASSERT_NE(fail_closed, std::string::npos);
+  ASSERT_NE(generic_portal, std::string::npos);
+  EXPECT_LT(compatible, identity);
+  EXPECT_LT(identity, reuse);
+  EXPECT_LT(reuse, no_wayland);
+  EXPECT_LT(no_wayland, no_wayland_mode);
+  EXPECT_LT(no_wayland_mode, no_wayland_reject);
+  EXPECT_LT(no_wayland_reject, wayland_guard);
+  EXPECT_LT(wayland_guard, kwin_start);
+  EXPECT_LT(required, fail_closed);
+  EXPECT_LT(fail_closed, generic_portal);
+}
+
+TEST(SourceSafetyContracts, PortalSourceSelectionAndIdentityTransitionOwnOneGeneration) {
+  std::ifstream portal_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/portal_grab.cpp");
+  ASSERT_TRUE(portal_input.is_open());
+  std::ostringstream portal_contents;
+  portal_contents << portal_input.rdbuf();
+  const auto portal = portal_contents.str();
+
+  EXPECT_EQ(portal.find("static bool ensure_global_session()"), std::string::npos);
+  const auto init = portal.find("if (!cage_configured)");
+  const auto init_capture = portal.find("ensure_global_capture(", init);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(init_capture, std::string::npos);
+  EXPECT_EQ(portal.substr(init, init_capture - init).find("ensure_global_session()"), std::string::npos);
+
+  const auto capture_fallback = portal.find("// Fallback: source-owned portal/KWin capture");
+  const auto capture_owner = portal.find("ensure_global_capture(", capture_fallback);
+  ASSERT_NE(capture_fallback, std::string::npos);
+  ASSERT_NE(capture_owner, std::string::npos);
+  EXPECT_EQ(portal.substr(capture_fallback, capture_owner - capture_fallback).find("ensure_global_session()"), std::string::npos);
+
+  const auto transition = portal.find("capture configuration changed");
+  const auto retired_portal = portal.find("auto retired_portal = std::move(g_media.portal)", transition);
+  const auto unlock = portal.find("lock.unlock()", transition);
+  const auto destroy_portal = portal.find("retired_portal.reset()", unlock);
+  const auto relock = portal.find("lock.lock()", destroy_portal);
+  ASSERT_NE(transition, std::string::npos);
+  ASSERT_NE(retired_portal, std::string::npos);
+  ASSERT_NE(unlock, std::string::npos);
+  ASSERT_NE(destroy_portal, std::string::npos);
+  ASSERT_NE(relock, std::string::npos);
+  EXPECT_LT(retired_portal, unlock);
+  EXPECT_LT(unlock, destroy_portal);
+  EXPECT_LT(destroy_portal, relock);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayCreationPublishesOnlyProvenOwnedConnectors) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto evdi_proof = source.find("if (!evdi_output_name_is_proven(output_name))");
+  const auto evdi_disconnect = source.find("fn_disconnect(handle)", evdi_proof);
+  const auto evdi_close = source.find("fn_close(handle)", evdi_disconnect);
+  const auto evdi_reject = source.find("return std::nullopt;", evdi_close);
+  const auto evdi_publish = source.find("vdisplay_t display", evdi_reject);
+  ASSERT_NE(evdi_proof, std::string::npos);
+  ASSERT_NE(evdi_disconnect, std::string::npos);
+  ASSERT_NE(evdi_close, std::string::npos);
+  ASSERT_NE(evdi_reject, std::string::npos);
+  ASSERT_NE(evdi_publish, std::string::npos);
+  EXPECT_LT(evdi_proof, evdi_disconnect);
+  EXPECT_LT(evdi_disconnect, evdi_close);
+  EXPECT_LT(evdi_close, evdi_reject);
+  EXPECT_LT(evdi_reject, evdi_publish);
+
+  const auto wayland = source.find("namespace wayland_wlr");
+  const auto create_entry = source.find("static std::optional<vdisplay_t> create(", wayland);
+  const auto hyprland = source.find("if (compositor == \"hyprland\")", create_entry);
+  const auto requested_name = source.find("std::string candidate = hyprland_output_name_for_pid(", hyprland);
+  const auto create = source.find("hyprctl output create headless", requested_name);
+  const auto ownership = source.find("hyprland_monitors_contain_output(", create);
+  const auto reject = source.find("return std::nullopt;", ownership);
+  const auto publish = source.find("display.backend = backend_e::WAYLAND_WLR", reject);
+  ASSERT_NE(wayland, std::string::npos);
+  ASSERT_NE(create_entry, std::string::npos);
+  ASSERT_NE(hyprland, std::string::npos);
+  ASSERT_NE(requested_name, std::string::npos);
+  ASSERT_NE(create, std::string::npos);
+  ASSERT_NE(ownership, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  ASSERT_NE(publish, std::string::npos);
+  EXPECT_LT(requested_name, create);
+  EXPECT_LT(create, ownership);
+  EXPECT_LT(ownership, reject);
+  EXPECT_LT(reject, publish);
+  EXPECT_EQ(source.find("swaymsg -r create_output"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPersistence) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/virtual_display.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto mutex = source.find("static std::mutex creation_mutex");
+  const auto cleanup_entry = source.find("bool cleanup_stale()");
+  const auto cleanup_end = source.find("#ifdef POLARIS_TESTS", cleanup_entry);
+  const auto cleanup_body = source.substr(cleanup_entry, cleanup_end - cleanup_entry);
+  const auto cleanup_lock = cleanup_body.find("std::lock_guard creation_lock {creation_mutex}");
+  const auto create = source.find("std::optional<vdisplay_t> create(int width, int height, int fps)", cleanup_entry);
+  const auto create_end = source.find("bool destroy(vdisplay_t &display)", create);
+  const auto destroy_lock = source.find("std::lock_guard creation_lock {creation_mutex}", create_end);
+  ASSERT_NE(mutex, std::string::npos);
+  ASSERT_NE(cleanup_entry, std::string::npos);
+  ASSERT_NE(cleanup_end, std::string::npos);
+  ASSERT_NE(cleanup_lock, std::string::npos);
+  ASSERT_NE(create, std::string::npos);
+  ASSERT_NE(create_end, std::string::npos);
+  ASSERT_NE(destroy_lock, std::string::npos);
+  const auto body = source.substr(create, create_end - create);
+  const auto lock = body.find("std::lock_guard creation_lock {creation_mutex}");
+  const auto cleanup = body.find("cleanup_stale_unlocked()");
+  const auto cleanup_refusal = body.find("if (!cleanup.succeeded)", cleanup);
+  const auto backend = body.find("detect_backend()");
+  const auto persistence = body.find("record_persisted_display(");
+  ASSERT_NE(lock, std::string::npos);
+  ASSERT_NE(cleanup, std::string::npos);
+  ASSERT_NE(cleanup_refusal, std::string::npos);
+  ASSERT_NE(backend, std::string::npos);
+  ASSERT_NE(persistence, std::string::npos);
+  EXPECT_LT(lock, cleanup);
+  EXPECT_LT(cleanup, cleanup_refusal);
+  EXPECT_LT(cleanup_refusal, backend);
+  EXPECT_LT(cleanup, backend);
+  EXPECT_LT(backend, persistence);
+
+  std::ifstream process_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  std::ifstream confighttp_input(fs::path {POLARIS_SOURCE_DIR} / "src/confighttp.cpp");
+  ASSERT_TRUE(process_input.is_open());
+  ASSERT_TRUE(confighttp_input.is_open());
+  std::ostringstream process_contents;
+  std::ostringstream confighttp_contents;
+  process_contents << process_input.rdbuf();
+  confighttp_contents << confighttp_input.rdbuf();
+  EXPECT_NE(process_contents.str().find("virtual_display::create("), std::string::npos);
+  EXPECT_NE(confighttp_contents.str().find("virtual_display::create("), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, VirtualDisplayTeardownKeepsRecoveryUntilExactReadback) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream virtual_display_in(root / "src/platform/linux/virtual_display.cpp");
+  std::ifstream process_in(root / "src/process.cpp");
+  ASSERT_TRUE(virtual_display_in.is_open());
+  ASSERT_TRUE(process_in.is_open());
+  std::ostringstream virtual_display_out, process_out;
+  virtual_display_out << virtual_display_in.rdbuf();
+  process_out << process_in.rdbuf();
+  const auto source = virtual_display_out.str();
+  const auto process = process_out.str();
+
+  const auto destroy = source.find("static bool destroy_unlocked(vdisplay_t &display)");
+  const auto public_destroy = source.find("bool destroy(vdisplay_t &display)", destroy);
+  ASSERT_NE(destroy, std::string::npos);
+  ASSERT_NE(public_destroy, std::string::npos);
+  const auto body = source.substr(destroy, public_destroy - destroy);
+  const auto verify = body.find("teardown_is_verified(destroyed, display.active)");
+  const auto retain = body.find("persisted recovery record retained", verify);
+  const auto forget = body.find("forget_persisted_display(display)", retain);
+  ASSERT_NE(verify, std::string::npos);
+  ASSERT_NE(retain, std::string::npos);
+  ASSERT_NE(forget, std::string::npos);
+  EXPECT_LT(verify, retain);
+  EXPECT_LT(retain, forget);
+
+  const auto kscreen = source.find("namespace kscreen");
+  const auto kscreen_end = source.find("}  // namespace kscreen", kscreen);
+  ASSERT_NE(kscreen, std::string::npos);
+  ASSERT_NE(kscreen_end, std::string::npos);
+  const auto kscreen_body = source.substr(kscreen, kscreen_end - kscreen);
+  EXPECT_NE(kscreen_body.find("kscreen-doctor --json"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("kscreen_output_before"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("kscreen_primary_before"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("*output_after == *display.kscreen_output_before"), std::string::npos);
+  EXPECT_NE(kscreen_body.find("*primary_after == *display.kscreen_primary_before"), std::string::npos);
+  const auto kscreen_record = kscreen_body.find("record_persisted_display(display, 0)");
+  const auto kscreen_mutation = kscreen_body.find("platf::run_process_argv(args)", kscreen_record);
+  ASSERT_NE(kscreen_record, std::string::npos);
+  ASSERT_NE(kscreen_mutation, std::string::npos);
+  EXPECT_LT(kscreen_record, kscreen_mutation);
+
+  const auto durable_write = source.find("bool write_persisted_entries(");
+  const auto file_sync = source.find("::fsync(fd)", durable_write);
+  const auto rename = source.find("fs::rename(temp_path, path", file_sync);
+  const auto directory_sync = source.find("sync_parent()", rename);
+  ASSERT_NE(durable_write, std::string::npos);
+  ASSERT_NE(file_sync, std::string::npos);
+  ASSERT_NE(rename, std::string::npos);
+  ASSERT_NE(directory_sync, std::string::npos);
+  EXPECT_LT(file_sync, rename);
+  EXPECT_LT(rename, directory_sync);
+
+  EXPECT_NE(source.find("const auto connected = output_is_connected(display)"), std::string::npos);
+  EXPECT_NE(source.find("if (connected && !*connected)"), std::string::npos);
+  EXPECT_NE(source.find("if (present && !*present)"), std::string::npos);
+  const auto hypr_destroy = source.find("static bool destroy(vdisplay_t &display)", source.find("namespace wayland_wlr"));
+  const auto stable_absence = source.find("std::optional<std::chrono::steady_clock::time_point> absent_since", hypr_destroy);
+  const auto stable_window = source.find("now - *absent_since >= 500ms", stable_absence);
+  const auto mark_inactive = source.find("display.active = false", stable_window);
+  ASSERT_NE(hypr_destroy, std::string::npos);
+  ASSERT_NE(stable_absence, std::string::npos);
+  ASSERT_NE(stable_window, std::string::npos);
+  ASSERT_NE(mark_inactive, std::string::npos);
+  EXPECT_LT(stable_absence, stable_window);
+  EXPECT_LT(stable_window, mark_inactive);
+
+  const auto process_destroy = process.find("if (virtual_display::destroy(*linux_vdisplay))");
+  const auto process_reset = process.find("linux_vdisplay.reset()", process_destroy);
+  ASSERT_NE(process_destroy, std::string::npos);
+  ASSERT_NE(process_reset, std::string::npos);
+  EXPECT_LT(process_destroy, process_reset);
+}
+
+TEST(SourceSafetyContracts, WlgrabReinitEnumeratesFromImmutableCaptureGeneration) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream wlgrab_in(root / "src/platform/linux/wlgrab.cpp");
+  std::ifstream linux_misc_in(root / "src/platform/linux/misc.cpp");
+  std::ifstream video_in(root / "src/video.cpp");
+  ASSERT_TRUE(wlgrab_in.is_open());
+  ASSERT_TRUE(linux_misc_in.is_open());
+  ASSERT_TRUE(video_in.is_open());
+  std::ostringstream wlgrab_out, linux_misc_out, video_out;
+  wlgrab_out << wlgrab_in.rdbuf();
+  linux_misc_out << linux_misc_in.rdbuf();
+  video_out << video_in.rdbuf();
+  const auto wlgrab = wlgrab_out.str();
+  const auto linux_misc = linux_misc_out.str();
+  const auto video = video_out.str();
+
+  EXPECT_NE(wlgrab.find("resolve_generation_policy("), std::string::npos);
+  EXPECT_NE(wlgrab.find("private_runtime_matches_generation("), std::string::npos);
+  EXPECT_NE(wlgrab.find("wl_display_names_for_generation("), std::string::npos);
+  EXPECT_NE(wlgrab.find("Immutable private capture generation cannot enumerate a replacement labwc instance"), std::string::npos);
+  EXPECT_NE(linux_misc.find("wl_display_names(generation)"), std::string::npos);
+  EXPECT_NE(video.find("platf::display_names(dev_type, *capture_config)"), std::string::npos);
+  EXPECT_NE(video.find("&capture_ctxs.front().config"), std::string::npos);
+  EXPECT_NE(video.find("&synced_session_ctxs.front()->config"), std::string::npos);
+}
+
+TEST(SourceSafetyContracts, WlgrabRequestedOutputSelectionFailsClosed) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/wlgrab.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  const auto init = source.find("int init(platf::mem_type_e hwdevice_type");
+  const auto next_method = source.find("std::shared_ptr<platf::img_t> alloc_img()", init);
+  ASSERT_NE(init, std::string::npos);
+  ASSERT_NE(next_method, std::string::npos);
+  const auto body = source.substr(init, next_method - init);
+
+  const auto select = body.find("wlgrab_capture_policy::select_monitor_index(");
+  const auto reject = body.find("if (!monitor_index)", select);
+  const auto refuse = body.find("refusing to capture another output", reject);
+  const auto return_failure = body.find("return -1;", reject);
+  const auto dereference = body.find("interface.monitors[*monitor_index]", select);
+  ASSERT_NE(select, std::string::npos);
+  ASSERT_NE(reject, std::string::npos);
+  ASSERT_NE(refuse, std::string::npos);
+  ASSERT_NE(return_failure, std::string::npos);
+  ASSERT_NE(dereference, std::string::npos);
+  EXPECT_LT(reject, return_failure);
+  EXPECT_LT(return_failure, dereference);
+  EXPECT_EQ(body.find("interface.monitors[0].get()"), std::string::npos);
+}
+
 TEST(SourceSafetyContracts, ReadlinkResultsAreCheckedBeforeUse) {
   // readlink reports failure as -1. Widening that into a size handed a
   // string_view a length of SIZE_MAX; the other seven call sites all checked.

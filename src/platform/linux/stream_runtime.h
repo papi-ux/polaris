@@ -86,6 +86,7 @@ namespace stream_runtime {
     void stop();
     void reset_after_external_stop();
     std::string wayland_socket();
+    std::string session_instance_id();
     std::string x11_display();
     platf::runtime_state_t runtime_state();
 

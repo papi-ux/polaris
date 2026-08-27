@@ -420,10 +420,10 @@ TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunc
 }
 
 TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionState) {
-  // An explicit headless_stream request may match the current stream_mode ID
-  // while legacy companion state (for example prefer_gpu_native_capture) is
-  // stale. Skipping apply_selection in that case can resolve the session as
-  // windowed_stream even though the launch requested headless_stream.
+  // Explicit session modes must always normalize companion state. Mirror is
+  // derived as a session-scoped desktop_display override, so bypassing
+  // apply_selection would preserve a host_virtual_display default and could
+  // create or capture the wrong output.
   const auto source = read_source_file_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
 
@@ -439,13 +439,71 @@ TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionStat
   ASSERT_NE(apply_start, std::string::npos);
   const auto guard = body.substr(guard_start, apply_start - guard_start);
 
-  EXPECT_NE(guard.find("!(launch_session && launch_session->mirror_desktop)"), std::string::npos);
+  EXPECT_EQ(guard.find("!(launch_session && launch_session->mirror_desktop)"), std::string::npos)
+    << "mirror must normalize to the session-scoped desktop_display override";
   EXPECT_NE(
     guard.find("!stream_display_policy::selection_companion_state_matches(session_mode)"),
     std::string::npos
   );
   EXPECT_EQ(guard.find("session_mode != linux_display.stream_mode"), std::string::npos)
     << "same-ID explicit overrides must still normalize companion state";
+}
+
+TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxModeDerivation) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(", execute_start);
+  ASSERT_NE(execute_start, std::string::npos);
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto body = source.substr(execute_start, terminate_start - execute_start);
+
+  const auto optimization_guard = body.find("if (resolved_optimization.virtual_display.has_value())");
+  const auto optimization_write = body.find(
+    "launch_session->virtual_display = *resolved_optimization.virtual_display",
+    optimization_guard
+  );
+  const auto desktop_mirror_semantic = body.find(
+    "if (_app.desktop_mirror)",
+    optimization_write
+  );
+  const auto mode_derivation = body.find(
+    "stream_display_policy::effective_session_selection_for_launch(",
+    optimization_write
+  );
+  const auto mode_apply = body.find(
+    "stream_display_policy::apply_selection(session_mode",
+    mode_derivation
+  );
+  const auto runtime_derivation = body.find(
+    "const bool gamescope_stream_session",
+    mode_apply
+  );
+  const auto capture_policy = body.find(
+    "stream_display_policy::resolve_current(",
+    runtime_derivation
+  );
+
+  ASSERT_NE(optimization_guard, std::string::npos);
+  ASSERT_NE(optimization_write, std::string::npos);
+  ASSERT_NE(desktop_mirror_semantic, std::string::npos);
+  ASSERT_NE(mode_derivation, std::string::npos);
+  ASSERT_NE(mode_apply, std::string::npos);
+  ASSERT_NE(runtime_derivation, std::string::npos);
+  ASSERT_NE(capture_policy, std::string::npos);
+  EXPECT_LT(optimization_guard, optimization_write);
+  EXPECT_LT(optimization_write, desktop_mirror_semantic);
+  EXPECT_LT(desktop_mirror_semantic, mode_derivation)
+    << "final device/AI virtual-display intent must own session mode derivation";
+  EXPECT_LT(mode_derivation, mode_apply);
+  EXPECT_LT(mode_apply, runtime_derivation)
+    << "gamescope/headless decisions must consume the final session mode";
+  EXPECT_LT(runtime_derivation, capture_policy);
+  EXPECT_EQ(
+    body.find("stream_display_policy::effective_session_selection_for_launch(", mode_derivation + 1),
+    std::string::npos
+  ) << "one final derivation must own mode, capture, and reported runtime behavior";
 }
 
 TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWithoutCrossLockingRtsp) {
@@ -3047,8 +3105,12 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationOwnedCandidateSurvivesAnotherCand
   const bool transient_exited = wait_for_pidfd_exit(transient_pidfd.fd, std::chrono::seconds(2));
   EXPECT_TRUE(owned_exited) << "a previously proven owned pidfd must survive another candidate's retry";
   EXPECT_TRUE(transient_exited);
-  if (owned_exited) EXPECT_EQ(owned_guard.wait(nullptr, 0), owned);
-  if (transient_exited) EXPECT_EQ(transient_guard.wait(nullptr, 0), transient);
+  if (owned_exited) {
+    EXPECT_EQ(owned_guard.wait(nullptr, 0), owned);
+  }
+  if (transient_exited) {
+    EXPECT_EQ(transient_guard.wait(nullptr, 0), transient);
+  }
 #else
   GTEST_SKIP() << "Linux-only exact-generation owned pidfd retention";
 #endif
@@ -4004,6 +4066,24 @@ TEST(ProcessRuntimeConfigTests, ClearPrivateSteamLaunchIsAllowed) {
   EXPECT_TRUE(policy.canMirrorDesktop);
   EXPECT_EQ(policy.recommendedAction, "launch_private_stream");
 }
+
+TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPreference) {
+  proc::ctx_t desktop;
+  desktop.name = "Desktop";
+  desktop.desktop_mirror = true;
+
+  rtsp_stream::launch_session_t launch_session;
+  launch_session.virtual_display = true;
+  launch_session.user_locked_virtual_display = true;
+  launch_session.mirror_desktop = false;
+
+  proc::apply_app_display_semantics(desktop, launch_session);
+
+  EXPECT_TRUE(launch_session.mirror_desktop);
+  EXPECT_FALSE(launch_session.virtual_display);
+  EXPECT_TRUE(launch_session.user_locked_virtual_display)
+    << "the semantic overrides this launch without mutating paired settings";
+}
 #endif
 
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
@@ -4040,7 +4120,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 9);
+  EXPECT_EQ(migrated_tree["version"], 10);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -4075,6 +4155,51 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
   EXPECT_EQ(migrated_ctx->scale_factor, 125);
   EXPECT_EQ(migrated_ctx->exit_timeout, std::chrono::seconds(5));
   EXPECT_EQ(migrated_ctx->last_launched, 1710000000);
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyForExactStockShape) {
+  const auto file_path = test_paths::root() / "legacy_desktop_mirror_migration.json";
+  const nlohmann::json legacy_apps = {
+    {"version", 9},
+    {"apps", {
+      {
+        {"name", "Desktop"},
+        {"uuid", "11111111-1111-4111-8111-111111111111"},
+        {"image-path", "desktop.png"},
+        {"allow-client-commands", false}
+      },
+      {
+        {"name", "Desktop"},
+        {"uuid", "22222222-2222-4222-8222-222222222222"},
+        {"image-path", "custom-desktop.png"},
+        {"cmd", "launch-custom-desktop"},
+        {"allow-client-commands", false}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), legacy_apps.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(migrated_tree["version"], 10);
+  EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
+  EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
+
+  const auto &apps = parsed_proc->get_apps();
+  const auto stock = std::find_if(apps.begin(), apps.end(), [](const auto &app) {
+    return app.uuid == "11111111-1111-4111-8111-111111111111";
+  });
+  const auto custom = std::find_if(apps.begin(), apps.end(), [](const auto &app) {
+    return app.uuid == "22222222-2222-4222-8222-222222222222";
+  });
+  ASSERT_NE(stock, apps.end());
+  ASSERT_NE(custom, apps.end());
+  EXPECT_TRUE(stock->desktop_mirror);
+  EXPECT_FALSE(custom->desktop_mirror);
 
   std::filesystem::remove(file_path);
 }
@@ -4256,7 +4381,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 9);
+  EXPECT_EQ(migrated_tree["version"], 10);
 
   std::filesystem::remove(file_path);
 }
@@ -4307,7 +4432,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 9);
+  EXPECT_EQ(parsed_tree["version"], 10);
 
   std::filesystem::remove(file_path);
 }
@@ -4520,7 +4645,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 9);
+  EXPECT_EQ(migrated_tree["version"], 10);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -4586,7 +4711,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 9);
+  EXPECT_EQ(migrated_tree["version"], 10);
 
   const auto &migrated_apps = migrated_tree["apps"];
   const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {

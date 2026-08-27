@@ -13,6 +13,7 @@
  */
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <errno.h>
 #include <filesystem>
 #include <fstream>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -35,6 +37,7 @@
 #include <dlfcn.h>
 #include <nlohmann/json.hpp>
 #include <sys/wait.h>
+#include <sys/stat.h>
 
 // local includes
 #include "misc.h"
@@ -70,6 +73,10 @@ namespace virtual_display {
     }
 
     std::mutex persisted_state_mutex;
+    // One creation transaction across stream and web UI callers. The lock is
+    // held through output discovery/configuration and persisted ownership
+    // publication so Sway before/after attribution cannot overlap in-process.
+    static std::mutex creation_mutex;
 
     const char *backend_persist_name(backend_e backend) {
       switch (backend) {
@@ -98,6 +105,36 @@ namespace virtual_display {
       return backend_e::NONE;
     }
 
+    std::optional<kscreen_output_state_t> parse_kscreen_state(const nlohmann::json &node) {
+      if (!node.is_object() ||
+          !node.contains("name") || !node["name"].is_string() ||
+          !node.contains("enabled") || !node["enabled"].is_boolean() ||
+          !node.contains("current_mode_id") || !node["current_mode_id"].is_string() ||
+          !node.contains("priority") || !node["priority"].is_number_integer()) {
+        return std::nullopt;
+      }
+      const int priority = node["priority"].get<int>();
+      const auto name = node["name"].get<std::string>();
+      if (name.empty() || priority < 0 || priority > 100) {
+        return std::nullopt;
+      }
+      return kscreen_output_state_t {
+        .name = name,
+        .enabled = node["enabled"].get<bool>(),
+        .current_mode_id = node["current_mode_id"].get<std::string>(),
+        .priority = priority,
+      };
+    }
+
+    nlohmann::json serialize_kscreen_state(const kscreen_output_state_t &state) {
+      return {
+        {"name", state.name},
+        {"enabled", state.enabled},
+        {"current_mode_id", state.current_mode_id},
+        {"priority", state.priority},
+      };
+    }
+
     std::optional<persisted_display_t> parse_persisted_entry(const nlohmann::json &node) {
       if (!node.is_object()) {
         return std::nullopt;
@@ -112,6 +149,12 @@ namespace virtual_display {
       entry.display.fps = node.value("fps", 0);
       entry.display.active = node.value("active", false);
       entry.display.backend = backend_from_persist_name(node.value("backend", "none"));
+      if (node.contains("kscreen_output_before")) {
+        entry.display.kscreen_output_before = parse_kscreen_state(node["kscreen_output_before"]);
+      }
+      if (node.contains("kscreen_primary_before")) {
+        entry.display.kscreen_primary_before = parse_kscreen_state(node["kscreen_primary_before"]);
+      }
 
       if (!entry.display.active || entry.display.backend == backend_e::NONE || entry.display.output_name.empty()) {
         return std::nullopt;
@@ -130,36 +173,82 @@ namespace virtual_display {
       node["fps"] = entry.display.fps;
       node["active"] = entry.display.active;
       node["backend"] = backend_persist_name(entry.display.backend);
+      if (entry.display.kscreen_output_before) {
+        node["kscreen_output_before"] = serialize_kscreen_state(*entry.display.kscreen_output_before);
+      }
+      if (entry.display.kscreen_primary_before) {
+        node["kscreen_primary_before"] = serialize_kscreen_state(*entry.display.kscreen_primary_before);
+      }
       return node;
     }
 
     /**
      * @brief Read every persisted display. Callers must hold persisted_state_mutex.
      */
-    std::vector<persisted_display_t> load_persisted_entries() {
-      std::ifstream file(persisted_state_path());
+    std::optional<std::vector<persisted_display_t>> load_persisted_entries() {
+      const auto path = persisted_state_path();
+      std::ifstream file(path);
       if (!file.is_open()) {
-        return {};
+        std::error_code ec;
+        if (!fs::exists(path, ec) && !ec) {
+          return std::vector<persisted_display_t> {};
+        }
+        BOOST_LOG(error) << "Virtual display: persisted recovery state is unreadable at "sv << path.string();
+        return std::nullopt;
       }
 
       std::ostringstream buffer;
       buffer << file.rdbuf();
-      return parse_persisted_displays(buffer.str());
+      const auto serialized = buffer.str();
+      const auto root = nlohmann::json::parse(serialized, nullptr, false);
+      if (!root.is_object()) {
+        BOOST_LOG(error) << "Virtual display: persisted recovery state is malformed; refusing to replace it"sv;
+        return std::nullopt;
+      }
+
+      auto entries = parse_persisted_displays(serialized);
+      const std::size_t expected_entries =
+        root.contains("displays") && root["displays"].is_array() ?
+          root["displays"].size() :
+          1;
+      if (entries.size() != expected_entries) {
+        BOOST_LOG(error) << "Virtual display: persisted recovery state contains an unusable entry; refusing to replace it"sv;
+        return std::nullopt;
+      }
+      return entries;
     }
 
     /**
      * @brief Replace the persisted state with these displays. Callers must hold persisted_state_mutex.
      */
-    void write_persisted_entries(const std::vector<persisted_display_t> &entries) {
+    bool write_persisted_entries(const std::vector<persisted_display_t> &entries) {
       const auto path = persisted_state_path();
       std::error_code ec;
 
+      const auto sync_parent = [&]() {
+        const int dir_fd = ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dir_fd < 0) {
+          return false;
+        }
+        const bool synced = ::fsync(dir_fd) == 0;
+        ::close(dir_fd);
+        return synced;
+      };
+
       if (entries.empty()) {
-        fs::remove(path, ec);
-        return;
+        const bool removed = fs::remove(path, ec);
+        if (ec) {
+          BOOST_LOG(error) << "Virtual display: failed to remove persisted recovery state: "sv << ec.message();
+          return false;
+        }
+        return !removed || sync_parent();
       }
 
       fs::create_directories(path.parent_path(), ec);
+      if (ec) {
+        BOOST_LOG(error) << "Virtual display: failed to create recovery state directory: "sv << ec.message();
+        return false;
+      }
 
       nlohmann::json root;
       root["displays"] = nlohmann::json::array();
@@ -171,43 +260,99 @@ namespace virtual_display {
       // through a write would otherwise strand every display it was tracking.
       auto temp_path = path;
       temp_path += ".tmp";
-      {
-        std::ofstream file(temp_path, std::ios::trunc);
-        if (!file.is_open()) {
-          BOOST_LOG(warning) << "Virtual display: failed to persist state at "sv << path.string();
-          return;
+      const auto serialized = root.dump(2);
+      const int fd = ::open(
+        temp_path.c_str(),
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+        S_IRUSR | S_IWUSR
+      );
+      if (fd < 0 || ::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+        if (fd >= 0) {
+          ::close(fd);
         }
-        file << root.dump(2);
+        BOOST_LOG(error) << "Virtual display: failed to open private recovery state at "sv << temp_path.string();
+        return false;
+      }
+      std::size_t offset = 0;
+      bool wrote = true;
+      while (offset < serialized.size()) {
+        const auto result = ::write(fd, serialized.data() + offset, serialized.size() - offset);
+        if (result < 0 && errno == EINTR) {
+          continue;
+        }
+        if (result <= 0) {
+          wrote = false;
+          break;
+        }
+        offset += static_cast<std::size_t>(result);
+      }
+      const bool synced = wrote && ::fsync(fd) == 0;
+      const bool closed = ::close(fd) == 0;
+      if (!synced || !closed) {
+        BOOST_LOG(error) << "Virtual display: failed to durably write recovery state at "sv << temp_path.string();
+        fs::remove(temp_path, ec);
+        return false;
       }
 
       fs::rename(temp_path, path, ec);
       if (ec) {
-        BOOST_LOG(warning) << "Virtual display: failed to persist state at "sv << path.string()
+        BOOST_LOG(error) << "Virtual display: failed to persist state at "sv << path.string()
                            << ": "sv << ec.message();
         fs::remove(temp_path, ec);
+        return false;
       }
+      if (!sync_parent()) {
+        BOOST_LOG(error) << "Virtual display: recovery state rename was not durably committed"sv;
+        return false;
+      }
+      return true;
     }
 
-    void record_persisted_display(const vdisplay_t &display) {
-      const pid_t self = getpid();
+    bool record_persisted_display(const vdisplay_t &display, pid_t owner_pid = getpid()) {
       std::lock_guard lock {persisted_state_mutex};
 
-      auto entries = load_persisted_entries();
-      std::erase_if(entries, [&](const persisted_display_t &entry) {
-        return entry.owner_pid == self && entry.display.output_name == display.output_name;
+      auto loaded = load_persisted_entries();
+      if (!loaded) {
+        return false;
+      }
+      auto &entries = *loaded;
+      const auto incoming = persisted_display_t {owner_pid, display};
+      const auto existing = std::find_if(entries.begin(), entries.end(), [&](const persisted_display_t &entry) {
+        return entry.display.output_name == display.output_name;
       });
-      entries.push_back({self, display});
-      write_persisted_entries(entries);
+      if (existing != entries.end()) {
+        auto existing_display = serialize_persisted_entry(*existing);
+        auto incoming_display = serialize_persisted_entry(incoming);
+        existing_display.erase("pid");
+        incoming_display.erase("pid");
+        const bool same_display = existing_display == incoming_display;
+        if (!same_display || (existing->owner_pid != owner_pid && existing->owner_pid != 0)) {
+          BOOST_LOG(error) << "Virtual display: refusing to replace existing recovery authority for ["sv
+                           << display.output_name << ']';
+          return false;
+        }
+        if (existing->owner_pid == owner_pid) {
+          return true;
+        }
+        *existing = incoming;  // Promote a durable pre-mutation intent to its live owner.
+      } else {
+        entries.push_back(incoming);
+      }
+      return write_persisted_entries(entries);
     }
 
-    void forget_persisted_display(const vdisplay_t &display) {
+    bool forget_persisted_display(const vdisplay_t &display) {
       std::lock_guard lock {persisted_state_mutex};
 
-      auto entries = load_persisted_entries();
+      auto loaded = load_persisted_entries();
+      if (!loaded) {
+        return false;
+      }
+      auto &entries = *loaded;
       std::erase_if(entries, [&](const persisted_display_t &entry) {
         return entry.display.output_name == display.output_name;
       });
-      write_persisted_entries(entries);
+      return write_persisted_entries(entries);
     }
 
     void log_detected_backend(backend_e backend) {
@@ -232,6 +377,10 @@ namespace virtual_display {
       }
     }
   }  // namespace
+
+  bool wayland_compositor_supports_exact_output_creation(std::string_view compositor) {
+    return compositor == "hyprland"sv;
+  }
 
   std::vector<persisted_display_t> parse_persisted_displays(std::string_view state_json) {
     std::vector<persisted_display_t> entries;
@@ -307,22 +456,40 @@ namespace virtual_display {
     return "POLARIS-HEADLESS-" + std::to_string(pid) + "-" + std::to_string(slot);
   }
 
-  bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name) {
+  std::optional<bool> hyprland_monitors_contain_output(
+    std::string_view monitors_json,
+    std::string_view output_name
+  ) {
+    if (output_name.empty()) {
+      return std::nullopt;
+    }
     const auto monitors = nlohmann::json::parse(monitors_json, nullptr, false);
     if (!monitors.is_array()) {
-      return false;
+      return std::nullopt;
     }
 
     for (const auto &monitor : monitors) {
-      if (monitor.is_object() &&
-          monitor.contains("name") &&
-          monitor["name"].is_string() &&
-          monitor["name"].get_ref<const std::string &>() == output_name) {
+      if (!monitor.is_object() ||
+          !monitor.contains("name") ||
+          !monitor["name"].is_string()) {
+        return std::nullopt;
+      }
+      if (monitor["name"].get_ref<const std::string &>() == output_name) {
         return true;
       }
     }
 
     return false;
+  }
+
+  std::optional<bool> evdi_connector_status_is_connected(std::string_view status) {
+    if (status == "connected"sv) {
+      return true;
+    }
+    if (status == "disconnected"sv) {
+      return false;
+    }
+    return std::nullopt;
   }
 
   std::optional<hyprland_mode_t> hyprland_monitor_mode(
@@ -361,6 +528,43 @@ namespace virtual_display {
     }
 
     return std::nullopt;
+  }
+
+  std::optional<kscreen_output_state_t> kscreen_output_state_from_json(
+    std::string_view output_json,
+    std::string_view output_name
+  ) {
+    const auto root = nlohmann::json::parse(output_json, nullptr, false);
+    if (!root.is_object() || !root.contains("outputs") || !root["outputs"].is_array()) {
+      return std::nullopt;
+    }
+
+    for (const auto &output : root["outputs"]) {
+      if (!output.is_object() ||
+          !output.contains("name") || !output["name"].is_string() ||
+          output["name"].get_ref<const std::string &>() != output_name ||
+          !output.contains("enabled") || !output["enabled"].is_boolean() ||
+          !output.contains("currentModeId") || !output["currentModeId"].is_string() ||
+          !output.contains("priority") || !output["priority"].is_number_integer()) {
+        continue;
+      }
+
+      const int priority = output["priority"].get<int>();
+      if (priority < 0 || priority > 100) {
+        return std::nullopt;
+      }
+      return kscreen_output_state_t {
+        .name = std::string {output_name},
+        .enabled = output["enabled"].get<bool>(),
+        .current_mode_id = output["currentModeId"].get<std::string>(),
+        .priority = priority,
+      };
+    }
+    return std::nullopt;
+  }
+
+  bool evdi_output_name_is_proven(std::string_view output_name) {
+    return !output_name.empty();
   }
 
   bool hyprland_output_is_polaris_owned(std::string_view output_name) {
@@ -772,6 +976,33 @@ namespace virtual_display {
       return {};
     }
 
+    static std::optional<bool> output_is_connected(const vdisplay_t &display) {
+      const auto card_name = fs::path {display.device_path}.filename().string();
+      if (card_name.empty() || display.output_name.empty()) {
+        return std::nullopt;
+      }
+      const auto status_path = fs::path {"/sys/class/drm"} /
+                               (card_name + "-" + display.output_name) /
+                               "status";
+      std::error_code ec;
+      const bool exists = fs::exists(status_path, ec);
+      if (ec) {
+        return std::nullopt;
+      }
+      if (!exists) {
+        return false;
+      }
+      std::ifstream status(status_path);
+      if (!status.is_open()) {
+        return std::nullopt;
+      }
+      std::string value;
+      if (!(status >> value)) {
+        return std::nullopt;
+      }
+      return evdi_connector_status_is_connected(value);
+    }
+
     static bool supported_gpu_driver(const std::string &driver) {
       return driver == "nvidia" || driver == "amdgpu" || driver == "i915";
     }
@@ -960,11 +1191,11 @@ namespace virtual_display {
         output_name = find_evdi_output(new_device_path);
       }
 
-      if (output_name.empty()) {
-        // Fallback: use a generic name that downstream code can try to match
-        output_name = "VIRTUAL-1";
-        BOOST_LOG(warning) << "Virtual display: could not determine EVDI output name, using fallback ["sv
-                           << output_name << "]"sv;
+      if (!evdi_output_name_is_proven(output_name)) {
+        BOOST_LOG(error) << "Virtual display: could not prove the EVDI output connector; refusing to publish a guessed name"sv;
+        fn_disconnect(handle);
+        fn_close(handle);
+        return std::nullopt;
       }
 
       vdisplay_t display;
@@ -986,9 +1217,15 @@ namespace virtual_display {
     /**
      * @brief Destroy an EVDI virtual display.
      */
-    static void destroy(vdisplay_t &display) {
+    static bool destroy(vdisplay_t &display) {
       if (!display.evdi_handle) {
-        return;
+        const auto connected = output_is_connected(display);
+        if (connected && !*connected) {
+          display.active = false;
+          return true;
+        }
+        BOOST_LOG(error) << "Virtual display: EVDI absence could not be verified without a disconnect handle; retaining recovery authority"sv;
+        return false;
       }
 
       BOOST_LOG(info) << "Virtual display: disconnecting EVDI display ["sv << display.output_name << "]"sv;
@@ -1001,9 +1238,19 @@ namespace virtual_display {
       fn_close((evdi_handle_t)display.evdi_handle);
 
       display.evdi_handle = nullptr;
-      display.active = false;
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      do {
+        const auto connected = output_is_connected(display);
+        if (connected && !*connected) {
+          display.active = false;
+          BOOST_LOG(info) << "Virtual display: EVDI disconnect verified"sv;
+          return true;
+        }
+        std::this_thread::sleep_for(50ms);
+      } while (std::chrono::steady_clock::now() < deadline);
 
-      BOOST_LOG(info) << "Virtual display: EVDI display destroyed"sv;
+      BOOST_LOG(error) << "Virtual display: EVDI connector remains connected; retaining recovery authority"sv;
+      return false;
     }
 
   }  // namespace evdi
@@ -1076,24 +1323,12 @@ namespace virtual_display {
       }
 
       std::string compositor = detect_compositor();
-      if (compositor == "hyprland") {
-        // hyprctl is the control interface for Hyprland
-        return exec_cmd_rc("which hyprctl >/dev/null 2>&1") == 0;
-      }
-      if (compositor == "sway") {
-        // swaymsg can create outputs
-        return exec_cmd_rc("which swaymsg >/dev/null 2>&1") == 0;
-      }
-      if (compositor == "kwin") {
-        // KWin supports virtual outputs via DBus or kscreen-doctor
-        // (handled by kscreen fallback)
+      if (!wayland_compositor_supports_exact_output_creation(compositor)) {
         return false;
       }
 
-      // No supported compositor identified. wlr-randr alone cannot create an
-      // output (create() refuses the generic branch), so reporting available
-      // here would advertise a display that can never appear.
-      return false;
+      // hyprctl is the control interface for Hyprland and accepts a caller-owned name.
+      return exec_cmd_rc("which hyprctl >/dev/null 2>&1") == 0;
     }
 
     /**
@@ -1101,6 +1336,12 @@ namespace virtual_display {
      */
     static std::optional<vdisplay_t> create(int width, int height, int fps) {
       std::string compositor = detect_compositor();
+      if (!wayland_compositor_supports_exact_output_creation(compositor)) {
+        BOOST_LOG(warning) << "Virtual display: compositor ["sv << compositor
+                           << "] cannot create a caller-named output; refusing before mutation"sv;
+        return std::nullopt;
+      }
+
       std::string output_name;
 
       if (compositor == "hyprland") {
@@ -1118,14 +1359,16 @@ namespace virtual_display {
             continue;
           }
 
-          if (hyprland_monitors_contain_output(monitors_before, candidate)) {
-            // In the compositor but reserved by nothing: an orphan from an
-            // earlier create of ours that materialized after we gave up on it.
-            // The name is ours by construction, so removing it is safe. Take the
-            // next slot either way — removal may not land before we need a name.
-            BOOST_LOG(info) << "Virtual display: removing orphaned Hyprland output ["sv
-                            << candidate << "]"sv;
-            exec_cmd_rc("hyprctl output remove " + candidate + " >/dev/null 2>&1");
+          const auto present = hyprland_monitors_contain_output(monitors_before, candidate);
+          if (!present) {
+            BOOST_LOG(error) << "Virtual display: Hyprland monitor inventory was not valid; refusing named-output creation"sv;
+            hyprland_release_output_name(candidate);
+            return std::nullopt;
+          }
+          if (*present) {
+            // Never mutate an untracked orphan during selection. A durable
+            // recovery record, if one exists, is handled by stale cleanup;
+            // otherwise occupying this slot is safer than guessing ownership.
             hyprland_release_output_name(candidate);
             continue;
           }
@@ -1138,11 +1381,24 @@ namespace virtual_display {
           return std::nullopt;
         }
 
+        vdisplay_t intent;
+        intent.output_name = output_name;
+        intent.width = width;
+        intent.height = height;
+        intent.fps = fps;
+        intent.active = true;
+        intent.backend = backend_e::WAYLAND_WLR;
+        if (!record_persisted_display(intent, 0)) {
+          BOOST_LOG(error) << "Virtual display: refusing Hyprland mutation because durable recovery intent could not be committed"sv;
+          hyprland_release_output_name(output_name);
+          return std::nullopt;
+        }
+
         std::string result = exec_cmd("hyprctl output create headless " + output_name + " 2>&1");
         BOOST_LOG(info) << "Virtual display: hyprctl output create headless: "sv << result;
         if (result != "ok") {
           BOOST_LOG(warning) << "Virtual display: Hyprland rejected headless output creation for ["sv
-                             << output_name << "]"sv;
+                             << output_name << "]; retaining recovery intent until serialized cleanup verifies stable absence"sv;
           hyprland_release_output_name(output_name);
           return std::nullopt;
         }
@@ -1150,10 +1406,11 @@ namespace virtual_display {
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         bool output_appeared = false;
         do {
-          if (hyprland_monitors_contain_output(
-                exec_cmd("hyprctl monitors -j 2>/dev/null"),
-                output_name
-              )) {
+          const auto present = hyprland_monitors_contain_output(
+            exec_cmd("hyprctl monitors -j 2>/dev/null"),
+            output_name
+          );
+          if (present && *present) {
             output_appeared = true;
             break;
           }
@@ -1163,9 +1420,9 @@ namespace virtual_display {
         if (!output_appeared) {
           BOOST_LOG(warning) << "Virtual display: created Hyprland output did not appear ["sv
                              << output_name << "]"sv;
-          // Best effort: the output may still materialize after this removal
-          // runs. Releasing the reservation lets the next create recognize it as
-          // an orphan and clear it rather than inheriting a name it cannot use.
+          // The output may still materialize after this removal runs. Keep the
+          // owner-zero recovery intent even if one immediate query says absent;
+          // serialized stale cleanup must verify removal before another create.
           exec_cmd_rc("hyprctl output remove " + output_name + " >/dev/null 2>&1");
           hyprland_release_output_name(output_name);
           return std::nullopt;
@@ -1230,25 +1487,8 @@ namespace virtual_display {
           }
         }
       }
-      else if (compositor == "sway") {
-        // Sway: create a headless output
-        std::string result = exec_cmd("swaymsg create_output 2>&1");
-        BOOST_LOG(info) << "Virtual display: swaymsg create_output: "sv << result;
-
-        std::this_thread::sleep_for(500ms);
-
-        // Sway names headless outputs as HEADLESS-N
-        output_name = "HEADLESS-1";
-
-        // Set the resolution
-        std::string mode_str = std::to_string(width) + "x" + std::to_string(height) +
-                               "@" + std::to_string(fps) + "Hz";
-        std::string mode_cmd = "swaymsg output " + output_name + " mode " + mode_str;
-        exec_cmd_rc(mode_cmd);
-      }
       else {
-        // Generic wlr-randr approach
-        BOOST_LOG(warning) << "Virtual display: no supported Wayland compositor detected for headless output creation"sv;
+        BOOST_LOG(warning) << "Virtual display: no supported Wayland compositor detected for named output creation"sv;
         return std::nullopt;
       }
 
@@ -1273,32 +1513,57 @@ namespace virtual_display {
     /**
      * @brief Destroy a Wayland headless output.
      */
-    static void destroy(vdisplay_t &display) {
+    static bool destroy(vdisplay_t &display) {
       std::string compositor = detect_compositor();
 
       if (compositor == "hyprland") {
         if (!hyprland_output_is_polaris_owned(display.output_name)) {
           BOOST_LOG(warning) << "Virtual display: refusing to remove unowned Hyprland output ["sv
                              << display.output_name << "]"sv;
-          display.active = false;
-          return;
+          return false;
         }
         std::string cmd = "hyprctl output remove " + display.output_name;
         int rc = exec_cmd_rc(cmd);
         if (rc != 0) {
           BOOST_LOG(warning) << "Virtual display: hyprctl output remove failed (rc="sv << rc << ")"sv;
         }
-        hyprland_release_output_name(display.output_name);
-      }
-      else if (compositor == "sway") {
-        // Sway doesn't have a direct "remove output" command for headless outputs,
-        // but we can disable it
-        std::string cmd = "swaymsg output " + display.output_name + " disable";
-        exec_cmd_rc(cmd);
+
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        std::optional<std::chrono::steady_clock::time_point> absent_since;
+        do {
+          const auto now = std::chrono::steady_clock::now();
+          const auto present = hyprland_monitors_contain_output(
+            exec_cmd("hyprctl monitors -j 2>/dev/null"),
+            display.output_name
+          );
+          if (present && !*present) {
+            if (!absent_since) {
+              absent_since = now;
+            }
+            if (now - *absent_since >= 500ms) {
+              hyprland_release_output_name(display.output_name);
+              display.active = false;
+              BOOST_LOG(info) << "Virtual display: Wayland headless display removal verified after stable absence ["sv
+                              << display.output_name << "]"sv;
+              return true;
+            }
+          } else {
+            // Presence or an invalid query breaks the proof window. This also
+            // covers a create request that materializes after its caller timed out.
+            absent_since.reset();
+          }
+          std::this_thread::sleep_for(50ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        BOOST_LOG(error) << "Virtual display: Hyprland output remains after removal attempt ["sv
+                         << display.output_name << "]; retaining recovery authority"sv;
+        return false;
       }
 
-      display.active = false;
-      BOOST_LOG(info) << "Virtual display: Wayland headless display destroyed ["sv << display.output_name << "]"sv;
+      BOOST_LOG(error) << "Virtual display: cannot verify removal for compositor ["sv
+                       << compositor << "]; retaining recovery authority for ["sv
+                       << display.output_name << "]"sv;
+      return false;
     }
 
   }  // namespace wayland_wlr
@@ -1313,6 +1578,65 @@ namespace virtual_display {
         return false;
       }
       return exec_cmd_rc("which kscreen-doctor >/dev/null 2>&1") == 0;
+    }
+
+    static std::optional<kscreen_output_state_t> current_output_state(
+      const std::string &output_name
+    ) {
+      return kscreen_output_state_from_json(
+        exec_cmd("kscreen-doctor --json 2>/dev/null"),
+        output_name
+      );
+    }
+
+    static void append_restore_args(
+      std::vector<std::string> &args,
+      const kscreen_output_state_t &state
+    ) {
+      const auto prefix = "output." + state.name;
+      if (state.enabled) {
+        args.push_back(prefix + ".enable");
+      }
+      if (!state.current_mode_id.empty()) {
+        args.push_back(prefix + ".mode." + state.current_mode_id);
+      }
+      args.push_back(prefix + ".priority." + std::to_string(state.priority));
+      if (!state.enabled) {
+        args.push_back(prefix + ".disable");
+      }
+    }
+
+    static bool restore_exact(vdisplay_t &display) {
+      if (!display.kscreen_output_before) {
+        BOOST_LOG(error) << "Virtual display: KScreen teardown has no exact pre-launch output state; retaining recovery authority"sv;
+        return false;
+      }
+
+      std::vector<std::string> args {"kscreen-doctor"};
+      append_restore_args(args, *display.kscreen_output_before);
+      if (display.kscreen_primary_before &&
+          display.kscreen_primary_before->name != display.kscreen_output_before->name) {
+        append_restore_args(args, *display.kscreen_primary_before);
+      }
+
+      const int rc = platf::run_process_argv(args);
+      const auto output_after = current_output_state(display.kscreen_output_before->name);
+      const auto primary_after = display.kscreen_primary_before ?
+        current_output_state(display.kscreen_primary_before->name) :
+        std::optional<kscreen_output_state_t> {};
+      const bool output_restored = output_after && *output_after == *display.kscreen_output_before;
+      const bool primary_restored = !display.kscreen_primary_before ||
+        (primary_after && *primary_after == *display.kscreen_primary_before);
+      if (!output_restored || !primary_restored) {
+        BOOST_LOG(error) << "Virtual display: KScreen exact topology restore did not read back"
+                         << " rc="sv << rc << "; retaining recovery authority"sv;
+        return false;
+      }
+
+      display.active = false;
+      BOOST_LOG(info) << "Virtual display: KScreen topology restored exactly for ["sv
+                      << display.output_name << ']';
+      return true;
     }
 
     /**
@@ -1333,6 +1657,39 @@ namespace virtual_display {
       }
 
       std::string output = cfg.streaming_output;
+      const auto output_before = current_output_state(output);
+      const auto primary_before =
+        !cfg.primary_output.empty() && cfg.primary_output != output ?
+          current_output_state(cfg.primary_output) :
+          std::optional<kscreen_output_state_t> {};
+      if (!output_before ||
+          (!cfg.primary_output.empty() && cfg.primary_output != output && !primary_before)) {
+        BOOST_LOG(error) << "Virtual display: refusing KScreen mutation because exact pre-launch topology could not be read"sv;
+        return std::nullopt;
+      }
+
+      vdisplay_t display;
+      display.output_name = output;
+      display.width = width;
+      display.height = height;
+      display.fps = fps;
+      display.active = true;
+      display.backend = backend_e::KSCREEN_DOCTOR;
+      display.kscreen_output_before = output_before;
+      display.kscreen_primary_before = primary_before;
+      if (!record_persisted_display(display, 0)) {
+        BOOST_LOG(error) << "Virtual display: refusing KScreen mutation because durable pre-launch recovery state could not be committed"sv;
+        return std::nullopt;
+      }
+      const auto restore_or_retain = [&]() {
+        if (restore_exact(display)) {
+          if (!forget_persisted_display(display)) {
+            BOOST_LOG(error) << "Virtual display: KScreen topology was restored but its recovery record could not be retired"sv;
+          }
+        } else {
+          display.active = true;
+        }
+      };
 
       // Set mode and enable the output
       std::string mode_str = std::to_string(width) + "x" + std::to_string(height) +
@@ -1366,17 +1723,17 @@ namespace virtual_display {
         rc = platf::run_process_argv(args);
         if (rc != 0) {
           BOOST_LOG(error) << "Virtual display: kscreen-doctor fallback enable also failed (rc="sv << rc << ")"sv;
+          restore_or_retain();
           return std::nullopt;
         }
       }
 
-      vdisplay_t display;
-      display.output_name = output;
-      display.width = width;
-      display.height = height;
-      display.fps = fps;
-      display.active = true;
-      display.backend = backend_e::KSCREEN_DOCTOR;
+      const auto output_after = current_output_state(output);
+      if (!output_after || !output_after->enabled) {
+        BOOST_LOG(error) << "Virtual display: KScreen enable did not read back; restoring exact pre-launch topology"sv;
+        restore_or_retain();
+        return std::nullopt;
+      }
 
       BOOST_LOG(info) << "Virtual display: kscreen-doctor display enabled ["sv
                       << output << "] "sv << width << "x"sv << height << "@"sv << fps << "Hz"sv;
@@ -1387,24 +1744,9 @@ namespace virtual_display {
     /**
      * @brief Disable the display managed by kscreen-doctor.
      */
-    static void destroy(vdisplay_t &display) {
-      const auto &cfg = config::video.linux_display;
-
-      std::vector<std::string> args {"kscreen-doctor"};
-      if (!cfg.primary_output.empty()) {
-        args.push_back("output." + cfg.primary_output + ".priority.1");
-      }
-      args.push_back("output." + display.output_name + ".priority.2");
-      args.push_back("output." + display.output_name + ".disable");
-
-      BOOST_LOG(info) << "Virtual display: running kscreen-doctor disable with "sv << args.size() - 1 << " argument(s)"sv;
-      int rc = platf::run_process_argv(args);
-      if (rc != 0) {
-        BOOST_LOG(warning) << "Virtual display: kscreen-doctor disable failed (rc="sv << rc << ")"sv;
-      }
-
-      display.active = false;
-      BOOST_LOG(info) << "Virtual display: kscreen-doctor display disabled ["sv << display.output_name << "]"sv;
+    static bool destroy(vdisplay_t &display) {
+      BOOST_LOG(info) << "Virtual display: restoring exact pre-launch KScreen topology"sv;
+      return restore_exact(display);
     }
 
   }  // namespace kscreen
@@ -1508,17 +1850,26 @@ namespace virtual_display {
     return unavailable_reason_for(backend, evdi_blocked, !config::video.linux_display.streaming_output.empty());
   }
 
-  bool cleanup_stale() {
+  static bool destroy_unlocked(vdisplay_t &display);
+
+  struct stale_cleanup_result_t {
+    bool found = false;
+    bool succeeded = true;
+  };
+
+  static stale_cleanup_result_t cleanup_stale_unlocked() {
     const pid_t self = getpid();
     std::vector<persisted_display_t> stale;
 
     {
       std::lock_guard lock {persisted_state_mutex};
-      auto entries = load_persisted_entries();
+      auto loaded = load_persisted_entries();
+      if (!loaded) {
+        return {.found = false, .succeeded = false};
+      }
+      const auto &entries = *loaded;
       if (entries.empty()) {
-        // Nothing usable in the file, so drop whatever is left of it.
-        write_persisted_entries({});
-        return false;
+        return {};
       }
 
       for (const auto &entry : entries) {
@@ -1537,44 +1888,67 @@ namespace virtual_display {
 
     // destroy() drops each entry from the file itself, so the lock is released
     // before it runs.
+    bool succeeded = true;
     for (auto &entry : stale) {
       BOOST_LOG(info) << "Virtual display: cleaning up stale persisted display ["sv
                       << entry.display.output_name << "] from pid "sv << entry.owner_pid;
-      destroy(entry.display);
+      if (!destroy_unlocked(entry.display)) {
+        succeeded = false;
+      }
     }
 
-    return !stale.empty();
+    return {.found = !stale.empty(), .succeeded = succeeded};
   }
 
+  bool cleanup_stale() {
+    std::lock_guard creation_lock {creation_mutex};
+    const auto result = cleanup_stale_unlocked();
+    return result.found && result.succeeded;
+  }
+
+#ifdef POLARIS_TESTS
+  void with_creation_lock_for_tests(const std::function<void()> &callback) {
+    std::lock_guard creation_lock {creation_mutex};
+    callback();
+  }
+#endif
+
   std::optional<vdisplay_t> create(int width, int height, int fps) {
-    cleanup_stale();
+    std::lock_guard creation_lock {creation_mutex};
+    const auto cleanup = cleanup_stale_unlocked();
+    if (!cleanup.succeeded) {
+      BOOST_LOG(error) << "Virtual display: stale recovery cleanup failed; refusing a replacement display"sv;
+      return std::nullopt;
+    }
 
     backend_e backend = detect_backend();
 
     BOOST_LOG(info) << "Virtual display: creating "sv << width << "x"sv << height
                     << "@"sv << fps << "Hz using backend: "sv << backend_name(backend);
 
+    const auto publish = [&](std::optional<vdisplay_t> display) -> std::optional<vdisplay_t> {
+      if (!display) {
+        return std::nullopt;
+      }
+      if (record_persisted_display(*display)) {
+        return display;
+      }
+      BOOST_LOG(error) << "Virtual display: live output could not be bound to durable recovery authority; tearing it down"sv;
+      if (!destroy_unlocked(*display)) {
+        BOOST_LOG(error) << "Virtual display: emergency teardown was not verified after persistence failure"sv;
+      }
+      return std::nullopt;
+    };
+
     switch (backend) {
       case backend_e::EVDI:
-        if (auto display = evdi::create(width, height, fps)) {
-          record_persisted_display(*display);
-          return display;
-        }
-        return std::nullopt;
+        return publish(evdi::create(width, height, fps));
 
       case backend_e::WAYLAND_WLR:
-        if (auto display = wayland_wlr::create(width, height, fps)) {
-          record_persisted_display(*display);
-          return display;
-        }
-        return std::nullopt;
+        return publish(wayland_wlr::create(width, height, fps));
 
       case backend_e::KSCREEN_DOCTOR:
-        if (auto display = kscreen::create(width, height, fps)) {
-          record_persisted_display(*display);
-          return display;
-        }
-        return std::nullopt;
+        return publish(kscreen::create(width, height, fps));
 
       case backend_e::NONE:
       default:
@@ -1583,25 +1957,26 @@ namespace virtual_display {
     }
   }
 
-  void destroy(vdisplay_t &display) {
+  static bool destroy_unlocked(vdisplay_t &display) {
     if (!display.active) {
-      return;
+      return forget_persisted_display(display);
     }
 
     BOOST_LOG(info) << "Virtual display: destroying ["sv << display.output_name
                     << "] via "sv << backend_name(display.backend);
 
+    bool destroyed = false;
     switch (display.backend) {
       case backend_e::EVDI:
-        evdi::destroy(display);
+        destroyed = evdi::destroy(display);
         break;
 
       case backend_e::WAYLAND_WLR:
-        wayland_wlr::destroy(display);
+        destroyed = wayland_wlr::destroy(display);
         break;
 
       case backend_e::KSCREEN_DOCTOR:
-        kscreen::destroy(display);
+        destroyed = kscreen::destroy(display);
         break;
 
       case backend_e::NONE:
@@ -1609,9 +1984,25 @@ namespace virtual_display {
         break;
     }
 
-    // Drop only this display's record. Clearing the whole file here used to
-    // strand a sibling display that was still live.
-    forget_persisted_display(display);
+    if (!teardown_is_verified(destroyed, display.active)) {
+      BOOST_LOG(error) << "Virtual display: teardown was not verified; persisted recovery record retained for ["sv
+                       << display.output_name << "]"sv;
+      return false;
+    }
+
+    // Drop only this display's record after verified teardown. Clearing the
+    // whole file here used to strand a sibling display that was still live.
+    if (!forget_persisted_display(display)) {
+      BOOST_LOG(error) << "Virtual display: teardown was verified but persisted recovery retirement failed for ["sv
+                       << display.output_name << ']';
+      return false;
+    }
+    return true;
+  }
+
+  bool destroy(vdisplay_t &display) {
+    std::lock_guard creation_lock {creation_mutex};
+    return destroy_unlocked(display);
   }
 
 }  // namespace virtual_display

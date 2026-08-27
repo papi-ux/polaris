@@ -1,6 +1,7 @@
 # Changelog
 
 - Fixed Gamescope session recovery on distro-package hosts by restoring their empty compositor baseline without requiring Nix-only idle/portal units, and made failed prior-session recovery retain its exact claim instead of forcing unsafe socket cleanup.
+- Fixed Linux host-virtual-display ownership across launch, capture reinitialization, and teardown. The bundled legacy Desktop entry is migrated to an explicit mirror semantic that overrides paired virtual-display preferences; wlroots capture remains bound to the immutable private-compositor generation; and failed output removal retains durable retry state. KScreen restores and reads back the exact pre-launch output state instead of assuming that disable succeeded.
 
 This file tracks the public Polaris release line.
 

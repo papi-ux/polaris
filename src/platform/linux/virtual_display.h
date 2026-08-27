@@ -11,6 +11,7 @@
 #pragma once
 
 // standard includes
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,6 +27,15 @@ namespace virtual_display {
     EVDI,            ///< EVDI kernel module + libevdi
     WAYLAND_WLR,     ///< wlroots-based compositor (wlr-randr / hyprctl)
     KSCREEN_DOCTOR,  ///< KDE kscreen-doctor (manages existing outputs)
+  };
+
+  struct kscreen_output_state_t {
+    std::string name;
+    bool enabled = false;
+    std::string current_mode_id;
+    int priority = 0;
+
+    bool operator==(const kscreen_output_state_t &) const = default;
   };
 
   /**
@@ -57,6 +67,11 @@ namespace virtual_display {
     int fps = 0;                 ///< Refresh rate (Hz)
     bool active = false;         ///< Whether the display is currently active
     backend_e backend = backend_e::NONE;  ///< Which backend created this display
+
+    // KScreen mutates an existing output rather than creating one. Exact
+    // pre-launch state is therefore part of the durable teardown authority.
+    std::optional<kscreen_output_state_t> kscreen_output_before;
+    std::optional<kscreen_output_state_t> kscreen_primary_before;
 
     // EVDI-specific state (opaque handle, managed internally)
     void *evdi_handle = nullptr;
@@ -104,6 +119,9 @@ namespace virtual_display {
    */
   bool wayland_backend_probe_allowed(bool platform_reports_wayland, std::string_view wayland_display);
 
+  /** @brief Return true only when the compositor can create a caller-named output. */
+  bool wayland_compositor_supports_exact_output_creation(std::string_view compositor);
+
   /**
    * @brief Build the connector name requested from Hyprland for one virtual display.
    *
@@ -114,9 +132,11 @@ namespace virtual_display {
   std::string hyprland_output_name_for_pid(int pid, int slot);
 
   /**
-   * @brief Return whether a Hyprland monitor JSON response contains an exact output name.
+   * @brief Return exact presence from a valid Hyprland monitor response.
+   *
+   * `nullopt` means the response cannot prove either presence or absence.
    */
-  bool hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name);
+  std::optional<bool> hyprland_monitors_contain_output(std::string_view monitors_json, std::string_view output_name);
 
   /// An output's active mode as the compositor reports it.
   struct hyprland_mode_t {
@@ -137,6 +157,18 @@ namespace virtual_display {
     std::string_view monitors_json,
     std::string_view output_name
   );
+
+  /** @brief Parse one exact output from `kscreen-doctor --json`. */
+  std::optional<kscreen_output_state_t> kscreen_output_state_from_json(
+    std::string_view output_json,
+    std::string_view output_name
+  );
+
+  /** @brief EVDI output identity is proven only by non-empty connector discovery. */
+  bool evdi_output_name_is_proven(std::string_view output_name);
+
+  /** @brief Parse a DRM connector status; unknown values are not absence proof. */
+  std::optional<bool> evdi_connector_status_is_connected(std::string_view status);
 
   /**
    * @brief Return whether an output name belongs to Polaris's Hyprland namespace.
@@ -160,6 +192,11 @@ namespace virtual_display {
    * and the web UI each own one, and neither can see the other's.
    */
   bool persisted_display_is_stale(int owner_pid, int self_pid, bool owner_alive);
+
+  /** @brief Persistence may be cleared only after backend success and inactive readback. */
+  inline bool teardown_is_verified(bool backend_succeeded, bool display_active) {
+    return backend_succeeded && !display_active;
+  }
 
   /**
    * @brief Human-readable reason a virtual display cannot be created right now.
@@ -189,6 +226,11 @@ namespace virtual_display {
    */
   std::optional<vdisplay_t> create(int width, int height, int fps);
 
+#ifdef POLARIS_TESTS
+  /** @brief Execute a callback under the production virtual-display creation mutex. */
+  void with_creation_lock_for_tests(const std::function<void()> &callback);
+#endif
+
   /**
    * @brief Destroy a previously created virtual display.
    * @param display The display instance to destroy (will be marked inactive).
@@ -197,7 +239,7 @@ namespace virtual_display {
    * For Wayland, removes the headless output.
    * For kscreen-doctor, disables the managed output.
    */
-  void destroy(vdisplay_t &display);
+  [[nodiscard]] bool destroy(vdisplay_t &display);
 
   /**
    * @brief Clean up a persisted virtual display from a dead Polaris process.
