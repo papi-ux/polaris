@@ -513,7 +513,7 @@ namespace nvhttp {
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         mirror_desktop_requested,
-        force_private_after_desktop_steam_shutdown_requested(args),
+        force_private_after_desktop_steam_shutdown_requested(args) || app.close_desktop_steam_for_private,
         app,
         proc::desktop_steam_client_active(),
         active_desktop_game
@@ -551,7 +551,7 @@ namespace nvhttp {
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         mirror_desktop_requested,
-        force_private_after_desktop_steam_shutdown_requested(body),
+        force_private_after_desktop_steam_shutdown_requested(body) || app.close_desktop_steam_for_private,
         app,
         proc::desktop_steam_client_active(),
         active_desktop_game

@@ -402,6 +402,7 @@ namespace confighttp::validation {
       "per-client-app-identity"sv,
       "terminate-on-pause"sv,
       "use-app-identity"sv,
+      "close-desktop-steam-for-private"sv,
       "desktop-mirror"sv,
       "virtual-display"sv,
       "virtual-display-primary"sv,
