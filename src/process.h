@@ -65,6 +65,15 @@ namespace proc {
   struct steam_big_picture_guard_runtime_t;
   struct steam_big_picture_guard_snapshot_t;
 
+  struct retained_steam_shutdown_t {
+    std::string command;
+    std::string pipe_path;
+    std::string remote_path;
+    std::string working_dir;
+    boost::process::v1::environment env;
+    std::chrono::seconds timeout {0};
+  };
+
   struct pidfd_handle_t {
     pid_t pid = -1;
     int fd = -1;
@@ -238,6 +247,31 @@ namespace proc {
     std::chrono::milliseconds poll_interval
   );
 
+  enum class retained_steam_shutdown_scenario_e {
+    listener_absent,
+    helper_missing,
+    dispatch_error,
+    dispatch_timeout,
+    delivery_failed_listener_retained,
+    target_exited_during_delivery,
+    delivered_and_released,
+    delivered_release_timeout,
+    retry_after_helper_failure_then_listener_released,
+  };
+
+  struct retained_steam_shutdown_test_result_t {
+    bool complete = false;
+    bool retained = false;
+    std::size_t attempts = 0;
+    std::size_t listener_checks = 0;
+    std::size_t dispatch_calls = 0;
+    std::size_t release_waits = 0;
+  };
+
+  retained_steam_shutdown_test_result_t run_retained_steam_shutdown_scenario_for_tests(
+    retained_steam_shutdown_scenario_e scenario
+  );
+
   struct private_steam_graceful_shutdown_test_result_t {
     bool root_exited = false;
     std::size_t app_stop_calls = 0;
@@ -253,6 +287,10 @@ namespace proc {
     bool exact_root_exited
   );
   std::optional<std::string> steam_instance_pipe_path_for_tests(
+    const std::optional<std::string> &home_env,
+    const std::optional<std::string> &account_home
+  );
+  std::optional<std::string> steam_remote_command_path_for_tests(
     const std::optional<std::string> &home_env,
     const std::optional<std::string> &account_home
   );
@@ -280,9 +318,15 @@ namespace proc {
   bool cage_mangohud_allowed_for_session_for_tests(const struct ctx_t &app,
                                                    bool use_cage_compositor,
                                                    bool requested_headless);
-  bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(const struct ctx_t &app,
-                                                                   const config::prep_cmd_t &cmd,
-                                                                   bool use_cage_compositor);
+  bool should_skip_steam_shutdown_undo_after_cage_cleanup_for_tests(
+    const config::prep_cmd_t &cmd,
+    bool use_cage_compositor
+  );
+  bool should_forward_steam_shutdown_undo_without_launch_for_tests(
+    const struct ctx_t &app,
+    const config::prep_cmd_t &cmd,
+    bool use_cage_compositor
+  );
   bool should_terminate_session_owned_steam_before_cage_stop_for_tests(
     const struct ctx_t &app,
     bool use_cage_compositor,
@@ -814,6 +858,7 @@ namespace proc {
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     bool terminate_session_owned_steam_before_cage_stop();
     bool cleanup_tracked_detached_children_after_launch_failure();
+    bool retry_retained_steam_shutdown();
     void finalize_isolated_session_runtime(bool runtime_was_stopped_externally);
     void terminate_isolated_session_generation();
     void finish_isolated_session_generation_cleanup();
@@ -867,6 +912,7 @@ namespace proc {
     bool _session_used_cage_compositor = false;
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
+    std::optional<retained_steam_shutdown_t> _retained_steam_shutdown;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
