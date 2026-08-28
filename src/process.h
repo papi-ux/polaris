@@ -592,6 +592,10 @@ namespace proc {
     bool virtual_display;
     bool virtual_display_primary;
     bool desktop_mirror = false;
+    // Per-app twin of the closeDesktopSteamForPrivate launch parameter: when
+    // desktop Steam blocks a private launch of this app, shut it down and
+    // proceed instead of refusing.
+    bool close_desktop_steam_for_private = false;
     bool use_app_identity;
     bool per_client_app_identity;
     bool allow_client_commands;
