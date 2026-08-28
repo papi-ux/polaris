@@ -27,6 +27,7 @@ namespace launch_profile {
 
     std::optional<int> paired_bitrate_kbps;
     std::optional<int> explicit_bitrate_kbps;
+    bool bitrate_locked = false;
     std::optional<int> configured_bitrate_kbps;
 
     bool hdr_requested = false;

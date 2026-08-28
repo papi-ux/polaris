@@ -2064,13 +2064,21 @@ namespace nvhttp {
       const double fps_gap = target_fps > 0 ? std::max(0.0, target_fps - stats.fps) : 0.0;
       const bool meaningful_fps_shortfall =
         stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
+      const bool source_cadence_confirms_motion =
+        stats.capture_source_fps > 0.0 &&
+        target_fps > 0.0 &&
+        stats.capture_source_fps >= target_fps * 0.85;
+      const bool static_or_duplicate_content =
+        stats.duplicate_frame_ratio >= 0.50 ||
+        (target_fps > 0.0 && stats.capture_source_fps > 0.0 &&
+         stats.capture_source_fps < target_fps * 0.50 && stats.duplicate_frame_ratio >= 0.10);
 
       const bool network_risk = stats.network_risk;
       const bool pacing_risk =
-        stats.frame_jitter_ms >= 2.2 ||
-        stats.duplicate_frame_ratio >= 0.10 ||
         stats.dropped_frame_ratio >= 0.04 ||
-        meaningful_fps_shortfall;
+        (!static_or_duplicate_content &&
+         (stats.frame_jitter_ms >= 2.2 ||
+          (meaningful_fps_shortfall && source_cadence_confirms_motion)));
       const bool capture_fallback =
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
@@ -4213,11 +4221,16 @@ namespace nvhttp {
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
     }
 
+    launch_session->resolved_profile_from_client =
+      util::from_view(get_arg(args, "resolvedProfile", "0"));
+
     std::stringstream mode;
-    if (named_cert_p->display_mode.empty()) {
+    if (launch_session->resolved_profile_from_client || named_cert_p->display_mode.empty()) {
       auto mode_str = get_arg(args, "mode", config::video.fallback_mode.c_str());
       mode = std::stringstream(mode_str);
-      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] requested to ["sv << mode_str << ']';
+      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name << "] requested to ["sv << mode_str
+                      << "] source="sv
+                      << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv : "client_request"sv);
     } else {
       mode = std::stringstream(named_cert_p->display_mode);
       BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode << ']';
@@ -4260,6 +4273,21 @@ namespace nvhttp {
     launch_session->profile_preference = launch_profile::normalize_preset(
       get_arg(args, "profilePreference", "auto")
     );
+    if (launch_session->resolved_profile_from_client) {
+      const auto raw_bitrate = get_arg(args, "bitrateKbps", "");
+      try {
+        std::size_t consumed = 0;
+        const auto parsed = std::stoll(raw_bitrate, &consumed);
+        if (consumed != raw_bitrate.size() || parsed < 1000 || parsed > 300000) {
+          BOOST_LOG(warning) << "Rejecting resolved launch profile with invalid bitrate"sv;
+          return nullptr;
+        }
+        launch_session->explicit_target_bitrate_kbps = static_cast<int>(parsed);
+      } catch (...) {
+        BOOST_LOG(warning) << "Rejecting resolved launch profile with malformed bitrate"sv;
+        return nullptr;
+      }
+    }
     launch_session->watch_only = watch_requested(args);
     launch_session->perm = launch_session->watch_only ? PERM::view : named_cert_p->perm;
     launch_session->enable_sops = util::from_view(get_arg(args, "sops", "0"));
@@ -4291,7 +4319,8 @@ namespace nvhttp {
     launch_session->force_private_after_desktop_steam_shutdown = false;
     #endif
     launch_session->virtual_display = !launch_session->mirror_desktop && (client_requested_virtual_display || named_cert_p->always_use_virtual_display);
-    launch_session->user_locked_display_mode = !named_cert_p->display_mode.empty();
+    launch_session->user_locked_display_mode =
+      launch_session->resolved_profile_from_client || !named_cert_p->display_mode.empty();
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
     if (named_cert_p->target_bitrate_kbps > 0) {
@@ -8750,6 +8779,16 @@ namespace nvhttp {
       }
       const bool any_explicit_mode = explicit_width || explicit_height || explicit_fps;
       const bool complete_explicit_mode = explicit_width && explicit_height && explicit_fps;
+      const auto exact_flag = [&](const char *name) {
+        const auto it = args.find(name);
+        if (it == args.end()) return false;
+        if (it->second == "1" || boost::iequals(it->second, "true")) return true;
+        if (it->second == "0" || boost::iequals(it->second, "false")) return false;
+        invalid_argument = true;
+        return false;
+      };
+      const bool display_locked = exact_flag("display_locked");
+      const bool bitrate_locked = exact_flag("bitrate_locked");
       std::optional<bool> explicit_hdr;
       if (const auto it = args.find("hdr"); it != args.end()) {
         const auto value = lower_copy(it->second);
@@ -8757,7 +8796,9 @@ namespace nvhttp {
         else if (value == "0" || value == "false" || value == "off" || value == "no") explicit_hdr = false;
         else invalid_argument = true;
       }
-      if (invalid_argument || (any_explicit_mode && !complete_explicit_mode)) {
+      if (invalid_argument || (any_explicit_mode && !complete_explicit_mode) ||
+          (display_locked && !complete_explicit_mode) ||
+          (bitrate_locked && !explicit_bitrate)) {
         reply_bad_request("invalid_explicit_launch_fields");
         return;
       }
@@ -8777,6 +8818,7 @@ namespace nvhttp {
       preset_request.app_name = game;
       preset_request.preset = profile_preference;
       preset_request.explicit_bitrate_kbps = explicit_bitrate;
+      preset_request.bitrate_locked = bitrate_locked;
       preset_request.paired_bitrate_kbps = named_cert_p->target_bitrate_kbps > 0 ?
         std::optional<int> {named_cert_p->target_bitrate_kbps} : std::nullopt;
       if (config::video.max_bitrate > 0) {
@@ -8786,7 +8828,7 @@ namespace nvhttp {
         preset_request.requested_width = *explicit_width;
         preset_request.requested_height = *explicit_height;
         preset_request.requested_fps = *explicit_fps;
-        preset_request.display_locked = true;
+        preset_request.display_locked = display_locked;
         preset_request.paired_display = false;
       } else if (!named_cert_p->display_mode.empty()) {
         double paired_fps = 0.0;
@@ -8797,7 +8839,7 @@ namespace nvhttp {
               paired_fps
             )) {
           preset_request.requested_fps = static_cast<int>(std::round(paired_fps * 1000.0));
-          preset_request.display_locked = true;
+          preset_request.display_locked = false;
           preset_request.paired_display = true;
         }
       }

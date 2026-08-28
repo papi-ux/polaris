@@ -221,7 +221,7 @@ TEST_F(RecoveryDoctorActionTest, UndoCancelsOnlyTheMatchingQueuedRun) {
 TEST(PairedDoctorRoutePolicyTests, AllowsDisconnectedOwnerUndoButRejectsViewerAndOtherActions) {
   EXPECT_TRUE(doctor_actions::paired_route_allowed("undo", false, false));
   EXPECT_TRUE(doctor_actions::paired_route_allowed("undo", true, true));
-  EXPECT_TRUE(doctor_actions::paired_route_allowed("undo", true, false));
+  EXPECT_FALSE(doctor_actions::paired_route_allowed("undo", true, false));
   EXPECT_FALSE(doctor_actions::paired_route_allowed(
     "apply_recovery_profile_next_launch", false, false
   ));

@@ -74,6 +74,7 @@ TEST(AdaptiveBitrateController, ClampsBaseToConfiguredBounds) {
 
 TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget) {
   enable_controller(7580);
+  const auto configured_ceiling = config::video.adaptive_bitrate.max_bitrate_kbps;
   adaptive_bitrate::set_max_bitrate(7580);
   adaptive_bitrate::set_max_bitrate(20000);
   adaptive_bitrate::set_live_bitrate(9475);
@@ -83,6 +84,7 @@ TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget
   EXPECT_EQ(state.base_bitrate_kbps, 9475);
   EXPECT_EQ(state.target_bitrate_kbps, 9475);
   EXPECT_EQ(state.reason, "doctor_action");
+  EXPECT_EQ(config::video.adaptive_bitrate.max_bitrate_kbps, configured_ceiling);
 }
 
 TEST(AdaptiveBitrateController, HidesTargetsWhenEncoderCannotApplyRuntimeUpdates) {

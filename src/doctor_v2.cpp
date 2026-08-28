@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -21,6 +22,8 @@ namespace doctor_v2 {
     constexpr std::int64_t k_window_ms = 30'000;
     constexpr std::int64_t k_retention_ms = 180'000;
     constexpr double k_required_coverage = 0.90;
+    constexpr std::size_t k_max_samples_per_scope = 256;
+    constexpr std::size_t k_max_scopes = 64;
 
     struct sample_t {
       std::int64_t client_ms = 0;
@@ -48,8 +51,15 @@ namespace doctor_v2 {
 
     std::mutex samples_mutex;
     std::unordered_map<std::string, std::deque<sample_t>> samples_by_scope;
+#ifdef POLARIS_TESTS
+    std::atomic<std::int64_t> test_now_ms {-1};
+#endif
 
     std::int64_t now_ms() {
+#ifdef POLARIS_TESTS
+      const auto test_value = test_now_ms.load(std::memory_order_relaxed);
+      if (test_value >= 0) return test_value;
+#endif
       return std::chrono::duration_cast<std::chrono::milliseconds>(
         clock_t::now().time_since_epoch()
       ).count();
@@ -142,9 +152,9 @@ namespace doctor_v2 {
       window_t result;
       std::array<bool, 30> covered_seconds {};
       for (const auto &sample : samples) {
-        if (sample.client_ms >= begin_ms && sample.client_ms < end_ms) {
+        if (sample.received_ms >= begin_ms && sample.received_ms < end_ms) {
           result.samples.push_back(sample);
-          const auto bucket = static_cast<std::size_t>((sample.client_ms - begin_ms) / 1000);
+          const auto bucket = static_cast<std::size_t>((sample.received_ms - begin_ms) / 1000);
           if (bucket < covered_seconds.size()) covered_seconds[bucket] = true;
         }
       }
@@ -188,7 +198,14 @@ namespace doctor_v2 {
   }
 
   bool trials_enabled() {
+#ifdef POLARIS_ENABLE_DOCTOR_TRIALS
     return flag_enabled("POLARIS_DOCTOR_TRIALS");
+#else
+    // v1.3.14 is a containment release. Keep the authenticated trial contract
+    // compiled for unit coverage and follow-up development, but do not let a
+    // runtime environment variable turn a shadow observer into launch policy.
+    return false;
+#endif
   }
 
   nlohmann::json ingest(const std::string &owner_uuid,
@@ -216,7 +233,21 @@ namespace doctor_v2 {
     }
 
     std::lock_guard lock(samples_mutex);
-    auto &samples = samples_by_scope[scope_key(owner_uuid, app_uuid)];
+    const auto key = scope_key(owner_uuid, app_uuid);
+    if (!samples_by_scope.contains(key) && samples_by_scope.size() >= k_max_scopes) {
+      const auto oldest = std::min_element(
+        samples_by_scope.begin(),
+        samples_by_scope.end(),
+        [](const auto &lhs, const auto &rhs) {
+          const auto lhs_ms = lhs.second.empty() ? 0 : lhs.second.back().received_ms;
+          const auto rhs_ms = rhs.second.empty() ? 0 : rhs.second.back().received_ms;
+          return lhs_ms < rhs_ms;
+        }
+      );
+      if (oldest != samples_by_scope.end()) samples_by_scope.erase(oldest);
+    }
+    auto &samples = samples_by_scope[key];
+    bool counter_epoch_reset = false;
     if (!samples.empty()) {
       const auto &last = samples.back();
       if (parsed->generation < last.generation ||
@@ -232,18 +263,22 @@ namespace doctor_v2 {
            parsed->frames_received < last.frames_received ||
            parsed->frames_rendered < last.frames_rendered ||
            parsed->frames_lost < last.frames_lost)) {
-        return {
-          {"status", false}, {"changed", false}, {"state", "rejected"},
-          {"code", "counter_regression"}
-        };
+        // Decoder/counter producers can restart inside one authenticated host
+        // stream generation. Begin a fresh evidence epoch; host receipt time
+        // still requires a full warm-up and two windows before classification.
+        samples.clear();
+        counter_epoch_reset = true;
       }
     }
     samples.push_back(*parsed);
-    while (!samples.empty() && parsed->client_ms - samples.front().client_ms > k_retention_ms) {
+    while (!samples.empty() &&
+           (parsed->received_ms - samples.front().received_ms > k_retention_ms ||
+            samples.size() > k_max_samples_per_scope)) {
       samples.pop_front();
     }
     return {
-      {"status", true}, {"changed", true}, {"state", "observed"},
+      {"status", true}, {"changed", true},
+      {"state", counter_epoch_reset ? "counter_epoch_reset" : "observed"},
       {"sample_count", samples.size()}, {"session_generation", parsed->generation}
     };
   }
@@ -287,8 +322,8 @@ namespace doctor_v2 {
 
     const auto generation = samples.back().generation;
     std::erase_if(samples, [generation](const sample_t &sample) { return sample.generation != generation; });
-    const auto warmup_end = samples.front().client_ms + k_warmup_ms;
-    const auto end = samples.back().client_ms;
+    const auto warmup_end = samples.front().received_ms + k_warmup_ms;
+    const auto end = samples.back().received_ms;
     const auto rolling_begin = end - (2 * k_window_ms);
     const auto begin = std::max(warmup_end, rolling_begin);
     const auto first = window_between(samples, begin, begin + k_window_ms);
@@ -351,10 +386,14 @@ namespace doctor_v2 {
     const bool source_capture_measured =
       source_capture_evidence.contains("source_fps") &&
       source_capture_evidence["source_fps"].is_number() &&
-      source_capture_evidence["source_fps"].get<double>() > 0.0 &&
+      source_capture_evidence["source_fps"].get<double>() >= 0.0 &&
       source_capture_evidence.contains("duplicate_frame_ratio") &&
       source_capture_evidence["duplicate_frame_ratio"].is_number() &&
-      source_capture_evidence["duplicate_frame_ratio"].get<double>() >= 0.0;
+      source_capture_evidence["duplicate_frame_ratio"].get<double>() >= 0.0 &&
+      source_capture_evidence.contains("capture_pacing") &&
+      source_capture_evidence["capture_pacing"].is_string() &&
+      !source_capture_evidence["capture_pacing"].get<std::string>().empty() &&
+      source_capture_evidence["capture_pacing"].get<std::string>() != "unknown";
     const auto encode_evidence =
       host_evidence.contains("encode") && host_evidence["encode"].is_object() ?
         host_evidence["encode"] : nlohmann::json::object();
@@ -382,9 +421,25 @@ namespace doctor_v2 {
         host_evidence["transport"] : nlohmann::json::object();
     const auto bytes_sent = host_transport.contains("bytes_sent") && host_transport["bytes_sent"].is_number() ?
       host_transport["bytes_sent"] : nlohmann::json(nullptr);
-    const bool transport_measured = !bytes_sent.is_null() && bytes_sent.get<double>() > 0.0;
+    const auto retransmissions =
+      host_transport.contains("retransmissions") && host_transport["retransmissions"].is_number() ?
+        host_transport["retransmissions"] : nlohmann::json(nullptr);
+    const bool transport_measured =
+      !bytes_sent.is_null() && bytes_sent.get<double>() > 0.0 &&
+      !retransmissions.is_null() && retransmissions.get<double>() >= 0.0;
+    const auto presentation_evidence =
+      host_evidence.contains("receive_decode_render") && host_evidence["receive_decode_render"].is_object() ?
+        host_evidence["receive_decode_render"] : nlohmann::json::object();
+    const bool receive_decode_render_complete =
+      presentation_evidence.contains("decoded_fps") && presentation_evidence["decoded_fps"].is_number() &&
+      presentation_evidence["decoded_fps"].get<double>() >= 0.0 &&
+      presentation_evidence.contains("queue_latency_ms") && presentation_evidence["queue_latency_ms"].is_number() &&
+      presentation_evidence["queue_latency_ms"].get<double>() >= 0.0 &&
+      presentation_evidence.contains("render_latency_ms") && presentation_evidence["render_latency_ms"].is_number() &&
+      presentation_evidence["render_latency_ms"].get<double>() >= 0.0;
     const bool core_evidence_adequate =
-      source_capture_measured && encode_measured && transport_measured && effective_settings_measured;
+      source_capture_measured && encode_measured && transport_measured &&
+      effective_settings_measured && receive_decode_render_complete;
 
     nlohmann::json stages;
     stages["source_capture"] = source_capture_measured ?
@@ -393,19 +448,19 @@ namespace doctor_v2 {
     stages["encode"] = encode_measured ?
       stage("measured", encode_evidence, "polaris_encoder_stats") :
       stage("unknown", nlohmann::json::object(), "unavailable");
-    stages["transport"] = stage(transport_measured ? "partial" : "unknown", {
+    stages["transport"] = stage(transport_measured ? "measured" : "partial", {
       {"confirmed_media_loss_pct", loss_pct},
       {"rtt_ms", rtt_ms},
       {"bytes_sent", bytes_sent},
-      {"retransmissions", nullptr}
+      {"retransmissions", retransmissions}
     }, "nova_media_counters_host_transport_and_control_rtt");
-    stages["receive_decode_render"] = stage("measured", {
+    stages["receive_decode_render"] = stage(receive_decode_render_complete ? "measured" : "partial", {
       {"received_fps", received_fps},
-      {"decoded_fps", nullptr},
+      {"decoded_fps", receive_decode_render_complete ? presentation_evidence["decoded_fps"] : nlohmann::json(nullptr)},
       {"rendered_fps", rendered_fps},
       {"decode_latency_ms", decode_ms},
-      {"queue_latency_ms", nullptr},
-      {"render_latency_ms", nullptr},
+      {"queue_latency_ms", receive_decode_render_complete ? presentation_evidence["queue_latency_ms"] : nlohmann::json(nullptr)},
+      {"render_latency_ms", receive_decode_render_complete ? presentation_evidence["render_latency_ms"] : nlohmann::json(nullptr)},
       {"host_processing_latency_ms", latest.host_processing_ms ? nlohmann::json(*latest.host_processing_ms) : nlohmann::json(nullptr)},
       {"frames_received", latest.frames_received},
       {"frames_rendered", latest.frames_rendered}
@@ -434,9 +489,13 @@ namespace doctor_v2 {
     result["trial_metrics"]["ready"] = windows_complete && core_evidence_adequate;
     if (!core_evidence_adequate) result["trial_metrics"]["duration_seconds"] = 0;
 
-    result["missing_evidence"] = nlohmann::json::array({
-      "decoded_frame_counter", "retransmissions", "queue_latency", "render_latency"
-    });
+    result["missing_evidence"] = nlohmann::json::array();
+    if (retransmissions.is_null()) result["missing_evidence"].push_back("retransmissions");
+    if (!receive_decode_render_complete) {
+      result["missing_evidence"].push_back("decoded_frame_counter");
+      result["missing_evidence"].push_back("queue_latency");
+      result["missing_evidence"].push_back("render_latency");
+    }
     if (!effective_settings_measured) {
       result["missing_evidence"].push_back("host_effective_settings");
     }
@@ -495,19 +554,28 @@ namespace doctor_v2 {
       });
     }
     if (network_warning) {
+      auto missing = nlohmann::json::array();
+      if (bytes_sent.is_null()) missing.push_back("transport_bytes");
+      if (retransmissions.is_null()) missing.push_back("retransmissions");
       result["hypotheses"].push_back({
         {"id", "network_pressure"}, {"confidence", windows_complete ? "high" : "medium"},
         {"evidence_for", nlohmann::json::array({"confirmed media loss or RTT threshold exceeded"})},
         {"evidence_against", nlohmann::json::array()},
-        {"missing_measurements", nlohmann::json::array({"transport_bytes", "retransmissions"})}
+        {"missing_measurements", std::move(missing)}
       });
     }
     if (decoder_gap) {
+      auto missing = nlohmann::json::array();
+      if (!receive_decode_render_complete) {
+        missing.push_back("decoded_frame_counter");
+        missing.push_back("queue_latency");
+        missing.push_back("render_latency");
+      }
       result["hypotheses"].push_back({
         {"id", "decoder_or_render_pressure"}, {"confidence", windows_complete && decode_ms > 0.0 ? "medium" : "low"},
         {"evidence_for", nlohmann::json::array({"rendered cadence trails received cadence"})},
         {"evidence_against", nlohmann::json::array()},
-        {"missing_measurements", nlohmann::json::array({"decoded_frame_counter", "queue_latency", "render_latency"})}
+        {"missing_measurements", std::move(missing)}
       });
     }
     if (encode_warning) {
@@ -519,11 +587,13 @@ namespace doctor_v2 {
       });
     }
     if (pacing_gap && !network_warning && !decoder_gap) {
+      auto missing = nlohmann::json::array();
+      if (!source_capture_measured) missing.push_back("source_duplicate_frame_counter");
       result["hypotheses"].push_back({
         {"id", "source_or_capture_cadence"}, {"confidence", "low"},
         {"evidence_for", nlohmann::json::array({"rendered cadence is below the stream target"})},
         {"evidence_against", nlohmann::json::array({"confirmed network evidence is clean"})},
-        {"missing_measurements", nlohmann::json::array({"source_duplicate_frame_counter"})}
+        {"missing_measurements", std::move(missing)}
       });
     }
 
@@ -564,6 +634,11 @@ namespace doctor_v2 {
   void clear_for_tests() {
     std::lock_guard lock(samples_mutex);
     samples_by_scope.clear();
+    test_now_ms.store(-1, std::memory_order_relaxed);
+  }
+
+  void set_now_ms_for_tests(std::int64_t value) {
+    test_now_ms.store(value, std::memory_order_relaxed);
   }
 #endif
 

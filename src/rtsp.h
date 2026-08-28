@@ -55,6 +55,11 @@ namespace rtsp_stream {
     // Explicit deterministic launch preset. This is never populated from
     // Doctor history or AI output.
     std::string profile_preference = "auto";
+    // Nova may submit the already-resolved deterministic profile on the
+    // authenticated /launch request. These values are then explicit launch
+    // locks, avoiding dependence on a prior paired-settings persistence call.
+    bool resolved_profile_from_client = false;
+    std::optional<int> explicit_target_bitrate_kbps;
     std::string session_token;
     crypto::PERM perm;
     bool watch_only;
@@ -128,8 +133,8 @@ namespace rtsp_stream {
     // Empty = host default. Validated in make_launch_session; applied to the
     // in-memory config by proc_t::execute and restored at teardown.
     std::string stream_mode;
-    bool user_locked_display_mode;
-    bool user_locked_virtual_display;
+    bool user_locked_display_mode = false;
+    bool user_locked_virtual_display = false;
     uint32_t scale_factor;
     std::optional<int> paired_target_bitrate_kbps;
     std::optional<int> target_bitrate_kbps;

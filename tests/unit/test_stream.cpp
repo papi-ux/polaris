@@ -57,6 +57,7 @@ namespace {
     stats.encode_target_residency = platf::frame_residency_e::gpu;
     stats.fps = delivered_fps;
     stats.encode_target_fps = target_fps;
+    stats.capture_source_fps = target_fps;
     stats.codec = "hevc";
     return stats;
   }
@@ -116,7 +117,7 @@ TEST(NvhttpSessionHealthTests, MeaningfulTargetMissRemainsHostRenderLimited) {
   EXPECT_TRUE(health.at("host_render_limited").get<bool>());
 }
 
-TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing) {
+TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryDoesNotInventPacing) {
   auto stats = stable_gpu_native_stats(60.0, 60.0);
   stats.duplicate_frame_ratio = 0.10;
 
@@ -127,9 +128,9 @@ TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing
     "Control"
   );
 
-  EXPECT_EQ(health.at("grade"), "watch");
-  EXPECT_EQ(health.at("primary_issue"), "frame_pacing");
-  EXPECT_EQ(health.at("limiting_factor"), "pacing");
+  EXPECT_EQ(health.at("grade"), "good");
+  EXPECT_EQ(health.at("primary_issue"), "steady");
+  EXPECT_EQ(health.at("limiting_factor"), "none");
   EXPECT_EQ(health.at("auto_action"), "none");
   EXPECT_FALSE(health.at("host_render_limited").get<bool>());
 }
@@ -254,7 +255,7 @@ TEST(ProcHostPauseClassificationTests, MeaningfulTargetMissRemainsHostRenderLimi
   EXPECT_TRUE(classification.at("host_render_limited").get<bool>());
 }
 
-TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing) {
+TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryDoesNotInventPacing) {
   auto stats = stable_gpu_native_stats(60.0, 60.0);
   stats.duplicate_frame_ratio = 0.10;
 
@@ -264,8 +265,8 @@ TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryRemainsFra
     false
   );
 
-  EXPECT_EQ(classification.at("health_grade"), "watch");
-  EXPECT_EQ(classification.at("primary_issue"), "frame_pacing");
+  EXPECT_EQ(classification.at("health_grade"), "good");
+  EXPECT_EQ(classification.at("primary_issue"), "steady");
   EXPECT_FALSE(classification.at("host_render_limited").get<bool>());
 }
 

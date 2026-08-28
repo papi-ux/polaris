@@ -81,6 +81,9 @@ namespace stream_stats {
     std::atomic<bool> hot_packet_loss_available {false};
     std::atomic<double> hot_control_channel_packet_loss {0.0};
     std::atomic<uint64_t> hot_control_channel_samples {0};
+    // Process-lifetime monotonic revision. Doctor uses this to prove that a
+    // verification decision includes measurements received after its change.
+    std::atomic<uint64_t> hot_network_sample_revision {0};
     std::atomic<bool> hot_network_risk {false};
     std::atomic<uint64_t> hot_bytes_sent {0};
 
@@ -167,6 +170,9 @@ namespace stream_stats {
       hot_packet_loss_available.store(false, std::memory_order_relaxed);
       hot_control_channel_packet_loss.store(0.0, std::memory_order_relaxed);
       hot_control_channel_samples.store(0, std::memory_order_relaxed);
+      // network_sample_revision intentionally survives stream resets so an
+      // old receipt cannot mistake a new generation's first samples for its
+      // own baseline. Authenticated session generation still fences actions.
       {
         std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
         network_risk_tracker.reset();
@@ -398,6 +404,7 @@ namespace stream_stats {
     j["optimization_normalization_reason"] = optimization_normalization_reason;
     j["recommendation_version"] = recommendation_version;
     j["paired_target_bitrate_kbps"] = paired_target_bitrate_kbps;
+    j["effective_launch_bitrate_kbps"] = effective_launch_bitrate_kbps;
     j["width"] = width;
     j["height"] = height;
     j["latency_ms"] = latency_ms;
@@ -406,6 +413,7 @@ namespace stream_stats {
     j["packet_loss_source"] = packet_loss_source;
     j["control_channel_packet_loss"] = control_channel_packet_loss;
     j["control_channel_samples"] = control_channel_samples;
+    j["network_sample_revision"] = network_sample_revision;
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
@@ -829,15 +837,15 @@ namespace stream_stats {
         body = "The reliable control channel retried packets, but Polaris has no confirmed video-loss evidence and RTT remains stable. Do not lower quality from this observation alone.";
         next_step = "Keep monitoring";
         expected = "Visible media loss or sustained RTT pressure must appear before Doctor recommends a network recovery action.";
-      } else if (primary_issue == "quality_capped_by_history") {
+      } else if (primary_issue == "quality_reduced_live") {
         if (live_bitrate_tunable) {
-          body = "The current network is clean, but an older recovery profile is holding bitrate below this paired device's saved target. Doctor can retry quality gradually and verify every step.";
+          body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
           next_step = "Restore and verify";
-          expected = "Bitrate should climb toward the paired target while Doctor stops immediately if live loss or latency returns.";
+          expected = "Bitrate should climb toward the capability-validated launch ceiling while Doctor stops immediately if live loss or latency returns.";
         } else {
-          body = "The current network is clean, but this encoder cannot restore bitrate during a live stream. Relaunch to apply the paired quality target.";
-          next_step = "Relaunch with paired target";
-          expected = "The next stream should start at the saved paired bitrate.";
+          body = "The current network is clean, but this encoder cannot restore bitrate during the active stream. Doctor will not change the next launch.";
+          next_step = "Keep current settings";
+          expected = "Any later launch remains governed only by the user's selected preset and capability validation.";
         }
       } else if (primary_issue == "steam_input_conflict") {
         body = "Local Steam Input settings can claim the Polaris Xbox virtual controller while strict isolation prevents Steam from creating its replacement controller. Disable Steam Input for Xbox controllers in Steam Settings, and set any per-game Force On overrides to Default or Disable.";
@@ -934,7 +942,7 @@ namespace stream_stats {
           {"endpoint", "/api/doctor/action"},
           {"success_when", nlohmann::json::array({"current network evidence remains below the action threshold"})}
         };
-      } else if (primary_issue == "quality_capped_by_history" && live_bitrate_tunable) {
+      } else if (primary_issue == "quality_reduced_live" && live_bitrate_tunable) {
         id = "restore_quality";
         label = "Auto Fix";
         kind = "live_tuning";
@@ -943,14 +951,14 @@ namespace stream_stats {
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
         payload["target_bitrate_kbps"] = paired_target_bitrate_kbps;
-        rollback = "Undo restores the recovery-profile bitrate and Auto Quality state that were active before this Doctor run.";
+        rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "graduated_live_telemetry"},
           {"delay_seconds", 8},
           {"endpoint", "/api/doctor/action"},
-          {"success_when", nlohmann::json::array({"network_risk stays clear", "packet_loss_pct <= 2", "latency_ms < 45", "paired bitrate target is reached"})}
+          {"success_when", nlohmann::json::array({"network_risk stays clear", "packet_loss_pct <= 2", "latency_ms < 45", "effective launch bitrate ceiling is reached"})}
         };
-      } else if ((primary_issue == "network_jitter" || primary_issue == "quality_capped_by_history") && !live_bitrate_tunable) {
+      } else if ((primary_issue == "network_jitter" || primary_issue == "quality_reduced_live") && !live_bitrate_tunable) {
         unavailable_reason = "The active encoder does not support runtime bitrate updates.";
       } else if (primary_issue == "steam_input_conflict") {
         id = "none";
@@ -998,7 +1006,7 @@ namespace stream_stats {
         {"capability", capability},
         {"kind", kind},
         {"destructive", false},
-        {"requires_confirmation", id != "none" && id != "lower_bitrate" && id != "recheck_network" && id != "restore_quality"},
+        {"requires_confirmation", id != "none" && id != "lower_bitrate" && id != "recheck_network" && id != "recheck_pacing" && id != "restore_quality"},
         {"requires_owner", id != "none"},
         {"allowed_in_viewer_mode", id == "export_support_bundle"},
         {"endpoint", endpoint},
@@ -1038,9 +1046,16 @@ namespace stream_stats {
       stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    const int effective_quality_target_kbps =
+      stats.paired_target_bitrate_kbps > 0 && stats.effective_launch_bitrate_kbps > 0 ?
+        std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps) :
+        0;
+    const bool network_evidence_available =
+      stats.packet_loss_available || stats.control_channel_samples > 0;
     const bool quality_reduced_live =
-      stats.streaming && !stats.network_risk && stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
-      stats.adaptive_runtime_update_supported && stats.paired_target_bitrate_kbps > live_bitrate_kbps;
+      stats.streaming && network_evidence_available && !stats.network_risk &&
+      stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
+      stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -1054,11 +1069,18 @@ namespace stream_stats {
                                (stats.encode_time_ms >= 8.0 ||
                                 (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
     const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
+    const bool source_cadence_available = stats.capture_source_fps > 0.0 && target_fps > 0.0;
+    const bool source_cadence_confirms_motion =
+      source_cadence_available && stats.capture_source_fps >= target_fps * 0.85;
+    const bool observed_target_shortfall = meaningful_fps_shortfall && source_cadence_confirms_motion;
+    const bool static_or_duplicate_content =
+      stats.duplicate_frame_ratio >= 0.50 ||
+      (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
+       stats.duplicate_frame_ratio >= 0.10);
     const bool pacing_watch =
-      stats.frame_jitter_ms >= 2.2 ||
-      stats.duplicate_frame_ratio >= 0.10 ||
       stats.dropped_frame_ratio >= 0.04 ||
-      meaningful_fps_shortfall;
+      (!static_or_duplicate_content &&
+       (stats.frame_jitter_ms >= 2.2 || observed_target_shortfall));
     const bool strict_gamepad_isolation =
       stats.input_host_controller_isolation == "strict_bwrap";
     const bool steam_input_known =
@@ -1072,6 +1094,8 @@ namespace stream_stats {
     std::string primary_issue = health.value("primary_issue", std::string {});
     if (primary_issue == "steady" || primary_issue == "none") primary_issue.clear();
     const bool health_claims_network_jitter = primary_issue == "network_jitter";
+    const bool health_claims_unconfirmed_frame_pacing =
+      primary_issue == "frame_pacing" && !pacing_watch;
     const bool suppressed_stale_network_finding =
       health_claims_network_jitter && !network_fail && !network_watch;
     if (health_claims_network_jitter && !network_fail) {
@@ -1080,6 +1104,9 @@ namespace stream_stats {
       // bitrate reduction without current debounced network evidence. A live
       // debounced watch can request another check, never a quality change.
       primary_issue = network_watch ? "network_observation" : std::string {};
+    }
+    if (health_claims_unconfirmed_frame_pacing) {
+      primary_issue.clear();
     }
     if (steam_input_conflict && !network_fail && !encoder_fail && !capture_latency_fail) {
       // This is a deterministic host-state conflict, not an inference from a
@@ -1101,7 +1128,7 @@ namespace stream_stats {
       else if (capture_cpu_copy) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
-      else if (quality_reduced_live) primary_issue = "quality_capped_by_history";
+      else if (quality_reduced_live) primary_issue = "quality_reduced_live";
       else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
     }
@@ -1111,7 +1138,8 @@ namespace stream_stats {
     std::string severity = "info";
     std::string simple_state = "Streaming ready";
     const auto health_grade = health.value("grade", std::string {});
-    const bool honor_health_grade = !health_claims_network_jitter || network_fail;
+    const bool honor_health_grade =
+      (!health_claims_network_jitter || network_fail) && !health_claims_unconfirmed_frame_pacing;
     if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";
@@ -1137,7 +1165,7 @@ namespace stream_stats {
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
       primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
-      primary_issue == "quality_capped_by_history" ? "The reversible live bitrate target is below the paired setting and current network evidence is clean." :
+      primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
@@ -1170,7 +1198,18 @@ namespace stream_stats {
       "enet_control_channel",
       "ENet reliable-channel EWMA. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
     );
-    append_doctor_evidence(evidence, "latency", "Network latency", stats.latency_ms, "ms", stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Round-trip latency reported by the active client control channel.");
+    append_doctor_evidence(
+      evidence,
+      "latency",
+      "Network latency",
+      network_evidence_available ? nlohmann::json(stats.latency_ms) : nlohmann::json(nullptr),
+      "ms",
+      !network_evidence_available ? "unknown" : stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass",
+      network_evidence_available ? "stream_stats" : "unavailable",
+      network_evidence_available ?
+        "Round-trip latency reported by the active client control channel." :
+        "No current media or control-channel latency sample is available for this stream."
+    );
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
     append_doctor_evidence(
       evidence,
@@ -1184,8 +1223,32 @@ namespace stream_stats {
       stats.adaptive_runtime_update_supported ? "The active encoder accepts runtime bitrate updates." :
                                                 "The active encoder does not support runtime bitrate updates; bitrate changes require a new stream."
     );
-    append_doctor_evidence(evidence, "paired_bitrate_target", "Paired quality target", stats.paired_target_bitrate_kbps, "kbps", quality_reduced_live ? "watch" : stats.paired_target_bitrate_kbps > 0 ? "pass" : "unknown", "paired_client", quality_reduced_live ? "A reversible same-stream bitrate target is below the paired setting." : "Saved bitrate preference for the active paired client.");
-    append_doctor_evidence(evidence, "target_fps_gap", "Target FPS gap", target_fps_gap, "FPS", meaningful_fps_shortfall ? "watch" : "pass", "stream_stats", "Encoded FPS below the requested cadence is a source or compositor pacing gap, not network jitter by itself.");
+    append_doctor_evidence(
+      evidence,
+      "effective_quality_ceiling",
+      "Effective quality ceiling",
+      effective_quality_target_kbps > 0 ? nlohmann::json(effective_quality_target_kbps) : nlohmann::json(nullptr),
+      "kbps",
+      quality_reduced_live ? "watch" : effective_quality_target_kbps > 0 ? "pass" : "unknown",
+      "launch_policy",
+      quality_reduced_live ?
+        "The reversible live bitrate target is below the capability-validated launch ceiling." :
+        "The launch ceiling is the paired preference after host capability validation."
+    );
+    append_doctor_evidence(
+      evidence,
+      "target_fps_gap",
+      "Target FPS gap",
+      target_fps_gap,
+      "FPS",
+      observed_target_shortfall ? "watch" : meaningful_fps_shortfall && !source_cadence_available ? "unknown" : "pass",
+      "stream_stats",
+      observed_target_shortfall ?
+        "Encoded FPS is below the requested cadence while measured source cadence confirms moving content." :
+      meaningful_fps_shortfall && !source_cadence_available ?
+        "Encoded FPS is below the requested cadence, but source cadence is unavailable; static content is not a pacing fault." :
+        "No source-confirmed target cadence shortfall is present."
+    );
     append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
     append_doctor_evidence(
       evidence,
@@ -1226,7 +1289,7 @@ namespace stream_stats {
       confidence_score = 0.98;
       confidence_level = "high";
       basis = "local_steam_config_and_isolation_plan";
-    } else if (primary_issue == "quality_capped_by_history") {
+    } else if (primary_issue == "quality_reduced_live") {
       confidence_score = 0.96;
       confidence_level = "high";
       basis = "session_policy_and_live_telemetry";
@@ -1282,7 +1345,7 @@ namespace stream_stats {
       primary_issue,
       health,
       live_bitrate_kbps,
-      stats.paired_target_bitrate_kbps,
+      effective_quality_target_kbps,
       stats.adaptive_runtime_update_supported,
       doctor["result_id"].get<std::string>(),
       app_uuid
@@ -1447,7 +1510,8 @@ namespace stream_stats {
                               const std::string &optimization_reasoning,
                               const std::string &optimization_normalization_reason,
                               int recommendation_version,
-                              int paired_target_bitrate_kbps) {
+                              int paired_target_bitrate_kbps,
+                              int effective_launch_bitrate_kbps) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.requested_client_fps = requested_client_fps;
@@ -1461,6 +1525,7 @@ namespace stream_stats {
     current_stats.optimization_normalization_reason = optimization_normalization_reason;
     current_stats.recommendation_version = recommendation_version;
     current_stats.paired_target_bitrate_kbps = paired_target_bitrate_kbps;
+    current_stats.effective_launch_bitrate_kbps = effective_launch_bitrate_kbps;
   }
 
   void update_frame_delivery(double duplicate_frame_ratio,
@@ -1498,6 +1563,7 @@ namespace stream_stats {
     hot_packet_loss_available.store(true, std::memory_order_relaxed);
     hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
     ingest_network_risk(latency_ms, packet_loss);
+    hot_network_sample_revision.fetch_add(1, std::memory_order_release);
   }
 
   void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent) {
@@ -1524,6 +1590,7 @@ namespace stream_stats {
       hot_packet_loss_available.store(true, std::memory_order_relaxed);
       hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
       ingest_network_risk(latency_ms, packet_loss);
+      hot_network_sample_revision.fetch_add(1, std::memory_order_release);
     }
   }
 
@@ -1535,6 +1602,7 @@ namespace stream_stats {
     // RTT describes the shared path. The ENet loss EWMA describes only its
     // reliable control channel, so it cannot enter the actionable loss term.
     ingest_network_risk(latency_ms, 0.0);
+    hot_network_sample_revision.fetch_add(1, std::memory_order_release);
   }
 
   void update_control_channel_stats(const std::string &client_ip,
@@ -1560,6 +1628,7 @@ namespace stream_stats {
       hot_control_channel_samples.fetch_add(1, std::memory_order_relaxed);
       hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
       ingest_network_risk(latency_ms, 0.0);
+      hot_network_sample_revision.fetch_add(1, std::memory_order_release);
     }
   }
 
@@ -2398,6 +2467,7 @@ namespace stream_stats {
     result.packet_loss_source = result.packet_loss_available ? "media_transport" : "unavailable";
     result.control_channel_packet_loss = hot_control_channel_packet_loss.load(std::memory_order_relaxed);
     result.control_channel_samples = hot_control_channel_samples.load(std::memory_order_relaxed);
+    result.network_sample_revision = hot_network_sample_revision.load(std::memory_order_acquire);
     result.network_risk = hot_network_risk.load(std::memory_order_relaxed);
     result.bytes_sent = hot_bytes_sent.load(std::memory_order_relaxed);
     result.idr_requests_total = hot_idr_requests_total.load(std::memory_order_relaxed);
