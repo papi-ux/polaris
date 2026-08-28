@@ -26,6 +26,7 @@ extern "C" {
 #include "config.h"
 #include "crypto.h"
 #include "display_device.h"
+#include "doctor_actions.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -2369,6 +2370,7 @@ namespace stream {
       }
 
       // Remove this client from multi-client stats
+      doctor_actions::session_ended(session.device_uuid, session.session_generation);
       stream_stats::remove_client(session.control.expected_peer_address);
       stream_stats::stop_session_timing(session.device_uuid, session.session_generation);
 
@@ -2481,7 +2483,8 @@ namespace stream {
         session.optimization_reasoning,
         session.optimization_normalization_reason,
         session.optimization_recommendation_version,
-        session.paired_target_bitrate_kbps
+        session.paired_target_bitrate_kbps,
+        adaptive_bitrate::get_state().base_bitrate_kbps
       );
       stream_stats::update_dynamic_range(session.config.monitor.dynamicRange);
       stream_stats::update_video_stats(addr_string,

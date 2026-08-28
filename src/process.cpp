@@ -443,12 +443,20 @@ namespace proc {
       host_pause_session_classification_t classification;
       const bool meaningful_fps_shortfall =
         stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
+      const bool source_cadence_available =
+        stats.capture_source_fps > 0.0 && target_fps > 0.0;
+      const bool source_cadence_confirms_motion =
+        source_cadence_available && stats.capture_source_fps >= target_fps * 0.85;
+      const bool static_or_duplicate_content =
+        stats.duplicate_frame_ratio >= 0.50 ||
+        (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
+         stats.duplicate_frame_ratio >= 0.10);
       classification.network_risk = stats.network_risk;
       classification.pacing_risk =
-        stats.frame_jitter_ms >= 2.2 ||
-        stats.duplicate_frame_ratio >= 0.10 ||
         stats.dropped_frame_ratio >= 0.04 ||
-        meaningful_fps_shortfall;
+        (!static_or_duplicate_content &&
+         (stats.frame_jitter_ms >= 2.2 ||
+          (meaningful_fps_shortfall && source_cadence_confirms_motion)));
       classification.capture_fallback = stream_stats::capture_path_uses_cpu_copy(stats);
       classification.capture_path = stream_stats::capture_path_summary(stats);
       classification.encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
@@ -463,9 +471,6 @@ namespace proc {
                                             (classification.pacing_risk ||
                                              classification.capture_fallback ||
                                              classification.hdr_risk);
-      // Reused frames can be intentional for static or menu content. Keep
-      // duplicate cadence as a pacing signal, but require an actual target
-      // miss or dropped frames before attributing the cause to host rendering.
       classification.host_render_limited =
         classification.pacing_risk &&
         !classification.network_risk &&
@@ -3721,10 +3726,6 @@ namespace proc {
       bool display_mode = false;
       bool color_range = false;
       bool hdr = false;
-      bool virtual_display = false;
-      bool bitrate = false;
-      bool nvenc_tune = false;
-      bool preferred_codec = false;
     };
 
     std::string format_session_fps(int fps) {
@@ -3747,8 +3748,7 @@ namespace proc {
     }
 
     parsed_display_mode_t clamp_optimized_display_mode_to_client_request(const parsed_display_mode_t &candidate,
-                                                                         const parsed_display_mode_t &requested,
-                                                                         std::string_view source) {
+                                                                         const parsed_display_mode_t &requested) {
       auto clamped = candidate;
 
       if (requested.fps > 0 && clamped.fps > requested.fps) {
@@ -3763,9 +3763,7 @@ namespace proc {
 
       constexpr int balanced_floor_width = 1920;
       constexpr int balanced_floor_height = 1080;
-      const bool recovery_profile = source.find("history_safe") != std::string_view::npos;
-      if (!recovery_profile &&
-          requested.width >= balanced_floor_width &&
+      if (requested.width >= balanced_floor_width &&
           requested.height >= balanced_floor_height &&
           clamped.height < balanced_floor_height) {
         clamped.width = balanced_floor_width;
@@ -6700,11 +6698,6 @@ namespace proc {
       launch_session->user_locked_display_mode || !launch_session->enable_sops || launch_preset != "stability";
     // Topology is never a launch-preset field. Only explicit app/client display
     // semantics below may select it.
-    optimization_locks.virtual_display = true;
-    optimization_locks.bitrate =
-      config::video.max_bitrate > 0 ||
-      launch_session->paired_target_bitrate_kbps.has_value() ||
-      launch_preset == "auto";
 
     resolved_session_optimization_t resolved_optimization;
     if (launch_session->paired_target_bitrate_kbps.has_value()) {
@@ -6753,11 +6746,14 @@ namespace proc {
     preset_request.display_locked = optimization_locks.display_mode;
     preset_request.paired_display = launch_session->user_locked_display_mode;
     preset_request.paired_bitrate_kbps = launch_session->paired_target_bitrate_kbps;
+    preset_request.explicit_bitrate_kbps = launch_session->explicit_target_bitrate_kbps;
+    preset_request.bitrate_locked = launch_session->explicit_target_bitrate_kbps.has_value();
     if (config::video.max_bitrate > 0) {
       preset_request.configured_bitrate_kbps = config::video.max_bitrate;
     }
     preset_request.hdr_requested = launch_session->enable_hdr;
-    preset_request.hdr_locked = optimization_locks.hdr;
+    preset_request.hdr_locked =
+      optimization_locks.hdr || launch_session->resolved_profile_from_client;
     if (resolved_optimization.color_range) {
       preset_request.color_range = resolved_optimization.color_range;
     }
@@ -6801,8 +6797,7 @@ namespace proc {
       const auto normalized_display_mode =
         clamp_optimized_display_mode_to_client_request(
           *resolved_optimization.display_mode,
-          requested_display_mode,
-          resolved_optimization.display_mode_source
+          requested_display_mode
         );
 
       if (!display_modes_equal(normalized_display_mode, *resolved_optimization.display_mode)) {

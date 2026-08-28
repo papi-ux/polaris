@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <string>
 
 namespace doctor_v2 {
@@ -25,6 +26,7 @@ namespace doctor_v2 {
 
 #ifdef POLARIS_TESTS
   void clear_for_tests();
+  void set_now_ms_for_tests(std::int64_t value);
 #endif
 
 }  // namespace doctor_v2

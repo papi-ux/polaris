@@ -287,7 +287,6 @@ namespace adaptive_bitrate {
   void set_max_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
     current_config.max_bitrate_kbps = std::max(kbps, current_config.min_bitrate_kbps);
-    config::video.adaptive_bitrate.max_bitrate_kbps = current_config.max_bitrate_kbps;
 
     const int base = std::min(
       base_bitrate_kbps.load(std::memory_order_relaxed),

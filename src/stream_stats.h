@@ -136,6 +136,8 @@ namespace stream_stats {
     std::string optimization_normalization_reason;
     int recommendation_version = 0;
     int paired_target_bitrate_kbps = 0;
+    /// Capability-validated bitrate ceiling captured when this stream began.
+    int effective_launch_bitrate_kbps = 0;
     int width = 0;
     int height = 0;
 
@@ -148,6 +150,8 @@ namespace stream_stats {
     /// ENet reliable control-channel EWMA; diagnostic context, not video loss.
     double control_channel_packet_loss = 0;
     uint64_t control_channel_samples = 0;
+    /// Monotonic count of primary media/control network observations.
+    uint64_t network_sample_revision = 0;
     /// Debounced by network_risk_tracker_t; the single truth every reader serves.
     bool network_risk = false;
     uint64_t bytes_sent = 0;
@@ -327,6 +331,7 @@ namespace stream_stats {
    * @param optimization_normalization_reason Explanation for any server-side correction.
    * @param recommendation_version Optimization schema version used to produce the result.
    * @param paired_target_bitrate_kbps Bitrate explicitly saved for the paired client, if any.
+   * @param effective_launch_bitrate_kbps Capability-validated encoder bitrate when the stream began.
    */
   void update_session_targets(double requested_client_fps,
                               double session_target_fps,
@@ -338,7 +343,8 @@ namespace stream_stats {
                               const std::string &optimization_reasoning,
                               const std::string &optimization_normalization_reason,
                               int recommendation_version,
-                              int paired_target_bitrate_kbps);
+                              int paired_target_bitrate_kbps,
+                              int effective_launch_bitrate_kbps);
 
   /**
    * @brief Update frame delivery telemetry derived from the encode loop.

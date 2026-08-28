@@ -56,4 +56,15 @@ namespace doctor_actions {
   nlohmann::json execute(const nlohmann::json &request,
                          const recovery_action_context_t &recovery_context);
 
+  /** Roll back and retire a same-stream action when its authenticated session ends. */
+  void session_ended(std::string_view owner_uuid, std::uint64_t session_generation);
+
+#ifdef POLARIS_TESTS
+  /** Make the active receipt's post-change window due without sleeping in unit tests. */
+  void make_verification_due_for_tests();
+
+  /** Run the active receipt's verification watchdog synchronously in unit tests. */
+  void run_verification_watchdog_for_tests();
+#endif
+
 }  // namespace doctor_actions

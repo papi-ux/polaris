@@ -156,15 +156,13 @@ namespace launch_profile {
     if (request.explicit_bitrate_kbps && *request.explicit_bitrate_kbps > 0) {
       result.target_bitrate_kbps = request.explicit_bitrate_kbps;
       add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
-                "explicit_launch_request", "requested_bitrate_setting", true);
+                request.bitrate_locked ? "explicit_launch_request" : "client_launch_request",
+                request.bitrate_locked ? "requested_bitrate_lock" : "requested_bitrate_setting",
+                request.bitrate_locked);
     } else if (request.paired_bitrate_kbps && *request.paired_bitrate_kbps > 0) {
       result.target_bitrate_kbps = request.paired_bitrate_kbps;
       add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
                 "paired_client", "paired_bitrate_setting", true);
-    } else if (request.configured_bitrate_kbps && *request.configured_bitrate_kbps > 0) {
-      result.target_bitrate_kbps = request.configured_bitrate_kbps;
-      add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
-                "host_configuration", "configured_bitrate_lock", true);
     } else if (result.preset != "auto" && device && device->ideal_bitrate_kbps > 0) {
       const int target = result.preset == "stability" ?
         std::min(device->ideal_bitrate_kbps, 15000) : device->ideal_bitrate_kbps;
@@ -175,29 +173,38 @@ namespace launch_profile {
                 false,
                 result.preset == "stability" && target != device->ideal_bitrate_kbps);
     }
+    if (result.preset == "stability" && !request.bitrate_locked && result.target_bitrate_kbps) {
+      const int conservative_target = std::min(
+        *result.target_bitrate_kbps,
+        device && device->ideal_bitrate_kbps > 0 ?
+          std::min(device->ideal_bitrate_kbps, 15000) : 15000
+      );
+      const bool normalized = conservative_target != *result.target_bitrate_kbps;
+      result.target_bitrate_kbps = conservative_target;
+      add_field(result.fields, "target_bitrate_kbps", conservative_target,
+                "device_profile_v1", "stability_preset_selected", false, normalized);
+    }
     if (result.target_bitrate_kbps && request.configured_bitrate_kbps &&
         *request.configured_bitrate_kbps > 0 &&
         *result.target_bitrate_kbps > *request.configured_bitrate_kbps) {
       result.target_bitrate_kbps = request.configured_bitrate_kbps;
       add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
-                "capability_validation", "host_bitrate_cap", false, true);
+                "capability_validation", "host_bitrate_cap", request.bitrate_locked, true);
     }
 
     if (result.preset != "auto" && device) {
-      if (!device->preferred_codec.empty()) {
-        result.preferred_codec = device->preferred_codec;
-        add_field(result.fields, "preferred_codec", *result.preferred_codec,
-                  "device_profile_v1", "preset_device_capability", false);
-      }
+      // Codec remains client-selected until the resolver receives an exact
+      // decoder-capability set. An advisory device preference is not an
+      // executable resolved value and therefore is deliberately omitted.
       result.nvenc_tune = device->nvenc_tune;
       add_field(result.fields, "nvenc_tune", *result.nvenc_tune,
                 "device_profile_v1", "preset_encoder_tuning", false);
     }
 
-    if (request.hdr_requested && device && !device->hdr_capable && !request.hdr_locked) {
+    if (request.hdr_requested && device && !device->hdr_capable) {
       result.hdr = false;
       add_field(result.fields, "hdr", false, "capability_validation",
-                "paired_device_hdr_unsupported", false, true);
+                "paired_device_hdr_unsupported", request.hdr_locked, true);
     } else {
       add_field(result.fields, "hdr", result.hdr,
                 request.hdr_locked ? "client_profile" : "explicit_launch_request",
