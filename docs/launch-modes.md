@@ -117,6 +117,9 @@ You do not need to change the host mode to briefly share your desktop. Any Moonl
 
 The exception is Headless Dongle: its layout is physical, so per-launch overrides are ignored there.
 
+> [!TIP]
+> The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.
+
 ## Under the hood (optional reading)
 
 - [Runtime and Streaming Model](runtime.md): how capture paths and fallback decisions actually work.
