@@ -10396,7 +10396,8 @@ namespace proc {
    * Legacy versions of Sunshine/Apollo stored boolean and integer values as strings.
    * The following keys are converted:
    *   - Boolean keys: "exclude-global-prep-cmd", "elevated", "auto-detach", "wait-all",
-   *                     "use-app-identity", "per-client-app-identity", "desktop-mirror", "virtual-display"
+   *                     "use-app-identity", "per-client-app-identity", "desktop-mirror", "virtual-display",
+   *                     "close-desktop-steam-for-private"
    *   - Integer keys: "exit-timeout"
    *
    * A migration version is stored in the file tree (under "version") so that future changes can be applied.
@@ -10486,6 +10487,7 @@ namespace proc {
         {"use-app-identity", false},
         {"per-client-app-identity", false},
         {"desktop-mirror", false},
+        {"close-desktop-steam-for-private", false},
         {"virtual-display", false},
         {"virtual-display-primary", false},
         {"terminate-on-pause", false}
@@ -11132,6 +11134,7 @@ namespace proc {
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           ctx.virtual_display = app_node.value("virtual-display", false);
           ctx.desktop_mirror = app_node.value("desktop-mirror", false);
+          ctx.close_desktop_steam_for_private = app_node.value("close-desktop-steam-for-private", false);
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);

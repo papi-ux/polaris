@@ -49,6 +49,8 @@
     "close": "Terminate",
     "close_warning": "Are you sure to terminate the current running app?",
     "close_failed": "App termination failed.",
+    "close_desktop_steam_for_private": "Close desktop Steam for private launches",
+    "close_desktop_steam_for_private_desc": "If desktop Steam is running when this app starts a private stream, quit it and wait for it to fully exit instead of refusing the launch. Anything unsaved in the desktop Steam session is closed.",
     "cmd": "Command",
     "cmd_desc": "The main application to start. If blank, no application will be started.",
     "cmd_note": "If the path to the command executable contains spaces, you must enclose it in quotes.",

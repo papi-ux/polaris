@@ -737,4 +737,37 @@ TEST(SteamShutdownStateMachineTests, BothNvhttpRoutesGateOnLiveRefreshedPolicy) 
   ASSERT_NE(api_gate, std::string::npos);
   EXPECT_LT(api_refresh, api_gate);
 }
+
+TEST(SteamShutdownStateMachineTests, PerAppCloseDesktopSteamReachesBothNvhttpRoutes) {
+  // The per-app "close-desktop-steam-for-private" flag is the only way a
+  // standard Moonlight client (which cannot add launch parameters) can opt
+  // into close-desktop-Steam-then-launch. It must enter the policy exactly
+  // where the request-side closeDesktopSteamForPrivate parameter does, in
+  // BOTH nvhttp wrappers, so the shutdown-and-re-resolve flow the routes
+  // already implement applies to it unchanged. It must not be OR-ed into the
+  // post-shutdown recheck, which deliberately re-resolves with the force flag
+  // off.
+  const auto nvhttp = read_source_file("src/nvhttp.cpp");
+  ASSERT_FALSE(nvhttp.empty());
+  EXPECT_NE(
+    nvhttp.find("force_private_after_desktop_steam_shutdown_requested(args) || app.close_desktop_steam_for_private"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    nvhttp.find("force_private_after_desktop_steam_shutdown_requested(body) || app.close_desktop_steam_for_private"),
+    std::string::npos
+  );
+
+  // The flag only exists if apps.json parsing and payload validation both
+  // know the key; losing either silently turns the toggle into a no-op.
+  const auto process = read_source_file("src/process.cpp");
+  ASSERT_FALSE(process.empty());
+  EXPECT_NE(
+    process.find("app_node.value(\"close-desktop-steam-for-private\", false)"),
+    std::string::npos
+  );
+  const auto validation = read_source_file("src/confighttp_validation.cpp");
+  ASSERT_FALSE(validation.empty());
+  EXPECT_NE(validation.find("\"close-desktop-steam-for-private\"sv"), std::string::npos);
+}
 #endif
