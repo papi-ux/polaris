@@ -40,11 +40,23 @@ def function_body(source: str, name: str) -> str:
     called `json` — so artwork manifest and asset fields land in the game set and
     the tool reports drift that does not exist.
     """
-    start = re.search(rf'^\s*(?:internal |private |public )?fun {re.escape(name)}\(', source, re.M)
+    start = re.search(
+        rf'^([ \t]*)(?:internal |private |public )?fun {re.escape(name)}\(',
+        source,
+        re.M,
+    )
     if not start:
         raise SystemExit(f"function not found: {name}")
     rest = source[start.end():]
-    nxt = re.search(r'^\s*(?:internal |private |public )?fun \w+\(', rest, re.M)
+    # Local helper functions are deeper-indented and remain part of the reader
+    # scope. Only a sibling declaration at the exact same indentation closes
+    # the method whose JSON reads we are auditing.
+    indent = re.escape(start.group(1))
+    nxt = re.search(
+        rf'^{indent}(?:internal |private |public )?fun \w+\(',
+        rest,
+        re.M,
+    )
     return rest[: nxt.start()] if nxt else rest
 
 

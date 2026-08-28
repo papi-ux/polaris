@@ -68,6 +68,8 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp
     ${CMAKE_SOURCE_DIR}/src/crash_report.cpp
     ${CMAKE_SOURCE_DIR}/src/client_support_report.cpp
+    ${CMAKE_SOURCE_DIR}/src/doctor_v2.cpp
+    ${CMAKE_SOURCE_DIR}/src/doctor_trial.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
@@ -134,6 +136,9 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_source_safety_contracts.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_reset_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_v2.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_trial.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
@@ -193,6 +198,7 @@ set(TEST_INPUT_SOURCES
 set(TEST_CONFIG_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_config_parser.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_device_db.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_profile.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_entry_handler.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launcher_identity.cpp

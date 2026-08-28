@@ -902,7 +902,7 @@ namespace stream_stats {
 
       if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
-        label = "Fix and verify";
+        label = "Auto Fix";
         kind = "live_tuning";
         endpoint = "/api/doctor/action";
         method = "POST";
@@ -921,7 +921,7 @@ namespace stream_stats {
         };
       } else if (primary_issue == "network_observation") {
         id = "recheck_network";
-        label = "Recheck network";
+        label = "Recheck";
         kind = "verification";
         endpoint = "/api/doctor/action";
         method = "POST";
@@ -936,7 +936,7 @@ namespace stream_stats {
         };
       } else if (primary_issue == "quality_capped_by_history" && live_bitrate_tunable) {
         id = "restore_quality";
-        label = "Restore and verify";
+        label = "Auto Fix";
         kind = "live_tuning";
         endpoint = "/api/doctor/action";
         method = "POST";
@@ -954,7 +954,7 @@ namespace stream_stats {
         unavailable_reason = "The active encoder does not support runtime bitrate updates.";
       } else if (primary_issue == "steam_input_conflict") {
         id = "none";
-        label = "Review Steam Input";
+        label = "Manual";
         kind = "manual_guidance";
         unavailable_reason =
           "Automatic Steam profile changes are disabled in this release. Review the host-wide Xbox opt-in and per-game overrides in Steam controller settings.";
@@ -967,34 +967,35 @@ namespace stream_stats {
         };
       } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
         id = "export_support_bundle";
-        label = "Export diagnostics";
+        label = "Manual";
         kind = "export";
         rollback = "Export only; no host settings are changed.";
       } else if (health.value("relaunch_recommended", false)) {
-        id = "apply_recovery_profile_next_launch";
-        label = "Use safer next launch";
-        kind = "next_launch_profile";
+        id = "recheck_pacing";
+        label = "Recheck";
+        kind = "verification";
         endpoint = "/api/doctor/action";
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        if (!app_uuid.empty()) payload["app_uuid"] = app_uuid;
-        rollback = "Undo cancels only the queued, unconsumed next-launch profile. The current stream and saved host settings remain unchanged.";
+        rollback = "This check is read-only and cannot change the next launch.";
         verification = {
-          {"mode", "post_connect"},
-          {"delay_seconds", 0},
-          {"action_id", "verify_recovery_profile_next_launch"},
-          {"endpoint", "/polaris/v1/doctor/action"},
-          {"success_when", nlohmann::json::array({"matching owner and game are connected", "effective topology, resolution, FPS, bitrate, codec, and HDR match the queued safe profile"})}
+          {"mode", "live_telemetry"},
+          {"delay_seconds", 3},
+          {"endpoint", "/api/doctor/action"},
+          {"success_when", nlohmann::json::array({"a fresh complete pacing evidence window is available"})}
         };
       }
 
-      const bool undoable = id == "lower_bitrate" || id == "restore_quality" ||
-        id == "apply_recovery_profile_next_launch";
+      const bool undoable = id == "lower_bitrate" || id == "restore_quality";
+      const std::string capability =
+        (id == "lower_bitrate" || id == "restore_quality") ? "auto_fix" :
+        (id == "recheck_network" || id == "recheck_pacing") ? "recheck" : "manual";
 
       return {
         {"id", id},
         {"label", label},
+        {"capability", capability},
         {"kind", kind},
         {"destructive", false},
         {"requires_confirmation", id != "none" && id != "lower_bitrate" && id != "recheck_network" && id != "restore_quality"},
@@ -1006,10 +1007,10 @@ namespace stream_stats {
         {"payload_preview", payload},
         {"rollback", rollback},
         {"verification", verification},
-        {"paired_endpoint", id == "apply_recovery_profile_next_launch" ? "/polaris/v1/doctor/action" : ""},
-        {"owner_tuning_allowed", id == "apply_recovery_profile_next_launch"},
+        {"paired_endpoint", ""},
+        {"owner_tuning_allowed", false},
         {"undo", {{"supported", undoable}, {"endpoint", undoable ? "/api/doctor/action" : ""},
-          {"paired_endpoint", id == "apply_recovery_profile_next_launch" ? "/polaris/v1/doctor/action" : ""}}}
+          {"paired_endpoint", ""}}}
       };
     }
   }  // namespace
@@ -1037,10 +1038,9 @@ namespace stream_stats {
       stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
-    const bool history_safe_source = stats.optimization_source.find("history_safe") != std::string::npos;
-    const bool quality_capped_by_history =
+    const bool quality_reduced_live =
       stats.streaming && !stats.network_risk && stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
-      history_safe_source && stats.paired_target_bitrate_kbps > live_bitrate_kbps;
+      stats.adaptive_runtime_update_supported && stats.paired_target_bitrate_kbps > live_bitrate_kbps;
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -1101,7 +1101,7 @@ namespace stream_stats {
       else if (capture_cpu_copy) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
-      else if (quality_capped_by_history) primary_issue = "quality_capped_by_history";
+      else if (quality_reduced_live) primary_issue = "quality_capped_by_history";
       else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
     }
@@ -1137,7 +1137,7 @@ namespace stream_stats {
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
       primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
-      primary_issue == "quality_capped_by_history" ? "An older recovery profile is limiting quality even though the live network is stable." :
+      primary_issue == "quality_capped_by_history" ? "The reversible live bitrate target is below the paired setting and current network evidence is clean." :
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
@@ -1171,7 +1171,7 @@ namespace stream_stats {
       "ENet reliable-channel EWMA. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
     );
     append_doctor_evidence(evidence, "latency", "Network latency", stats.latency_ms, "ms", stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass", "stream_stats", "Round-trip latency reported by the active client control channel.");
-    append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a guarded recovery-profile retry." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
+    append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
     append_doctor_evidence(
       evidence,
       "live_bitrate_control",
@@ -1184,7 +1184,7 @@ namespace stream_stats {
       stats.adaptive_runtime_update_supported ? "The active encoder accepts runtime bitrate updates." :
                                                 "The active encoder does not support runtime bitrate updates; bitrate changes require a new stream."
     );
-    append_doctor_evidence(evidence, "paired_bitrate_target", "Paired quality target", stats.paired_target_bitrate_kbps, "kbps", quality_capped_by_history ? "watch" : stats.paired_target_bitrate_kbps > 0 ? "pass" : "unknown", "session_profile", quality_capped_by_history ? "A history-safe recovery layer is keeping the live bitrate below the paired target." : "Saved bitrate preference for the active paired client.");
+    append_doctor_evidence(evidence, "paired_bitrate_target", "Paired quality target", stats.paired_target_bitrate_kbps, "kbps", quality_reduced_live ? "watch" : stats.paired_target_bitrate_kbps > 0 ? "pass" : "unknown", "paired_client", quality_reduced_live ? "A reversible same-stream bitrate target is below the paired setting." : "Saved bitrate preference for the active paired client.");
     append_doctor_evidence(evidence, "target_fps_gap", "Target FPS gap", target_fps_gap, "FPS", meaningful_fps_shortfall ? "watch" : "pass", "stream_stats", "Encoded FPS below the requested cadence is a source or compositor pacing gap, not network jitter by itself.");
     append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
     append_doctor_evidence(

@@ -98,6 +98,9 @@
 #endif
 
 #include "device_db.h"
+#include "launch_profile.h"
+#include "doctor_trial.h"
+#include "doctor_v2.h"
 #include "ai_optimizer.h"
 #include "browser_stream.h"
 #include "stream_stats.h"
@@ -3724,28 +3727,6 @@ namespace proc {
       bool preferred_codec = false;
     };
 
-    bool parse_display_mode_string(const std::string &value, parsed_display_mode_t &parsed) {
-      if (value.empty()) {
-        return false;
-      }
-
-      int width = 0;
-      int height = 0;
-      float fps = 60.0f;
-      if (sscanf(value.c_str(), "%dx%dx%f", &width, &height, &fps) < 2) {
-        return false;
-      }
-
-      if (width <= 0 || height <= 0 || fps <= 0.0f) {
-        return false;
-      }
-
-      parsed.width = width;
-      parsed.height = height;
-      parsed.fps = fps < 1000.0f ? static_cast<int>(std::round(fps * 1000.0f)) : static_cast<int>(std::round(fps));
-      return parsed.fps > 0;
-    }
-
     std::string format_session_fps(int fps) {
       if (fps <= 0) {
         return "0";
@@ -3821,12 +3802,6 @@ namespace proc {
       resolved.normalization_reason += reason;
     }
 
-    bool launch_bitrate_is_locked(int configured_max_bitrate,
-                                   bool has_paired_target_bitrate,
-                                   bool ai_auto_quality_enabled) {
-      return configured_max_bitrate > 0 || has_paired_target_bitrate || !ai_auto_quality_enabled;
-    }
-
 #ifdef __linux__
     bool should_reprobe_deferred_cage_encoder(
       bool use_cage_compositor,
@@ -3837,78 +3812,6 @@ namespace proc {
              (no_active_sessions_at_launch || !encoder_selected);
     }
 #endif
-
-    void apply_optimization_layer(resolved_session_optimization_t &resolved,
-                                  const optimization_locks_t &locks,
-                                  const device_db::optimization_t &optimization,
-                                  const std::string &layer) {
-      bool touched = false;
-
-      if (optimization.display_mode && !locks.display_mode) {
-        parsed_display_mode_t parsed;
-        if (parse_display_mode_string(*optimization.display_mode, parsed)) {
-          resolved.display_mode = parsed;
-          resolved.display_mode_source = layer;
-          touched = true;
-        } else {
-          BOOST_LOG(warning) << "session_optimization: Ignoring invalid display mode ["sv
-                             << *optimization.display_mode << "] from "sv << layer;
-        }
-      }
-
-      if (optimization.color_range && !locks.color_range) {
-        resolved.color_range = *optimization.color_range;
-        resolved.color_range_source = layer;
-        touched = true;
-      }
-
-      if (optimization.hdr.has_value() && !locks.hdr) {
-        resolved.hdr = *optimization.hdr;
-        resolved.hdr_source = layer;
-        touched = true;
-      }
-
-      if (optimization.virtual_display.has_value() && !locks.virtual_display) {
-        resolved.virtual_display = *optimization.virtual_display;
-        resolved.virtual_display_source = layer;
-        touched = true;
-      }
-
-      if (optimization.target_bitrate_kbps && !locks.bitrate) {
-        resolved.target_bitrate_kbps = *optimization.target_bitrate_kbps;
-        resolved.bitrate_source = layer;
-        touched = true;
-      }
-
-      if (optimization.nvenc_tune && !locks.nvenc_tune) {
-        resolved.nvenc_tune = *optimization.nvenc_tune;
-        resolved.nvenc_tune_source = layer;
-        touched = true;
-      }
-
-      if (optimization.preferred_codec && !locks.preferred_codec) {
-        resolved.preferred_codec = *optimization.preferred_codec;
-        resolved.preferred_codec_source = layer;
-        touched = true;
-      }
-
-      if (touched) {
-        note_layer(resolved, layer);
-        note_reasoning(resolved, optimization.reasoning);
-        if (!optimization.confidence.empty()) {
-          resolved.confidence = optimization.confidence;
-        }
-        if (!optimization.cache_status.empty()) {
-          resolved.cache_status = optimization.cache_status;
-        }
-        if (!optimization.normalization_reason.empty()) {
-          resolved.normalization_reason = optimization.normalization_reason;
-        }
-        if (optimization.recommendation_version > 0) {
-          resolved.recommendation_version = optimization.recommendation_version;
-        }
-      }
-    }
 
     std::string join_layers(const std::vector<std::string> &layers) {
       std::ostringstream stream;
@@ -4037,22 +3940,6 @@ namespace proc {
       }
 
       return {};
-    }
-
-    bool session_pacing_is_enabled(const proc::ctx_t &app,
-                                   const rtsp_stream::launch_session_t &launch_session,
-                                   const std::string &game_category) {
-      if (launch_session.input_only) {
-        return false;
-      }
-      if (game_category == "desktop") {
-        return false;
-      }
-      if (app.cmd.empty() && app.detached.empty()) {
-        return false;
-      }
-      const int target_fps = launch_session.fps >= 1000 ? static_cast<int>(std::round(static_cast<double>(launch_session.fps) / 1000.0)) : launch_session.fps;
-      return target_fps > 0;
     }
 
     bool env_flag_enabled(const proc::ctx_t &app, const boost::process::v1::environment &env, const std::string &key) {
@@ -4964,30 +4851,6 @@ namespace proc {
     };
   }
 
-  std::optional<int> resolve_device_db_launch_bitrate_for_tests(
-      int configured_max_bitrate,
-      const std::optional<int> &paired_target_bitrate_kbps,
-      bool ai_auto_quality_enabled,
-      const std::string &device_name,
-      const std::string &app_name) {
-    optimization_locks_t locks;
-    locks.bitrate = launch_bitrate_is_locked(
-      configured_max_bitrate,
-      paired_target_bitrate_kbps.has_value(),
-      ai_auto_quality_enabled
-    );
-
-    resolved_session_optimization_t resolved;
-    if (paired_target_bitrate_kbps.has_value()) {
-      resolved.target_bitrate_kbps = *paired_target_bitrate_kbps;
-      resolved.bitrate_source = "paired_client";
-      note_layer(resolved, "paired_client");
-    }
-
-    const auto device_optimization = device_db::get_optimization(device_name, app_name);
-    apply_optimization_layer(resolved, locks, device_optimization, "device_db");
-    return resolved.target_bitrate_kbps;
-  }
 #endif
 
 #if defined(__linux__)
@@ -6827,21 +6690,21 @@ namespace proc {
       BOOST_LOG(info) << "game_classifier: "sv << _app.name << " classified as "sv << game_category;
     }
 
-    // Resolve session overrides in a strict order:
-    // explicit user/client locks -> client profile -> device DB -> AI.
+    // Resolve session overrides in a strict, evidence-independent order:
+    // app/display semantics -> explicit launch locks -> paired/client settings
+    // -> selected deterministic preset -> capability validation. Doctor
+    // history and AI output are deliberately absent from this path.
+    const auto launch_preset = launch_profile::normalize_preset(launch_session->profile_preference);
     optimization_locks_t optimization_locks;
-    optimization_locks.display_mode = launch_session->user_locked_display_mode || !launch_session->enable_sops;
-    optimization_locks.virtual_display = launch_session->user_locked_virtual_display;
-    const bool auto_quality_enabled = ai_optimizer::is_enabled();
-    optimization_locks.bitrate = launch_bitrate_is_locked(
-      config::video.max_bitrate,
-      launch_session->paired_target_bitrate_kbps.has_value(),
-      auto_quality_enabled
-    );
-    if (!auto_quality_enabled && config::video.max_bitrate <= 0 &&
-        !launch_session->paired_target_bitrate_kbps.has_value()) {
-      BOOST_LOG(debug) << "session_optimization: AI Auto Quality disabled with max_bitrate=0; leaving bitrate to the client request"sv;
-    }
+    optimization_locks.display_mode =
+      launch_session->user_locked_display_mode || !launch_session->enable_sops || launch_preset != "stability";
+    // Topology is never a launch-preset field. Only explicit app/client display
+    // semantics below may select it.
+    optimization_locks.virtual_display = true;
+    optimization_locks.bitrate =
+      config::video.max_bitrate > 0 ||
+      launch_session->paired_target_bitrate_kbps.has_value() ||
+      launch_preset == "auto";
 
     resolved_session_optimization_t resolved_optimization;
     if (launch_session->paired_target_bitrate_kbps.has_value()) {
@@ -6880,100 +6743,54 @@ namespace proc {
       }
     }
 
-    auto device_optimization = device_db::get_optimization(launch_session->device_name, _app.name);
-    apply_optimization_layer(resolved_optimization, optimization_locks, device_optimization, "device_db");
-
-    std::optional<ai_optimizer::session_history_t> history;
-
-    // AI optimizer: cached results override device DB; unknown devices get a sync request.
-    if (auto_quality_enabled) {
-      std::string gpu_info = config::video.adapter_name.empty()
-        ? "NVIDIA GPU (NVENC)"s
-        : config::video.adapter_name;
-      history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
-      auto device_info = device_db::get_device(launch_session->device_name);
-      auto ai_opt = ai_optimizer::get_cached(launch_session->device_name, _app.name);
-      if (ai_opt) {
-        BOOST_LOG(info) << "ai_optimizer: Applying cached AI optimization for \""sv
-                        << launch_session->device_name << "\" + \""sv << _app.name
-                        << "\" — "sv << ai_opt->reasoning;
-        apply_optimization_layer(resolved_optimization, optimization_locks, *ai_opt, ai_opt->source);
-      } else if (!device_info) {
-        BOOST_LOG(info) << "ai_optimizer: Unknown device \""sv << launch_session->device_name
-                        << "\" — requesting sync AI optimization"sv;
-        if (auto sync_opt = ai_optimizer::request_sync(
-              launch_session->device_name, _app.name, gpu_info, game_category, history)) {
-          BOOST_LOG(info) << "ai_optimizer: AI identified device — "sv << sync_opt->reasoning;
-          apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
-        }
-      } else {
-        bool applied_sync_ai = false;
-        if (ai_optimizer::should_sync_on_cache_miss()) {
-          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
-                          << "\" — requesting sync AI optimization before first session"sv;
-          if (auto sync_opt = ai_optimizer::request_sync(
-                launch_session->device_name, _app.name, gpu_info, game_category, history)) {
-            BOOST_LOG(info) << "ai_optimizer: Applying fresh AI optimization for \""sv
-                            << launch_session->device_name << "\" + \""sv << _app.name
-                            << "\" — "sv << sync_opt->reasoning;
-            apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
-            applied_sync_ai = true;
-          }
-          if (!applied_sync_ai) {
-            BOOST_LOG(warning) << "ai_optimizer: Sync optimization failed for known device \""sv
-                               << launch_session->device_name << "\" — falling back to cached/device heuristics"sv;
-          }
-        }
-
-        if (!applied_sync_ai) {
-          if (auto history_opt = ai_optimizer::get_history_safe_fallback(
-                launch_session->device_name, _app.name, history)) {
-            BOOST_LOG(info) << "ai_optimizer: Applying history-safe fallback for \""sv
-                            << launch_session->device_name << "\" + \""sv << _app.name
-                            << "\" — "sv << history_opt->reasoning;
-            apply_optimization_layer(resolved_optimization, optimization_locks, *history_opt, history_opt->source);
-          }
-          ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
-          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
-                          << "\" — fired async request for next session"sv;
-        }
-      }
+    launch_profile::request_t preset_request;
+    preset_request.device_name = launch_session->device_name;
+    preset_request.app_name = _app.name;
+    preset_request.preset = launch_preset;
+    preset_request.requested_width = launch_session->requested_width;
+    preset_request.requested_height = launch_session->requested_height;
+    preset_request.requested_fps = launch_session->requested_fps;
+    preset_request.display_locked = optimization_locks.display_mode;
+    preset_request.paired_display = launch_session->user_locked_display_mode;
+    preset_request.paired_bitrate_kbps = launch_session->paired_target_bitrate_kbps;
+    if (config::video.max_bitrate > 0) {
+      preset_request.configured_bitrate_kbps = config::video.max_bitrate;
+    }
+    preset_request.hdr_requested = launch_session->enable_hdr;
+    preset_request.hdr_locked = optimization_locks.hdr;
+    if (resolved_optimization.color_range) {
+      preset_request.color_range = resolved_optimization.color_range;
     }
 
-    const double effective_history_safe_target_fps =
-      history ? ai_optimizer::effective_history_safe_target_fps(launch_session->device_name, *history) : 0.0;
-    if (history && effective_history_safe_target_fps > 0.0 &&
-        !ai_optimizer::should_relax_history_safe_target_fps(*history)) {
-      const int safe_fps =
-        static_cast<int>(std::round(effective_history_safe_target_fps * 1000.0));
-      if (safe_fps > 0 && launch_session->fps > safe_fps) {
-        const parsed_display_mode_t safe_display_mode {
-          static_cast<int>(launch_session->width),
-          static_cast<int>(launch_session->height),
-          safe_fps,
-        };
-        BOOST_LOG(info) << "session_optimization: history-safe pacing target lowered FPS from "sv
-                        << format_session_fps(launch_session->fps) << " to "sv
-                        << format_session_fps(safe_fps)
-                        << " for \""sv << launch_session->device_name << "\" + \""sv << _app.name << '"';
-        resolved_optimization.display_mode = safe_display_mode;
-        resolved_optimization.display_mode_source = "history_safe";
-        note_layer(resolved_optimization, "history_safe");
-        note_reasoning(
-          resolved_optimization,
-          "Recent Nova pacing feedback lowered the next launch FPS target."
-        );
-        append_normalization_reason(
-          resolved_optimization,
-          "History-safe pacing overrode the paired display-mode FPS ceiling."
-        );
-      }
-    } else if (history && effective_history_safe_target_fps > 0.0) {
-      BOOST_LOG(info) << "session_optimization: relaxing history-safe "
-                      << static_cast<int>(std::round(effective_history_safe_target_fps))
-                      << " FPS cap for \""sv << launch_session->device_name << "\" + \""sv
-                      << _app.name << "\" after a completed safe-target trial";
-    }
+    const auto preset_resolution = launch_profile::resolve(preset_request);
+    const auto resolved_field_source = [&](std::string_view field) -> std::string {
+      const auto it = preset_resolution.fields.find(std::string {field});
+      return it != preset_resolution.fields.end() && it->is_object() ?
+        it->value("source", std::string {}) : std::string {};
+    };
+    resolved_optimization.display_mode = parsed_display_mode_t {
+      preset_resolution.width,
+      preset_resolution.height,
+      preset_resolution.fps,
+    };
+    resolved_optimization.display_mode_source = resolved_field_source("display_mode");
+    resolved_optimization.target_bitrate_kbps = preset_resolution.target_bitrate_kbps;
+    resolved_optimization.bitrate_source = resolved_field_source("target_bitrate_kbps");
+    resolved_optimization.preferred_codec = preset_resolution.preferred_codec;
+    resolved_optimization.preferred_codec_source = resolved_field_source("preferred_codec");
+    resolved_optimization.nvenc_tune = preset_resolution.nvenc_tune;
+    resolved_optimization.nvenc_tune_source = resolved_field_source("nvenc_tune");
+    resolved_optimization.hdr = preset_resolution.hdr;
+    resolved_optimization.hdr_source = resolved_field_source("hdr");
+    note_layer(resolved_optimization, "deterministic_preset_v1");
+    note_reasoning(
+      resolved_optimization,
+      "The " + launch_profile::preset_label(launch_preset) +
+      " launch preset was resolved without Doctor history or AI settings."
+    );
+    resolved_optimization.confidence = "deterministic";
+    resolved_optimization.cache_status = "not_applicable";
+    resolved_optimization.recommendation_version = launch_profile::k_policy_version;
 
     if (!optimization_locks.display_mode && resolved_optimization.display_mode.has_value()) {
       const parsed_display_mode_t requested_display_mode {
@@ -7007,6 +6824,31 @@ namespace proc {
       }
     }
 
+    if (doctor_v2::trials_enabled() && resolved_optimization.display_mode &&
+        launch_session && !launch_session->unique_id.empty() && !_app.uuid.empty()) {
+      const auto trial = doctor_trial::begin_launch(
+        platf::appdata() / "doctor_trials.json",
+        launch_session->unique_id,
+        _app.uuid,
+        launch_session->session_token,
+        _session_generation,
+        doctor_trial::now_epoch_seconds()
+      );
+      if (trial) {
+        // An explicitly confirmed Doctor trial changes the stream ceiling and
+        // nothing else. It never injects a game-process limiter or topology.
+        resolved_optimization.display_mode->fps = trial->target_fps * 1000;
+        resolved_optimization.display_mode_source = "explicit_doctor_trial";
+        note_layer(resolved_optimization, "explicit_doctor_trial");
+        note_reasoning(
+          resolved_optimization,
+          "An explicit one-shot Doctor trial changed only the stream FPS ceiling."
+        );
+        BOOST_LOG(info) << "doctor_trial: applying one-shot stream FPS ceiling "sv
+                        << trial->target_fps << " for run "sv << trial->run_id;
+      }
+    }
+
     if (resolved_optimization.display_mode) {
       launch_session->width = resolved_optimization.display_mode->width;
       launch_session->height = resolved_optimization.display_mode->height;
@@ -7017,20 +6859,8 @@ namespace proc {
       config::video.color_range = *resolved_optimization.color_range;
     }
 
-    // device_db sets hdr from hdr_capable (capability), not a session request.
-    // Only client_profile (optimization_locks.hdr) may force enable_hdr.
-    if (resolved_optimization.hdr.has_value() && optimization_locks.hdr) {
+    if (resolved_optimization.hdr.has_value()) {
       launch_session->enable_hdr = *resolved_optimization.hdr;
-    } else if (resolved_optimization.hdr.has_value() &&
-               *resolved_optimization.hdr != launch_session->enable_hdr) {
-      BOOST_LOG(info) << "Ignoring non-profile HDR optimization (device_db/ai capability) "
-                      << (*resolved_optimization.hdr ? "enabled"sv : "disabled"sv)
-                      << "; keeping client enable_hdr="sv
-                      << (launch_session->enable_hdr ? "true"sv : "false"sv);
-    }
-
-    if (resolved_optimization.virtual_display.has_value()) {
-      launch_session->virtual_display = *resolved_optimization.virtual_display;
     }
 
 #ifdef __linux__
@@ -7042,9 +6872,8 @@ namespace proc {
       apply_app_display_semantics(_app, *launch_session);
     }
 
-    // Apply the session display policy only after device/AI optimization has
-    // finalized virtual_display. This generation then owns runtime topology,
-    // capture policy, and the creation decision together.
+    // Apply the explicit app/client session display policy. Launch presets do
+    // not contain a topology field and therefore cannot affect this decision.
     const bool virtual_display_requested_before_mode =
       launch_session->virtual_display ||
       (_app.virtual_display && !launch_session->user_locked_virtual_display);
@@ -7054,7 +6883,7 @@ namespace proc {
       launch_session && launch_session->virtual_display,
       _app.virtual_display,
       launch_session && launch_session->user_locked_virtual_display,
-      resolved_optimization.virtual_display.has_value()
+      false
     );
     if (!session_mode.empty()) {
       launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
@@ -7905,85 +7734,30 @@ namespace proc {
     }
 #endif
 
-    // If MangoHud is enabled, also set DLSYM mode for safer Vulkan hooking
-    // (prevents crashes in Wine utilities like d3ddriverquery64.exe)
-    if (_app.env_vars.count("MANGOHUD") && _app.env_vars.at("MANGOHUD") == "1") {
-      _env["MANGOHUD_DLSYM"] = "1";
-      platf::set_env("MANGOHUD_DLSYM", "1");
-      _session_env_keys.insert("MANGOHUD_DLSYM");
-    }
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_REQUESTED_FPS", format_session_fps(launch_session->requested_fps));
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_TARGET_FPS", format_session_fps(launch_session->fps));
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_OPTIMIZATION_SOURCE", launch_session->optimization_source);
 
-    const bool enable_session_pacing = session_pacing_is_enabled(_app, *launch_session, game_category);
-    const int pacing_target_fps = launch_session->fps >= 1000 ?
+    // The stream target is encoder/session policy only. Polaris never injects
+    // MangoHud, DXVK, or VKD3D limiters into the launched game process.
+    launch_session->pacing_policy = "stream_fps_only";
+    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_PACING_POLICY", launch_session->pacing_policy);
+    const int stream_target_fps = launch_session->fps >= 1000 ?
       static_cast<int>(std::round(static_cast<double>(launch_session->fps) / 1000.0)) :
       launch_session->fps;
 #ifdef __linux__
+    // User-authored MangoHud configuration remains supported where the private
+    // runtime can safely carry it. This gate never creates or edits a limiter.
     const bool allow_cage_mangohud = cage_mangohud_allowed_for_session(
       _app,
       config::video.linux_display.use_cage_compositor,
       config::video.linux_display.headless_mode
     );
-#else
-    constexpr bool allow_cage_mangohud = true;
 #endif
-    launch_session->pacing_policy = enable_session_pacing ? "client_fps_limit" : "none";
-    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_PACING_POLICY", launch_session->pacing_policy);
 
     if (launch_session->target_bitrate_kbps) {
       set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_TARGET_BITRATE_KBPS",
                           std::to_string(*launch_session->target_bitrate_kbps));
-    }
-
-    if (enable_session_pacing) {
-      if (env_value(_app, _env, "DXVK_FRAME_RATE").empty()) {
-        set_session_env_var(_env, _session_env_keys, "DXVK_FRAME_RATE", std::to_string(pacing_target_fps));
-      }
-
-      const int requested_fps = launch_session->requested_fps >= 1000 ?
-        static_cast<int>(std::round(static_cast<double>(launch_session->requested_fps) / 1000.0)) :
-        launch_session->requested_fps;
-      bool auto_mangohud_cap = false;
-      if (allow_cage_mangohud &&
-          pacing_target_fps > 0 &&
-          (requested_fps <= 0 || pacing_target_fps + 1 < requested_fps) &&
-          env_value(_app, _env, "MANGOHUD").empty()) {
-        set_session_env_var(_env, _session_env_keys, "MANGOHUD", "1");
-        set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
-        auto_mangohud_cap = true;
-      }
-
-      if (allow_cage_mangohud && env_flag_enabled(_app, _env, "MANGOHUD")) {
-        if (env_value(_app, _env, "MANGOHUD_DLSYM").empty()) {
-          set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
-        }
-
-        auto mangohud_config = env_value(_app, _env, "MANGOHUD_CONFIG");
-        if (mangohud_config.find("fps_limit=") == std::string::npos) {
-          if (!mangohud_config.empty() && mangohud_config.back() != ',') {
-            mangohud_config += ',';
-          }
-          mangohud_config += "fps_limit=" + std::to_string(pacing_target_fps);
-        }
-        if (auto_mangohud_cap && mangohud_config.find("no_display") == std::string::npos) {
-          if (!mangohud_config.empty() && mangohud_config.back() != ',') {
-            mangohud_config += ',';
-          }
-          mangohud_config += "no_display";
-        }
-        if (!mangohud_config.empty()) {
-          set_session_env_var(_env, _session_env_keys, "MANGOHUD_CONFIG", mangohud_config);
-        }
-        if (auto_mangohud_cap) {
-          BOOST_LOG(info) << "session_pacing: auto-enabled hidden MangoHud FPS cap target_fps="sv
-                          << pacing_target_fps;
-        }
-      }
-
-      BOOST_LOG(info) << "session_pacing: policy="sv << launch_session->pacing_policy
-                      << " target_fps="sv << pacing_target_fps;
     }
 
 #ifdef __linux__
@@ -8064,9 +7838,9 @@ namespace proc {
         std::optional<bool> {};
     bool force_windowed_cage_for_gpu_native = false;
     bool headless_extcopy_dmabuf_selected = false;
-    const int cage_refresh_hz = std::max(pacing_target_fps, 1);
+    const int cage_refresh_hz = std::max(stream_target_fps, 1);
 
-    const int gpu_native_probe_fps = std::max(pacing_target_fps, 1);
+    const int gpu_native_probe_fps = std::max(stream_target_fps, 1);
     const video::config_t gpu_native_probe_config {
       static_cast<int>(render_width),
       static_cast<int>(render_height),

@@ -449,7 +449,7 @@ TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionStat
     << "same-ID explicit overrides must still normalize companion state";
 }
 
-TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxModeDerivation) {
+TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsFollowPresetResolutionAndPrecedeLinuxModeDerivation) {
   const auto source = read_source_file_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
 
@@ -459,18 +459,14 @@ TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxM
   ASSERT_NE(terminate_start, std::string::npos);
   const auto body = source.substr(execute_start, terminate_start - execute_start);
 
-  const auto optimization_guard = body.find("if (resolved_optimization.virtual_display.has_value())");
-  const auto optimization_write = body.find(
-    "launch_session->virtual_display = *resolved_optimization.virtual_display",
-    optimization_guard
-  );
+  const auto preset_resolution = body.find("const auto preset_resolution = launch_profile::resolve(preset_request)");
   const auto desktop_mirror_semantic = body.find(
     "if (_app.desktop_mirror)",
-    optimization_write
+    preset_resolution
   );
   const auto mode_derivation = body.find(
     "stream_display_policy::effective_session_selection_for_launch(",
-    optimization_write
+    desktop_mirror_semantic
   );
   const auto mode_apply = body.find(
     "stream_display_policy::apply_selection(session_mode",
@@ -485,17 +481,17 @@ TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxM
     runtime_derivation
   );
 
-  ASSERT_NE(optimization_guard, std::string::npos);
-  ASSERT_NE(optimization_write, std::string::npos);
+  ASSERT_NE(preset_resolution, std::string::npos);
   ASSERT_NE(desktop_mirror_semantic, std::string::npos);
   ASSERT_NE(mode_derivation, std::string::npos);
   ASSERT_NE(mode_apply, std::string::npos);
   ASSERT_NE(runtime_derivation, std::string::npos);
   ASSERT_NE(capture_policy, std::string::npos);
-  EXPECT_LT(optimization_guard, optimization_write);
-  EXPECT_LT(optimization_write, desktop_mirror_semantic);
+  EXPECT_EQ(body.find("launch_session->virtual_display = *resolved_optimization.virtual_display"), std::string::npos)
+    << "deterministic presets must never carry topology";
+  EXPECT_LT(preset_resolution, desktop_mirror_semantic);
   EXPECT_LT(desktop_mirror_semantic, mode_derivation)
-    << "final device/AI virtual-display intent must own session mode derivation";
+    << "explicit app/client topology semantics must own session mode derivation";
   EXPECT_LT(mode_derivation, mode_apply);
   EXPECT_LT(mode_apply, runtime_derivation)
     << "gamescope/headless decisions must consume the final session mode";
@@ -915,56 +911,6 @@ TEST(ProcessRuntimeConfigTests, RefreshPreservesLifecycleSynchronizationObjects)
   const auto get_apps_body = source.substr(get_apps_start, get_apps_end - get_apps_start);
   EXPECT_NE(get_apps_body.find("std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex)"), std::string::npos);
   EXPECT_NE(get_apps_body.find("return _apps"), std::string::npos);
-}
-
-TEST(ProcessRuntimeConfigTests, DeviceDbBitrateStaysOutWhenAutoQualityOffAndMaxBitrateUnlocked) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    0,
-    std::optional<int> {},
-    false,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  EXPECT_FALSE(resolved.has_value());
-}
-
-TEST(ProcessRuntimeConfigTests, DeviceDbBitrateCanSeedAutoQualityWhenEnabled) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    0,
-    std::optional<int> {},
-    true,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ(*resolved, 25000);
-}
-
-TEST(ProcessRuntimeConfigTests, PairedClientBitrateWinsEvenWhenAutoQualityOff) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    0,
-    std::optional<int> {45000},
-    false,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ(*resolved, 45000);
-}
-
-TEST(ProcessRuntimeConfigTests, ManualMaxBitrateLocksOutDeviceDbProfile) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    50000,
-    std::optional<int> {},
-    true,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  EXPECT_FALSE(resolved.has_value());
 }
 
 TEST(ProcessRuntimeConfigTests, MissionControlPolicyDoesNotUseDeviceDbBitrateWhenAutoQualityOffAndClientBitrateUnknown) {
