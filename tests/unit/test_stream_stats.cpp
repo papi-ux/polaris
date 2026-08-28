@@ -1024,7 +1024,7 @@ TEST(StreamStatsDoctorTests, CleanHistorySafeCapOffersGraduatedQualityRestore) {
   ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
 }
 
-TEST(StreamStatsDoctorTests, RelaunchFindingOffersExactDurableNextLaunchContract) {
+TEST(StreamStatsDoctorTests, RelaunchFindingOffersReadOnlyPacingRecheck) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
   stats.fps = 54.0;
@@ -1051,23 +1051,25 @@ TEST(StreamStatsDoctorTests, RelaunchFindingOffersExactDurableNextLaunchContract
   );
   const auto &action = doctor.at("safe_recovery_action");
 
-  EXPECT_EQ(action.at("id"), "apply_recovery_profile_next_launch");
-  EXPECT_EQ(action.at("kind"), "next_launch_profile");
+  EXPECT_EQ(action.at("id"), "recheck_pacing");
+  EXPECT_EQ(action.at("label"), "Recheck");
+  EXPECT_EQ(action.at("capability"), "recheck");
+  EXPECT_EQ(action.at("kind"), "verification");
   EXPECT_EQ(action.at("endpoint"), "/api/doctor/action");
-  EXPECT_EQ(action.at("paired_endpoint"), "/polaris/v1/doctor/action");
+  EXPECT_EQ(action.at("paired_endpoint"), "");
   EXPECT_EQ(action.at("method"), "POST");
   EXPECT_TRUE(action.at("requires_confirmation"));
   EXPECT_TRUE(action.at("requires_owner"));
-  EXPECT_TRUE(action.at("owner_tuning_allowed"));
-  EXPECT_TRUE(action.at("undo").at("supported"));
-  EXPECT_EQ(action.at("payload_preview").size(), 3);
+  EXPECT_FALSE(action.at("owner_tuning_allowed"));
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_EQ(action.at("payload_preview").size(), 2);
   EXPECT_EQ(action.at("payload_preview").at("action_id"), action.at("id"));
   EXPECT_EQ(action.at("payload_preview").at("source_result_id"), doctor.at("result_id"));
-  EXPECT_EQ(action.at("payload_preview").at("app_uuid"), "game-a");
-  EXPECT_EQ(action.at("verification").at("mode"), "post_connect");
+  EXPECT_FALSE(action.at("payload_preview").contains("app_uuid"));
+  EXPECT_EQ(action.at("verification").at("mode"), "live_telemetry");
   EXPECT_EQ(
-    action.at("verification").at("action_id"),
-    "verify_recovery_profile_next_launch"
+    action.at("rollback"),
+    "This check is read-only and cannot change the next launch."
   );
 
   const auto identical = stream_stats::build_doctor_json(
@@ -1196,6 +1198,13 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   ASSERT_FALSE(run_id.empty());
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 16000);
 
+  const auto overlapping = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(overlapping.at("status").get<bool>());
+  EXPECT_FALSE(overlapping.at("changed").get<bool>());
+  EXPECT_EQ(overlapping.at("state"), "action_in_progress");
+  EXPECT_EQ(overlapping.at("run_id"), run_id);
+  EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 16000);
+
   const auto wrong_run = doctor_actions::execute({{"action_id", "verify"}, {"run_id", "doctor-run-imposter"}});
   EXPECT_FALSE(wrong_run.at("status").get<bool>());
   EXPECT_EQ(wrong_run.at("state"), "expired");
@@ -1216,6 +1225,45 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   const auto replay = doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
   EXPECT_FALSE(replay.at("status").get<bool>());
   EXPECT_EQ(replay.at("error"), "This Doctor undo is no longer available.");
+
+  const auto reapplied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(reapplied.at("status").get<bool>());
+  const auto second_run_id = reapplied.at("run_id").get<std::string>();
+  adaptive_bitrate::set_runtime_update_supported(false);
+
+  const auto unavailable_during_verification = doctor_actions::execute({
+    {"action_id", "verify"}, {"run_id", second_run_id}
+  });
+  EXPECT_TRUE(unavailable_during_verification.at("status").get<bool>());
+  EXPECT_TRUE(unavailable_during_verification.at("changed").get<bool>());
+  EXPECT_EQ(unavailable_during_verification.at("state"), "rolled_back");
+  EXPECT_EQ(unavailable_during_verification.at("restored_bitrate_kbps"), 20000);
+  EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 0);
+  adaptive_bitrate::set_runtime_update_supported(true);
+
+  doctor_actions::recovery_action_context_t scoped_context;
+  scoped_context.owner_uuid = "client-a";
+  scoped_context.app_uuid = "game-a";
+  scoped_context.session_generation = 101;
+  scoped_context.stats = stream_stats::get_current();
+  const auto scoped = doctor_actions::execute(
+    {{"action_id", "lower_bitrate"}}, scoped_context
+  );
+  ASSERT_TRUE(scoped.at("status").get<bool>());
+  const auto scoped_run_id = scoped.at("run_id").get<std::string>();
+
+  // Simulate teardown restoring the next stream's own target. A receipt from
+  // generation 101 must expire without changing generation 102.
+  adaptive_bitrate::set_live_bitrate(20000);
+  auto next_generation = scoped_context;
+  next_generation.session_generation = 102;
+  next_generation.stats = stream_stats::get_current();
+  const auto stale_generation = doctor_actions::execute({
+    {"action_id", "verify"}, {"run_id", scoped_run_id}
+  }, next_generation);
+  EXPECT_FALSE(stale_generation.at("status").get<bool>());
+  EXPECT_EQ(stale_generation.at("state"), "expired");
+  EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 20000);
 
   stream_stats::update_stream_active(false);
 }

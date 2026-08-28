@@ -52,6 +52,9 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    // Explicit deterministic launch preset. This is never populated from
+    // Doctor history or AI output.
+    std::string profile_preference = "auto";
     std::string session_token;
     crypto::PERM perm;
     bool watch_only;

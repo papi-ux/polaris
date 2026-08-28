@@ -23,12 +23,6 @@ namespace stream {
 }
 
 namespace nvhttp {
-  std::optional<int> select_paired_client_launch_bitrate_for_tests(
-    const std::optional<int> &target_bitrate_kbps,
-    int paired_bitrate_kbps,
-    bool applied_history_safe
-  );
-
   nlohmann::json build_session_health_json_for_tests(
     const stream_stats::stats_t &stats,
     bool current_virtual_display,
@@ -92,28 +86,6 @@ TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
   auto res = concat_and_insert(1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
   auto expected = std::vector<uint8_t> {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
   ASSERT_EQ(res, expected);
-}
-
-TEST(NvhttpOptimizerTests, PairedClientLaunchBitrateOverridesCachedLowerOptimizerTarget) {
-  const auto selected = nvhttp::select_paired_client_launch_bitrate_for_tests(
-    25000,
-    80000,
-    false
-  );
-
-  ASSERT_TRUE(selected.has_value());
-  EXPECT_EQ(*selected, 80000);
-}
-
-TEST(NvhttpOptimizerTests, PairedClientLaunchBitrateKeepsHistorySafeRecoveryCap) {
-  const auto selected = nvhttp::select_paired_client_launch_bitrate_for_tests(
-    25000,
-    80000,
-    true
-  );
-
-  ASSERT_TRUE(selected.has_value());
-  EXPECT_EQ(*selected, 25000);
 }
 
 TEST(NvhttpSessionHealthTests, HighRefreshNearTargetDeliveryRemainsSteady) {

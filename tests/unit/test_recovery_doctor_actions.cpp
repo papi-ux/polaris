@@ -92,116 +92,94 @@ namespace {
   };
 }
 
-TEST_F(RecoveryDoctorActionTest, RequiresConfirmationCurrentEvidenceAndOwnerTuning) {
+TEST_F(RecoveryDoctorActionTest, LegacyApplyIsDeprecatedRegardlessOfConfirmationOrContext) {
   auto unconfirmed = apply_request();
   unconfirmed["confirmed"] = false;
-  EXPECT_EQ(
-    doctor_actions::execute(unconfirmed, context).value("state", ""),
-    "confirmation_required"
-  );
+  const auto unconfirmed_result = doctor_actions::execute(unconfirmed, context);
+  EXPECT_FALSE(unconfirmed_result.value("status", true));
+  EXPECT_EQ(unconfirmed_result.value("state", ""), "deprecated");
+  EXPECT_EQ(unconfirmed_result.value("code", ""), "unsupported_deprecated");
 
   auto stale = apply_request();
   stale["source_result_id"] = "doctor-v2-stale";
-  EXPECT_EQ(doctor_actions::execute(stale, context).value("state", ""), "evidence_changed");
+  EXPECT_EQ(doctor_actions::execute(stale, context).value("state", ""), "deprecated");
 
   auto viewer = context;
   viewer.active_owner = false;
-  EXPECT_EQ(doctor_actions::execute(apply_request(), viewer).value("state", ""), "evidence_changed");
+  EXPECT_EQ(doctor_actions::execute(apply_request(), viewer).value("state", ""), "deprecated");
 }
 
-TEST_F(RecoveryDoctorActionTest, RejectsConfirmationReplayedForAnotherGame) {
+TEST_F(RecoveryDoctorActionTest, LegacyApplyCannotCreateARecordForAnyGame) {
   auto game_b = context;
   game_b.app_uuid = "game-b";
   game_b.app_name = "Another Game";
 
   EXPECT_EQ(
     doctor_actions::execute(apply_request(), game_b).value("state", ""),
-    "evidence_changed"
+    "deprecated"
   );
 
   auto forged_for_b = apply_request();
   forged_for_b["app_uuid"] = "game-b";
   EXPECT_EQ(
     doctor_actions::execute(forged_for_b, game_b).value("state", ""),
-    "evidence_changed"
+    "deprecated"
   );
   EXPECT_FALSE(recovery_profile::queued(
     context.state_path, context.owner_uuid, "game-b"
   ));
 }
 
-TEST_F(RecoveryDoctorActionTest, QueuesOnlyHostDerivedProfileAndIsIdempotent) {
+TEST_F(RecoveryDoctorActionTest, LegacyApplyNeverQueuesHostOrClientSettings) {
   const auto first = doctor_actions::execute(apply_request(), context);
-  ASSERT_TRUE(first.value("status", false));
-  EXPECT_TRUE(first.value("changed", false));
-  EXPECT_EQ(first.value("recovery_state", ""), "queued");
-  const auto profile = first.at("safe_profile");
-  EXPECT_EQ(profile.value("stream_display_mode", ""), "headless_stream");
-  EXPECT_EQ(profile.value("width", 0), 1920);
-  EXPECT_EQ(profile.value("height", 0), 1080);
-  EXPECT_EQ(profile.value("target_fps", 0), 40);
-  EXPECT_EQ(profile.value("target_bitrate_kbps", 0), 18000);
-  EXPECT_EQ(profile.value("preferred_codec", ""), "hevc");
-  EXPECT_FALSE(profile.value("hdr", true));
-  EXPECT_TRUE(profile.value("requires_fresh_launch", false));
+  EXPECT_FALSE(first.value("status", true));
+  EXPECT_FALSE(first.value("changed", true));
+  EXPECT_EQ(first.value("recovery_state", ""), "deprecated");
+  EXPECT_FALSE(first.value("applicable", true));
+  EXPECT_TRUE(first.value("cancellable", false));
+  EXPECT_FALSE(first.contains("safe_profile"));
+  EXPECT_FALSE(recovery_profile::queued(
+    context.state_path, context.owner_uuid, context.app_uuid
+  ));
 
   const auto repeated = doctor_actions::execute(apply_request(), context);
-  EXPECT_EQ(repeated.value("run_id", ""), first.value("run_id", ""));
-  EXPECT_TRUE(repeated.value("idempotent", false));
+  EXPECT_EQ(repeated.value("state", ""), "deprecated");
   EXPECT_FALSE(repeated.value("changed", true));
 }
 
-TEST_F(RecoveryDoctorActionTest, VerifiesTrustedEffectiveSettingsAfterConnectAndConsumesOnce) {
-  const auto queued = doctor_actions::execute(apply_request(), context);
-  const auto run_id = queued.value("run_id", "");
-  ASSERT_FALSE(run_id.empty());
-
-  const auto rejected = doctor_actions::execute({
+TEST_F(RecoveryDoctorActionTest, LegacyVerifyIsDeprecatedAndCannotConsume) {
+  const auto result = doctor_actions::execute({
     {"action_id", "verify_recovery_profile_next_launch"},
-    {"run_id", run_id},
+    {"run_id", "recovery-run-attacker"},
     {"target_fps", 40}
   }, context);
-  EXPECT_EQ(rejected.value("state", ""), "rejected");
-  EXPECT_EQ(rejected.value("recovery_state", ""), "queued");
-
-  context.stats.encode_target_fps = 40;
-  context.stats.bitrate_kbps = 18000;
-  context.stats.codec = "HEVC";
-  context.stats.stream_hdr_enabled = false;
-  context.effective_stream_display_mode = "headless_stream";
-  const auto same_launch = doctor_actions::execute({
-    {"action_id", "verify_recovery_profile_next_launch"},
-    {"run_id", run_id}
-  }, context);
-  EXPECT_FALSE(same_launch.value("status", true));
-  EXPECT_EQ(same_launch.value("recovery_state", ""), "queued");
-  EXPECT_NE(
-    std::find(same_launch.at("mismatches").begin(), same_launch.at("mismatches").end(), "fresh_launch"),
-    same_launch.at("mismatches").end()
-  );
-
-  context.launch_instance_id = "launch-b";
-  context.session_generation = 2;
-  const auto applied = doctor_actions::execute({
-    {"action_id", "verify_recovery_profile_next_launch"},
-    {"run_id", run_id}
-  }, context);
-  EXPECT_TRUE(applied.value("status", false));
-  EXPECT_TRUE(applied.value("changed", false));
-  EXPECT_EQ(applied.value("recovery_state", ""), "applied");
-
-  const auto repeated = doctor_actions::execute({
-    {"action_id", "verify_recovery_profile_next_launch"},
-    {"run_id", run_id}
-  }, context);
-  EXPECT_TRUE(repeated.value("status", false));
-  EXPECT_TRUE(repeated.value("idempotent", false));
-  EXPECT_FALSE(repeated.value("changed", true));
+  EXPECT_FALSE(result.value("status", true));
+  EXPECT_FALSE(result.value("changed", true));
+  EXPECT_EQ(result.value("state", ""), "deprecated");
+  EXPECT_EQ(result.value("code", ""), "unsupported_deprecated");
 }
 
 TEST_F(RecoveryDoctorActionTest, UndoCancelsOnlyTheMatchingQueuedRun) {
-  const auto queued = doctor_actions::execute(apply_request(), context);
+  recovery_profile::safe_profile_t legacy_profile {
+    .stream_display_mode = "headless_stream",
+    .width = 1920,
+    .height = 1080,
+    .target_fps = 40,
+    .target_bitrate_kbps = 18000,
+    .preferred_codec = "hevc",
+    .hdr = false,
+  };
+  const auto queued = recovery_profile::queue(
+    context.state_path,
+    context.owner_uuid,
+    context.app_uuid,
+    source_result_id,
+    legacy_profile,
+    context.launch_instance_id,
+    context.session_generation
+  );
   const auto run_id = queued.value("run_id", "");
+  ASSERT_FALSE(run_id.empty());
 
   const auto wrong = doctor_actions::execute({
     {"action_id", "undo"}, {"run_id", "recovery-run-imposter"}

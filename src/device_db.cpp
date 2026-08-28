@@ -382,6 +382,8 @@ namespace device_db {
     if (dev->ideal_bitrate_kbps > 0)
       opt.target_bitrate_kbps = dev->ideal_bitrate_kbps;
     opt.nvenc_tune = dev->nvenc_tune;
+    if (!dev->preferred_codec.empty())
+      opt.preferred_codec = dev->preferred_codec;
 
     opt.reasoning = dev->type + ": " + dev->notes;
     BOOST_LOG(info) << "device_db: Optimization for \""sv << device_name << "\": "sv

@@ -83,8 +83,8 @@ namespace adaptive_bitrate {
   /**
    * @brief Change the in-memory adaptive bitrate ceiling for this session.
    *
-   * Doctor uses this to retry a paired quality target that was capped by a
-   * stale recovery profile. Session teardown restores the pre-launch config.
+   * Doctor uses this for a temporary same-stream quality retry. Verification
+   * or session teardown restores the target and the pre-action clamp.
    */
   void set_max_bitrate(int kbps);
 

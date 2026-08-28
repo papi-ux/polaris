@@ -384,46 +384,49 @@
     },
     "optimization": {
       "$comment": [
-        "Top-level GET /optimize response body. append_optimization_json is the",
-        "shared serializer for the AI profile itself (cached, sync, and async",
-        "answers all pass through it); the route handler attaches the",
-        "profile-state and stability blocks beside it. mode echoes the cache",
-        "bucket the answer came from - empty is the legacy mode-less bucket -",
-        "and ai_recommended_mode is the provider's advisory stream-path pick,",
-        "registry-validated, never acted on by the host (roadmap: mode-aware",
-        "AI with an advisory badge; the host never switches modes)."
+        "Top-level GET /optimize deterministic launch resolver response.",
+        "append_deterministic_optimization_json emits the selected preset, the",
+        "authoritative nested field provenance, and temporary flat compatibility",
+        "values. History, recovery records, and AI output cannot define these",
+        "settings. ai_explanation is typed informational output only."
       ],
       "fields": [
-        "ai_recommended_mode",
+        "ai_explanation",
+        "auto_action",
+        "auto_mode",
         "cache_status",
         "color_range",
         "confidence",
         "display_mode",
-        "expires_at",
-        "generated_at",
         "hdr",
-        "mode",
-        "normalization_reason",
+        "limiting_factor",
         "nvenc_tune",
         "preferred_codec",
+        "preset",
+        "profile_state",
         "reasoning",
         "reasoning_summary",
         "recommendation_version",
+        "recovery_policy",
+        "resolved_profile",
         "signals_used",
         "source",
-        "target_bitrate_kbps",
-        "virtual_display"
+        "stability",
+        "target_bitrate_kbps"
       ],
       "informational_ok": [
+        "ai_explanation",
+        "auto_action",
+        "auto_mode",
         "color_range",
-        "expires_at",
         "hdr",
-        "mode",
+        "limiting_factor",
         "nvenc_tune",
+        "preset",
         "reasoning_summary",
         "recommendation_version",
-        "signals_used",
-        "virtual_display"
+        "recovery_policy",
+        "signals_used"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/ui/NovaGameDetailActivity.kt",
@@ -432,7 +435,7 @@
       },
       "polaris_emitter": {
         "file": "src/nvhttp.cpp",
-        "function": "append_optimization_json",
+        "function": "append_deterministic_optimization_json",
         "style": "assignments",
         "variable": "output"
       }
@@ -461,12 +464,13 @@
         "runtime_label"
       ],
       "optimization": [
+        "ai_recommended_mode",
         "consecutive_poor_outcomes",
         "effective_profile",
         "effective_target_fps",
-        "profile_state",
-        "requested_target_fps",
-        "stability"
+        "generated_at",
+        "normalization_reason",
+        "requested_target_fps"
       ]
     },
     "polaris_sends_nova_never_reads": {
@@ -505,12 +509,10 @@
         "today is one Nova already maps."
       ],
       "optimization": [
-        "Not drift in reality, in either direction. The reads listed under",
-        "nova_reads_polaris_never_sends are served by the /optimize route handler, which",
-        "attaches the profile-state and stability blocks beside the serializer; the object",
-        "models append_optimization_json because that is the one named function the audit",
-        "extractor can hold to. ai_recommended_mode moved out of the ledger on",
-        "2026-08-08 when the Nova picker badge landed (papi-ux/nova#215)."
+        "The containment resolver now serves profile_state, stability, and",
+        "resolved_profile directly from deterministic policy. Nova temporarily keeps",
+        "fallback reads for older AI and recovery fields; those reads are listed as",
+        "known missing until the compatibility window closes. None can affect launch."
       ]
     }
   }
