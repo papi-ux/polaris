@@ -394,6 +394,17 @@ TEST(DoctorResetContract, DisabledTrialsNeverExposeOrMutateRetainedReceipts) {
   ASSERT_NE(cancel, std::string::npos);
   EXPECT_LT(disabled_gate, get_route);
   EXPECT_LT(disabled_gate, cancel);
+
+  const auto session_report = between(
+    nvhttp,
+    "auto polarisSessionReport =",
+    "auto polarisClearOptimizerProfile ="
+  );
+  const auto report_gate = session_report.find("doctor_v2::trials_enabled()");
+  const auto crash_observation = session_report.find("doctor_trial::observe(");
+  ASSERT_NE(report_gate, std::string::npos);
+  ASSERT_NE(crash_observation, std::string::npos);
+  EXPECT_LT(report_gate, crash_observation);
 }
 
 TEST(DoctorResetContract, LegacyLaunchOverlayHelpersAreRemoved) {
