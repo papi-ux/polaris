@@ -135,6 +135,14 @@ namespace stream_display_policy {
   bool selection_valid(std::string_view selection, std::string &error);
 
   /**
+   * @brief Validate against a newly probed host capability snapshot.
+   *
+   * Use this at exact optimize/parse/final-launch boundaries. Status and UI
+   * catalogs may use selection_valid(), which accepts the short probe cache.
+   */
+  bool selection_valid_fresh(std::string_view selection, std::string &error);
+
+  /**
    * @brief Capability-injected form used to keep served availability and the
    *        launch validator on one deterministic rule.
    */

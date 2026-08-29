@@ -139,6 +139,10 @@ namespace rtsp_stream {
     // Empty = host default. Validated in make_launch_session; applied to the
     // in-memory config by proc_t::execute and restored at teardown.
     std::string stream_mode;
+    // Assertion copied from deterministic /optimize topology_resolution.resolved.
+    // It never selects topology; final process resolution must equal it or the
+    // exact launch/resume fails closed.
+    std::string expected_stream_mode;
     bool user_locked_display_mode = false;
     bool user_locked_virtual_display = false;
     uint32_t scale_factor;

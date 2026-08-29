@@ -479,7 +479,7 @@ namespace nvhttp {
       // Validity first: an unknown or unavailable id deserves its own reason
       // rather than being reported as a per-session restriction.
       std::string error;
-      if (!stream_display_policy::selection_valid(requested, error)) {
+      if (!stream_display_policy::selection_valid_fresh(requested, error)) {
         reject_reason = error;
         return {};
       }
@@ -1343,49 +1343,56 @@ namespace nvhttp {
 #endif
     }
 
-    bool apply_stream_display_mode_selection(const std::string &selection,
-                                             std::string &error) {
+    using persist_config_values_fn_t = std::function<bool(
+      const std::unordered_map<std::string, std::string> &
+    )>;
+
+    bool apply_stream_display_mode_selection(
+      const std::string &selection,
+      std::string &error,
+      const persist_config_values_fn_t &persist = persist_config_values
+    ) {
 #ifdef __linux__
+      const auto previous_linux_display = config::video.linux_display;
+      const auto previous_capture = config::video.capture;
+      const auto previous_output_name = config::video.output_name;
+      const auto restore_live_state = [&]() {
+        config::video.linux_display = previous_linux_display;
+        config::video.capture = previous_capture;
+        config::video.output_name = previous_output_name;
+      };
+
       if (!stream_display_policy::apply_selection(selection, error)) {
+        // Dongle discovery can fill only one connector before discovering that
+        // the pair is incomplete. A rejected request must be observation-only.
+        restore_live_state();
         return false;
       }
 
       const auto &linux_display = config::video.linux_display;
       std::unordered_map<std::string, std::string> values {
         {"linux_stream_mode", linux_display.stream_mode},
-        {"linux_private_runtime", linux_display.private_runtime.empty() ? "labwc" : linux_display.private_runtime},
+        {"linux_private_runtime", linux_display.private_runtime},
         {"headless_mode", bool_config_value(linux_display.headless_mode)},
         {"linux_use_cage_compositor", bool_config_value(linux_display.use_cage_compositor)},
         {"linux_prefer_gpu_native_capture", bool_config_value(linux_display.prefer_gpu_native_capture)},
+        {"linux_auto_manage_displays", bool_config_value(linux_display.auto_manage_displays)},
+        {"headless_swap_mode", linux_display.headless_swap_mode},
+        {"linux_streaming_output", linux_display.streaming_output},
+        {"linux_primary_output", linux_display.primary_output},
       };
-      if (selection == "headless_dongle") {
-        values["linux_auto_manage_displays"] = bool_config_value(linux_display.auto_manage_displays);
-        values["headless_swap_mode"] = linux_display.headless_swap_mode.empty() ? "privacy" : linux_display.headless_swap_mode;
-        if (!linux_display.streaming_output.empty()) {
-          values["linux_streaming_output"] = linux_display.streaming_output;
-        }
-        if (!linux_display.primary_output.empty()) {
-          values["linux_primary_output"] = linux_display.primary_output;
-        }
-        if (!config::video.capture.empty()) {
-          values["capture"] = config::video.capture;
-        }
-        if (!config::video.output_name.empty()) {
-          values["output_name"] = config::video.output_name;
-        }
-      }
-      if (selection == "gamescope_stream") {
-        if (!config::video.capture.empty()) {
-          values["capture"] = config::video.capture;
-        }
-        else {
-          values["capture"] = "portal";
-        }
-      }
-      if (!persist_config_values(values)) {
+      if (!persist(values)) {
+        restore_live_state();
         error = "failed to persist stream display mode";
         return false;
       }
+
+      // Capture backend and output_name are launch-scoped companion settings,
+      // not durable ownership of the topology selector. The process resolver
+      // reapplies them for the selected generation and restores them at
+      // teardown, so switching away cannot leak dongle/Gamescope capture state.
+      config::video.capture = previous_capture;
+      config::video.output_name = previous_output_name;
 
       return true;
 #else
@@ -2463,6 +2470,19 @@ namespace nvhttp {
   std::string accepted_session_stream_mode_for_tests(const std::string &requested) {
     std::string reject_reason;
     return accepted_session_stream_mode(requested, reject_reason);
+  }
+
+  bool apply_stream_display_mode_selection_for_tests(
+      const std::string &selection,
+      bool persistence_succeeds,
+      std::string &error) {
+    return apply_stream_display_mode_selection(
+      selection,
+      error,
+      [persistence_succeeds](const auto &) {
+        return persistence_succeeds;
+      }
+    );
   }
 #endif
 
@@ -4379,6 +4399,21 @@ namespace nvhttp {
     #if defined(__linux__)
     launch_session->mirror_desktop = explicit_mirror_desktop_requested(args);
     launch_session->force_private_after_desktop_steam_shutdown = force_private_after_desktop_steam_shutdown_requested(args);
+    if (launch_session->resolved_profile_from_client) {
+      launch_session->expected_stream_mode = lower_copy(
+        get_arg(args, "expectedTopology", "")
+      );
+      std::string expected_topology_error;
+      if (launch_session->expected_stream_mode.empty() ||
+          !stream_display_policy::selection_valid_fresh(
+            launch_session->expected_stream_mode,
+            expected_topology_error
+          )) {
+        BOOST_LOG(warning) << "Rejecting exact resolved launch with missing or unavailable expectedTopology: "sv
+                           << expected_topology_error;
+        return nullptr;
+      }
+    }
     if (const auto requested_mode = session_stream_mode_requested(args); !requested_mode.empty()) {
       if (launch_session->mirror_desktop) {
         BOOST_LOG(info) << "Ignoring streamMode ["sv << requested_mode << "] because mirrorDesktop wins for this launch"sv;
@@ -4410,6 +4445,19 @@ namespace nvhttp {
         !client_display_mode_explicit &&
         named_cert_p->always_use_virtual_display) {
       launch_session->stream_mode = std::string {stream_display_policy::k_host_virtual_display};
+    }
+    if (launch_session->resolved_profile_from_client &&
+        !launch_session->mirror_desktop &&
+        !launch_session->stream_mode.empty()) {
+      std::string resolved_mode_error;
+      if (!stream_display_policy::selection_valid_fresh(
+            launch_session->stream_mode,
+            resolved_mode_error
+          )) {
+        BOOST_LOG(warning) << "Rejecting exact resolved launch after paired topology resolution: "sv
+                           << resolved_mode_error;
+        return nullptr;
+      }
     }
 #endif
     launch_session->virtual_display = !launch_session->mirror_desktop &&
@@ -6879,6 +6927,8 @@ namespace nvhttp {
         response->write(status, body.dump(), headers);
       };
 
+      bool paired_device_updated = false;
+
       try {
         if (request->method == "POST") {
           std::string body_str(std::istreambuf_iterator<char>(request->content), {});
@@ -6888,6 +6938,34 @@ namespace nvhttp {
           if (!request_stream_scope) {
             write_json({{"error", stream_scope_error}}, SimpleWeb::StatusCode::client_error_bad_request);
             return;
+          }
+
+          const bool changes_paired_device_settings =
+            body.contains("display_mode") ||
+            body.contains("clear_display_mode") ||
+            body.contains("target_bitrate_kbps") ||
+            body.contains("clear_target_bitrate");
+          if (body.contains("stream_display_mode")) {
+            static const std::unordered_set<std::string> topology_request_fields {
+              "stream_display_mode",
+              "app_session_id",
+              "session_generation",
+            };
+            bool contains_unrelated_update = false;
+            for (auto item = body.begin(); item != body.end(); ++item) {
+              if (!topology_request_fields.contains(item.key())) {
+                contains_unrelated_update = true;
+                break;
+              }
+            }
+            if (contains_unrelated_update) {
+              write_json(
+                {{"status", false}, {"changed", false}, {"state", "standalone_topology_required"},
+                 {"error", "stream_display_mode must be updated in a standalone request."}},
+                SimpleWeb::StatusCode::client_error_bad_request
+              );
+              return;
+            }
           }
 
           const bool changes_global_host_control =
@@ -6940,7 +7018,7 @@ namespace nvhttp {
             // allowed_modes/capabilities just advertised (it used to hardcode
             // four ids and 400 gamescope_stream/headless_dongle). The error is
             // the host's real reason for registered-but-unavailable modes.
-            if (!stream_display_policy::selection_valid(*stream_display_mode, error)) {
+            if (!stream_display_policy::selection_valid_fresh(*stream_display_mode, error)) {
               write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
@@ -7075,29 +7153,31 @@ namespace nvhttp {
             topology_lifecycle_guard.unlock();
           }
 
-          const auto update_result = update_device_info_result(
-            named_cert_p->uuid,
-            named_cert_p->name,
-            display_mode,
-            target_bitrate_kbps,
-            named_cert_p->do_cmds,
-            named_cert_p->undo_cmds,
-            named_cert_p->perm,
-            named_cert_p->enable_legacy_ordering,
-            named_cert_p->allow_client_commands,
-            named_cert_p->always_use_virtual_display
-          );
-
-          if (update_result != client_mutation_result_t::success) {
-            write_json(
-              {{"error", update_result == client_mutation_result_t::not_found
-                ? "paired client is no longer authorized"
-                : "paired client update could not be persisted"}},
-              update_result == client_mutation_result_t::not_found
-                ? SimpleWeb::StatusCode::client_error_unauthorized
-                : SimpleWeb::StatusCode::server_error_internal_server_error
+          if (changes_paired_device_settings) {
+            const auto update_result = update_device_info_result(
+              named_cert_p->uuid,
+              named_cert_p->name,
+              display_mode,
+              target_bitrate_kbps,
+              named_cert_p->do_cmds,
+              named_cert_p->undo_cmds,
+              named_cert_p->perm,
+              named_cert_p->enable_legacy_ordering,
+              named_cert_p->allow_client_commands,
+              named_cert_p->always_use_virtual_display
             );
-            return;
+            if (update_result != client_mutation_result_t::success) {
+              write_json(
+                {{"error", update_result == client_mutation_result_t::not_found
+                  ? "paired client is no longer authorized"
+                  : "paired client update could not be persisted"}},
+                update_result == client_mutation_result_t::not_found
+                  ? SimpleWeb::StatusCode::client_error_unauthorized
+                  : SimpleWeb::StatusCode::server_error_internal_server_error
+              );
+              return;
+            }
+            paired_device_updated = true;
           }
           if (target_bitrate_kbps > 0) {
             // A paired client setting is an explicit newer operator choice.
@@ -7112,24 +7192,33 @@ namespace nvhttp {
           }
         }
 
+        // A standalone/global update was authorized at request admission and
+        // has no later paired-record persistence step that can fail after it
+        // commits. Only refresh the record when this request actually replaced
+        // paired-device settings.
         const auto response_client = resolve_authorized_client(named_cert_p, request->path);
-        if (!response_client) {
+        if (!response_client && paired_device_updated) {
           write_json({{"error", "paired client is no longer authorized"}}, SimpleWeb::StatusCode::client_error_unauthorized);
           return;
         }
+        const auto &rendered_response_client = response_client ? *response_client : *named_cert_p;
 
         const auto stats = stream_stats::get_current();
         const auto health = build_session_health_json(
           stats,
           proc::proc.session_uses_virtual_display(),
-          response_client->name,
+          rendered_response_client.name,
           proc::proc.get_last_run_app_name(),
           proc::proc.get_running_app_uuid()
         );
 
         nlohmann::json output;
         output["status"] = true;
-        output["client_settings"] = build_client_settings_json(*response_client, stats, health);
+        if (response_client) {
+          output["client_settings"] = build_client_settings_json(*response_client, stats, health);
+        } else {
+          output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
+        }
         output["sync_status"] = output["client_settings"]["sync_status"];
         output["stream_policy"] = output["client_settings"]["policy"];
         output["health"] = health;
@@ -9160,7 +9249,7 @@ namespace nvhttp {
       }
       if (!effective_selection.empty()) {
         std::string topology_reject_reason;
-        if (!stream_display_policy::selection_valid(
+        if (!stream_display_policy::selection_valid_fresh(
               effective_selection,
               topology_reject_reason
             )) {

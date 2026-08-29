@@ -6560,8 +6560,13 @@ namespace proc {
         );
         return selection.empty() ? stream_display_policy::configured_selection() : selection;
       };
-      if (effective_topology(launch_session) != effective_topology(_launch_session)) {
-        BOOST_LOG(warning) << "process: rejecting resolved resume profile for a topology other than the active app generation"sv;
+      const auto requested_topology = effective_topology(launch_session);
+      const auto active_topology = _launch_session->expected_stream_mode.empty() ?
+        effective_topology(_launch_session) : _launch_session->expected_stream_mode;
+      if (launch_session->expected_stream_mode.empty() ||
+          requested_topology != launch_session->expected_stream_mode ||
+          active_topology != launch_session->expected_stream_mode) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile whose expected topology does not match the active app generation"sv;
         return 409;
       }
 #else
@@ -6786,6 +6791,14 @@ namespace proc {
     if (!session_mode.empty()) {
       launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
     }
+    if (launch_session->resolved_profile_from_client &&
+        (launch_session->expected_stream_mode.empty() ||
+         launch_session->expected_stream_mode != session_mode)) {
+      BOOST_LOG(warning) << "process: rejecting exact resolved profile because expected topology ["sv
+                         << launch_session->expected_stream_mode
+                         << "] no longer matches final topology ["sv << session_mode << ']';
+      return 409;
+    }
 
     // Snapshot the host policy before a session-scoped override. On a rejected
     // legacy request, restore this snapshot and retain the documented host-
@@ -6830,7 +6843,7 @@ namespace proc {
     if (!session_mode.empty()) {
       std::string mode_error;
       bool session_mode_failed =
-        !stream_display_policy::selection_valid(session_mode, mode_error);
+        !stream_display_policy::selection_valid_fresh(session_mode, mode_error);
       if (!session_mode_failed &&
           !stream_display_policy::selection_companion_state_matches(session_mode)) {
         if (stream_display_policy::apply_selection(session_mode, mode_error)) {
@@ -6852,10 +6865,12 @@ namespace proc {
           return 409;
         }
         launch_session->stream_mode.clear();
+        const auto rejected_session_mode = session_mode;
         const auto fallback_mode = stream_display_policy::configured_selection();
+        session_mode = fallback_mode;
         launch_session->virtual_display =
           fallback_mode == stream_display_policy::k_host_virtual_display;
-        BOOST_LOG(warning) << "process: session stream mode override ["sv << session_mode
+        BOOST_LOG(warning) << "process: session stream mode override ["sv << rejected_session_mode
                            << "] rejected: "sv << mode_error << "; using the host default"sv;
       }
     }
@@ -6866,6 +6881,12 @@ namespace proc {
     this->initial_video_config_saved = true;
 #endif
 
+#ifdef __linux__
+    // Store the canonical generation identity even for a legacy launch so a
+    // later exact resume compares against what this generation actually owns,
+    // never against a newly changed host default.
+    launch_session->expected_stream_mode = session_mode;
+#endif
     ++_session_generation;
     capture_generation.generation_id = _session_generation;
 #ifdef __linux__

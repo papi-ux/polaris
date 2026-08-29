@@ -73,7 +73,9 @@ namespace {
     return cert;
   }
 
-  nvhttp::args_t resolved_launch_args(std::string stream_mode = {}) {
+  nvhttp::args_t resolved_launch_args(
+      std::string stream_mode = {},
+      std::string expected_topology = "desktop_display") {
     nvhttp::args_t args;
     args.emplace("rikey", std::string(crypto::cipher::key_size * 2, '0'));
     args.emplace("rikeyid", "1");
@@ -81,6 +83,7 @@ namespace {
     args.emplace("resolvedProfile", "1");
     args.emplace("bitrateKbps", "20000");
     args.emplace("resolvedHdr", "0");
+    args.emplace("expectedTopology", std::move(expected_topology));
     if (!stream_mode.empty()) {
       args.emplace("streamMode", std::move(stream_mode));
     }
@@ -201,7 +204,7 @@ TEST(SessionStreamMode, ExactResolvedLaunchRejectsUnavailableOrHostOnlyModes) {
     nvhttp::make_launch_session(
       true,
       false,
-      resolved_launch_args("gamescope_stream"),
+      resolved_launch_args("gamescope_stream", "gamescope_stream"),
       cert.get()
     ),
     nullptr
@@ -210,7 +213,7 @@ TEST(SessionStreamMode, ExactResolvedLaunchRejectsUnavailableOrHostOnlyModes) {
     nvhttp::make_launch_session(
       true,
       false,
-      resolved_launch_args("headless_dongle"),
+      resolved_launch_args("headless_dongle", "headless_dongle"),
       cert.get()
     ),
     nullptr
@@ -234,6 +237,7 @@ TEST(SessionStreamMode, LegacyMirrorAndHostDefaultKeepDocumentedSemantics) {
   legacy_args.erase("resolvedProfile");
   legacy_args.erase("bitrateKbps");
   legacy_args.erase("resolvedHdr");
+  legacy_args.erase("expectedTopology");
   const auto legacy_session = nvhttp::make_launch_session(
     true,
     false,
@@ -245,7 +249,7 @@ TEST(SessionStreamMode, LegacyMirrorAndHostDefaultKeepDocumentedSemantics) {
     EXPECT_TRUE(legacy_session->stream_mode.empty());
   }
 
-  auto mirror_args = resolved_launch_args("gamescope_stream");
+  auto mirror_args = resolved_launch_args("gamescope_stream", "desktop_display");
   mirror_args.emplace("mirrorDesktop", "1");
   const auto mirror_session = nvhttp::make_launch_session(
     true,
@@ -268,6 +272,7 @@ TEST(SessionStreamMode, LegacyMirrorAndHostDefaultKeepDocumentedSemantics) {
   EXPECT_NE(host_default_session, nullptr);
   if (host_default_session) {
     EXPECT_TRUE(host_default_session->stream_mode.empty());
+    EXPECT_EQ(host_default_session->expected_stream_mode, "desktop_display");
   }
 
   if (path_was_set) {
@@ -275,5 +280,15 @@ TEST(SessionStreamMode, LegacyMirrorAndHostDefaultKeepDocumentedSemantics) {
   } else {
     EXPECT_EQ(unsetenv("PATH"), 0);
   }
+}
+
+TEST(SessionStreamMode, ExactResolvedLaunchRequiresTopologyAssertion) {
+  auto cert = launch_client_cert();
+  auto args = resolved_launch_args();
+  args.erase("expectedTopology");
+  EXPECT_EQ(
+    nvhttp::make_launch_session(true, false, args, cert.get()),
+    nullptr
+  );
 }
 #endif
