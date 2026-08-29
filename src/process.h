@@ -760,6 +760,9 @@ namespace proc {
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int validate_resolved_profile_for_running_app(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session
+    );
     bool raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     std::optional<std::uint64_t> capture_session_launch_generation() const;
     bool try_begin_session_launch(std::uint64_t expected_generation);

@@ -3710,6 +3710,7 @@ namespace confighttp {
         .host_tuning_allowed = stats.streaming && !proc::proc.session_shutdown_requested(),
         .caller_is_viewer = false,
         .require_owner_scope = false,
+        .enforce_request_scope = true,
         .owner_uuid = owner_uuid,
         .device_name = device_name,
         .app_uuid = app_uuid,
@@ -4084,7 +4085,9 @@ namespace confighttp {
         return;
       }
       if (input_tree.contains("adaptive_bitrate_enabled")) {
-        adaptive_bitrate::set_enabled(json_config_enabled(input_tree["adaptive_bitrate_enabled"]));
+        doctor_actions::set_adaptive_enabled(
+          json_config_enabled(input_tree["adaptive_bitrate_enabled"])
+        );
       }
       if (input_tree.contains("ai_enabled")) {
         ai_optimizer::set_enabled(json_config_enabled(input_tree["ai_enabled"]));

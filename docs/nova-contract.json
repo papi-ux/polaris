@@ -412,7 +412,8 @@
         "signals_used",
         "source",
         "stability",
-        "target_bitrate_kbps"
+        "target_bitrate_kbps",
+        "topology_resolution"
       ],
       "informational_ok": [
         "ai_explanation",
@@ -426,7 +427,8 @@
         "reasoning_summary",
         "recommendation_version",
         "recovery_policy",
-        "signals_used"
+        "signals_used",
+        "topology_resolution"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/ui/NovaGameDetailActivity.kt",
@@ -438,6 +440,34 @@
         "function": "append_deterministic_optimization_json",
         "style": "assignments",
         "variable": "output"
+      }
+    },
+    "optimization_topology_resolution": {
+      "$comment": [
+        "Exact app and topology identity bound to a deterministic optimize result.",
+        "Nova rejects a preflight or fresh result unless the canonical app id,",
+        "host-default or explicit topology request, lock state, and Steam desktop",
+        "choice all match the launch that will consume it."
+      ],
+      "fields": [
+        "app_id",
+        "app_uuid",
+        "force_private_after_steam_close_requested",
+        "locked",
+        "mirror_desktop_requested",
+        "requested",
+        "resolved"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/manager/LaunchTopologyEnvelope.kt",
+        "function": "matches",
+        "receiver": "topologyResolution"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "optimization_topology_resolution_json",
+        "style": "initializer_list",
+        "declaration": "return {"
       }
     },
     "optimization_resolved_field": {
@@ -478,12 +508,6 @@
       "Verified against origin/master with function scoping, Nova reads every field Polaris",
       "serves; only the reverse direction drifts."
     ],
-    "polaris_accepts_nova_does_not_send_yet": {
-      "$comment": "Session-scoped stream-mode override (step 2 of the launch-must-not-clobber-host-default fix; nova#222 was step 1). GET /launch accepts streamMode=<stream path registry id>: nvhttp::make_launch_session validates it via stream_display_policy::selection_valid, mirrorDesktop wins over it, and headless_dongle is rejected as a session override (host-default-only). proc_t::execute applies the accepted mode to the in-memory config for that session only and re-bakes capture sources (platf::reevaluate_capture_sources); terminate_impl restores the host values after teardown. Nothing persists. Nova does not send streamMode yet; the Nova-side change lands separately, at which point this entry moves to objects.",
-      "launch": [
-        "streamMode"
-      ]
-    },
     "nova_reads_polaris_never_sends": {
       "$comment": "Nova defaults each of these, so platform and runtime resolve to \"unknown\" and the labels to empty strings rather than failing.",
       "game": [

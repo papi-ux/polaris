@@ -6424,6 +6424,72 @@ namespace proc {
 #endif
   }
 
+  namespace {
+    int validate_resolved_launch_profile_for_app(
+        const ctx_t &app,
+        const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+        const std::optional<client_profiles::client_profile_t> &client_profile) {
+      if (!launch_session) return 400;
+      const std::string selected_output_name =
+        client_profile && !client_profile->output_name.empty() ?
+          client_profile->output_name : config::video.output_name;
+      bool launch_owns_refresh_rate = false;
+#ifdef __linux__
+      auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
+        launch_session->stream_mode,
+        launch_session->mirror_desktop || app.desktop_mirror,
+        launch_session->virtual_display,
+        app.virtual_display,
+        launch_session->user_locked_virtual_display,
+        false
+      );
+      if (effective_selection.empty()) {
+        effective_selection = stream_display_policy::configured_selection();
+      }
+      launch_owns_refresh_rate =
+        stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
+#elif defined(_WIN32)
+      launch_owns_refresh_rate =
+        config::video.linux_display.headless_mode ||
+        launch_session->virtual_display ||
+        (!launch_session->user_locked_virtual_display && app.virtual_display) ||
+        !video::allow_encoder_probing();
+#endif
+      launch_session->host_max_fps.reset();
+      if (launch_owns_refresh_rate) {
+        launch_session->host_max_fps = 120000;
+      } else if (const auto refresh_rate =
+                   display_device::active_refresh_rate_hz_hint(selected_output_name)) {
+        launch_session->host_max_fps = *refresh_rate * 1000;
+      }
+
+      const auto current_codec_support = video::advertised_codec_capability_state();
+      launch_session->host_hdr_capable =
+        current_codec_support.hevc_mode >= 3 || current_codec_support.av1_mode >= 3;
+
+      if (!launch_session->resolved_profile_from_client) return 0;
+      if (launch_session->host_max_fps &&
+          launch_session->requested_fps > *launch_session->host_max_fps) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved profile above final output refresh cap: "sv
+                           << launch_session->requested_fps << " > " << *launch_session->host_max_fps;
+        return 409;
+      }
+      if (config::video.max_bitrate > 0 &&
+          launch_session->explicit_target_bitrate_kbps &&
+          *launch_session->explicit_target_bitrate_kbps > config::video.max_bitrate) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved profile above configured bitrate cap: "sv
+                           << *launch_session->explicit_target_bitrate_kbps
+                           << " > " << config::video.max_bitrate;
+        return 409;
+      }
+      if (launch_session->enable_hdr && launch_session->host_hdr_capable == false) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved HDR profile because the final encoder lacks HDR support"sv;
+        return 409;
+      }
+      return 0;
+    }
+  }
+
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     _session_lifecycle_gate->begin_launch();
     auto release_launch = util::fail_guard([this]() {
@@ -6443,6 +6509,59 @@ namespace proc {
       return rtsp_stream::launch_session_raise(std::move(launch_session)) ? 0 : 409;
     }
     return err;
+  }
+
+  int proc_t::validate_resolved_profile_for_running_app(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return 503;
+    if (launch_session->watch_only) {
+      // A viewer attaches to the already-running capture generation. Pin its
+      // topology semantics to the owner before validating capabilities so a
+      // default viewer request cannot either replace or falsely conflict with
+      // an explicit mirror/private owner launch.
+      launch_session->stream_mode = _launch_session->stream_mode;
+      launch_session->mirror_desktop = _launch_session->mirror_desktop;
+      launch_session->virtual_display = _launch_session->virtual_display;
+      launch_session->user_locked_virtual_display =
+        _launch_session->user_locked_virtual_display;
+      launch_session->force_private_after_desktop_steam_shutdown =
+        _launch_session->force_private_after_desktop_steam_shutdown;
+    }
+    if (launch_session->resolved_profile_from_client) {
+#ifdef __linux__
+      const auto effective_topology = [this](
+          const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
+        auto selection = stream_display_policy::effective_session_selection_for_launch(
+          session->stream_mode,
+          session->mirror_desktop || _app.desktop_mirror,
+          session->virtual_display,
+          _app.virtual_display,
+          session->user_locked_virtual_display,
+          false
+        );
+        return selection.empty() ? stream_display_policy::configured_selection() : selection;
+      };
+      if (effective_topology(launch_session) != effective_topology(_launch_session)) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile for a topology other than the active app generation"sv;
+        return 409;
+      }
+#else
+      if (launch_session->virtual_display != _launch_session->virtual_display) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile for a display topology other than the active app generation"sv;
+        return 409;
+      }
+#endif
+      if (launch_session->mirror_desktop != _launch_session->mirror_desktop ||
+          launch_session->force_private_after_desktop_steam_shutdown !=
+            _launch_session->force_private_after_desktop_steam_shutdown) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile for launch semantics other than the active app generation"sv;
+        return 409;
+      }
+    }
+    const auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
+    return validate_resolved_launch_profile_for_app(_app, launch_session, client_profile);
   }
 
   bool proc_t::raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
@@ -6609,67 +6728,12 @@ namespace proc {
 
     // Resolve hard output capabilities only after the previous generation has
     // been torn down, but before installing any state for the new generation.
-    // The paired output profile and app topology semantics are immutable local
-    // snapshots for the rest of this launch, so /optimize and the final process
-    // resolver cannot observe different outputs mid-flight.
+    // /resume calls this same helper immediately before admitting its RTSP
+    // session, so neither launch verb can bypass exact-envelope validation.
     const auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
-    const std::string selected_output_name =
-      client_profile && !client_profile->output_name.empty() ?
-        client_profile->output_name : config::video.output_name;
-    bool launch_owns_refresh_rate = false;
-#ifdef __linux__
-    auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
-      launch_session->stream_mode,
-      launch_session->mirror_desktop || app.desktop_mirror,
-      launch_session->virtual_display,
-      app.virtual_display,
-      launch_session->user_locked_virtual_display,
-      false
-    );
-    if (effective_selection.empty()) {
-      effective_selection = stream_display_policy::configured_selection();
-    }
-    launch_owns_refresh_rate =
-      stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
-#elif defined(_WIN32)
-    launch_owns_refresh_rate =
-      config::video.linux_display.headless_mode ||
-      launch_session->virtual_display ||
-      (!launch_session->user_locked_virtual_display && app.virtual_display) ||
-      !video::allow_encoder_probing();
-#endif
-    launch_session->host_max_fps.reset();
-    if (launch_owns_refresh_rate) {
-      // The stock containment presets do not create modes above 120 Hz.
-      launch_session->host_max_fps = 120000;
-    } else if (const auto refresh_rate =
-                 display_device::active_refresh_rate_hz_hint(selected_output_name)) {
-      launch_session->host_max_fps = *refresh_rate * 1000;
-    }
-
-    const auto current_codec_support = video::advertised_codec_capability_state();
-    launch_session->host_hdr_capable =
-      current_codec_support.hevc_mode >= 3 || current_codec_support.av1_mode >= 3;
-
-    if (launch_session->resolved_profile_from_client) {
-      if (launch_session->host_max_fps &&
-          launch_session->requested_fps > *launch_session->host_max_fps) {
-        BOOST_LOG(warning) << "process: rejecting exact resolved profile above final output refresh cap: "sv
-                           << launch_session->requested_fps << " > " << *launch_session->host_max_fps;
-        return 409;
-      }
-      if (config::video.max_bitrate > 0 &&
-          launch_session->explicit_target_bitrate_kbps &&
-          *launch_session->explicit_target_bitrate_kbps > config::video.max_bitrate) {
-        BOOST_LOG(warning) << "process: rejecting exact resolved profile above configured bitrate cap: "sv
-                           << *launch_session->explicit_target_bitrate_kbps
-                           << " > " << config::video.max_bitrate;
-        return 409;
-      }
-      if (launch_session->enable_hdr && launch_session->host_hdr_capable == false) {
-        BOOST_LOG(warning) << "process: rejecting exact resolved HDR profile because the final encoder lacks HDR support"sv;
-        return 409;
-      }
+    if (const auto validation_error =
+          validate_resolved_launch_profile_for_app(app, launch_session, client_profile)) {
+      return validation_error;
     }
 
     ++_session_generation;
@@ -6931,7 +6995,17 @@ namespace proc {
     const bool virtual_display_requested_before_mode =
       launch_session->virtual_display ||
       (_app.virtual_display && !launch_session->user_locked_virtual_display);
-    const std::string session_mode = effective_selection;
+    auto session_mode = stream_display_policy::effective_session_selection_for_launch(
+      launch_session->stream_mode,
+      launch_session->mirror_desktop || _app.desktop_mirror,
+      launch_session->virtual_display,
+      _app.virtual_display,
+      launch_session->user_locked_virtual_display,
+      false
+    );
+    if (session_mode.empty()) {
+      session_mode = stream_display_policy::configured_selection();
+    }
     if (!session_mode.empty()) {
       launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
     }

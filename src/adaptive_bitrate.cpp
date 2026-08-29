@@ -561,10 +561,16 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
-    pending_live_update_active.store(false, std::memory_order_relaxed);
     config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
-    ++operator_revision;
+    const auto revision = ++operator_revision;
+    const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    const bool needs_encoder_update = target > 0 && encoder_applied_bitrate_kbps != target;
+    pending_live_update_active.store(needs_encoder_update, std::memory_order_relaxed);
+    if (!needs_encoder_update && target > 0) {
+      encoder_applied_revision = revision;
+      encoder_applied_at = std::chrono::steady_clock::now();
+    }
     state_changed.notify_all();
   }
 

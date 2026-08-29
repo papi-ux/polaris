@@ -108,6 +108,45 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    struct request_stream_scope_t {
+      std::uint64_t session_generation = 0;
+      std::string app_session_id;
+    };
+
+    std::optional<request_stream_scope_t> parse_request_stream_scope(
+        const nlohmann::json &body,
+        std::string &error) {
+      const bool has_generation = body.contains("session_generation");
+      const bool has_app_session = body.contains("app_session_id");
+      if (!has_generation && !has_app_session) return request_stream_scope_t {};
+      if (!has_generation || !has_app_session ||
+          !body["session_generation"].is_number_integer() ||
+          !body["app_session_id"].is_string()) {
+        error = "app_session_id and session_generation must be supplied together with exact types";
+        return std::nullopt;
+      }
+      request_stream_scope_t scope;
+      try {
+        if (body["session_generation"].is_number_unsigned()) {
+          scope.session_generation = body["session_generation"].get<std::uint64_t>();
+          if (scope.session_generation == 0) throw std::out_of_range("session_generation");
+        } else {
+          const auto value = body["session_generation"].get<std::int64_t>();
+          if (value <= 0) throw std::out_of_range("session_generation");
+          scope.session_generation = static_cast<std::uint64_t>(value);
+        }
+      } catch (...) {
+        error = "session_generation must be a positive integer";
+        return std::nullopt;
+      }
+      scope.app_session_id = body["app_session_id"].get<std::string>();
+      if (scope.app_session_id.empty() || scope.app_session_id.size() > 2048) {
+        error = "app_session_id must contain 1 to 2048 characters";
+        return std::nullopt;
+      }
+      return scope;
+    }
+
     struct artwork_curl_body_t {
       std::vector<unsigned char> bytes;
       std::uintmax_t maximum_bytes;
@@ -334,6 +373,31 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", fallback_message);
     }
 
+    std::optional<proc::ctx_t> find_app_for_optimization_game(const std::string &game) {
+      if (game.empty()) {
+        return std::nullopt;
+      }
+
+      const auto apps = proc::proc.get_apps();
+      // Canonical identity must win before the display-name compatibility
+      // fallback. Duplicate titles are valid and can carry different display
+      // topology semantics; resolving the first matching title would make
+      // /optimize disagree with the app selected for /launch.
+      auto app_iter = std::find_if(apps.begin(), apps.end(), [&game](const proc::ctx_t &app) {
+        return boost::iequals(app.uuid, game) || boost::iequals(app.id, game);
+      });
+      if (app_iter == apps.end()) {
+        app_iter = std::find_if(apps.begin(), apps.end(), [&game](const proc::ctx_t &app) {
+          return boost::iequals(app.name, game);
+        });
+      }
+
+      if (app_iter == apps.end()) {
+        return std::nullopt;
+      }
+      return *app_iter;
+    }
+
 #if defined(__linux__)
     bool truthy_query_value(std::string value) {
       value = lower_copy(std::move(value));
@@ -535,24 +599,6 @@ namespace nvhttp {
       }
     }
 
-    std::optional<proc::ctx_t> find_app_for_optimization_game(const std::string &game) {
-      if (game.empty()) {
-        return std::nullopt;
-      }
-
-      const auto apps = proc::proc.get_apps();
-      const auto app_iter = std::find_if(apps.begin(), apps.end(), [&game](const proc::ctx_t &app) {
-        return boost::iequals(app.name, game) ||
-               boost::iequals(app.uuid, game) ||
-               boost::iequals(app.id, game);
-      });
-
-      if (app_iter == apps.end()) {
-        return std::nullopt;
-      }
-      return *app_iter;
-    }
-
     void put_optimization_launch_policy(nlohmann::json &output,
                                         const args_t &args,
                                         const std::string &game) {
@@ -570,11 +616,31 @@ namespace nvhttp {
     }
 #endif
 
+    nlohmann::json optimization_topology_resolution_json(
+      const std::string &requested_topology,
+      const std::string &resolved_topology,
+      bool topology_locked,
+      bool mirror_desktop_requested,
+      bool force_private_requested,
+      const std::optional<proc::ctx_t> &app
+    ) {
+      return {
+        {"requested", requested_topology.empty() ? "host_default" : requested_topology},
+        {"resolved", resolved_topology},
+        {"locked", topology_locked},
+        {"mirror_desktop_requested", mirror_desktop_requested},
+        {"force_private_after_steam_close_requested", force_private_requested},
+        {"app_uuid", app ? app->uuid : std::string {}},
+        {"app_id", app ? app->id : std::string {}}
+      };
+    }
+
     void append_deterministic_optimization_json(
       nlohmann::json &output,
       const launch_profile::resolution_t &resolved,
       const std::string &device,
-      const std::string &game
+      const std::string &game,
+      const nlohmann::json &topology_resolution
     ) {
       output["source"] = "deterministic_preset_v1";
       output["cache_status"] = "not_applicable";
@@ -593,6 +659,7 @@ namespace nvhttp {
         {"preset_label", launch_profile::preset_label(resolved.preset)},
         {"fields", resolved.fields}
       };
+      output["topology_resolution"] = topology_resolution;
 
       // Keep the v1 flat fields for compatibility while making every emitted
       // value explicit enough for the cross-repository contract extractor to
@@ -5771,6 +5838,19 @@ namespace nvhttp {
       }
     }
 
+    if (const auto validation_error =
+          proc::proc.validate_resolved_profile_for_running_app(launch_session)) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", validation_error);
+      tree.put(
+        "root.<xmlattr>.status_message",
+        validation_error == 409 ?
+          "The resolved stream profile no longer matches the active app, topology, or output capabilities" :
+          "The active app could not be validated for resume"
+      );
+      return;
+    }
+
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
       BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
@@ -6296,6 +6376,8 @@ namespace nvhttp {
       const auto &stop_snapshot = status_snapshot.stop;
       auto stats = stream_stats::get_current();
       auto adaptive_state = adaptive_bitrate::get_state();
+      const auto doctor_controller = adaptive_bitrate::get_doctor_state();
+      const auto session_timing = stream_stats::get_session_timing(named_cert_p->uuid);
       const auto session_state = confighttp::get_session_state();
       const auto running_app_id = stop_snapshot.running_app_id;
       const auto &session_token = stop_snapshot.session_token;
@@ -6312,6 +6394,9 @@ namespace nvhttp {
 #endif
       output["owned_by_client"] = owned_by_client;
       output["session_token"] = session_token;
+      output["app_session_id"] = session_token;
+      output["session_generation"] = session_timing.session_active ?
+        session_timing.session_generation : 0;
       output["owner_unique_id"] = status_snapshot.owner_unique_id;
       output["owner_device_name"] = status_snapshot.owner_device_name;
       output["viewer_count"] = status_snapshot.viewer_count;
@@ -6459,6 +6544,14 @@ namespace nvhttp {
       );
       output["health"] = health;
       auto doctor_v1 = health.value("doctor", nlohmann::json::object());
+      stream_stats::bind_doctor_action_scope(
+        doctor_v1,
+        session_token,
+        session_timing.session_active ? session_timing.session_generation : 0,
+        doctor_controller.revision,
+        stats.network_sample_revision,
+        stats.video_sample_revision
+      );
       doctor_v1["contract"] = "doctor_v1_observational";
       doctor_v1["launch_policy_authority"] = false;
       doctor_v1["recovery_profile_action_supported"] = false;
@@ -6740,13 +6833,23 @@ namespace nvhttp {
         if (request->method == "POST") {
           std::string body_str(std::istreambuf_iterator<char>(request->content), {});
           const auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
+          std::string stream_scope_error;
+          const auto request_stream_scope = parse_request_stream_scope(body, stream_scope_error);
+          if (!request_stream_scope) {
+            write_json({{"error", stream_scope_error}}, SimpleWeb::StatusCode::client_error_bad_request);
+            return;
+          }
 
           const bool changes_global_host_control =
             body.contains("adaptive_bitrate_enabled") ||
             body.contains("disconnect_resume_timeout_seconds") ||
             body.contains("stream_display_mode");
           auto global_control_guard = changes_global_host_control ?
-            doctor_actions::acquire_paired_global_control(named_cert_p->uuid) :
+            doctor_actions::acquire_paired_global_control(
+              named_cert_p->uuid,
+              request_stream_scope->session_generation,
+              request_stream_scope->app_session_id
+            ) :
             doctor_actions::paired_global_control_guard_t {};
           if (changes_global_host_control && !global_control_guard) {
             write_json(
@@ -6843,7 +6946,14 @@ namespace nvhttp {
               write_json({{"error", "failed to persist adaptive bitrate setting"}}, SimpleWeb::StatusCode::server_error_internal_server_error);
               return;
             }
-            adaptive_bitrate::set_enabled(enabled);
+            if (!global_control_guard.set_adaptive_enabled(enabled)) {
+              write_json(
+                {{"status", false}, {"changed", false}, {"state", "scope_mismatch"},
+                 {"error", "The active stream generation changed before adaptive bitrate could be updated."}},
+                SimpleWeb::StatusCode::client_error_conflict
+              );
+              return;
+            }
           }
 
           if (body.contains("disconnect_resume_timeout_seconds")) {
@@ -6925,6 +7035,8 @@ namespace nvhttp {
             // older Doctor/adaptive reduction beneath the new base.
             (void) doctor_actions::set_owner_live_bitrate(
               named_cert_p->uuid,
+              request_stream_scope->session_generation,
+              request_stream_scope->app_session_id,
               target_bitrate_kbps
             );
           }
@@ -8193,6 +8305,7 @@ namespace nvhttp {
           .host_tuning_allowed = stats.streaming && !proc::proc.session_shutdown_requested(),
           .caller_is_viewer = !active_owner && active_owner_present,
           .require_owner_scope = true,
+          .enforce_request_scope = true,
           .owner_uuid = named_cert_p->uuid,
           .device_name = named_cert_p->name,
           .app_uuid = app_uuid,
@@ -8229,6 +8342,15 @@ namespace nvhttp {
       try {
         std::string body_str(std::istreambuf_iterator<char>(request->content), {});
         auto body = nlohmann::json::parse(body_str);
+        std::string stream_scope_error;
+        const auto request_stream_scope = parse_request_stream_scope(body, stream_scope_error);
+        if (!request_stream_scope) {
+          nlohmann::json err {{"status", false}, {"changed", false}, {"error", stream_scope_error}};
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+          return;
+        }
         int bitrate_kbps = body.value("bitrate_kbps", 0);
         if (bitrate_kbps < 1000 || bitrate_kbps > 300000) {
           nlohmann::json err;
@@ -8241,7 +8363,12 @@ namespace nvhttp {
         // This endpoint is an explicit live target, not merely a new adaptive
         // ceiling. A newer client increase must supersede an older Doctor
         // reduction in both the base and the encoder-visible target.
-        if (!doctor_actions::set_owner_live_bitrate(named_cert_p->uuid, bitrate_kbps)) {
+        if (!doctor_actions::set_owner_live_bitrate(
+              named_cert_p->uuid,
+              request_stream_scope->session_generation,
+              request_stream_scope->app_session_id,
+              bitrate_kbps
+            )) {
           nlohmann::json err {
             {"status", false}, {"changed", false},
             {"state", "active_owner_required"},
@@ -8293,6 +8420,15 @@ namespace nvhttp {
       try {
         std::string body_str(std::istreambuf_iterator<char>(request->content), {});
         auto body = nlohmann::json::parse(body_str);
+        std::string stream_scope_error;
+        const auto request_stream_scope = parse_request_stream_scope(body, stream_scope_error);
+        if (!request_stream_scope) {
+          nlohmann::json err {{"status", false}, {"changed", false}, {"error", stream_scope_error}};
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
+          return;
+        }
         if (!body.contains("enabled") || !body["enabled"].is_boolean()) {
           nlohmann::json err;
           err["error"] = "enabled must be a boolean";
@@ -8304,7 +8440,11 @@ namespace nvhttp {
 
         const bool enabled = body["enabled"].get<bool>();
         auto global_control_guard =
-          doctor_actions::acquire_paired_global_control(named_cert_p->uuid);
+          doctor_actions::acquire_paired_global_control(
+            named_cert_p->uuid,
+            request_stream_scope->session_generation,
+            request_stream_scope->app_session_id
+          );
         if (!global_control_guard) {
           nlohmann::json err {
             {"status", false}, {"changed", false},
@@ -8326,7 +8466,16 @@ namespace nvhttp {
           response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err.dump(), headers);
           return;
         }
-        adaptive_bitrate::set_enabled(enabled);
+        if (!global_control_guard.set_adaptive_enabled(enabled)) {
+          nlohmann::json err {
+            {"status", false}, {"changed", false}, {"state", "scope_mismatch"},
+            {"error", "The active stream generation changed before adaptive bitrate could be updated."}
+          };
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_conflict, err.dump(), headers);
+          return;
+        }
         BOOST_LOG(info) << "Adaptive bitrate toggled: " << (enabled ? "enabled" : "disabled");
 
         nlohmann::json output;
@@ -8886,8 +9035,14 @@ namespace nvhttp {
       );
       const auto optimization_app = find_app_for_optimization_game(game);
       bool launch_owned_display = false;
+      std::string resolved_topology = requested_topology;
+      bool mirror_desktop_requested = false;
+      bool force_private_requested = false;
 #if defined(__linux__)
-      const bool mirror_desktop = optimization_app && optimization_app->desktop_mirror;
+      mirror_desktop_requested = explicit_mirror_desktop_requested(args);
+      force_private_requested = force_private_after_desktop_steam_shutdown_requested(args);
+      const bool mirror_desktop = mirror_desktop_requested ||
+        (optimization_app && optimization_app->desktop_mirror);
       const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
       const bool paired_virtual_lock =
         named_cert_p->always_use_virtual_display && !topology_locked;
@@ -8904,6 +9059,7 @@ namespace nvhttp {
       if (effective_selection.empty()) {
         effective_selection = stream_display_policy::configured_selection();
       }
+      resolved_topology = effective_selection;
       launch_owned_display =
         stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
 #else
@@ -8914,6 +9070,9 @@ namespace nvhttp {
         requested_topology == "windowed_stream" ||
         requested_topology == "gamescope_stream" ||
         (optimization_app && optimization_app->virtual_display && !topology_locked);
+      if (resolved_topology.empty()) {
+        resolved_topology = launch_owned_display ? "host_virtual_display" : "desktop_display";
+      }
 #endif
       launch_profile::request_t preset_request;
       preset_request.device_name = device;
@@ -8967,7 +9126,20 @@ namespace nvhttp {
 
       const auto resolved = launch_profile::resolve(preset_request);
       nlohmann::json deterministic_output;
-      append_deterministic_optimization_json(deterministic_output, resolved, device, game);
+      append_deterministic_optimization_json(
+        deterministic_output,
+        resolved,
+        device,
+        game,
+        optimization_topology_resolution_json(
+          requested_topology,
+          resolved_topology,
+          topology_locked,
+          mirror_desktop_requested,
+          force_private_requested,
+          optimization_app
+        )
+      );
 
 #ifdef __linux__
       put_optimization_launch_policy(deterministic_output, args, game);

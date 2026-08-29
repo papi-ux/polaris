@@ -1292,7 +1292,15 @@ const doctorSafeAction = computed(() => {
   return action
 })
 
-const doctorActionExecutable = computed(() => Boolean(doctorSafeAction.value?.endpoint?.startsWith('/api/')))
+const doctorActionExecutable = computed(() => {
+  const action = doctorSafeAction.value
+  const payload = action?.payload_preview || action?.payload || {}
+  return Boolean(
+    action?.endpoint?.startsWith('/api/') &&
+    typeof payload.app_session_id === 'string' && payload.app_session_id.length > 0 &&
+    Number.isSafeInteger(Number(payload.session_generation)) && Number(payload.session_generation) > 0
+  )
+})
 
 const doctorActionConfirmOpen = ref(false)
 const doctorActionPending = ref(false)
@@ -1347,6 +1355,8 @@ async function verifyDoctorAction(verification) {
     const result = await postDoctorAction({
       action_id: verification.action_id || 'verify',
       run_id: verification.run_id,
+      app_session_id: verification.app_session_id,
+      session_generation: verification.session_generation,
     })
     doctorActionResult.value = result
     if (result.state === 'resolved') {
@@ -1391,7 +1401,12 @@ async function undoDoctorAction() {
   doctorActionPending.value = true
   if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
   try {
-    doctorActionResult.value = await postDoctorAction({ action_id: undo.action_id || 'undo', run_id: undo.run_id })
+    doctorActionResult.value = await postDoctorAction({
+      action_id: undo.action_id || 'undo',
+      run_id: undo.run_id,
+      app_session_id: undo.app_session_id,
+      session_generation: undo.session_generation,
+    })
     showToast(t('dashboard.doctor_action_undone'), 'success')
   } catch (e) {
     showToast(t('dashboard.doctor_action_error') + e.message, 'error')
