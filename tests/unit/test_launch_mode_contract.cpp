@@ -3,7 +3,13 @@
  * @brief Tests for the Polaris v1 game launch-mode recommendation contract.
  */
 
+#include <src/crypto.h>
 #include <src/nvhttp.h>
+
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -55,6 +61,36 @@ TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHo
 #ifdef __linux__
   #include <src/platform/linux/stream_display_policy.h>
 
+namespace {
+  std::unique_ptr<crypto::named_cert_t> launch_client_cert() {
+    auto cert = std::make_unique<crypto::named_cert_t>();
+    cert->name = "topology-test-client";
+    cert->uuid = "topology-test-client-uuid";
+    cert->perm = crypto::PERM::_game_control;
+    cert->enable_legacy_ordering = false;
+    cert->allow_client_commands = false;
+    cert->always_use_virtual_display = false;
+    return cert;
+  }
+
+  nvhttp::args_t resolved_launch_args(
+      std::string stream_mode = {},
+      std::string expected_topology = "desktop_display") {
+    nvhttp::args_t args;
+    args.emplace("rikey", std::string(crypto::cipher::key_size * 2, '0'));
+    args.emplace("rikeyid", "1");
+    args.emplace("mode", "1920x1080x60");
+    args.emplace("resolvedProfile", "1");
+    args.emplace("bitrateKbps", "20000");
+    args.emplace("resolvedHdr", "0");
+    args.emplace("expectedTopology", std::move(expected_topology));
+    if (!stream_mode.empty()) {
+      args.emplace("streamMode", std::move(stream_mode));
+    }
+    return args;
+  }
+}
+
 // The client-settings POST validator used to hardcode four ids while
 // allowed_modes advertised the full registry, so gamescope_stream and
 // headless_dongle were advertised and then rejected with 400. The validator now
@@ -64,7 +100,11 @@ TEST(LaunchModeContractTests, EveryAdvertisedModeVerdictMatchesTheValidator) {
   for (const bool virtual_display_available : {false, true}) {
     for (const auto &option : stream_display_policy::mode_options(virtual_display_available)) {
       std::string error;
-      const bool valid = stream_display_policy::selection_valid(option.value, error);
+      const bool valid = stream_display_policy::selection_valid_for_capabilities(
+        option.value,
+        virtual_display_available,
+        error
+      );
       if (option.available) {
         EXPECT_TRUE(valid) << option.value << ": advertised available but rejected: " << error;
       } else {
@@ -73,6 +113,23 @@ TEST(LaunchModeContractTests, EveryAdvertisedModeVerdictMatchesTheValidator) {
       }
     }
   }
+}
+
+TEST(LaunchModeContractTests, MissingVirtualBackendFailsTheLaunchValidator) {
+  std::string unavailable_error;
+  EXPECT_FALSE(stream_display_policy::selection_valid_for_capabilities(
+    "host_virtual_display",
+    false,
+    unavailable_error
+  ));
+  EXPECT_FALSE(unavailable_error.empty());
+
+  std::string available_error;
+  EXPECT_TRUE(stream_display_policy::selection_valid_for_capabilities(
+    "host_virtual_display",
+    true,
+    available_error
+  )) << available_error;
 }
 
 TEST(LaunchModeContractTests, ReservedAndUnknownIdsAreRejectedWithGuidance) {
@@ -116,5 +173,149 @@ TEST(SessionStreamMode, RejectsDongleReservedUnknownAndEmpty) {
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("family_isolated"), "");
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("garbage_mode"), "");
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests(""), "");
+}
+
+TEST(SessionStreamMode, RejectsGamescopeWhenItIsNoLongerOnPath) {
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+  EXPECT_EQ(
+    nvhttp::accepted_session_stream_mode_for_tests("gamescope_stream"),
+    ""
+  );
+
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
+}
+
+TEST(SessionStreamMode, ExactResolvedLaunchRejectsUnavailableOrHostOnlyModes) {
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+
+  auto cert = launch_client_cert();
+  EXPECT_EQ(
+    nvhttp::make_launch_session(
+      true,
+      false,
+      resolved_launch_args("gamescope_stream", "gamescope_stream"),
+      cert.get()
+    ),
+    nullptr
+  );
+  EXPECT_EQ(
+    nvhttp::make_launch_session(
+      true,
+      false,
+      resolved_launch_args("headless_dongle", "headless_dongle"),
+      cert.get()
+    ),
+    nullptr
+  );
+
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
+}
+
+TEST(SessionStreamMode, ExactParserDefersAvailabilityForALosingAppTopologyRequest) {
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+
+  auto cert = launch_client_cert();
+  const auto session = nvhttp::make_launch_session(
+    true,
+    false,
+    resolved_launch_args("gamescope_stream", "desktop_display"),
+    cert.get()
+  );
+  EXPECT_NE(session, nullptr)
+    << "parser availability must not outrank the app-aware final topology resolver";
+  if (session) {
+    EXPECT_EQ(session->stream_mode, "gamescope_stream");
+    EXPECT_EQ(session->expected_stream_mode, "desktop_display");
+  }
+
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
+}
+
+TEST(SessionStreamMode, LegacyMirrorAndHostDefaultKeepDocumentedSemantics) {
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+
+  auto cert = launch_client_cert();
+  auto legacy_args = resolved_launch_args("gamescope_stream");
+  legacy_args.erase("resolvedProfile");
+  legacy_args.erase("bitrateKbps");
+  legacy_args.erase("resolvedHdr");
+  legacy_args.erase("expectedTopology");
+  const auto legacy_session = nvhttp::make_launch_session(
+    true,
+    false,
+    legacy_args,
+    cert.get()
+  );
+  EXPECT_NE(legacy_session, nullptr);
+  if (legacy_session) {
+    EXPECT_TRUE(legacy_session->stream_mode.empty());
+  }
+
+  auto mirror_args = resolved_launch_args("gamescope_stream", "desktop_display");
+  mirror_args.emplace("mirrorDesktop", "1");
+  const auto mirror_session = nvhttp::make_launch_session(
+    true,
+    false,
+    mirror_args,
+    cert.get()
+  );
+  EXPECT_NE(mirror_session, nullptr);
+  if (mirror_session) {
+    EXPECT_TRUE(mirror_session->mirror_desktop);
+    EXPECT_TRUE(mirror_session->stream_mode.empty());
+  }
+
+  const auto host_default_session = nvhttp::make_launch_session(
+    true,
+    false,
+    resolved_launch_args(),
+    cert.get()
+  );
+  EXPECT_NE(host_default_session, nullptr);
+  if (host_default_session) {
+    EXPECT_TRUE(host_default_session->stream_mode.empty());
+    EXPECT_EQ(host_default_session->expected_stream_mode, "desktop_display");
+  }
+
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
+}
+
+TEST(SessionStreamMode, ExactResolvedLaunchRequiresTopologyAssertion) {
+  auto cert = launch_client_cert();
+  auto args = resolved_launch_args();
+  args.erase("expectedTopology");
+  EXPECT_EQ(
+    nvhttp::make_launch_session(true, false, args, cert.get()),
+    nullptr
+  );
 }
 #endif

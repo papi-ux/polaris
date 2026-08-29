@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // lib includes
@@ -136,6 +137,8 @@ namespace stream_stats {
     std::string optimization_normalization_reason;
     int recommendation_version = 0;
     int paired_target_bitrate_kbps = 0;
+    /// Capability-validated bitrate ceiling captured when this stream began.
+    int effective_launch_bitrate_kbps = 0;
     int width = 0;
     int height = 0;
 
@@ -148,6 +151,17 @@ namespace stream_stats {
     /// ENet reliable control-channel EWMA; diagnostic context, not video loss.
     double control_channel_packet_loss = 0;
     uint64_t control_channel_samples = 0;
+    /// Process-lifetime monotonic count of primary video/pacing observations.
+    uint64_t video_sample_revision = 0;
+    /// Monotonic count of primary media/control network observations.
+    uint64_t network_sample_revision = 0;
+    /// Host monotonic age of the newest complete network observation, or -1
+    /// when no observation has been received. Client timestamps never feed it.
+    std::int64_t network_last_received_age_ms = -1;
+    /// Host age/revision of the last confirmed media-loss observation. A
+    /// newer control-channel sample never refreshes these fields.
+    uint64_t media_loss_sample_revision = 0;
+    std::int64_t media_loss_last_received_age_ms = -1;
     /// Debounced by network_risk_tracker_t; the single truth every reader serves.
     bool network_risk = false;
     uint64_t bytes_sent = 0;
@@ -156,6 +170,8 @@ namespace stream_stats {
     int adaptive_target_bitrate_kbps = 0;
     bool adaptive_bitrate_active = false;
     bool adaptive_runtime_update_supported = false;
+    /// True only while one uncontaminated stream generation owns the global actuator.
+    bool doctor_live_action_scope_available = true;
 
     // System
     double gpu_usage = 0;
@@ -327,6 +343,7 @@ namespace stream_stats {
    * @param optimization_normalization_reason Explanation for any server-side correction.
    * @param recommendation_version Optimization schema version used to produce the result.
    * @param paired_target_bitrate_kbps Bitrate explicitly saved for the paired client, if any.
+   * @param effective_launch_bitrate_kbps Capability-validated encoder bitrate when the stream began.
    */
   void update_session_targets(double requested_client_fps,
                               double session_target_fps,
@@ -338,7 +355,8 @@ namespace stream_stats {
                               const std::string &optimization_reasoning,
                               const std::string &optimization_normalization_reason,
                               int recommendation_version,
-                              int paired_target_bitrate_kbps);
+                              int paired_target_bitrate_kbps,
+                              int effective_launch_bitrate_kbps);
 
   /**
    * @brief Update frame delivery telemetry derived from the encode loop.
@@ -383,6 +401,58 @@ namespace stream_stats {
                                     double latency_ms,
                                     double control_packet_loss,
                                     uint64_t bytes_sent);
+
+  /** Publish whether a sole stream generation safely owns Doctor's global actuator. */
+  void set_doctor_live_action_scope_available(bool available);
+
+  /**
+   * @brief Host-received primary network observations covering one Doctor
+   *        verification interval.
+   *
+   * These values come from one mutex-protected observation record, rather
+   * than independently sampled atomics. complete is true only when fresh
+   * observations cover the beginning and end of the requested interval.
+   */
+  struct network_verification_window_t {
+    std::size_t sample_count = 0;
+    std::size_t media_sample_count = 0;
+    std::uint64_t last_revision = 0;
+    std::int64_t first_delay_ms = 0;
+    std::int64_t last_delay_ms = 0;
+    std::int64_t span_ms = 0;
+    std::int64_t last_age_ms = 0;
+    double latency_ms = 0.0;
+    double packet_loss = 0.0;
+    bool packet_loss_available = false;
+    double max_latency_ms = 0.0;
+    double max_packet_loss = 0.0;
+    bool any_packet_loss_available = false;
+    double control_channel_packet_loss = 0.0;
+    std::uint64_t control_channel_samples = 0;
+    bool network_risk = false;
+    bool any_network_risk = false;
+    bool complete = false;
+  };
+
+  network_verification_window_t get_network_verification_window(
+    std::uint64_t after_revision,
+    std::chrono::steady_clock::time_point applied_at,
+    std::chrono::steady_clock::duration required_duration
+  );
+
+#ifdef POLARIS_TESTS
+  /** Spread already-received post-change samples across a synthetic window. */
+  void spread_network_verification_window_for_tests(
+    std::uint64_t after_revision,
+    std::chrono::steady_clock::time_point applied_at,
+    std::chrono::steady_clock::time_point completed_at
+  );
+
+  /** Age the newest host-received observation without sleeping. */
+  void age_latest_network_observation_for_tests(
+    std::chrono::steady_clock::duration age
+  );
+#endif
 
   /**
    * @brief Convert a scaled loss ratio (e.g. ENet's peer packetLoss against
@@ -458,6 +528,21 @@ namespace stream_stats {
 
   /** @brief Publish the capture protocol's successful source-frame rate. */
   void update_capture_source_fps(double fps);
+
+  /**
+   * @brief Linearize one complete host video-policy sample before publication.
+   *
+   * The implementation advances Doctor action authority only when the sample
+   * changes whether encoder/pacing evidence suppresses a quality restore.
+   * Repeated samples in the same class remain human-clickable.
+   */
+  void note_doctor_video_policy_sample(double target_fps,
+                                       double delivered_fps,
+                                       double duplicate_frame_ratio,
+                                       double dropped_frame_ratio,
+                                       double avg_frame_age_ms,
+                                       double frame_jitter_ms,
+                                       double encode_time_ms);
 
   /** @brief Publish whether capture is timer-paced or compositor/source-driven. */
   void update_capture_pacing(const std::string &pacing);
@@ -642,7 +727,9 @@ namespace stream_stats {
    * @param device_uuid The connecting device's paired UUID (session_t::device_uuid).
    * @param session_generation The new session_t's own generation (session_t::session_generation).
    */
-  void start_session_timing(const std::string &device_uuid, std::uint64_t session_generation);
+  void start_session_timing(const std::string &device_uuid,
+                            std::uint64_t session_generation,
+                            std::string session_token = {});
 
   /**
    * @brief Stop and discard per-session T0-T2 timing state for one device -
@@ -695,6 +782,7 @@ namespace stream_stats {
   struct active_session_identity_t {
     std::string device_uuid;
     std::uint64_t session_generation = 0;
+    std::string session_token;
   };
 
   /**
@@ -719,6 +807,14 @@ namespace stream_stats {
    * @return The active session's identity, or std::nullopt.
    */
   std::optional<active_session_identity_t> get_single_active_session_identity();
+
+  /** Bind an executable Doctor envelope to one exact app and stream generation. */
+  void bind_doctor_action_scope(nlohmann::json &doctor,
+                                std::string_view app_session_id,
+                                std::uint64_t session_generation,
+                                std::uint64_t controller_revision,
+                                std::uint64_t network_evidence_revision,
+                                std::uint64_t video_evidence_revision);
 
   // ---------------------------------------------------------------------
   // P0-5 benchmark-run-capture engine (measurement-spec-v1.md 6.4-6.5).

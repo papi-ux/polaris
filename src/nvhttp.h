@@ -420,6 +420,11 @@ namespace nvhttp {
                                                       bool host_prefers_headless);
 #if defined(__linux__)
   std::string accepted_session_stream_mode_for_tests(const std::string &requested);
+  bool apply_stream_display_mode_selection_for_tests(
+    const std::string &selection,
+    bool persistence_succeeds,
+    std::string &error
+  );
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(
     const args_t &args,
     bool app_uses_steam,

@@ -44,7 +44,10 @@ describe('DashboardView hierarchy', () => {
   it('executes Doctor v2 actions on the web origin and verifies reversible fixes', () => {
     const dashboard = webSource('views/DashboardView.vue')
 
-    expect(dashboard).toContain("postDoctorAction(action.payload_preview || action.payload || {})")
+    expect(dashboard).toContain("const payload = { ...(action.payload_preview || action.payload || {}) }")
+    expect(dashboard).toContain("payload.action_id === 'lower_bitrate' || payload.action_id === 'restore_quality'")
+    expect(dashboard).toContain('payload.request_id = randomId')
+    expect(dashboard).toContain('postDoctorAction(payload)')
     expect(dashboard).toContain("fetch('./api/doctor/action'")
     expect(dashboard).toContain('verifyDoctorAction(result.verification)')
     expect(dashboard).toContain('undoDoctorAction')

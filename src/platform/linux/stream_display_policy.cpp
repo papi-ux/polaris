@@ -18,30 +18,87 @@ namespace stream_display_policy {
 
     using stream_path::to_lower_copy;
 
-    std::string configured_selection_id() {
+    void clear_connector_output_authority(bool retire_connectors) {
       auto &linux_display = config::video.linux_display;
-      if (!linux_display.stream_mode.empty()) {
-        if (stream_path::find(linux_display.stream_mode)) {
-          return to_lower_copy(linux_display.stream_mode);
+      linux_display.auto_manage_displays = false;
+      linux_display.headless_swap_mode.clear();
+      if (retire_connectors) {
+        if (!linux_display.streaming_output.empty() &&
+            config::video.output_name == linux_display.streaming_output) {
+          config::video.output_name.clear();
         }
+        linux_display.streaming_output.clear();
+        linux_display.primary_output.clear();
       }
-      return selection_from_legacy_booleans({
-        linux_display.headless_mode,
-        linux_display.use_cage_compositor,
-        linux_display.prefer_gpu_native_capture,
-      });
     }
 
     void normalize_host_virtual_display_state() {
-      auto &linux_display = config::video.linux_display;
-      linux_display.auto_manage_displays = false;
-      config::video.capture = capture_for_host_virtual_display_backend(
-        virtual_display::detect_backend(),
-        config::video.capture
+      normalize_host_virtual_display_state_for_backend(
+        virtual_display::detect_backend()
       );
     }
 
+    bool selection_available_for_capabilities(
+      std::string_view selection,
+      bool virtual_display_available
+    ) {
+      if (const auto *path = stream_path::find(selection)) {
+        if (!path->available) {
+          return false;
+        }
+        if (path->id == stream_path::k_gamescope_stream) {
+          return stream_path::probe_host_capabilities().gamescope_present;
+        }
+        if (path->id == stream_path::k_host_virtual_display) {
+          return virtual_display_available;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    std::string selection_unavailable_reason_for_capabilities(
+      std::string_view selection,
+      bool virtual_display_available
+    ) {
+      if (const auto *path = stream_path::find(selection)) {
+        if (path->id == stream_path::k_gamescope_stream &&
+            !stream_path::probe_host_capabilities().gamescope_present) {
+          return "gamescope binary not found on PATH";
+        }
+        if (path->id == stream_path::k_host_virtual_display &&
+            !virtual_display_available) {
+          return "Host virtual display is not available on this host.";
+        }
+        if (!path->unavailable_reason.empty()) {
+          return std::string {path->unavailable_reason};
+        }
+        return std::string {path->label} + " is not available on this host.";
+      }
+      return "Unknown stream display mode.";
+    }
+
   }  // namespace
+
+  std::string configured_selection() {
+    auto &linux_display = config::video.linux_display;
+    if (!linux_display.stream_mode.empty() && stream_path::find(linux_display.stream_mode)) {
+      return stream_path::to_lower_copy(linux_display.stream_mode);
+    }
+    return selection_from_legacy_booleans({
+      linux_display.headless_mode,
+      linux_display.use_cage_compositor,
+      linux_display.prefer_gpu_native_capture,
+    });
+  }
+
+  bool selection_owns_launch_refresh_rate(std::string_view selection) {
+    const auto key = stream_path::to_lower_copy(selection);
+    return key == k_headless_stream ||
+           key == k_windowed_stream ||
+           key == k_host_virtual_display ||
+           key == k_gamescope_stream;
+  }
 
   std::string label_for_selection(std::string_view selection) {
     if (const auto *path = stream_path::find(selection)) {
@@ -61,16 +118,11 @@ namespace stream_display_policy {
   }
 
   bool selection_available(std::string_view selection) {
-    if (const auto *path = stream_path::find(selection)) {
-      if (!path->available) {
-        return false;
-      }
-      if (path->id == stream_path::k_gamescope_stream) {
-        return stream_path::probe_host_capabilities().gamescope_present;
-      }
-      return true;
-    }
-    return false;
+    const auto key = to_lower_copy(selection);
+    return selection_available_for_capabilities(
+      key,
+      key != k_host_virtual_display || virtual_display::is_available()
+    );
   }
 
   bool selection_session_overridable(std::string_view selection) {
@@ -83,20 +135,19 @@ namespace stream_display_policy {
   }
 
   std::string selection_unavailable_reason(std::string_view selection) {
-    if (const auto *path = stream_path::find(selection)) {
-      // Probe-dependent reasons are not in the static registry entry; mirror
-      // selection_available so the rejection matches the served catalog.
-      if (path->id == stream_path::k_gamescope_stream &&
-          !stream_path::probe_host_capabilities().gamescope_present) {
-        return "gamescope binary not found on PATH";
+    const auto key = to_lower_copy(selection);
+    const bool virtual_display_available =
+      key != k_host_virtual_display || virtual_display::is_available();
+    if (key == k_host_virtual_display && !virtual_display_available) {
+      const auto backend_reason = virtual_display::unavailable_reason();
+      if (!backend_reason.empty()) {
+        return backend_reason;
       }
-      if (!path->unavailable_reason.empty()) {
-        return std::string {path->unavailable_reason};
-      }
-      // An unavailable path must still explain itself to a rejected client.
-      return std::string {path->label} + " is not available on this host.";
     }
-    return "Unknown stream display mode.";
+    return selection_unavailable_reason_for_capabilities(
+      key,
+      virtual_display_available
+    );
   }
 
   std::string selection_from_legacy_booleans(const legacy_booleans_t &booleans) {
@@ -159,15 +210,23 @@ namespace stream_display_policy {
     if (mirror_desktop) {
       return std::string {k_desktop_display};
     }
-    if (!requested_selection.empty()) {
-      return std::string {requested_selection};
-    }
-    if (launch_virtual_display) {
-      return std::string {k_host_virtual_display};
+    if (virtual_display_user_locked) {
+      if (!requested_selection.empty()) {
+        return std::string {requested_selection};
+      }
+      if (launch_virtual_display) {
+        return std::string {k_host_virtual_display};
+      }
     }
     if (!virtual_display_optimization_present &&
         app_virtual_display &&
         !virtual_display_user_locked) {
+      return std::string {k_host_virtual_display};
+    }
+    if (!requested_selection.empty()) {
+      return std::string {requested_selection};
+    }
+    if (launch_virtual_display) {
       return std::string {k_host_virtual_display};
     }
     return {};
@@ -196,8 +255,38 @@ namespace stream_display_policy {
     return std::string {current_capture};
   }
 
+  void normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e backend) {
+    auto &linux_display = config::video.linux_display;
+    clear_connector_output_authority(
+      host_virtual_backend_creates_output(backend)
+    );
+    // KScreen needs the streaming connector it manages, but never the dongle
+    // profile's separate primary-output authority. EVDI and wlroots create a
+    // new output, so their old connector and capture-output pins are retired.
+    linux_display.primary_output.clear();
+    config::video.capture = capture_for_host_virtual_display_backend(
+      backend,
+      config::video.capture
+    );
+  }
+
+  bool host_virtual_backend_creates_output(
+      virtual_display::backend_e backend) {
+    return backend == virtual_display::backend_e::EVDI ||
+           backend == virtual_display::backend_e::WAYLAND_WLR;
+  }
+
+  bool host_virtual_connector_state_matches(
+      virtual_display::backend_e backend,
+      std::string_view streaming_output,
+      std::string_view output_name) {
+    return !host_virtual_backend_creates_output(backend) ||
+           (streaming_output.empty() && output_name.empty());
+  }
+
   resolved_t resolve(const input_t &input) {
-    const auto selection = configured_selection_id();
+    const auto selection = configured_selection();
     const auto *path = stream_path::find(selection);
     stream_path::descriptor_t desc {};
     if (path) {
@@ -275,17 +364,42 @@ namespace stream_display_policy {
     return configured;
   }
 
-  bool selection_valid(std::string_view selection, std::string &error) {
+  bool selection_valid_for_capabilities(
+    std::string_view selection,
+    bool virtual_display_available,
+    std::string &error
+  ) {
     const auto key = to_lower_copy(selection);
     if (!stream_path::find(key) && key != k_desktop_display) {
       error = "stream_display_mode must be a known stream path id (see /client-settings modes)";
       return false;
     }
-    if (!selection_available(key)) {
-      error = selection_unavailable_reason(key);
+    if (!selection_available_for_capabilities(key, virtual_display_available)) {
+      error = selection_unavailable_reason_for_capabilities(
+        key,
+        virtual_display_available
+      );
       return false;
     }
     return true;
+  }
+
+  bool selection_valid(std::string_view selection, std::string &error) {
+    const auto key = to_lower_copy(selection);
+    return selection_valid_for_capabilities(
+      key,
+      key != k_host_virtual_display || virtual_display::is_available(),
+      error
+    );
+  }
+
+  bool selection_valid_fresh(std::string_view selection, std::string &error) {
+    const auto key = to_lower_copy(selection);
+    return selection_valid_for_capabilities(
+      key,
+      key != k_host_virtual_display || virtual_display::is_available_fresh(),
+      error
+    );
   }
 
   bool selection_companion_state_matches(std::string_view selection) {
@@ -311,15 +425,23 @@ namespace stream_display_policy {
         return false;
       }
 
-      if (key == k_host_virtual_display && linux_display.auto_manage_displays) {
+      if (key != stream_path::k_headless_dongle &&
+          linux_display.auto_manage_displays) {
         return false;
       }
-      if (key == k_host_virtual_display &&
-          config::video.capture != capture_for_host_virtual_display_backend(
-                                     virtual_display::detect_backend(),
-                                     config::video.capture
-                                   )) {
-        return false;
+      if (key == k_host_virtual_display) {
+        const auto backend = virtual_display::detect_backend();
+        if (config::video.capture != capture_for_host_virtual_display_backend(
+                                       backend,
+                                       config::video.capture
+                                     ) ||
+            !host_virtual_connector_state_matches(
+              backend,
+              linux_display.streaming_output,
+              config::video.output_name
+            )) {
+          return false;
+        }
       }
       if (key == stream_path::k_gamescope_stream && config::video.capture.empty()) {
         return false;
@@ -341,12 +463,25 @@ namespace stream_display_policy {
   }
 
   bool apply_selection(std::string_view selection, std::string &error) {
-    if (!selection_valid(selection, error)) {
+    if (!selection_valid_fresh(selection, error)) {
       return false;
     }
     const auto key = to_lower_copy(selection);
 
     auto &linux_display = config::video.linux_display;
+
+    // Connector/capture-target ownership belongs only to canonical dongle mode
+    // and the KScreen Host Virtual fallback. Clear it for Desktop, Gamescope,
+    // and compositor-private modes so a prior dongle cannot pin capture or SDL
+    // fullscreen hints after its topology actuator has been disabled.
+    if (key != stream_path::k_headless_dongle && key != k_host_virtual_display) {
+      const bool retiring_connector_state =
+        linux_display.stream_mode == stream_path::k_headless_dongle ||
+        linux_display.stream_mode == k_host_virtual_display ||
+        linux_display.auto_manage_displays ||
+        !linux_display.headless_swap_mode.empty();
+      clear_connector_output_authority(retiring_connector_state);
+    }
 
     if (key == k_host_virtual_display) {
       normalize_host_virtual_display_state();
@@ -426,6 +561,13 @@ namespace stream_display_policy {
         if (path->id == k_host_virtual_display) {
           normalize_host_virtual_display_state();
         }
+        if (path->id != stream_path::k_headless_dongle &&
+            path->id != k_host_virtual_display) {
+          const bool retiring_connector_state =
+            linux_display.auto_manage_displays ||
+            !linux_display.headless_swap_mode.empty();
+          clear_connector_output_authority(retiring_connector_state);
+        }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.
         if (path->id == stream_path::k_headless_dongle) {
@@ -466,8 +608,14 @@ namespace stream_display_policy {
       option.value = std::string {path.id};
       option.label = std::string {path.label};
       option.reason = reason_for_selection(path.id, virtual_display_available);
-      option.available = path.available;
+      option.available = path.available &&
+        (path.id != stream_path::k_host_virtual_display || virtual_display_available);
       option.unavailable_reason = std::string {path.unavailable_reason};
+      if (!option.available &&
+          path.id == stream_path::k_host_virtual_display &&
+          option.unavailable_reason.empty()) {
+        option.unavailable_reason = "Host virtual display is not available on this host.";
+      }
       option.group = std::string {path.group};
       option.runtime = std::string {stream_path::runtime_kind_id(path.runtime)};
       option.capture = std::string {stream_path::capture_kind_id(path.capture)};

@@ -264,6 +264,14 @@ namespace display_topology {
     if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
       return false;
     }
+    // A first-class selection owns the actuator only in headless_dongle.
+    // Preserve the legacy empty-mode behavior for older configurations, but
+    // never let stale dongle flags make Desktop or a private mode rearrange
+    // host outputs.
+    if (!cfg.stream_mode.empty() &&
+        cfg.stream_mode != stream_display_policy::k_headless_dongle) {
+      return false;
+    }
     // Private labwc must never dim/rearrange the host desktop.
     if (cfg.use_cage_compositor) {
       return false;

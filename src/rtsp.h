@@ -6,6 +6,8 @@
 
 // standard includes
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <list>
@@ -52,6 +54,18 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    // Explicit deterministic launch preset. This is never populated from
+    // Doctor history or AI output.
+    std::string profile_preference = "auto";
+    // Nova may submit the already-resolved deterministic profile on the
+    // authenticated /launch request. These values are then explicit launch
+    // locks, avoiding dependence on a prior paired-settings persistence call.
+    bool resolved_profile_from_client = false;
+    std::optional<int> explicit_target_bitrate_kbps;
+    // Hard capabilities captured after authenticated topology/client-profile
+    // selection and re-applied by the final deterministic resolver.
+    std::optional<int> host_max_fps;
+    std::optional<bool> host_hdr_capable;
     std::string session_token;
     crypto::PERM perm;
     bool watch_only;
@@ -125,8 +139,12 @@ namespace rtsp_stream {
     // Empty = host default. Validated in make_launch_session; applied to the
     // in-memory config by proc_t::execute and restored at teardown.
     std::string stream_mode;
-    bool user_locked_display_mode;
-    bool user_locked_virtual_display;
+    // Assertion copied from deterministic /optimize topology_resolution.resolved.
+    // It never selects topology; final process resolution must equal it or the
+    // exact launch/resume fails closed.
+    std::string expected_stream_mode;
+    bool user_locked_display_mode = false;
+    bool user_locked_virtual_display = false;
     uint32_t scale_factor;
     std::optional<int> paired_target_bitrate_kbps;
     std::optional<int> target_bitrate_kbps;
@@ -174,6 +192,11 @@ namespace rtsp_stream {
   session_snapshot_t session_snapshot(const std::string_view& uuid);
 
 #ifdef POLARIS_TESTS
+  std::int64_t bound_session_bitrate_for_tests(
+    std::int64_t requested_bitrate_kbps,
+    std::size_t warp_factor,
+    int session_bitrate_ceiling_kbps
+  );
   session_role_e merge_session_role_for_tests(session_role_e current, bool watch_only);
   void accumulate_session_snapshot_for_tests(
     session_snapshot_t &snapshot,

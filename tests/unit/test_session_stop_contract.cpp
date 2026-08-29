@@ -70,6 +70,13 @@ namespace {
   }
 }
 
+TEST(SessionBitrateContract, HardCeilingAppliesAfterWarpExpansion) {
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(40000, 1, 40000), 40000);
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(40000, 2, 40000), 40000);
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(40000, 4, 40000), 40000);
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(10000, 4, 50000), 40000);
+}
+
 TEST(ProcessRefreshContractTests, ParsedConfigurationPreservesLifecycleIdentityAndGeneration) {
   auto current_env = boost::this_process::environment();
   proc::proc_t subject {std::move(current_env), {}};
@@ -802,6 +809,17 @@ TEST(SessionStopContractTests, SpawnRollbackRejectsPidfdForDifferentLeader) {
     signal(SIGTERM, SIG_IGN);
     for (;;) pause();
   }
+  const auto became_private_group_leader = [](pid_t pid) {
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      if (getpgid(pid) == pid && getsid(pid) == pid) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+  };
+  ASSERT_TRUE(became_private_group_leader(first));
+  ASSERT_TRUE(became_private_group_leader(second));
   const int second_pidfd = static_cast<int>(syscall(SYS_pidfd_open, second, 0));
   ASSERT_GE(second_pidfd, 0);
   EXPECT_FALSE(stream_runtime::rollback_gamescope_spawn_for_tests(first, second_pidfd));
@@ -1061,6 +1079,13 @@ TEST(SessionStopContractTests, ExactTokenIsRequiredForRtspOnlyPendingSession) {
   EXPECT_TRUE(matched.stopped);
   EXPECT_TRUE(pending->is_cancelled());
   rtsp_stream::terminate_sessions();
+}
+
+TEST(SessionStopContractTests, FreshProcessReportsNoRunningApp) {
+  auto env = boost::this_process::environment();
+  proc::proc_t subject {std::move(env), {}};
+
+  EXPECT_EQ(subject.running(), 0);
 }
 
 TEST(SessionStopContractTests, MismatchedTokenIsRejectedForRunningApp) {

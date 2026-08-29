@@ -98,6 +98,9 @@
 #endif
 
 #include "device_db.h"
+#include "launch_profile.h"
+#include "doctor_trial.h"
+#include "doctor_v2.h"
 #include "ai_optimizer.h"
 #include "browser_stream.h"
 #include "stream_stats.h"
@@ -440,12 +443,20 @@ namespace proc {
       host_pause_session_classification_t classification;
       const bool meaningful_fps_shortfall =
         stream_stats::is_meaningful_fps_shortfall(target_fps, stats.fps);
+      const bool source_cadence_available =
+        stats.capture_source_fps > 0.0 && target_fps > 0.0;
+      const bool source_cadence_confirms_motion =
+        source_cadence_available && stats.capture_source_fps >= target_fps * 0.85;
+      const bool static_or_duplicate_content =
+        stats.duplicate_frame_ratio >= 0.50 ||
+        (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
+         stats.duplicate_frame_ratio >= 0.10);
       classification.network_risk = stats.network_risk;
       classification.pacing_risk =
-        stats.frame_jitter_ms >= 2.2 ||
-        stats.duplicate_frame_ratio >= 0.10 ||
         stats.dropped_frame_ratio >= 0.04 ||
-        meaningful_fps_shortfall;
+        (!static_or_duplicate_content &&
+         (stats.frame_jitter_ms >= 2.2 ||
+          (meaningful_fps_shortfall && source_cadence_confirms_motion)));
       classification.capture_fallback = stream_stats::capture_path_uses_cpu_copy(stats);
       classification.capture_path = stream_stats::capture_path_summary(stats);
       classification.encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
@@ -460,9 +471,6 @@ namespace proc {
                                             (classification.pacing_risk ||
                                              classification.capture_fallback ||
                                              classification.hdr_risk);
-      // Reused frames can be intentional for static or menu content. Keep
-      // duplicate cadence as a pacing signal, but require an actual target
-      // miss or dropped frames before attributing the cause to host rendering.
       classification.host_render_limited =
         classification.pacing_risk &&
         !classification.network_risk &&
@@ -3717,34 +3725,7 @@ namespace proc {
     struct optimization_locks_t {
       bool display_mode = false;
       bool color_range = false;
-      bool hdr = false;
-      bool virtual_display = false;
-      bool bitrate = false;
-      bool nvenc_tune = false;
-      bool preferred_codec = false;
     };
-
-    bool parse_display_mode_string(const std::string &value, parsed_display_mode_t &parsed) {
-      if (value.empty()) {
-        return false;
-      }
-
-      int width = 0;
-      int height = 0;
-      float fps = 60.0f;
-      if (sscanf(value.c_str(), "%dx%dx%f", &width, &height, &fps) < 2) {
-        return false;
-      }
-
-      if (width <= 0 || height <= 0 || fps <= 0.0f) {
-        return false;
-      }
-
-      parsed.width = width;
-      parsed.height = height;
-      parsed.fps = fps < 1000.0f ? static_cast<int>(std::round(fps * 1000.0f)) : static_cast<int>(std::round(fps));
-      return parsed.fps > 0;
-    }
 
     std::string format_session_fps(int fps) {
       if (fps <= 0) {
@@ -3766,8 +3747,7 @@ namespace proc {
     }
 
     parsed_display_mode_t clamp_optimized_display_mode_to_client_request(const parsed_display_mode_t &candidate,
-                                                                         const parsed_display_mode_t &requested,
-                                                                         std::string_view source) {
+                                                                         const parsed_display_mode_t &requested) {
       auto clamped = candidate;
 
       if (requested.fps > 0 && clamped.fps > requested.fps) {
@@ -3782,9 +3762,7 @@ namespace proc {
 
       constexpr int balanced_floor_width = 1920;
       constexpr int balanced_floor_height = 1080;
-      const bool recovery_profile = source.find("history_safe") != std::string_view::npos;
-      if (!recovery_profile &&
-          requested.width >= balanced_floor_width &&
+      if (requested.width >= balanced_floor_width &&
           requested.height >= balanced_floor_height &&
           clamped.height < balanced_floor_height) {
         clamped.width = balanced_floor_width;
@@ -3821,12 +3799,6 @@ namespace proc {
       resolved.normalization_reason += reason;
     }
 
-    bool launch_bitrate_is_locked(int configured_max_bitrate,
-                                   bool has_paired_target_bitrate,
-                                   bool ai_auto_quality_enabled) {
-      return configured_max_bitrate > 0 || has_paired_target_bitrate || !ai_auto_quality_enabled;
-    }
-
 #ifdef __linux__
     bool should_reprobe_deferred_cage_encoder(
       bool use_cage_compositor,
@@ -3837,78 +3809,6 @@ namespace proc {
              (no_active_sessions_at_launch || !encoder_selected);
     }
 #endif
-
-    void apply_optimization_layer(resolved_session_optimization_t &resolved,
-                                  const optimization_locks_t &locks,
-                                  const device_db::optimization_t &optimization,
-                                  const std::string &layer) {
-      bool touched = false;
-
-      if (optimization.display_mode && !locks.display_mode) {
-        parsed_display_mode_t parsed;
-        if (parse_display_mode_string(*optimization.display_mode, parsed)) {
-          resolved.display_mode = parsed;
-          resolved.display_mode_source = layer;
-          touched = true;
-        } else {
-          BOOST_LOG(warning) << "session_optimization: Ignoring invalid display mode ["sv
-                             << *optimization.display_mode << "] from "sv << layer;
-        }
-      }
-
-      if (optimization.color_range && !locks.color_range) {
-        resolved.color_range = *optimization.color_range;
-        resolved.color_range_source = layer;
-        touched = true;
-      }
-
-      if (optimization.hdr.has_value() && !locks.hdr) {
-        resolved.hdr = *optimization.hdr;
-        resolved.hdr_source = layer;
-        touched = true;
-      }
-
-      if (optimization.virtual_display.has_value() && !locks.virtual_display) {
-        resolved.virtual_display = *optimization.virtual_display;
-        resolved.virtual_display_source = layer;
-        touched = true;
-      }
-
-      if (optimization.target_bitrate_kbps && !locks.bitrate) {
-        resolved.target_bitrate_kbps = *optimization.target_bitrate_kbps;
-        resolved.bitrate_source = layer;
-        touched = true;
-      }
-
-      if (optimization.nvenc_tune && !locks.nvenc_tune) {
-        resolved.nvenc_tune = *optimization.nvenc_tune;
-        resolved.nvenc_tune_source = layer;
-        touched = true;
-      }
-
-      if (optimization.preferred_codec && !locks.preferred_codec) {
-        resolved.preferred_codec = *optimization.preferred_codec;
-        resolved.preferred_codec_source = layer;
-        touched = true;
-      }
-
-      if (touched) {
-        note_layer(resolved, layer);
-        note_reasoning(resolved, optimization.reasoning);
-        if (!optimization.confidence.empty()) {
-          resolved.confidence = optimization.confidence;
-        }
-        if (!optimization.cache_status.empty()) {
-          resolved.cache_status = optimization.cache_status;
-        }
-        if (!optimization.normalization_reason.empty()) {
-          resolved.normalization_reason = optimization.normalization_reason;
-        }
-        if (optimization.recommendation_version > 0) {
-          resolved.recommendation_version = optimization.recommendation_version;
-        }
-      }
-    }
 
     std::string join_layers(const std::vector<std::string> &layers) {
       std::ostringstream stream;
@@ -4037,22 +3937,6 @@ namespace proc {
       }
 
       return {};
-    }
-
-    bool session_pacing_is_enabled(const proc::ctx_t &app,
-                                   const rtsp_stream::launch_session_t &launch_session,
-                                   const std::string &game_category) {
-      if (launch_session.input_only) {
-        return false;
-      }
-      if (game_category == "desktop") {
-        return false;
-      }
-      if (app.cmd.empty() && app.detached.empty()) {
-        return false;
-      }
-      const int target_fps = launch_session.fps >= 1000 ? static_cast<int>(std::round(static_cast<double>(launch_session.fps) / 1000.0)) : launch_session.fps;
-      return target_fps > 0;
     }
 
     bool env_flag_enabled(const proc::ctx_t &app, const boost::process::v1::environment &env, const std::string &key) {
@@ -4964,30 +4848,6 @@ namespace proc {
     };
   }
 
-  std::optional<int> resolve_device_db_launch_bitrate_for_tests(
-      int configured_max_bitrate,
-      const std::optional<int> &paired_target_bitrate_kbps,
-      bool ai_auto_quality_enabled,
-      const std::string &device_name,
-      const std::string &app_name) {
-    optimization_locks_t locks;
-    locks.bitrate = launch_bitrate_is_locked(
-      configured_max_bitrate,
-      paired_target_bitrate_kbps.has_value(),
-      ai_auto_quality_enabled
-    );
-
-    resolved_session_optimization_t resolved;
-    if (paired_target_bitrate_kbps.has_value()) {
-      resolved.target_bitrate_kbps = *paired_target_bitrate_kbps;
-      resolved.bitrate_source = "paired_client";
-      note_layer(resolved, "paired_client");
-    }
-
-    const auto device_optimization = device_db::get_optimization(device_name, app_name);
-    apply_optimization_layer(resolved, locks, device_optimization, "device_db");
-    return resolved.target_bitrate_kbps;
-  }
 #endif
 
 #if defined(__linux__)
@@ -6564,6 +6424,101 @@ namespace proc {
 #endif
   }
 
+#ifdef __linux__
+  bool resolved_reconnect_cadence_allowed(
+      bool launch_owns_refresh_rate,
+      int requested_fps,
+      int active_fps,
+      bool exact_private_refresh_reapply_will_run) {
+    return !launch_owns_refresh_rate ||
+           requested_fps == active_fps ||
+           exact_private_refresh_reapply_will_run;
+  }
+#endif
+
+  namespace {
+    int validate_resolved_launch_profile_for_app(
+        const ctx_t &app,
+        const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+        const std::optional<client_profiles::client_profile_t> &client_profile) {
+      if (!launch_session) return 400;
+      const std::string selected_output_name =
+        client_profile && !client_profile->output_name.empty() ?
+          client_profile->output_name : config::video.output_name;
+      bool launch_owns_refresh_rate = false;
+#ifdef __linux__
+      auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
+        launch_session->stream_mode,
+        launch_session->mirror_desktop || app.desktop_mirror,
+        launch_session->virtual_display,
+        app.virtual_display,
+        launch_session->user_locked_virtual_display,
+        false
+      );
+      if (effective_selection.empty()) {
+        effective_selection = stream_display_policy::configured_selection();
+      }
+      launch_owns_refresh_rate =
+        stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
+#else
+      bool virtual_display_supported = false;
+      bool host_requires_virtual_display = false;
+#if defined(_WIN32)
+      virtual_display_supported =
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::UNKNOWN;
+      host_requires_virtual_display =
+        config::video.linux_display.headless_mode ||
+        !video::allow_encoder_probing();
+#endif
+      const std::string requested_topology = launch_session->virtual_display ?
+        "host_virtual_display" :
+        launch_session->user_locked_virtual_display ? "desktop_display" : "";
+      const auto topology = launch_profile::resolve_non_linux_topology(
+        requested_topology,
+        launch_session->user_locked_virtual_display,
+        false,
+        !launch_session->user_locked_virtual_display && app.virtual_display,
+        virtual_display_supported,
+        host_requires_virtual_display
+      );
+      launch_owns_refresh_rate = topology.launch_owns_refresh_rate;
+#endif
+      launch_session->host_max_fps.reset();
+      if (launch_owns_refresh_rate) {
+        launch_session->host_max_fps = 120000;
+      } else if (const auto refresh_rate =
+                   display_device::active_refresh_rate_hz_hint(selected_output_name)) {
+        launch_session->host_max_fps = *refresh_rate * 1000;
+      }
+
+      const auto current_codec_support = video::advertised_codec_capability_state();
+      launch_session->host_hdr_capable =
+        current_codec_support.hevc_mode >= 3 || current_codec_support.av1_mode >= 3;
+
+      if (!launch_session->resolved_profile_from_client) return 0;
+      if (launch_session->host_max_fps &&
+          launch_session->requested_fps > *launch_session->host_max_fps) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved profile above final output refresh cap: "sv
+                           << launch_session->requested_fps << " > " << *launch_session->host_max_fps;
+        return 409;
+      }
+      if (config::video.max_bitrate > 0 &&
+          launch_session->explicit_target_bitrate_kbps &&
+          *launch_session->explicit_target_bitrate_kbps > config::video.max_bitrate) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved profile above configured bitrate cap: "sv
+                           << *launch_session->explicit_target_bitrate_kbps
+                           << " > " << config::video.max_bitrate;
+        return 409;
+      }
+      if (launch_session->enable_hdr && launch_session->host_hdr_capable == false) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved HDR profile because the final encoder lacks HDR support"sv;
+        return 409;
+      }
+      return 0;
+    }
+  }
+
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     _session_lifecycle_gate->begin_launch();
     auto release_launch = util::fail_guard([this]() {
@@ -6583,6 +6538,81 @@ namespace proc {
       return rtsp_stream::launch_session_raise(std::move(launch_session)) ? 0 : 409;
     }
     return err;
+  }
+
+  int proc_t::validate_resolved_profile_for_running_app(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+      bool exact_private_refresh_reapply_will_run) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return 503;
+    if (launch_session->watch_only) {
+      // A viewer attaches to the already-running capture generation. Pin its
+      // topology semantics to the owner before validating capabilities so a
+      // default viewer request cannot either replace or falsely conflict with
+      // an explicit mirror/private owner launch.
+      launch_session->stream_mode = _launch_session->stream_mode;
+      launch_session->mirror_desktop = _launch_session->mirror_desktop;
+      launch_session->virtual_display = _launch_session->virtual_display;
+      launch_session->user_locked_virtual_display =
+        _launch_session->user_locked_virtual_display;
+      launch_session->force_private_after_desktop_steam_shutdown =
+        _launch_session->force_private_after_desktop_steam_shutdown;
+    }
+    if (launch_session->resolved_profile_from_client) {
+#ifdef __linux__
+      const auto effective_topology = [this](
+          const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
+        auto selection = stream_display_policy::effective_session_selection_for_launch(
+          session->stream_mode,
+          session->mirror_desktop || _app.desktop_mirror,
+          session->virtual_display,
+          _app.virtual_display,
+          session->user_locked_virtual_display,
+          false
+        );
+        return selection.empty() ? stream_display_policy::configured_selection() : selection;
+      };
+      const auto requested_topology = effective_topology(launch_session);
+      const auto active_topology = _launch_session->expected_stream_mode.empty() ?
+        effective_topology(_launch_session) : _launch_session->expected_stream_mode;
+      if (launch_session->expected_stream_mode.empty() ||
+          requested_topology != launch_session->expected_stream_mode ||
+          active_topology != launch_session->expected_stream_mode) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile whose expected topology does not match the active app generation"sv;
+        return 409;
+      }
+      const bool active_labwc_refresh_reapply_will_run =
+        exact_private_refresh_reapply_will_run &&
+        _session_used_cage_compositor &&
+        !_session_used_gamescope_runtime &&
+        (active_topology == stream_display_policy::k_headless_stream ||
+         active_topology == stream_display_policy::k_windowed_stream);
+      if (!launch_session->watch_only &&
+          !resolved_reconnect_cadence_allowed(
+            stream_display_policy::selection_owns_launch_refresh_rate(active_topology),
+            launch_session->requested_fps,
+            _launch_session->fps,
+            active_labwc_refresh_reapply_will_run
+          )) {
+        BOOST_LOG(warning) << "process: rejecting exact reconnect cadence change because the active launch-owned output cannot apply and verify it"sv;
+        return 409;
+      }
+#else
+      if (launch_session->virtual_display != _launch_session->virtual_display) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile for a display topology other than the active app generation"sv;
+        return 409;
+      }
+#endif
+      if (launch_session->mirror_desktop != _launch_session->mirror_desktop ||
+          launch_session->force_private_after_desktop_steam_shutdown !=
+            _launch_session->force_private_after_desktop_steam_shutdown) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile for launch semantics other than the active app generation"sv;
+        return 409;
+      }
+    }
+    const auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
+    return validate_resolved_launch_profile_for_app(_app, launch_session, client_profile);
   }
 
   bool proc_t::raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
@@ -6606,6 +6636,10 @@ namespace proc {
 
   void proc_t::finish_session_launch() {
     _session_lifecycle_gate->finish_launch();
+  }
+
+  std::unique_lock<std::recursive_mutex> proc_t::acquire_session_lifecycle_lock() const {
+    return std::unique_lock<std::recursive_mutex> {session_lifecycle_sync().mutex};
   }
 
 #ifdef __linux__
@@ -6747,6 +6781,141 @@ namespace proc {
     }
 #endif
 
+    // Resolve hard output capabilities only after the previous generation has
+    // been torn down, but before installing any state for the new generation.
+    // /resume calls this same helper immediately before admitting its RTSP
+    // session, so neither launch verb can bypass exact-envelope validation.
+    const auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
+    if (const auto validation_error =
+          validate_resolved_launch_profile_for_app(app, launch_session, client_profile)) {
+      return validation_error;
+    }
+
+#ifdef __linux__
+    if (app.desktop_mirror) {
+      if (!launch_session->mirror_desktop || launch_session->virtual_display) {
+        BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
+                        << app.name << "]; ignoring virtual-display preference for this session"sv;
+      }
+      apply_app_display_semantics(app, *launch_session);
+    }
+
+    // Resolve and apply the exact topology before installing a new process
+    // generation. Availability is allowed to change after /optimize and HTTP
+    // parsing, so this is the final fail-closed gate immediately before launch.
+    const bool virtual_display_requested_before_mode =
+      launch_session->virtual_display ||
+      (app.virtual_display && !launch_session->user_locked_virtual_display);
+    auto session_mode = stream_display_policy::effective_session_selection_for_launch(
+      launch_session->stream_mode,
+      launch_session->mirror_desktop || app.desktop_mirror,
+      launch_session->virtual_display,
+      app.virtual_display,
+      launch_session->user_locked_virtual_display,
+      false
+    );
+    if (session_mode.empty()) {
+      session_mode = stream_display_policy::configured_selection();
+    }
+    if (!session_mode.empty()) {
+      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
+    }
+    if (launch_session->resolved_profile_from_client &&
+        (launch_session->expected_stream_mode.empty() ||
+         launch_session->expected_stream_mode != session_mode)) {
+      BOOST_LOG(warning) << "process: rejecting exact resolved profile because expected topology ["sv
+                         << launch_session->expected_stream_mode
+                         << "] no longer matches final topology ["sv << session_mode << ']';
+      return 409;
+    }
+
+    // Snapshot the host policy before a session-scoped override. On a rejected
+    // legacy request, restore this snapshot and retain the documented host-
+    // default fallback. Exact resolved profiles never receive that fallback.
+    {
+      auto &linux_display = config::video.linux_display;
+      this->initial_stream_mode = linux_display.stream_mode;
+      this->initial_private_runtime = linux_display.private_runtime;
+      this->initial_headless_swap_mode = linux_display.headless_swap_mode;
+      this->initial_streaming_output = linux_display.streaming_output;
+      this->initial_primary_output = linux_display.primary_output;
+      this->initial_capture = config::video.capture;
+      this->initial_headless_mode = linux_display.headless_mode;
+      this->initial_use_cage_compositor = linux_display.use_cage_compositor;
+      this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
+      this->initial_auto_manage_displays = linux_display.auto_manage_displays;
+    }
+    this->initial_display = config::video.output_name;
+    this->initial_color_range = config::video.color_range;
+    this->initial_nvenc_tune = config::video.nvenc_tune;
+    this->initial_video_config_saved = true;
+    this->initial_linux_display_saved = false;
+
+    const auto restore_prelaunch_display_policy = [this]() {
+      auto &linux_display = config::video.linux_display;
+      linux_display.stream_mode = initial_stream_mode;
+      linux_display.private_runtime = initial_private_runtime;
+      linux_display.headless_swap_mode = initial_headless_swap_mode;
+      linux_display.streaming_output = initial_streaming_output;
+      linux_display.primary_output = initial_primary_output;
+      linux_display.headless_mode = initial_headless_mode;
+      linux_display.use_cage_compositor = initial_use_cage_compositor;
+      linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
+      linux_display.auto_manage_displays = initial_auto_manage_displays;
+      config::video.capture = initial_capture;
+      config::video.output_name = initial_display;
+      config::video.color_range = initial_color_range;
+      config::video.nvenc_tune = initial_nvenc_tune;
+    };
+
+    bool session_mode_applied = false;
+    if (!session_mode.empty()) {
+      std::string mode_error;
+      bool session_mode_failed =
+        !stream_display_policy::selection_valid_fresh(session_mode, mode_error);
+      if (!session_mode_failed &&
+          !stream_display_policy::selection_companion_state_matches(session_mode)) {
+        if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+          this->initial_linux_display_saved = true;
+          session_mode_applied = true;
+          BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
+                          << "] applied in-memory after optimization; host default restored at teardown"sv;
+        } else {
+          session_mode_failed = true;
+        }
+      }
+      if (session_mode_failed) {
+        restore_prelaunch_display_policy();
+        platf::reevaluate_capture_sources();
+        if (launch_session->resolved_profile_from_client) {
+          this->initial_video_config_saved = false;
+          BOOST_LOG(warning) << "process: rejecting exact resolved session stream mode ["sv
+                             << session_mode << "]: "sv << mode_error;
+          return 409;
+        }
+        launch_session->stream_mode.clear();
+        const auto rejected_session_mode = session_mode;
+        const auto fallback_mode = stream_display_policy::configured_selection();
+        session_mode = fallback_mode;
+        launch_session->virtual_display =
+          fallback_mode == stream_display_policy::k_host_virtual_display;
+        BOOST_LOG(warning) << "process: session stream mode override ["sv << rejected_session_mode
+                           << "] rejected: "sv << mode_error << "; using the host default"sv;
+      }
+    }
+#else
+    this->initial_display = config::video.output_name;
+    this->initial_color_range = config::video.color_range;
+    this->initial_nvenc_tune = config::video.nvenc_tune;
+    this->initial_video_config_saved = true;
+#endif
+
+#ifdef __linux__
+    // Store the canonical generation identity even for a legacy launch so a
+    // later exact resume compares against what this generation actually owns,
+    // never against a newly changed host default.
+    launch_session->expected_stream_mode = session_mode;
+#endif
     ++_session_generation;
     capture_generation.generation_id = _session_generation;
 #ifdef __linux__
@@ -6766,30 +6935,11 @@ namespace proc {
       _launch_session->session_token = generate_session_token();
     }
     allow_client_commands = app.allow_client_commands;
-
 #ifdef __linux__
-    // Snapshot the host display policy before any session-scoped override.
-    // Final mode derivation is intentionally deferred until device/AI
-    // optimization has settled launch_session->virtual_display.
-    {
-      auto &linux_display = config::video.linux_display;
-      this->initial_stream_mode = linux_display.stream_mode;
-      this->initial_private_runtime = linux_display.private_runtime;
-      this->initial_headless_swap_mode = linux_display.headless_swap_mode;
-      this->initial_capture = config::video.capture;
-      this->initial_headless_mode = linux_display.headless_mode;
-      this->initial_use_cage_compositor = linux_display.use_cage_compositor;
-      this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
-      this->initial_auto_manage_displays = linux_display.auto_manage_displays;
+    if (session_mode_applied) {
+      platf::reevaluate_capture_sources();
     }
 #endif
-
-    this->initial_display = config::video.output_name;
-    this->initial_color_range = config::video.color_range;
-    this->initial_nvenc_tune = config::video.nvenc_tune;
-    this->initial_max_bitrate = config::video.max_bitrate;
-    this->initial_adaptive_max_bitrate = config::video.adaptive_bitrate.max_bitrate_kbps;
-    this->initial_video_config_saved = true;
 
     launch_session->width = launch_session->requested_width;
     launch_session->height = launch_session->requested_height;
@@ -6827,23 +6977,19 @@ namespace proc {
       BOOST_LOG(info) << "game_classifier: "sv << _app.name << " classified as "sv << game_category;
     }
 
-    // Resolve session overrides in a strict order:
-    // explicit user/client locks -> client profile -> device DB -> AI.
+    // Resolve session overrides in a strict, evidence-independent order:
+    // app/display semantics -> explicit launch locks -> paired/client settings
+    // -> selected deterministic preset -> capability validation. Doctor
+    // history and AI output are deliberately absent from this path.
+    const auto launch_preset = launch_profile::normalize_preset(launch_session->profile_preference);
     optimization_locks_t optimization_locks;
-    optimization_locks.display_mode = launch_session->user_locked_display_mode || !launch_session->enable_sops;
-    optimization_locks.virtual_display = launch_session->user_locked_virtual_display;
-    const bool auto_quality_enabled = ai_optimizer::is_enabled();
-    optimization_locks.bitrate = launch_bitrate_is_locked(
-      config::video.max_bitrate,
-      launch_session->paired_target_bitrate_kbps.has_value(),
-      auto_quality_enabled
-    );
-    if (!auto_quality_enabled && config::video.max_bitrate <= 0 &&
-        !launch_session->paired_target_bitrate_kbps.has_value()) {
-      BOOST_LOG(debug) << "session_optimization: AI Auto Quality disabled with max_bitrate=0; leaving bitrate to the client request"sv;
-    }
+    optimization_locks.display_mode =
+      launch_session->user_locked_display_mode || !launch_session->enable_sops || launch_preset != "stability";
+    // Topology is never a launch-preset field. Only explicit app/client display
+    // semantics below may select it.
 
     resolved_session_optimization_t resolved_optimization;
+    std::optional<bool> client_profile_hdr;
     if (launch_session->paired_target_bitrate_kbps.has_value()) {
       resolved_optimization.target_bitrate_kbps = *launch_session->paired_target_bitrate_kbps;
       resolved_optimization.bitrate_source = "paired_client";
@@ -6852,7 +6998,6 @@ namespace proc {
                       << *launch_session->paired_target_bitrate_kbps << " kbps";
     }
 
-    auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
     if (client_profile) {
       BOOST_LOG(info) << "Applying client profile for \""sv << launch_session->device_name << '"';
 
@@ -6871,109 +7016,64 @@ namespace proc {
       }
 
       if (client_profile->hdr.has_value()) {
-        optimization_locks.hdr = true;
-        resolved_optimization.hdr = client_profile->hdr;
-        resolved_optimization.hdr_source = "client_profile";
-        note_layer(resolved_optimization, "client_profile");
-        BOOST_LOG(info) << "Client profile: overriding HDR to "sv << (client_profile->hdr.value() ? "enabled"sv : "disabled"sv);
-        launch_session->enable_hdr = client_profile->hdr.value();
+        client_profile_hdr = client_profile->hdr;
+        BOOST_LOG(info) << "Client profile: supplying paired HDR preference "sv
+                        << (client_profile->hdr.value() ? "enabled"sv : "disabled"sv);
       }
     }
 
-    auto device_optimization = device_db::get_optimization(launch_session->device_name, _app.name);
-    apply_optimization_layer(resolved_optimization, optimization_locks, device_optimization, "device_db");
-
-    std::optional<ai_optimizer::session_history_t> history;
-
-    // AI optimizer: cached results override device DB; unknown devices get a sync request.
-    if (auto_quality_enabled) {
-      std::string gpu_info = config::video.adapter_name.empty()
-        ? "NVIDIA GPU (NVENC)"s
-        : config::video.adapter_name;
-      history = ai_optimizer::get_session_history(launch_session->device_name, _app.name);
-      auto device_info = device_db::get_device(launch_session->device_name);
-      auto ai_opt = ai_optimizer::get_cached(launch_session->device_name, _app.name);
-      if (ai_opt) {
-        BOOST_LOG(info) << "ai_optimizer: Applying cached AI optimization for \""sv
-                        << launch_session->device_name << "\" + \""sv << _app.name
-                        << "\" — "sv << ai_opt->reasoning;
-        apply_optimization_layer(resolved_optimization, optimization_locks, *ai_opt, ai_opt->source);
-      } else if (!device_info) {
-        BOOST_LOG(info) << "ai_optimizer: Unknown device \""sv << launch_session->device_name
-                        << "\" — requesting sync AI optimization"sv;
-        if (auto sync_opt = ai_optimizer::request_sync(
-              launch_session->device_name, _app.name, gpu_info, game_category, history)) {
-          BOOST_LOG(info) << "ai_optimizer: AI identified device — "sv << sync_opt->reasoning;
-          apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
-        }
-      } else {
-        bool applied_sync_ai = false;
-        if (ai_optimizer::should_sync_on_cache_miss()) {
-          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
-                          << "\" — requesting sync AI optimization before first session"sv;
-          if (auto sync_opt = ai_optimizer::request_sync(
-                launch_session->device_name, _app.name, gpu_info, game_category, history)) {
-            BOOST_LOG(info) << "ai_optimizer: Applying fresh AI optimization for \""sv
-                            << launch_session->device_name << "\" + \""sv << _app.name
-                            << "\" — "sv << sync_opt->reasoning;
-            apply_optimization_layer(resolved_optimization, optimization_locks, *sync_opt, sync_opt->source);
-            applied_sync_ai = true;
-          }
-          if (!applied_sync_ai) {
-            BOOST_LOG(warning) << "ai_optimizer: Sync optimization failed for known device \""sv
-                               << launch_session->device_name << "\" — falling back to cached/device heuristics"sv;
-          }
-        }
-
-        if (!applied_sync_ai) {
-          if (auto history_opt = ai_optimizer::get_history_safe_fallback(
-                launch_session->device_name, _app.name, history)) {
-            BOOST_LOG(info) << "ai_optimizer: Applying history-safe fallback for \""sv
-                            << launch_session->device_name << "\" + \""sv << _app.name
-                            << "\" — "sv << history_opt->reasoning;
-            apply_optimization_layer(resolved_optimization, optimization_locks, *history_opt, history_opt->source);
-          }
-          ai_optimizer::request_async(launch_session->device_name, _app.name, gpu_info, game_category, history);
-          BOOST_LOG(info) << "ai_optimizer: Cache miss for known device \""sv << launch_session->device_name
-                          << "\" — fired async request for next session"sv;
-        }
-      }
+    launch_profile::request_t preset_request;
+    preset_request.device_name = launch_session->device_name;
+    preset_request.app_name = _app.name;
+    preset_request.preset = launch_preset;
+    preset_request.requested_width = launch_session->requested_width;
+    preset_request.requested_height = launch_session->requested_height;
+    preset_request.requested_fps = launch_session->requested_fps;
+    preset_request.host_max_fps = launch_session->host_max_fps;
+    preset_request.display_locked = optimization_locks.display_mode;
+    preset_request.paired_bitrate_kbps = launch_session->paired_target_bitrate_kbps;
+    preset_request.explicit_bitrate_kbps = launch_session->explicit_target_bitrate_kbps;
+    preset_request.bitrate_locked = launch_session->explicit_target_bitrate_kbps.has_value();
+    if (config::video.max_bitrate > 0) {
+      preset_request.configured_bitrate_kbps = config::video.max_bitrate;
+    }
+    preset_request.hdr_requested = launch_session->enable_hdr;
+    preset_request.hdr_locked = launch_session->resolved_profile_from_client;
+    preset_request.client_profile_hdr = client_profile_hdr;
+    preset_request.host_hdr_capable = launch_session->host_hdr_capable;
+    if (resolved_optimization.color_range) {
+      preset_request.color_range = resolved_optimization.color_range;
     }
 
-    const double effective_history_safe_target_fps =
-      history ? ai_optimizer::effective_history_safe_target_fps(launch_session->device_name, *history) : 0.0;
-    if (history && effective_history_safe_target_fps > 0.0 &&
-        !ai_optimizer::should_relax_history_safe_target_fps(*history)) {
-      const int safe_fps =
-        static_cast<int>(std::round(effective_history_safe_target_fps * 1000.0));
-      if (safe_fps > 0 && launch_session->fps > safe_fps) {
-        const parsed_display_mode_t safe_display_mode {
-          static_cast<int>(launch_session->width),
-          static_cast<int>(launch_session->height),
-          safe_fps,
-        };
-        BOOST_LOG(info) << "session_optimization: history-safe pacing target lowered FPS from "sv
-                        << format_session_fps(launch_session->fps) << " to "sv
-                        << format_session_fps(safe_fps)
-                        << " for \""sv << launch_session->device_name << "\" + \""sv << _app.name << '"';
-        resolved_optimization.display_mode = safe_display_mode;
-        resolved_optimization.display_mode_source = "history_safe";
-        note_layer(resolved_optimization, "history_safe");
-        note_reasoning(
-          resolved_optimization,
-          "Recent Nova pacing feedback lowered the next launch FPS target."
-        );
-        append_normalization_reason(
-          resolved_optimization,
-          "History-safe pacing overrode the paired display-mode FPS ceiling."
-        );
-      }
-    } else if (history && effective_history_safe_target_fps > 0.0) {
-      BOOST_LOG(info) << "session_optimization: relaxing history-safe "
-                      << static_cast<int>(std::round(effective_history_safe_target_fps))
-                      << " FPS cap for \""sv << launch_session->device_name << "\" + \""sv
-                      << _app.name << "\" after a completed safe-target trial";
-    }
+    const auto preset_resolution = launch_profile::resolve(preset_request);
+    const auto resolved_field_source = [&](std::string_view field) -> std::string {
+      const auto it = preset_resolution.fields.find(std::string {field});
+      return it != preset_resolution.fields.end() && it->is_object() ?
+        it->value("source", std::string {}) : std::string {};
+    };
+    resolved_optimization.display_mode = parsed_display_mode_t {
+      preset_resolution.width,
+      preset_resolution.height,
+      preset_resolution.fps,
+    };
+    resolved_optimization.display_mode_source = resolved_field_source("display_mode");
+    resolved_optimization.target_bitrate_kbps = preset_resolution.target_bitrate_kbps;
+    resolved_optimization.bitrate_source = resolved_field_source("target_bitrate_kbps");
+    resolved_optimization.preferred_codec = preset_resolution.preferred_codec;
+    resolved_optimization.preferred_codec_source = resolved_field_source("preferred_codec");
+    resolved_optimization.nvenc_tune = preset_resolution.nvenc_tune;
+    resolved_optimization.nvenc_tune_source = resolved_field_source("nvenc_tune");
+    resolved_optimization.hdr = preset_resolution.hdr;
+    resolved_optimization.hdr_source = resolved_field_source("hdr");
+    note_layer(resolved_optimization, "deterministic_preset_v1");
+    note_reasoning(
+      resolved_optimization,
+      "The " + launch_profile::preset_label(launch_preset) +
+      " launch preset was resolved without Doctor history or AI settings."
+    );
+    resolved_optimization.confidence = "deterministic";
+    resolved_optimization.cache_status = "not_applicable";
+    resolved_optimization.recommendation_version = launch_profile::k_policy_version;
 
     if (!optimization_locks.display_mode && resolved_optimization.display_mode.has_value()) {
       const parsed_display_mode_t requested_display_mode {
@@ -6984,8 +7084,7 @@ namespace proc {
       const auto normalized_display_mode =
         clamp_optimized_display_mode_to_client_request(
           *resolved_optimization.display_mode,
-          requested_display_mode,
-          resolved_optimization.display_mode_source
+          requested_display_mode
         );
 
       if (!display_modes_equal(normalized_display_mode, *resolved_optimization.display_mode)) {
@@ -7007,6 +7106,30 @@ namespace proc {
       }
     }
 
+    if (doctor_v2::trials_enabled() && resolved_optimization.display_mode &&
+        launch_session && !launch_session->unique_id.empty() && !_app.uuid.empty()) {
+      const auto trial = doctor_trial::begin_launch(
+        platf::appdata() / "doctor_trials.json",
+        launch_session->unique_id,
+        _app.uuid,
+        launch_session->session_token,
+        doctor_trial::now_epoch_seconds()
+      );
+      if (trial) {
+        // An explicitly confirmed Doctor trial changes the stream ceiling and
+        // nothing else. It never injects a game-process limiter or topology.
+        resolved_optimization.display_mode->fps = trial->target_fps * 1000;
+        resolved_optimization.display_mode_source = "explicit_doctor_trial";
+        note_layer(resolved_optimization, "explicit_doctor_trial");
+        note_reasoning(
+          resolved_optimization,
+          "An explicit one-shot Doctor trial changed only the stream FPS ceiling."
+        );
+        BOOST_LOG(info) << "doctor_trial: applying one-shot stream FPS ceiling "sv
+                        << trial->target_fps << " for run "sv << trial->run_id;
+      }
+    }
+
     if (resolved_optimization.display_mode) {
       launch_session->width = resolved_optimization.display_mode->width;
       launch_session->height = resolved_optimization.display_mode->height;
@@ -7017,62 +7140,11 @@ namespace proc {
       config::video.color_range = *resolved_optimization.color_range;
     }
 
-    // device_db sets hdr from hdr_capable (capability), not a session request.
-    // Only client_profile (optimization_locks.hdr) may force enable_hdr.
-    if (resolved_optimization.hdr.has_value() && optimization_locks.hdr) {
+    if (resolved_optimization.hdr.has_value()) {
       launch_session->enable_hdr = *resolved_optimization.hdr;
-    } else if (resolved_optimization.hdr.has_value() &&
-               *resolved_optimization.hdr != launch_session->enable_hdr) {
-      BOOST_LOG(info) << "Ignoring non-profile HDR optimization (device_db/ai capability) "
-                      << (*resolved_optimization.hdr ? "enabled"sv : "disabled"sv)
-                      << "; keeping client enable_hdr="sv
-                      << (launch_session->enable_hdr ? "true"sv : "false"sv);
-    }
-
-    if (resolved_optimization.virtual_display.has_value()) {
-      launch_session->virtual_display = *resolved_optimization.virtual_display;
     }
 
 #ifdef __linux__
-    if (_app.desktop_mirror) {
-      if (!launch_session->mirror_desktop || launch_session->virtual_display) {
-        BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
-                        << _app.name << "]; ignoring virtual-display preference for this session"sv;
-      }
-      apply_app_display_semantics(_app, *launch_session);
-    }
-
-    // Apply the session display policy only after device/AI optimization has
-    // finalized virtual_display. This generation then owns runtime topology,
-    // capture policy, and the creation decision together.
-    const bool virtual_display_requested_before_mode =
-      launch_session->virtual_display ||
-      (_app.virtual_display && !launch_session->user_locked_virtual_display);
-    const std::string session_mode = stream_display_policy::effective_session_selection_for_launch(
-      launch_session ? std::string_view {launch_session->stream_mode} : std::string_view {},
-      launch_session && launch_session->mirror_desktop,
-      launch_session && launch_session->virtual_display,
-      _app.virtual_display,
-      launch_session && launch_session->user_locked_virtual_display,
-      resolved_optimization.virtual_display.has_value()
-    );
-    if (!session_mode.empty()) {
-      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
-    }
-    if (!session_mode.empty() &&
-        !stream_display_policy::selection_companion_state_matches(session_mode)) {
-      std::string mode_error;
-      if (stream_display_policy::apply_selection(session_mode, mode_error)) {
-        this->initial_linux_display_saved = true;
-        BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
-                        << "] applied in-memory after optimization; host default restored at teardown"sv;
-        platf::reevaluate_capture_sources();
-      } else {
-        BOOST_LOG(warning) << "process: final session stream mode override ["sv << session_mode
-                           << "] rejected: "sv << mode_error << "; using the host default"sv;
-      }
-    }
-
     const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
     const bool gamescope_stream_session =
       config::video.linux_display.stream_mode == "gamescope_stream" ||
@@ -7175,10 +7247,6 @@ namespace proc {
 
     if (resolved_optimization.target_bitrate_kbps.has_value()) {
       launch_session->target_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
-      config::video.max_bitrate = *resolved_optimization.target_bitrate_kbps;
-      if (config::video.adaptive_bitrate.enabled) {
-        config::video.adaptive_bitrate.max_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
-      }
     }
 
     if (resolved_optimization.nvenc_tune.has_value()) {
@@ -7315,10 +7383,6 @@ namespace proc {
       config::video.output_name = this->initial_display;
       config::video.color_range = this->initial_color_range;
       config::video.nvenc_tune = this->initial_nvenc_tune;
-      config::video.max_bitrate = this->initial_max_bitrate;
-      if (this->initial_video_config_saved) {
-        config::video.adaptive_bitrate.max_bitrate_kbps = this->initial_adaptive_max_bitrate;
-      }
       terminate_impl(false, true);
       display_device::revert_configuration();
 #ifdef __linux__
@@ -7490,6 +7554,14 @@ namespace proc {
 
         if (vdisplay.has_value()) {
           linux_vdisplay = std::move(vdisplay);
+          // Preflight and final validation can observe a different available
+          // backend than the actuator ultimately uses. Bind connector and
+          // capture authority to the backend that actually created this
+          // display before capture identity or game-placement hints are built.
+          stream_display_policy::normalize_host_virtual_display_state_for_backend(
+            linux_vdisplay->backend
+          );
+          this->initial_linux_display_saved = true;
           launch_session->virtual_display = true;
           this->virtual_display = true;
           this->display_name = linux_vdisplay->output_name;
@@ -7508,6 +7580,7 @@ namespace proc {
             this->display_name,
             mapped_output_name
           );
+          platf::reevaluate_capture_sources();
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;
@@ -7905,85 +7978,30 @@ namespace proc {
     }
 #endif
 
-    // If MangoHud is enabled, also set DLSYM mode for safer Vulkan hooking
-    // (prevents crashes in Wine utilities like d3ddriverquery64.exe)
-    if (_app.env_vars.count("MANGOHUD") && _app.env_vars.at("MANGOHUD") == "1") {
-      _env["MANGOHUD_DLSYM"] = "1";
-      platf::set_env("MANGOHUD_DLSYM", "1");
-      _session_env_keys.insert("MANGOHUD_DLSYM");
-    }
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_REQUESTED_FPS", format_session_fps(launch_session->requested_fps));
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_TARGET_FPS", format_session_fps(launch_session->fps));
     set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_OPTIMIZATION_SOURCE", launch_session->optimization_source);
 
-    const bool enable_session_pacing = session_pacing_is_enabled(_app, *launch_session, game_category);
-    const int pacing_target_fps = launch_session->fps >= 1000 ?
+    // The stream target is encoder/session policy only. Polaris never injects
+    // MangoHud, DXVK, or VKD3D limiters into the launched game process.
+    launch_session->pacing_policy = "stream_fps_only";
+    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_PACING_POLICY", launch_session->pacing_policy);
+    const int stream_target_fps = launch_session->fps >= 1000 ?
       static_cast<int>(std::round(static_cast<double>(launch_session->fps) / 1000.0)) :
       launch_session->fps;
 #ifdef __linux__
+    // User-authored MangoHud configuration remains supported where the private
+    // runtime can safely carry it. This gate never creates or edits a limiter.
     const bool allow_cage_mangohud = cage_mangohud_allowed_for_session(
       _app,
       config::video.linux_display.use_cage_compositor,
       config::video.linux_display.headless_mode
     );
-#else
-    constexpr bool allow_cage_mangohud = true;
 #endif
-    launch_session->pacing_policy = enable_session_pacing ? "client_fps_limit" : "none";
-    set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_PACING_POLICY", launch_session->pacing_policy);
 
     if (launch_session->target_bitrate_kbps) {
       set_session_env_var(_env, _session_env_keys, "POLARIS_SESSION_TARGET_BITRATE_KBPS",
                           std::to_string(*launch_session->target_bitrate_kbps));
-    }
-
-    if (enable_session_pacing) {
-      if (env_value(_app, _env, "DXVK_FRAME_RATE").empty()) {
-        set_session_env_var(_env, _session_env_keys, "DXVK_FRAME_RATE", std::to_string(pacing_target_fps));
-      }
-
-      const int requested_fps = launch_session->requested_fps >= 1000 ?
-        static_cast<int>(std::round(static_cast<double>(launch_session->requested_fps) / 1000.0)) :
-        launch_session->requested_fps;
-      bool auto_mangohud_cap = false;
-      if (allow_cage_mangohud &&
-          pacing_target_fps > 0 &&
-          (requested_fps <= 0 || pacing_target_fps + 1 < requested_fps) &&
-          env_value(_app, _env, "MANGOHUD").empty()) {
-        set_session_env_var(_env, _session_env_keys, "MANGOHUD", "1");
-        set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
-        auto_mangohud_cap = true;
-      }
-
-      if (allow_cage_mangohud && env_flag_enabled(_app, _env, "MANGOHUD")) {
-        if (env_value(_app, _env, "MANGOHUD_DLSYM").empty()) {
-          set_session_env_var(_env, _session_env_keys, "MANGOHUD_DLSYM", "1");
-        }
-
-        auto mangohud_config = env_value(_app, _env, "MANGOHUD_CONFIG");
-        if (mangohud_config.find("fps_limit=") == std::string::npos) {
-          if (!mangohud_config.empty() && mangohud_config.back() != ',') {
-            mangohud_config += ',';
-          }
-          mangohud_config += "fps_limit=" + std::to_string(pacing_target_fps);
-        }
-        if (auto_mangohud_cap && mangohud_config.find("no_display") == std::string::npos) {
-          if (!mangohud_config.empty() && mangohud_config.back() != ',') {
-            mangohud_config += ',';
-          }
-          mangohud_config += "no_display";
-        }
-        if (!mangohud_config.empty()) {
-          set_session_env_var(_env, _session_env_keys, "MANGOHUD_CONFIG", mangohud_config);
-        }
-        if (auto_mangohud_cap) {
-          BOOST_LOG(info) << "session_pacing: auto-enabled hidden MangoHud FPS cap target_fps="sv
-                          << pacing_target_fps;
-        }
-      }
-
-      BOOST_LOG(info) << "session_pacing: policy="sv << launch_session->pacing_policy
-                      << " target_fps="sv << pacing_target_fps;
     }
 
 #ifdef __linux__
@@ -8064,9 +8082,9 @@ namespace proc {
         std::optional<bool> {};
     bool force_windowed_cage_for_gpu_native = false;
     bool headless_extcopy_dmabuf_selected = false;
-    const int cage_refresh_hz = std::max(pacing_target_fps, 1);
+    const int cage_refresh_hz = std::max(stream_target_fps, 1);
 
-    const int gpu_native_probe_fps = std::max(pacing_target_fps, 1);
+    const int gpu_native_probe_fps = std::max(stream_target_fps, 1);
     const video::config_t gpu_native_probe_config {
       static_cast<int>(render_width),
       static_cast<int>(render_height),
@@ -8886,6 +8904,10 @@ namespace proc {
       while (waitpid(-1, nullptr, WNOHANG) > 0);
     });
 #endif
+
+    if (_app_id == 0) {
+      return 0;
+    }
 
     if (placebo) {
       return _app_id;
@@ -9757,16 +9779,17 @@ namespace proc {
     if (initial_video_config_saved) {
       config::video.color_range = initial_color_range;
       config::video.nvenc_tune = initial_nvenc_tune;
-      config::video.max_bitrate = initial_max_bitrate;
-      config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
     }
 
     if (initial_linux_display_saved) {
-      // Armed only when a session stream-mode override was actually applied.
+      // Armed when a session mode override or the backend that actually
+      // created Host Virtual changed connector/capture authority.
       auto &linux_display = config::video.linux_display;
       linux_display.stream_mode = initial_stream_mode;
       linux_display.private_runtime = initial_private_runtime;
       linux_display.headless_swap_mode = initial_headless_swap_mode;
+      linux_display.streaming_output = initial_streaming_output;
+      linux_display.primary_output = initial_primary_output;
       linux_display.headless_mode = initial_headless_mode;
       linux_display.use_cage_compositor = initial_use_cage_compositor;
       linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
@@ -9788,12 +9811,12 @@ namespace proc {
     initial_display.clear();
     initial_color_range = 0;
     initial_nvenc_tune = 0;
-    initial_max_bitrate = 0;
-    initial_adaptive_max_bitrate = 0;
     initial_video_config_saved = false;
     initial_stream_mode.clear();
     initial_private_runtime.clear();
     initial_headless_swap_mode.clear();
+    initial_streaming_output.clear();
+    initial_primary_output.clear();
     initial_capture.clear();
     initial_headless_mode = false;
     initial_use_cage_compositor = false;
@@ -10084,6 +10107,9 @@ namespace proc {
     snapshot.mangohud_configured = !_app.uuid.empty() && env_flag_enabled(_app, _env, "MANGOHUD");
     snapshot.virtual_display = virtual_display;
     snapshot.display_mode_explicit = _launch_session && _launch_session->user_locked_virtual_display;
+    snapshot.mirror_desktop = _launch_session && _launch_session->mirror_desktop;
+    snapshot.force_private_after_desktop_steam_shutdown =
+      _launch_session && _launch_session->force_private_after_desktop_steam_shutdown;
     return {std::move(guard), std::move(snapshot)};
   }
 

@@ -71,7 +71,6 @@ namespace ai_optimizer {
     constexpr int MAX_REASONABLE_POOR_OUTCOME_COUNT = 10000;
     constexpr int LOW_CONFIDENCE_TTL_HOURS = 24;
     constexpr int MEDIUM_CONFIDENCE_TTL_HOURS = 72;
-    constexpr int RECOVERY_TTL_HOURS = 12;
     constexpr int MODEL_DISCOVERY_TTL_SECONDS = 300;
   }  // namespace
 

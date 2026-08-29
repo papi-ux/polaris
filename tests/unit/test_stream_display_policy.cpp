@@ -5,9 +5,12 @@
 
 #include <src/platform/linux/stream_display_policy.h>
 #include <src/platform/linux/virtual_display.h>
+#include <src/platform/linux/display_topology.h>
 #include <src/config.h>
+#include <src/nvhttp.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <gtest/gtest.h>
 
 namespace {
@@ -148,12 +151,34 @@ TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClie
     "desktop_display"
   ) << "mirrorDesktop must override a host_virtual_display default for this session";
   EXPECT_EQ(
-    effective_session_selection_for_launch("headless_stream", false, true, true, false),
+    effective_session_selection_for_launch("headless_stream", false, true, true, true),
     "headless_stream"
   ) << "an explicit accepted streamMode remains authoritative";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("gamescope_stream", true, false, false, true),
+    "desktop_display"
+  ) << "explicit desktop mirroring must still beat a stale private streamMode";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("headless_stream", false, false, true, false),
+    "host_virtual_display"
+  ) << "an unlocked paired mode must not override the app's display semantic";
+}
+
+TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) {
+  using stream_display_policy::selection_owns_launch_refresh_rate;
+
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("headless_stream"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("windowed_stream"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("host_virtual_display"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("gamescope_stream"));
+  EXPECT_FALSE(selection_owns_launch_refresh_rate("desktop_display"));
+  EXPECT_FALSE(selection_owns_launch_refresh_rate("headless_dongle"));
 }
 
 TEST(StreamDisplayPolicyTests, HostVirtualClearsStaleAutoManage) {
+  if (!virtual_display::is_available()) {
+    GTEST_SKIP() << "host virtual display normalization requires an available backend";
+  }
   LinuxDisplayPolicyGuard guard;
   std::string error;
   ASSERT_TRUE(stream_display_policy::apply_selection("host_virtual_display", error)) << error;
@@ -289,6 +314,20 @@ TEST(StreamDisplayPolicyTests, GamescopeCompanionStateIncludesCaptureDefault) {
 
   config::video.capture = "portal";
   EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("gamescope_stream"));
+
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+  std::string error;
+  EXPECT_FALSE(stream_display_policy::selection_valid("gamescope_stream", error))
+    << "matching companion state must not bypass current availability";
+  EXPECT_FALSE(error.empty());
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
 }
 
 TEST(StreamDisplayPolicyTests, HeadlessDongleCompanionStateIncludesConditionalDefaults) {
@@ -327,6 +366,199 @@ TEST(StreamDisplayPolicyTests, HeadlessDongleCompanionStateIncludesConditionalDe
   config::video.capture = "portal";
   config::video.output_name.clear();
   EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+}
+
+TEST(StreamDisplayPolicyTests, LeavingDongleMakesStoredConnectorsInert) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = false;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "portal")
+    << "switching topology must not rewrite a user-selected capture backend";
+  EXPECT_FALSE(display_topology::should_manage_host_topology());
+  EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("desktop_display"));
+}
+
+TEST(StreamDisplayPolicyTests, FailedDurableSelectionRestoresEveryLiveField) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.private_runtime = "legacy-runtime";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = false;
+  linux_display.prefer_gpu_native_capture = true;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+  const auto before_linux_display = linux_display;
+  const auto before_capture = config::video.capture;
+  const auto before_output_name = config::video.output_name;
+
+  std::string error;
+  EXPECT_FALSE(nvhttp::apply_stream_display_mode_selection_for_tests(
+    "desktop_display",
+    false,
+    error
+  ));
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(linux_display.stream_mode, before_linux_display.stream_mode);
+  EXPECT_EQ(linux_display.private_runtime, before_linux_display.private_runtime);
+  EXPECT_EQ(linux_display.headless_mode, before_linux_display.headless_mode);
+  EXPECT_EQ(linux_display.use_cage_compositor, before_linux_display.use_cage_compositor);
+  EXPECT_EQ(
+    linux_display.prefer_gpu_native_capture,
+    before_linux_display.prefer_gpu_native_capture
+  );
+  EXPECT_EQ(linux_display.auto_manage_displays, before_linux_display.auto_manage_displays);
+  EXPECT_EQ(linux_display.headless_swap_mode, before_linux_display.headless_swap_mode);
+  EXPECT_EQ(linux_display.streaming_output, before_linux_display.streaming_output);
+  EXPECT_EQ(linux_display.primary_output, before_linux_display.primary_output);
+  EXPECT_EQ(config::video.capture, before_capture);
+  EXPECT_EQ(config::video.output_name, before_output_name);
+}
+
+TEST(StreamDisplayPolicyTests, SuccessfulDurableSwitchRetiresOwnedDongleCaptureTarget) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.headless_mode = true;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+
+  std::string error;
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests(
+    "desktop_display",
+    true,
+    error
+  )) << error;
+  EXPECT_EQ(linux_display.stream_mode, "desktop_display");
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "portal");
+}
+
+TEST(StreamDisplayPolicyTests, HostVirtualKeepsAConfiguredConnectorOnlyForKScreen) {
+  EXPECT_FALSE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::KSCREEN_DOCTOR
+  ));
+  EXPECT_TRUE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::EVDI
+  ));
+  EXPECT_TRUE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::WAYLAND_WLR
+  ));
+  EXPECT_FALSE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::NONE
+  ));
+
+  EXPECT_TRUE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::KSCREEN_DOCTOR,
+    "DP-1",
+    "DP-1"
+  ));
+  EXPECT_FALSE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::EVDI,
+    "DP-1",
+    "DP-1"
+  ));
+  EXPECT_FALSE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::WAYLAND_WLR,
+    "",
+    "DP-1"
+  ));
+  EXPECT_TRUE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::EVDI,
+    "",
+    ""
+  ));
+}
+
+TEST(StreamDisplayPolicyTests, CreatedHostVirtualBackendOwnsFinalConnectorAndCaptureState) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+
+  const auto set_stale_kscreen_state = [&]() {
+    linux_display.auto_manage_displays = true;
+    linux_display.headless_swap_mode = "privacy";
+    linux_display.streaming_output = "DP-1";
+    linux_display.primary_output = "eDP-1";
+    config::video.capture = "portal";
+    config::video.output_name = "DP-1";
+  };
+
+  set_stale_kscreen_state();
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::KSCREEN_DOCTOR
+  );
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_EQ(linux_display.streaming_output, "DP-1");
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_EQ(config::video.output_name, "DP-1");
+  EXPECT_EQ(config::video.capture, "portal");
+
+  set_stale_kscreen_state();
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::EVDI
+  );
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "portal");
+
+  set_stale_kscreen_state();
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::WAYLAND_WLR
+  );
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "wlr");
+}
+
+TEST(StreamDisplayPolicyTests, LeavingKScreenHostVirtualRetiresItsConnectorAuthority) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "host_virtual_display";
+  linux_display.auto_manage_displays = false;
+  linux_display.headless_swap_mode.clear();
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output.clear();
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
 }
 
 TEST(StreamDisplayPolicyTests, GamescopeStreamRegisteredWithGamescopeRuntime) {

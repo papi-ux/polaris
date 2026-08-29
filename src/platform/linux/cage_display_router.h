@@ -59,13 +59,22 @@ namespace cage_display_router {
   int normalize_session_refresh_hz(int session_fps);
 
   /**
-   * @brief The refresh a resume should apply, honoring a launch-time clamp.
+   * @brief The refresh a resume should apply, optionally honoring a legacy launch-time clamp.
    *
    * @param session_fps The resuming session's FPS (whole hertz or millihertz).
    * @param recorded_ceiling_hz Non-zero when the launch deliberately ran below
    *                            the client's request; resumes stay at or under it.
+   * @param respect_recorded_ceiling Keep the prior clamp for a legacy/raw
+   *                                 request. Exact resolved profiles set false.
    */
-  int resolve_resume_refresh_hz(int session_fps, int recorded_ceiling_hz);
+  int resolve_resume_refresh_hz(
+    int session_fps,
+    int recorded_ceiling_hz,
+    bool respect_recorded_ceiling = true
+  );
+
+  /** @brief Cached last-settled whole-Hz output mode; meaningful while the cage is running. */
+  int current_output_refresh_hz();
 
   /**
    * @brief Re-apply the running compositor's output refresh for a resuming session.
@@ -73,16 +82,21 @@ namespace cage_display_router {
    * The cage outlives the launch that started it and the output mode is only
    * ever set from the startup command, so a client resuming with a different
    * refresh than the original launch would otherwise stay capped at the old
-   * rate for the whole session (issue #367). Keeps the launch-time resolution
-   * and any launch-time refresh clamp; only an unclamped refresh follows the
-   * resuming client.
+   * rate for the whole session (issue #367). Keeps the launch-time resolution.
+   * Legacy/raw resumes also keep the prior refresh clamp; an exact resolved
+   * profile applies its already-authoritative cadence instead.
    *
    * @param session_fps The resuming session's FPS (whole hertz or millihertz).
+   * @param respect_recorded_ceiling Keep the prior generation's clamp for
+   *                                 legacy/raw requests only.
    * @return true when the mode already matches or was re-applied; false when
    *         the cage is not running, startup has not recorded a settled mode
    *         yet, or the compositor did not settle on the new mode.
    */
-  bool ensure_output_refresh(int session_fps);
+  bool ensure_output_refresh(
+    int session_fps,
+    bool respect_recorded_ceiling = true
+  );
 
   /**
    * @brief Wrap a command to run inside the cage compositor.
