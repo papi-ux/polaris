@@ -35,6 +35,7 @@ namespace launch_profile {
 
     bool hdr_requested = false;
     bool hdr_locked = false;
+    std::optional<bool> client_profile_hdr;
     std::optional<int> color_range;
   };
 

@@ -3725,7 +3725,6 @@ namespace proc {
     struct optimization_locks_t {
       bool display_mode = false;
       bool color_range = false;
-      bool hdr = false;
     };
 
     std::string format_session_fps(int fps) {
@@ -6648,8 +6647,6 @@ namespace proc {
     this->initial_display = config::video.output_name;
     this->initial_color_range = config::video.color_range;
     this->initial_nvenc_tune = config::video.nvenc_tune;
-    this->initial_max_bitrate = config::video.max_bitrate;
-    this->initial_adaptive_max_bitrate = config::video.adaptive_bitrate.max_bitrate_kbps;
     this->initial_video_config_saved = true;
 
     launch_session->width = launch_session->requested_width;
@@ -6700,6 +6697,7 @@ namespace proc {
     // semantics below may select it.
 
     resolved_session_optimization_t resolved_optimization;
+    std::optional<bool> client_profile_hdr;
     if (launch_session->paired_target_bitrate_kbps.has_value()) {
       resolved_optimization.target_bitrate_kbps = *launch_session->paired_target_bitrate_kbps;
       resolved_optimization.bitrate_source = "paired_client";
@@ -6727,12 +6725,9 @@ namespace proc {
       }
 
       if (client_profile->hdr.has_value()) {
-        optimization_locks.hdr = true;
-        resolved_optimization.hdr = client_profile->hdr;
-        resolved_optimization.hdr_source = "client_profile";
-        note_layer(resolved_optimization, "client_profile");
-        BOOST_LOG(info) << "Client profile: overriding HDR to "sv << (client_profile->hdr.value() ? "enabled"sv : "disabled"sv);
-        launch_session->enable_hdr = client_profile->hdr.value();
+        client_profile_hdr = client_profile->hdr;
+        BOOST_LOG(info) << "Client profile: supplying paired HDR preference "sv
+                        << (client_profile->hdr.value() ? "enabled"sv : "disabled"sv);
       }
     }
 
@@ -6751,8 +6746,8 @@ namespace proc {
       preset_request.configured_bitrate_kbps = config::video.max_bitrate;
     }
     preset_request.hdr_requested = launch_session->enable_hdr;
-    preset_request.hdr_locked =
-      optimization_locks.hdr || launch_session->resolved_profile_from_client;
+    preset_request.hdr_locked = launch_session->resolved_profile_from_client;
+    preset_request.client_profile_hdr = client_profile_hdr;
     if (resolved_optimization.color_range) {
       preset_request.color_range = resolved_optimization.color_range;
     }
@@ -6997,10 +6992,6 @@ namespace proc {
 
     if (resolved_optimization.target_bitrate_kbps.has_value()) {
       launch_session->target_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
-      config::video.max_bitrate = *resolved_optimization.target_bitrate_kbps;
-      if (config::video.adaptive_bitrate.enabled) {
-        config::video.adaptive_bitrate.max_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
-      }
     }
 
     if (resolved_optimization.nvenc_tune.has_value()) {
@@ -7137,10 +7128,6 @@ namespace proc {
       config::video.output_name = this->initial_display;
       config::video.color_range = this->initial_color_range;
       config::video.nvenc_tune = this->initial_nvenc_tune;
-      config::video.max_bitrate = this->initial_max_bitrate;
-      if (this->initial_video_config_saved) {
-        config::video.adaptive_bitrate.max_bitrate_kbps = this->initial_adaptive_max_bitrate;
-      }
       terminate_impl(false, true);
       display_device::revert_configuration();
 #ifdef __linux__
@@ -9524,8 +9511,6 @@ namespace proc {
     if (initial_video_config_saved) {
       config::video.color_range = initial_color_range;
       config::video.nvenc_tune = initial_nvenc_tune;
-      config::video.max_bitrate = initial_max_bitrate;
-      config::video.adaptive_bitrate.max_bitrate_kbps = initial_adaptive_max_bitrate;
     }
 
     if (initial_linux_display_saved) {
@@ -9555,8 +9540,6 @@ namespace proc {
     initial_display.clear();
     initial_color_range = 0;
     initial_nvenc_tune = 0;
-    initial_max_bitrate = 0;
-    initial_adaptive_max_bitrate = 0;
     initial_video_config_saved = false;
     initial_stream_mode.clear();
     initial_private_runtime.clear();

@@ -1496,9 +1496,15 @@ namespace rtsp_stream {
 
       BOOST_LOG(info) << "Client Requested bitrate is [" << configuredBitrateKbps << "kbps]";
 
-      if (config::video.max_bitrate > 0) {
-        if (config::video.max_bitrate < configuredBitrateKbps) {
-          configuredBitrateKbps = config::video.max_bitrate;
+      // A resolved launch target belongs to this RTSP session. Never publish it
+      // through config::video.max_bitrate: that is the stable configured host
+      // capability used by other clients' deterministic /optimize requests.
+      const int session_bitrate_ceiling = session.target_bitrate_kbps.value_or(
+        config::video.max_bitrate
+      );
+      if (session_bitrate_ceiling > 0) {
+        if (session_bitrate_ceiling < configuredBitrateKbps) {
+          configuredBitrateKbps = session_bitrate_ceiling;
         }
       }
 

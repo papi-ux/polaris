@@ -82,6 +82,7 @@
 #include "doctor_v2.h"
 #include "doctor_trial.h"
 #include "recovery_profile.h"
+#include "client_profiles.h"
 #include "client_support_report.h"
 #include "confighttp.h"
 #include "stream_stats.h"
@@ -4287,6 +4288,17 @@ namespace nvhttp {
         BOOST_LOG(warning) << "Rejecting resolved launch profile with malformed bitrate"sv;
         return nullptr;
       }
+      const auto raw_hdr = get_arg(args, "resolvedHdr", "");
+      if (raw_hdr == "1") {
+        launch_session->enable_hdr = true;
+      } else if (raw_hdr == "0") {
+        launch_session->enable_hdr = false;
+      } else {
+        BOOST_LOG(warning) << "Rejecting resolved launch profile with missing or malformed HDR value"sv;
+        return nullptr;
+      }
+    } else {
+      launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     }
     launch_session->watch_only = watch_requested(args);
     launch_session->perm = launch_session->watch_only ? PERM::view : named_cert_p->perm;
@@ -4294,7 +4306,6 @@ namespace nvhttp {
     launch_session->surround_info = util::from_view(get_arg(args, "surroundAudioInfo", "196610"));
     launch_session->surround_params = (get_arg(args, "surroundParams", ""));
     launch_session->gcmap = util::from_view(get_arg(args, "gcmap", "0"));
-    launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     const bool client_display_mode_explicit = util::from_view(get_arg(args, "displayModeExplicit", "0"));
     const bool client_requested_virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0"));
     #if defined(__linux__)
@@ -8845,6 +8856,10 @@ namespace nvhttp {
             )) {
           preset_request.paired_fps = static_cast<int>(std::round(paired_fps * 1000.0));
         }
+      }
+      if (const auto client_profile = client_profiles::get_client_profile(device)) {
+        preset_request.client_profile_hdr = client_profile->hdr;
+        preset_request.color_range = client_profile->color_range;
       }
       if (explicit_hdr) {
         preset_request.hdr_requested = *explicit_hdr;

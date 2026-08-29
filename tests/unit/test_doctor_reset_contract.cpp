@@ -61,6 +61,36 @@ TEST(DoctorResetContract, FinalResolverCannotReadHistoryOrAiSettings) {
   EXPECT_NE(resolver.find("launch_profile::resolve"), std::string::npos);
 }
 
+TEST(DoctorResetContract, RunningSessionCannotRewriteTheConfiguredHostBitrateCap) {
+  const auto process = source("src/process.cpp");
+  EXPECT_EQ(process.find("config::video.max_bitrate ="), std::string::npos);
+  EXPECT_EQ(
+    process.find("config::video.adaptive_bitrate.max_bitrate_kbps ="),
+    std::string::npos
+  );
+
+  const auto rtsp = source("src/rtsp.cpp");
+  EXPECT_NE(
+    rtsp.find("session.target_bitrate_kbps.value_or(\n        config::video.max_bitrate"),
+    std::string::npos
+  );
+}
+
+TEST(DoctorResetContract, ResolvedLaunchRequiresAnExactResolvedHdrValue) {
+  const auto launch_parser = between(
+    source("src/nvhttp.cpp"),
+    "if (launch_session->resolved_profile_from_client) {",
+    "launch_session->watch_only ="
+  );
+  EXPECT_NE(launch_parser.find("get_arg(args, \"resolvedHdr\", \"\")"), std::string::npos);
+  EXPECT_NE(launch_parser.find("raw_hdr == \"1\""), std::string::npos);
+  EXPECT_NE(launch_parser.find("raw_hdr == \"0\""), std::string::npos);
+  EXPECT_NE(
+    launch_parser.find("Rejecting resolved launch profile with missing or malformed HDR value"),
+    std::string::npos
+  );
+}
+
 TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLock) {
   const auto launch_parser = between(
     source("src/nvhttp.cpp"),
@@ -145,4 +175,12 @@ TEST(DoctorResetContract, LegacyAiSurfacesAreExplanationOnly) {
   EXPECT_EQ(ui.find("testResult.payload.display_mode"), std::string::npos);
   EXPECT_EQ(ui.find("testResult.payload.target_bitrate_kbps"), std::string::npos);
   EXPECT_NE(ui.find("AI explanations"), std::string::npos);
+
+  const auto audio_video = source("src_assets/common/assets/web/configs/tabs/AudioVideo.vue");
+  EXPECT_EQ(audio_video.find("AI Auto Quality"), std::string::npos);
+  EXPECT_NE(audio_video.find("Adaptive bitrate"), std::string::npos);
+  EXPECT_EQ(
+    audio_video.find("config.value.adaptive_bitrate_enabled === 'enabled' &&"),
+    std::string::npos
+  );
 }

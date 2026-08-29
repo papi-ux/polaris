@@ -150,6 +150,8 @@ namespace stream_stats {
     /// ENet reliable control-channel EWMA; diagnostic context, not video loss.
     double control_channel_packet_loss = 0;
     uint64_t control_channel_samples = 0;
+    /// Process-lifetime monotonic count of primary video/pacing observations.
+    uint64_t video_sample_revision = 0;
     /// Monotonic count of primary media/control network observations.
     uint64_t network_sample_revision = 0;
     /// Debounced by network_risk_tracker_t; the single truth every reader serves.
