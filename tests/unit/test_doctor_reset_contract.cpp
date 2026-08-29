@@ -677,8 +677,8 @@ TEST(DoctorResetContract, HostVirtualRetiresDongleAuthorityUnlessKScreenNeedsIt)
   const auto policy = source("src/platform/linux/stream_display_policy.cpp");
   const auto normalization = between(
     policy,
-    "void normalize_host_virtual_display_state()",
-    "bool selection_available_for_capabilities("
+    "void normalize_host_virtual_display_state_for_backend(",
+    "bool host_virtual_backend_creates_output("
   );
   EXPECT_NE(
     normalization.find(
@@ -700,6 +700,31 @@ TEST(DoctorResetContract, HostVirtualRetiresDongleAuthorityUnlessKScreenNeedsIt)
     companion_match.find("host_virtual_connector_state_matches("),
     std::string::npos
   ) << "the final launch fast path must re-normalize if the live backend no longer owns a retained connector";
+
+  const auto process = source("src/process.cpp");
+  const auto actuator = between(
+    process,
+    "auto vdisplay = virtual_display::create(",
+    "display_device::configure_display(config::video, *launch_session);"
+  );
+  const auto actual_backend_normalization = actuator.find(
+    "normalize_host_virtual_display_state_for_backend("
+  );
+  const auto capture_identity = actuator.find(
+    "config::video.output_name = stream_display_policy::capture_output_name_for_virtual_display("
+  );
+  ASSERT_NE(actual_backend_normalization, std::string::npos);
+  ASSERT_NE(capture_identity, std::string::npos);
+  EXPECT_LT(actual_backend_normalization, capture_identity)
+    << "the created backend must retire stale connector authority before capture identity is published";
+  EXPECT_NE(
+    actuator.find("linux_vdisplay->backend", actual_backend_normalization),
+    std::string::npos
+  ) << "normalization must use the backend that actually created the display";
+  EXPECT_NE(
+    actuator.find("platf::reevaluate_capture_sources()", capture_identity),
+    std::string::npos
+  ) << "a backend-driven capture change must be applied before encoder probing";
 }
 
 TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {

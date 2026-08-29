@@ -498,6 +498,51 @@ TEST(StreamDisplayPolicyTests, HostVirtualKeepsAConfiguredConnectorOnlyForKScree
   ));
 }
 
+TEST(StreamDisplayPolicyTests, CreatedHostVirtualBackendOwnsFinalConnectorAndCaptureState) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+
+  const auto set_stale_kscreen_state = [&]() {
+    linux_display.auto_manage_displays = true;
+    linux_display.headless_swap_mode = "privacy";
+    linux_display.streaming_output = "DP-1";
+    linux_display.primary_output = "eDP-1";
+    config::video.capture = "portal";
+    config::video.output_name = "DP-1";
+  };
+
+  set_stale_kscreen_state();
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::KSCREEN_DOCTOR
+  );
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_EQ(linux_display.streaming_output, "DP-1");
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_EQ(config::video.output_name, "DP-1");
+  EXPECT_EQ(config::video.capture, "portal");
+
+  set_stale_kscreen_state();
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::EVDI
+  );
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "portal");
+
+  set_stale_kscreen_state();
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::WAYLAND_WLR
+  );
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "wlr");
+}
+
 TEST(StreamDisplayPolicyTests, LeavingKScreenHostVirtualRetiresItsConnectorAuthority) {
   LinuxDisplayPolicyGuard guard;
   auto &linux_display = config::video.linux_display;
