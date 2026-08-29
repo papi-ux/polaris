@@ -6894,6 +6894,21 @@ namespace nvhttp {
             body.contains("adaptive_bitrate_enabled") ||
             body.contains("disconnect_resume_timeout_seconds") ||
             body.contains("stream_display_mode");
+          std::unique_lock<std::recursive_mutex> topology_lifecycle_guard;
+          if (body.contains("stream_display_mode")) {
+            // Serialize durable topology writes with final launch resolution,
+            // application, and generation install. Take this before Doctor's
+            // controller lock to preserve lifecycle -> controller lock order.
+            topology_lifecycle_guard = proc::proc.acquire_session_lifecycle_lock();
+            if (proc::proc.running() != 0) {
+              write_json(
+                {{"status", false}, {"changed", false}, {"state", "active_generation"},
+                 {"error", "Stop the active app generation before changing stream topology."}},
+                SimpleWeb::StatusCode::client_error_conflict
+              );
+              return;
+            }
+          }
           auto global_control_guard = changes_global_host_control ?
             doctor_actions::acquire_paired_global_control(
               named_cert_p->uuid,
@@ -7050,10 +7065,15 @@ namespace nvhttp {
               return;
             }
           }
-          // Global host mutations above were authorized and applied under the
-          // same lock used by stream generation handoff. Per-client durable
-          // settings and the separately owner-gated live bitrate follow.
+          // Global host mutations above were authorized under the controller
+          // lock; topology was additionally applied under the process
+          // lifecycle lock used by final resolution and generation install.
+          // Per-client durable settings and separately owner-gated live
+          // bitrate follow.
           global_control_guard.release();
+          if (topology_lifecycle_guard.owns_lock()) {
+            topology_lifecycle_guard.unlock();
+          }
 
           const auto update_result = update_device_info_result(
             named_cert_p->uuid,
@@ -9137,6 +9157,20 @@ namespace nvhttp {
       );
       if (effective_selection.empty()) {
         effective_selection = stream_display_policy::configured_selection();
+      }
+      if (!effective_selection.empty()) {
+        std::string topology_reject_reason;
+        if (!stream_display_policy::selection_valid(
+              effective_selection,
+              topology_reject_reason
+            )) {
+          reply_bad_request(
+            "invalid_or_unavailable_topology",
+            topology_reject_reason.empty() ?
+              "The resolved stream topology is unavailable." : topology_reject_reason
+          );
+          return;
+        }
       }
       resolved_topology = effective_selection;
       launch_owned_display =

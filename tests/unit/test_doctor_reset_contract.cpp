@@ -396,6 +396,16 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
     optimize.find("invalid_or_unavailable_topology"),
     std::string::npos
   );
+  const auto effective_topology = optimize.find(
+    "effective_session_selection_for_launch("
+  );
+  const auto effective_availability = optimize.find(
+    "stream_display_policy::selection_valid(",
+    effective_topology
+  );
+  ASSERT_NE(effective_topology, std::string::npos);
+  EXPECT_NE(effective_availability, std::string::npos)
+    << "app-derived and configured host-default topology also require availability";
 
   const auto process = source("src/process.cpp");
   const auto final_apply = between(
@@ -403,17 +413,84 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
     "Resolve and apply the exact topology before installing a new process",
     "++_session_generation;"
   );
+  const auto final_validity = final_apply.find(
+    "stream_display_policy::selection_valid("
+  );
+  const auto companion_match = final_apply.find(
+    "stream_display_policy::selection_companion_state_matches("
+  );
   const auto apply = final_apply.find("stream_display_policy::apply_selection(");
   const auto resolved = final_apply.find(
     "launch_session->resolved_profile_from_client",
     apply
   );
   const auto conflict = final_apply.find("return 409;", resolved);
+  ASSERT_NE(final_validity, std::string::npos);
+  ASSERT_NE(companion_match, std::string::npos);
   ASSERT_NE(apply, std::string::npos);
   ASSERT_NE(resolved, std::string::npos);
+  EXPECT_LT(final_validity, companion_match)
+    << "availability must be re-probed even when the companion state already matches";
   EXPECT_NE(conflict, std::string::npos);
   EXPECT_NE(
     final_apply.find("restore_prelaunch_display_policy();"),
+    std::string::npos
+  );
+  for (const auto *field : {"streaming_output", "primary_output"}) {
+    const auto snapshot = final_apply.find(
+      std::string {"initial_"} + field + " = linux_display." + field
+    );
+    const auto restore = final_apply.find(
+      std::string {"linux_display."} + field + " = initial_" + field,
+      snapshot
+    );
+    ASSERT_NE(snapshot, std::string::npos) << field;
+    EXPECT_NE(restore, std::string::npos) << field
+      << " must be restored if dongle auto-detection partially mutates then fails";
+  }
+}
+
+TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto client_settings = between(
+    nvhttp,
+    "auto polarisClientSettings =",
+    "auto polarisClientSupportReport ="
+  );
+  const auto lifecycle_lock = client_settings.find(
+    "proc::proc.acquire_session_lifecycle_lock()"
+  );
+  const auto controller_lock = client_settings.find(
+    "doctor_actions::acquire_paired_global_control("
+  );
+  const auto active_generation_gate = client_settings.find(
+    "proc::proc.running() != 0"
+  );
+  const auto topology_apply = client_settings.find(
+    "apply_stream_display_mode_selection("
+  );
+  const auto lifecycle_unlock = client_settings.find(
+    "topology_lifecycle_guard.unlock()"
+  );
+  ASSERT_NE(lifecycle_lock, std::string::npos);
+  ASSERT_NE(active_generation_gate, std::string::npos);
+  ASSERT_NE(controller_lock, std::string::npos);
+  ASSERT_NE(topology_apply, std::string::npos);
+  ASSERT_NE(lifecycle_unlock, std::string::npos);
+  EXPECT_LT(lifecycle_lock, controller_lock)
+    << "topology writers must preserve lifecycle-to-controller lock order";
+  EXPECT_LT(lifecycle_lock, active_generation_gate);
+  EXPECT_LT(active_generation_gate, controller_lock)
+    << "an installed process generation must reject topology mutation";
+  EXPECT_LT(controller_lock, topology_apply);
+  EXPECT_LT(topology_apply, lifecycle_unlock)
+    << "the lifecycle lock must cover the topology mutation";
+
+  const auto process = source("src/process.cpp");
+  EXPECT_NE(
+    process.find(
+      "std::unique_lock<std::recursive_mutex> proc_t::acquire_session_lifecycle_lock() const"
+    ),
     std::string::npos
   );
 }

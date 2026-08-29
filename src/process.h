@@ -742,6 +742,8 @@ namespace proc {
     std::string initial_stream_mode;
     std::string initial_private_runtime;
     std::string initial_headless_swap_mode;
+    std::string initial_streaming_output;
+    std::string initial_primary_output;
     std::string initial_capture;
     bool initial_headless_mode = false;
     bool initial_use_cage_compositor = false;
@@ -769,6 +771,7 @@ namespace proc {
     std::optional<std::uint64_t> capture_session_launch_generation() const;
     bool try_begin_session_launch(std::uint64_t expected_generation);
     void finish_session_launch();
+    std::unique_lock<std::recursive_mutex> acquire_session_lifecycle_lock() const;
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
