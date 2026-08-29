@@ -443,7 +443,7 @@ namespace doctor_actions {
       return stats.streaming && host_observation_fresh &&
         network_evidence_available && !stats.network_risk &&
         stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
-        !adaptive_bitrate::doctor_video_policy_blocks_quality_restore();
+        !adaptive_bitrate::doctor_policy_blocks_quality_restore();
     }
 
     nlohmann::json verification_window_json(
@@ -478,10 +478,10 @@ namespace doctor_actions {
         window.any_packet_loss_available : window.packet_loss_available;
       const double packet_loss = restoring_quality ? window.max_packet_loss : window.packet_loss;
       const double latency_ms = restoring_quality ? window.max_latency_ms : window.latency_ms;
-      const bool video_policy_clear = !restoring_quality ||
-        !adaptive_bitrate::doctor_video_policy_blocks_quality_restore();
+      const bool quality_policy_clear = !restoring_quality ||
+        !adaptive_bitrate::doctor_policy_blocks_quality_restore();
       return window.complete && required_media_arrived &&
-        video_policy_clear &&
+        quality_policy_clear &&
         !network_risk &&
         (!packet_loss_available || packet_loss <= 2.0) &&
         latency_ms < 45.0;
@@ -1178,10 +1178,7 @@ namespace doctor_actions {
       if (action_run.kind == action_kind_e::restore_quality) {
         const bool another_mutation_required =
           action_run.applied_bitrate_kbps < action_run.goal_bitrate_kbps;
-        // A cached watchdog pass is receipt history, not current authority.
-        // Every quality-restoration decision requires a complete, fresh,
-        // currently clean host-received window.
-        if (!current_verification_stable) {
+        const auto rollback_quality_restore = [&](std::string message) {
           const auto run_snapshot = action_run;
           const auto outcome = restore_bitrate_run_locked(action_run);
           if (outcome.status == restore_status_e::superseded) {
@@ -1199,7 +1196,7 @@ namespace doctor_actions {
             {"changed", true},
             {"run_id", run_id},
             {"state", "rolled_back"},
-            {"message", "Verification did not receive enough clean post-change loss and latency evidence, so Doctor automatically restored the prior live target."},
+            {"message", std::move(message)},
             {"restored_bitrate_kbps", outcome.bitrate_kbps},
             {"elapsed_seconds", elapsed_seconds},
             {"evidence", verification_evidence},
@@ -1208,6 +1205,14 @@ namespace doctor_actions {
           };
           remember_terminal_locked(run_snapshot, result);
           return terminal_action.result;
+        };
+        // A cached watchdog pass is receipt history, not current authority.
+        // Every quality-restoration decision requires a complete, fresh,
+        // currently clean host-received window.
+        if (!current_verification_stable) {
+          return rollback_quality_restore(
+            "Verification did not receive enough clean post-change loss, latency, and host video evidence, so Doctor automatically restored the prior live target."
+          );
         }
 
         if (another_mutation_required) {
@@ -1215,19 +1220,26 @@ namespace doctor_actions {
             action_run.applied_bitrate_kbps,
             action_run.goal_bitrate_kbps
           );
-          const auto next_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+          const auto next_apply = adaptive_bitrate::set_doctor_quality_bitrate_if_revision(
             action_run.controller_revision,
             next_bitrate_kbps,
             action_run.goal_bitrate_kbps
           );
-          if (!next_revision) {
+          if (next_apply.status ==
+              adaptive_bitrate::doctor_bitrate_apply_status_e::quality_policy_blocked) {
+            return rollback_quality_restore(
+              "Fresh network, host video, or capture evidence no longer supports a quality increase, so Doctor automatically restored the prior live target."
+            );
+          }
+          if (next_apply.status !=
+              adaptive_bitrate::doctor_bitrate_apply_status_e::applied) {
             const auto run_snapshot = action_run;
             action_run = action_run_t {};
             auto result = superseded_result(run_id);
             remember_terminal_locked(run_snapshot, result);
             return terminal_action.result;
           }
-          action_run.controller_revision = *next_revision;
+          action_run.controller_revision = next_apply.revision;
           action_run.applied_bitrate_kbps = next_bitrate_kbps;
           action_run.requested_at = std::chrono::steady_clock::now();
           action_run.applied_at = {};
@@ -1382,18 +1394,24 @@ namespace doctor_actions {
         run.goal_bitrate_kbps = goal_bitrate_kbps;
         run.verification_step = 1;
         run.requires_media_sample = false;
-        const auto applied_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+        const auto applied = adaptive_bitrate::set_doctor_quality_bitrate_if_revision(
           adaptive_state.revision,
           target_bitrate_kbps,
           goal_bitrate_kbps
         );
-        if (!applied_revision) {
+        if (applied.status !=
+            adaptive_bitrate::doctor_bitrate_apply_status_e::applied) {
+          const bool quality_policy_blocked = applied.status ==
+            adaptive_bitrate::doctor_bitrate_apply_status_e::quality_policy_blocked;
           return {
-            {"status", false}, {"changed", false}, {"state", "controller_changed"},
-            {"error", "The live bitrate controller changed while Doctor prepared this step. Recheck before applying it."}
+            {"status", false}, {"changed", false},
+            {"state", quality_policy_blocked ? "evidence_changed" : "controller_changed"},
+            {"error", quality_policy_blocked ?
+              "Network, host video, or capture evidence changed while Doctor prepared this step. Recheck before applying it." :
+              "The live bitrate controller changed while Doctor prepared this step. Recheck before applying it."}
           };
         }
-        run.controller_revision = *applied_revision;
+        run.controller_revision = applied.revision;
         run.requested_at = std::chrono::steady_clock::now();
         run.applied_at = {};
         run.network_sample_revision_at_apply =

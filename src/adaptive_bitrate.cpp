@@ -63,6 +63,11 @@ namespace adaptive_bitrate {
   // host video warning that suppresses it. Protected by state_mutex.
   static int doctor_video_policy_class = -1;
   static bool doctor_video_policy_regressed_during_override = false;
+  // A post-change network regression is verification evidence, not a
+  // competing controller writer. Keep it latched for the complete reversible
+  // transaction so a later clean sample cannot authorize another quality
+  // increase over an intervening bad observation. Protected by state_mutex.
+  static bool doctor_network_policy_regressed_during_override = false;
 
   // EWMA-smoothed network metrics
   static double ewma_packet_loss = 0.0;
@@ -107,6 +112,7 @@ namespace adaptive_bitrate {
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
     doctor_video_policy_regressed_during_override = false;
+    doctor_network_policy_regressed_during_override = false;
   }
 
   static int clamp_target(int target, int base) {
@@ -123,15 +129,20 @@ namespace adaptive_bitrate {
     return true;
   }
 
-  void note_network_evidence_arrival() {
+  void note_network_evidence_arrival(bool suppresses_quality_restore) {
     std::lock_guard<std::mutex> lock(state_mutex);
     // Post-change telemetry verifies the fixed Doctor target; it must not
     // supersede the transaction or its one-shot encoder rollback. Before
     // ownership begins, however, every host-received network observation
     // invalidates a controller snapshot so the initial mutation and evidence
     // publication share one monotonic transaction epoch.
-    if (doctor_override_active.load(std::memory_order_relaxed) ||
-        pending_live_update_active.load(std::memory_order_relaxed)) {
+    if (doctor_override_active.load(std::memory_order_relaxed)) {
+      if (suppresses_quality_restore) {
+        doctor_network_policy_regressed_during_override = true;
+      }
+      return;
+    }
+    if (pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
     }
     ++operator_revision;
@@ -162,10 +173,11 @@ namespace adaptive_bitrate {
     state_changed.notify_all();
   }
 
-  bool doctor_video_policy_blocks_quality_restore() {
+  bool doctor_policy_blocks_quality_restore() {
     std::lock_guard<std::mutex> lock(state_mutex);
     return doctor_video_policy_class == 1 ||
-      doctor_video_policy_regressed_during_override;
+      doctor_video_policy_regressed_during_override ||
+      doctor_network_policy_regressed_during_override;
   }
 
   void update_network_stats(double packet_loss_percent, double rtt_ms) {
@@ -410,14 +422,26 @@ namespace adaptive_bitrate {
     };
   }
 
-  std::optional<std::uint64_t> set_doctor_bitrate_if_revision(
+  static doctor_bitrate_apply_result_t apply_doctor_bitrate_if_revision_locked(
       std::uint64_t expected_revision,
       int target,
-      std::optional<int> temporary_max_bitrate_kbps) {
-    std::lock_guard<std::mutex> lock(state_mutex);
+      std::optional<int> temporary_max_bitrate_kbps,
+      bool require_quality_policy_clear) {
     if (operator_revision != expected_revision ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
-      return std::nullopt;
+      return {
+        doctor_bitrate_apply_status_e::controller_changed,
+        0,
+      };
+    }
+    if (require_quality_policy_clear &&
+        (doctor_video_policy_class == 1 ||
+         doctor_video_policy_regressed_during_override ||
+         doctor_network_policy_regressed_during_override)) {
+      return {
+        doctor_bitrate_apply_status_e::quality_policy_blocked,
+        0,
+      };
     }
 
     // Production encoder startup registers the launch bitrate explicitly.
@@ -435,6 +459,7 @@ namespace adaptive_bitrate {
     if (!doctor_override_active.load(std::memory_order_relaxed)) {
       doctor_previous_max_bitrate_kbps = current_config.max_bitrate_kbps;
       doctor_video_policy_regressed_during_override = false;
+      doctor_network_policy_regressed_during_override = false;
     }
     if (temporary_max_bitrate_kbps) {
       current_config.max_bitrate_kbps = std::max(
@@ -455,7 +480,38 @@ namespace adaptive_bitrate {
     set_controller_status("steady", "doctor_action");
     const auto revision = ++operator_revision;
     state_changed.notify_all();
-    return revision;
+    return {
+      doctor_bitrate_apply_status_e::applied,
+      revision,
+    };
+  }
+
+  std::optional<std::uint64_t> set_doctor_bitrate_if_revision(
+      std::uint64_t expected_revision,
+      int target,
+      std::optional<int> temporary_max_bitrate_kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    const auto result = apply_doctor_bitrate_if_revision_locked(
+      expected_revision,
+      target,
+      temporary_max_bitrate_kbps,
+      false
+    );
+    return result.status == doctor_bitrate_apply_status_e::applied ?
+      std::optional<std::uint64_t> {result.revision} : std::nullopt;
+  }
+
+  doctor_bitrate_apply_result_t set_doctor_quality_bitrate_if_revision(
+      std::uint64_t expected_revision,
+      int target,
+      std::optional<int> temporary_max_bitrate_kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return apply_doctor_bitrate_if_revision_locked(
+      expected_revision,
+      target,
+      temporary_max_bitrate_kbps,
+      true
+    );
   }
 
   std::optional<std::uint64_t> restore_doctor_state_if_revision(
@@ -691,6 +747,7 @@ namespace adaptive_bitrate {
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
     doctor_video_policy_regressed_during_override = false;
+    doctor_network_policy_regressed_during_override = false;
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
 
@@ -734,6 +791,7 @@ namespace adaptive_bitrate {
     encoder_applied_at = {};
     doctor_video_policy_class = -1;
     doctor_video_policy_regressed_during_override = false;
+    doctor_network_policy_regressed_during_override = false;
     ++operator_revision;
     state_changed.notify_all();
   }

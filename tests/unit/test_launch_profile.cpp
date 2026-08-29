@@ -3,36 +3,62 @@
 #include <src/launch_profile.h>
 
 TEST(LaunchProfileTests, NonLinuxTopologyUsesDeterministicPrecedence) {
-  EXPECT_EQ(
-    launch_profile::resolve_non_linux_topology(
-      "desktop_display", true, true, true
-    ),
-    "desktop_display"
+  const auto explicit_desktop = launch_profile::resolve_non_linux_topology(
+    "desktop_display", true, true, true, true, false
   );
-  EXPECT_EQ(
+  EXPECT_EQ(explicit_desktop.topology, "desktop_display");
+  EXPECT_FALSE(explicit_desktop.launch_owns_refresh_rate);
+  EXPECT_EQ(explicit_desktop.source, "client_launch_request");
+
+  const auto blank_explicit_desktop =
     launch_profile::resolve_non_linux_topology(
-      "desktop_display", false, true, false
-    ),
-    "host_virtual_display"
-  );
+      "", true, true, true, true, false
+    );
+  EXPECT_EQ(blank_explicit_desktop.topology, "desktop_display");
+  EXPECT_FALSE(blank_explicit_desktop.launch_owns_refresh_rate);
   EXPECT_EQ(
-    launch_profile::resolve_non_linux_topology(
-      "desktop_display", false, false, true
-    ),
-    "host_virtual_display"
+    blank_explicit_desktop.reason_code,
+    "explicit_desktop_lock"
   );
+
+  const auto paired_virtual = launch_profile::resolve_non_linux_topology(
+    "desktop_display", false, true, false, true, false
+  );
+  EXPECT_EQ(paired_virtual.topology, "host_virtual_display");
+  EXPECT_TRUE(paired_virtual.launch_owns_refresh_rate);
+  EXPECT_EQ(paired_virtual.source, "paired_client_settings");
+
+  const auto app_virtual = launch_profile::resolve_non_linux_topology(
+    "desktop_display", false, false, true, true, false
+  );
+  EXPECT_EQ(app_virtual.topology, "host_virtual_display");
+  EXPECT_TRUE(app_virtual.launch_owns_refresh_rate);
+  EXPECT_EQ(app_virtual.source, "app_configuration");
+
+  const auto unsupported_private = launch_profile::resolve_non_linux_topology(
+    "windowed_stream", true, false, false, true, false
+  );
+  EXPECT_EQ(unsupported_private.topology, "desktop_display");
+  EXPECT_FALSE(unsupported_private.launch_owns_refresh_rate);
+  EXPECT_TRUE(unsupported_private.normalized);
   EXPECT_EQ(
-    launch_profile::resolve_non_linux_topology(
-      "windowed_stream", false, false, false
-    ),
-    "windowed_stream"
+    unsupported_private.reason_code,
+    "unsupported_topology_normalized"
   );
-  EXPECT_EQ(
-    launch_profile::resolve_non_linux_topology(
-      "", false, false, false
-    ),
-    "desktop_display"
+
+  const auto desktop_only = launch_profile::resolve_non_linux_topology(
+    "host_virtual_display", true, true, true, false, false
   );
+  EXPECT_EQ(desktop_only.topology, "desktop_display");
+  EXPECT_FALSE(desktop_only.launch_owns_refresh_rate);
+  EXPECT_TRUE(desktop_only.normalized);
+
+  const auto forced_virtual = launch_profile::resolve_non_linux_topology(
+    "desktop_display", true, false, false, true, true
+  );
+  EXPECT_EQ(forced_virtual.topology, "host_virtual_display");
+  EXPECT_TRUE(forced_virtual.launch_owns_refresh_rate);
+  EXPECT_EQ(forced_virtual.reason_code, "host_requires_virtual_display");
 }
 
 TEST(LaunchProfileTests, AutoPreservesUnlockedClientRequestWithoutDeviceMutation) {

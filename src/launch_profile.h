@@ -57,13 +57,23 @@ namespace launch_profile {
     nlohmann::json fields = nlohmann::json::object();
   };
 
+  struct non_linux_topology_resolution_t {
+    std::string topology = "desktop_display";
+    bool launch_owns_refresh_rate = false;
+    std::string source = "host_capability";
+    std::string reason_code = "platform_desktop_only";
+    bool normalized = false;
+  };
+
   std::string normalize_preset(std::string preset);
   std::string preset_label(const std::string &preset);
-  std::string resolve_non_linux_topology(
+  non_linux_topology_resolution_t resolve_non_linux_topology(
     const std::string &requested_topology,
     bool topology_locked,
     bool paired_always_virtual,
-    bool app_virtual_display
+    bool app_virtual_display,
+    bool virtual_display_supported,
+    bool host_requires_virtual_display
   );
   resolution_t resolve(const request_t &request);
 

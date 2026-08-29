@@ -61,6 +61,18 @@ namespace adaptive_bitrate {
     std::uint64_t revision = 0;
   };
 
+  enum class doctor_bitrate_apply_status_e {
+    applied,
+    controller_changed,
+    quality_policy_blocked,
+  };
+
+  struct doctor_bitrate_apply_result_t {
+    doctor_bitrate_apply_status_e status =
+      doctor_bitrate_apply_status_e::controller_changed;
+    std::uint64_t revision = 0;
+  };
+
   /** One encoder-visible bitrate request owned by a controller revision. */
   struct live_bitrate_request_t {
     int target_bitrate_kbps = 0;
@@ -83,7 +95,7 @@ namespace adaptive_bitrate {
    * elapsed. Evidence remains observational once Doctor or its rollback owns
    * the actuator.
    */
-  void note_network_evidence_arrival();
+  void note_network_evidence_arrival(bool suppresses_quality_restore);
 
   /**
    * @brief Linearize a transition in host video evidence that can suppress a
@@ -103,7 +115,7 @@ namespace adaptive_bitrate {
    * A warning observed while Doctor owns the actuator remains latched until
    * that reversible transaction ends, even if a later sample looks clean.
    */
-  bool doctor_video_policy_blocks_quality_restore();
+  bool doctor_policy_blocks_quality_restore();
 
   /**
    * @brief Feed local stream health so bitrate can react to host pacing pressure.
@@ -140,6 +152,21 @@ namespace adaptive_bitrate {
    * restore it.
    */
   std::optional<std::uint64_t> set_doctor_bitrate_if_revision(
+    std::uint64_t expected_revision,
+    int target_bitrate_kbps,
+    std::optional<int> max_bitrate_kbps = std::nullopt
+  );
+
+  /**
+   * Atomically apply one guarded quality-restoration step only if the
+   * controller revision and Doctor network/video/capture policy remain
+   * eligible.
+   *
+   * The distinct quality_policy_blocked result lets the caller roll back the
+   * Doctor-owned transaction instead of treating fresh warning evidence as
+   * an unrelated controller supersession.
+   */
+  doctor_bitrate_apply_result_t set_doctor_quality_bitrate_if_revision(
     std::uint64_t expected_revision,
     int target_bitrate_kbps,
     std::optional<int> max_bitrate_kbps = std::nullopt

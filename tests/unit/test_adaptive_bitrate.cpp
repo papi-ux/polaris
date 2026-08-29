@@ -81,7 +81,7 @@ TEST(AdaptiveBitrateController, HostEvidenceInsideAdjustmentIntervalInvalidatesA
   const auto before_observation = adaptive_bitrate::get_doctor_state();
   // Production publishes the host evidence epoch before feeding the adaptive
   // loop. No interval sleep is intentional: this covers the early-return path.
-  adaptive_bitrate::note_network_evidence_arrival();
+  adaptive_bitrate::note_network_evidence_arrival(true);
   adaptive_bitrate::update_network_stats(0.0, 55.0);
 
   const auto after_observation = adaptive_bitrate::get_doctor_state();
@@ -105,7 +105,7 @@ TEST(AdaptiveBitrateController, VerificationEvidenceDoesNotSupersedeAnOwnedDocto
   );
   ASSERT_TRUE(doctor_revision.has_value());
 
-  adaptive_bitrate::note_network_evidence_arrival();
+  adaptive_bitrate::note_network_evidence_arrival(false);
 
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, *doctor_revision);
   EXPECT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
@@ -128,14 +128,70 @@ TEST(AdaptiveBitrateController, VideoRegressionRemainsLatchedForADoctorTransacti
 
   adaptive_bitrate::note_doctor_video_policy_evidence(true);
   adaptive_bitrate::note_doctor_video_policy_evidence(false);
-  EXPECT_TRUE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, *doctor_revision);
+
+  const auto blocked_step =
+    adaptive_bitrate::set_doctor_quality_bitrate_if_revision(
+      *doctor_revision,
+      18000,
+      before.max_bitrate_kbps
+    );
+  EXPECT_EQ(
+    blocked_step.status,
+    adaptive_bitrate::doctor_bitrate_apply_status_e::quality_policy_blocked
+  );
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, *doctor_revision);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
 
   EXPECT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
     *doctor_revision,
     before
   ).has_value());
-  EXPECT_FALSE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  adaptive_bitrate::reset();
+}
+
+TEST(AdaptiveBitrateController, NetworkRegressionBlocksTheNextDoctorQualityStep) {
+  enable_controller();
+  adaptive_bitrate::note_doctor_video_policy_evidence(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  const auto doctor_revision =
+    adaptive_bitrate::set_doctor_quality_bitrate_if_revision(
+      before.revision,
+      16000,
+      before.max_bitrate_kbps
+    );
+  ASSERT_EQ(
+    doctor_revision.status,
+    adaptive_bitrate::doctor_bitrate_apply_status_e::applied
+  );
+
+  adaptive_bitrate::note_network_evidence_arrival(true);
+  adaptive_bitrate::note_network_evidence_arrival(false);
+  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  EXPECT_EQ(
+    adaptive_bitrate::get_doctor_state().revision,
+    doctor_revision.revision
+  );
+
+  const auto blocked_step =
+    adaptive_bitrate::set_doctor_quality_bitrate_if_revision(
+      doctor_revision.revision,
+      18000,
+      before.max_bitrate_kbps
+    );
+  EXPECT_EQ(
+    blocked_step.status,
+    adaptive_bitrate::doctor_bitrate_apply_status_e::quality_policy_blocked
+  );
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+
+  EXPECT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
+    doctor_revision.revision,
+    before
+  ).has_value());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
   adaptive_bitrate::reset();
 }
 

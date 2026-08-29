@@ -573,7 +573,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
     platf::frame_format_e::nv12
   );
   const auto gpu_revision = adaptive_bitrate::get_doctor_state().revision;
-  EXPECT_FALSE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
 
   stream_stats::update_capture_metadata(platf::frame_metadata_t {
     .transport = platf::frame_transport_e::dmabuf,
@@ -587,7 +587,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
   });
   const auto fallback_revision = adaptive_bitrate::get_doctor_state().revision;
   EXPECT_GT(fallback_revision, gpu_revision);
-  EXPECT_TRUE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
   const auto fallback_stats = stream_stats::get_current();
   EXPECT_EQ(fallback_stats.capture_transport, platf::frame_transport_e::shm);
   EXPECT_EQ(fallback_stats.capture_residency, platf::frame_residency_e::cpu);
@@ -598,7 +598,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
   });
   const auto recovered_revision = adaptive_bitrate::get_doctor_state().revision;
   EXPECT_GT(recovered_revision, fallback_revision);
-  EXPECT_FALSE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
 
   stream_stats::update_encode_path_metadata(
     "cpu",
@@ -606,7 +606,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
     platf::frame_format_e::nv12
   );
   EXPECT_GT(adaptive_bitrate::get_doctor_state().revision, recovered_revision);
-  EXPECT_TRUE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
 
   stream_stats::update_stream_active(false);
   adaptive_bitrate::reset();

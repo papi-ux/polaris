@@ -620,6 +620,9 @@ namespace nvhttp {
       const std::string &requested_topology,
       const std::string &resolved_topology,
       bool topology_locked,
+      const std::string &source,
+      const std::string &reason_code,
+      bool normalized,
       bool mirror_desktop_requested,
       bool force_private_requested,
       const std::optional<proc::ctx_t> &app
@@ -628,6 +631,9 @@ namespace nvhttp {
         {"requested", requested_topology.empty() ? "host_default" : requested_topology},
         {"resolved", resolved_topology},
         {"locked", topology_locked},
+        {"source", source},
+        {"reason_code", reason_code},
+        {"normalized", normalized},
         {"mirror_desktop_requested", mirror_desktop_requested},
         {"force_private_after_steam_close_requested", force_private_requested},
         {"app_uuid", app ? app->uuid : std::string {}},
@@ -894,26 +900,33 @@ namespace nvhttp {
                                               bool prefers_headless) {
       // preferred_mode reflects the per-game stored preference; recommended_mode reflects
       // the Polaris-supported launch mode clients should choose for this host right now.
-      const std::string preferred_mode = app_prefers_virtual_display ? "host_virtual_display" : "headless_stream";
-      std::string recommended_mode = preferred_mode;
+      std::string preferred_mode;
+      std::string recommended_mode;
       std::string mode_reason;
 
       auto allowed_modes = nlohmann::json::array();
 #ifdef __linux__
+      preferred_mode = app_prefers_virtual_display ?
+        "host_virtual_display" : "headless_stream";
       for (const auto &mode : stream_display_policy::allowed_launch_modes(virtual_display_available, false)) {
         allowed_modes.push_back(mode);
       }
-#else
-      allowed_modes.push_back("headless_stream");
+#elif defined(_WIN32)
+      preferred_mode = app_prefers_virtual_display && virtual_display_available ?
+        "host_virtual_display" : "desktop_display";
       allowed_modes.push_back("desktop_display");
-      allowed_modes.push_back("windowed_stream");
       if (virtual_display_available) {
         allowed_modes.push_back("host_virtual_display");
       }
+#else
+      preferred_mode = "desktop_display";
+      allowed_modes.push_back("desktop_display");
 #endif
+      recommended_mode = preferred_mode;
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(std::string {app_name}), "Steam Big Picture");
 
+#ifdef __linux__
       if (prefers_headless) {
         recommended_mode = "headless_stream";
         if (steam_big_picture) {
@@ -942,6 +955,29 @@ namespace nvhttp {
         mode_reason =
           "This app defaults to Private Stream on this host.";
       }
+#elif defined(_WIN32)
+      (void) prefers_headless;
+      (void) steam_big_picture;
+      if (app_prefers_virtual_display && virtual_display_available) {
+        recommended_mode = "host_virtual_display";
+        mode_reason =
+          "This app is configured to prefer a dedicated virtual display on this Windows host.";
+      } else if (app_prefers_virtual_display) {
+        recommended_mode = "desktop_display";
+        mode_reason =
+          "This app prefers a virtual display, but the Windows virtual-display backend is unavailable; Polaris will mirror the desktop.";
+      } else {
+        recommended_mode = "desktop_display";
+        mode_reason = "Polaris will mirror the current Windows desktop session.";
+      }
+#else
+      (void) app_prefers_virtual_display;
+      (void) virtual_display_available;
+      (void) prefers_headless;
+      (void) steam_big_picture;
+      recommended_mode = "desktop_display";
+      mode_reason = "This Polaris build supports desktop mirroring only.";
+#endif
 
       nlohmann::json launch_mode;
       launch_mode["preferred_mode"] = preferred_mode;
@@ -6613,7 +6649,14 @@ namespace nvhttp {
           compat["simple_state"] = "Needs attention";
         }
       }
-      if (doctor_v2::trials_enabled() && owned_by_client && !status_snapshot.game_uuid.empty()) {
+      if (!doctor_v2::trials_enabled()) {
+        output["doctor_trial"] = {
+          {"status", false}, {"changed", false}, {"enabled", false},
+          {"state", "disabled"}, {"code", "doctor_trials_disabled"},
+          {"cancellable", false}, {"one_shot", true},
+          {"becomes_policy_automatically", false}
+        };
+      } else if (owned_by_client && !status_snapshot.game_uuid.empty()) {
         doctor_trial::effective_settings_t trial_settings {
           .topology = stream_display_mode,
           .width = stats.width,
@@ -8031,6 +8074,20 @@ namespace nvhttp {
         }
       };
 
+      if (!doctor_v2::trials_enabled()) {
+        write_json(
+          request->method == "GET" ?
+            SimpleWeb::StatusCode::success_ok :
+            SimpleWeb::StatusCode::client_error_conflict,
+          {
+            {"status", false}, {"changed", false}, {"state", "disabled"},
+            {"code", "doctor_trials_disabled"}, {"cancellable", false},
+            {"one_shot", true}, {"becomes_policy_automatically", false}
+          }
+        );
+        return;
+      }
+
       if (request->method == "GET") {
         auto query = request->parse_query_string();
         const auto requested_app = query.count("app_uuid") ? query.find("app_uuid")->second : std::string {};
@@ -8085,13 +8142,6 @@ namespace nvhttp {
         return;
       }
 
-      if (!doctor_v2::trials_enabled()) {
-        write_json(SimpleWeb::StatusCode::client_error_conflict, {
-          {"status", false}, {"changed", false}, {"state", "disabled"},
-          {"code", "doctor_trials_disabled"}
-        });
-        return;
-      }
       if (!proc::proc.is_session_owner(named_cert_p->uuid) || running_app.empty() || app_uuid != running_app) {
         write_json(SimpleWeb::StatusCode::client_error_forbidden, {
           {"status", false}, {"changed", false}, {"state", "rejected"},
@@ -9039,6 +9089,9 @@ namespace nvhttp {
       const auto optimization_app = find_app_for_optimization_game(game);
       bool launch_owned_display = false;
       std::string resolved_topology = requested_topology;
+      std::string topology_source = "host_configuration";
+      std::string topology_reason_code = "host_default_topology";
+      bool topology_normalized = false;
       bool mirror_desktop_requested = false;
       bool force_private_requested = false;
 #if defined(__linux__)
@@ -9065,18 +9118,49 @@ namespace nvhttp {
       resolved_topology = effective_selection;
       launch_owned_display =
         stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
+      if (mirror_desktop) {
+        topology_source = mirror_desktop_requested ?
+          "client_launch_request" : "app_configuration";
+        topology_reason_code = mirror_desktop_requested ?
+          "explicit_mirror_desktop" : "app_desktop_mirror_semantics";
+      } else if (paired_virtual_lock) {
+        topology_source = "paired_client_settings";
+        topology_reason_code = "paired_always_virtual_display";
+      } else if (topology_locked && !requested_topology.empty()) {
+        topology_source = "client_launch_request";
+        topology_reason_code = "explicit_topology_lock";
+      } else if (app_virtual_display &&
+                 effective_selection == stream_display_policy::k_host_virtual_display) {
+        topology_source = "app_configuration";
+        topology_reason_code = "app_virtual_display_default";
+      } else if (!requested_topology.empty()) {
+        topology_source = "client_launch_request";
+        topology_reason_code = "unlocked_topology_request";
+      }
+      topology_normalized = !requested_topology.empty() &&
+        resolved_topology != requested_topology;
 #else
-      resolved_topology = launch_profile::resolve_non_linux_topology(
+      bool virtual_display_supported = false;
+      bool host_requires_virtual_display = false;
+#if defined(_WIN32)
+      virtual_display_supported = host_virtual_display_available();
+      host_requires_virtual_display =
+        config::video.linux_display.headless_mode ||
+        !video::allow_encoder_probing();
+#endif
+      const auto topology = launch_profile::resolve_non_linux_topology(
         requested_topology,
         topology_locked,
         named_cert_p->always_use_virtual_display,
-        optimization_app && optimization_app->virtual_display
+        optimization_app && optimization_app->virtual_display,
+        virtual_display_supported,
+        host_requires_virtual_display
       );
-      launch_owned_display =
-        resolved_topology == "host_virtual_display" ||
-        resolved_topology == "headless_stream" ||
-        resolved_topology == "windowed_stream" ||
-        resolved_topology == "gamescope_stream";
+      resolved_topology = topology.topology;
+      launch_owned_display = topology.launch_owns_refresh_rate;
+      topology_source = topology.source;
+      topology_reason_code = topology.reason_code;
+      topology_normalized = topology.normalized;
 #endif
       launch_profile::request_t preset_request;
       preset_request.device_name = device;
@@ -9139,6 +9223,9 @@ namespace nvhttp {
           requested_topology,
           resolved_topology,
           topology_locked,
+          topology_source,
+          topology_reason_code,
+          topology_normalized,
           mirror_desktop_requested,
           force_private_requested,
           optimization_app

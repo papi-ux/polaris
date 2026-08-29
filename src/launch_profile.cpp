@@ -116,21 +116,113 @@ namespace launch_profile {
     return "Auto";
   }
 
-  std::string resolve_non_linux_topology(
+  non_linux_topology_resolution_t resolve_non_linux_topology(
       const std::string &requested_topology,
       bool topology_locked,
       bool paired_always_virtual,
-      bool app_virtual_display) {
+      bool app_virtual_display,
+      bool virtual_display_supported,
+      bool host_requires_virtual_display) {
+    non_linux_topology_resolution_t result;
+    const auto finish = [&](std::string topology,
+                            bool launch_owned,
+                            std::string source,
+                            std::string reason_code) {
+      result.topology = std::move(topology);
+      result.launch_owns_refresh_rate = launch_owned;
+      result.source = std::move(source);
+      result.reason_code = std::move(reason_code);
+      result.normalized = !requested_topology.empty() &&
+        result.topology != requested_topology;
+      return result;
+    };
+
+    // macOS and other desktop-only builds do not consume streamMode or create
+    // a launch-owned display. Normalize every unsupported/private request to
+    // the physical desktop so /optimize and final launch validation agree.
+    if (!virtual_display_supported) {
+      if (topology_locked &&
+          (requested_topology.empty() || requested_topology == "desktop_display")) {
+        return finish(
+          "desktop_display", false,
+          "client_launch_request", requested_topology.empty() ?
+            "explicit_desktop_lock" : "explicit_topology_lock"
+        );
+      }
+      return finish(
+        "desktop_display", false,
+        "host_capability", requested_topology.empty() ?
+          "platform_default_desktop" : "unsupported_topology_normalized"
+      );
+    }
+
+    // Windows may need to create a virtual display when no probeable physical
+    // output exists. This hard host semantic wins before launch preferences.
+    if (host_requires_virtual_display) {
+      return finish(
+        "host_virtual_display", true,
+        "host_capability", "host_requires_virtual_display"
+      );
+    }
+
+    // Nova's legacy-compatible wire uses a blank streamMode plus
+    // displayModeExplicit=1/virtualDisplay=0 for an explicit desktop choice.
+    // Preserve that lock before paired or app virtual-display defaults.
+    if (topology_locked && requested_topology.empty()) {
+      return finish(
+        "desktop_display", false,
+        "client_launch_request", "explicit_desktop_lock"
+      );
+    }
+
     if (topology_locked && !requested_topology.empty()) {
-      return requested_topology;
+      if (requested_topology == "host_virtual_display") {
+        return finish(
+          "host_virtual_display", true,
+          "client_launch_request", "explicit_topology_lock"
+        );
+      }
+      if (requested_topology == "desktop_display") {
+        return finish(
+          "desktop_display", false,
+          "client_launch_request", "explicit_topology_lock"
+        );
+      }
+      return finish(
+        "desktop_display", false,
+        "host_capability", "unsupported_topology_normalized"
+      );
     }
     if (paired_always_virtual || app_virtual_display) {
-      return "host_virtual_display";
+      return finish(
+        "host_virtual_display", true,
+        paired_always_virtual ? "paired_client_settings" : "app_configuration",
+        paired_always_virtual ?
+          "paired_always_virtual_display" : "app_virtual_display_default"
+      );
     }
     if (!requested_topology.empty()) {
-      return requested_topology;
+      if (requested_topology == "host_virtual_display") {
+        return finish(
+          "host_virtual_display", true,
+          "client_launch_request", "unlocked_topology_request"
+        );
+      }
+      if (requested_topology == "desktop_display") {
+        return finish(
+          "desktop_display", false,
+          "client_launch_request", "unlocked_topology_request"
+        );
+      }
+      return finish(
+        "desktop_display", false,
+        "host_capability", "unsupported_topology_normalized"
+      );
     }
-    return "desktop_display";
+    return finish(
+      "desktop_display", false,
+      "host_configuration", "host_default_topology"
+    );
   }
 
   resolution_t resolve(const request_t &request) {

@@ -447,7 +447,9 @@
         "Exact app and topology identity bound to a deterministic optimize result.",
         "Nova rejects a preflight or fresh result unless the canonical app id,",
         "host-default or explicit topology request, lock state, and Steam desktop",
-        "choice all match the launch that will consume it."
+        "choice all match the launch that will consume it. Source, reason, and",
+        "normalization metadata make paired, app, and host capability decisions",
+        "auditable without allowing them to become client-authored policy."
       ],
       "fields": [
         "app_id",
@@ -455,8 +457,11 @@
         "force_private_after_steam_close_requested",
         "locked",
         "mirror_desktop_requested",
+        "normalized",
+        "reason_code",
         "requested",
-        "resolved"
+        "resolved",
+        "source"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/manager/LaunchTopologyEnvelope.kt",
