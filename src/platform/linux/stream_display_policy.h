@@ -83,6 +83,17 @@ namespace stream_display_policy {
     std::string_view current_capture
   );
 
+  /**
+   * @brief Whether Host Virtual Display creates a new output connector.
+   *
+   * KScreen manages an existing connector. EVDI and wlroots create their own
+   * output, so carrying a dongle connector into those backends would leak game
+   * placement and capture authority from the previous topology.
+   */
+  bool host_virtual_backend_creates_output(
+    virtual_display::backend_e backend
+  );
+
   /** Stable selection ids — SoT is stream_path (no dual string tables). */
   constexpr std::string_view k_headless_stream = stream_path::k_headless_stream;
   constexpr std::string_view k_windowed_stream = stream_path::k_windowed_stream;

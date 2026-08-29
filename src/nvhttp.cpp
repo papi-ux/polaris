@@ -5613,7 +5613,10 @@ namespace nvhttp {
       if (!launch_cage_refresh_reapply_attempted || prior_launch_cage_refresh_hz <= 0) {
         return;
       }
-      if (!stream_runtime::labwc::ensure_output_refresh(prior_launch_cage_refresh_hz * 1000)) {
+      if (!stream_runtime::labwc::ensure_output_refresh(
+            prior_launch_cage_refresh_hz * 1000,
+            false
+          )) {
         BOOST_LOG(error) << "nvhttp: Failed to restore the prior cage refresh after rejected same-app launch"sv;
       }
       stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
@@ -5727,8 +5730,19 @@ namespace nvhttp {
         }
 
         const auto active_profile_is_valid = [&]() {
+#ifdef __linux__
+          const bool exact_private_refresh_reapply_will_run =
+            !watch_only && launch_session->resolved_profile_from_client &&
+            no_active_sessions && config::video.linux_display.use_cage_compositor &&
+            stream_runtime::labwc::is_running();
+#else
+          const bool exact_private_refresh_reapply_will_run = false;
+#endif
           const auto validation_error =
-            proc::proc.validate_resolved_profile_for_running_app(launch_session);
+            proc::proc.validate_resolved_profile_for_running_app(
+              launch_session,
+              exact_private_refresh_reapply_will_run
+            );
           if (!validation_error) {
             return true;
           }
@@ -5774,7 +5788,7 @@ namespace nvhttp {
           prior_launch_cage_refresh_hz = stream_runtime::labwc::current_output_refresh_hz();
           launch_cage_refresh_reapply_attempted = prior_launch_cage_refresh_hz > 0;
           const bool launch_cage_refresh_applied =
-            stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
+            stream_runtime::labwc::ensure_output_refresh(launch_session->fps, false);
           stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
           if (!launch_cage_refresh_applied) {
             tree.put("root.resume", 0);
@@ -6054,8 +6068,19 @@ namespace nvhttp {
       }
     }
 
+#ifdef __linux__
+    const bool exact_private_refresh_reapply_will_run =
+      !watch_only && launch_session->resolved_profile_from_client &&
+      no_active_sessions && config::video.linux_display.use_cage_compositor &&
+      stream_runtime::labwc::is_running();
+#else
+    const bool exact_private_refresh_reapply_will_run = false;
+#endif
     if (const auto validation_error =
-          proc::proc.validate_resolved_profile_for_running_app(launch_session)) {
+          proc::proc.validate_resolved_profile_for_running_app(
+            launch_session,
+            exact_private_refresh_reapply_will_run
+          )) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", validation_error);
       tree.put(
@@ -6085,7 +6110,10 @@ namespace nvhttp {
       if (!cage_refresh_reapply_attempted || prior_cage_refresh_hz <= 0) {
         return;
       }
-      if (!stream_runtime::labwc::ensure_output_refresh(prior_cage_refresh_hz * 1000)) {
+      if (!stream_runtime::labwc::ensure_output_refresh(
+            prior_cage_refresh_hz * 1000,
+            false
+          )) {
         BOOST_LOG(error) << "nvhttp: Failed to restore the prior cage refresh after rejected resume"sv;
       }
       stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
@@ -6099,7 +6127,10 @@ namespace nvhttp {
       prior_cage_refresh_hz = stream_runtime::labwc::current_output_refresh_hz();
       cage_refresh_reapply_attempted = prior_cage_refresh_hz > 0;
       const bool cage_refresh_applied =
-        stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
+        stream_runtime::labwc::ensure_output_refresh(
+          launch_session->fps,
+          !launch_session->resolved_profile_from_client
+        );
       stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
       if (!cage_refresh_applied && launch_session->resolved_profile_from_client) {
         tree.put("root.resume", 0);
@@ -7179,8 +7210,15 @@ namespace nvhttp {
 
           std::optional<std::string> stream_display_mode;
           if (body.contains("stream_display_mode")) {
+            const auto reject_stream_display_mode = [&](const std::string &message) {
+              write_json(
+                {{"status", false}, {"changed", false}, {"state", "rejected"},
+                 {"code", "invalid_or_unavailable_topology"}, {"error", message}},
+                SimpleWeb::StatusCode::client_error_bad_request
+              );
+            };
             if (!body["stream_display_mode"].is_string()) {
-              write_json({{"error", "stream_display_mode must be a string"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              reject_stream_display_mode("stream_display_mode must be a string");
               return;
             }
 
@@ -7193,7 +7231,7 @@ namespace nvhttp {
             // four ids and 400 gamescope_stream/headless_dongle). The error is
             // the host's real reason for registered-but-unavailable modes.
             if (!stream_display_policy::selection_valid_fresh(*stream_display_mode, error)) {
-              write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
+              reject_stream_display_mode(error);
               return;
             }
 #else
@@ -7202,7 +7240,7 @@ namespace nvhttp {
                 *stream_display_mode != "host_virtual_display" &&
                 *stream_display_mode != "windowed_stream") {
               error = "stream_display_mode must be headless_stream, desktop_display, host_virtual_display, or windowed_stream";
-              write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
+              reject_stream_display_mode(error);
               return;
             }
 #endif

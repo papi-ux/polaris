@@ -6424,6 +6424,18 @@ namespace proc {
 #endif
   }
 
+#ifdef __linux__
+  bool resolved_reconnect_cadence_allowed(
+      bool launch_owns_refresh_rate,
+      int requested_fps,
+      int active_fps,
+      bool exact_private_refresh_reapply_will_run) {
+    return !launch_owns_refresh_rate ||
+           requested_fps == active_fps ||
+           exact_private_refresh_reapply_will_run;
+  }
+#endif
+
   namespace {
     int validate_resolved_launch_profile_for_app(
         const ctx_t &app,
@@ -6529,7 +6541,8 @@ namespace proc {
   }
 
   int proc_t::validate_resolved_profile_for_running_app(
-      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session) {
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+      bool exact_private_refresh_reapply_will_run) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return 503;
@@ -6567,6 +6580,22 @@ namespace proc {
           requested_topology != launch_session->expected_stream_mode ||
           active_topology != launch_session->expected_stream_mode) {
         BOOST_LOG(warning) << "process: rejecting resolved resume profile whose expected topology does not match the active app generation"sv;
+        return 409;
+      }
+      const bool active_labwc_refresh_reapply_will_run =
+        exact_private_refresh_reapply_will_run &&
+        _session_used_cage_compositor &&
+        !_session_used_gamescope_runtime &&
+        (active_topology == stream_display_policy::k_headless_stream ||
+         active_topology == stream_display_policy::k_windowed_stream);
+      if (!launch_session->watch_only &&
+          !resolved_reconnect_cadence_allowed(
+            stream_display_policy::selection_owns_launch_refresh_rate(active_topology),
+            launch_session->requested_fps,
+            _launch_session->fps,
+            active_labwc_refresh_reapply_will_run
+          )) {
+        BOOST_LOG(warning) << "process: rejecting exact reconnect cadence change because the active launch-owned output cannot apply and verify it"sv;
         return 409;
       }
 #else
@@ -8866,6 +8895,10 @@ namespace proc {
       while (waitpid(-1, nullptr, WNOHANG) > 0);
     });
 #endif
+
+    if (_app_id == 0) {
+      return 0;
+    }
 
     if (placebo) {
       return _app_id;

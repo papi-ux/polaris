@@ -1406,11 +1406,17 @@ namespace cage_display_router {
     return session_fps;
   }
 
-  int resolve_resume_refresh_hz(int session_fps, int recorded_ceiling_hz) {
+  int resolve_resume_refresh_hz(
+      int session_fps,
+      int recorded_ceiling_hz,
+      bool respect_recorded_ceiling) {
     const int refresh_hz = normalize_session_refresh_hz(session_fps);
-    if (refresh_hz > 0 && recorded_ceiling_hz > 0 && refresh_hz > recorded_ceiling_hz) {
+    if (respect_recorded_ceiling &&
+        refresh_hz > 0 && recorded_ceiling_hz > 0 &&
+        refresh_hz > recorded_ceiling_hz) {
       // The launch deliberately ran below the client's request; a resume
-      // carrying the raw request must not out-vote that decision.
+      // carrying the legacy raw request must not out-vote that decision. An
+      // exact resolved profile has already made that decision and bypasses it.
       return recorded_ceiling_hz;
     }
     return refresh_hz;
@@ -1420,7 +1426,9 @@ namespace cage_display_router {
     return cage_mode_refresh_hz.load(std::memory_order_acquire);
   }
 
-  bool ensure_output_refresh(int session_fps) {
+  bool ensure_output_refresh(
+      int session_fps,
+      bool respect_recorded_ceiling) {
     if (cage_pid <= 0 || cage_wayland_socket.empty() || !is_running()) {
       return false;
     }
@@ -1432,7 +1440,11 @@ namespace cage_display_router {
       // resume); claiming success here would silently drop the re-apply.
       return false;
     }
-    const int refresh_hz = resolve_resume_refresh_hz(session_fps, cage_mode_refresh_ceiling_hz);
+    const int refresh_hz = resolve_resume_refresh_hz(
+      session_fps,
+      cage_mode_refresh_ceiling_hz,
+      respect_recorded_ceiling
+    );
     if (refresh_hz <= 0) {
       return false;
     }

@@ -93,10 +93,14 @@ namespace stream_runtime {
 
     /**
      * Re-apply the running cage's output refresh for a resuming session
-     * (millihertz-aware); the launch-time resolution is kept. See
+     * (millihertz-aware); the launch-time resolution is kept and the old
+     * request ceiling is optional for exact resolved profiles. See
      * cage_display_router::ensure_output_refresh (issue #367).
      */
-    bool ensure_output_refresh(int session_fps);
+    bool ensure_output_refresh(
+      int session_fps,
+      bool respect_recorded_ceiling = true
+    );
 
     bool should_attempt_windowed_gpu_native_probe(
       bool requested_headless,

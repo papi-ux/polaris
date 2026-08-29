@@ -2471,6 +2471,23 @@ TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCag
 #endif
 }
 
+TEST(ProcessRuntimeConfigTests, ExactReconnectCadenceNeedsAnAppliedLaunchOwnedOutput) {
+#ifdef __linux__
+  using proc::resolved_reconnect_cadence_allowed;
+
+  EXPECT_TRUE(resolved_reconnect_cadence_allowed(false, 120000, 60000, false))
+    << "desktop streams may change encoder cadence without changing an owned output";
+  EXPECT_TRUE(resolved_reconnect_cadence_allowed(true, 60000, 60000, false))
+    << "an unchanged exact target is already represented by the active generation";
+  EXPECT_TRUE(resolved_reconnect_cadence_allowed(true, 120000, 60000, true))
+    << "a surviving labwc output may change cadence when the route applies and reads it back";
+  EXPECT_FALSE(resolved_reconnect_cadence_allowed(true, 120000, 60000, false))
+    << "Host Virtual and Gamescope must not claim an unapplied cadence change";
+#else
+  GTEST_SKIP() << "Linux-only exact reconnect cadence policy";
+#endif
+}
+
 TEST(ProcessRuntimeConfigTests, ExternalCageRouterResetDoesNotSignalLiveProcess) {
 #ifdef __linux__
   const auto child = fork();

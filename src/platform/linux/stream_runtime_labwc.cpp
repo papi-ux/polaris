@@ -84,8 +84,13 @@ namespace stream_runtime {
       return cage_display_router::current_output_refresh_hz();
     }
 
-    bool ensure_output_refresh(int session_fps) {
-      return cage_display_router::ensure_output_refresh(session_fps);
+    bool ensure_output_refresh(
+        int session_fps,
+        bool respect_recorded_ceiling) {
+      return cage_display_router::ensure_output_refresh(
+        session_fps,
+        respect_recorded_ceiling
+      );
     }
 
     // Trivial AND/negation helpers live here only (not dual-exported via cage).

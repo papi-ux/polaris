@@ -462,6 +462,39 @@ TEST(StreamDisplayPolicyTests, SuccessfulDurableSwitchRetiresOwnedDongleCaptureT
   EXPECT_EQ(config::video.capture, "portal");
 }
 
+TEST(StreamDisplayPolicyTests, HostVirtualKeepsAConfiguredConnectorOnlyForKScreen) {
+  EXPECT_FALSE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::KSCREEN_DOCTOR
+  ));
+  EXPECT_TRUE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::EVDI
+  ));
+  EXPECT_TRUE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::WAYLAND_WLR
+  ));
+  EXPECT_FALSE(stream_display_policy::host_virtual_backend_creates_output(
+    virtual_display::backend_e::NONE
+  ));
+}
+
+TEST(StreamDisplayPolicyTests, LeavingKScreenHostVirtualRetiresItsConnectorAuthority) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "host_virtual_display";
+  linux_display.auto_manage_displays = false;
+  linux_display.headless_swap_mode.clear();
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output.clear();
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+}
+
 TEST(StreamDisplayPolicyTests, GamescopeStreamRegisteredWithGamescopeRuntime) {
   const auto options = stream_display_policy::mode_options(false);
   const auto gamescope = std::find_if(options.begin(), options.end(), [](const auto &opt) {
