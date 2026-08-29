@@ -24,6 +24,20 @@ namespace {
 TEST(LinuxPlatformHardeningSource, CageCapturePublishesMetadataAtomicallyAndJoins) {
   const auto source = read_source("src/platform/linux/cage_screencopy.cpp");
   EXPECT_NE(source.find("published_frame_t"), std::string::npos);
+  const auto frame_timestamp = source.find("img_out->frame_timestamp = std::chrono::steady_clock::now();");
+  const auto frame_metadata = source.find("img_out->frame_metadata = {", frame_timestamp);
+  const auto metadata_update = source.find("stream_stats::update_capture_metadata(img_out->frame_metadata);", frame_metadata);
+  const auto frame_publish = source.find("push_cb(std::move(img_out), true)", metadata_update);
+  ASSERT_NE(frame_timestamp, std::string::npos);
+  ASSERT_NE(frame_metadata, std::string::npos);
+  ASSERT_NE(metadata_update, std::string::npos);
+  ASSERT_NE(frame_publish, std::string::npos);
+  EXPECT_LT(frame_timestamp, frame_metadata);
+  EXPECT_LT(frame_metadata, metadata_update);
+  EXPECT_LT(metadata_update, frame_publish);
+  EXPECT_NE(source.find(".transport = platf::frame_transport_e::shm", frame_metadata), std::string::npos);
+  EXPECT_NE(source.find(".residency = platf::frame_residency_e::cpu", frame_metadata), std::string::npos);
+  EXPECT_NE(source.find(".format = platf::frame_format_e::bgra8", frame_metadata), std::string::npos);
   EXPECT_NE(source.find("::poll(&display_poll"), std::string::npos);
   EXPECT_NE(source.find("sc_thread.join()"), std::string::npos);
   EXPECT_EQ(source.find("sc_thread.detach()"), std::string::npos);
