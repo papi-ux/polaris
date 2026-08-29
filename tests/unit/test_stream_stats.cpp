@@ -86,7 +86,7 @@ namespace {
       doctor,
       context.launch_instance_id,
       context.session_generation,
-      controller.revision,
+      controller.action_authority_revision,
       context.stats.network_sample_revision,
       context.stats.video_sample_revision
     );
@@ -2267,6 +2267,97 @@ TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) 
   EXPECT_EQ(rejected.at("state"), "evidence_changed");
   EXPECT_EQ(rejected.at("code"), "stale_action_envelope");
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+
+  doctor_actions::session_ended("client-owner", generation);
+  stream_stats::stop_session_timing("client-owner", generation);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(
+    true, "DoctorFreshTelemetry", "203.0.113.26"
+  );
+  stream_stats::update_video_stats(
+    60.0, 20000, 5.0, "hevc", 1920, 1080
+  );
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 426;
+  doctor_actions::session_started(
+    "client-owner", generation, "launch-426", 20000
+  );
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  stream_stats::start_session_timing(
+    "client-owner", generation, "launch-426"
+  );
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.enforce_request_scope = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-426";
+  context.session_generation = generation;
+  context.stats = stream_stats::get_current();
+  ASSERT_TRUE(context.stats.network_risk);
+  const auto request = trusted_doctor_action_request(context);
+  ASSERT_EQ(request.at("action_id"), "lower_bitrate");
+  ASSERT_EQ(request.at("target_bitrate_kbps"), 16000);
+
+  const auto displayed_controller = adaptive_bitrate::get_doctor_state();
+  const auto displayed_evidence_revision =
+    context.stats.network_sample_revision;
+
+  // A fresh clean control ping moves the host evidence epoch, but the current
+  // confirmed media-loss sample remains fresh and derives the same guarded
+  // 20 -> 16 Mbps action. This routine telemetry must not make a human-speed
+  // button click stale.
+  stream_stats::update_control_channel_stats(5.0, 0.0, 1000);
+  const auto refreshed_stats = stream_stats::get_current();
+  const auto refreshed_controller = adaptive_bitrate::get_doctor_state();
+  ASSERT_GT(
+    refreshed_stats.network_sample_revision,
+    displayed_evidence_revision
+  );
+  ASSERT_GT(refreshed_controller.revision, displayed_controller.revision);
+  ASSERT_EQ(
+    refreshed_controller.action_authority_revision,
+    displayed_controller.action_authority_revision
+  );
+  ASSERT_TRUE(refreshed_stats.network_risk);
+
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(request, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  EXPECT_TRUE(applied.at("changed").get<bool>());
+  EXPECT_EQ(applied.at("state"), "applying");
+  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 16000);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({
+      {"action_id", "undo"},
+      {"run_id", run_id},
+      {"app_session_id", "launch-426"},
+      {"session_generation", generation}
+    }, context);
+  });
+  ASSERT_TRUE(undone.at("status").get<bool>());
+  EXPECT_EQ(undone.at("state"), "undone");
+  EXPECT_EQ(undone.at("restored_bitrate_kbps"), 20000);
 
   doctor_actions::session_ended("client-owner", generation);
   stream_stats::stop_session_timing("client-owner", generation);

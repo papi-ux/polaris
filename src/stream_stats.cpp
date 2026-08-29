@@ -570,7 +570,9 @@ namespace stream_stats {
       const auto controller = adaptive_bitrate::get_doctor_state();
       bind_doctor_action_scope(
         j["doctor"], identity->session_token, identity->session_generation,
-        controller.revision, network_sample_revision, video_sample_revision
+        controller.action_authority_revision,
+        network_sample_revision,
+        video_sample_revision
       );
     }
 
@@ -2365,7 +2367,7 @@ namespace stream_stats {
   void bind_doctor_action_scope(nlohmann::json &doctor,
                                 std::string_view app_session_id,
                                 std::uint64_t session_generation,
-                                std::uint64_t controller_revision,
+                                std::uint64_t action_authority_revision,
                                 std::uint64_t network_evidence_revision,
                                 std::uint64_t video_evidence_revision) {
     if (!doctor.is_object() || app_session_id.empty() || session_generation == 0) {
@@ -2383,7 +2385,7 @@ namespace stream_stats {
     (*payload)["app_session_id"] = app_session_id;
     (*payload)["session_generation"] = session_generation;
     if (action_id == "lower_bitrate" || action_id == "restore_quality") {
-      (*payload)["controller_revision"] = controller_revision;
+      (*payload)["controller_revision"] = action_authority_revision;
       (*payload)["evidence_revision"] = network_evidence_revision;
     }
     (void) video_evidence_revision;
