@@ -327,6 +327,7 @@ namespace stream_stats {
     // hashed lookup without being any slower at this size.
     struct session_timing_state_t {
       std::string device_uuid;
+      std::string session_token;
 
       // Matches the owning session_t::session_generation. A reconnecting
       // device reuses device_uuid but gets a new generation, which is what
@@ -495,6 +496,13 @@ namespace stream_stats {
     j["clients"] = clients_json;
     j["active_sessions"] = static_cast<int>(clients.size());
     j["doctor"] = build_doctor_json(*this, nlohmann::json::object());
+    if (const auto identity = get_single_active_session_identity()) {
+      const auto controller = adaptive_bitrate::get_doctor_state();
+      bind_doctor_action_scope(
+        j["doctor"], identity->session_token, identity->session_generation,
+        controller.revision, network_sample_revision, video_sample_revision
+      );
+    }
 
     return j.dump();
   }
@@ -2001,7 +2009,9 @@ namespace stream_stats {
     bucket.ready_to_handoff_us.clear();
   }
 
-  void start_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
+  void start_session_timing(const std::string &device_uuid,
+                            std::uint64_t session_generation,
+                            std::string session_token) {
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
@@ -2011,6 +2021,7 @@ namespace stream_stats {
     session_timing_state_t state;
     state.device_uuid = device_uuid;
     state.session_generation = session_generation;
+    state.session_token = std::move(session_token);
     session_timings.push_back(std::move(state));
   }
 
@@ -2071,7 +2082,38 @@ namespace stream_stats {
     if (session_timings.size() != 1) {
       return std::nullopt;
     }
-    return active_session_identity_t {session_timings.front().device_uuid, session_timings.front().session_generation};
+    return active_session_identity_t {
+      session_timings.front().device_uuid,
+      session_timings.front().session_generation,
+      session_timings.front().session_token
+    };
+  }
+
+  void bind_doctor_action_scope(nlohmann::json &doctor,
+                                std::string_view app_session_id,
+                                std::uint64_t session_generation,
+                                std::uint64_t controller_revision,
+                                std::uint64_t network_evidence_revision,
+                                std::uint64_t video_evidence_revision) {
+    if (!doctor.is_object() || app_session_id.empty() || session_generation == 0) {
+      return;
+    }
+    auto action = doctor.find("safe_recovery_action");
+    if (action == doctor.end() || !action->is_object()) return;
+    auto payload = action->find("payload_preview");
+    if (payload == action->end() || !payload->is_object()) return;
+    const auto action_id = action->value("id", std::string {});
+    if (action_id != "lower_bitrate" && action_id != "restore_quality" &&
+        action_id != "recheck_network" && action_id != "recheck_pacing") {
+      return;
+    }
+    (*payload)["app_session_id"] = app_session_id;
+    (*payload)["session_generation"] = session_generation;
+    if (action_id == "lower_bitrate" || action_id == "restore_quality") {
+      (*payload)["controller_revision"] = controller_revision;
+      (*payload)["evidence_revision"] = network_evidence_revision;
+    }
+    (void) video_evidence_revision;
   }
 
   // ---------------------------------------------------------------------

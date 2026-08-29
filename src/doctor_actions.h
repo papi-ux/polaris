@@ -22,6 +22,7 @@ namespace doctor_actions {
     bool host_tuning_allowed = false;
     bool caller_is_viewer = false;
     bool require_owner_scope = true;
+    bool enforce_request_scope = false;
     std::string owner_uuid;
     std::string device_name;
     std::string app_uuid;
@@ -58,13 +59,16 @@ namespace doctor_actions {
     paired_global_control_guard_t &operator=(paired_global_control_guard_t &&) noexcept = default;
 
     explicit operator bool() const noexcept { return authorized_; }
+    bool set_adaptive_enabled(bool enabled);
     void release() noexcept {
       if (lock_.owns_lock()) lock_.unlock();
     }
 
    private:
     friend paired_global_control_guard_t acquire_paired_global_control(
-      std::string_view owner_uuid
+      std::string_view owner_uuid,
+      std::uint64_t session_generation,
+      std::string_view launch_instance_id
     );
 
     paired_global_control_guard_t(std::unique_lock<std::mutex> lock,
@@ -78,11 +82,19 @@ namespace doctor_actions {
   };
 
   paired_global_control_guard_t acquire_paired_global_control(
-    std::string_view owner_uuid
+    std::string_view owner_uuid,
+    std::uint64_t session_generation = 0,
+    std::string_view launch_instance_id = {}
   );
 
   /** Atomically apply a live paired-client bitrate only for the sole owner. */
-  bool set_owner_live_bitrate(std::string_view owner_uuid, int bitrate_kbps);
+  bool set_owner_live_bitrate(std::string_view owner_uuid,
+                              std::uint64_t session_generation,
+                              std::string_view launch_instance_id,
+                              int bitrate_kbps);
+
+  /** Apply an authenticated host-admin adaptive toggle without inheriting Doctor's temporary target. */
+  void set_adaptive_enabled(bool enabled);
 
   /** Clamp a proposed bitrate to one guarded reduction step. */
   int guarded_bitrate_target(int current_bitrate_kbps,
@@ -106,12 +118,18 @@ namespace doctor_actions {
    */
   void session_started(std::string_view owner_uuid,
                        std::uint64_t session_generation,
+                       std::string_view launch_instance_id,
                        int base_bitrate_kbps);
 
   /** Roll back and retire a same-stream action when its authenticated session ends. */
   void session_ended(std::string_view owner_uuid, std::uint64_t session_generation);
 
 #ifdef POLARIS_TESTS
+  /** Compatibility helper for unit fixtures that do not model app-session tokens. */
+  void session_started(std::string_view owner_uuid,
+                       std::uint64_t session_generation,
+                       int base_bitrate_kbps);
+
   /** Make the active receipt's post-change window due without sleeping in unit tests. */
   void make_verification_due_for_tests();
 

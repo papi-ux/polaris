@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // lib includes
@@ -711,7 +712,9 @@ namespace stream_stats {
    * @param device_uuid The connecting device's paired UUID (session_t::device_uuid).
    * @param session_generation The new session_t's own generation (session_t::session_generation).
    */
-  void start_session_timing(const std::string &device_uuid, std::uint64_t session_generation);
+  void start_session_timing(const std::string &device_uuid,
+                            std::uint64_t session_generation,
+                            std::string session_token = {});
 
   /**
    * @brief Stop and discard per-session T0-T2 timing state for one device -
@@ -764,6 +767,7 @@ namespace stream_stats {
   struct active_session_identity_t {
     std::string device_uuid;
     std::uint64_t session_generation = 0;
+    std::string session_token;
   };
 
   /**
@@ -788,6 +792,14 @@ namespace stream_stats {
    * @return The active session's identity, or std::nullopt.
    */
   std::optional<active_session_identity_t> get_single_active_session_identity();
+
+  /** Bind an executable Doctor envelope to one exact app and stream generation. */
+  void bind_doctor_action_scope(nlohmann::json &doctor,
+                                std::string_view app_session_id,
+                                std::uint64_t session_generation,
+                                std::uint64_t controller_revision,
+                                std::uint64_t network_evidence_revision,
+                                std::uint64_t video_evidence_revision);
 
   // ---------------------------------------------------------------------
   // P0-5 benchmark-run-capture engine (measurement-spec-v1.md 6.4-6.5).

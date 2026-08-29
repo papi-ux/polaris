@@ -78,8 +78,17 @@ namespace {
       const doctor_actions::recovery_action_context_t &context) {
     const auto health = context.health.is_object() ?
       context.health : nlohmann::json::object();
-    const auto doctor = stream_stats::build_doctor_json(
+    auto doctor = stream_stats::build_doctor_json(
       context.stats, health, context.app_uuid
+    );
+    const auto controller = adaptive_bitrate::get_doctor_state();
+    stream_stats::bind_doctor_action_scope(
+      doctor,
+      context.launch_instance_id,
+      context.session_generation,
+      controller.revision,
+      context.stats.network_sample_revision,
+      context.stats.video_sample_revision
     );
     auto payload = doctor.at("safe_recovery_action").at("payload_preview");
     static std::uint64_t request_sequence = 0;
@@ -1685,8 +1694,11 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   const auto replay = doctor_actions::execute({
     {"action_id", "undo"}, {"run_id", verified_run_id}
   });
-  EXPECT_FALSE(replay.at("status").get<bool>());
-  EXPECT_EQ(replay.at("error"), "This Doctor undo is no longer available.");
+  EXPECT_TRUE(replay.at("status").get<bool>());
+  EXPECT_TRUE(replay.at("changed").get<bool>());
+  EXPECT_EQ(replay.at("state"), "undone");
+  EXPECT_EQ(replay.at("run_id"), verified_run_id);
+  EXPECT_EQ(replay.at("restored_bitrate_kbps"), 20000);
 
   for (int i = 0; i < 3; ++i) {
     stream_stats::update_network_stats(52.0, 3.4, 1000);
@@ -1975,18 +1987,28 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   }
 
   constexpr std::uint64_t generation = 421;
-  doctor_actions::session_started("client-owner", generation, 20000);
+  doctor_actions::session_started("client-owner", generation, "launch-421", 20000);
   adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
-  stream_stats::start_session_timing("client-owner", generation);
+  stream_stats::start_session_timing("client-owner", generation, "launch-421");
 
   doctor_actions::recovery_action_context_t context;
   context.active_owner = true;
   context.host_tuning_allowed = true;
   context.owner_uuid = "client-owner";
   context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-421";
   context.session_generation = generation;
+  context.enforce_request_scope = true;
   context.stats = stream_stats::get_current();
   const auto request = trusted_doctor_action_request(context);
+
+  auto stale_scope_request = request;
+  stale_scope_request["session_generation"] = generation - 1;
+  const auto stale_scope = doctor_actions::execute(stale_scope_request, context);
+  EXPECT_FALSE(stale_scope.at("status").get<bool>());
+  EXPECT_EQ(stale_scope.at("state"), "scope_mismatch");
+  EXPECT_EQ(stale_scope.at("code"), "stale_stream_generation");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
 
   const auto applied = doctor_actions::execute(request, context);
   ASSERT_TRUE(applied.at("status").get<bool>());
@@ -1999,9 +2021,13 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   EXPECT_FALSE(repeated.at("changed").get<bool>());
   EXPECT_EQ(repeated.at("run_id"), run_id);
   EXPECT_EQ(repeated.at("request_id"), request_id);
-  EXPECT_FALSE(doctor_actions::set_owner_live_bitrate("client-viewer", 18000));
+  EXPECT_FALSE(doctor_actions::set_owner_live_bitrate(
+    "client-viewer", generation, "launch-421", 18000
+  ));
 
-  ASSERT_TRUE(doctor_actions::set_owner_live_bitrate("client-owner", 18000));
+  ASSERT_TRUE(doctor_actions::set_owner_live_bitrate(
+    "client-owner", generation, "launch-421", 18000
+  ));
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
   const auto stale_retry = doctor_actions::execute(request, context);
   EXPECT_TRUE(stale_retry.at("status").get<bool>());
@@ -2014,16 +2040,203 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   stream_stats::update_stream_active(false);
 }
 
+TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(true, "DoctorRevision", "203.0.113.24");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 422;
+  doctor_actions::session_started("client-owner", generation, "launch-422", 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  stream_stats::start_session_timing("client-owner", generation, "launch-422");
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.enforce_request_scope = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-422";
+  context.session_generation = generation;
+  context.stats = stream_stats::get_current();
+  const auto stale_request = trusted_doctor_action_request(context);
+
+  ASSERT_TRUE(doctor_actions::set_owner_live_bitrate(
+    "client-owner", generation, "launch-422", 20000
+  ));
+  const auto rejected = doctor_actions::execute(stale_request, context);
+  EXPECT_FALSE(rejected.at("status").get<bool>());
+  EXPECT_EQ(rejected.at("state"), "evidence_changed");
+  EXPECT_EQ(rejected.at("code"), "stale_action_envelope");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+
+  doctor_actions::session_ended("client-owner", generation);
+  stream_stats::stop_session_timing("client-owner", generation);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGeneration) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(true, "DoctorIdempotencyHistory", "203.0.113.25");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 423;
+  doctor_actions::session_started("client-owner", generation, "launch-423", 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  stream_stats::start_session_timing("client-owner", generation, "launch-423");
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.enforce_request_scope = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-423";
+  context.session_generation = generation;
+
+  nlohmann::json first_request;
+  for (int i = 0; i < 128; ++i) {
+    context.stats = stream_stats::get_current();
+    const auto request = trusted_doctor_action_request(context);
+    if (i == 0) first_request = request;
+    const auto applied = doctor_actions::execute(request, context);
+    ASSERT_TRUE(applied.at("status").get<bool>());
+    ASSERT_EQ(applied.at("state"), "applying");
+    ASSERT_TRUE(doctor_actions::set_owner_live_bitrate(
+      "client-owner", generation, "launch-423", 20000
+    ));
+  }
+
+  context.stats = stream_stats::get_current();
+  const auto over_capacity = doctor_actions::execute(
+    trusted_doctor_action_request(context), context
+  );
+  EXPECT_FALSE(over_capacity.at("status").get<bool>());
+  EXPECT_EQ(over_capacity.at("state"), "generation_action_limit");
+  EXPECT_EQ(over_capacity.at("code"), "doctor_idempotency_capacity_reached");
+
+  const auto oldest_retry = doctor_actions::execute(first_request, context);
+  EXPECT_TRUE(oldest_retry.at("status").get<bool>());
+  EXPECT_FALSE(oldest_retry.at("changed").get<bool>());
+  EXPECT_EQ(oldest_retry.at("state"), "superseded");
+  EXPECT_EQ(
+    oldest_retry.at("request_id"),
+    first_request.at("request_id")
+  );
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+
+  doctor_actions::session_ended("client-owner", generation);
+  stream_stats::stop_session_timing("client-owner", generation);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, AdaptiveToggleRestoresDoctorTargetBeforeChangingPolicy) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(true, "DoctorAdaptiveToggle", "203.0.113.26");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 424;
+  doctor_actions::session_started("client-owner", generation, "launch-424", 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  stream_stats::start_session_timing("client-owner", generation, "launch-424");
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.enforce_request_scope = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-424";
+  context.session_generation = generation;
+  context.stats = stream_stats::get_current();
+  const auto request = trusted_doctor_action_request(context);
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(request, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+
+  auto guard = doctor_actions::acquire_paired_global_control(
+    "client-owner", generation, "launch-424"
+  );
+  ASSERT_TRUE(static_cast<bool>(guard));
+  std::atomic<bool> rollback_acknowledged {false};
+  std::thread encoder([&] {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (const auto pending = adaptive_bitrate::get_live_bitrate_request();
+          pending && pending->target_bitrate_kbps == 20000) {
+        adaptive_bitrate::acknowledge_live_bitrate_applied(
+          pending->revision,
+          pending->target_bitrate_kbps
+        );
+        rollback_acknowledged.store(true, std::memory_order_release);
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+  EXPECT_TRUE(guard.set_adaptive_enabled(true));
+  guard.release();
+  encoder.join();
+
+  EXPECT_TRUE(rollback_acknowledged.load(std::memory_order_acquire));
+  const auto restored = adaptive_bitrate::get_doctor_state();
+  EXPECT_TRUE(restored.enabled);
+  EXPECT_EQ(restored.base_bitrate_kbps, 20000);
+  EXPECT_EQ(restored.live_bitrate_kbps, 20000);
+  const auto stale_retry = doctor_actions::execute(request, context);
+  EXPECT_TRUE(stale_retry.at("status").get<bool>());
+  EXPECT_EQ(stale_retry.at("state"), "superseded");
+
+  doctor_actions::set_adaptive_enabled(false);
+  doctor_actions::session_ended("client-owner", generation);
+  stream_stats::stop_session_timing("client-owner", generation);
+  stream_stats::update_stream_active(false);
+}
+
 TEST(DoctorActionTests, GlobalControlAuthorizationSerializesStreamHandoff) {
-  doctor_actions::session_started("client-owner", 431, 20000);
-  auto guard = doctor_actions::acquire_paired_global_control("client-owner");
+  doctor_actions::session_started("client-owner", 431, "launch-431", 20000);
+  auto guard = doctor_actions::acquire_paired_global_control(
+    "client-owner", 431, "launch-431"
+  );
   ASSERT_TRUE(static_cast<bool>(guard));
 
   std::atomic<bool> handoff_entered {false};
   std::atomic<bool> handoff_finished {false};
   std::thread handoff([&] {
     handoff_entered.store(true, std::memory_order_release);
-    doctor_actions::session_started("client-viewer", 432, 18000);
+    doctor_actions::session_started("client-viewer", 432, "launch-432", 18000);
     handoff_finished.store(true, std::memory_order_release);
   });
   while (!handoff_entered.load(std::memory_order_acquire)) {
@@ -2036,7 +2249,9 @@ TEST(DoctorActionTests, GlobalControlAuthorizationSerializesStreamHandoff) {
   handoff.join();
   EXPECT_TRUE(handoff_finished.load(std::memory_order_acquire));
 
-  auto stale_owner_guard = doctor_actions::acquire_paired_global_control("client-owner");
+  auto stale_owner_guard = doctor_actions::acquire_paired_global_control(
+    "client-owner", 431, "launch-431"
+  );
   EXPECT_FALSE(static_cast<bool>(stale_owner_guard));
   doctor_actions::session_ended("client-owner", 431);
   doctor_actions::session_ended("client-viewer", 432);
@@ -2800,12 +3015,13 @@ TEST(GetSingleActiveSessionIdentityTests, ReturnsNulloptWhenNoSessionsAreActive)
 
 TEST(GetSingleActiveSessionIdentityTests, ReturnsTheSoleSessionsIdentityWhenExactlyOneIsActive) {
   const std::string uuid = "test-uuid-single-active-session";
-  stream_stats::start_session_timing(uuid, 7);
+  stream_stats::start_session_timing(uuid, 7, "launch-token-7");
 
   const auto identity = stream_stats::get_single_active_session_identity();
   ASSERT_TRUE(identity.has_value());
   EXPECT_EQ(identity->device_uuid, uuid);
   EXPECT_EQ(identity->session_generation, 7u);
+  EXPECT_EQ(identity->session_token, "launch-token-7");
 
   stream_stats::stop_session_timing(uuid, 7);
 }

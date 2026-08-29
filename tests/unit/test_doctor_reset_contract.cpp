@@ -152,18 +152,42 @@ TEST(DoctorResetContract, FutureLaunchOwnedDisplayIsNotCappedByCurrentPhysicalRe
   EXPECT_EQ(helper.find("return 60"), std::string::npos);
 }
 
+TEST(DoctorResetContract, CanonicalOptimizationIdentityPrecedesDisplayNameFallback) {
+  const auto lookup = between(
+    source("src/nvhttp.cpp"),
+    "std::optional<proc::ctx_t> find_app_for_optimization_game(",
+    "#if defined(__linux__)"
+  );
+  const auto uuid_match = lookup.find("boost::iequals(app.uuid, game)");
+  const auto id_match = lookup.find("boost::iequals(app.id, game)");
+  const auto name_match = lookup.find("boost::iequals(app.name, game)");
+  ASSERT_NE(uuid_match, std::string::npos);
+  ASSERT_NE(id_match, std::string::npos);
+  ASSERT_NE(name_match, std::string::npos);
+  EXPECT_LT(uuid_match, name_match);
+  EXPECT_LT(id_match, name_match);
+}
+
 TEST(DoctorResetContract, FinalResolverRevalidatesPostProfileRefreshAndHdrCaps) {
   const auto capability_snapshot = between(
     source("src/process.cpp"),
-    "Resolve hard output capabilities only after the previous generation",
-    "++_session_generation"
+    "int validate_resolved_launch_profile_for_app(",
+    "int proc_t::execute("
   );
-  EXPECT_NE(capability_snapshot.find("get_client_profile"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("client_profile"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("active_refresh_rate_hz_hint"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("effective_session_selection_for_launch"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("selection_owns_launch_refresh_rate"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("advertised_codec_capability_state"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("return 409"), std::string::npos);
+
+  const auto launch_validation = between(
+    source("src/process.cpp"),
+    "int proc_t::execute_impl(",
+    "Resolve session overrides in a strict, evidence-independent order"
+  );
+  EXPECT_NE(launch_validation.find("get_client_profile"), std::string::npos);
+  EXPECT_NE(launch_validation.find("validate_resolved_launch_profile_for_app"), std::string::npos);
 
   const auto process = between(
     source("src/process.cpp"),
@@ -177,13 +201,35 @@ TEST(DoctorResetContract, FinalResolverRevalidatesPostProfileRefreshAndHdrCaps) 
 TEST(DoctorResetContract, ResolvedLaunchFailsClosedWhenHostCapsChanged) {
   const auto final_capability_gate = between(
     source("src/process.cpp"),
-    "if (launch_session->resolved_profile_from_client) {",
-    "++_session_generation"
+    "int validate_resolved_launch_profile_for_app(",
+    "int proc_t::execute("
   );
   EXPECT_NE(final_capability_gate.find("above final output refresh cap"), std::string::npos);
   EXPECT_NE(final_capability_gate.find("above configured bitrate cap"), std::string::npos);
   EXPECT_NE(final_capability_gate.find("final encoder lacks HDR support"), std::string::npos);
   EXPECT_NE(final_capability_gate.find("return 409"), std::string::npos);
+}
+
+TEST(DoctorResetContract, ResumeRevalidatesTheExactProfileBeforeRaisingAStream) {
+  const auto process = between(
+    source("src/process.cpp"),
+    "int proc_t::validate_resolved_profile_for_running_app(",
+    "bool proc_t::raise_session_for_admitted_launch("
+  );
+  EXPECT_NE(process.find("validate_resolved_launch_profile_for_app"), std::string::npos);
+  EXPECT_NE(process.find("effective_session_selection_for_launch"), std::string::npos);
+  EXPECT_NE(process.find("active app generation"), std::string::npos);
+
+  const auto resume = between(
+    source("src/nvhttp.cpp"),
+    "void resume(",
+    "void cancel("
+  );
+  const auto validation = resume.find("validate_resolved_profile_for_running_app");
+  const auto raise = resume.find("raise_session_for_admitted_launch");
+  EXPECT_NE(validation, std::string::npos);
+  EXPECT_NE(raise, std::string::npos);
+  EXPECT_LT(validation, raise);
 }
 
 TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLock) {

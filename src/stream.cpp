@@ -2457,6 +2457,7 @@ namespace stream {
       doctor_actions::session_started(
         session.device_uuid,
         session.session_generation,
+        session.session_token,
         session.config.monitor.bitrate
       );
 
@@ -2471,7 +2472,9 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(addr_string, session.device_name);
-      stream_stats::start_session_timing(session.device_uuid, session.session_generation);
+      stream_stats::start_session_timing(
+        session.device_uuid, session.session_generation, session.session_token
+      );
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
         session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
