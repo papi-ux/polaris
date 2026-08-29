@@ -1416,6 +1416,10 @@ namespace cage_display_router {
     return refresh_hz;
   }
 
+  int current_output_refresh_hz() {
+    return cage_mode_refresh_hz.load(std::memory_order_acquire);
+  }
+
   bool ensure_output_refresh(int session_fps) {
     if (cage_pid <= 0 || cage_wayland_socket.empty() || !is_running()) {
       return false;

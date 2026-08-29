@@ -385,8 +385,11 @@ TEST(StreamDisplayPolicyTests, LeavingDongleMakesStoredConnectorsInert) {
   ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
   EXPECT_FALSE(linux_display.auto_manage_displays);
   EXPECT_TRUE(linux_display.headless_swap_mode.empty());
-  EXPECT_EQ(linux_display.streaming_output, "DP-1");
-  EXPECT_EQ(linux_display.primary_output, "eDP-1");
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "portal")
+    << "switching topology must not rewrite a user-selected capture backend";
   EXPECT_FALSE(display_topology::should_manage_host_topology());
   EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("desktop_display"));
 }
@@ -430,6 +433,33 @@ TEST(StreamDisplayPolicyTests, FailedDurableSelectionRestoresEveryLiveField) {
   EXPECT_EQ(linux_display.primary_output, before_linux_display.primary_output);
   EXPECT_EQ(config::video.capture, before_capture);
   EXPECT_EQ(config::video.output_name, before_output_name);
+}
+
+TEST(StreamDisplayPolicyTests, SuccessfulDurableSwitchRetiresOwnedDongleCaptureTarget) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.headless_mode = true;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+
+  std::string error;
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests(
+    "desktop_display",
+    true,
+    error
+  )) << error;
+  EXPECT_EQ(linux_display.stream_mode, "desktop_display");
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_TRUE(linux_display.streaming_output.empty());
+  EXPECT_TRUE(linux_display.primary_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
+  EXPECT_EQ(config::video.capture, "portal");
 }
 
 TEST(StreamDisplayPolicyTests, GamescopeStreamRegisteredWithGamescopeRuntime) {

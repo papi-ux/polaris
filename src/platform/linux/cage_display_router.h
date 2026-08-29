@@ -67,6 +67,9 @@ namespace cage_display_router {
    */
   int resolve_resume_refresh_hz(int session_fps, int recorded_ceiling_hz);
 
+  /** @brief Cached last-settled whole-Hz output mode; meaningful while the cage is running. */
+  int current_output_refresh_hz();
+
   /**
    * @brief Re-apply the running compositor's output refresh for a resuming session.
    *

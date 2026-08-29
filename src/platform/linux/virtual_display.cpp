@@ -1771,7 +1771,10 @@ namespace virtual_display {
   }
 
   namespace {
-    backend_e detect_backend_with_cache_policy(bool force_refresh) {
+    backend_e detect_backend_with_cache_policy(
+      bool force_refresh,
+      bool *evdi_blocked = nullptr
+    ) {
       // Detection touches both the cache and lazily initialized backend state
       // (including the EVDI library handle). Keep the full probe serialized,
       // rather than protecting only the two cache assignments.
@@ -1779,18 +1782,30 @@ namespace virtual_display {
       const auto now = std::chrono::steady_clock::now();
       if (!force_refresh && cached_backend.has_value() &&
           (now - cached_backend_time) <= backend_detection_cache_ttl) {
+        if (evdi_blocked) {
+          *evdi_blocked = *cached_backend == backend_e::NONE &&
+                          evdi::is_module_loaded() &&
+                          evdi::load_library() &&
+                          !evdi::can_create();
+        }
         return *cached_backend;
       }
 
       backend_e backend = backend_e::NONE;
+      bool evdi_module_ready = false;
+      bool evdi_library_ready = false;
+      bool evdi_can_create = false;
 
       // Priority 1: EVDI — creates true virtual connectors. Module + library
       // presence alone is not enough to advertise it: creation must actually be
       // possible, or the mode is offered and then silently fails at launch.
-      if (evdi::is_module_loaded() || evdi::load_module()) {
-        if (evdi::load_library() && evdi::can_create()) {
-          backend = backend_e::EVDI;
-        }
+      evdi_module_ready = evdi::is_module_loaded() || evdi::load_module();
+      if (evdi_module_ready) {
+        evdi_library_ready = evdi::load_library();
+        evdi_can_create = evdi_library_ready && evdi::can_create();
+      }
+      if (evdi_can_create) {
+        backend = backend_e::EVDI;
       }
 
       // Priority 2: Wayland compositor headless outputs
@@ -1805,6 +1820,9 @@ namespace virtual_display {
 
       cached_backend = backend;
       cached_backend_time = now;
+      if (evdi_blocked) {
+        *evdi_blocked = evdi_module_ready && evdi_library_ready && !evdi_can_create;
+      }
       log_detected_backend(backend);
       return backend;
     }
@@ -1864,10 +1882,11 @@ namespace virtual_display {
   }
 
   std::string unavailable_reason() {
-    const auto backend = detect_backend();
-    // Probe without side effects: report the module as blocked only when it is
-    // already loaded and usable but a device still cannot be obtained.
-    const bool evdi_blocked = evdi::is_module_loaded() && evdi::load_library() && !evdi::can_create();
+    bool evdi_blocked = false;
+    // Keep diagnostics in the same serialized probe as backend selection.
+    // load_library() owns lazy handle/function-pointer state and must never run
+    // outside backend_detection_mutex, including on its broken-library path.
+    const auto backend = detect_backend_with_cache_policy(false, &evdi_blocked);
     return unavailable_reason_for(backend, evdi_blocked, !config::video.linux_display.streaming_output.empty());
   }
 

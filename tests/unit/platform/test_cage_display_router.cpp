@@ -1080,7 +1080,23 @@ TEST(CageDisplayRouterResumeRefreshTests, ResumePathReappliesRefreshInNvhttp) {
 
   const auto resume_pos = source.find("void resume(");
   ASSERT_NE(resume_pos, std::string::npos);
-  EXPECT_NE(source.find("stream_runtime::labwc::ensure_output_refresh", resume_pos), std::string::npos)
+  const auto validation = source.find("validate_resolved_profile_for_running_app", resume_pos);
+  const auto refresh = source.find("stream_runtime::labwc::ensure_output_refresh", resume_pos);
+  const auto raise = source.find("raise_session_for_admitted_launch", refresh);
+  ASSERT_NE(validation, std::string::npos);
+  ASSERT_NE(refresh, std::string::npos);
+  ASSERT_NE(raise, std::string::npos);
+  EXPECT_LT(validation, refresh)
+    << "a rejected exact resume must not mutate the surviving cage generation";
+  EXPECT_LT(refresh, raise);
+  EXPECT_NE(
+    source.find("!cage_refresh_applied && launch_session->resolved_profile_from_client", refresh),
+    std::string::npos
+  )
+    << "an exact resume must fail closed when the resolved cage mode does not settle";
+  EXPECT_NE(source.find("prior_cage_refresh_hz * 1000", refresh), std::string::npos)
+    << "a failed pending launch must restore the prior settled cage mode";
+  EXPECT_NE(refresh, std::string::npos)
     << "the resume handler must re-apply the resuming client's refresh to a running cage";
 }
 #else
