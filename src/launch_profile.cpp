@@ -116,6 +116,23 @@ namespace launch_profile {
     return "Auto";
   }
 
+  std::string resolve_non_linux_topology(
+      const std::string &requested_topology,
+      bool topology_locked,
+      bool paired_always_virtual,
+      bool app_virtual_display) {
+    if (topology_locked && !requested_topology.empty()) {
+      return requested_topology;
+    }
+    if (paired_always_virtual || app_virtual_display) {
+      return "host_virtual_display";
+    }
+    if (!requested_topology.empty()) {
+      return requested_topology;
+    }
+    return "desktop_display";
+  }
+
   resolution_t resolve(const request_t &request) {
     resolution_t result;
     result.preset = normalize_preset(request.preset);

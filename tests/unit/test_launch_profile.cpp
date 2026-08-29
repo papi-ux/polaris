@@ -2,6 +2,39 @@
 
 #include <src/launch_profile.h>
 
+TEST(LaunchProfileTests, NonLinuxTopologyUsesDeterministicPrecedence) {
+  EXPECT_EQ(
+    launch_profile::resolve_non_linux_topology(
+      "desktop_display", true, true, true
+    ),
+    "desktop_display"
+  );
+  EXPECT_EQ(
+    launch_profile::resolve_non_linux_topology(
+      "desktop_display", false, true, false
+    ),
+    "host_virtual_display"
+  );
+  EXPECT_EQ(
+    launch_profile::resolve_non_linux_topology(
+      "desktop_display", false, false, true
+    ),
+    "host_virtual_display"
+  );
+  EXPECT_EQ(
+    launch_profile::resolve_non_linux_topology(
+      "windowed_stream", false, false, false
+    ),
+    "windowed_stream"
+  );
+  EXPECT_EQ(
+    launch_profile::resolve_non_linux_topology(
+      "", false, false, false
+    ),
+    "desktop_display"
+  );
+}
+
 TEST(LaunchProfileTests, AutoPreservesUnlockedClientRequestWithoutDeviceMutation) {
   launch_profile::request_t request;
   request.device_name = "RetroidPocket6";

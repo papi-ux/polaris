@@ -9066,16 +9066,17 @@ namespace nvhttp {
       launch_owned_display =
         stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
 #else
+      resolved_topology = launch_profile::resolve_non_linux_topology(
+        requested_topology,
+        topology_locked,
+        named_cert_p->always_use_virtual_display,
+        optimization_app && optimization_app->virtual_display
+      );
       launch_owned_display =
-        (!topology_locked && named_cert_p->always_use_virtual_display) ||
-        requested_topology == "host_virtual_display" ||
-        requested_topology == "headless_stream" ||
-        requested_topology == "windowed_stream" ||
-        requested_topology == "gamescope_stream" ||
-        (optimization_app && optimization_app->virtual_display && !topology_locked);
-      if (resolved_topology.empty()) {
-        resolved_topology = launch_owned_display ? "host_virtual_display" : "desktop_display";
-      }
+        resolved_topology == "host_virtual_display" ||
+        resolved_topology == "headless_stream" ||
+        resolved_topology == "windowed_stream" ||
+        resolved_topology == "gamescope_stream";
 #endif
       launch_profile::request_t preset_request;
       preset_request.device_name = device;

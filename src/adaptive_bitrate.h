@@ -97,6 +97,15 @@ namespace adaptive_bitrate {
   void note_doctor_video_policy_evidence(bool suppresses_quality_restore);
 
   /**
+   * @brief Whether current or latched post-change video evidence blocks a
+   *        guarded quality-restoration step.
+   *
+   * A warning observed while Doctor owns the actuator remains latched until
+   * that reversible transaction ends, even if a later sample looks clean.
+   */
+  bool doctor_video_policy_blocks_quality_restore();
+
+  /**
    * @brief Feed local stream health so bitrate can react to host pacing pressure.
    */
   void update_stream_health(double fps_ratio,

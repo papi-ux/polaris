@@ -559,6 +559,59 @@ TEST(StreamStatsCapturePathTests, DetectsCpuEncodeUpload) {
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
 }
 
+TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuthorityOnce) {
+  stream_stats::update_stream_active(false);
+  adaptive_bitrate::reset();
+
+  stream_stats::update_capture_metadata(platf::frame_metadata_t {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+  });
+  stream_stats::update_encode_path_metadata(
+    "/dev/dri/renderD128",
+    platf::frame_residency_e::gpu,
+    platf::frame_format_e::nv12
+  );
+  const auto gpu_revision = adaptive_bitrate::get_doctor_state().revision;
+  EXPECT_FALSE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+
+  stream_stats::update_capture_metadata(platf::frame_metadata_t {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+  });
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, gpu_revision);
+
+  stream_stats::update_capture_metadata(platf::frame_metadata_t {
+    .transport = platf::frame_transport_e::shm,
+    .residency = platf::frame_residency_e::cpu,
+  });
+  const auto fallback_revision = adaptive_bitrate::get_doctor_state().revision;
+  EXPECT_GT(fallback_revision, gpu_revision);
+  EXPECT_TRUE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  const auto fallback_stats = stream_stats::get_current();
+  EXPECT_EQ(fallback_stats.capture_transport, platf::frame_transport_e::shm);
+  EXPECT_EQ(fallback_stats.capture_residency, platf::frame_residency_e::cpu);
+
+  stream_stats::update_capture_metadata(platf::frame_metadata_t {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+  });
+  const auto recovered_revision = adaptive_bitrate::get_doctor_state().revision;
+  EXPECT_GT(recovered_revision, fallback_revision);
+  EXPECT_FALSE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+
+  stream_stats::update_encode_path_metadata(
+    "cpu",
+    platf::frame_residency_e::cpu,
+    platf::frame_format_e::nv12
+  );
+  EXPECT_GT(adaptive_bitrate::get_doctor_state().revision, recovered_revision);
+  EXPECT_TRUE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+
+  stream_stats::update_stream_active(false);
+  adaptive_bitrate::reset();
+}
+
 TEST(StreamStatsCapturePathTests, DetectsFullyGpuNativePath) {
   stream_stats::stats_t stats {};
   stats.capture_transport = platf::frame_transport_e::dmabuf;
@@ -1528,6 +1581,70 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
   EXPECT_TRUE(degraded.at("status").get<bool>());
   EXPECT_TRUE(degraded.at("changed").get<bool>());
   EXPECT_EQ(degraded.at("state"), "rolled_back");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 7580);
+
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, VideoWarningDuringQualityVerificationRollsBackTheRestore) {
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_live_bitrate(7580);
+  adaptive_bitrate::set_base_bitrate(15000);
+
+  stream_stats::update_stream_active(true, "DoctorRestoreVideoGuard", "203.0.113.24");
+  stream_stats::update_video_stats(60.0, 7580, 5.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 20000, 15000
+  );
+  stream_stats::note_doctor_video_policy_sample(
+    60.0, 60.0, 0.0, 0.0, 5.0, 1.0, 5.0
+  );
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+
+  const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  ASSERT_EQ(applied.at("requested").at("bitrate_kbps"), 9475);
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto apply_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(apply_request.has_value());
+  adaptive_bitrate::acknowledge_live_bitrate_applied(
+    apply_request->revision,
+    apply_request->target_bitrate_kbps
+  );
+
+  // A new encoder watch is evidence against another quality increase. Even if
+  // a later sample clears, the host must remember the regression for this
+  // reversible transaction and restore the pre-action target.
+  stream_stats::note_doctor_video_policy_sample(
+    60.0, 60.0, 0.0, 0.0, 5.0, 1.0, 9.0
+  );
+  stream_stats::note_doctor_video_policy_sample(
+    60.0, 60.0, 0.0, 0.0, 5.0, 1.0, 5.0
+  );
+  for (int i = 0; i < 2; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto rolled_back = execute_with_encoder_ack(7580, [&] {
+    doctor_actions::run_verification_watchdog_for_tests();
+    return doctor_actions::execute({
+      {"action_id", "verify"}, {"run_id", run_id}
+    });
+  });
+  EXPECT_TRUE(rolled_back.at("status").get<bool>());
+  EXPECT_TRUE(rolled_back.at("changed").get<bool>());
+  EXPECT_EQ(rolled_back.at("state"), "rolled_back");
+  EXPECT_EQ(rolled_back.at("restored_bitrate_kbps"), 7580);
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 7580);
 
   adaptive_bitrate::set_enabled(false);

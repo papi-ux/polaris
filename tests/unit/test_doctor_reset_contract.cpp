@@ -144,6 +144,24 @@ TEST(DoctorResetContract, HostVideoEvidenceLinearizesBeforeAdaptiveFeedbackAndPu
   ASSERT_NE(frame_publication, std::string::npos);
   EXPECT_LT(epoch, feedback);
   EXPECT_LT(epoch, frame_publication);
+
+  const auto stats = source("src/stream_stats.cpp");
+  const auto source_cadence = between(
+    stats,
+    "void update_capture_source_fps(",
+    "void note_doctor_video_policy_sample("
+  );
+  const auto policy_lock = source_cadence.find("doctor_video_policy_mutex");
+  const auto source_epoch = source_cadence.find("publish_doctor_video_policy_locked()");
+  const auto source_field = source_cadence.find("hot_capture_source_fps.store(");
+  const auto policy_unlock = source_cadence.find("\n    }", policy_lock);
+  ASSERT_NE(policy_lock, std::string::npos);
+  ASSERT_NE(source_epoch, std::string::npos);
+  ASSERT_NE(source_field, std::string::npos);
+  ASSERT_NE(policy_unlock, std::string::npos);
+  EXPECT_LT(policy_lock, source_epoch);
+  EXPECT_LT(source_epoch, source_field);
+  EXPECT_LT(source_field, policy_unlock);
 }
 
 TEST(DoctorResetContract, PairedGlobalAdaptiveToggleRequiresTheSoleActiveOwner) {
@@ -325,7 +343,7 @@ TEST(DoctorResetContract, ExplicitTopologyPrecedesPairedAlwaysVirtualDefault) {
     std::string::npos
   );
   EXPECT_NE(
-    optimize.find("(!topology_locked && named_cert_p->always_use_virtual_display)"),
+    optimize.find("launch_profile::resolve_non_linux_topology("),
     std::string::npos
   );
 }
