@@ -209,7 +209,7 @@ TEST_F(RecoveryDoctorActionTest, UndoCancelsOnlyTheMatchingQueuedRun) {
   context.host_tuning_allowed = true;
   context.app_uuid = "game-b";
   const auto undone = doctor_actions::execute({
-    {"action_id", "undo"}, {"run_id", run_id}
+    {"action_id", "undo_recovery_profile_next_launch"}, {"run_id", run_id}
   }, context);
   EXPECT_TRUE(undone.value("status", false));
   EXPECT_EQ(undone.value("recovery_state", ""), "undone");
@@ -219,13 +219,25 @@ TEST_F(RecoveryDoctorActionTest, UndoCancelsOnlyTheMatchingQueuedRun) {
 }
 
 TEST(PairedDoctorRoutePolicyTests, AllowsDisconnectedOwnerUndoButRejectsViewerAndOtherActions) {
-  EXPECT_TRUE(doctor_actions::paired_route_allowed("undo", false, false));
-  EXPECT_TRUE(doctor_actions::paired_route_allowed("undo", true, true));
-  EXPECT_FALSE(doctor_actions::paired_route_allowed("undo", true, false));
-  EXPECT_FALSE(doctor_actions::paired_route_allowed(
-    "apply_recovery_profile_next_launch", false, false
+  EXPECT_TRUE(doctor_actions::paired_route_allowed(
+    "undo", "recovery-run-owned", false, false
   ));
   EXPECT_TRUE(doctor_actions::paired_route_allowed(
-    "apply_recovery_profile_next_launch", true, true
+    "undo", "doctor-run-owned", true, true
+  ));
+  EXPECT_TRUE(doctor_actions::paired_route_allowed(
+    "undo", "recovery-run-owned", true, false
+  ));
+  EXPECT_TRUE(doctor_actions::paired_route_allowed(
+    "undo_recovery_profile_next_launch", "recovery-run-owned", true, false
+  ));
+  EXPECT_FALSE(doctor_actions::paired_route_allowed(
+    "undo", "doctor-run-other", true, false
+  ));
+  EXPECT_TRUE(doctor_actions::paired_route_allowed(
+    "apply_recovery_profile_next_launch", "", false, false
+  ));
+  EXPECT_TRUE(doctor_actions::paired_route_allowed(
+    "verify_recovery_profile_next_launch", "", true, false
   ));
 }

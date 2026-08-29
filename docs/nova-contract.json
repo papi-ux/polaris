@@ -439,6 +439,30 @@
         "style": "assignments",
         "variable": "output"
       }
+    },
+    "optimization_resolved_field": {
+      "$comment": [
+        "One entry in resolved_profile.fields. Nova rejects the value unless",
+        "all provenance metadata is present with the expected primitive types."
+      ],
+      "fields": [
+        "locked",
+        "normalized",
+        "reason_code",
+        "source",
+        "value"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+        "function": "validResolvedField",
+        "receiver": "detail"
+      },
+      "polaris_emitter": {
+        "file": "src/launch_profile.cpp",
+        "function": "add_field",
+        "style": "initializer_list",
+        "declaration": "fields[name] = {"
+      }
     }
   },
   "known_drift": {

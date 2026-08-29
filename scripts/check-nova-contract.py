@@ -27,7 +27,7 @@ from pathlib import Path
 
 # Nova reads responses through org.json accessors. Anything it asks for by name
 # is a field it expects Polaris to serve.
-ACCESSORS = "optString|optBoolean|optInt|optLong|optDouble|optJSONObject|optJSONArray|getString|getBoolean|getInt|getLong"
+ACCESSORS = "optString|optBoolean|optInt|optLong|optDouble|optJSONObject|optJSONArray|opt|getString|getBoolean|getInt|getLong|has|isNull"
 
 
 def function_body(source: str, name: str) -> str:

@@ -2,7 +2,7 @@
 
 #include <src/launch_profile.h>
 
-TEST(LaunchProfileTests, AutoPreservesExplicitRequestWithoutDeviceMutation) {
+TEST(LaunchProfileTests, AutoPreservesUnlockedClientRequestWithoutDeviceMutation) {
   launch_profile::request_t request;
   request.device_name = "RetroidPocket6";
   request.app_name = "Control Ultimate Edition";
@@ -19,7 +19,8 @@ TEST(LaunchProfileTests, AutoPreservesExplicitRequestWithoutDeviceMutation) {
   EXPECT_EQ(resolved.fps, 120000);
   EXPECT_FALSE(resolved.target_bitrate_kbps.has_value());
   EXPECT_FALSE(resolved.preferred_codec.has_value());
-  EXPECT_EQ(resolved.fields.at("display_mode").at("source"), "explicit_launch_request");
+  EXPECT_EQ(resolved.fields.at("display_mode").at("source"), "client_launch_request");
+  EXPECT_FALSE(resolved.fields.at("display_mode").at("locked").get<bool>());
 }
 
 TEST(LaunchProfileTests, StabilityNormalizesPairedBitrateButPreservesExplicitDisplayLock) {
@@ -30,7 +31,9 @@ TEST(LaunchProfileTests, StabilityNormalizesPairedBitrateButPreservesExplicitDis
   request.requested_height = 1080;
   request.requested_fps = 120000;
   request.display_locked = true;
-  request.paired_display = true;
+  request.paired_width = 1280;
+  request.paired_height = 720;
+  request.paired_fps = 60000;
   request.paired_bitrate_kbps = 24000;
 
   const auto resolved = launch_profile::resolve(request);
@@ -62,6 +65,33 @@ TEST(LaunchProfileTests, ExplicitBitrateWinsOverPairedAndReportsProvenance) {
   EXPECT_EQ(field.at("reason_code"), "requested_bitrate_lock");
   EXPECT_TRUE(field.at("locked"));
   EXPECT_FALSE(field.at("normalized"));
+}
+
+TEST(LaunchProfileTests, UnlockedRequestYieldsToPairedDisplayAndBitrate) {
+  launch_profile::request_t request;
+  request.device_name = "RetroidPocket6";
+  request.preset = "auto";
+  request.requested_width = 3840;
+  request.requested_height = 2160;
+  request.requested_fps = 120000;
+  request.display_locked = false;
+  request.paired_width = 1920;
+  request.paired_height = 1080;
+  request.paired_fps = 60000;
+  request.explicit_bitrate_kbps = 50000;
+  request.bitrate_locked = false;
+  request.paired_bitrate_kbps = 24000;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_EQ(resolved.width, 1920);
+  EXPECT_EQ(resolved.height, 1080);
+  EXPECT_EQ(resolved.fps, 60000);
+  ASSERT_EQ(resolved.target_bitrate_kbps, 24000);
+  EXPECT_EQ(resolved.fields.at("display_mode").at("source"), "paired_client");
+  EXPECT_EQ(resolved.fields.at("target_bitrate_kbps").at("source"), "paired_client");
+  EXPECT_FALSE(resolved.fields.at("display_mode").at("locked"));
+  EXPECT_FALSE(resolved.fields.at("target_bitrate_kbps").at("locked"));
 }
 
 TEST(LaunchProfileTests, HardHostBitrateCapNormalizesExplicitRequestLast) {
@@ -168,10 +198,16 @@ TEST(LaunchProfileTests, HighFpsLocksRequestedCadence) {
   request.requested_width = 1920;
   request.requested_height = 1080;
   request.requested_fps = 120000;
+  request.paired_width = 1280;
+  request.paired_height = 720;
+  request.paired_fps = 60000;
 
   const auto resolved = launch_profile::resolve(request);
 
+  EXPECT_EQ(resolved.width, 1280);
+  EXPECT_EQ(resolved.height, 720);
   EXPECT_EQ(resolved.fps, 120000);
-  EXPECT_TRUE(resolved.fields.at("display_mode").at("locked"));
-  EXPECT_EQ(resolved.fields.at("display_mode").at("reason_code"), "requested_display_setting");
+  EXPECT_FALSE(resolved.fields.at("display_mode").at("locked"));
+  EXPECT_EQ(resolved.fields.at("display_mode").at("reason_code"), "high_fps_cadence_lock");
+  EXPECT_EQ(resolved.fields.at("display_mode").at("locked_components").at(0), "fps");
 }

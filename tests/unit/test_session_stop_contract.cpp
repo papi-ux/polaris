@@ -802,6 +802,17 @@ TEST(SessionStopContractTests, SpawnRollbackRejectsPidfdForDifferentLeader) {
     signal(SIGTERM, SIG_IGN);
     for (;;) pause();
   }
+  const auto became_private_group_leader = [](pid_t pid) {
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      if (getpgid(pid) == pid && getsid(pid) == pid) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+  };
+  ASSERT_TRUE(became_private_group_leader(first));
+  ASSERT_TRUE(became_private_group_leader(second));
   const int second_pidfd = static_cast<int>(syscall(SYS_pidfd_open, second, 0));
   ASSERT_GE(second_pidfd, 0);
   EXPECT_FALSE(stream_runtime::rollback_gamescope_spawn_for_tests(first, second_pidfd));

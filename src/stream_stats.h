@@ -160,6 +160,8 @@ namespace stream_stats {
     int adaptive_target_bitrate_kbps = 0;
     bool adaptive_bitrate_active = false;
     bool adaptive_runtime_update_supported = false;
+    /// True only while one uncontaminated stream generation owns the global actuator.
+    bool doctor_live_action_scope_available = true;
 
     // System
     double gpu_usage = 0;
@@ -389,6 +391,53 @@ namespace stream_stats {
                                     double latency_ms,
                                     double control_packet_loss,
                                     uint64_t bytes_sent);
+
+  /** Publish whether a sole stream generation safely owns Doctor's global actuator. */
+  void set_doctor_live_action_scope_available(bool available);
+
+  /**
+   * @brief Host-received primary network observations covering one Doctor
+   *        verification interval.
+   *
+   * These values come from one mutex-protected observation record, rather
+   * than independently sampled atomics. complete is true only when fresh
+   * observations cover the beginning and end of the requested interval.
+   */
+  struct network_verification_window_t {
+    std::size_t sample_count = 0;
+    std::size_t media_sample_count = 0;
+    std::uint64_t last_revision = 0;
+    std::int64_t first_delay_ms = 0;
+    std::int64_t last_delay_ms = 0;
+    std::int64_t span_ms = 0;
+    std::int64_t last_age_ms = 0;
+    double latency_ms = 0.0;
+    double packet_loss = 0.0;
+    bool packet_loss_available = false;
+    double max_latency_ms = 0.0;
+    double max_packet_loss = 0.0;
+    bool any_packet_loss_available = false;
+    double control_channel_packet_loss = 0.0;
+    std::uint64_t control_channel_samples = 0;
+    bool network_risk = false;
+    bool any_network_risk = false;
+    bool complete = false;
+  };
+
+  network_verification_window_t get_network_verification_window(
+    std::uint64_t after_revision,
+    std::chrono::steady_clock::time_point applied_at,
+    std::chrono::steady_clock::duration required_duration
+  );
+
+#ifdef POLARIS_TESTS
+  /** Spread already-received post-change samples across a synthetic window. */
+  void spread_network_verification_window_for_tests(
+    std::uint64_t after_revision,
+    std::chrono::steady_clock::time_point applied_at,
+    std::chrono::steady_clock::time_point completed_at
+  );
+#endif
 
   /**
    * @brief Convert a scaled loss ratio (e.g. ENet's peer packetLoss against

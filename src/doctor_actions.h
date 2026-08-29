@@ -37,6 +37,7 @@ namespace doctor_actions {
 
   /** Paired-route authorization, including owner-scoped Undo after disconnect. */
   bool paired_route_allowed(std::string_view action_id,
+                            std::string_view run_id,
                             bool active_owner_present,
                             bool caller_is_active_owner);
 
@@ -56,12 +57,23 @@ namespace doctor_actions {
   nlohmann::json execute(const nlohmann::json &request,
                          const recovery_action_context_t &recovery_context);
 
+  /**
+   * Serialize global controller initialization with Doctor rollback and track
+   * the exact sessions that can observe that process-global actuator.
+   */
+  void session_started(std::string_view owner_uuid,
+                       std::uint64_t session_generation,
+                       int base_bitrate_kbps);
+
   /** Roll back and retire a same-stream action when its authenticated session ends. */
   void session_ended(std::string_view owner_uuid, std::uint64_t session_generation);
 
 #ifdef POLARIS_TESTS
   /** Make the active receipt's post-change window due without sleeping in unit tests. */
   void make_verification_due_for_tests();
+
+  /** Complete the active host-received evidence window without sleeping. */
+  void make_verification_window_complete_for_tests();
 
   /** Run the active receipt's verification watchdog synchronously in unit tests. */
   void run_verification_watchdog_for_tests();

@@ -87,7 +87,7 @@ TEST_F(DoctorTrialTest, ProposesOnlyOneHostDerivedDimensionAndPersistsPrivately)
 #endif
 }
 
-TEST_F(DoctorTrialTest, RequiresExplicitConfirmationAndFreshLaunchGeneration) {
+TEST_F(DoctorTrialTest, RequiresExplicitConfirmationAndFreshLaunchInstance) {
   const auto proposal = doctor_trial::propose(
     target, "owner-a", "app-a", "baseline-launch", 10, evidence(), settings(), now
   );
@@ -98,13 +98,10 @@ TEST_F(DoctorTrialTest, RequiresExplicitConfirmationAndFreshLaunchGeneration) {
   ).value("state", ""), "queued");
 
   EXPECT_FALSE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "stale-launch", 10, now + 2
-  ));
-  EXPECT_FALSE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "baseline-launch", 11, now + 2
+    target, "owner-a", "app-a", "baseline-launch", now + 2
   ));
   const auto trial = doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "trial-launch", 11, now + 3
+    target, "owner-a", "app-a", "trial-launch", now + 3
   );
 
   ASSERT_TRUE(trial);
@@ -112,11 +109,11 @@ TEST_F(DoctorTrialTest, RequiresExplicitConfirmationAndFreshLaunchGeneration) {
   EXPECT_EQ(trial->target_fps, 60);
   EXPECT_EQ(doctor_trial::status(target, "owner-a", "app-a", now + 4).value("state", ""), "running");
   EXPECT_FALSE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "another-launch", 12, now + 5
+    target, "owner-a", "app-a", "another-launch", now + 5
   ));
 }
 
-TEST_F(DoctorTrialTest, BaselineAndResultMustMatchTheirExactHostGenerations) {
+TEST_F(DoctorTrialTest, TrialBindsTheFullCandidateWindowHostGeneration) {
   const auto mismatched = doctor_trial::propose(
     target, "owner-a", "app-a", "baseline-launch", 10, evidence(9), settings(), now
   );
@@ -128,20 +125,32 @@ TEST_F(DoctorTrialTest, BaselineAndResultMustMatchTheirExactHostGenerations) {
   const auto run_id = proposal.value("run_id", "");
   ASSERT_TRUE(doctor_trial::confirm(target, "owner-a", "app-a", run_id, now + 1).value("status", false));
   ASSERT_TRUE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "trial-launch", 11, now + 2
+    target, "owner-a", "app-a", "trial-launch", now + 2
   ));
 
-  const auto wrong_generation = doctor_trial::observe(
-    target, "owner-a", "app-a", evidence(12, 60.0, 59.0), settings(60), false, now + 90
+  const auto later_launch_window = doctor_trial::observe(
+    target, "owner-a", "app-a", "later-launch",
+    evidence(11, 60.0, 59.0), settings(60), false, now + 88
   );
-  EXPECT_EQ(wrong_generation.value("state", ""), "collecting");
-  EXPECT_EQ(wrong_generation.value("reason_code", ""), "trial_generation_mismatch");
-  EXPECT_TRUE(wrong_generation.value("changed", false));
+  EXPECT_EQ(later_launch_window.value("state", ""), "running");
+  EXPECT_EQ(
+    later_launch_window.value("reason_code", ""),
+    "trial_launch_instance_mismatch"
+  );
 
-  const auto repeated = doctor_trial::observe(
-    target, "owner-a", "app-a", evidence(12, 60.0, 59.0), settings(60), false, now + 91
+  const auto stale_baseline_window = doctor_trial::observe(
+    target, "owner-a", "app-a", "trial-launch",
+    evidence(10, 120.0, 58.0), settings(60), false, now + 89
   );
-  EXPECT_FALSE(repeated.value("changed", true));
+  EXPECT_EQ(stale_baseline_window.value("state", ""), "collecting");
+  EXPECT_EQ(stale_baseline_window.value("reason_code", ""), "trial_target_window_mismatch");
+
+  const auto result = doctor_trial::observe(
+    target, "owner-a", "app-a", "trial-launch",
+    evidence(12, 60.0, 59.0), settings(60), false, now + 90
+  );
+  EXPECT_EQ(result.value("state", ""), "improved");
+  EXPECT_EQ(result.at("result").value("session_generation", 0), 12);
 }
 
 TEST_F(DoctorTrialTest, CrashAlwaysMarksTheRunningTrialWorse) {
@@ -151,11 +160,12 @@ TEST_F(DoctorTrialTest, CrashAlwaysMarksTheRunningTrialWorse) {
   const auto run_id = proposal.value("run_id", "");
   ASSERT_TRUE(doctor_trial::confirm(target, "owner-a", "app-a", run_id, now + 1).value("status", false));
   ASSERT_TRUE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "trial-launch", 11, now + 2
+    target, "owner-a", "app-a", "trial-launch", now + 2
   ));
 
   const auto result = doctor_trial::observe(
-    target, "owner-a", "app-a", nlohmann::json::object(), settings(60), true, now + 3
+    target, "owner-a", "app-a", "trial-launch",
+    nlohmann::json::object(), settings(60), true, now + 3
   );
   EXPECT_EQ(result.value("state", ""), "worse");
   EXPECT_EQ(result.value("reason_code", ""), "trial_session_crashed");
@@ -168,13 +178,14 @@ TEST_F(DoctorTrialTest, MarksImprovedOnlyAfterFullWindowWithoutGuardrailRegressi
   const auto run_id = proposal.value("run_id", "");
   ASSERT_TRUE(doctor_trial::confirm(target, "owner-a", "app-a", run_id, now + 1).value("status", false));
   ASSERT_TRUE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "trial-launch", 11, now + 2
+    target, "owner-a", "app-a", "trial-launch", now + 2
   ));
 
   const auto result = doctor_trial::observe(
     target,
     "owner-a",
     "app-a",
+    "trial-launch",
     evidence(11, 60.0, 59.0, 0.1, 10.5, 3.1, 5.2),
     settings(60),
     false,
@@ -193,13 +204,14 @@ TEST_F(DoctorTrialTest, ConfoundedSettingsAreInconclusiveAndNeverBecomePolicy) {
   const auto run_id = proposal.value("run_id", "");
   ASSERT_TRUE(doctor_trial::confirm(target, "owner-a", "app-a", run_id, now + 1).value("status", false));
   ASSERT_TRUE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "trial-launch", 11, now + 2
+    target, "owner-a", "app-a", "trial-launch", now + 2
   ));
   auto confounded = settings(60);
   confounded.bitrate_kbps = 20000;
 
   const auto result = doctor_trial::observe(
-    target, "owner-a", "app-a", evidence(11, 60.0, 59.0), confounded, false, now + 90
+    target, "owner-a", "app-a", "trial-launch",
+    evidence(11, 60.0, 59.0), confounded, false, now + 90
   );
 
   EXPECT_EQ(result.value("state", ""), "inconclusive");
@@ -221,6 +233,6 @@ TEST_F(DoctorTrialTest, CanCancelQueuedRunWithoutAConnectedSession) {
   EXPECT_EQ(cancelled.value("state", ""), "cancelled");
   EXPECT_FALSE(cancelled.value("cancellable", true));
   EXPECT_FALSE(doctor_trial::begin_launch(
-    target, "owner-a", "app-a", "trial-launch", 11, now + 3
+    target, "owner-a", "app-a", "trial-launch", now + 3
   ));
 }
