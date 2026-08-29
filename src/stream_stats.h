@@ -529,6 +529,21 @@ namespace stream_stats {
   /** @brief Publish the capture protocol's successful source-frame rate. */
   void update_capture_source_fps(double fps);
 
+  /**
+   * @brief Linearize one complete host video-policy sample before publication.
+   *
+   * The implementation advances Doctor action authority only when the sample
+   * changes whether encoder/pacing evidence suppresses a quality restore.
+   * Repeated samples in the same class remain human-clickable.
+   */
+  void note_doctor_video_policy_sample(double target_fps,
+                                       double delivered_fps,
+                                       double duplicate_frame_ratio,
+                                       double dropped_frame_ratio,
+                                       double avg_frame_age_ms,
+                                       double frame_jitter_ms,
+                                       double encode_time_ms);
+
   /** @brief Publish whether capture is timer-paced or compositor/source-driven. */
   void update_capture_pacing(const std::string &pacing);
 

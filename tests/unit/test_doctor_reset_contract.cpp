@@ -129,6 +129,23 @@ TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   EXPECT_LT(epoch, fields);
 }
 
+TEST(DoctorResetContract, HostVideoEvidenceLinearizesBeforeAdaptiveFeedbackAndPublication) {
+  const auto video = source("src/video.cpp");
+  const auto sample = between(
+    video,
+    "const double fps_ratio =",
+    "stream_stats::update_video_stats("
+  );
+  const auto epoch = sample.find("stream_stats::note_doctor_video_policy_sample(");
+  const auto feedback = sample.find("adaptive_bitrate::update_stream_health(");
+  const auto frame_publication = sample.find("stream_stats::update_frame_delivery(");
+  ASSERT_NE(epoch, std::string::npos);
+  ASSERT_NE(feedback, std::string::npos);
+  ASSERT_NE(frame_publication, std::string::npos);
+  EXPECT_LT(epoch, feedback);
+  EXPECT_LT(epoch, frame_publication);
+}
+
 TEST(DoctorResetContract, PairedGlobalAdaptiveToggleRequiresTheSoleActiveOwner) {
   const auto nvhttp = source("src/nvhttp.cpp");
   const auto adaptive_route = between(

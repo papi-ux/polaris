@@ -1263,6 +1263,54 @@ TEST(DoctorActionTests, HostNetworkPublicationInvalidatesDoctorSnapshotWithAdapt
   adaptive_bitrate::reset();
 }
 
+TEST(DoctorActionTests, CaptureCadenceTransitionInvalidatesVideoPolicyOnceWithAdaptiveDisabled) {
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true, "supported", 20000);
+  adaptive_bitrate::set_base_bitrate(20000);
+
+  // A 108/120 delivered cadence with duplicate-heavy 40 FPS source content is
+  // static evidence, not a pacing warning, so quality policy remains stable.
+  stream_stats::update_capture_source_fps(40.0);
+  stream_stats::note_doctor_video_policy_sample(
+    120.0, 108.0, 0.20, 0.0, 5.0, 1.0, 5.0
+  );
+  const auto static_controller = adaptive_bitrate::get_doctor_state();
+  ASSERT_FALSE(static_controller.enabled);
+
+  stream_stats::note_doctor_video_policy_sample(
+    120.0, 108.0, 0.20, 0.0, 5.0, 1.0, 5.0
+  );
+  EXPECT_EQ(
+    adaptive_bitrate::get_doctor_state().revision,
+    static_controller.revision
+  );
+
+  // When the source proves motion, the same delivered shortfall becomes a
+  // pacing warning. The source publication must invalidate the old restore
+  // envelope before exposing the new cadence, but only on this transition.
+  stream_stats::update_capture_source_fps(110.0);
+  const auto motion_controller = adaptive_bitrate::get_doctor_state();
+  EXPECT_GT(motion_controller.revision, static_controller.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    static_controller.revision,
+    25000,
+    static_controller.max_bitrate_kbps
+  ));
+  stream_stats::update_capture_source_fps(110.0);
+  EXPECT_EQ(
+    adaptive_bitrate::get_doctor_state().revision,
+    motion_controller.revision
+  );
+
+  stream_stats::update_stream_active(false);
+  adaptive_bitrate::reset();
+}
+
 TEST(DoctorActionTests, FreshControlObservationCannotRefreshStaleMediaLoss) {
   using namespace std::chrono_literals;
   stream_stats::update_stream_active(false);

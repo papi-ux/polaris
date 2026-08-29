@@ -49,16 +49,19 @@ namespace adaptive_bitrate {
   // Protected by state_mutex.
   static int doctor_previous_max_bitrate_kbps = 0;
   // Protected by state_mutex. Every target writer, autonomous telemetry
-  // decision, and host network-evidence arrival before Doctor acquisition
-  // bumps this value. Doctor snapshots it and performs an exact compare-and-
-  // set so a newer controller or evidence decision cannot be overwritten by
-  // a stale quality increase.
+  // decision, host network-evidence arrival, and host video-policy transition
+  // before Doctor acquisition bumps this value. Doctor snapshots it and
+  // performs an exact compare-and-set so a newer controller or evidence
+  // decision cannot be overwritten by a stale quality increase.
   static std::uint64_t operator_revision = 1;
   // The encoder thread is the only authority for what was actually applied.
   // Protected by state_mutex.
   static int encoder_applied_bitrate_kbps = 0;
   static std::uint64_t encoder_applied_revision = 0;
   static std::chrono::steady_clock::time_point encoder_applied_at {};
+  // -1 is unknown for a new stream, 0 allows quality restoration, and 1 is a
+  // host video warning that suppresses it. Protected by state_mutex.
+  static int doctor_video_policy_class = -1;
 
   // EWMA-smoothed network metrics
   static double ewma_packet_loss = 0.0;
@@ -122,9 +125,28 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     // Post-change telemetry verifies the fixed Doctor target; it must not
     // supersede the transaction or its one-shot encoder rollback. Before
-    // ownership begins, however, every host-received observation invalidates
-    // a controller snapshot so the initial mutation and evidence publication
-    // share one monotonic transaction epoch.
+    // ownership begins, however, every host-received network observation
+    // invalidates a controller snapshot so the initial mutation and evidence
+    // publication share one monotonic transaction epoch.
+    if (doctor_override_active.load(std::memory_order_relaxed) ||
+        pending_live_update_active.load(std::memory_order_relaxed)) {
+      return;
+    }
+    ++operator_revision;
+    state_changed.notify_all();
+  }
+
+  void note_doctor_video_policy_evidence(bool suppresses_quality_restore) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    const int policy_class = suppresses_quality_restore ? 1 : 0;
+    if (doctor_video_policy_class == policy_class) {
+      return;
+    }
+    doctor_video_policy_class = policy_class;
+
+    // Video samples collected during a Doctor-owned change are verification
+    // evidence, not a competing controller writer. The next generation resets
+    // this class before it can authorize another action.
     if (doctor_override_active.load(std::memory_order_relaxed) ||
         pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
@@ -292,6 +314,7 @@ namespace adaptive_bitrate {
       set_controller_status("frame_pacing_observed", "frame_pacing");
       return;
     }
+
     if (!interval_elapsed(now)) {
       last_pressure_time = now;
       return;
@@ -694,6 +717,7 @@ namespace adaptive_bitrate {
     encoder_applied_bitrate_kbps = 0;
     encoder_applied_revision = 0;
     encoder_applied_at = {};
+    doctor_video_policy_class = -1;
     ++operator_revision;
     state_changed.notify_all();
   }

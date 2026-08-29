@@ -3507,6 +3507,19 @@ namespace video {
           const double fps_ratio =
             target_fps > 0.0 && current_fps > 0.0 ? std::clamp(current_fps / target_fps, 0.0, 1.5) : 0.0;
 
+          // Linearize only a transition in deterministic video policy before
+          // adaptive feedback or hot-stat publication. Repeated samples in the
+          // same class must not expire a human-clickable Auto Fix every frame.
+          stream_stats::note_doctor_video_policy_sample(
+            target_fps,
+            current_fps,
+            duplicate_frame_ratio,
+            dropped_frame_ratio,
+            avg_frame_age_ms,
+            frame_jitter_ms,
+            encode_duration
+          );
+
           if (adaptive_bitrate::is_enabled()) {
             adaptive_bitrate::update_stream_health(
               fps_ratio,
