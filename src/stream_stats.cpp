@@ -100,6 +100,12 @@ namespace stream_stats {
       double avg_frame_age_ms = 0.0;
       double frame_jitter_ms = 0.0;
       double encode_time_ms = 0.0;
+      platf::frame_transport_e capture_transport =
+        platf::frame_transport_e::unknown;
+      platf::frame_residency_e capture_residency =
+        platf::frame_residency_e::unknown;
+      platf::frame_residency_e encode_target_residency =
+        platf::frame_residency_e::unknown;
     };
     doctor_video_policy_state_t doctor_video_policy_state;
     std::mutex doctor_video_policy_mutex;
@@ -124,12 +130,13 @@ namespace stream_stats {
              sample.target_fps,
              sample.delivered_fps
            ) && source_cadence_confirms_motion)));
-      // A CPU-copy capture path already suppresses restore_quality through its
-      // stable capture classification. Treating frame age >= 18 ms as a video
-      // warning here is conservative and exact for GPU-resident paths.
+      const bool capture_cpu_copy =
+        sample.capture_transport == platf::frame_transport_e::shm ||
+        sample.capture_residency == platf::frame_residency_e::cpu ||
+        sample.encode_target_residency == platf::frame_residency_e::cpu;
       const bool encoder_watch =
         sample.encode_time_ms >= 8.0 || sample.avg_frame_age_ms >= 18.0;
-      return encoder_watch || pacing_watch;
+      return capture_cpu_copy || encoder_watch || pacing_watch;
     }
 
     void publish_doctor_video_policy_locked() {
@@ -1914,8 +1921,8 @@ namespace stream_stats {
       std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
       doctor_video_policy_state.capture_source_fps = normalized_fps;
       publish_doctor_video_policy_locked();
+      hot_capture_source_fps.store(normalized_fps, std::memory_order_relaxed);
     }
-    hot_capture_source_fps.store(normalized_fps, std::memory_order_relaxed);
   }
 
   void note_doctor_video_policy_sample(double target_fps,
@@ -1957,6 +1964,18 @@ namespace stream_stats {
 
   void update_capture_metadata(const platf::frame_metadata_t &metadata) {
     std::lock_guard<std::mutex> lock(stats_mutex);
+    std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+    const bool policy_input_changed =
+      doctor_video_policy_state.capture_transport != metadata.transport ||
+      doctor_video_policy_state.capture_residency != metadata.residency;
+    doctor_video_policy_state.capture_transport = metadata.transport;
+    doctor_video_policy_state.capture_residency = metadata.residency;
+    if (policy_input_changed) {
+      publish_doctor_video_policy_locked();
+    }
+    // Keep the action-visible capture path under both locks until the policy
+    // transition is fully published. No status/action snapshot can bind the
+    // new controller revision to the old capture metadata.
     current_stats.capture_transport = metadata.transport;
     current_stats.capture_residency = metadata.residency;
     current_stats.capture_format = metadata.format;
@@ -2019,6 +2038,13 @@ namespace stream_stats {
                                    platf::frame_residency_e target_residency,
                                    platf::frame_format_e target_format) {
     std::lock_guard<std::mutex> lock(stats_mutex);
+    std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+    const bool policy_input_changed =
+      doctor_video_policy_state.encode_target_residency != target_residency;
+    doctor_video_policy_state.encode_target_residency = target_residency;
+    if (policy_input_changed) {
+      publish_doctor_video_policy_locked();
+    }
     current_stats.encode_target_device = target_device;
     current_stats.encode_target_residency = target_residency;
     current_stats.encode_target_format = target_format;

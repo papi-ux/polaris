@@ -62,6 +62,7 @@ namespace adaptive_bitrate {
   // -1 is unknown for a new stream, 0 allows quality restoration, and 1 is a
   // host video warning that suppresses it. Protected by state_mutex.
   static int doctor_video_policy_class = -1;
+  static bool doctor_video_policy_regressed_during_override = false;
 
   // EWMA-smoothed network metrics
   static double ewma_packet_loss = 0.0;
@@ -105,6 +106,7 @@ namespace adaptive_bitrate {
     }
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
+    doctor_video_policy_regressed_during_override = false;
   }
 
   static int clamp_target(int target, int base) {
@@ -145,14 +147,25 @@ namespace adaptive_bitrate {
     doctor_video_policy_class = policy_class;
 
     // Video samples collected during a Doctor-owned change are verification
-    // evidence, not a competing controller writer. The next generation resets
-    // this class before it can authorize another action.
-    if (doctor_override_active.load(std::memory_order_relaxed) ||
-        pending_live_update_active.load(std::memory_order_relaxed)) {
+    // evidence, not a competing controller writer. Latch a regression so a
+    // later clean sample cannot hide it from the host verification window.
+    if (doctor_override_active.load(std::memory_order_relaxed)) {
+      if (suppresses_quality_restore) {
+        doctor_video_policy_regressed_during_override = true;
+      }
+      return;
+    }
+    if (pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
     }
     ++operator_revision;
     state_changed.notify_all();
+  }
+
+  bool doctor_video_policy_blocks_quality_restore() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return doctor_video_policy_class == 1 ||
+      doctor_video_policy_regressed_during_override;
   }
 
   void update_network_stats(double packet_loss_percent, double rtt_ms) {
@@ -421,6 +434,7 @@ namespace adaptive_bitrate {
 
     if (!doctor_override_active.load(std::memory_order_relaxed)) {
       doctor_previous_max_bitrate_kbps = current_config.max_bitrate_kbps;
+      doctor_video_policy_regressed_during_override = false;
     }
     if (temporary_max_bitrate_kbps) {
       current_config.max_bitrate_kbps = std::max(
@@ -676,6 +690,7 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
+    doctor_video_policy_regressed_during_override = false;
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
 
@@ -718,6 +733,7 @@ namespace adaptive_bitrate {
     encoder_applied_revision = 0;
     encoder_applied_at = {};
     doctor_video_policy_class = -1;
+    doctor_video_policy_regressed_during_override = false;
     ++operator_revision;
     state_changed.notify_all();
   }

@@ -59,6 +59,12 @@ namespace launch_profile {
 
   std::string normalize_preset(std::string preset);
   std::string preset_label(const std::string &preset);
+  std::string resolve_non_linux_topology(
+    const std::string &requested_topology,
+    bool topology_locked,
+    bool paired_always_virtual,
+    bool app_virtual_display
+  );
   resolution_t resolve(const request_t &request);
 
 }  // namespace launch_profile

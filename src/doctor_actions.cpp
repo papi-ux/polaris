@@ -442,7 +442,8 @@ namespace doctor_actions {
           ).count();
       return stats.streaming && host_observation_fresh &&
         network_evidence_available && !stats.network_risk &&
-        stats.packet_loss <= 2.0 && stats.latency_ms < 45.0;
+        stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
+        !adaptive_bitrate::doctor_video_policy_blocks_quality_restore();
     }
 
     nlohmann::json verification_window_json(
@@ -477,7 +478,10 @@ namespace doctor_actions {
         window.any_packet_loss_available : window.packet_loss_available;
       const double packet_loss = restoring_quality ? window.max_packet_loss : window.packet_loss;
       const double latency_ms = restoring_quality ? window.max_latency_ms : window.latency_ms;
+      const bool video_policy_clear = !restoring_quality ||
+        !adaptive_bitrate::doctor_video_policy_blocks_quality_restore();
       return window.complete && required_media_arrived &&
+        video_policy_clear &&
         !network_risk &&
         (!packet_loss_available || packet_loss <= 2.0) &&
         latency_ms < 45.0;

@@ -115,6 +115,30 @@ TEST(AdaptiveBitrateController, VerificationEvidenceDoesNotSupersedeAnOwnedDocto
   adaptive_bitrate::reset();
 }
 
+TEST(AdaptiveBitrateController, VideoRegressionRemainsLatchedForADoctorTransaction) {
+  enable_controller();
+  adaptive_bitrate::note_doctor_video_policy_evidence(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    16000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+
+  adaptive_bitrate::note_doctor_video_policy_evidence(true);
+  adaptive_bitrate::note_doctor_video_policy_evidence(false);
+  EXPECT_TRUE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, *doctor_revision);
+
+  EXPECT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  ).has_value());
+  EXPECT_FALSE(adaptive_bitrate::doctor_video_policy_blocks_quality_restore());
+  adaptive_bitrate::reset();
+}
+
 TEST(AdaptiveBitrateController, ReportsFramePacingWithoutLoweringBitrate) {
   enable_controller();
 
