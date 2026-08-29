@@ -321,6 +321,8 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   EXPECT_NE(status_handler.find("get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("auto status_view = proc::proc.get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("const auto &status_snapshot = status_view.snapshot"), std::string::npos);
+  EXPECT_NE(status_handler.find("display_mode[\"mirror_desktop\"] = status_snapshot.mirror_desktop"), std::string::npos);
+  EXPECT_NE(status_handler.find("status_snapshot.force_private_after_desktop_steam_shutdown"), std::string::npos);
   const auto status_view_claim = status_handler.find("get_session_status_view(");
   const auto status_stats_read = status_handler.find("stream_stats::get_current()");
   ASSERT_NE(status_view_claim, std::string::npos);
@@ -449,7 +451,7 @@ TEST(ProcessRuntimeConfigTests, ExplicitSessionModeAlwaysNormalizesCompanionStat
     << "same-ID explicit overrides must still normalize companion state";
 }
 
-TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxModeDerivation) {
+TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinuxModeDerivation) {
   const auto source = read_source_file_for_contract("src/process.cpp");
   ASSERT_FALSE(source.empty());
 
@@ -459,51 +461,56 @@ TEST(ProcessRuntimeConfigTests, FinalOptimizedVirtualDisplayChoicePrecedesLinuxM
   ASSERT_NE(terminate_start, std::string::npos);
   const auto body = source.substr(execute_start, terminate_start - execute_start);
 
-  const auto optimization_guard = body.find("if (resolved_optimization.virtual_display.has_value())");
-  const auto optimization_write = body.find(
-    "launch_session->virtual_display = *resolved_optimization.virtual_display",
-    optimization_guard
+  const auto final_capability_validation = body.find(
+    "validate_resolved_launch_profile_for_app(app, launch_session, client_profile)"
   );
-  const auto desktop_mirror_semantic = body.find(
-    "if (_app.desktop_mirror)",
-    optimization_write
-  );
+  const auto desktop_mirror_semantic = body.find("if (app.desktop_mirror)", final_capability_validation);
   const auto mode_derivation = body.find(
     "stream_display_policy::effective_session_selection_for_launch(",
-    optimization_write
+    desktop_mirror_semantic
   );
+  const auto mode_binding = body.rfind("auto session_mode =", mode_derivation);
   const auto mode_apply = body.find(
     "stream_display_policy::apply_selection(session_mode",
-    mode_derivation
+    mode_binding
+  );
+  const auto generation_install = body.find("++_session_generation", mode_apply);
+  const auto preset_resolution = body.find(
+    "const auto preset_resolution = launch_profile::resolve(preset_request)",
+    generation_install
   );
   const auto runtime_derivation = body.find(
     "const bool gamescope_stream_session",
-    mode_apply
+    preset_resolution
   );
   const auto capture_policy = body.find(
     "stream_display_policy::resolve_current(",
     runtime_derivation
   );
 
-  ASSERT_NE(optimization_guard, std::string::npos);
-  ASSERT_NE(optimization_write, std::string::npos);
+  ASSERT_NE(preset_resolution, std::string::npos);
   ASSERT_NE(desktop_mirror_semantic, std::string::npos);
+  ASSERT_NE(final_capability_validation, std::string::npos);
   ASSERT_NE(mode_derivation, std::string::npos);
+  ASSERT_NE(mode_binding, std::string::npos);
   ASSERT_NE(mode_apply, std::string::npos);
+  ASSERT_NE(generation_install, std::string::npos);
   ASSERT_NE(runtime_derivation, std::string::npos);
   ASSERT_NE(capture_policy, std::string::npos);
-  EXPECT_LT(optimization_guard, optimization_write);
-  EXPECT_LT(optimization_write, desktop_mirror_semantic);
-  EXPECT_LT(desktop_mirror_semantic, mode_derivation)
-    << "final device/AI virtual-display intent must own session mode derivation";
-  EXPECT_LT(mode_derivation, mode_apply);
+  EXPECT_EQ(body.find("launch_session->virtual_display = *resolved_optimization.virtual_display"), std::string::npos)
+    << "deterministic presets must never carry topology";
+  EXPECT_LT(final_capability_validation, desktop_mirror_semantic)
+    << "hard app/client topology semantics must be capability-validated before topology application";
+  EXPECT_LT(desktop_mirror_semantic, mode_derivation);
+  EXPECT_LT(mode_binding, mode_apply);
+  EXPECT_LT(mode_apply, generation_install)
+    << "an exact topology must be applied or rejected before a process generation is installed";
+  EXPECT_LT(generation_install, preset_resolution);
   EXPECT_LT(mode_apply, runtime_derivation)
     << "gamescope/headless decisions must consume the final session mode";
   EXPECT_LT(runtime_derivation, capture_policy);
-  EXPECT_EQ(
-    body.find("stream_display_policy::effective_session_selection_for_launch(", mode_derivation + 1),
-    std::string::npos
-  ) << "one final derivation must own mode, capture, and reported runtime behavior";
+  EXPECT_EQ(body.find("effective_selection"), std::string::npos)
+    << "runtime topology must be re-derived after app semantics instead of reusing a stale pre-preset local";
 }
 
 TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWithoutCrossLockingRtsp) {
@@ -619,6 +626,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(snapshot_guard.find("finish_snapshot()"), std::string::npos);
   EXPECT_NE(header.find("session_snapshot_guard_t guard;"), std::string::npos);
   EXPECT_NE(status_snapshot.find("snapshot.viewer_count = rtsp_snapshot.viewer_count"), std::string::npos);
+  EXPECT_NE(status_snapshot.find("snapshot.mirror_desktop = _launch_session && _launch_session->mirror_desktop"), std::string::npos);
+  EXPECT_NE(status_snapshot.find("snapshot.force_private_after_desktop_steam_shutdown"), std::string::npos);
   const auto stop_snapshot_locked = function_source_between(
     source,
     "session_stop_snapshot_t proc_t::get_session_stop_snapshot_locked(",
@@ -915,56 +924,6 @@ TEST(ProcessRuntimeConfigTests, RefreshPreservesLifecycleSynchronizationObjects)
   const auto get_apps_body = source.substr(get_apps_start, get_apps_end - get_apps_start);
   EXPECT_NE(get_apps_body.find("std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex)"), std::string::npos);
   EXPECT_NE(get_apps_body.find("return _apps"), std::string::npos);
-}
-
-TEST(ProcessRuntimeConfigTests, DeviceDbBitrateStaysOutWhenAutoQualityOffAndMaxBitrateUnlocked) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    0,
-    std::optional<int> {},
-    false,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  EXPECT_FALSE(resolved.has_value());
-}
-
-TEST(ProcessRuntimeConfigTests, DeviceDbBitrateCanSeedAutoQualityWhenEnabled) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    0,
-    std::optional<int> {},
-    true,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ(*resolved, 25000);
-}
-
-TEST(ProcessRuntimeConfigTests, PairedClientBitrateWinsEvenWhenAutoQualityOff) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    0,
-    std::optional<int> {45000},
-    false,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ(*resolved, 45000);
-}
-
-TEST(ProcessRuntimeConfigTests, ManualMaxBitrateLocksOutDeviceDbProfile) {
-  const auto resolved = proc::resolve_device_db_launch_bitrate_for_tests(
-    50000,
-    std::optional<int> {},
-    true,
-    "Steam Deck OLED",
-    "Steam Big Picture"
-  );
-
-  EXPECT_FALSE(resolved.has_value());
 }
 
 TEST(ProcessRuntimeConfigTests, MissionControlPolicyDoesNotUseDeviceDbBitrateWhenAutoQualityOffAndClientBitrateUnknown) {
@@ -2509,6 +2468,23 @@ TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCag
   EXPECT_FALSE(proc::isolated_session_detaches_legacy_handles_for_tests(false));
 #else
   GTEST_SKIP() << "Linux-only isolated session generation policy";
+#endif
+}
+
+TEST(ProcessRuntimeConfigTests, ExactReconnectCadenceNeedsAnAppliedLaunchOwnedOutput) {
+#ifdef __linux__
+  using proc::resolved_reconnect_cadence_allowed;
+
+  EXPECT_TRUE(resolved_reconnect_cadence_allowed(false, 120000, 60000, false))
+    << "desktop streams may change encoder cadence without changing an owned output";
+  EXPECT_TRUE(resolved_reconnect_cadence_allowed(true, 60000, 60000, false))
+    << "an unchanged exact target is already represented by the active generation";
+  EXPECT_TRUE(resolved_reconnect_cadence_allowed(true, 120000, 60000, true))
+    << "a surviving labwc output may change cadence when the route applies and reads it back";
+  EXPECT_FALSE(resolved_reconnect_cadence_allowed(true, 120000, 60000, false))
+    << "Host Virtual and Gamescope must not claim an unapplied cadence change";
+#else
+  GTEST_SKIP() << "Linux-only exact reconnect cadence policy";
 #endif
 }
 

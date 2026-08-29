@@ -202,10 +202,7 @@ const canTestDraft = computed(() => {
   return !!config.value.ai_api_key || hasStoredApiKey.value
 })
 
-const autoQualityEnabled = computed(() => (
-  config.value.ai_enabled === 'enabled' &&
-  config.value.adaptive_bitrate_enabled === 'enabled'
-))
+const aiExplanationsEnabled = computed(() => config.value.ai_enabled === 'enabled')
 
 const authReady = computed(() => {
   if (config.value.ai_auth_mode === 'none') return true
@@ -225,13 +222,6 @@ const authHelpText = computed(() => {
   return `Sign in with ${currentSubscriptionLabel.value}`
 })
 
-const hasFirstStreamProfile = computed(() => {
-  const cacheCount = Number(aiStatus.value?.cache_count || 0)
-  const historyCount = Array.isArray(aiHistory.value) ? aiHistory.value.length : 0
-  const cacheEntries = Array.isArray(aiCache.value) ? aiCache.value.length : 0
-  return cacheCount > 0 || historyCount > 0 || cacheEntries > 0
-})
-
 const setupSteps = computed(() => [
   {
     label: '1. Choose provider',
@@ -249,27 +239,20 @@ const setupSteps = computed(() => [
     done: testResult.value?.success === true
   },
   {
-    label: '4. Enable Auto Quality',
-    status: autoQualityEnabled.value ? 'Enabled' : 'Turn on when the draft passes',
-    done: autoQualityEnabled.value
-  },
-  {
-    label: '5. Build first stream profile',
-    status: hasFirstStreamProfile.value ? 'Profile history found' : 'Start one stream after save/apply',
-    done: hasFirstStreamProfile.value
+    label: '4. Enable explanations',
+    status: aiExplanationsEnabled.value ? 'Enabled' : 'Turn on when the draft passes',
+    done: aiExplanationsEnabled.value
   }
 ])
 
-function setAutoQualityEnabled(enabled) {
-  const value = enabled ? 'enabled' : 'disabled'
-  config.value.ai_enabled = value
-  config.value.adaptive_bitrate_enabled = value
+function setAiExplanationsEnabled(enabled) {
+  config.value.ai_enabled = enabled ? 'enabled' : 'disabled'
 }
 
 const draftMatchesRuntime = computed(() => {
   if (!aiStatus.value) return false
 
-  return aiStatus.value.enabled === autoQualityEnabled.value
+  return aiStatus.value.enabled === aiExplanationsEnabled.value
     && aiStatus.value.provider === config.value.ai_provider
     && aiStatus.value.model === config.value.ai_model
     && aiStatus.value.auth_mode === config.value.ai_auth_mode
@@ -466,8 +449,8 @@ function providerAuthSummary(provider) {
 
 function providerRuntimeSummary(provider) {
   if (!aiStatus.value || aiStatus.value.provider !== provider.id) return 'Not saved'
-  if (aiStatus.value.enabled) return 'Saved runtime · Auto Quality on'
-  return 'Saved runtime · Auto Quality off'
+  if (aiStatus.value.enabled) return 'Saved runtime · explanations on'
+  return 'Saved runtime · explanations off'
 }
 
 function providerRuntimeTone(provider) {
@@ -618,17 +601,17 @@ async function testProviderConfig() {
   testLoading.value = false
   if (result.status) {
     const message = provider.id === 'local'
-      ? `Local endpoint returned a valid optimization for ${testDeviceName.value || 'the selected device'}.`
-      : `${provider.name} returned a valid optimization for ${testDeviceName.value || 'the selected device'}.`
+      ? `Local endpoint returned an explanation for ${testDeviceName.value || 'the selected device'}.`
+      : `${provider.name} returned an explanation for ${testDeviceName.value || 'the selected device'}.`
     testResult.value = {
       success: true,
       label: 'Draft verified',
       message,
       detail: result.reasoning || '',
-      action: 'Next step: save and apply, then start a stream to build the first profile.',
+      action: 'Next step: save the provider settings. AI can explain Doctor evidence, but it cannot define launch settings or actions.',
       payload: result
     }
-    toast(`${provider.name} draft settings verified`, 'success')
+    toast(`${provider.name} explanation provider verified`, 'success')
   } else {
     testResult.value = {
       success: false,
@@ -646,7 +629,7 @@ async function testProviderConfig() {
 async function handleClearCache() {
   const ok = await clearCache()
   if (ok) {
-    toast('AI optimization cache cleared', 'success')
+    toast('AI explanation cache cleared', 'success')
     fetchCache()
   } else {
     toast('Failed to clear cache', 'error')
@@ -696,24 +679,24 @@ onBeforeUnmount(() => {
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="max-w-3xl">
           <div class="section-kicker">Provider</div>
-          <h2 class="settings-section-title mt-2">Choose the optimizer.</h2>
-          <p class="settings-section-copy">Pick the AI provider and adjust the live draft below before you save and apply it.</p>
+          <h2 class="settings-section-title mt-2">Choose an explanation provider.</h2>
+          <p class="settings-section-copy">AI can summarize structured Doctor evidence. Deterministic Launch presets remain the only source of launch settings.</p>
         </div>
 
         <div class="flex items-center gap-3 rounded-2xl border border-storm/40 bg-void/30 px-4 py-3">
           <div>
-            <div class="text-xs uppercase tracking-wider text-storm">AI Auto Quality</div>
+            <div class="text-xs uppercase tracking-wider text-storm">AI explanations</div>
             <div class="text-sm font-medium text-silver mt-1">
-              {{ autoQualityEnabled ? 'Enabled' : 'Disabled' }}
+              {{ aiExplanationsEnabled ? 'Enabled' : 'Disabled' }}
             </div>
           </div>
           <button
-            @click="setAutoQualityEnabled(!autoQualityEnabled)"
+            @click="setAiExplanationsEnabled(!aiExplanationsEnabled)"
             class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors duration-200"
-            :class="autoQualityEnabled ? 'bg-ice' : 'bg-storm/50'">
+            :class="aiExplanationsEnabled ? 'bg-ice' : 'bg-storm/50'">
             <span
               class="inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-200 mt-0.5"
-              :class="autoQualityEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'"></span>
+              :class="aiExplanationsEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'"></span>
           </button>
         </div>
       </div>
@@ -748,14 +731,14 @@ onBeforeUnmount(() => {
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div class="section-kicker">Recommended setup</div>
-            <div class="settings-section-title mt-2 text-base">Guided path to first Auto Quality profile</div>
-            <p class="settings-section-copy mt-2">Follow these in order when you only want the safe default path. Advanced controls stay below.</p>
+            <div class="settings-section-title mt-2 text-base">Guided path to optional AI explanations</div>
+            <p class="settings-section-copy mt-2">Provider output is informational and cannot change bitrate, display, codec, HDR, topology, or Doctor actions.</p>
           </div>
           <div class="rounded-full border border-storm/40 bg-void/30 px-3 py-1 text-xs text-storm">
             {{ setupSteps.filter(step => step.done).length }}/{{ setupSteps.length }} done
           </div>
         </div>
-        <div class="mt-4 grid gap-2 lg:grid-cols-5">
+        <div class="mt-4 grid gap-2 lg:grid-cols-4">
           <div
             v-for="step in setupSteps"
             :key="step.label"
@@ -883,7 +866,7 @@ onBeforeUnmount(() => {
             <div>
               <div class="text-xs uppercase tracking-eyebrow text-storm">{{ currentSubscriptionLabel }}</div>
               <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
-              <div class="text-xs text-storm mt-2">The Web UI can test the draft config below, but live sessions still switch over only after save and apply.</div>
+              <div class="text-xs text-storm mt-2">The Web UI can test this explanation provider. Saving it never changes the deterministic launch resolver.</div>
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
                 If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
               </div>
@@ -947,14 +930,14 @@ onBeforeUnmount(() => {
           <div class="flex items-center justify-between gap-3">
             <div>
               <div class="section-kicker">Testing</div>
-              <div class="settings-section-title mt-2 text-base">Cache, timeout, and draft checks</div>
+              <div class="settings-section-title mt-2 text-base">Explanation cache, timeout, and provider check</div>
             </div>
             <button
               @click="testProviderConfig"
               :disabled="testLoading || aiLoading || !canTestDraft"
               class="inline-flex items-center gap-2 h-10 px-4 text-sm font-medium rounded-lg bg-ice text-void hover:bg-ice/90 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
               <svg v-if="testLoading || aiLoading" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span>{{ testLoading || aiLoading ? 'Testing…' : 'Test draft' }}</span>
+              <span>{{ testLoading || aiLoading ? 'Testing…' : 'Test explanation' }}</span>
             </button>
           </div>
 
@@ -998,7 +981,7 @@ onBeforeUnmount(() => {
                 type="text"
                 class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
                 placeholder="Steam Deck OLED" />
-              <div class="text-xs text-storm mt-1">Use a real or close-match device name.</div>
+              <div class="text-xs text-storm mt-1">Context for the explanation only; this cannot select device settings.</div>
               <datalist id="ai-device-options">
                 <option v-for="device in aiDevices" :key="device.name" :value="device.name" />
               </datalist>
@@ -1011,7 +994,7 @@ onBeforeUnmount(() => {
                 type="text"
                 class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
                 placeholder="Rocket League" />
-              <div class="text-xs text-storm mt-1">Optional title or genre cue.</div>
+              <div class="text-xs text-storm mt-1">Optional explanatory context; this cannot select app settings.</div>
             </div>
           </div>
 
@@ -1042,24 +1025,6 @@ onBeforeUnmount(() => {
                   <span class="text-storm"> · expires {{ formatRelativeTime(testResult.payload.expires_at) }}</span>
                 </div>
               </div>
-              <div v-if="testResult.payload.display_mode" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">Display</div>
-                <div class="text-sm font-mono text-silver mt-1">{{ testResult.payload.display_mode }}</div>
-              </div>
-              <div v-if="testResult.payload.target_bitrate_kbps" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">Bitrate</div>
-                <div class="text-sm font-mono text-silver mt-1">{{ (testResult.payload.target_bitrate_kbps / 1000).toFixed(1) }} Mbps</div>
-              </div>
-              <div v-if="testResult.payload.preferred_codec" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">Codec</div>
-                <div class="text-sm font-mono text-silver mt-1">{{ testResult.payload.preferred_codec.toUpperCase() }}</div>
-              </div>
-              <div v-if="testResult.payload.hdr != null" class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">HDR</div>
-                <div class="text-sm font-mono mt-1" :class="testResult.payload.hdr ? 'text-success' : 'text-storm'">
-                  {{ testResult.payload.hdr ? 'Enabled' : 'Disabled' }}
-                </div>
-              </div>
             </div>
             <div v-if="testResult.success && testResult.payload?.signals_used?.length" class="mt-3 rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
               <div class="text-[10px] uppercase tracking-wider text-storm">Signals used</div>
@@ -1068,10 +1033,6 @@ onBeforeUnmount(() => {
                   {{ signal }}
                 </span>
               </div>
-            </div>
-            <div v-if="testResult.success && testResult.payload?.normalization_reason" class="mt-3 rounded-lg border border-warning/20 bg-warning/6 px-3 py-2">
-              <div class="text-[10px] uppercase tracking-wider text-storm">Normalization</div>
-              <div class="text-xs text-silver mt-2">{{ testResult.payload.normalization_reason }}</div>
             </div>
             <div v-if="selectedHistoryEntry" class="mt-3 rounded-lg border px-3 py-2" :class="selectedHistoryEntry.consecutive_poor_outcomes > 0 ? 'border-danger/20 bg-danger/8' : 'border-storm/20 bg-void/40'">
               <div class="text-[10px] uppercase tracking-wider text-storm">Recent outcome for this device + app</div>
@@ -1097,7 +1058,7 @@ onBeforeUnmount(() => {
                 {{ selectedHistoryEntry.consecutive_poor_outcomes }} consecutive poor sessions.
               </div>
               <div v-if="selectedHistoryEntry.last_invalidated_at" class="text-xs text-warning-bright mt-2">
-                Cache invalidated {{ formatRelativeTime(selectedHistoryEntry.last_invalidated_at) }} after the last poor run.
+                  Historical explanation archived {{ formatRelativeTime(selectedHistoryEntry.last_invalidated_at) }} after the last poor run.
               </div>
             </div>
           </div>
@@ -1109,7 +1070,7 @@ onBeforeUnmount(() => {
           <summary class="settings-disclosure-summary">
             <div>
               <div class="section-kicker">Runtime</div>
-              <div class="settings-section-title mt-2 text-base">Saved optimizer status</div>
+              <div class="settings-section-title mt-2 text-base">Saved explanation status</div>
               <div class="settings-summary-copy">The loaded runtime can differ from the unsaved draft on the left.</div>
             </div>
             <div class="flex items-center gap-2">
@@ -1197,7 +1158,7 @@ onBeforeUnmount(() => {
 
             <div v-if="aiStatus && !draftMatchesRuntime" class="rounded-xl border border-warning/20 bg-warning/6 p-3">
               <div class="text-xs uppercase tracking-wider text-storm">Pending Change</div>
-              <div class="text-sm text-silver mt-2">The draft on the left differs from the loaded runtime. Save and apply before expecting live sessions to switch providers or models.</div>
+              <div class="text-sm text-silver mt-2">The draft on the left differs from the loaded explanation runtime. Save before expecting Doctor explanations to switch providers or models.</div>
             </div>
 
             <div v-if="aiStatus?.last_error" class="rounded-xl border border-danger/20 bg-danger/8 p-3">
@@ -1223,7 +1184,7 @@ onBeforeUnmount(() => {
               <svg class="settings-disclosure-chevron h-4 w-4 text-storm" :class="{ 'rotate-180': cacheExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
             </div>
           </summary>
-          <div class="settings-disclosure-body text-sm text-storm">Stored recommendations for known device and app pairs.</div>
+          <div class="settings-disclosure-body text-sm text-storm">Legacy explanation records are informational and never feed launch policy.</div>
 
           <div v-if="cacheExpanded && Array.isArray(aiCache) && aiCache.length > 0" class="space-y-2 max-h-96 overflow-y-auto scrollbar-hidden">
             <div v-for="(entry, i) in aiCache" :key="i" class="py-2" :class="i > 0 ? 'border-t border-storm/20' : ''">
@@ -1231,9 +1192,7 @@ onBeforeUnmount(() => {
                 <div class="min-w-0 flex-1">
                   <div class="text-silver font-medium truncate">{{ entry.device_name }}{{ entry.app_name ? ' + ' + entry.app_name : '' }}</div>
                   <div class="text-xs text-silver/60">
-                    {{ entry.display_mode || '—' }} · {{ entry.target_bitrate_kbps ? (entry.target_bitrate_kbps / 1000).toFixed(0) + ' Mbps' : '—' }}
-                    <span v-if="entry.preferred_codec"> · {{ entry.preferred_codec.toUpperCase() }}</span>
-                    <span v-if="entry.model"> · {{ entry.model }}</span>
+                    Explanation only<span v-if="entry.model"> · {{ entry.model }}</span>
                   </div>
                 </div>
                 <div class="flex items-center gap-2 shrink-0 ml-3">
@@ -1253,30 +1212,6 @@ onBeforeUnmount(() => {
                   </span>
                   <span class="text-storm">updated {{ formatRelativeTime(entry.generated_at || entry.cached_at) }}</span>
                 </div>
-                <div class="flex justify-between" v-if="entry.display_mode">
-                  <span class="text-storm">Display Mode</span>
-                  <span class="text-ice font-mono">{{ entry.display_mode }}</span>
-                </div>
-                <div class="flex justify-between" v-if="entry.target_bitrate_kbps">
-                  <span class="text-storm">Target Bitrate</span>
-                  <span class="text-ice font-mono">{{ (entry.target_bitrate_kbps / 1000).toFixed(1) }} Mbps</span>
-                </div>
-                <div class="flex justify-between" v-if="entry.nvenc_tune">
-                  <span class="text-storm">NVENC Tune</span>
-                  <span class="text-ice font-mono">{{ entry.nvenc_tune === 1 ? 'Quality' : entry.nvenc_tune === 2 ? 'Low Latency' : 'Ultra Low Latency' }}</span>
-                </div>
-                <div class="flex justify-between" v-if="entry.color_range != null">
-                  <span class="text-storm">Color Range</span>
-                  <span class="text-ice font-mono">{{ entry.color_range === 0 ? 'Client' : entry.color_range === 1 ? 'Limited' : 'Full' }}</span>
-                </div>
-                <div class="flex justify-between" v-if="entry.preferred_codec">
-                  <span class="text-storm">Preferred Codec</span>
-                  <span class="text-ice font-mono">{{ entry.preferred_codec.toUpperCase() }}</span>
-                </div>
-                <div class="flex justify-between" v-if="entry.hdr != null">
-                  <span class="text-storm">HDR</span>
-                  <span class="font-mono" :class="entry.hdr ? 'text-success' : 'text-storm'">{{ entry.hdr ? 'Yes' : 'No' }}</span>
-                </div>
                 <div class="flex justify-between" v-if="entry.expires_at">
                   <span class="text-storm">Expires</span>
                   <span class="text-silver">{{ formatRelativeTime(entry.expires_at) }}</span>
@@ -1289,9 +1224,9 @@ onBeforeUnmount(() => {
                     </span>
                   </div>
                 </div>
-                <div v-if="entry.normalization_reason" class="pt-1.5 border-t border-storm/20">
-                  <span class="text-storm">Normalization: </span>
-                  <span class="text-silver/80">{{ entry.normalization_reason }}</span>
+                <div v-if="entry.reasoning || entry.reasoning_summary" class="pt-1.5 border-t border-storm/20">
+                  <span class="text-storm">Explanation: </span>
+                  <span class="text-silver/80">{{ entry.reasoning_summary || entry.reasoning }}</span>
                 </div>
                 <div v-if="entry.reasoning" class="pt-1.5 border-t border-storm/20">
                   <span class="text-storm">AI Reasoning: </span>
@@ -1300,7 +1235,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
-          <div v-else-if="cacheExpanded" class="text-sm text-storm text-center py-3">No cached optimizations yet</div>
+          <div v-else-if="cacheExpanded" class="text-sm text-storm text-center py-3">No cached explanations yet</div>
         </details>
       </div>
     </div>
@@ -1313,7 +1248,7 @@ onBeforeUnmount(() => {
         </div>
         <svg class="settings-disclosure-chevron h-4 w-4 text-storm" :class="{ 'rotate-180': knowledgeExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </summary>
-      <div class="settings-disclosure-body text-sm text-storm">Known device hints used to seed recommendations.</div>
+      <div class="settings-disclosure-body text-sm text-storm">Versioned device facts used only by deterministic Launch presets.</div>
       <div v-if="knowledgeExpanded" class="mt-4">
         <input
           v-model="deviceSearch"

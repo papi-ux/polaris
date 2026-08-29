@@ -203,21 +203,11 @@ TEST(SourceSafetyContracts, DoctorSteamVdfMutationAndUndoAreReleaseReadOnly) {
   const auto doctor = read(root / "src/doctor_actions.cpp");
   const auto stream = read(root / "src/stream_stats.cpp");
 
-  const auto apply = doctor.find("if (action_id == \"disable_steam_input_xbox\"");
-  const auto apply_guard = doctor.find("return steam_vdf_read_only_response()", apply);
-  const auto shutdown = doctor.find("ensure_steam_client_quiescent_for_doctor()", apply);
-  ASSERT_NE(apply, std::string::npos);
-  ASSERT_NE(apply_guard, std::string::npos);
-  ASSERT_NE(shutdown, std::string::npos);
-  EXPECT_LT(apply_guard, shutdown);
-
-  const auto undo = doctor.find("if (action_run.kind == action_kind_e::disable_steam_input_xbox)");
-  const auto undo_guard = doctor.find("return steam_vdf_read_only_response()", undo);
-  const auto restore = doctor.find("rewrite_steam_profile(edit.path", undo);
-  ASSERT_NE(undo, std::string::npos);
-  ASSERT_NE(undo_guard, std::string::npos);
-  ASSERT_NE(restore, std::string::npos);
-  EXPECT_LT(undo_guard, restore);
+  EXPECT_NE(doctor.find("if (action_id == \"disable_steam_input_xbox\")"), std::string::npos);
+  EXPECT_NE(doctor.find("return steam_vdf_read_only_response()"), std::string::npos);
+  EXPECT_EQ(doctor.find("ensure_steam_client_quiescent_for_doctor()"), std::string::npos);
+  EXPECT_EQ(doctor.find("rewrite_steam_profile"), std::string::npos);
+  EXPECT_EQ(doctor.find("action_kind_e::disable_steam_input_xbox"), std::string::npos);
 
   const auto builder = stream.find("nlohmann::json doctor_safe_action(");
   const auto branch = stream.find("else if (primary_issue == \"steam_input_conflict\")", builder);

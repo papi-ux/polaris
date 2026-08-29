@@ -15,6 +15,10 @@
 #include <mutex>
 #include <regex>
 
+// standard includes
+#include <cmath>
+#include <type_traits>
+
 // local includes
 #include "audio.h"
 #include "platform/common.h"
@@ -30,6 +34,25 @@
 namespace display_device {
   namespace {
     constexpr std::chrono::milliseconds DEFAULT_RETRY_INTERVAL {5000};
+
+    std::optional<int> rounded_refresh_rate_hz(const FloatingPoint &value) {
+      return std::visit(
+        [](const auto &refresh_rate) -> std::optional<int> {
+          using value_t = std::decay_t<decltype(refresh_rate)>;
+          if constexpr (std::is_same_v<value_t, Rational>) {
+            if (refresh_rate.m_denominator == 0) {
+              return std::nullopt;
+            }
+
+            return static_cast<int>(std::lround(static_cast<double>(refresh_rate.m_numerator) /
+                                                static_cast<double>(refresh_rate.m_denominator)));
+          } else {
+            return static_cast<int>(std::lround(refresh_rate));
+          }
+        },
+        value
+      );
+    }
 
     /**
      * @brief A global for the settings manager interface and other settings whose lifetime is managed by `display_device::init(...)`.
@@ -749,6 +772,44 @@ namespace display_device {
     };
 
     return std::make_unique<deinit_t>();
+  }
+
+  std::optional<int> active_refresh_rate_hz_hint(std::string_view output_name) {
+    const std::string selected_output {output_name};
+    const auto configured_display_name = map_output_name(selected_output);
+    const auto enumerated_devices = enumerate_devices();
+
+    std::optional<int> primary_refresh_rate;
+    std::optional<int> any_active_refresh_rate;
+
+    for (const auto &device : enumerated_devices) {
+      if (!device.m_info) {
+        continue;
+      }
+
+      const auto refresh_rate_hz = rounded_refresh_rate_hz(device.m_info->m_refresh_rate);
+      if (!refresh_rate_hz || *refresh_rate_hz <= 0) {
+        continue;
+      }
+
+      const bool matches_configured_output = !configured_display_name.empty() &&
+                                             (device.m_display_name == configured_display_name ||
+                                              device.m_device_id == selected_output);
+      if (matches_configured_output) {
+        return refresh_rate_hz;
+      }
+
+      if (device.m_info->m_primary &&
+          (!primary_refresh_rate || *refresh_rate_hz > *primary_refresh_rate)) {
+        primary_refresh_rate = refresh_rate_hz;
+      }
+
+      if (!any_active_refresh_rate || *refresh_rate_hz > *any_active_refresh_rate) {
+        any_active_refresh_rate = refresh_rate_hz;
+      }
+    }
+
+    return primary_refresh_rate ? primary_refresh_rate : any_active_refresh_rate;
   }
 
   std::string map_output_name(const std::string &output_name) {

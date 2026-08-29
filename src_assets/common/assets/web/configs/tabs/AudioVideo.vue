@@ -177,16 +177,14 @@ const clientSettingsRows = computed(() => [
   { label: 'Display mode', value: clientSettingsSync.value.desiredModeLabel, note: 'Next stream' },
   { label: 'Effective mode', value: clientSettingsSync.value.effectiveModeLabel, note: clientSettingsSync.value.relaunchRequired ? 'Pending' : 'Synced' },
   { label: 'Bitrate limit', value: 'Live', note: 'Client write' },
-  { label: 'AI Auto Quality', value: 'Live', note: 'Host + Nova' },
+  { label: 'Adaptive bitrate', value: 'Live', note: 'Measured loss + RTT' },
 ])
 
 const autoQualityEnabled = computed(() => (
-  config.value.adaptive_bitrate_enabled === 'enabled' &&
-  config.value.ai_enabled === 'enabled'
+  config.value.adaptive_bitrate_enabled === 'enabled'
 ))
 const autoQualityPartial = computed(() => (
-  config.value.adaptive_bitrate_enabled === 'enabled' ||
-  config.value.ai_enabled === 'enabled'
+  config.value.adaptive_bitrate_enabled === 'enabled'
 ))
 const autoQualityBadge = computed(() => {
   if (autoQualityEnabled.value) return 'Enabled'
@@ -1000,7 +998,7 @@ pactl info | grep Source</pre>
         <div>
           <div class="section-kicker">Advanced Tuning</div>
           <h3 class="settings-section-title mt-2">Manual bitrate and pacing</h3>
-          <div class="settings-summary-copy">Direct controls for bitrate ceilings, pacing floors, and Auto Quality bitrate range.</div>
+          <div class="settings-summary-copy">Direct controls for bitrate ceilings, pacing floors, and the measured adaptive-bitrate range.</div>
         </div>
         <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
       </summary>
@@ -1029,8 +1027,8 @@ pactl info | grep Source</pre>
         <div class="settings-subtle-surface space-y-3">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <div class="text-sm font-medium text-silver">AI Auto Quality bitrate range</div>
-              <div class="mt-1 text-sm text-storm">Used by Auto Quality when it needs to lower bitrate, then recover gradually.</div>
+              <div class="text-sm font-medium text-silver">Adaptive bitrate range</div>
+              <div class="mt-1 text-sm text-storm">Used only for evidence-backed live bitrate changes and gradual recovery.</div>
             </div>
             <div class="control-chip whitespace-nowrap" :class="autoQualityTone">{{ autoQualityBadge }}</div>
           </div>
@@ -1064,7 +1062,7 @@ pactl info | grep Source</pre>
             Floor: {{ config.adaptive_bitrate_min / 1000 }} Mbps. Ceiling: {{ config.adaptive_bitrate_max / 1000 }} Mbps.
           </div>
           <div v-else class="text-sm text-storm">
-            Enable AI Auto Quality above to use adaptive live bitrate recovery.
+            Enable Adaptive Bitrate above to use measured live bitrate recovery.
           </div>
         </div>
       </div>

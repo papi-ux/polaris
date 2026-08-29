@@ -117,16 +117,6 @@ namespace proc {
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
 
-#if defined(POLARIS_TESTS)
-  std::optional<int> resolve_device_db_launch_bitrate_for_tests(
-    int configured_max_bitrate,
-    const std::optional<int> &paired_target_bitrate_kbps,
-    bool ai_auto_quality_enabled,
-    const std::string &device_name,
-    const std::string &app_name
-  );
-#endif
-
 #if defined(__linux__)
   struct desktop_launch_safety_policy_t {
     bool desktopSteamActive = false;
@@ -165,6 +155,12 @@ namespace proc {
   void apply_app_display_semantics(
     const struct ctx_t &app,
     rtsp_stream::launch_session_t &launch_session
+  );
+  bool resolved_reconnect_cadence_allowed(
+    bool launch_owns_refresh_rate,
+    int requested_fps,
+    int active_fps,
+    bool exact_private_refresh_reapply_will_run
   );
 #endif
 
@@ -659,6 +655,8 @@ namespace proc {
     bool mangohud_configured = false;
     bool virtual_display = false;
     bool display_mode_explicit = false;
+    bool mirror_desktop = false;
+    bool force_private_after_desktop_steam_shutdown = false;
   };
 
   session_stop_outcome_t evaluate_session_stop_request(
@@ -744,14 +742,14 @@ namespace proc {
     bool allow_client_commands = false;
     int initial_color_range = 0;
     int initial_nvenc_tune = 0;
-    int initial_max_bitrate = 0;
-    int initial_adaptive_max_bitrate = 0;
     bool initial_video_config_saved = false;
     // Session-scoped linux_display override bookkeeping (/launch streamMode):
     // host values saved by execute(), restored in terminate_impl after teardown.
     std::string initial_stream_mode;
     std::string initial_private_runtime;
     std::string initial_headless_swap_mode;
+    std::string initial_streaming_output;
+    std::string initial_primary_output;
     std::string initial_capture;
     bool initial_headless_mode = false;
     bool initial_use_cage_compositor = false;
@@ -772,10 +770,15 @@ namespace proc {
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int validate_resolved_profile_for_running_app(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+      bool exact_private_refresh_reapply_will_run = false
+    );
     bool raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     std::optional<std::uint64_t> capture_session_launch_generation() const;
     bool try_begin_session_launch(std::uint64_t expected_generation);
     void finish_session_launch();
+    std::unique_lock<std::recursive_mutex> acquire_session_lifecycle_lock() const;
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`

@@ -26,6 +26,7 @@ extern "C" {
 #include "config.h"
 #include "crypto.h"
 #include "display_device.h"
+#include "doctor_actions.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -1092,12 +1093,11 @@ namespace stream {
         session->control.peer->packetLoss,
         ENET_PEER_PACKET_LOSS_SCALE);
 
+      const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
+      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
       if (adaptive_bitrate::is_enabled()) {
         adaptive_bitrate::update_network_stats(0.0, rtt_ms);
       }
-
-      const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
-      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
     });
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
@@ -1130,14 +1130,13 @@ namespace stream {
         client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
       }
 
-      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
-        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
-      }
-
       // IDX_LOSS_STATS reports a lost-packet count and elapsed milliseconds,
       // not a total-packet denominator. Dividing count by time manufactured a
       // percentage, so retain RTT and wait for quantified media telemetry.
       record_network_stats(client_ip, rtt_ms, 0.0, 0);
+      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
+        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
+      }
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
@@ -2369,6 +2368,7 @@ namespace stream {
       }
 
       // Remove this client from multi-client stats
+      doctor_actions::session_ended(session.device_uuid, session.session_generation);
       stream_stats::remove_client(session.control.expected_peer_address);
       stream_stats::stop_session_timing(session.device_uuid, session.session_generation);
 
@@ -2452,9 +2452,12 @@ namespace stream {
       // Initialize controller state before the encoder thread publishes its
       // runtime-update capability. Resetting after the thread starts can erase
       // that capability and silently leave a supported encoder inactive.
-      adaptive_bitrate::load_config();
-      adaptive_bitrate::reset();
-      adaptive_bitrate::set_base_bitrate(session.config.monitor.bitrate);
+      doctor_actions::session_started(
+        session.device_uuid,
+        session.session_generation,
+        session.session_token,
+        session.config.monitor.bitrate
+      );
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
@@ -2467,7 +2470,9 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(addr_string, session.device_name);
-      stream_stats::start_session_timing(session.device_uuid, session.session_generation);
+      stream_stats::start_session_timing(
+        session.device_uuid, session.session_generation, session.session_token
+      );
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
         session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
@@ -2481,7 +2486,8 @@ namespace stream {
         session.optimization_reasoning,
         session.optimization_normalization_reason,
         session.optimization_recommendation_version,
-        session.paired_target_bitrate_kbps
+        session.paired_target_bitrate_kbps,
+        adaptive_bitrate::get_state().base_bitrate_kbps
       );
       stream_stats::update_dynamic_range(session.config.monitor.dynamicRange);
       stream_stats::update_video_stats(addr_string,

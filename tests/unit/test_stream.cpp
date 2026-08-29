@@ -23,12 +23,6 @@ namespace stream {
 }
 
 namespace nvhttp {
-  std::optional<int> select_paired_client_launch_bitrate_for_tests(
-    const std::optional<int> &target_bitrate_kbps,
-    int paired_bitrate_kbps,
-    bool applied_history_safe
-  );
-
   nlohmann::json build_session_health_json_for_tests(
     const stream_stats::stats_t &stats,
     bool current_virtual_display,
@@ -63,6 +57,7 @@ namespace {
     stats.encode_target_residency = platf::frame_residency_e::gpu;
     stats.fps = delivered_fps;
     stats.encode_target_fps = target_fps;
+    stats.capture_source_fps = target_fps;
     stats.codec = "hevc";
     return stats;
   }
@@ -94,28 +89,6 @@ TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
   ASSERT_EQ(res, expected);
 }
 
-TEST(NvhttpOptimizerTests, PairedClientLaunchBitrateOverridesCachedLowerOptimizerTarget) {
-  const auto selected = nvhttp::select_paired_client_launch_bitrate_for_tests(
-    25000,
-    80000,
-    false
-  );
-
-  ASSERT_TRUE(selected.has_value());
-  EXPECT_EQ(*selected, 80000);
-}
-
-TEST(NvhttpOptimizerTests, PairedClientLaunchBitrateKeepsHistorySafeRecoveryCap) {
-  const auto selected = nvhttp::select_paired_client_launch_bitrate_for_tests(
-    25000,
-    80000,
-    true
-  );
-
-  ASSERT_TRUE(selected.has_value());
-  EXPECT_EQ(*selected, 25000);
-}
-
 TEST(NvhttpSessionHealthTests, HighRefreshNearTargetDeliveryRemainsSteady) {
   const auto health = nvhttp::build_session_health_json_for_tests(
     stable_gpu_native_stats(115.6, 120.0),
@@ -144,7 +117,7 @@ TEST(NvhttpSessionHealthTests, MeaningfulTargetMissRemainsHostRenderLimited) {
   EXPECT_TRUE(health.at("host_render_limited").get<bool>());
 }
 
-TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing) {
+TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryDoesNotInventPacing) {
   auto stats = stable_gpu_native_stats(60.0, 60.0);
   stats.duplicate_frame_ratio = 0.10;
 
@@ -155,9 +128,9 @@ TEST(NvhttpSessionHealthTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing
     "Control"
   );
 
-  EXPECT_EQ(health.at("grade"), "watch");
-  EXPECT_EQ(health.at("primary_issue"), "frame_pacing");
-  EXPECT_EQ(health.at("limiting_factor"), "pacing");
+  EXPECT_EQ(health.at("grade"), "good");
+  EXPECT_EQ(health.at("primary_issue"), "steady");
+  EXPECT_EQ(health.at("limiting_factor"), "none");
   EXPECT_EQ(health.at("auto_action"), "none");
   EXPECT_FALSE(health.at("host_render_limited").get<bool>());
 }
@@ -282,7 +255,7 @@ TEST(ProcHostPauseClassificationTests, MeaningfulTargetMissRemainsHostRenderLimi
   EXPECT_TRUE(classification.at("host_render_limited").get<bool>());
 }
 
-TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryRemainsFramePacing) {
+TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryDoesNotInventPacing) {
   auto stats = stable_gpu_native_stats(60.0, 60.0);
   stats.duplicate_frame_ratio = 0.10;
 
@@ -292,8 +265,8 @@ TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryRemainsFra
     false
   );
 
-  EXPECT_EQ(classification.at("health_grade"), "watch");
-  EXPECT_EQ(classification.at("primary_issue"), "frame_pacing");
+  EXPECT_EQ(classification.at("health_grade"), "good");
+  EXPECT_EQ(classification.at("primary_issue"), "steady");
   EXPECT_FALSE(classification.at("host_render_limited").get<bool>());
 }
 

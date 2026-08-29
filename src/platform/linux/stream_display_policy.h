@@ -83,6 +83,43 @@ namespace stream_display_policy {
     std::string_view current_capture
   );
 
+  /**
+   * @brief Normalize connector and capture authority for the backend that will
+   *        or did create the Host Virtual display.
+   *
+   * The caller must pass the authoritative backend. In particular, the launch
+   * actuator calls this again with vdisplay_t::backend after creation so a
+   * backend change after preflight cannot carry KScreen connector authority
+   * into an EVDI or wlroots session.
+   */
+  void normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e backend
+  );
+
+  /**
+   * @brief Whether Host Virtual Display creates a new output connector.
+   *
+   * KScreen manages an existing connector. EVDI and wlroots create their own
+   * output, so carrying a dongle connector into those backends would leak game
+   * placement and capture authority from the previous topology.
+   */
+  bool host_virtual_backend_creates_output(
+    virtual_display::backend_e backend
+  );
+
+  /**
+   * @brief Whether retained connector authority is valid for a Host Virtual backend.
+   *
+   * KScreen manages an existing connector. EVDI and wlroots create a new one,
+   * so their final launch fast path must force normalization while any prior
+   * connector or capture-output pin remains.
+   */
+  bool host_virtual_connector_state_matches(
+    virtual_display::backend_e backend,
+    std::string_view streaming_output,
+    std::string_view output_name
+  );
+
   /** Stable selection ids — SoT is stream_path (no dual string tables). */
   constexpr std::string_view k_headless_stream = stream_path::k_headless_stream;
   constexpr std::string_view k_windowed_stream = stream_path::k_windowed_stream;
@@ -135,10 +172,38 @@ namespace stream_display_policy {
   bool selection_valid(std::string_view selection, std::string &error);
 
   /**
+   * @brief Validate against a newly probed host capability snapshot.
+   *
+   * Use this at exact optimize/parse/final-launch boundaries. Status and UI
+   * catalogs may use selection_valid(), which accepts the short probe cache.
+   */
+  bool selection_valid_fresh(std::string_view selection, std::string &error);
+
+  /**
+   * @brief Capability-injected form used to keep served availability and the
+   *        launch validator on one deterministic rule.
+   */
+  bool selection_valid_for_capabilities(
+    std::string_view selection,
+    bool virtual_display_available,
+    std::string &error
+  );
+
+  /**
    * @brief Derive the configured selection from legacy booleans when
    *        linux_stream_mode is unset.
    */
   std::string selection_from_legacy_booleans(const legacy_booleans_t &booleans);
+
+  /**
+   * @brief Return the configured selection after legacy-boolean normalization.
+   */
+  std::string configured_selection();
+
+  /**
+   * @brief Whether a mode creates/owns the stream output refresh rate.
+   */
+  bool selection_owns_launch_refresh_rate(std::string_view selection);
 
   /**
    * @brief Map a selection id to the legacy boolean triple used by older clients.

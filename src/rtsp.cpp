@@ -15,6 +15,7 @@ extern "C" {
 #include <cctype>
 #include <chrono>
 #include <format>
+#include <limits>
 #include <optional>
 #include <set>
 #include <thread>
@@ -52,6 +53,25 @@ namespace rtsp_stream {
   }
 
   namespace {
+    std::int64_t bound_session_bitrate(
+        std::int64_t requested_bitrate_kbps,
+        std::size_t warp_factor,
+        int session_bitrate_ceiling_kbps) {
+      auto warped_bitrate_kbps = requested_bitrate_kbps;
+      if (warp_factor >= 2) {
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        warped_bitrate_kbps = requested_bitrate_kbps > maximum / static_cast<std::int64_t>(warp_factor) ?
+          maximum : requested_bitrate_kbps * static_cast<std::int64_t>(warp_factor);
+      }
+      if (session_bitrate_ceiling_kbps > 0) {
+        warped_bitrate_kbps = std::min(
+          warped_bitrate_kbps,
+          static_cast<std::int64_t>(session_bitrate_ceiling_kbps)
+        );
+      }
+      return warped_bitrate_kbps;
+    }
+
     session_role_e merge_session_role(session_role_e current, bool watch_only) {
       if (current == session_role_e::controller || !watch_only) {
         return session_role_e::controller;
@@ -498,6 +518,17 @@ namespace rtsp_stream {
   };
 
 #ifdef POLARIS_TESTS
+  std::int64_t bound_session_bitrate_for_tests(
+      std::int64_t requested_bitrate_kbps,
+      std::size_t warp_factor,
+      int session_bitrate_ceiling_kbps) {
+    return bound_session_bitrate(
+      requested_bitrate_kbps,
+      warp_factor,
+      session_bitrate_ceiling_kbps
+    );
+  }
+
   std::atomic_uint cleanup_call_counter_for_tests {0};
   std::function<void()> cleanup_unlocked_probe_for_tests;
   std::function<void()> cleanup_session_probe_for_tests;
@@ -1496,20 +1527,24 @@ namespace rtsp_stream {
 
       BOOST_LOG(info) << "Client Requested bitrate is [" << configuredBitrateKbps << "kbps]";
 
-      if (config::video.max_bitrate > 0) {
-        if (config::video.max_bitrate < configuredBitrateKbps) {
-          configuredBitrateKbps = config::video.max_bitrate;
-        }
-      }
-
-      BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
-
+      // A resolved launch target belongs to this RTSP session. Never publish it
+      // through config::video.max_bitrate: that is the stable configured host
+      // capability used by other clients' deterministic /optimize requests.
+      const int session_bitrate_ceiling = session.target_bitrate_kbps.value_or(
+        config::video.max_bitrate
+      );
       // Hack: Restore bitrate for warp mode
       size_t warp_factor = std::round((float)config.monitor.framerate * 1000 / session.fps);
       if (config::video.limit_framerate && warp_factor >= 2) {
-        configuredBitrateKbps *= warp_factor;
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
       }
+      configuredBitrateKbps = bound_session_bitrate(
+        configuredBitrateKbps,
+        config::video.limit_framerate ? warp_factor : 1,
+        session_bitrate_ceiling
+      );
+
+      BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
 
     } catch (std::out_of_range &) {
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});

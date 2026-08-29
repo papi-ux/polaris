@@ -42,13 +42,15 @@ describe('v1.3.14 release contract', () => {
   it('publishes only the approved v1.3.14 scope', () => {
     const release = `${currentChangelog()}\n${read('docs/release-notes/v1.3.14.md')}`
     for (const fact of [
-      'frame_pacing',
+      'frame-pacing',
       'apply_recovery_profile_next_launch',
-      '24 hours',
-      'one-shot',
+      'unsupported_deprecated',
+      'deterministic',
+      'resolved_profile.fields',
+      'MangoHud',
+      'automatic rollback',
+      'Doctor v2',
       'Steam Input',
-      'deterministic-fallback',
-      'Codex CLI',
       'Nova v1.3.9',
     ]) {
       expect(release, `release must include: ${fact}`).toContain(fact)
@@ -56,7 +58,7 @@ describe('v1.3.14 release contract', () => {
     for (const excluded of [
       'High FPS',
       'history_safe',
-      'profilePreference',
+      'durable next-launch recovery profile',
       '#532',
       'Mirror desktop mode',
     ]) {

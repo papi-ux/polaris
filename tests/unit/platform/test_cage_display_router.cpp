@@ -1067,6 +1067,15 @@ TEST(CageDisplayRouterResumeRefreshTests, ResumeRefreshHonorsLaunchClamp) {
   EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(0, 60), 0);
 }
 
+TEST(CageDisplayRouterResumeRefreshTests, ExactResolvedRefreshBypassesLegacyClamp) {
+  // The deterministic resolver already chose the exact target. Reusing the
+  // prior generation's raw-request ceiling would falsely acknowledge the new
+  // profile while leaving the private output at the old cadence.
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(120, 60, false), 120);
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(120000, 60, false), 120);
+  EXPECT_EQ(cage_display_router::resolve_resume_refresh_hz(60, 120, false), 60);
+}
+
 TEST(CageDisplayRouterResumeRefreshTests, ResumePathReappliesRefreshInNvhttp) {
   // Source pin, same rationale as the render-device guards: the fix is only
   // real if the resume handler actually calls it. A cage that outlives its
@@ -1080,7 +1089,27 @@ TEST(CageDisplayRouterResumeRefreshTests, ResumePathReappliesRefreshInNvhttp) {
 
   const auto resume_pos = source.find("void resume(");
   ASSERT_NE(resume_pos, std::string::npos);
-  EXPECT_NE(source.find("stream_runtime::labwc::ensure_output_refresh", resume_pos), std::string::npos)
+  const auto validation = source.find("validate_resolved_profile_for_running_app", resume_pos);
+  const auto refresh = source.find("stream_runtime::labwc::ensure_output_refresh", resume_pos);
+  const auto raise = source.find("raise_session_for_admitted_launch", refresh);
+  ASSERT_NE(validation, std::string::npos);
+  ASSERT_NE(refresh, std::string::npos);
+  ASSERT_NE(raise, std::string::npos);
+  EXPECT_LT(validation, refresh)
+    << "a rejected exact resume must not mutate the surviving cage generation";
+  EXPECT_LT(refresh, raise);
+  EXPECT_NE(
+    source.find("!cage_refresh_applied && launch_session->resolved_profile_from_client", refresh),
+    std::string::npos
+  )
+    << "an exact resume must fail closed when the resolved cage mode does not settle";
+  EXPECT_NE(source.find("prior_cage_refresh_hz * 1000", refresh), std::string::npos)
+    << "a failed pending launch must restore the prior settled cage mode";
+  EXPECT_NE(
+    source.find("!launch_session->resolved_profile_from_client", refresh),
+    std::string::npos
+  ) << "only legacy resumes may reuse the prior generation's request ceiling";
+  EXPECT_NE(refresh, std::string::npos)
     << "the resume handler must re-apply the resuming client's refresh to a running cage";
 }
 #else

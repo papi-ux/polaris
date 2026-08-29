@@ -105,8 +105,8 @@ describe('AI optimizer guided setup', () => {
     expect(text).toContain('1. Choose provider')
     expect(text).toContain('2. Verify auth')
     expect(text).toContain('3. Test draft')
-    expect(text).toContain('4. Enable Auto Quality')
-    expect(text).toContain('5. Build first stream profile')
+    expect(text).toContain('4. Enable explanations')
+    expect(text).not.toContain('Build first stream profile')
     expect(text).toContain('Auth: Subscription, API Key')
     expect(text).toContain('Saved runtime')
     expect(text).toContain('Run claude login')
@@ -148,7 +148,7 @@ describe('AI optimizer guided setup', () => {
     const wrapper = mountOptimizer(config)
     await flushMounted()
 
-    const testButton = wrapper.findAll('button').find(button => button.text().includes('Test draft'))
+    const testButton = wrapper.findAll('button').find(button => button.text().includes('Test explanation'))
     expect(testButton).toBeTruthy()
 
     await testButton.trigger('click')

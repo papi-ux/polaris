@@ -3257,7 +3257,11 @@ namespace video {
       return;
     }
 
-    adaptive_bitrate::set_runtime_update_supported(session->supports_runtime_bitrate_update());
+    adaptive_bitrate::set_runtime_update_supported(
+      session->supports_runtime_bitrate_update(),
+      {},
+      config.bitrate
+    );
     auto runtime_bitrate_guard = util::fail_guard([] {
       adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
     });
@@ -3503,6 +3507,19 @@ namespace video {
           const double fps_ratio =
             target_fps > 0.0 && current_fps > 0.0 ? std::clamp(current_fps / target_fps, 0.0, 1.5) : 0.0;
 
+          // Linearize only a transition in deterministic video policy before
+          // adaptive feedback or hot-stat publication. Repeated samples in the
+          // same class must not expire a human-clickable Auto Fix every frame.
+          stream_stats::note_doctor_video_policy_sample(
+            target_fps,
+            current_fps,
+            duplicate_frame_ratio,
+            dropped_frame_ratio,
+            avg_frame_age_ms,
+            frame_jitter_ms,
+            encode_duration
+          );
+
           if (adaptive_bitrate::is_enabled()) {
             adaptive_bitrate::update_stream_health(
               fps_ratio,
@@ -3515,19 +3532,25 @@ namespace video {
           }
 
           // Check adaptive bitrate and update encoder if target has changed
-          int effective_bitrate = config.bitrate;
-          if (adaptive_bitrate::is_enabled()) {
-            int target = adaptive_bitrate::get_target_bitrate_kbps();
-            if (target > 0 && target != applied_adaptive_bitrate) {
-              if (session->update_bitrate(target)) {
-                applied_adaptive_bitrate = target;
-                effective_bitrate = target;
+          int effective_bitrate = applied_adaptive_bitrate;
+          if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+            if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
+              if (session->update_bitrate(request->target_bitrate_kbps)) {
+                applied_adaptive_bitrate = request->target_bitrate_kbps;
+                adaptive_bitrate::acknowledge_live_bitrate_applied(
+                  request->revision,
+                  applied_adaptive_bitrate
+                );
+                effective_bitrate = applied_adaptive_bitrate;
               } else {
                 BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
                 adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
               }
-            } else if (target > 0) {
-              effective_bitrate = applied_adaptive_bitrate;
+            } else {
+              adaptive_bitrate::acknowledge_live_bitrate_applied(
+                request->revision,
+                applied_adaptive_bitrate
+              );
             }
           }
 
