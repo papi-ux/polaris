@@ -304,6 +304,79 @@ TEST(DoctorResetContract, ResumeRevalidatesTheExactProfileBeforeRaisingAStream) 
   EXPECT_NE(validation, std::string::npos);
   EXPECT_NE(raise, std::string::npos);
   EXPECT_LT(validation, raise);
+
+  const auto launch = between(
+    source("src/nvhttp.cpp"),
+    "void launch(",
+    "void resume("
+  );
+  const auto same_app = launch.find("We're basically resuming the same app");
+  const auto launch_validation = launch.find(
+    "validate_resolved_profile_for_running_app",
+    same_app
+  );
+  ASSERT_NE(same_app, std::string::npos);
+  ASSERT_NE(launch_validation, std::string::npos);
+  const auto initial_validation = launch.find(
+    "if (!active_profile_is_valid())",
+    launch_validation
+  );
+  const auto display_prepare = launch.find("display_device::configure_display", same_app);
+  const auto launch_capability_revalidation = launch.find(
+    "if (!active_profile_is_valid())",
+    display_prepare
+  );
+  ASSERT_NE(initial_validation, std::string::npos);
+  ASSERT_NE(display_prepare, std::string::npos);
+  ASSERT_NE(launch_capability_revalidation, std::string::npos);
+  const auto launch_raise = launch.find(
+    "raise_session_for_admitted_launch",
+    launch_capability_revalidation
+  );
+  const auto launch_cage_refresh = launch.find(
+    "stream_runtime::labwc::ensure_output_refresh(launch_session->fps)",
+    launch_capability_revalidation
+  );
+  ASSERT_NE(launch_raise, std::string::npos);
+  EXPECT_LT(initial_validation, display_prepare)
+    << "the same-app /launch race is a resume and must reject a stale exact envelope before preparation";
+  EXPECT_LT(display_prepare, launch_capability_revalidation);
+  ASSERT_NE(launch_cage_refresh, std::string::npos);
+  EXPECT_LT(launch_capability_revalidation, launch_cage_refresh);
+  EXPECT_LT(launch_cage_refresh, launch_raise);
+  EXPECT_NE(
+    launch.find("if (!launch_cage_refresh_applied)", launch_cage_refresh),
+    std::string::npos
+  ) << "the same-app exact launch must not hide a failed private-output refresh";
+}
+
+TEST(DoctorResetContract, ExactReconnectRequiresTheActiveSessionToken) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto token_matcher = between(
+    nvhttp,
+    "bool session_token_matches_value(",
+    "void append_current_game_session_fields("
+  );
+  EXPECT_NE(token_matcher.find("bool require_exact_token = false"), std::string::npos);
+  EXPECT_NE(
+    token_matcher.find("!expected_token.empty() && !active_token.empty()"),
+    std::string::npos
+  );
+
+  const auto launch = between(nvhttp, "void launch(", "void resume(");
+  const auto resume = between(nvhttp, "void resume(", "void cancel(");
+  EXPECT_NE(
+    launch.find(
+      "session_token_matches_request(\n              args,\n              launch_session->resolved_profile_from_client"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    resume.find(
+      "session_token_matches_request(\n          args,\n          launch_session->resolved_profile_from_client"
+    ),
+    std::string::npos
+  );
 }
 
 TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLock) {
@@ -475,6 +548,9 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   const auto standalone_gate = client_settings.find(
     "standalone_topology_required"
   );
+  const auto typed_persistence_failure = client_settings.find(
+    "stream_display_mode_persistence_failed"
+  );
   const auto controller_lock = client_settings.find(
     "doctor_actions::acquire_paired_global_control("
   );
@@ -489,12 +565,20 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   );
   ASSERT_NE(lifecycle_lock, std::string::npos);
   ASSERT_NE(standalone_gate, std::string::npos);
+  ASSERT_NE(typed_persistence_failure, std::string::npos);
   ASSERT_NE(active_generation_gate, std::string::npos);
   ASSERT_NE(controller_lock, std::string::npos);
   ASSERT_NE(topology_apply, std::string::npos);
   ASSERT_NE(lifecycle_unlock, std::string::npos);
   EXPECT_LT(standalone_gate, lifecycle_lock)
     << "topology persistence must not share a request with a later fallible paired update";
+  EXPECT_NE(
+    client_settings.find(
+      "SimpleWeb::StatusCode::server_error_internal_server_error",
+      typed_persistence_failure
+    ),
+    std::string::npos
+  ) << "a config write failure is a typed server error, never a rejected client value";
   EXPECT_LT(lifecycle_lock, controller_lock)
     << "topology writers must preserve lifecycle-to-controller lock order";
   EXPECT_LT(lifecycle_lock, active_generation_gate);
@@ -513,6 +597,65 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   );
 }
 
+TEST(DoctorResetContract, ClientSettingsPersistencePreservesExistingConfigAtomically) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto persistence = between(
+    nvhttp,
+    "bool persist_config_values(",
+    "std::string configured_stream_display_mode_selection()"
+  );
+
+  EXPECT_EQ(persistence.find("file_handler::read_file"), std::string::npos);
+  EXPECT_EQ(persistence.find("file_handler::write_file"), std::string::npos);
+  EXPECT_NE(persistence.find("fs::symlink_status"), std::string::npos);
+  EXPECT_NE(persistence.find("std::ifstream input"), std::string::npos);
+  EXPECT_NE(persistence.find("input.bad()"), std::string::npos);
+  EXPECT_NE(persistence.find("input.close()"), std::string::npos);
+  EXPECT_NE(persistence.find("input.fail()"), std::string::npos);
+  EXPECT_NE(persistence.find("private_state_file::write_atomic"), std::string::npos);
+  EXPECT_NE(
+    persistence.find("private_state_file::write_status_e::not_committed"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    persistence.find("private_state_file::write_status_e::durability_uncertain"),
+    std::string::npos
+  );
+}
+
+TEST(DoctorResetContract, ExactTopologyAssertionHasItsOwnCapabilityVersion) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  EXPECT_NE(
+    nvhttp.find("features[\"expected_topology_assertion_v1\"] = true"),
+    std::string::npos
+  );
+}
+
+TEST(DoctorResetContract, AppTopologyPrecedenceIsResolvedBeforeRequestAvailability) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto optimize_topology = between(
+    nvhttp,
+    "const bool paired_virtual_lock =",
+    "resolved_topology = effective_selection;"
+  );
+  const auto effective = optimize_topology.find(
+    "auto effective_selection = stream_display_policy::effective_session_selection_for_launch("
+  );
+  const auto requested_availability = optimize_topology.find(
+    "accepted_session_stream_mode(",
+    effective
+  );
+
+  ASSERT_NE(effective, std::string::npos);
+  ASSERT_NE(requested_availability, std::string::npos);
+  EXPECT_LT(effective, requested_availability)
+    << "hard app mirror and unlocked app-virtual semantics must choose the winner before a losing request is probed";
+  EXPECT_NE(
+    optimize_topology.find("if (effective_selection == requested_selection)"),
+    std::string::npos
+  ) << "only the winning requested topology may make its live availability authoritative";
+}
+
 TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {
   const auto virtual_display = source("src/platform/linux/virtual_display.cpp");
   EXPECT_NE(
@@ -527,6 +670,18 @@ TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {
   EXPECT_NE(detector.find("std::lock_guard cache_lock"), std::string::npos);
   EXPECT_NE(detector.find("!force_refresh && cached_backend.has_value()"), std::string::npos);
   EXPECT_NE(detector.find("detect_backend_with_cache_policy(true)"), std::string::npos);
+
+  const auto unavailable_reason = between(
+    virtual_display,
+    "std::string unavailable_reason()",
+    "static bool destroy_unlocked("
+  );
+  EXPECT_NE(
+    unavailable_reason.find("detect_backend_with_cache_policy(false, &evdi_blocked)"),
+    std::string::npos
+  );
+  EXPECT_EQ(unavailable_reason.find("evdi::load_library()"), std::string::npos)
+    << "lazy EVDI loader state must only be touched under the detector mutex";
 
   const auto policy = source("src/platform/linux/stream_display_policy.cpp");
   const auto fresh_validator = between(

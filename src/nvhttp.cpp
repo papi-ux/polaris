@@ -14,8 +14,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -70,6 +72,7 @@
 #include "game_library_scanner.h"
 #include "platform/common.h"
 #include "process.h"
+#include "private_state_file.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "system_tray.h"
@@ -1258,7 +1261,35 @@ namespace nvhttp {
         return true;
       }
 
-      auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+      const fs::path target {config::sunshine.config_file};
+      std::error_code metadata_error;
+      const auto metadata = fs::symlink_status(target, metadata_error);
+      if (metadata_error || !fs::exists(metadata) || !fs::is_regular_file(metadata)) {
+        BOOST_LOG(error) << "client_settings: refusing to replace missing, unreadable, or non-regular config file: "sv
+                         << target;
+        return false;
+      }
+
+      std::ifstream input {target, std::ios::binary};
+      if (!input.is_open()) {
+        BOOST_LOG(error) << "client_settings: failed to open config file for a lossless update: "sv << target;
+        return false;
+      }
+      const std::string existing_config {
+        std::istreambuf_iterator<char> {input},
+        std::istreambuf_iterator<char> {}
+      };
+      if (input.bad()) {
+        BOOST_LOG(error) << "client_settings: failed while reading config file: "sv << target;
+        return false;
+      }
+      input.close();
+      if (input.fail()) {
+        BOOST_LOG(error) << "client_settings: failed to close config file after reading: "sv << target;
+        return false;
+      }
+
+      auto vars = config::parse_config(existing_config);
       for (const auto &[key, value] : updates) {
         vars[key] = value;
       }
@@ -1271,9 +1302,17 @@ namespace nvhttp {
         config_stream << key << " = " << value << std::endl;
       }
 
-      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
-        BOOST_LOG(error) << "client_settings: failed to write config file: "sv << config::sunshine.config_file;
+      const auto persisted = private_state_file::write_atomic(target, config_stream.str());
+      if (persisted.status == private_state_file::write_status_e::not_committed) {
+        BOOST_LOG(error) << "client_settings: atomic config replacement did not commit: "sv << target;
         return false;
+      }
+      if (persisted.status == private_state_file::write_status_e::durability_uncertain) {
+        // rename(2) already made the new config visible. Report the committed
+        // mutation honestly even though the parent-directory fsync/close could
+        // not prove crash durability; claiming unchanged would invite a retry.
+        BOOST_LOG(warning) << "client_settings: config replacement committed with uncertain durability: "sv
+                           << target;
       }
 
       return true;
@@ -1347,7 +1386,13 @@ namespace nvhttp {
       const std::unordered_map<std::string, std::string> &
     )>;
 
-    bool apply_stream_display_mode_selection(
+    enum class stream_display_mode_apply_result_e {
+      success,
+      rejected,
+      persistence_failed,
+    };
+
+    stream_display_mode_apply_result_e apply_stream_display_mode_selection(
       const std::string &selection,
       std::string &error,
       const persist_config_values_fn_t &persist = persist_config_values
@@ -1366,10 +1411,14 @@ namespace nvhttp {
         // Dongle discovery can fill only one connector before discovering that
         // the pair is incomplete. A rejected request must be observation-only.
         restore_live_state();
-        return false;
+        return stream_display_mode_apply_result_e::rejected;
       }
 
       const auto &linux_display = config::video.linux_display;
+      const bool cleared_owned_output_name =
+        !previous_output_name.empty() &&
+        config::video.output_name.empty() &&
+        previous_output_name == previous_linux_display.streaming_output;
       std::unordered_map<std::string, std::string> values {
         {"linux_stream_mode", linux_display.stream_mode},
         {"linux_private_runtime", linux_display.private_runtime},
@@ -1381,23 +1430,27 @@ namespace nvhttp {
         {"linux_streaming_output", linux_display.streaming_output},
         {"linux_primary_output", linux_display.primary_output},
       };
+      if (cleared_owned_output_name) {
+        values["output_name"] = "";
+      }
       if (!persist(values)) {
         restore_live_state();
         error = "failed to persist stream display mode";
-        return false;
+        return stream_display_mode_apply_result_e::persistence_failed;
       }
 
       // Capture backend and output_name are launch-scoped companion settings,
-      // not durable ownership of the topology selector. The process resolver
-      // reapplies them for the selected generation and restores them at
-      // teardown, so switching away cannot leak dongle/Gamescope capture state.
+      // not durable ownership of the topology selector. The sole exception is
+      // removing an output_name that exactly matched the dongle connector we
+      // just retired; keeping that value would continue to pin capture after a
+      // successful switch to Desktop/private mode.
       config::video.capture = previous_capture;
-      config::video.output_name = previous_output_name;
+      config::video.output_name = cleared_owned_output_name ? "" : previous_output_name;
 
-      return true;
+      return stream_display_mode_apply_result_e::success;
 #else
       error = "stream display mode selection is only supported on Linux";
-      return false;
+      return stream_display_mode_apply_result_e::rejected;
 #endif
     }
 
@@ -2482,7 +2535,7 @@ namespace nvhttp {
       [persistence_succeeds](const auto &) {
         return persistence_succeeds;
       }
-    );
+    ) == stream_display_mode_apply_result_e::success;
   }
 #endif
 
@@ -3200,13 +3253,26 @@ namespace nvhttp {
       return util::from_view(get_arg(args, "watch", "0"));
     }
 
-    bool session_token_matches_value(std::string_view expected_token) {
+    bool session_token_matches_value(
+      std::string_view expected_token,
+      bool require_exact_token = false
+    ) {
       const auto active_token = proc::proc.get_session_token();
+      if (require_exact_token) {
+        return !expected_token.empty() && !active_token.empty() &&
+               crypto::constant_time_equals(expected_token, active_token);
+      }
       return expected_token.empty() || active_token.empty() || crypto::constant_time_equals(expected_token, active_token);
     }
 
-    bool session_token_matches_request(const args_t &args) {
-      return session_token_matches_value(get_arg(args, "sessiontoken", ""));
+    bool session_token_matches_request(
+      const args_t &args,
+      bool require_exact_token = false
+    ) {
+      return session_token_matches_value(
+        get_arg(args, "sessiontoken", ""),
+        require_exact_token
+      );
     }
 
     void append_current_game_session_fields(pt::ptree &tree, const crypto::named_cert_t *named_cert_p) {
@@ -4419,7 +4485,18 @@ namespace nvhttp {
         BOOST_LOG(info) << "Ignoring streamMode ["sv << requested_mode << "] because mirrorDesktop wins for this launch"sv;
       } else {
         std::string reject_reason;
-        const auto accepted = accepted_session_stream_mode(requested_mode, reject_reason);
+        // App desktop-mirror semantics are resolved only after the app is
+        // loaded in process::execute_impl(). When /optimize already reported a
+        // different winning topology, validate that this is at least a known,
+        // session-overridable request but defer its live availability to the
+        // final resolver. expected_stream_mode remains assertion-only: if the
+        // app does not actually override this request, final comparison fails.
+        const bool defer_losing_mode_availability =
+          launch_session->resolved_profile_from_client &&
+          launch_session->expected_stream_mode != requested_mode &&
+          stream_display_policy::selection_session_overridable(requested_mode);
+        const auto accepted = defer_losing_mode_availability ?
+          requested_mode : accepted_session_stream_mode(requested_mode, reject_reason);
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
           BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
@@ -4446,19 +4523,10 @@ namespace nvhttp {
         named_cert_p->always_use_virtual_display) {
       launch_session->stream_mode = std::string {stream_display_policy::k_host_virtual_display};
     }
-    if (launch_session->resolved_profile_from_client &&
-        !launch_session->mirror_desktop &&
-        !launch_session->stream_mode.empty()) {
-      std::string resolved_mode_error;
-      if (!stream_display_policy::selection_valid_fresh(
-            launch_session->stream_mode,
-            resolved_mode_error
-          )) {
-        BOOST_LOG(warning) << "Rejecting exact resolved launch after paired topology resolution: "sv
-                           << resolved_mode_error;
-        return nullptr;
-      }
-    }
+    // expectedTopology has already been freshly validated above. The final
+    // app-aware resolver freshly validates the winning mode before generation
+    // install; probing this lower-precedence paired default here would wrongly
+    // reject an app whose hard semantic is Desktop mirroring.
 #endif
     launch_session->virtual_display = !launch_session->mirror_desktop &&
       (client_requested_virtual_display ||
@@ -5528,8 +5596,8 @@ namespace nvhttp {
       }
     }
 
-    host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    auto launch_session = make_launch_session(host_audio, is_input_only, args, named_cert_p.get());
+    const bool launch_host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
+    auto launch_session = make_launch_session(launch_host_audio, is_input_only, args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -5538,6 +5606,19 @@ namespace nvhttp {
     }
     const bool watch_only = launch_session->watch_only;
     bool launch_session_raised = false;
+#ifdef __linux__
+    int prior_launch_cage_refresh_hz = 0;
+    bool launch_cage_refresh_reapply_attempted = false;
+    auto restore_launch_cage_refresh = util::fail_guard([&]() {
+      if (!launch_cage_refresh_reapply_attempted || prior_launch_cage_refresh_hz <= 0) {
+        return;
+      }
+      if (!stream_runtime::labwc::ensure_output_refresh(prior_launch_cage_refresh_hz * 1000)) {
+        BOOST_LOG(error) << "nvhttp: Failed to restore the prior cage refresh after rejected same-app launch"sv;
+      }
+      stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
+    });
+#endif
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
     if (!launch_session->rtsp_cipher && encryption_mode == config::ENCRYPTION_MODE_MANDATORY) {
@@ -5581,7 +5662,10 @@ namespace nvhttp {
 
           return;
         }
-        if (!watch_only && !session_token_matches_request(args)) {
+        if (!watch_only && !session_token_matches_request(
+              args,
+              launch_session->resolved_profile_from_client
+            )) {
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 470);
           tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
@@ -5620,7 +5704,10 @@ namespace nvhttp {
 
           return;
         }
-        if (!watch_only && !session_token_matches_request(args)) {
+        if (!watch_only && !session_token_matches_request(
+              args,
+              launch_session->resolved_profile_from_client
+            )) {
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 470);
           tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
@@ -5639,6 +5726,26 @@ namespace nvhttp {
           launch_session->input_only = true;
         }
 
+        const auto active_profile_is_valid = [&]() {
+          const auto validation_error =
+            proc::proc.validate_resolved_profile_for_running_app(launch_session);
+          if (!validation_error) {
+            return true;
+          }
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", validation_error);
+          tree.put(
+            "root.<xmlattr>.status_message",
+            validation_error == 409 ?
+              "The resolved stream profile no longer matches the active app, topology, or output capabilities" :
+              "The active app could not be validated for resume"
+          );
+          return false;
+        };
+        if (!active_profile_is_valid()) {
+          return;
+        }
+
         if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
           display_device::configure_display(config::video, *launch_session);
 #ifdef __linux__
@@ -5654,6 +5761,32 @@ namespace nvhttp {
             return;
           }
         }
+        // The probe above may change the currently advertised encoder/HDR
+        // capability. Recheck before the common pending-session raise; on
+        // Linux configure_display() itself is observation-only.
+        if (!active_profile_is_valid()) {
+          return;
+        }
+#ifdef __linux__
+        if (!watch_only && launch_session->resolved_profile_from_client &&
+            no_active_sessions && config::video.linux_display.use_cage_compositor &&
+            stream_runtime::labwc::is_running()) {
+          prior_launch_cage_refresh_hz = stream_runtime::labwc::current_output_refresh_hz();
+          launch_cage_refresh_reapply_attempted = prior_launch_cage_refresh_hz > 0;
+          const bool launch_cage_refresh_applied =
+            stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
+          stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
+          if (!launch_cage_refresh_applied) {
+            tree.put("root.resume", 0);
+            tree.put("root.<xmlattr>.status_code", 409);
+            tree.put(
+              "root.<xmlattr>.status_message",
+              "The resolved refresh rate could not be applied to the active private stream"
+            );
+            return;
+          }
+        }
+#endif
       } else {
         const auto& apps = proc::proc.get_apps();
         auto app_iter = std::find_if(apps.begin(), apps.end(), [&appid_str, &appuuid_str](const auto _app) {
@@ -5752,6 +5885,10 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Another launch is already pending");
       return;
     }
+#ifdef __linux__
+    restore_launch_cage_refresh.disable();
+#endif
+    host_audio = launch_host_audio;
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
@@ -5832,14 +5969,15 @@ namespace nvhttp {
       return;
     }
 
-    // Newer Moonlight clients send localAudioPlayMode on /resume too,
-    // so we should use it if it's present in the args and there are
-    // no active sessions we could be interfering with.
+    // Newer Moonlight clients send localAudioPlayMode on /resume too. Keep the
+    // global choice unchanged until this request has passed every admission
+    // check and its pending RTSP launch has actually been installed.
     const bool no_active_sessions {rtsp_stream::session_count() == 0};
+    bool resume_host_audio = host_audio;
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
-      host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
+      resume_host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
-    auto launch_session = make_launch_session(host_audio, false, args, named_cert_p.get());
+    auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get());
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -5871,7 +6009,10 @@ namespace nvhttp {
 
       return;
     }
-    if (!watch_only && !session_token_matches_request(args)) {
+    if (!watch_only && !session_token_matches_request(
+          args,
+          launch_session->resolved_profile_from_client
+        )) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 470);
       tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
@@ -5888,19 +6029,6 @@ namespace nvhttp {
     if (config::input.enable_input_only_mode && current_appid == proc::input_only_app_id) {
       launch_session->input_only = true;
     }
-
-#ifdef __linux__
-    if (!watch_only && no_active_sessions &&
-        config::video.linux_display.use_cage_compositor &&
-        stream_runtime::labwc::is_running()) {
-      // The cage outlives the launch that started it and only the startup
-      // command ever set its output mode, so a resume carrying a different
-      // refresh stayed capped at the previous session's rate (issue #367:
-      // a 120 FPS client resuming a 60 Hz session could never get past 60).
-      stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
-      stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
-    }
-#endif
 
     if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
       // We want to prepare display only if there are no active sessions
@@ -5950,11 +6078,52 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    int prior_cage_refresh_hz = 0;
+    bool cage_refresh_reapply_attempted = false;
+    auto restore_cage_refresh = util::fail_guard([&]() {
+      if (!cage_refresh_reapply_attempted || prior_cage_refresh_hz <= 0) {
+        return;
+      }
+      if (!stream_runtime::labwc::ensure_output_refresh(prior_cage_refresh_hz * 1000)) {
+        BOOST_LOG(error) << "nvhttp: Failed to restore the prior cage refresh after rejected resume"sv;
+      }
+      stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
+    });
+    if (!watch_only && no_active_sessions &&
+        config::video.linux_display.use_cage_compositor &&
+        stream_runtime::labwc::is_running()) {
+      // This is the only resume-time topology mutation. Run it only after the
+      // exact app/topology/capability and encryption checks above. If the
+      // pending RTSP launch cannot be installed, restore the prior settled mode.
+      prior_cage_refresh_hz = stream_runtime::labwc::current_output_refresh_hz();
+      cage_refresh_reapply_attempted = prior_cage_refresh_hz > 0;
+      const bool cage_refresh_applied =
+        stream_runtime::labwc::ensure_output_refresh(launch_session->fps);
+      stream_stats::update_runtime_state(stream_runtime::labwc::runtime_state());
+      if (!cage_refresh_applied && launch_session->resolved_profile_from_client) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 409);
+        tree.put(
+          "root.<xmlattr>.status_message",
+          "The resolved refresh rate could not be applied to the active private stream"
+        );
+        return;
+      }
+    }
+#endif
+
     if (!proc::proc.raise_session_for_admitted_launch(launch_session)) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "Another launch is already pending");
       return;
+    }
+#ifdef __linux__
+    restore_cage_refresh.disable();
+#endif
+    if (no_active_sessions) {
+      host_audio = resume_host_audio;
     }
 
     tree.put("root.<xmlattr>.status_code", 200);
@@ -6344,6 +6513,11 @@ namespace nvhttp {
       features["ai_optimizer_control"] = false;
       features["deterministic_launch_presets_v1"] = true;
       features["resolved_profile_provenance_v1"] = true;
+#if defined(__linux__)
+      features["expected_topology_assertion_v1"] = true;
+#else
+      features["expected_topology_assertion_v1"] = false;
+#endif
       features["adaptive_bitrate_control"] = true;
       features["game_library"] = true;
       // Declared so a client can light up the UI conditionally instead of
@@ -7138,8 +7312,24 @@ namespace nvhttp {
 
           if (stream_display_mode) {
             std::string error;
-            if (!apply_stream_display_mode_selection(*stream_display_mode, error)) {
-              write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
+            const auto apply_result = apply_stream_display_mode_selection(
+              *stream_display_mode,
+              error
+            );
+            if (apply_result != stream_display_mode_apply_result_e::success) {
+              const bool persistence_failed =
+                apply_result == stream_display_mode_apply_result_e::persistence_failed;
+              write_json(
+                {{"status", false}, {"changed", false},
+                 {"state", persistence_failed ? "persistence_failed" : "rejected"},
+                 {"code", persistence_failed ?
+                   "stream_display_mode_persistence_failed" :
+                   "invalid_or_unavailable_topology"},
+                 {"error", error}},
+                persistence_failed ?
+                  SimpleWeb::StatusCode::server_error_internal_server_error :
+                  SimpleWeb::StatusCode::client_error_bad_request
+              );
               return;
             }
           }
@@ -9220,22 +9410,6 @@ namespace nvhttp {
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
         std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
-      if (!mirror_desktop && !requested_selection.empty()) {
-        std::string topology_reject_reason;
-        auto accepted_selection = accepted_session_stream_mode(
-          requested_selection,
-          topology_reject_reason
-        );
-        if (accepted_selection.empty()) {
-          reply_bad_request(
-            "invalid_or_unavailable_topology",
-            topology_reject_reason.empty() ?
-              "The requested stream topology is unavailable." : topology_reject_reason
-          );
-          return;
-        }
-        requested_selection = std::move(accepted_selection);
-      }
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         requested_selection,
         mirror_desktop,
@@ -9244,6 +9418,31 @@ namespace nvhttp {
         topology_locked || paired_virtual_lock,
         false
       );
+      if (!mirror_desktop && !requested_selection.empty()) {
+        if (effective_selection == requested_selection) {
+          std::string topology_reject_reason;
+          auto accepted_selection = accepted_session_stream_mode(
+            requested_selection,
+            topology_reject_reason
+          );
+          if (accepted_selection.empty()) {
+            reply_bad_request(
+              "invalid_or_unavailable_topology",
+              topology_reject_reason.empty() ?
+                "The requested stream topology is unavailable." : topology_reject_reason
+            );
+            return;
+          }
+          requested_selection = std::move(accepted_selection);
+          effective_selection = requested_selection;
+        } else if (!stream_display_policy::selection_session_overridable(requested_selection)) {
+          reply_bad_request(
+            "invalid_or_unavailable_topology",
+            "The lower-precedence topology request is not a known per-session stream mode."
+          );
+          return;
+        }
+      }
       if (effective_selection.empty()) {
         effective_selection = stream_display_policy::configured_selection();
       }

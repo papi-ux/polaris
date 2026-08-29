@@ -89,6 +89,7 @@ namespace stream_runtime {
     std::string session_instance_id();
     std::string x11_display();
     platf::runtime_state_t runtime_state();
+    int current_output_refresh_hz();
 
     /**
      * Re-apply the running cage's output refresh for a resuming session

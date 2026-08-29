@@ -226,6 +226,33 @@ TEST(SessionStreamMode, ExactResolvedLaunchRejectsUnavailableOrHostOnlyModes) {
   }
 }
 
+TEST(SessionStreamMode, ExactParserDefersAvailabilityForALosingAppTopologyRequest) {
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+
+  auto cert = launch_client_cert();
+  const auto session = nvhttp::make_launch_session(
+    true,
+    false,
+    resolved_launch_args("gamescope_stream", "desktop_display"),
+    cert.get()
+  );
+  EXPECT_NE(session, nullptr)
+    << "parser availability must not outrank the app-aware final topology resolver";
+  if (session) {
+    EXPECT_EQ(session->stream_mode, "gamescope_stream");
+    EXPECT_EQ(session->expected_stream_mode, "desktop_display");
+  }
+
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
+}
+
 TEST(SessionStreamMode, LegacyMirrorAndHostDefaultKeepDocumentedSemantics) {
   const char *prior_path = std::getenv("PATH");
   const std::string saved_path = prior_path ? prior_path : "";

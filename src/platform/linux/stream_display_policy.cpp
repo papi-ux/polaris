@@ -27,6 +27,20 @@ namespace stream_display_policy {
       );
     }
 
+    void clear_dongle_output_authority(bool retire_connectors) {
+      auto &linux_display = config::video.linux_display;
+      linux_display.auto_manage_displays = false;
+      linux_display.headless_swap_mode.clear();
+      if (retire_connectors) {
+        if (!linux_display.streaming_output.empty() &&
+            config::video.output_name == linux_display.streaming_output) {
+          config::video.output_name.clear();
+        }
+        linux_display.streaming_output.clear();
+        linux_display.primary_output.clear();
+      }
+    }
+
     bool selection_available_for_capabilities(
       std::string_view selection,
       bool virtual_display_available
@@ -388,7 +402,6 @@ namespace stream_display_policy {
           linux_display.auto_manage_displays) {
         return false;
       }
-
       if (key == k_host_virtual_display &&
           config::video.capture != capture_for_host_virtual_display_backend(
                                      virtual_display::detect_backend(),
@@ -423,13 +436,20 @@ namespace stream_display_policy {
 
     auto &linux_display = config::video.linux_display;
 
-    // Connector ownership is exclusive to the canonical dongle mode. Preserve
-    // configured connector names for a later switch back, but make them inert
-    // for every other explicit mode so Desktop cannot inherit a stale display
-    // actuator from a previous dongle selection.
-    if (key != stream_path::k_headless_dongle) {
+    // Connector/capture-target ownership belongs only to canonical dongle mode
+    // and the KScreen Host Virtual fallback. Clear it for Desktop, Gamescope,
+    // and compositor-private modes so a prior dongle cannot pin capture or SDL
+    // fullscreen hints after its topology actuator has been disabled.
+    if (key != stream_path::k_headless_dongle && key != k_host_virtual_display) {
+      const bool retiring_dongle_state =
+        linux_display.stream_mode == stream_path::k_headless_dongle ||
+        linux_display.auto_manage_displays ||
+        !linux_display.headless_swap_mode.empty();
+      clear_dongle_output_authority(retiring_dongle_state);
+    } else if (key == k_host_virtual_display) {
       linux_display.auto_manage_displays = false;
       linux_display.headless_swap_mode.clear();
+      linux_display.primary_output.clear();
     }
 
     if (key == k_host_virtual_display) {
@@ -510,9 +530,16 @@ namespace stream_display_policy {
         if (path->id == k_host_virtual_display) {
           normalize_host_virtual_display_state();
         }
-        if (path->id != stream_path::k_headless_dongle) {
+        if (path->id != stream_path::k_headless_dongle &&
+            path->id != k_host_virtual_display) {
+          const bool retiring_dongle_state =
+            linux_display.auto_manage_displays ||
+            !linux_display.headless_swap_mode.empty();
+          clear_dongle_output_authority(retiring_dongle_state);
+        } else if (path->id == k_host_virtual_display) {
           linux_display.auto_manage_displays = false;
           linux_display.headless_swap_mode.clear();
+          linux_display.primary_output.clear();
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.
