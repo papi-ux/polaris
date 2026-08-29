@@ -6753,6 +6753,104 @@ namespace proc {
       return validation_error;
     }
 
+#ifdef __linux__
+    if (app.desktop_mirror) {
+      if (!launch_session->mirror_desktop || launch_session->virtual_display) {
+        BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
+                        << app.name << "]; ignoring virtual-display preference for this session"sv;
+      }
+      apply_app_display_semantics(app, *launch_session);
+    }
+
+    // Resolve and apply the exact topology before installing a new process
+    // generation. Availability is allowed to change after /optimize and HTTP
+    // parsing, so this is the final fail-closed gate immediately before launch.
+    const bool virtual_display_requested_before_mode =
+      launch_session->virtual_display ||
+      (app.virtual_display && !launch_session->user_locked_virtual_display);
+    auto session_mode = stream_display_policy::effective_session_selection_for_launch(
+      launch_session->stream_mode,
+      launch_session->mirror_desktop || app.desktop_mirror,
+      launch_session->virtual_display,
+      app.virtual_display,
+      launch_session->user_locked_virtual_display,
+      false
+    );
+    if (session_mode.empty()) {
+      session_mode = stream_display_policy::configured_selection();
+    }
+    if (!session_mode.empty()) {
+      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
+    }
+
+    // Snapshot the host policy before a session-scoped override. On a rejected
+    // legacy request, restore this snapshot and retain the documented host-
+    // default fallback. Exact resolved profiles never receive that fallback.
+    {
+      auto &linux_display = config::video.linux_display;
+      this->initial_stream_mode = linux_display.stream_mode;
+      this->initial_private_runtime = linux_display.private_runtime;
+      this->initial_headless_swap_mode = linux_display.headless_swap_mode;
+      this->initial_capture = config::video.capture;
+      this->initial_headless_mode = linux_display.headless_mode;
+      this->initial_use_cage_compositor = linux_display.use_cage_compositor;
+      this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
+      this->initial_auto_manage_displays = linux_display.auto_manage_displays;
+    }
+    this->initial_display = config::video.output_name;
+    this->initial_color_range = config::video.color_range;
+    this->initial_nvenc_tune = config::video.nvenc_tune;
+    this->initial_video_config_saved = true;
+    this->initial_linux_display_saved = false;
+
+    const auto restore_prelaunch_display_policy = [this]() {
+      auto &linux_display = config::video.linux_display;
+      linux_display.stream_mode = initial_stream_mode;
+      linux_display.private_runtime = initial_private_runtime;
+      linux_display.headless_swap_mode = initial_headless_swap_mode;
+      linux_display.headless_mode = initial_headless_mode;
+      linux_display.use_cage_compositor = initial_use_cage_compositor;
+      linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
+      linux_display.auto_manage_displays = initial_auto_manage_displays;
+      config::video.capture = initial_capture;
+      config::video.output_name = initial_display;
+      config::video.color_range = initial_color_range;
+      config::video.nvenc_tune = initial_nvenc_tune;
+    };
+
+    bool session_mode_applied = false;
+    if (!session_mode.empty() &&
+        !stream_display_policy::selection_companion_state_matches(session_mode)) {
+      std::string mode_error;
+      if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+        this->initial_linux_display_saved = true;
+        session_mode_applied = true;
+        BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
+                        << "] applied in-memory after optimization; host default restored at teardown"sv;
+      } else {
+        restore_prelaunch_display_policy();
+        platf::reevaluate_capture_sources();
+        if (launch_session->resolved_profile_from_client) {
+          this->initial_video_config_saved = false;
+          BOOST_LOG(warning) << "process: rejecting exact resolved session stream mode ["sv
+                             << session_mode << "]: "sv << mode_error;
+          return 409;
+        }
+        launch_session->stream_mode.clear();
+        const auto fallback_mode = stream_display_policy::configured_selection();
+        launch_session->virtual_display =
+          fallback_mode == stream_display_policy::k_host_virtual_display;
+        BOOST_LOG(warning) << "process: session stream mode override ["sv << session_mode
+                           << "] rejected: "sv << mode_error << "; using the host default"sv;
+      }
+    }
+#else
+    this->initial_display = config::video.output_name;
+    this->initial_color_range = config::video.color_range;
+    this->initial_nvenc_tune = config::video.nvenc_tune;
+    this->initial_video_config_saved = true;
+#endif
+
     ++_session_generation;
     capture_generation.generation_id = _session_generation;
 #ifdef __linux__
@@ -6772,28 +6870,11 @@ namespace proc {
       _launch_session->session_token = generate_session_token();
     }
     allow_client_commands = app.allow_client_commands;
-
 #ifdef __linux__
-    // Snapshot the host display policy before any session-scoped override.
-    // Final mode derivation is intentionally deferred until device/AI
-    // optimization has settled launch_session->virtual_display.
-    {
-      auto &linux_display = config::video.linux_display;
-      this->initial_stream_mode = linux_display.stream_mode;
-      this->initial_private_runtime = linux_display.private_runtime;
-      this->initial_headless_swap_mode = linux_display.headless_swap_mode;
-      this->initial_capture = config::video.capture;
-      this->initial_headless_mode = linux_display.headless_mode;
-      this->initial_use_cage_compositor = linux_display.use_cage_compositor;
-      this->initial_prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture;
-      this->initial_auto_manage_displays = linux_display.auto_manage_displays;
+    if (session_mode_applied) {
+      platf::reevaluate_capture_sources();
     }
 #endif
-
-    this->initial_display = config::video.output_name;
-    this->initial_color_range = config::video.color_range;
-    this->initial_nvenc_tune = config::video.nvenc_tune;
-    this->initial_video_config_saved = true;
 
     launch_session->width = launch_session->requested_width;
     launch_session->height = launch_session->requested_height;
@@ -6999,47 +7080,6 @@ namespace proc {
     }
 
 #ifdef __linux__
-    if (_app.desktop_mirror) {
-      if (!launch_session->mirror_desktop || launch_session->virtual_display) {
-        BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
-                        << _app.name << "]; ignoring virtual-display preference for this session"sv;
-      }
-      apply_app_display_semantics(_app, *launch_session);
-    }
-
-    // Apply the explicit app/client session display policy. Launch presets do
-    // not contain a topology field and therefore cannot affect this decision.
-    const bool virtual_display_requested_before_mode =
-      launch_session->virtual_display ||
-      (_app.virtual_display && !launch_session->user_locked_virtual_display);
-    auto session_mode = stream_display_policy::effective_session_selection_for_launch(
-      launch_session->stream_mode,
-      launch_session->mirror_desktop || _app.desktop_mirror,
-      launch_session->virtual_display,
-      _app.virtual_display,
-      launch_session->user_locked_virtual_display,
-      false
-    );
-    if (session_mode.empty()) {
-      session_mode = stream_display_policy::configured_selection();
-    }
-    if (!session_mode.empty()) {
-      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
-    }
-    if (!session_mode.empty() &&
-        !stream_display_policy::selection_companion_state_matches(session_mode)) {
-      std::string mode_error;
-      if (stream_display_policy::apply_selection(session_mode, mode_error)) {
-        this->initial_linux_display_saved = true;
-        BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
-                        << "] applied in-memory after optimization; host default restored at teardown"sv;
-        platf::reevaluate_capture_sources();
-      } else {
-        BOOST_LOG(warning) << "process: final session stream mode override ["sv << session_mode
-                           << "] rejected: "sv << mode_error << "; using the host default"sv;
-      }
-    }
-
     const bool mirror_desktop_session = launch_session && launch_session->mirror_desktop;
     const bool gamescope_stream_session =
       config::video.linux_display.stream_mode == "gamescope_stream" ||

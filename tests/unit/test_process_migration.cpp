@@ -464,8 +464,7 @@ TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinu
   const auto final_capability_validation = body.find(
     "validate_resolved_launch_profile_for_app(app, launch_session, client_profile)"
   );
-  const auto preset_resolution = body.find("const auto preset_resolution = launch_profile::resolve(preset_request)");
-  const auto desktop_mirror_semantic = body.find("if (_app.desktop_mirror)", preset_resolution);
+  const auto desktop_mirror_semantic = body.find("if (app.desktop_mirror)", final_capability_validation);
   const auto mode_derivation = body.find(
     "stream_display_policy::effective_session_selection_for_launch(",
     desktop_mirror_semantic
@@ -475,9 +474,14 @@ TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinu
     "stream_display_policy::apply_selection(session_mode",
     mode_binding
   );
+  const auto generation_install = body.find("++_session_generation", mode_apply);
+  const auto preset_resolution = body.find(
+    "const auto preset_resolution = launch_profile::resolve(preset_request)",
+    generation_install
+  );
   const auto runtime_derivation = body.find(
     "const bool gamescope_stream_session",
-    mode_apply
+    preset_resolution
   );
   const auto capture_policy = body.find(
     "stream_display_policy::resolve_current(",
@@ -490,15 +494,18 @@ TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinu
   ASSERT_NE(mode_derivation, std::string::npos);
   ASSERT_NE(mode_binding, std::string::npos);
   ASSERT_NE(mode_apply, std::string::npos);
+  ASSERT_NE(generation_install, std::string::npos);
   ASSERT_NE(runtime_derivation, std::string::npos);
   ASSERT_NE(capture_policy, std::string::npos);
   EXPECT_EQ(body.find("launch_session->virtual_display = *resolved_optimization.virtual_display"), std::string::npos)
     << "deterministic presets must never carry topology";
-  EXPECT_LT(final_capability_validation, preset_resolution)
-    << "hard app/client topology semantics must be capability-validated before preset resolution";
-  EXPECT_LT(preset_resolution, desktop_mirror_semantic);
+  EXPECT_LT(final_capability_validation, desktop_mirror_semantic)
+    << "hard app/client topology semantics must be capability-validated before topology application";
   EXPECT_LT(desktop_mirror_semantic, mode_derivation);
   EXPECT_LT(mode_binding, mode_apply);
+  EXPECT_LT(mode_apply, generation_install)
+    << "an exact topology must be applied or rejected before a process generation is installed";
+  EXPECT_LT(generation_install, preset_resolution);
   EXPECT_LT(mode_apply, runtime_derivation)
     << "gamescope/headless decisions must consume the final session mode";
   EXPECT_LT(runtime_derivation, capture_policy);

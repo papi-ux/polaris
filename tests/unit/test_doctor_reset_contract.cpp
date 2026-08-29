@@ -366,6 +366,58 @@ TEST(DoctorResetContract, ExplicitTopologyPrecedesPairedAlwaysVirtualDefault) {
   );
 }
 
+TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto launch_parser = between(
+    nvhttp,
+    "const bool client_display_mode_explicit =",
+    "launch_session->virtual_display ="
+  );
+  const auto launch_gate = launch_parser.find("accepted_session_stream_mode(");
+  const auto exact_rejection = launch_parser.find(
+    "launch_session->resolved_profile_from_client",
+    launch_gate
+  );
+  const auto fail_closed = launch_parser.find("return nullptr;", exact_rejection);
+  ASSERT_NE(launch_gate, std::string::npos);
+  ASSERT_NE(exact_rejection, std::string::npos);
+  EXPECT_NE(fail_closed, std::string::npos);
+
+  const auto optimize = between(
+    nvhttp,
+    "auto polarisOptimize =",
+    "auto polarisClientSupportReport ="
+  );
+  EXPECT_NE(
+    optimize.find("accepted_session_stream_mode("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    optimize.find("invalid_or_unavailable_topology"),
+    std::string::npos
+  );
+
+  const auto process = source("src/process.cpp");
+  const auto final_apply = between(
+    process,
+    "Resolve and apply the exact topology before installing a new process",
+    "++_session_generation;"
+  );
+  const auto apply = final_apply.find("stream_display_policy::apply_selection(");
+  const auto resolved = final_apply.find(
+    "launch_session->resolved_profile_from_client",
+    apply
+  );
+  const auto conflict = final_apply.find("return 409;", resolved);
+  ASSERT_NE(apply, std::string::npos);
+  ASSERT_NE(resolved, std::string::npos);
+  EXPECT_NE(conflict, std::string::npos);
+  EXPECT_NE(
+    final_apply.find("restore_prelaunch_display_policy();"),
+    std::string::npos
+  );
+}
+
 TEST(DoctorResetContract, DisabledTrialsNeverExposeOrMutateRetainedReceipts) {
   const auto nvhttp = source("src/nvhttp.cpp");
   const auto session_status = between(

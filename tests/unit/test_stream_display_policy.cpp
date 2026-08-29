@@ -152,6 +152,10 @@ TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClie
     "headless_stream"
   ) << "an explicit accepted streamMode remains authoritative";
   EXPECT_EQ(
+    effective_session_selection_for_launch("gamescope_stream", true, false, false, true),
+    "desktop_display"
+  ) << "explicit desktop mirroring must still beat a stale private streamMode";
+  EXPECT_EQ(
     effective_session_selection_for_launch("headless_stream", false, false, true, false),
     "host_virtual_display"
   ) << "an unlocked paired mode must not override the app's display semantic";
