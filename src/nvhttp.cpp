@@ -4297,6 +4297,30 @@ namespace nvhttp {
         BOOST_LOG(warning) << "Rejecting resolved launch profile with missing or malformed HDR value"sv;
         return nullptr;
       }
+
+      // A resolved profile is an exact deterministic envelope. If hard host
+      // capabilities changed after /optimize, fail closed instead of silently
+      // rewriting an authenticated value while claiming it was preserved.
+      const int host_max_fps = advertised_max_launch_refresh_rate_for_http() * 1000;
+      if (host_max_fps > 0 && launch_session->fps > host_max_fps) {
+        BOOST_LOG(warning) << "Rejecting resolved launch profile above the current host refresh cap: "sv
+                           << launch_session->fps << " > " << host_max_fps;
+        return nullptr;
+      }
+      if (config::video.max_bitrate > 0 &&
+          *launch_session->explicit_target_bitrate_kbps > config::video.max_bitrate) {
+        BOOST_LOG(warning) << "Rejecting resolved launch profile above the configured host bitrate cap: "sv
+                           << *launch_session->explicit_target_bitrate_kbps
+                           << " > " << config::video.max_bitrate;
+        return nullptr;
+      }
+      if (launch_session->enable_hdr) {
+        const auto host_codecs = advertised_codec_support_for_http(true);
+        if (host_codecs.hevc_mode < 3 && host_codecs.av1_mode < 3) {
+          BOOST_LOG(warning) << "Rejecting resolved HDR launch profile because the current encoder lacks HDR support"sv;
+          return nullptr;
+        }
+      }
     } else {
       launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     }
@@ -6922,7 +6946,10 @@ namespace nvhttp {
             return;
           }
           if (target_bitrate_kbps > 0) {
-            adaptive_bitrate::set_base_bitrate(target_bitrate_kbps);
+            // A paired client setting is an explicit newer operator choice.
+            // Apply it exactly to the live target instead of preserving an
+            // older Doctor/adaptive reduction beneath the new base.
+            adaptive_bitrate::set_live_bitrate(target_bitrate_kbps);
           }
         }
 
@@ -8234,12 +8261,18 @@ namespace nvhttp {
           response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
           return;
         }
-        adaptive_bitrate::set_base_bitrate(bitrate_kbps);
-        BOOST_LOG(info) << "Client requested bitrate change: " << bitrate_kbps << " kbps";
+        // This endpoint is an explicit live target, not merely a new adaptive
+        // ceiling. A newer client increase must supersede an older Doctor
+        // reduction in both the base and the encoder-visible target.
+        adaptive_bitrate::set_live_bitrate(bitrate_kbps);
+        const int applied_bitrate_kbps =
+          adaptive_bitrate::get_doctor_state().live_bitrate_kbps;
+        BOOST_LOG(info) << "Client requested bitrate change: " << bitrate_kbps
+                        << " kbps; applied " << applied_bitrate_kbps << " kbps";
 
         nlohmann::json output;
         output["status"] = true;
-        output["bitrate_kbps"] = bitrate_kbps;
+        output["bitrate_kbps"] = applied_bitrate_kbps;
         const auto stats = stream_stats::get_current();
         const auto health = build_session_health_json(
           stats,
@@ -8793,6 +8826,20 @@ namespace nvhttp {
           invalid_argument = true;
         }
       }
+      std::optional<int> client_max_fps;
+      if (const auto it = args.find("client_max_fps"); it != args.end()) {
+        try {
+          std::size_t consumed = 0;
+          const auto fps = std::stod(it->second, &consumed);
+          if (consumed != it->second.size() || !std::isfinite(fps) || fps < 15.0 || fps > 360.0) {
+            invalid_argument = true;
+          } else {
+            client_max_fps = static_cast<int>(std::round(fps * 1000.0));
+          }
+        } catch (...) {
+          invalid_argument = true;
+        }
+      }
       const bool any_explicit_mode = explicit_width || explicit_height || explicit_fps;
       const bool complete_explicit_mode = explicit_width && explicit_height && explicit_fps;
       const auto exact_flag = [&](const char *name) {
@@ -8837,6 +8884,12 @@ namespace nvhttp {
       preset_request.bitrate_locked = bitrate_locked;
       preset_request.paired_bitrate_kbps = named_cert_p->target_bitrate_kbps > 0 ?
         std::optional<int> {named_cert_p->target_bitrate_kbps} : std::nullopt;
+      preset_request.client_max_fps = client_max_fps;
+      preset_request.host_max_fps =
+        advertised_max_launch_refresh_rate_for_http() * 1000;
+      const auto host_codecs = advertised_codec_support_for_http(true);
+      preset_request.host_hdr_capable =
+        host_codecs.hevc_mode >= 3 || host_codecs.av1_mode >= 3;
       if (config::video.max_bitrate > 0) {
         preset_request.configured_bitrate_kbps = config::video.max_bitrate;
       }

@@ -70,6 +70,13 @@ namespace {
   }
 }
 
+TEST(SessionBitrateContract, HardCeilingAppliesAfterWarpExpansion) {
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(40000, 1, 40000), 40000);
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(40000, 2, 40000), 40000);
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(40000, 4, 40000), 40000);
+  EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(10000, 4, 50000), 40000);
+}
+
 TEST(ProcessRefreshContractTests, ParsedConfigurationPreservesLifecycleIdentityAndGeneration) {
   auto current_env = boost::this_process::environment();
   proc::proc_t subject {std::move(current_env), {}};

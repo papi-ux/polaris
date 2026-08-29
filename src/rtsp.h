@@ -6,6 +6,8 @@
 
 // standard includes
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <list>
@@ -182,6 +184,11 @@ namespace rtsp_stream {
   session_snapshot_t session_snapshot(const std::string_view& uuid);
 
 #ifdef POLARIS_TESTS
+  std::int64_t bound_session_bitrate_for_tests(
+    std::int64_t requested_bitrate_kbps,
+    std::size_t warp_factor,
+    int session_bitrate_ceiling_kbps
+  );
   session_role_e merge_session_role_for_tests(session_role_e current, bool watch_only);
   void accumulate_session_snapshot_for_tests(
     session_snapshot_t &snapshot,

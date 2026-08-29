@@ -76,6 +76,25 @@ TEST(DoctorResetContract, RunningSessionCannotRewriteTheConfiguredHostBitrateCap
   );
 }
 
+TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto live_route = between(
+    nvhttp,
+    "auto polarisSetBitrate =",
+    "auto polarisSetAdaptiveBitrate ="
+  );
+  EXPECT_NE(live_route.find("adaptive_bitrate::set_live_bitrate"), std::string::npos);
+  EXPECT_EQ(live_route.find("adaptive_bitrate::set_base_bitrate"), std::string::npos);
+
+  const auto video = source("src/video.cpp");
+  const auto runtime_update = between(
+    video,
+    "// Check adaptive bitrate and update encoder if target has changed",
+    "stream_stats::update_frame_delivery("
+  );
+  EXPECT_NE(runtime_update.find("adaptive_bitrate::is_active()"), std::string::npos);
+}
+
 TEST(DoctorResetContract, ResolvedLaunchRequiresAnExactResolvedHdrValue) {
   const auto launch_parser = between(
     source("src/nvhttp.cpp"),
@@ -89,6 +108,30 @@ TEST(DoctorResetContract, ResolvedLaunchRequiresAnExactResolvedHdrValue) {
     launch_parser.find("Rejecting resolved launch profile with missing or malformed HDR value"),
     std::string::npos
   );
+}
+
+TEST(DoctorResetContract, OptimizeOwnsHardRefreshAndHdrCapabilityValidation) {
+  const auto handler = between(
+    source("src/nvhttp.cpp"),
+    "auto polarisOptimize =",
+    "auto polarisClientSupportReport ="
+  );
+  EXPECT_NE(handler.find("client_max_fps"), std::string::npos);
+  EXPECT_NE(handler.find("advertised_max_launch_refresh_rate_for_http"), std::string::npos);
+  EXPECT_NE(handler.find("advertised_codec_support_for_http"), std::string::npos);
+  EXPECT_NE(handler.find("host_hdr_capable"), std::string::npos);
+}
+
+TEST(DoctorResetContract, ResolvedLaunchFailsClosedWhenHostCapsChanged) {
+  const auto launch_parser = between(
+    source("src/nvhttp.cpp"),
+    "if (launch_session->resolved_profile_from_client) {",
+    "launch_session->watch_only ="
+  );
+  EXPECT_NE(launch_parser.find("above the current host refresh cap"), std::string::npos);
+  EXPECT_NE(launch_parser.find("above the configured host bitrate cap"), std::string::npos);
+  EXPECT_NE(launch_parser.find("current encoder lacks HDR support"), std::string::npos);
+  EXPECT_NE(launch_parser.find("return nullptr"), std::string::npos);
 }
 
 TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLock) {
