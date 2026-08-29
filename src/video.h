@@ -306,6 +306,12 @@ namespace video {
   };
 
   struct encode_session_t {
+    enum class bitrate_update_e {
+      rejected,
+      applied,
+      pending_frame
+    };
+
     virtual ~encode_session_t() = default;
 
     virtual int convert(frame_t &frame) = 0;
@@ -326,10 +332,11 @@ namespace video {
     /**
      * @brief Dynamically update the encoder bitrate at runtime.
      * @param new_bitrate_kbps New target bitrate in kilobits per second.
-     * @return `true` if the encoder supports runtime bitrate update and it succeeded.
+     * @return Whether the encoder rejected the request, applied it immediately,
+     *         or accepted it for confirmation on the next encoded frame.
      */
-    virtual bool update_bitrate(int new_bitrate_kbps) {
-      return false;  // Not supported by default
+    virtual bitrate_update_e update_bitrate(int new_bitrate_kbps) {
+      return bitrate_update_e::rejected;
     }
   };
 

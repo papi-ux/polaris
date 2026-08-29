@@ -2775,6 +2775,126 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
   stream_stats::update_stream_active(false);
 }
 
+TEST(StreamStatsHotFieldTests, ClientMediaCountersPublishHostScopedDerivedLoss) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true);
+  stream_stats::update_control_channel_stats(12.0, 9.0, 777);
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-a",
+    .app_session_id = "app-session-a",
+    .session_generation = 41,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 100,
+    .frames_received = 100,
+    .frames_lost = 0
+  };
+  const auto baseline = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(baseline.accepted);
+  EXPECT_FALSE(baseline.observation_published);
+  EXPECT_EQ(baseline.state, stream_stats::client_media_ingest_state_e::baseline);
+  EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 200;
+  sample.frames_received = 196;
+  sample.frames_lost = 4;
+  const auto observed = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(observed.accepted);
+  EXPECT_TRUE(observed.observation_published);
+  EXPECT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_DOUBLE_EQ(observed.media_loss_pct, 4.0);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.latency_ms, 12.0)
+    << "client media telemetry must preserve host-observed RTT";
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 4.0);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_EQ(stats.packet_loss_source, "media_transport");
+  EXPECT_EQ(stats.bytes_sent, 777u);
+
+  const auto replay = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_FALSE(replay.accepted);
+  EXPECT_EQ(replay.state, stream_stats::client_media_ingest_state_e::non_monotonic);
+
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCounterRestartNeedsANewBaseline) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true);
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-b",
+    .app_session_id = "app-session-b",
+    .session_generation = 52,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 1'000,
+    .frames_received = 990,
+    .frames_lost = 10
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 20;
+  sample.frames_received = 20;
+  sample.frames_lost = 0;
+  const auto reset = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(reset.accepted);
+  EXPECT_FALSE(reset.observation_published);
+  EXPECT_EQ(reset.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+
+  sample.client_monotonic_ms = 3'000;
+  sample.frames_expected = 120;
+  sample.frames_received = 120;
+  const auto clean = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(clean.observation_published);
+  EXPECT_DOUBLE_EQ(clean.media_loss_pct, 0.0);
+
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCoverageGapCannotRefreshOldLoss) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true);
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-c",
+    .app_session_id = "app-session-c",
+    .session_generation = 63,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 100,
+    .frames_received = 100,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+  stream_stats::age_client_media_counter_baseline_for_tests(
+    std::chrono::seconds(6)
+  );
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 200;
+  sample.frames_received = 190;
+  sample.frames_lost = 10;
+  const auto gap = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(gap.accepted);
+  EXPECT_FALSE(gap.observation_published);
+  EXPECT_EQ(gap.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+
+  sample.client_monotonic_ms = 3'000;
+  sample.frames_expected = 300;
+  sample.frames_received = 290;
+  const auto current = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(current.observation_published);
+  EXPECT_DOUBLE_EQ(current.media_loss_pct, 0.0);
+
+  stream_stats::update_stream_active(false);
+}
+
 TEST(StreamStatsHotFieldTests, ControlChannelLossNeverBecomesMediaLossOrRisk) {
   stream_stats::update_stream_active(false);
   stream_stats::update_stream_active(true);

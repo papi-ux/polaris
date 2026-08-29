@@ -150,6 +150,14 @@ namespace stream_stats {
     network_risk_tracker_t network_risk_tracker;
     std::mutex network_risk_mutex;
 
+    constexpr auto CLIENT_MEDIA_COUNTER_MAX_GAP = std::chrono::seconds(5);
+    struct client_media_counter_epoch_t {
+      client_media_counters_t sample;
+      std::chrono::steady_clock::time_point received_at {};
+    };
+    std::mutex client_media_counter_mutex;
+    std::optional<client_media_counter_epoch_t> last_client_media_counter_epoch;
+
     struct primary_network_observation_t {
       std::uint64_t revision = 0;
       std::chrono::steady_clock::time_point received_at {};
@@ -260,6 +268,10 @@ namespace stream_stats {
         network_risk_tracker.reset();
         primary_network_observations.clear();
         primary_network_state = primary_network_observation_t {};
+      }
+      {
+        std::lock_guard<std::mutex> media_lock(client_media_counter_mutex);
+        last_client_media_counter_epoch.reset();
       }
       hot_network_risk.store(false, std::memory_order_relaxed);
       hot_bytes_sent.store(0, std::memory_order_relaxed);
@@ -1781,6 +1793,109 @@ namespace stream_stats {
       record_primary_network_observation(true, latency_ms, packet_loss, bytes_sent);
     }
   }
+
+  std::string_view from_client_media_ingest_state(
+      client_media_ingest_state_e state) {
+    switch (state) {
+      case client_media_ingest_state_e::baseline: return "baseline";
+      case client_media_ingest_state_e::observed: return "observed";
+      case client_media_ingest_state_e::waiting_for_frames: return "waiting_for_frames";
+      case client_media_ingest_state_e::coverage_gap_reset: return "coverage_gap_reset";
+      case client_media_ingest_state_e::counter_epoch_reset: return "counter_epoch_reset";
+      case client_media_ingest_state_e::non_monotonic: return "non_monotonic";
+      case client_media_ingest_state_e::invalid: return "invalid";
+    }
+    return "invalid";
+  }
+
+  client_media_ingest_result_t ingest_client_media_counters(
+      const client_media_counters_t &sample) {
+    client_media_ingest_result_t result;
+    if (sample.owner_uuid.empty() || sample.app_session_id.empty() ||
+        sample.session_generation == 0 || sample.client_monotonic_ms == 0 ||
+        sample.frames_received > sample.frames_expected ||
+        sample.frames_lost != sample.frames_expected - sample.frames_received) {
+      return result;
+    }
+
+    std::lock_guard<std::mutex> lock(client_media_counter_mutex);
+    const auto received_at = std::chrono::steady_clock::now();
+    const bool same_scope = last_client_media_counter_epoch &&
+      last_client_media_counter_epoch->sample.owner_uuid == sample.owner_uuid &&
+      last_client_media_counter_epoch->sample.app_session_id == sample.app_session_id &&
+      last_client_media_counter_epoch->sample.session_generation == sample.session_generation;
+    if (!same_scope) {
+      last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+      result.state = client_media_ingest_state_e::baseline;
+      result.accepted = true;
+      return result;
+    }
+
+    const auto previous_epoch = *last_client_media_counter_epoch;
+    const auto &previous = previous_epoch.sample;
+    if (sample.client_monotonic_ms <= previous.client_monotonic_ms) {
+      result.state = client_media_ingest_state_e::non_monotonic;
+      return result;
+    }
+
+    const auto client_gap = std::chrono::milliseconds(
+      sample.client_monotonic_ms - previous.client_monotonic_ms
+    );
+    if (received_at - previous_epoch.received_at > CLIENT_MEDIA_COUNTER_MAX_GAP ||
+        client_gap > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+      last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+      result.state = client_media_ingest_state_e::coverage_gap_reset;
+      result.accepted = true;
+      return result;
+    }
+
+    if (sample.frames_expected < previous.frames_expected ||
+        sample.frames_received < previous.frames_received ||
+        sample.frames_lost < previous.frames_lost) {
+      last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+      result.state = client_media_ingest_state_e::counter_epoch_reset;
+      result.accepted = true;
+      return result;
+    }
+
+    const auto expected_delta = sample.frames_expected - previous.frames_expected;
+    const auto received_delta = sample.frames_received - previous.frames_received;
+    const auto lost_delta = sample.frames_lost - previous.frames_lost;
+    if (received_delta > expected_delta || lost_delta != expected_delta - received_delta) {
+      result.state = client_media_ingest_state_e::invalid;
+      return result;
+    }
+    last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+    result.accepted = true;
+    if (expected_delta == 0) {
+      result.state = client_media_ingest_state_e::waiting_for_frames;
+      return result;
+    }
+    result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
+    result.state = client_media_ingest_state_e::observed;
+
+    // Serialize counter advancement with evidence publication so concurrent
+    // authenticated requests cannot publish an older delta after a newer one.
+    // The media counters prove loss. RTT and byte totals remain host-owned.
+    const auto host = get_current();
+    update_network_stats(host.latency_ms, result.media_loss_pct, host.bytes_sent);
+    if (adaptive_bitrate::is_enabled()) {
+      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
+    }
+    result.observation_published = true;
+    return result;
+  }
+
+#ifdef POLARIS_TESTS
+  void age_client_media_counter_baseline_for_tests(
+      std::chrono::steady_clock::duration age) {
+    std::lock_guard<std::mutex> lock(client_media_counter_mutex);
+    if (last_client_media_counter_epoch) {
+      last_client_media_counter_epoch->received_at =
+        std::chrono::steady_clock::now() - age;
+    }
+  }
+#endif
 
   void update_control_channel_stats(double latency_ms, double control_packet_loss, uint64_t bytes_sent) {
     // RTT describes the shared path. The ENet loss EWMA describes only its

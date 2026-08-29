@@ -94,6 +94,18 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
   );
   EXPECT_NE(runtime_update.find("adaptive_bitrate::get_live_bitrate_request()"), std::string::npos);
   EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
+  EXPECT_NE(runtime_update.find("bitrate_update_e::pending_frame"), std::string::npos);
+  EXPECT_NE(video.find("codec_name == \"h264_nvenc\""), std::string::npos);
+  EXPECT_NE(video.find("codec_name == \"hevc_nvenc\""), std::string::npos);
+  EXPECT_NE(video.find("codec_name == \"av1_nvenc\""), std::string::npos);
+
+  const auto encode_success = between(
+    video,
+    "if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp))",
+    "auto encode_end = std::chrono::steady_clock::now()"
+  );
+  EXPECT_NE(encode_success.find("pending_bitrate_confirmation"), std::string::npos);
+  EXPECT_NE(encode_success.find("acknowledge_live_bitrate_applied"), std::string::npos);
 }
 
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
@@ -133,6 +145,40 @@ TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   EXPECT_LT(fields, policy);
   EXPECT_LT(policy, epoch);
   EXPECT_LT(epoch, revision);
+}
+
+TEST(DoctorResetContract, LiveMediaTelemetryIsEvidenceOnlyAndGenerationBound) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto capabilities = between(
+    nvhttp,
+    "auto polarisCapabilities =",
+    "auto polarisSessionTiming ="
+  );
+  EXPECT_NE(capabilities.find("live_media_telemetry_v1"), std::string::npos);
+
+  const auto route = between(
+    nvhttp,
+    "auto polarisSessionTelemetry =",
+    "// Paired, active-owner raw evidence ingress for Doctor v2 shadow mode."
+  );
+  EXPECT_NE(route.find("parse_request_stream_scope"), std::string::npos);
+  EXPECT_NE(route.find("stop.owned_by_client"), std::string::npos);
+  EXPECT_NE(route.find("requested_scope->app_session_id != stop.session_token"), std::string::npos);
+  EXPECT_NE(route.find("requested_scope->session_generation != timing.session_generation"), std::string::npos);
+  EXPECT_NE(route.find("stream_stats::ingest_client_media_counters"), std::string::npos);
+  EXPECT_NE(route.find("frames_expected"), std::string::npos);
+  EXPECT_NE(route.find("frames_received"), std::string::npos);
+  EXPECT_NE(route.find("frames_lost"), std::string::npos);
+  EXPECT_EQ(route.find("safe_settings"), route.rfind("safe_settings"))
+    << "safe_settings may appear only in the explicit forbidden-field list";
+  EXPECT_EQ(route.find("target_bitrate_kbps"), std::string::npos);
+  EXPECT_EQ(route.find("rtt_ms"), std::string::npos)
+    << "client RTT must not become live Doctor authority";
+
+  EXPECT_NE(
+    nvhttp.find("^/polaris/v1/session/telemetry$"),
+    std::string::npos
+  );
 }
 
 TEST(DoctorResetContract, HostVideoEvidenceLinearizesBeforeAdaptiveFeedbackAndPublication) {

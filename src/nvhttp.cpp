@@ -6579,6 +6579,7 @@ namespace nvhttp {
       features["disconnect_resume_v1"] = true;
       features["diagnostics_doctor_v1"] = true;
       features["doctor_actions_v1"] = true;
+      features["live_media_telemetry_v1"] = true;
       features["doctor_v2_shadow_v1"] = true;
       features["doctor_v2_shadow_enabled"] = doctor_v2::shadow_enabled();
       features["doctor_trials_v1"] = true;
@@ -8562,6 +8563,178 @@ namespace nvhttp {
       );
     };
 
+    // Paired, active-owner raw media counters for the observational Doctor.
+    // This endpoint is independent of Doctor v2 shadow mode: v1 needs current
+    // confirmed media loss to decide whether a reversible bitrate action is
+    // even eligible. All scope is exact and all loss is derived on the host.
+    auto polarisSessionTelemetry = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      auto write_json = [&](SimpleWeb::StatusCode code, const nlohmann::json &body) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(code, body.dump(), headers);
+      };
+
+      try {
+        const std::string body_str {
+          std::istreambuf_iterator<char>(request->content),
+          std::istreambuf_iterator<char>()
+        };
+        if (body_str.size() > 16 * 1024) {
+          write_json(SimpleWeb::StatusCode::client_error_payload_too_large, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "telemetry_too_large"}
+          });
+          return;
+        }
+        auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
+        if (!body.is_object()) {
+          write_json(SimpleWeb::StatusCode::client_error_bad_request, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "invalid_telemetry"}, {"error", "request body must be an object"}
+          });
+          return;
+        }
+
+        std::string scope_error;
+        const auto requested_scope = parse_request_stream_scope(body, scope_error);
+        if (!requested_scope || requested_scope->session_generation == 0 ||
+            requested_scope->app_session_id.empty()) {
+          write_json(SimpleWeb::StatusCode::client_error_bad_request, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "exact_stream_scope_required"},
+            {"error", scope_error.empty() ?
+              "app_session_id and session_generation are required" : scope_error}
+          });
+          return;
+        }
+
+        const bool can_launch = static_cast<bool>(named_cert_p->perm & PERM::launch);
+        auto status_view = proc::proc.get_session_status_view(named_cert_p->uuid, can_launch);
+        const auto &stop = status_view.snapshot.stop;
+        const auto timing = stream_stats::get_session_timing(named_cert_p->uuid);
+        const auto stats = stream_stats::get_current();
+        if (!stats.streaming || !timing.session_active || timing.session_generation == 0 ||
+            stop.session_token.empty() || !stop.owned_by_client) {
+          write_json(SimpleWeb::StatusCode::client_error_conflict, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "active_owner_stream_required"}
+          });
+          return;
+        }
+        if (requested_scope->app_session_id != stop.session_token ||
+            requested_scope->session_generation != timing.session_generation) {
+          write_json(SimpleWeb::StatusCode::client_error_conflict, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "stream_scope_mismatch"}
+          });
+          return;
+        }
+
+        auto &sample = body.contains("sample") ? body["sample"] : body;
+        if (!sample.is_object()) {
+          write_json(SimpleWeb::StatusCode::client_error_bad_request, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "invalid_telemetry"}, {"error", "sample must be an object"}
+          });
+          return;
+        }
+        for (const char *forbidden : {
+               "settings", "actions", "action", "primary_issue", "safe_profile",
+               "safe_settings", "confidence", "observations", "hypotheses",
+               "recommendation", "relaunch_recommended"
+             }) {
+          if (body.contains(forbidden) || sample.contains(forbidden)) {
+            write_json(SimpleWeb::StatusCode::client_error_bad_request, {
+              {"status", false}, {"changed", false}, {"state", "rejected"},
+              {"code", "evidence_only"},
+              {"error", std::string {"raw telemetry cannot contain "} + forbidden}
+            });
+            return;
+          }
+        }
+
+        auto required_u64 = [&](const char *key) -> std::optional<std::uint64_t> {
+          if (!sample.contains(key) || !sample[key].is_number_integer()) return std::nullopt;
+          try {
+            if (sample[key].is_number_unsigned()) return sample[key].get<std::uint64_t>();
+            const auto value = sample[key].get<std::int64_t>();
+            if (value < 0) return std::nullopt;
+            return static_cast<std::uint64_t>(value);
+          } catch (...) {
+            return std::nullopt;
+          }
+        };
+        const auto client_ms = required_u64("monotonic_timestamp_ms");
+        const auto frames_expected = required_u64("frames_expected");
+        const auto frames_received = required_u64("frames_received");
+        const auto frames_lost = required_u64("frames_lost");
+        if (!client_ms || *client_ms == 0 || !frames_expected || !frames_received || !frames_lost) {
+          write_json(SimpleWeb::StatusCode::client_error_bad_request, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", "invalid_telemetry"},
+            {"error", "raw media counters must be non-negative integers and monotonic_timestamp_ms must be positive"}
+          });
+          return;
+        }
+
+        const auto result = stream_stats::ingest_client_media_counters({
+          .owner_uuid = named_cert_p->uuid,
+          .app_session_id = requested_scope->app_session_id,
+          .session_generation = requested_scope->session_generation,
+          .client_monotonic_ms = *client_ms,
+          .frames_expected = *frames_expected,
+          .frames_received = *frames_received,
+          .frames_lost = *frames_lost
+        });
+        const auto state = stream_stats::from_client_media_ingest_state(result.state);
+        if (!result.accepted) {
+          const auto code = result.state == stream_stats::client_media_ingest_state_e::non_monotonic ?
+            SimpleWeb::StatusCode::client_error_conflict :
+            SimpleWeb::StatusCode::client_error_bad_request;
+          write_json(code, {
+            {"status", false}, {"changed", false}, {"state", "rejected"},
+            {"code", state}
+          });
+          return;
+        }
+
+        nlohmann::json output {
+          {"status", true}, {"changed", false}, {"state", state},
+          {"session_generation", timing.session_generation},
+          {"observation_published", result.observation_published}
+        };
+        if (result.observation_published) {
+          output["media_loss_pct"] = result.media_loss_pct;
+          output["media_loss_source"] = "client_media_counters";
+        }
+        if (doctor_v2::shadow_enabled()) {
+          auto shadow_body = body;
+          auto &shadow_sample = shadow_body.contains("sample") ?
+            shadow_body["sample"] : shadow_body;
+          shadow_sample["session_generation"] = timing.session_generation;
+          const auto app_uuid = proc::proc.get_running_app_uuid();
+          if (!app_uuid.empty()) {
+            output["doctor_v2_shadow"] = doctor_v2::ingest(
+              named_cert_p->uuid, app_uuid, shadow_body
+            );
+          }
+        }
+        write_json(SimpleWeb::StatusCode::success_ok, output);
+      } catch (const std::exception &e) {
+        write_json(SimpleWeb::StatusCode::client_error_bad_request, {
+          {"status", false}, {"changed", false}, {"state", "rejected"},
+          {"code", "invalid_telemetry"}, {"error", e.what()}
+        });
+      }
+    };
+
     // Paired, active-owner raw evidence ingress for Doctor v2 shadow mode.
     // Scope and generation come from the authenticated host session, never
     // from client-supplied launch policy or diagnosis fields.
@@ -9692,6 +9865,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
+    https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;

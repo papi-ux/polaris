@@ -463,6 +463,50 @@ namespace stream_stats {
    */
   double packet_loss_percent(uint64_t scaled_loss, uint64_t scale);
 
+  /** Raw cumulative media counters reported by the authenticated stream owner. */
+  struct client_media_counters_t {
+    std::string owner_uuid;
+    std::string app_session_id;
+    std::uint64_t session_generation = 0;
+    std::uint64_t client_monotonic_ms = 0;
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_received = 0;
+    std::uint64_t frames_lost = 0;
+  };
+
+  enum class client_media_ingest_state_e {
+    baseline,
+    observed,
+    waiting_for_frames,
+    coverage_gap_reset,
+    counter_epoch_reset,
+    non_monotonic,
+    invalid
+  };
+
+  struct client_media_ingest_result_t {
+    client_media_ingest_state_e state = client_media_ingest_state_e::invalid;
+    bool accepted = false;
+    bool observation_published = false;
+    double media_loss_pct = 0.0;
+  };
+
+  /**
+   * Fold one owner- and generation-bound raw counter sample into live Doctor
+   * network evidence. Polaris derives loss from counter deltas and combines it
+   * only with host-observed RTT; no client diagnosis or RTT is accepted here.
+   */
+  client_media_ingest_result_t ingest_client_media_counters(
+    const client_media_counters_t &sample);
+
+  std::string_view from_client_media_ingest_state(
+    client_media_ingest_state_e state);
+
+#ifdef POLARIS_TESTS
+  void age_client_media_counter_baseline_for_tests(
+    std::chrono::steady_clock::duration age);
+#endif
+
   /**
    * @brief Debounced elevated/normal state behind the served network_risk.
    *
