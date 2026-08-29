@@ -97,7 +97,11 @@ TEST(LaunchModeContractTests, EveryAdvertisedModeVerdictMatchesTheValidator) {
   for (const bool virtual_display_available : {false, true}) {
     for (const auto &option : stream_display_policy::mode_options(virtual_display_available)) {
       std::string error;
-      const bool valid = stream_display_policy::selection_valid(option.value, error);
+      const bool valid = stream_display_policy::selection_valid_for_capabilities(
+        option.value,
+        virtual_display_available,
+        error
+      );
       if (option.available) {
         EXPECT_TRUE(valid) << option.value << ": advertised available but rejected: " << error;
       } else {
@@ -106,6 +110,23 @@ TEST(LaunchModeContractTests, EveryAdvertisedModeVerdictMatchesTheValidator) {
       }
     }
   }
+}
+
+TEST(LaunchModeContractTests, MissingVirtualBackendFailsTheLaunchValidator) {
+  std::string unavailable_error;
+  EXPECT_FALSE(stream_display_policy::selection_valid_for_capabilities(
+    "host_virtual_display",
+    false,
+    unavailable_error
+  ));
+  EXPECT_FALSE(unavailable_error.empty());
+
+  std::string available_error;
+  EXPECT_TRUE(stream_display_policy::selection_valid_for_capabilities(
+    "host_virtual_display",
+    true,
+    available_error
+  )) << available_error;
 }
 
 TEST(LaunchModeContractTests, ReservedAndUnknownIdsAreRejectedWithGuidance) {

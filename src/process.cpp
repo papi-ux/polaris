@@ -6604,6 +6604,10 @@ namespace proc {
     _session_lifecycle_gate->finish_launch();
   }
 
+  std::unique_lock<std::recursive_mutex> proc_t::acquire_session_lifecycle_lock() const {
+    return std::unique_lock<std::recursive_mutex> {session_lifecycle_sync().mutex};
+  }
+
 #ifdef __linux__
   void proc_t::stop_steam_big_picture_input_guard() {
     auto runtime = std::move(_steam_big_picture_guard);
@@ -6791,6 +6795,8 @@ namespace proc {
       this->initial_stream_mode = linux_display.stream_mode;
       this->initial_private_runtime = linux_display.private_runtime;
       this->initial_headless_swap_mode = linux_display.headless_swap_mode;
+      this->initial_streaming_output = linux_display.streaming_output;
+      this->initial_primary_output = linux_display.primary_output;
       this->initial_capture = config::video.capture;
       this->initial_headless_mode = linux_display.headless_mode;
       this->initial_use_cage_compositor = linux_display.use_cage_compositor;
@@ -6808,6 +6814,8 @@ namespace proc {
       linux_display.stream_mode = initial_stream_mode;
       linux_display.private_runtime = initial_private_runtime;
       linux_display.headless_swap_mode = initial_headless_swap_mode;
+      linux_display.streaming_output = initial_streaming_output;
+      linux_display.primary_output = initial_primary_output;
       linux_display.headless_mode = initial_headless_mode;
       linux_display.use_cage_compositor = initial_use_cage_compositor;
       linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
@@ -6819,15 +6827,22 @@ namespace proc {
     };
 
     bool session_mode_applied = false;
-    if (!session_mode.empty() &&
-        !stream_display_policy::selection_companion_state_matches(session_mode)) {
+    if (!session_mode.empty()) {
       std::string mode_error;
-      if (stream_display_policy::apply_selection(session_mode, mode_error)) {
-        this->initial_linux_display_saved = true;
-        session_mode_applied = true;
-        BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
-                        << "] applied in-memory after optimization; host default restored at teardown"sv;
-      } else {
+      bool session_mode_failed =
+        !stream_display_policy::selection_valid(session_mode, mode_error);
+      if (!session_mode_failed &&
+          !stream_display_policy::selection_companion_state_matches(session_mode)) {
+        if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+          this->initial_linux_display_saved = true;
+          session_mode_applied = true;
+          BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
+                          << "] applied in-memory after optimization; host default restored at teardown"sv;
+        } else {
+          session_mode_failed = true;
+        }
+      }
+      if (session_mode_failed) {
         restore_prelaunch_display_policy();
         platf::reevaluate_capture_sources();
         if (launch_session->resolved_profile_from_client) {
@@ -9709,6 +9724,8 @@ namespace proc {
       linux_display.stream_mode = initial_stream_mode;
       linux_display.private_runtime = initial_private_runtime;
       linux_display.headless_swap_mode = initial_headless_swap_mode;
+      linux_display.streaming_output = initial_streaming_output;
+      linux_display.primary_output = initial_primary_output;
       linux_display.headless_mode = initial_headless_mode;
       linux_display.use_cage_compositor = initial_use_cage_compositor;
       linux_display.prefer_gpu_native_capture = initial_prefer_gpu_native_capture;
@@ -9734,6 +9751,8 @@ namespace proc {
     initial_stream_mode.clear();
     initial_private_runtime.clear();
     initial_headless_swap_mode.clear();
+    initial_streaming_output.clear();
+    initial_primary_output.clear();
     initial_capture.clear();
     initial_headless_mode = false;
     initial_use_cage_compositor = false;

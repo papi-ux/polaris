@@ -135,6 +135,16 @@ namespace stream_display_policy {
   bool selection_valid(std::string_view selection, std::string &error);
 
   /**
+   * @brief Capability-injected form used to keep served availability and the
+   *        launch validator on one deterministic rule.
+   */
+  bool selection_valid_for_capabilities(
+    std::string_view selection,
+    bool virtual_display_available,
+    std::string &error
+  );
+
+  /**
    * @brief Derive the configured selection from legacy booleans when
    *        linux_stream_mode is unset.
    */

@@ -8,6 +8,7 @@
 #include <src/config.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <gtest/gtest.h>
 
 namespace {
@@ -173,6 +174,9 @@ TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) 
 }
 
 TEST(StreamDisplayPolicyTests, HostVirtualClearsStaleAutoManage) {
+  if (!virtual_display::is_available()) {
+    GTEST_SKIP() << "host virtual display normalization requires an available backend";
+  }
   LinuxDisplayPolicyGuard guard;
   std::string error;
   ASSERT_TRUE(stream_display_policy::apply_selection("host_virtual_display", error)) << error;
@@ -308,6 +312,20 @@ TEST(StreamDisplayPolicyTests, GamescopeCompanionStateIncludesCaptureDefault) {
 
   config::video.capture = "portal";
   EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("gamescope_stream"));
+
+  const char *prior_path = std::getenv("PATH");
+  const std::string saved_path = prior_path ? prior_path : "";
+  const bool path_was_set = prior_path != nullptr;
+  EXPECT_EQ(setenv("PATH", "/polaris-test-no-gamescope", 1), 0);
+  std::string error;
+  EXPECT_FALSE(stream_display_policy::selection_valid("gamescope_stream", error))
+    << "matching companion state must not bypass current availability";
+  EXPECT_FALSE(error.empty());
+  if (path_was_set) {
+    EXPECT_EQ(setenv("PATH", saved_path.c_str(), 1), 0);
+  } else {
+    EXPECT_EQ(unsetenv("PATH"), 0);
+  }
 }
 
 TEST(StreamDisplayPolicyTests, HeadlessDongleCompanionStateIncludesConditionalDefaults) {

@@ -27,6 +27,46 @@ namespace stream_display_policy {
       );
     }
 
+    bool selection_available_for_capabilities(
+      std::string_view selection,
+      bool virtual_display_available
+    ) {
+      if (const auto *path = stream_path::find(selection)) {
+        if (!path->available) {
+          return false;
+        }
+        if (path->id == stream_path::k_gamescope_stream) {
+          return stream_path::probe_host_capabilities().gamescope_present;
+        }
+        if (path->id == stream_path::k_host_virtual_display) {
+          return virtual_display_available;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    std::string selection_unavailable_reason_for_capabilities(
+      std::string_view selection,
+      bool virtual_display_available
+    ) {
+      if (const auto *path = stream_path::find(selection)) {
+        if (path->id == stream_path::k_gamescope_stream &&
+            !stream_path::probe_host_capabilities().gamescope_present) {
+          return "gamescope binary not found on PATH";
+        }
+        if (path->id == stream_path::k_host_virtual_display &&
+            !virtual_display_available) {
+          return "Host virtual display is not available on this host.";
+        }
+        if (!path->unavailable_reason.empty()) {
+          return std::string {path->unavailable_reason};
+        }
+        return std::string {path->label} + " is not available on this host.";
+      }
+      return "Unknown stream display mode.";
+    }
+
   }  // namespace
 
   std::string configured_selection() {
@@ -67,16 +107,11 @@ namespace stream_display_policy {
   }
 
   bool selection_available(std::string_view selection) {
-    if (const auto *path = stream_path::find(selection)) {
-      if (!path->available) {
-        return false;
-      }
-      if (path->id == stream_path::k_gamescope_stream) {
-        return stream_path::probe_host_capabilities().gamescope_present;
-      }
-      return true;
-    }
-    return false;
+    const auto key = to_lower_copy(selection);
+    return selection_available_for_capabilities(
+      key,
+      key != k_host_virtual_display || virtual_display::is_available()
+    );
   }
 
   bool selection_session_overridable(std::string_view selection) {
@@ -89,20 +124,19 @@ namespace stream_display_policy {
   }
 
   std::string selection_unavailable_reason(std::string_view selection) {
-    if (const auto *path = stream_path::find(selection)) {
-      // Probe-dependent reasons are not in the static registry entry; mirror
-      // selection_available so the rejection matches the served catalog.
-      if (path->id == stream_path::k_gamescope_stream &&
-          !stream_path::probe_host_capabilities().gamescope_present) {
-        return "gamescope binary not found on PATH";
+    const auto key = to_lower_copy(selection);
+    const bool virtual_display_available =
+      key != k_host_virtual_display || virtual_display::is_available();
+    if (key == k_host_virtual_display && !virtual_display_available) {
+      const auto backend_reason = virtual_display::unavailable_reason();
+      if (!backend_reason.empty()) {
+        return backend_reason;
       }
-      if (!path->unavailable_reason.empty()) {
-        return std::string {path->unavailable_reason};
-      }
-      // An unavailable path must still explain itself to a rejected client.
-      return std::string {path->label} + " is not available on this host.";
     }
-    return "Unknown stream display mode.";
+    return selection_unavailable_reason_for_capabilities(
+      key,
+      virtual_display_available
+    );
   }
 
   std::string selection_from_legacy_booleans(const legacy_booleans_t &booleans) {
@@ -289,17 +323,33 @@ namespace stream_display_policy {
     return configured;
   }
 
-  bool selection_valid(std::string_view selection, std::string &error) {
+  bool selection_valid_for_capabilities(
+    std::string_view selection,
+    bool virtual_display_available,
+    std::string &error
+  ) {
     const auto key = to_lower_copy(selection);
     if (!stream_path::find(key) && key != k_desktop_display) {
       error = "stream_display_mode must be a known stream path id (see /client-settings modes)";
       return false;
     }
-    if (!selection_available(key)) {
-      error = selection_unavailable_reason(key);
+    if (!selection_available_for_capabilities(key, virtual_display_available)) {
+      error = selection_unavailable_reason_for_capabilities(
+        key,
+        virtual_display_available
+      );
       return false;
     }
     return true;
+  }
+
+  bool selection_valid(std::string_view selection, std::string &error) {
+    const auto key = to_lower_copy(selection);
+    return selection_valid_for_capabilities(
+      key,
+      key != k_host_virtual_display || virtual_display::is_available(),
+      error
+    );
   }
 
   bool selection_companion_state_matches(std::string_view selection) {
@@ -480,8 +530,14 @@ namespace stream_display_policy {
       option.value = std::string {path.id};
       option.label = std::string {path.label};
       option.reason = reason_for_selection(path.id, virtual_display_available);
-      option.available = path.available;
+      option.available = path.available &&
+        (path.id != stream_path::k_host_virtual_display || virtual_display_available);
       option.unavailable_reason = std::string {path.unavailable_reason};
+      if (!option.available &&
+          path.id == stream_path::k_host_virtual_display &&
+          option.unavailable_reason.empty()) {
+        option.unavailable_reason = "Host virtual display is not available on this host.";
+      }
       option.group = std::string {path.group};
       option.runtime = std::string {stream_path::runtime_kind_id(path.runtime)};
       option.capture = std::string {stream_path::capture_kind_id(path.capture)};
