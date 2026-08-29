@@ -1380,7 +1380,14 @@ async function runDoctorSafeAction() {
   if (!action || doctorActionPending.value) return
   doctorActionPending.value = true
   try {
-    const result = await postDoctorAction(action.payload_preview || action.payload || {})
+    const payload = { ...(action.payload_preview || action.payload || {}) }
+    if (payload.action_id === 'lower_bitrate' || payload.action_id === 'restore_quality') {
+      const randomId = globalThis.crypto?.randomUUID?.()
+      payload.request_id = randomId
+        ? `dashboard-${randomId}`
+        : `dashboard-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+    }
+    const result = await postDoctorAction(payload)
     doctorActionResult.value = result
     showToast(result.message || t('dashboard.doctor_action_success') + action.label, 'success')
     if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
