@@ -54,6 +54,7 @@ namespace adaptive_bitrate {
   // performs an exact compare-and-set so a newer controller or evidence
   // decision cannot be overwritten by a stale quality increase.
   static std::uint64_t operator_revision = 1;
+  static std::uint64_t action_authority_revision = 1;
   // The encoder thread is the only authority for what was actually applied.
   // Protected by state_mutex.
   static int encoder_applied_bitrate_kbps = 0;
@@ -292,6 +293,7 @@ namespace adaptive_bitrate {
     const int clamped_target = clamp_target(new_target, base);
     if (clamped_target != current_target) {
       target_bitrate_kbps.store(clamped_target, std::memory_order_relaxed);
+      ++action_authority_revision;
     }
     // Keep direct controller callers safe at the floor too. Production network
     // observations already advance the common evidence/controller epoch before
@@ -364,6 +366,7 @@ namespace adaptive_bitrate {
                        << "ms, encode=" << encode_time_ms
                        << "ms, age=" << avg_frame_age_ms << "ms)";
       target_bitrate_kbps.store(new_target, std::memory_order_relaxed);
+      ++action_authority_revision;
     }
     // Encoder pressure is still a newer controller decision at the bitrate
     // floor. Advance the revision so Doctor cannot raise quality from a clean
@@ -418,6 +421,7 @@ namespace adaptive_bitrate {
       target_bitrate_kbps.load(std::memory_order_relaxed),
       current_config.min_bitrate_kbps,
       current_config.max_bitrate_kbps,
+      action_authority_revision,
       operator_revision,
     };
   }
@@ -478,6 +482,7 @@ namespace adaptive_bitrate {
     doctor_override_active.store(true, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
     set_controller_status("steady", "doctor_action");
+    ++action_authority_revision;
     const auto revision = ++operator_revision;
     state_changed.notify_all();
     return {
@@ -551,6 +556,7 @@ namespace adaptive_bitrate {
       previous_state.enabled ? "steady" : "disabled",
       "doctor_rollback"
     );
+    ++action_authority_revision;
     const auto revision = ++operator_revision;
     const bool already_applied = restored_target > 0 &&
       encoder_applied_bitrate_kbps == restored_target;
@@ -645,6 +651,7 @@ namespace adaptive_bitrate {
       target_bitrate_kbps.store(clamp_target(current, clamped), std::memory_order_relaxed);
     }
     ++operator_revision;
+    ++action_authority_revision;
     state_changed.notify_all();
   }
 
@@ -661,6 +668,7 @@ namespace adaptive_bitrate {
     pending_live_update_active.store(false, std::memory_order_relaxed);
     set_controller_status("steady", "paired_client_action");
     ++operator_revision;
+    ++action_authority_revision;
     state_changed.notify_all();
   }
 
@@ -682,6 +690,7 @@ namespace adaptive_bitrate {
     base_bitrate_kbps.store(base, std::memory_order_relaxed);
     target_bitrate_kbps.store(std::min(target, base), std::memory_order_relaxed);
     ++operator_revision;
+    ++action_authority_revision;
     state_changed.notify_all();
   }
 
@@ -691,6 +700,7 @@ namespace adaptive_bitrate {
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
+    ++action_authority_revision;
     const auto revision = ++operator_revision;
     const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
     const bool needs_encoder_update = target > 0 && encoder_applied_bitrate_kbps != target;
@@ -709,6 +719,7 @@ namespace adaptive_bitrate {
     pending_live_update_active.store(false, std::memory_order_relaxed);
     enabled.store(enable, std::memory_order_relaxed);
     ++operator_revision;
+    ++action_authority_revision;
     state_changed.notify_all();
   }
 
@@ -759,6 +770,7 @@ namespace adaptive_bitrate {
 
     enabled.store(current_config.enabled, std::memory_order_relaxed);
     ++operator_revision;
+    ++action_authority_revision;
     state_changed.notify_all();
 
     BOOST_LOG(info) << "Adaptive bitrate: "
@@ -793,6 +805,7 @@ namespace adaptive_bitrate {
     doctor_video_policy_regressed_during_override = false;
     doctor_network_policy_regressed_during_override = false;
     ++operator_revision;
+    ++action_authority_revision;
     state_changed.notify_all();
   }
 

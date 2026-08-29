@@ -6845,7 +6845,7 @@ namespace nvhttp {
         doctor_v1,
         session_token,
         session_timing.session_active ? session_timing.session_generation : 0,
-        doctor_controller.revision,
+        doctor_controller.action_authority_revision,
         stats.network_sample_revision,
         stats.video_sample_revision
       );

@@ -369,7 +369,9 @@ namespace doctor_actions {
       auto current_doctor = stream_stats::build_doctor_json(
         stats, trusted_health, context->app_uuid
       );
-      bind_current_action_scope(current_doctor, stats, context, controller.revision);
+      bind_current_action_scope(
+        current_doctor, stats, context, controller.action_authority_revision
+      );
       if (current_doctor_out != nullptr) *current_doctor_out = current_doctor;
       const auto current_action = current_doctor.value(
         "safe_recovery_action", nlohmann::json::object()
@@ -381,7 +383,20 @@ namespace doctor_actions {
           !expected_payload.is_object()) {
         return false;
       }
+      const bool live_mutation =
+        action_id == "lower_bitrate" || action_id == "restore_quality";
       for (auto it = expected_payload.begin(); it != expected_payload.end(); ++it) {
+        // These fields identify the telemetry snapshot that rendered the
+        // button, not user authority. A paired click is allowed to cross a
+        // newer equivalent observation only when the current host still
+        // derives the same action, target, stream scope, and controller
+        // authority below. The mutation path rechecks current evidence and
+        // uses a fresh internal controller revision atomically.
+        if (live_mutation &&
+            (it.key() == "source_result_id" ||
+             it.key() == "evidence_revision")) {
+          continue;
+        }
         const auto actual = request.find(it.key());
         if (actual == request.end() || *actual != it.value()) return false;
       }
@@ -1344,8 +1359,8 @@ namespace doctor_actions {
           };
         }
         if (action_run.active) return action_in_progress(action_run);
-        const auto mutation_stats = stream_stats::get_current();
         adaptive_state = adaptive_bitrate::get_doctor_state();
+        const auto mutation_stats = stream_stats::get_current();
         mutation_evidence = network_evidence(mutation_stats);
         if (!deterministic_action_envelope_matches(
               request, action_id, mutation_stats, trusted_context, adaptive_state
@@ -1465,8 +1480,8 @@ namespace doctor_actions {
         };
       }
       if (action_run.active) return action_in_progress(action_run);
-      const auto mutation_stats = stream_stats::get_current();
       adaptive_state = adaptive_bitrate::get_doctor_state();
+      const auto mutation_stats = stream_stats::get_current();
       mutation_evidence = network_evidence(mutation_stats);
       if (!deterministic_action_envelope_matches(
             request, action_id, mutation_stats, trusted_context, adaptive_state

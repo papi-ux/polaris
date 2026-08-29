@@ -49,6 +49,10 @@ TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot
   const auto after_pressure = adaptive_bitrate::get_doctor_state();
   ASSERT_LT(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
   ASSERT_GT(after_pressure.revision, before_pressure.revision);
+  EXPECT_GT(
+    after_pressure.action_authority_revision,
+    before_pressure.action_authority_revision
+  );
   EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
     before_pressure.revision,
     before_pressure.live_bitrate_kbps,
@@ -87,6 +91,10 @@ TEST(AdaptiveBitrateController, HostEvidenceInsideAdjustmentIntervalInvalidatesA
   const auto after_observation = adaptive_bitrate::get_doctor_state();
   ASSERT_EQ(after_observation.live_bitrate_kbps, before_observation.live_bitrate_kbps);
   ASSERT_GT(after_observation.revision, before_observation.revision);
+  EXPECT_EQ(
+    after_observation.action_authority_revision,
+    before_observation.action_authority_revision
+  );
   EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
     before_observation.revision,
     25000,

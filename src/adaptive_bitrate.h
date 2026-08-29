@@ -58,6 +58,10 @@ namespace adaptive_bitrate {
     int live_bitrate_kbps = 0;
     int min_bitrate_kbps = 0;
     int max_bitrate_kbps = 0;
+    // Changes only when a user/client/controller decision changes the live
+    // bitrate authority. Host telemetry may rotate revision without making a
+    // still-identical Doctor button impossible to press.
+    std::uint64_t action_authority_revision = 0;
     std::uint64_t revision = 0;
   };
 

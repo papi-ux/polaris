@@ -856,7 +856,7 @@ namespace stream_stats {
   void bind_doctor_action_scope(nlohmann::json &doctor,
                                 std::string_view app_session_id,
                                 std::uint64_t session_generation,
-                                std::uint64_t controller_revision,
+                                std::uint64_t action_authority_revision,
                                 std::uint64_t network_evidence_revision,
                                 std::uint64_t video_evidence_revision);
 
