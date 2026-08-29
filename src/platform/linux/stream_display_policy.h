@@ -84,6 +84,19 @@ namespace stream_display_policy {
   );
 
   /**
+   * @brief Normalize connector and capture authority for the backend that will
+   *        or did create the Host Virtual display.
+   *
+   * The caller must pass the authoritative backend. In particular, the launch
+   * actuator calls this again with vdisplay_t::backend after creation so a
+   * backend change after preflight cannot carry KScreen connector authority
+   * into an EVDI or wlroots session.
+   */
+  void normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e backend
+  );
+
+  /**
    * @brief Whether Host Virtual Display creates a new output connector.
    *
    * KScreen manages an existing connector. EVDI and wlroots create their own

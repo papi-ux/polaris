@@ -33,17 +33,8 @@ namespace stream_display_policy {
     }
 
     void normalize_host_virtual_display_state() {
-      auto &linux_display = config::video.linux_display;
-      const auto backend = virtual_display::detect_backend();
-      clear_connector_output_authority(
-        host_virtual_backend_creates_output(backend)
-      );
-      // KScreen needs the streaming connector it manages, but never the
-      // dongle profile's separate primary-output authority.
-      linux_display.primary_output.clear();
-      config::video.capture = capture_for_host_virtual_display_backend(
-        backend,
-        config::video.capture
+      normalize_host_virtual_display_state_for_backend(
+        virtual_display::detect_backend()
       );
     }
 
@@ -262,6 +253,22 @@ namespace stream_display_policy {
     }
 
     return std::string {current_capture};
+  }
+
+  void normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e backend) {
+    auto &linux_display = config::video.linux_display;
+    clear_connector_output_authority(
+      host_virtual_backend_creates_output(backend)
+    );
+    // KScreen needs the streaming connector it manages, but never the dongle
+    // profile's separate primary-output authority. EVDI and wlroots create a
+    // new output, so their old connector and capture-output pins are retired.
+    linux_display.primary_output.clear();
+    config::video.capture = capture_for_host_virtual_display_backend(
+      backend,
+      config::video.capture
+    );
   }
 
   bool host_virtual_backend_creates_output(

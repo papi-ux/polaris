@@ -7554,6 +7554,14 @@ namespace proc {
 
         if (vdisplay.has_value()) {
           linux_vdisplay = std::move(vdisplay);
+          // Preflight and final validation can observe a different available
+          // backend than the actuator ultimately uses. Bind connector and
+          // capture authority to the backend that actually created this
+          // display before capture identity or game-placement hints are built.
+          stream_display_policy::normalize_host_virtual_display_state_for_backend(
+            linux_vdisplay->backend
+          );
+          this->initial_linux_display_saved = true;
           launch_session->virtual_display = true;
           this->virtual_display = true;
           this->display_name = linux_vdisplay->output_name;
@@ -7572,6 +7580,7 @@ namespace proc {
             this->display_name,
             mapped_output_name
           );
+          platf::reevaluate_capture_sources();
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;
@@ -9773,7 +9782,8 @@ namespace proc {
     }
 
     if (initial_linux_display_saved) {
-      // Armed only when a session stream-mode override was actually applied.
+      // Armed when a session mode override or the backend that actually
+      // created Host Virtual changed connector/capture authority.
       auto &linux_display = config::video.linux_display;
       linux_display.stream_mode = initial_stream_mode;
       linux_display.private_runtime = initial_private_runtime;
