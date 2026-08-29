@@ -9967,6 +9967,9 @@ namespace proc {
     snapshot.mangohud_configured = !_app.uuid.empty() && env_flag_enabled(_app, _env, "MANGOHUD");
     snapshot.virtual_display = virtual_display;
     snapshot.display_mode_explicit = _launch_session && _launch_session->user_locked_virtual_display;
+    snapshot.mirror_desktop = _launch_session && _launch_session->mirror_desktop;
+    snapshot.force_private_after_desktop_steam_shutdown =
+      _launch_session && _launch_session->force_private_after_desktop_steam_shutdown;
     return {std::move(guard), std::move(snapshot)};
   }
 

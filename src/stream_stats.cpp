@@ -1628,6 +1628,11 @@ namespace stream_stats {
                                             double loss,
                                             uint64_t bytes_sent) {
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+      // Advance the controller's Doctor transaction epoch before exposing any
+      // part of this observation. A concurrent action therefore sees either
+      // the complete prior observation and prior epoch, or the complete new
+      // observation and new epoch; it cannot CAS from stale clean evidence.
+      adaptive_bitrate::note_network_evidence_arrival();
       primary_network_state.received_at = std::chrono::steady_clock::now();
       primary_network_state.media_sample = media_sample;
       primary_network_state.latency_ms = latency_ms;

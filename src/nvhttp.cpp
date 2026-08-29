@@ -6484,6 +6484,9 @@ namespace nvhttp {
       display_mode["selection"] = stream_display_mode;
       display_mode["stream_display_mode"] = stream_display_mode;
       display_mode["explicit_choice"] = status_snapshot.display_mode_explicit;
+      display_mode["mirror_desktop"] = status_snapshot.mirror_desktop;
+      display_mode["force_private_after_steam_close"] =
+        status_snapshot.force_private_after_desktop_steam_shutdown;
       display_mode["requested"] =
         session_token.empty() ? "" :
         status_snapshot.display_mode_explicit ?

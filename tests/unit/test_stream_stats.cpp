@@ -1240,6 +1240,29 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
 }
 
+TEST(DoctorActionTests, HostNetworkPublicationInvalidatesDoctorSnapshotWithAdaptiveDisabled) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true, "supported", 20000);
+  adaptive_bitrate::set_base_bitrate(20000);
+  const auto stale_controller = adaptive_bitrate::get_doctor_state();
+  ASSERT_FALSE(stale_controller.enabled);
+
+  stream_stats::update_control_channel_stats(55.0, 0.0, 1000);
+
+  const auto current_controller = adaptive_bitrate::get_doctor_state();
+  EXPECT_GT(current_controller.revision, stale_controller.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    stale_controller.revision,
+    25000,
+    stale_controller.max_bitrate_kbps
+  ));
+  adaptive_bitrate::reset();
+}
+
 TEST(DoctorActionTests, FreshControlObservationCannotRefreshStaleMediaLoss) {
   using namespace std::chrono_literals;
   stream_stats::update_stream_active(false);

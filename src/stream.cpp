@@ -1093,12 +1093,11 @@ namespace stream {
         session->control.peer->packetLoss,
         ENET_PEER_PACKET_LOSS_SCALE);
 
+      const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
+      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
       if (adaptive_bitrate::is_enabled()) {
         adaptive_bitrate::update_network_stats(0.0, rtt_ms);
       }
-
-      const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
-      record_network_stats(client_ip, rtt_ms, loss_pct, 0);
     });
 
     server->map(packetTypes[IDX_START_A], [&](session_t *session, const std::string_view &payload) {
@@ -1131,14 +1130,13 @@ namespace stream {
         client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
       }
 
-      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
-        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
-      }
-
       // IDX_LOSS_STATS reports a lost-packet count and elapsed milliseconds,
       // not a total-packet denominator. Dividing count by time manufactured a
       // percentage, so retain RTT and wait for quantified media telemetry.
       record_network_stats(client_ip, rtt_ms, 0.0, 0);
+      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
+        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
+      }
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
