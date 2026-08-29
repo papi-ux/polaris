@@ -91,6 +91,53 @@ namespace stream_stats {
     std::atomic<uint64_t> hot_bytes_sent {0};
     std::atomic<bool> hot_doctor_live_action_scope_available {false};
 
+    struct doctor_video_policy_state_t {
+      double target_fps = 0.0;
+      double delivered_fps = 0.0;
+      double capture_source_fps = 0.0;
+      double duplicate_frame_ratio = 0.0;
+      double dropped_frame_ratio = 0.0;
+      double avg_frame_age_ms = 0.0;
+      double frame_jitter_ms = 0.0;
+      double encode_time_ms = 0.0;
+    };
+    doctor_video_policy_state_t doctor_video_policy_state;
+    std::mutex doctor_video_policy_mutex;
+
+    bool video_policy_suppresses_quality_restore(
+        const doctor_video_policy_state_t &sample) {
+      const bool source_cadence_available =
+        sample.capture_source_fps > 0.0 && sample.target_fps > 0.0;
+      const bool source_cadence_confirms_motion =
+        source_cadence_available &&
+        sample.capture_source_fps >= sample.target_fps * 0.85;
+      const bool static_or_duplicate_content =
+        sample.duplicate_frame_ratio >= 0.50 ||
+        (source_cadence_available &&
+         sample.capture_source_fps < sample.target_fps * 0.50 &&
+         sample.duplicate_frame_ratio >= 0.10);
+      const bool pacing_watch =
+        sample.dropped_frame_ratio >= 0.04 ||
+        (!static_or_duplicate_content &&
+         (sample.frame_jitter_ms >= 2.2 ||
+          (is_meaningful_fps_shortfall(
+             sample.target_fps,
+             sample.delivered_fps
+           ) && source_cadence_confirms_motion)));
+      // A CPU-copy capture path already suppresses restore_quality through its
+      // stable capture classification. Treating frame age >= 18 ms as a video
+      // warning here is conservative and exact for GPU-resident paths.
+      const bool encoder_watch =
+        sample.encode_time_ms >= 8.0 || sample.avg_frame_age_ms >= 18.0;
+      return encoder_watch || pacing_watch;
+    }
+
+    void publish_doctor_video_policy_locked() {
+      adaptive_bitrate::note_doctor_video_policy_evidence(
+        video_policy_suppresses_quality_restore(doctor_video_policy_state)
+      );
+    }
+
     // Guarded by its own lock so the lock-free update_network_stats
     // overload stays clear of stats_mutex.
     network_risk_tracker_t network_risk_tracker;
@@ -178,17 +225,21 @@ namespace stream_stats {
     }
 
     void reset_hot_fields() {
-      hot_fps.store(0.0, std::memory_order_relaxed);
       hot_bitrate_kbps.store(0, std::memory_order_relaxed);
-      hot_encode_time_ms.store(0.0, std::memory_order_relaxed);
       hot_codec_id.store(-1, std::memory_order_relaxed);
       hot_width.store(0, std::memory_order_relaxed);
       hot_height.store(0, std::memory_order_relaxed);
-      hot_duplicate_frame_ratio.store(0.0, std::memory_order_relaxed);
-      hot_dropped_frame_ratio.store(0.0, std::memory_order_relaxed);
-      hot_avg_frame_age_ms.store(0.0, std::memory_order_relaxed);
-      hot_frame_jitter_ms.store(0.0, std::memory_order_relaxed);
-      hot_capture_source_fps.store(0.0, std::memory_order_relaxed);
+      {
+        std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+        hot_fps.store(0.0, std::memory_order_relaxed);
+        hot_encode_time_ms.store(0.0, std::memory_order_relaxed);
+        hot_duplicate_frame_ratio.store(0.0, std::memory_order_relaxed);
+        hot_dropped_frame_ratio.store(0.0, std::memory_order_relaxed);
+        hot_avg_frame_age_ms.store(0.0, std::memory_order_relaxed);
+        hot_frame_jitter_ms.store(0.0, std::memory_order_relaxed);
+        hot_capture_source_fps.store(0.0, std::memory_order_relaxed);
+        doctor_video_policy_state = {};
+      }
       hot_latency_ms.store(0.0, std::memory_order_relaxed);
       hot_packet_loss.store(0.0, std::memory_order_relaxed);
       hot_packet_loss_available.store(false, std::memory_order_relaxed);
@@ -1526,13 +1577,19 @@ namespace stream_stats {
   }
 
   void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height) {
-    hot_fps.store(fps, std::memory_order_relaxed);
     hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
-    hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
     hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
     hot_width.store(width, std::memory_order_relaxed);
     hot_height.store(height, std::memory_order_relaxed);
-    hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+      doctor_video_policy_state.delivered_fps = fps;
+      doctor_video_policy_state.encode_time_ms = encode_time_ms;
+      publish_doctor_video_policy_locked();
+      hot_fps.store(fps, std::memory_order_relaxed);
+      hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
+      hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+    }
 
     // Multi-client mirror: bounded by active client count (typically 1),
     // and the only reason this call still needs stats_mutex at all.
@@ -1565,13 +1622,19 @@ namespace stream_stats {
 
     // Also update top-level stats (use first client for backward compat)
     if (!current_stats.clients.empty() && current_stats.clients.front().ip == client_ip) {
-      hot_fps.store(fps, std::memory_order_relaxed);
       hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
-      hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
       hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
       hot_width.store(width, std::memory_order_relaxed);
       hot_height.store(height, std::memory_order_relaxed);
-      hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+      {
+        std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+        doctor_video_policy_state.delivered_fps = fps;
+        doctor_video_policy_state.encode_time_ms = encode_time_ms;
+        publish_doctor_video_policy_locked();
+        hot_fps.store(fps, std::memory_order_relaxed);
+        hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
+        hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+      }
     }
   }
 
@@ -1607,7 +1670,12 @@ namespace stream_stats {
                              double dropped_frame_ratio,
                              double avg_frame_age_ms,
                              double frame_jitter_ms) {
-    // Fully lock-free: no per-client mirror exists for these fields.
+    std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+    doctor_video_policy_state.duplicate_frame_ratio = duplicate_frame_ratio;
+    doctor_video_policy_state.dropped_frame_ratio = dropped_frame_ratio;
+    doctor_video_policy_state.avg_frame_age_ms = avg_frame_age_ms;
+    doctor_video_policy_state.frame_jitter_ms = frame_jitter_ms;
+    publish_doctor_video_policy_locked();
     hot_duplicate_frame_ratio.store(duplicate_frame_ratio, std::memory_order_relaxed);
     hot_dropped_frame_ratio.store(dropped_frame_ratio, std::memory_order_relaxed);
     hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
@@ -1841,7 +1909,40 @@ namespace stream_stats {
   }
 
   void update_capture_source_fps(double fps) {
-    hot_capture_source_fps.store(std::max(0.0, fps), std::memory_order_relaxed);
+    const double normalized_fps = std::max(0.0, fps);
+    {
+      std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+      doctor_video_policy_state.capture_source_fps = normalized_fps;
+      publish_doctor_video_policy_locked();
+    }
+    hot_capture_source_fps.store(normalized_fps, std::memory_order_relaxed);
+  }
+
+  void note_doctor_video_policy_sample(double target_fps,
+                                       double delivered_fps,
+                                       double duplicate_frame_ratio,
+                                       double dropped_frame_ratio,
+                                       double avg_frame_age_ms,
+                                       double frame_jitter_ms,
+                                       double encode_time_ms) {
+    std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+    doctor_video_policy_state.target_fps = target_fps;
+    doctor_video_policy_state.delivered_fps = delivered_fps;
+    doctor_video_policy_state.duplicate_frame_ratio = duplicate_frame_ratio;
+    doctor_video_policy_state.dropped_frame_ratio = dropped_frame_ratio;
+    doctor_video_policy_state.avg_frame_age_ms = avg_frame_age_ms;
+    doctor_video_policy_state.frame_jitter_ms = frame_jitter_ms;
+    doctor_video_policy_state.encode_time_ms = encode_time_ms;
+    publish_doctor_video_policy_locked();
+    // Publish every Doctor-policy field under the same lock as its class
+    // transition. get_current() cannot observe the new authority with the old
+    // evidence (or vice versa) while an Auto Fix is being re-derived.
+    hot_fps.store(delivered_fps, std::memory_order_relaxed);
+    hot_encode_time_ms.store(encode_time_ms, std::memory_order_relaxed);
+    hot_duplicate_frame_ratio.store(duplicate_frame_ratio, std::memory_order_relaxed);
+    hot_dropped_frame_ratio.store(dropped_frame_ratio, std::memory_order_relaxed);
+    hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
+    hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
   }
 
   void update_capture_pacing(const std::string &pacing) {
@@ -2679,20 +2780,24 @@ namespace stream_stats {
       result = current_stats;
     }
 
-    // Hot fields: independent relaxed loads, taken outside stats_mutex so a
-    // reader here never contends with the encode/network hot writers above.
-    result.fps = hot_fps.load(std::memory_order_relaxed);
+    // Doctor-policy video fields are read under the same narrow lock used to
+    // publish a policy-class transition. Other hot fields remain independent
+    // relaxed telemetry outside stats_mutex.
     result.bitrate_kbps = hot_bitrate_kbps.load(std::memory_order_relaxed);
-    result.encode_time_ms = hot_encode_time_ms.load(std::memory_order_relaxed);
     result.codec = codec_from_id(hot_codec_id.load(std::memory_order_relaxed));
     result.width = hot_width.load(std::memory_order_relaxed);
     result.height = hot_height.load(std::memory_order_relaxed);
-    result.duplicate_frame_ratio = hot_duplicate_frame_ratio.load(std::memory_order_relaxed);
-    result.dropped_frame_ratio = hot_dropped_frame_ratio.load(std::memory_order_relaxed);
-    result.avg_frame_age_ms = hot_avg_frame_age_ms.load(std::memory_order_relaxed);
-    result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
-    result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
-    result.video_sample_revision = hot_video_sample_revision.load(std::memory_order_acquire);
+    {
+      std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+      result.fps = hot_fps.load(std::memory_order_relaxed);
+      result.encode_time_ms = hot_encode_time_ms.load(std::memory_order_relaxed);
+      result.duplicate_frame_ratio = hot_duplicate_frame_ratio.load(std::memory_order_relaxed);
+      result.dropped_frame_ratio = hot_dropped_frame_ratio.load(std::memory_order_relaxed);
+      result.avg_frame_age_ms = hot_avg_frame_age_ms.load(std::memory_order_relaxed);
+      result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
+      result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
+      result.video_sample_revision = hot_video_sample_revision.load(std::memory_order_acquire);
+    }
     {
       // Keep the complete network group on one host-received observation.
       // Doctor must never pair a new revision with stale loss/RTT fields.

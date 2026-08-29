@@ -154,6 +154,60 @@ TEST(AdaptiveBitrateController, EncoderPressureMovementAdvancesControllerRevisio
   EXPECT_GT(after_pressure.revision, before_pressure.revision);
 }
 
+TEST(AdaptiveBitrateController, EncoderPressureInsideAdjustmentIntervalInvalidatesAStaleDoctorSnapshot) {
+  enable_controller();
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before_pressure = adaptive_bitrate::get_doctor_state();
+  // No interval sleep is intentional: a pressure sample must invalidate a
+  // stale Doctor snapshot even when the adaptive target cannot move yet.
+  adaptive_bitrate::note_doctor_video_policy_evidence(true);
+  adaptive_bitrate::update_stream_health(0.96, 0.0, 0.0, 1.0, 12.0, 20.0);
+
+  const auto after_pressure = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
+  EXPECT_GT(after_pressure.revision, before_pressure.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before_pressure.revision,
+    25000,
+    before_pressure.max_bitrate_kbps
+  ));
+}
+
+TEST(AdaptiveBitrateController, VideoPolicyTransitionsInvalidateOnceWithAdaptiveDisabled) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::note_doctor_video_policy_evidence(false);
+  const auto clean_observation = adaptive_bitrate::get_doctor_state();
+
+  // Repeated clean samples retain a still-valid action envelope.
+  adaptive_bitrate::note_doctor_video_policy_evidence(false);
+  EXPECT_EQ(
+    adaptive_bitrate::get_doctor_state().revision,
+    clean_observation.revision
+  );
+
+  // The first host video warning suppresses restore_quality even though the
+  // adaptive controller itself is disabled and would ignore this sample.
+  adaptive_bitrate::note_doctor_video_policy_evidence(true);
+  const auto warning_observation = adaptive_bitrate::get_doctor_state();
+  EXPECT_FALSE(warning_observation.enabled);
+  EXPECT_GT(warning_observation.revision, clean_observation.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    clean_observation.revision,
+    25000,
+    clean_observation.max_bitrate_kbps
+  ));
+
+  // Persistent warning samples do not starve an unrelated stable network
+  // action by continuously rotating controller authority.
+  adaptive_bitrate::note_doctor_video_policy_evidence(true);
+  EXPECT_EQ(
+    adaptive_bitrate::get_doctor_state().revision,
+    warning_observation.revision
+  );
+}
+
 TEST(AdaptiveBitrateController, EncoderPressureAtFloorAdvancesControllerRevision) {
   enable_controller(2000);
 

@@ -86,6 +86,17 @@ namespace adaptive_bitrate {
   void note_network_evidence_arrival();
 
   /**
+   * @brief Linearize a transition in host video evidence that can suppress a
+   *        deterministic quality restore.
+   *
+   * Repeated samples in the same policy class do not rotate action authority.
+   * This keeps a stable action usable between status publication and a human
+   * click while still rejecting a stale restore after clean evidence becomes
+   * an encoder or pacing warning. The class is reset for every stream.
+   */
+  void note_doctor_video_policy_evidence(bool suppresses_quality_restore);
+
+  /**
    * @brief Feed local stream health so bitrate can react to host pacing pressure.
    */
   void update_stream_health(double fps_ratio,
