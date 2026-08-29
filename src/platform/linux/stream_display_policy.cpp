@@ -18,16 +18,7 @@ namespace stream_display_policy {
 
     using stream_path::to_lower_copy;
 
-    void normalize_host_virtual_display_state() {
-      auto &linux_display = config::video.linux_display;
-      linux_display.auto_manage_displays = false;
-      config::video.capture = capture_for_host_virtual_display_backend(
-        virtual_display::detect_backend(),
-        config::video.capture
-      );
-    }
-
-    void clear_dongle_output_authority(bool retire_connectors) {
+    void clear_connector_output_authority(bool retire_connectors) {
       auto &linux_display = config::video.linux_display;
       linux_display.auto_manage_displays = false;
       linux_display.headless_swap_mode.clear();
@@ -39,6 +30,21 @@ namespace stream_display_policy {
         linux_display.streaming_output.clear();
         linux_display.primary_output.clear();
       }
+    }
+
+    void normalize_host_virtual_display_state() {
+      auto &linux_display = config::video.linux_display;
+      const auto backend = virtual_display::detect_backend();
+      clear_connector_output_authority(
+        host_virtual_backend_creates_output(backend)
+      );
+      // KScreen needs the streaming connector it manages, but never the
+      // dongle profile's separate primary-output authority.
+      linux_display.primary_output.clear();
+      config::video.capture = capture_for_host_virtual_display_backend(
+        backend,
+        config::video.capture
+      );
     }
 
     bool selection_available_for_capabilities(
@@ -258,6 +264,12 @@ namespace stream_display_policy {
     return std::string {current_capture};
   }
 
+  bool host_virtual_backend_creates_output(
+      virtual_display::backend_e backend) {
+    return backend == virtual_display::backend_e::EVDI ||
+           backend == virtual_display::backend_e::WAYLAND_WLR;
+  }
+
   resolved_t resolve(const input_t &input) {
     const auto selection = configured_selection();
     const auto *path = stream_path::find(selection);
@@ -441,15 +453,12 @@ namespace stream_display_policy {
     // and compositor-private modes so a prior dongle cannot pin capture or SDL
     // fullscreen hints after its topology actuator has been disabled.
     if (key != stream_path::k_headless_dongle && key != k_host_virtual_display) {
-      const bool retiring_dongle_state =
+      const bool retiring_connector_state =
         linux_display.stream_mode == stream_path::k_headless_dongle ||
+        linux_display.stream_mode == k_host_virtual_display ||
         linux_display.auto_manage_displays ||
         !linux_display.headless_swap_mode.empty();
-      clear_dongle_output_authority(retiring_dongle_state);
-    } else if (key == k_host_virtual_display) {
-      linux_display.auto_manage_displays = false;
-      linux_display.headless_swap_mode.clear();
-      linux_display.primary_output.clear();
+      clear_connector_output_authority(retiring_connector_state);
     }
 
     if (key == k_host_virtual_display) {
@@ -532,14 +541,10 @@ namespace stream_display_policy {
         }
         if (path->id != stream_path::k_headless_dongle &&
             path->id != k_host_virtual_display) {
-          const bool retiring_dongle_state =
+          const bool retiring_connector_state =
             linux_display.auto_manage_displays ||
             !linux_display.headless_swap_mode.empty();
-          clear_dongle_output_authority(retiring_dongle_state);
-        } else if (path->id == k_host_virtual_display) {
-          linux_display.auto_manage_displays = false;
-          linux_display.headless_swap_mode.clear();
-          linux_display.primary_output.clear();
+          clear_connector_output_authority(retiring_connector_state);
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.

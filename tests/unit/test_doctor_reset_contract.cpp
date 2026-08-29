@@ -334,7 +334,7 @@ TEST(DoctorResetContract, ResumeRevalidatesTheExactProfileBeforeRaisingAStream) 
     launch_capability_revalidation
   );
   const auto launch_cage_refresh = launch.find(
-    "stream_runtime::labwc::ensure_output_refresh(launch_session->fps)",
+    "stream_runtime::labwc::ensure_output_refresh(launch_session->fps, false)",
     launch_capability_revalidation
   );
   ASSERT_NE(launch_raise, std::string::npos);
@@ -348,6 +348,15 @@ TEST(DoctorResetContract, ResumeRevalidatesTheExactProfileBeforeRaisingAStream) 
     launch.find("if (!launch_cage_refresh_applied)", launch_cage_refresh),
     std::string::npos
   ) << "the same-app exact launch must not hide a failed private-output refresh";
+
+  EXPECT_NE(
+    process.find("resolved_reconnect_cadence_allowed"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    process.find("active launch-owned output cannot apply and verify it"),
+    std::string::npos
+  ) << "Host Virtual and Gamescope reconnects must reject cadence changes they cannot apply";
 }
 
 TEST(DoctorResetContract, ExactReconnectRequiresTheActiveSessionToken) {
@@ -551,6 +560,9 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   const auto typed_persistence_failure = client_settings.find(
     "stream_display_mode_persistence_failed"
   );
+  const auto typed_topology_rejection = client_settings.find(
+    "const auto reject_stream_display_mode ="
+  );
   const auto controller_lock = client_settings.find(
     "doctor_actions::acquire_paired_global_control("
   );
@@ -566,6 +578,7 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   ASSERT_NE(lifecycle_lock, std::string::npos);
   ASSERT_NE(standalone_gate, std::string::npos);
   ASSERT_NE(typed_persistence_failure, std::string::npos);
+  ASSERT_NE(typed_topology_rejection, std::string::npos);
   ASSERT_NE(active_generation_gate, std::string::npos);
   ASSERT_NE(controller_lock, std::string::npos);
   ASSERT_NE(topology_apply, std::string::npos);
@@ -579,6 +592,10 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
     ),
     std::string::npos
   ) << "a config write failure is a typed server error, never a rejected client value";
+  EXPECT_NE(
+    client_settings.find("invalid_or_unavailable_topology", typed_topology_rejection),
+    std::string::npos
+  ) << "malformed and unavailable topology values must share the typed rejection envelope";
   EXPECT_LT(lifecycle_lock, controller_lock)
     << "topology writers must preserve lifecycle-to-controller lock order";
   EXPECT_LT(lifecycle_lock, active_generation_gate);
@@ -654,6 +671,25 @@ TEST(DoctorResetContract, AppTopologyPrecedenceIsResolvedBeforeRequestAvailabili
     optimize_topology.find("if (effective_selection == requested_selection)"),
     std::string::npos
   ) << "only the winning requested topology may make its live availability authoritative";
+}
+
+TEST(DoctorResetContract, HostVirtualRetiresDongleAuthorityUnlessKScreenNeedsIt) {
+  const auto policy = source("src/platform/linux/stream_display_policy.cpp");
+  const auto normalization = between(
+    policy,
+    "void normalize_host_virtual_display_state()",
+    "bool selection_available_for_capabilities("
+  );
+  EXPECT_NE(
+    normalization.find(
+      "host_virtual_backend_creates_output(backend)"
+    ),
+    std::string::npos
+  );
+  EXPECT_NE(
+    normalization.find("clear_connector_output_authority("),
+    std::string::npos
+  ) << "EVDI/wlroots Host Virtual must not inherit dongle capture or game-placement connectors";
 }
 
 TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {

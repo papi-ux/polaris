@@ -1081,6 +1081,13 @@ TEST(SessionStopContractTests, ExactTokenIsRequiredForRtspOnlyPendingSession) {
   rtsp_stream::terminate_sessions();
 }
 
+TEST(SessionStopContractTests, FreshProcessReportsNoRunningApp) {
+  auto env = boost::this_process::environment();
+  proc::proc_t subject {std::move(env), {}};
+
+  EXPECT_EQ(subject.running(), 0);
+}
+
 TEST(SessionStopContractTests, MismatchedTokenIsRejectedForRunningApp) {
   EXPECT_EQ(
     decide(true, true, 1, true, session_role_e::controller, false, false),

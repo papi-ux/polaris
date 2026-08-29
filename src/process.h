@@ -156,6 +156,12 @@ namespace proc {
     const struct ctx_t &app,
     rtsp_stream::launch_session_t &launch_session
   );
+  bool resolved_reconnect_cadence_allowed(
+    bool launch_owns_refresh_rate,
+    int requested_fps,
+    int active_fps,
+    bool exact_private_refresh_reapply_will_run
+  );
 #endif
 
 #if defined(POLARIS_TESTS) && defined(__linux__)
@@ -765,7 +771,8 @@ namespace proc {
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     int validate_resolved_profile_for_running_app(
-      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
+      bool exact_private_refresh_reapply_will_run = false
     );
     bool raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     std::optional<std::uint64_t> capture_session_launch_generation() const;
