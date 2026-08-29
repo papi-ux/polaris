@@ -690,6 +690,16 @@ TEST(DoctorResetContract, HostVirtualRetiresDongleAuthorityUnlessKScreenNeedsIt)
     normalization.find("clear_connector_output_authority("),
     std::string::npos
   ) << "EVDI/wlroots Host Virtual must not inherit dongle capture or game-placement connectors";
+
+  const auto companion_match = between(
+    policy,
+    "bool selection_companion_state_matches(",
+    "bool apply_selection("
+  );
+  EXPECT_NE(
+    companion_match.find("host_virtual_connector_state_matches("),
+    std::string::npos
+  ) << "the final launch fast path must re-normalize if the live backend no longer owns a retained connector";
 }
 
 TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {

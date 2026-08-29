@@ -270,6 +270,14 @@ namespace stream_display_policy {
            backend == virtual_display::backend_e::WAYLAND_WLR;
   }
 
+  bool host_virtual_connector_state_matches(
+      virtual_display::backend_e backend,
+      std::string_view streaming_output,
+      std::string_view output_name) {
+    return !host_virtual_backend_creates_output(backend) ||
+           (streaming_output.empty() && output_name.empty());
+  }
+
   resolved_t resolve(const input_t &input) {
     const auto selection = configured_selection();
     const auto *path = stream_path::find(selection);
@@ -414,12 +422,19 @@ namespace stream_display_policy {
           linux_display.auto_manage_displays) {
         return false;
       }
-      if (key == k_host_virtual_display &&
-          config::video.capture != capture_for_host_virtual_display_backend(
-                                     virtual_display::detect_backend(),
-                                     config::video.capture
-                                   )) {
-        return false;
+      if (key == k_host_virtual_display) {
+        const auto backend = virtual_display::detect_backend();
+        if (config::video.capture != capture_for_host_virtual_display_backend(
+                                       backend,
+                                       config::video.capture
+                                     ) ||
+            !host_virtual_connector_state_matches(
+              backend,
+              linux_display.streaming_output,
+              config::video.output_name
+            )) {
+          return false;
+        }
       }
       if (key == stream_path::k_gamescope_stream && config::video.capture.empty()) {
         return false;

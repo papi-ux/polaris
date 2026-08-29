@@ -94,6 +94,19 @@ namespace stream_display_policy {
     virtual_display::backend_e backend
   );
 
+  /**
+   * @brief Whether retained connector authority is valid for a Host Virtual backend.
+   *
+   * KScreen manages an existing connector. EVDI and wlroots create a new one,
+   * so their final launch fast path must force normalization while any prior
+   * connector or capture-output pin remains.
+   */
+  bool host_virtual_connector_state_matches(
+    virtual_display::backend_e backend,
+    std::string_view streaming_output,
+    std::string_view output_name
+  );
+
   /** Stable selection ids — SoT is stream_path (no dual string tables). */
   constexpr std::string_view k_headless_stream = stream_path::k_headless_stream;
   constexpr std::string_view k_windowed_stream = stream_path::k_windowed_stream;

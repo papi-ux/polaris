@@ -475,6 +475,27 @@ TEST(StreamDisplayPolicyTests, HostVirtualKeepsAConfiguredConnectorOnlyForKScree
   EXPECT_FALSE(stream_display_policy::host_virtual_backend_creates_output(
     virtual_display::backend_e::NONE
   ));
+
+  EXPECT_TRUE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::KSCREEN_DOCTOR,
+    "DP-1",
+    "DP-1"
+  ));
+  EXPECT_FALSE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::EVDI,
+    "DP-1",
+    "DP-1"
+  ));
+  EXPECT_FALSE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::WAYLAND_WLR,
+    "",
+    "DP-1"
+  ));
+  EXPECT_TRUE(stream_display_policy::host_virtual_connector_state_matches(
+    virtual_display::backend_e::EVDI,
+    "",
+    ""
+  ));
 }
 
 TEST(StreamDisplayPolicyTests, LeavingKScreenHostVirtualRetiresItsConnectorAuthority) {
