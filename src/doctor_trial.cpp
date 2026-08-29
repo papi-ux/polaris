@@ -435,9 +435,8 @@ namespace doctor_trial {
                                                  const std::string &owner_uuid,
                                                  const std::string &app_uuid,
                                                  const std::string &launch_instance_id,
-                                                 std::uint64_t launch_generation,
                                                  std::int64_t now) {
-    if (!nonblank(owner_uuid) || !nonblank(app_uuid) || !nonblank(launch_instance_id) || launch_generation == 0) {
+    if (!nonblank(owner_uuid) || !nonblank(app_uuid) || !nonblank(launch_instance_id)) {
       return std::nullopt;
     }
     std::lock_guard lock(store_mutex);
@@ -446,14 +445,15 @@ namespace doctor_trial {
     const bool expired = expire_and_prune(loaded.store, now);
     auto record = find_scope(loaded.store, owner_uuid, app_uuid);
     if (record == loaded.store.records.end() || record->state != "queued" ||
-        record->baseline_launch_instance_id == launch_instance_id ||
-        launch_generation <= record->baseline_session_generation) {
+        record->baseline_launch_instance_id == launch_instance_id) {
       if (expired) static_cast<void>(persist(path, loaded.store));
       return std::nullopt;
     }
     record->state = "running";
     record->trial_launch_instance_id = launch_instance_id;
-    record->trial_launch_generation = launch_generation;
+    // proc_t's launch counter is not stream::session_t's evidence generation.
+    // Bind the latter only after a full host-received Doctor window arrives.
+    record->trial_launch_generation = 0;
     if (!persist(path, loaded.store)) return std::nullopt;
     return launch_override_t {record->run_id, record->candidate_target_fps};
   }
@@ -461,6 +461,7 @@ namespace doctor_trial {
   nlohmann::json observe(const std::filesystem::path &path,
                          const std::string &owner_uuid,
                          const std::string &app_uuid,
+                         const std::string &launch_instance_id,
                          const nlohmann::json &doctor_status,
                          const effective_settings_t &settings,
                          bool crashed,
@@ -476,6 +477,13 @@ namespace doctor_trial {
       return record == loaded.store.records.end() ?
         nlohmann::json {{"status", true}, {"changed", false}, {"state", "none"}} : receipt(*record);
     }
+    if (!nonblank(launch_instance_id) ||
+        record->trial_launch_instance_id != launch_instance_id) {
+      if (expired && !persist(path, loaded.store)) return unavailable(load_status_e::io_error);
+      auto output = receipt(*record);
+      output["reason_code"] = "trial_launch_instance_mismatch";
+      return output;
+    }
     if (crashed) {
       record->state = "worse";
       if (!persist(path, loaded.store)) return unavailable(load_status_e::io_error);
@@ -485,7 +493,9 @@ namespace doctor_trial {
     }
 
     const auto metrics = parse_metrics(doctor_status.value("trial_metrics", nlohmann::json::object()), true);
-    if (!metrics || metrics->session_generation != record->trial_launch_generation) {
+    const bool metrics_match_candidate = metrics &&
+      std::abs(metrics->target_fps - record->candidate_target_fps) <= 1.0;
+    if (!metrics_match_candidate) {
       bool changed = false;
       if (record->state != "collecting") {
         record->state = "collecting";
@@ -496,9 +506,15 @@ namespace doctor_trial {
       }
       auto output = receipt(*record, changed);
       output["reason_code"] = metrics ?
-        "trial_generation_mismatch" : "complete_trial_window_required";
+        "trial_target_window_mismatch" : "complete_trial_window_required";
       return output;
     }
+
+    // The authenticated evidence route replaces Nova's local generation with
+    // stream::session_t's host generation. It is therefore safe to bind here,
+    // and remains correct after a Polaris restart resets either process-local
+    // counter independently.
+    record->trial_launch_generation = metrics->session_generation;
 
     const bool settings_match = valid_settings(settings) &&
       settings.topology == record->preserved.topology &&

@@ -23,7 +23,10 @@ namespace launch_profile {
     // Polaris stores launch FPS as milli-FPS (60000 == 60 FPS).
     int requested_fps = 0;
     bool display_locked = false;
-    bool paired_display = false;
+
+    int paired_width = 0;
+    int paired_height = 0;
+    int paired_fps = 0;
 
     std::optional<int> paired_bitrate_kbps;
     std::optional<int> explicit_bitrate_kbps;

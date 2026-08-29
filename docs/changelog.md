@@ -14,9 +14,10 @@ starts at `v1.0.0`.
 
 A matched Doctor containment patch for Nova v1.3.9. Frame-pacing diagnosis is observational, launch fields come from deterministic presets with field-level provenance, and neither history nor AI output can silently change a launch or inject a game-process limiter.
 
-- Reports frame-pacing Watch evidence under the compatibility reason code `frame_pacing`, without contradictory Stable state or unsupported network/bitrate blame; static and duplicate-only content remains unknown instead of becoming a pacing fault
+- Reports frame-pacing Watch evidence under the compatibility reason code `frame_pacing`, without contradictory Stable state or unsupported network/bitrate blame; static and duplicate-only content is not treated as a pacing fault without source-cadence evidence
 - Removes history, recovery, and AI launch overlays; the legacy `apply_recovery_profile_next_launch` action is disabled, old recovery records are deprecated, non-applicable, and cancellable, and old apply/verify calls fail as `unsupported_deprecated`
 - Resolves `auto`, `quality`, `high_fps`, and `stability` deterministically and returns source, reason code, lock, and normalization provenance for every resolved launch field
+- Advertises the deterministic resolved-profile contract so Nova v1.3.9 refuses older Polaris launch policy rather than failing open to legacy history or AI settings
 - Keeps topology exclusively under explicit app/client display semantics and stops synthesizing MangoHud, DXVK, or VKD3D frame limiters for game processes
 - Keeps Auto Fix only for same-stream bitrate changes with measured verification and automatic rollback; pacing uses Recheck or manual guidance
 - Adds disabled-by-default Doctor v2 shadow evidence and a separate authenticated, private, one-dimension trial contract; records expire after a 24-hour lifetime, every trial is one-shot, and actions remain hidden until dedicated acceptance enables them

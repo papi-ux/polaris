@@ -2454,9 +2454,11 @@ namespace stream {
       // Initialize controller state before the encoder thread publishes its
       // runtime-update capability. Resetting after the thread starts can erase
       // that capability and silently leave a supported encoder inactive.
-      adaptive_bitrate::load_config();
-      adaptive_bitrate::reset();
-      adaptive_bitrate::set_base_bitrate(session.config.monitor.bitrate);
+      doctor_actions::session_started(
+        session.device_uuid,
+        session.session_generation,
+        session.config.monitor.bitrate
+      );
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};

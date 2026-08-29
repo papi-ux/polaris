@@ -3394,7 +3394,8 @@ namespace confighttp {
     response->write(device_db::get_all_devices_json(), headers);
   }
 
-  void appendOptimizationJson(nlohmann::json &output, const device_db::optimization_t &opt) {
+  void appendDeterministicDeviceSuggestionJson(nlohmann::json &output,
+                                               const device_db::optimization_t &opt) {
     if (opt.display_mode) output["display_mode"] = *opt.display_mode;
     if (opt.color_range) output["color_range"] = *opt.color_range;
     if (opt.hdr.has_value()) output["hdr"] = *opt.hdr;
@@ -3412,6 +3413,42 @@ namespace confighttp {
     output["recommendation_version"] = opt.recommendation_version;
     output["generated_at"] = opt.generated_at;
     output["expires_at"] = opt.expires_at;
+    output["authority"] = "deterministic_device_profile";
+    output["may_define_settings"] = true;
+  }
+
+  void appendAiExplanationJson(nlohmann::json &output,
+                               const device_db::optimization_t &result) {
+    output["authority"] = "explanation_only";
+    output["may_define_settings"] = false;
+    output["reasoning"] = result.reasoning;
+    output["reasoning_summary"] = result.reasoning;
+    output["source"] = result.source;
+    output["cache_status"] = result.cache_status;
+    output["confidence"] = result.confidence;
+    output["signals_used"] = result.signals_used;
+    output["generated_at"] = result.generated_at;
+    output["expires_at"] = result.expires_at;
+  }
+
+  void scrubAiSettingFields(nlohmann::json &value) {
+    if (value.is_array()) {
+      for (auto &entry : value) scrubAiSettingFields(entry);
+      return;
+    }
+    if (!value.is_object()) return;
+    for (const auto *field : {
+           "display_mode", "color_range", "hdr", "virtual_display",
+           "target_bitrate_kbps", "nvenc_tune", "preferred_codec",
+           "safe_target_fps", "safe_bitrate_kbps", "safe_display_mode",
+           "safe_codec", "safe_hdr"
+         }) {
+      value.erase(field);
+    }
+    for (auto &[key, entry] : value.items()) {
+      (void) key;
+      scrubAiSettingFields(entry);
+    }
   }
 
   void getDeviceSuggestion(resp_https_t response, req_https_t request) {
@@ -3425,12 +3462,8 @@ namespace confighttp {
     nlohmann::json output;
     output["status"] = true;
     output["device_name"] = name;
-    if (auto ai_opt = ai_optimizer::get_cached(name, app)) {
-      appendOptimizationJson(output, *ai_opt);
-    } else {
-      auto opt = device_db::get_optimization(name, app);
-      appendOptimizationJson(output, opt);
-    }
+    auto opt = device_db::get_optimization(name, app);
+    appendDeterministicDeviceSuggestionJson(output, opt);
     send_response(response, output);
   }
 
@@ -3483,7 +3516,12 @@ namespace confighttp {
     print_req(request);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
-    response->write(ai_optimizer::get_cache_json(), headers);
+    auto cache = nlohmann::json::parse(
+      ai_optimizer::get_cache_json(), nullptr, false
+    );
+    if (cache.is_discarded()) cache = nlohmann::json::object();
+    scrubAiSettingFields(cache);
+    response->write(cache.dump(), headers);
   }
 
   void getAiHistory(resp_https_t response, req_https_t request) {
@@ -3491,7 +3529,12 @@ namespace confighttp {
     print_req(request);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
-    response->write(ai_optimizer::get_history_json(), headers);
+    auto history = nlohmann::json::parse(
+      ai_optimizer::get_history_json(), nullptr, false
+    );
+    if (history.is_discarded()) history = nlohmann::json::array();
+    scrubAiSettingFields(history);
+    response->write(history.dump(), headers);
   }
 
   void clearAiCache(resp_https_t response, req_https_t request) {
@@ -3552,7 +3595,7 @@ namespace confighttp {
         output["model"] = ai_cfg.model;
         output["auth_mode"] = ai_cfg.auth_mode;
         output["base_url"] = ai_cfg.base_url;
-        appendOptimizationJson(output, *result);
+        appendAiExplanationJson(output, *result);
       } else {
         output["status"] = false;
         output["error"] = "Connection test failed — check provider settings and logs";
@@ -3567,37 +3610,15 @@ namespace confighttp {
   void triggerAiOptimize(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
-
-    nlohmann::json output;
-    try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      auto body = nlohmann::json::parse(ss.str());
-
-      std::string device = body.value("device_name", "");
-      std::string app = body.value("app_name", "");
-      std::string gpu = body.value("gpu_info", "NVIDIA RTX (NVENC)");
-
-      if (device.empty()) {
-        output["status"] = false;
-        output["error"] = "Missing device_name";
-        send_response(response, output);
-        return;
-      }
-
-      auto result = ai_optimizer::request_sync(device, app, gpu);
-      if (result) {
-        output["status"] = true;
-        appendOptimizationJson(output, *result);
-      } else {
-        output["status"] = false;
-        output["error"] = "AI optimization failed — check provider settings and logs";
-      }
-    } catch (const std::exception &e) {
-      output["status"] = false;
-      output["error"] = e.what();
-    }
-    send_response(response, output);
+    send_response(response, {
+      {"status", false},
+      {"changed", false},
+      {"state", "deprecated"},
+      {"code", "ai_launch_policy_removed"},
+      {"authority", "explanation_only"},
+      {"may_define_settings", false},
+      {"error", "AI-authored launch settings are disabled. Use a deterministic Launch preset; AI remains available only to explain Doctor evidence."}
+    });
   }
 
   void explainDoctorWithAi(resp_https_t response, req_https_t request) {
@@ -4031,18 +4052,6 @@ namespace confighttp {
         } else {
           ++it;
         }
-      }
-      if (input_tree.contains("ai_enabled") || input_tree.contains("adaptive_bitrate_enabled")) {
-        const bool has_ai_enabled = input_tree.contains("ai_enabled");
-        const bool has_adaptive_enabled = input_tree.contains("adaptive_bitrate_enabled");
-        const auto unified_value =
-          has_ai_enabled ? input_tree["ai_enabled"] : input_tree["adaptive_bitrate_enabled"];
-        if (has_ai_enabled && has_adaptive_enabled && input_tree["ai_enabled"] != input_tree["adaptive_bitrate_enabled"]) {
-          bad_request(response, request, "AI Optimizer and Adaptive Bitrate are controlled by AI Auto Quality and must match.");
-          return;
-        }
-        input_tree["ai_enabled"] = unified_value;
-        input_tree["adaptive_bitrate_enabled"] = unified_value;
       }
       if (!validation::validate_config_payload(input_tree, validation_error)) {
         bad_request(response, request, validation_error);

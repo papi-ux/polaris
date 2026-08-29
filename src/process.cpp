@@ -6744,7 +6744,6 @@ namespace proc {
     preset_request.requested_height = launch_session->requested_height;
     preset_request.requested_fps = launch_session->requested_fps;
     preset_request.display_locked = optimization_locks.display_mode;
-    preset_request.paired_display = launch_session->user_locked_display_mode;
     preset_request.paired_bitrate_kbps = launch_session->paired_target_bitrate_kbps;
     preset_request.explicit_bitrate_kbps = launch_session->explicit_target_bitrate_kbps;
     preset_request.bitrate_locked = launch_session->explicit_target_bitrate_kbps.has_value();
@@ -6826,7 +6825,6 @@ namespace proc {
         launch_session->unique_id,
         _app.uuid,
         launch_session->session_token,
-        _session_generation,
         doctor_trial::now_epoch_seconds()
       );
       if (trial) {

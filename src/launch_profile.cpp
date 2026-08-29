@@ -70,12 +70,9 @@ namespace launch_profile {
     }
 
     display_mode_t conservative_mode(const request_t &request,
-                                     const std::optional<device_db::device_t> &device) {
-      display_mode_t candidate {
-        request.requested_width,
-        request.requested_height,
-        request.requested_fps,
-      };
+                                     const std::optional<device_db::device_t> &device,
+                                     display_mode_t selected) {
+      display_mode_t candidate = selected;
       if (device && !device->display_mode.empty()) {
         if (const auto parsed = parse_display_mode(device->display_mode)) {
           candidate = *parsed;
@@ -85,9 +82,9 @@ namespace launch_profile {
       // Versioned v1 conservative policy: never raise a requested dimension,
       // and limit the stability preset to 1080p60. This is a selected preset,
       // not a conclusion learned from a previous session.
-      if (request.requested_width > 0) candidate.width = std::min(candidate.width, request.requested_width);
-      if (request.requested_height > 0) candidate.height = std::min(candidate.height, request.requested_height);
-      if (request.requested_fps > 0) candidate.fps = std::min(candidate.fps, request.requested_fps);
+      if (selected.width > 0) candidate.width = std::min(candidate.width, selected.width);
+      if (selected.height > 0) candidate.height = std::min(candidate.height, selected.height);
+      if (selected.fps > 0) candidate.fps = std::min(candidate.fps, selected.fps);
       candidate.width = std::min(candidate.width, 1920);
       candidate.height = std::min(candidate.height, 1080);
       candidate.fps = std::min(candidate.fps, 60000);
@@ -115,15 +112,49 @@ namespace launch_profile {
   resolution_t resolve(const request_t &request) {
     resolution_t result;
     result.preset = normalize_preset(request.preset);
-    result.width = request.requested_width;
-    result.height = request.requested_height;
-    result.fps = request.requested_fps;
     result.hdr = request.hdr_requested;
     result.color_range = request.color_range;
 
     const auto device = device_db::get_device(request.device_name);
-    const auto display_source = request.paired_display ? "paired_client" : "explicit_launch_request";
-    const auto display_reason = request.paired_display ? "paired_display_setting" : "requested_display_setting";
+    const bool requested_display_complete = request.requested_width > 0 &&
+      request.requested_height > 0 && request.requested_fps > 0;
+    const bool paired_display_complete = request.paired_width > 0 &&
+      request.paired_height > 0 && request.paired_fps > 0;
+    std::string display_source;
+    std::string display_reason;
+    bool display_field_locked = false;
+
+    if (request.display_locked && requested_display_complete) {
+      result.width = request.requested_width;
+      result.height = request.requested_height;
+      result.fps = request.requested_fps;
+      display_source = "explicit_launch_request";
+      display_reason = "requested_display_lock";
+      display_field_locked = true;
+    } else if (paired_display_complete) {
+      result.width = request.paired_width;
+      result.height = request.paired_height;
+      result.fps = request.paired_fps;
+      display_source = "paired_client";
+      display_reason = "paired_display_setting";
+    } else if (requested_display_complete) {
+      result.width = request.requested_width;
+      result.height = request.requested_height;
+      result.fps = request.requested_fps;
+      display_source = "client_launch_request";
+      display_reason = result.preset == "high_fps" ?
+        "high_fps_cadence_lock" : "requested_display_setting";
+    }
+
+    if (result.preset == "high_fps" && request.requested_fps > 0 &&
+        !request.display_locked) {
+      // High FPS is a cadence lock, not a whole-display lock. Paired width and
+      // height still win at their precedence layer, while the launch request's
+      // FPS remains exact.
+      result.fps = request.requested_fps;
+      display_source = "client_launch_request";
+      display_reason = "high_fps_cadence_lock";
+    }
 
     if (result.width > 0 && result.height > 0 && result.fps > 0) {
       add_field(
@@ -132,12 +163,17 @@ namespace launch_profile {
         format_display_mode({result.width, result.height, result.fps}),
         display_source,
         display_reason,
-        request.display_locked || result.preset == "quality" || result.preset == "high_fps"
+        display_field_locked
       );
+      if (result.preset == "high_fps" && !display_field_locked) {
+        result.fields["display_mode"]["locked_components"] = {"fps"};
+      }
     }
 
     if (result.preset == "stability" && !request.display_locked) {
-      const auto stable = conservative_mode(request, device);
+      const auto stable = conservative_mode(
+        request, device, {result.width, result.height, result.fps}
+      );
       const bool normalized = stable.width != result.width || stable.height != result.height || stable.fps != result.fps;
       result.width = stable.width;
       result.height = stable.height;
@@ -153,16 +189,19 @@ namespace launch_profile {
       );
     }
 
-    if (request.explicit_bitrate_kbps && *request.explicit_bitrate_kbps > 0) {
+    if (request.bitrate_locked && request.explicit_bitrate_kbps &&
+        *request.explicit_bitrate_kbps > 0) {
       result.target_bitrate_kbps = request.explicit_bitrate_kbps;
       add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
-                request.bitrate_locked ? "explicit_launch_request" : "client_launch_request",
-                request.bitrate_locked ? "requested_bitrate_lock" : "requested_bitrate_setting",
-                request.bitrate_locked);
+                "explicit_launch_request", "requested_bitrate_lock", true);
     } else if (request.paired_bitrate_kbps && *request.paired_bitrate_kbps > 0) {
       result.target_bitrate_kbps = request.paired_bitrate_kbps;
       add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
-                "paired_client", "paired_bitrate_setting", true);
+                "paired_client", "paired_bitrate_setting", false);
+    } else if (request.explicit_bitrate_kbps && *request.explicit_bitrate_kbps > 0) {
+      result.target_bitrate_kbps = request.explicit_bitrate_kbps;
+      add_field(result.fields, "target_bitrate_kbps", *result.target_bitrate_kbps,
+                "client_launch_request", "requested_bitrate_setting", false);
     } else if (result.preset != "auto" && device && device->ideal_bitrate_kbps > 0) {
       const int target = result.preset == "stability" ?
         std::min(device->ideal_bitrate_kbps, 15000) : device->ideal_bitrate_kbps;

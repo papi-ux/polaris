@@ -95,6 +95,15 @@ namespace adaptive_bitrate {
   void set_enabled(bool enabled);
 
   /**
+   * @brief Change adaptive bitrate only for the current in-memory controller.
+   *
+   * Unlike set_enabled(), this never changes the saved configuration value.
+   * Doctor uses it for a reversible same-stream action so a temporary enable
+   * cannot become policy for a later stream generation.
+   */
+  void set_runtime_enabled(bool enabled);
+
+  /**
    * @brief Check if adaptive bitrate control is enabled.
    * @return True if enabled.
    */

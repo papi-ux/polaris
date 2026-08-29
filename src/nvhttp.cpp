@@ -4319,8 +4319,10 @@ namespace nvhttp {
     launch_session->force_private_after_desktop_steam_shutdown = false;
     #endif
     launch_session->virtual_display = !launch_session->mirror_desktop && (client_requested_virtual_display || named_cert_p->always_use_virtual_display);
-    launch_session->user_locked_display_mode =
-      launch_session->resolved_profile_from_client || !named_cert_p->display_mode.empty();
+    // A host-resolved envelope is an explicit per-launch lock. The paired
+    // display mode is the input at the paired-settings precedence layer, so a
+    // selected stability preset may still conservatively normalize it.
+    launch_session->user_locked_display_mode = launch_session->resolved_profile_from_client;
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
     if (named_cert_p->target_bitrate_kbps > 0) {
@@ -6542,6 +6544,7 @@ namespace nvhttp {
           platf::appdata() / "doctor_trials.json",
           named_cert_p->uuid,
           status_snapshot.game_uuid,
+          session_token,
           doctor_v2_status,
           trial_settings,
           false,
@@ -8151,6 +8154,7 @@ namespace nvhttp {
           active_owner_present && proc::proc.is_session_owner(named_cert_p->uuid);
         if (!doctor_actions::paired_route_allowed(
               body.value("action_id", std::string {}),
+              body.value("run_id", std::string {}),
               active_owner_present,
               active_owner
             )) {
@@ -8594,6 +8598,7 @@ namespace nvhttp {
               platf::appdata() / "doctor_trials.json",
               named_cert_p->uuid,
               app_uuid,
+              proc::proc.get_session_token(),
               nlohmann::json::object(),
               doctor_trial::effective_settings_t {},
               true,
@@ -8829,18 +8834,16 @@ namespace nvhttp {
         preset_request.requested_height = *explicit_height;
         preset_request.requested_fps = *explicit_fps;
         preset_request.display_locked = display_locked;
-        preset_request.paired_display = false;
-      } else if (!named_cert_p->display_mode.empty()) {
+      }
+      if (!named_cert_p->display_mode.empty()) {
         double paired_fps = 0.0;
         if (parse_stream_policy_display_mode(
               named_cert_p->display_mode,
-              preset_request.requested_width,
-              preset_request.requested_height,
+              preset_request.paired_width,
+              preset_request.paired_height,
               paired_fps
             )) {
-          preset_request.requested_fps = static_cast<int>(std::round(paired_fps * 1000.0));
-          preset_request.display_locked = false;
-          preset_request.paired_display = true;
+          preset_request.paired_fps = static_cast<int>(std::round(paired_fps * 1000.0));
         }
       }
       if (explicit_hdr) {

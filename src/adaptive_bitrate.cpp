@@ -305,6 +305,10 @@ namespace adaptive_bitrate {
     enabled.store(enable, std::memory_order_relaxed);
   }
 
+  void set_runtime_enabled(bool enable) {
+    enabled.store(enable, std::memory_order_relaxed);
+  }
+
   bool is_enabled() {
     return enabled.load(std::memory_order_relaxed);
   }

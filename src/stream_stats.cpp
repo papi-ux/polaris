@@ -10,6 +10,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <vector>
@@ -86,11 +87,29 @@ namespace stream_stats {
     std::atomic<uint64_t> hot_network_sample_revision {0};
     std::atomic<bool> hot_network_risk {false};
     std::atomic<uint64_t> hot_bytes_sent {0};
+    std::atomic<bool> hot_doctor_live_action_scope_available {false};
 
     // Guarded by its own lock so the lock-free update_network_stats
     // overload stays clear of stats_mutex.
     network_risk_tracker_t network_risk_tracker;
     std::mutex network_risk_mutex;
+
+    struct primary_network_observation_t {
+      std::uint64_t revision = 0;
+      std::chrono::steady_clock::time_point received_at {};
+      bool media_sample = false;
+      double latency_ms = 0.0;
+      double packet_loss = 0.0;
+      bool packet_loss_available = false;
+      double control_channel_packet_loss = 0.0;
+      std::uint64_t control_channel_samples = 0;
+      bool network_risk = false;
+      std::uint64_t bytes_sent = 0;
+    };
+
+    constexpr std::size_t NETWORK_OBSERVATION_CAPACITY = 256;
+    std::deque<primary_network_observation_t> primary_network_observations;
+    primary_network_observation_t primary_network_state;
 
     // Recovery counters: monotonic for the life of the process, matching
     // the roadmap's P0-2 ask; a per-session view is a get_current() delta.
@@ -176,9 +195,12 @@ namespace stream_stats {
       {
         std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
         network_risk_tracker.reset();
+        primary_network_observations.clear();
+        primary_network_state = primary_network_observation_t {};
       }
       hot_network_risk.store(false, std::memory_order_relaxed);
       hot_bytes_sent.store(0, std::memory_order_relaxed);
+      hot_doctor_live_action_scope_available.store(false, std::memory_order_relaxed);
       // idr_requests_total / invalidate_ref_frames_requests_total are
       // intentionally NOT reset here: they are process-lifetime recovery
       // counters (see the header doc comment), not per-session state.
@@ -419,6 +441,7 @@ namespace stream_stats {
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
+    j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
     j["idr_requests_total"] = idr_requests_total;
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
     j["headless_mode"] = config::video.linux_display.headless_mode;
@@ -807,7 +830,8 @@ namespace stream_stats {
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
                                          const nlohmann::json &health,
-                                         bool live_bitrate_tunable) {
+                                         bool live_bitrate_tunable,
+                                         bool single_session_scope) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -823,6 +847,10 @@ namespace stream_stats {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
           expected = "Packet loss and latency should return to the stable range without changing encoder or display settings.";
+        } else if (!single_session_scope) {
+          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          next_step = "Reconnect one stream";
+          expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
           body = "Current sustained loss or latency evidence confirms network pressure, but this encoder cannot change bitrate during a live stream. Lower the paired or client bitrate for the next launch.";
           next_step = "Lower next-stream bitrate";
@@ -842,6 +870,10 @@ namespace stream_stats {
           body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
           next_step = "Restore and verify";
           expected = "Bitrate should climb toward the capability-validated launch ceiling while Doctor stops immediately if live loss or latency returns.";
+        } else if (!single_session_scope) {
+          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          next_step = "Reconnect one stream";
+          expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
           body = "The current network is clean, but this encoder cannot restore bitrate during the active stream. Doctor will not change the next launch.";
           next_step = "Keep current settings";
@@ -890,6 +922,7 @@ namespace stream_stats {
                                       int current_bitrate_kbps,
                                       int paired_target_bitrate_kbps,
                                       bool live_bitrate_tunable,
+                                      bool single_session_scope,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid) {
       std::string id = "none";
@@ -959,7 +992,9 @@ namespace stream_stats {
           {"success_when", nlohmann::json::array({"network_risk stays clear", "packet_loss_pct <= 2", "latency_ms < 45", "effective launch bitrate ceiling is reached"})}
         };
       } else if ((primary_issue == "network_jitter" || primary_issue == "quality_reduced_live") && !live_bitrate_tunable) {
-        unavailable_reason = "The active encoder does not support runtime bitrate updates.";
+        unavailable_reason = single_session_scope ?
+          "The active encoder does not support runtime bitrate updates." :
+          "Auto Fix requires a fresh, unshared stream generation to own the process-global bitrate controller.";
       } else if (primary_issue == "steam_input_conflict") {
         id = "none";
         label = "Manual";
@@ -1056,6 +1091,10 @@ namespace stream_stats {
       stats.streaming && network_evidence_available && !stats.network_risk &&
       stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
+    const bool single_session_scope = stats.clients.size() <= 1 &&
+      stats.doctor_live_action_scope_available;
+    const bool live_bitrate_tunable =
+      stats.adaptive_runtime_update_supported && single_session_scope;
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -1338,7 +1377,9 @@ namespace stream_stats {
     doctor["primary_issue"] = primary_issue;
     doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.control_channel_samples}, {"seconds", 0}}}};
     doctor["summary"] = summary;
-    doctor["recommendation"] = doctor_recommendation(primary_issue, summary, health, stats.adaptive_runtime_update_supported);
+    doctor["recommendation"] = doctor_recommendation(
+      primary_issue, summary, health, live_bitrate_tunable, single_session_scope
+    );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
     doctor["safe_recovery_action"] = doctor_safe_action(
@@ -1346,7 +1387,8 @@ namespace stream_stats {
       health,
       live_bitrate_kbps,
       effective_quality_target_kbps,
-      stats.adaptive_runtime_update_supported,
+      live_bitrate_tunable,
+      single_session_scope,
       doctor["result_id"].get<std::string>(),
       app_uuid
     );
@@ -1547,23 +1589,48 @@ namespace stream_stats {
   }
 
   namespace {
-    void ingest_network_risk(double latency_ms, double packet_loss) {
+    void record_primary_network_observation(bool media_sample,
+                                            double latency_ms,
+                                            double loss,
+                                            uint64_t bytes_sent) {
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
-      hot_network_risk.store(
-        network_risk_tracker.update(packet_loss, latency_ms),
-        std::memory_order_relaxed);
+      primary_network_state.received_at = std::chrono::steady_clock::now();
+      primary_network_state.media_sample = media_sample;
+      primary_network_state.latency_ms = latency_ms;
+      primary_network_state.bytes_sent = bytes_sent;
+      if (media_sample) {
+        primary_network_state.packet_loss = loss;
+        primary_network_state.packet_loss_available = true;
+      } else {
+        primary_network_state.control_channel_packet_loss = loss;
+        ++primary_network_state.control_channel_samples;
+      }
+      primary_network_state.network_risk = network_risk_tracker.update(
+        media_sample ? loss : 0.0,
+        latency_ms
+      );
+      primary_network_state.revision =
+        hot_network_sample_revision.fetch_add(1, std::memory_order_release) + 1;
+
+      hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
+      hot_packet_loss.store(primary_network_state.packet_loss, std::memory_order_relaxed);
+      hot_packet_loss_available.store(primary_network_state.packet_loss_available, std::memory_order_relaxed);
+      hot_control_channel_packet_loss.store(primary_network_state.control_channel_packet_loss, std::memory_order_relaxed);
+      hot_control_channel_samples.store(primary_network_state.control_channel_samples, std::memory_order_relaxed);
+      hot_network_risk.store(primary_network_state.network_risk, std::memory_order_relaxed);
+      hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
+
+      primary_network_observations.push_back(primary_network_state);
+      if (primary_network_observations.size() > NETWORK_OBSERVATION_CAPACITY) {
+        primary_network_observations.pop_front();
+      }
     }
   }  // namespace
 
   void update_network_stats(double latency_ms, double packet_loss, uint64_t bytes_sent) {
     // No per-client mirror on this overload, and the risk tracker has its
     // own lock, so stats_mutex stays out of this path.
-    hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
-    hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
-    hot_packet_loss_available.store(true, std::memory_order_relaxed);
-    hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
-    ingest_network_risk(latency_ms, packet_loss);
-    hot_network_sample_revision.fetch_add(1, std::memory_order_release);
+    record_primary_network_observation(true, latency_ms, packet_loss, bytes_sent);
   }
 
   void update_network_stats(const std::string &client_ip, double latency_ms, double packet_loss, uint64_t bytes_sent) {
@@ -1585,24 +1652,14 @@ namespace stream_stats {
     const bool primary_client =
       !current_stats.clients.empty() && current_stats.clients.front().ip == client_ip;
     if (primary_client) {
-      hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
-      hot_packet_loss.store(packet_loss, std::memory_order_relaxed);
-      hot_packet_loss_available.store(true, std::memory_order_relaxed);
-      hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
-      ingest_network_risk(latency_ms, packet_loss);
-      hot_network_sample_revision.fetch_add(1, std::memory_order_release);
+      record_primary_network_observation(true, latency_ms, packet_loss, bytes_sent);
     }
   }
 
   void update_control_channel_stats(double latency_ms, double control_packet_loss, uint64_t bytes_sent) {
-    hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
-    hot_control_channel_packet_loss.store(control_packet_loss, std::memory_order_relaxed);
-    hot_control_channel_samples.fetch_add(1, std::memory_order_relaxed);
-    hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
     // RTT describes the shared path. The ENet loss EWMA describes only its
     // reliable control channel, so it cannot enter the actionable loss term.
-    ingest_network_risk(latency_ms, 0.0);
-    hot_network_sample_revision.fetch_add(1, std::memory_order_release);
+    record_primary_network_observation(false, latency_ms, control_packet_loss, bytes_sent);
   }
 
   void update_control_channel_stats(const std::string &client_ip,
@@ -1623,14 +1680,98 @@ namespace stream_stats {
     const bool primary_client =
       !current_stats.clients.empty() && current_stats.clients.front().ip == client_ip;
     if (primary_client) {
-      hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
-      hot_control_channel_packet_loss.store(control_packet_loss, std::memory_order_relaxed);
-      hot_control_channel_samples.fetch_add(1, std::memory_order_relaxed);
-      hot_bytes_sent.store(bytes_sent, std::memory_order_relaxed);
-      ingest_network_risk(latency_ms, 0.0);
-      hot_network_sample_revision.fetch_add(1, std::memory_order_release);
+      record_primary_network_observation(false, latency_ms, control_packet_loss, bytes_sent);
     }
   }
+
+  void set_doctor_live_action_scope_available(bool available) {
+    hot_doctor_live_action_scope_available.store(available, std::memory_order_release);
+  }
+
+  network_verification_window_t get_network_verification_window(
+      std::uint64_t after_revision,
+      std::chrono::steady_clock::time_point applied_at,
+      std::chrono::steady_clock::duration required_duration) {
+    network_verification_window_t result;
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+
+    const primary_network_observation_t *first = nullptr;
+    const primary_network_observation_t *last = nullptr;
+    for (const auto &observation : primary_network_observations) {
+      if (observation.revision <= after_revision ||
+          observation.received_at < applied_at || observation.received_at > now) {
+        continue;
+      }
+      if (!first) first = &observation;
+      last = &observation;
+      ++result.sample_count;
+      if (observation.media_sample) ++result.media_sample_count;
+      result.max_latency_ms = std::max(result.max_latency_ms, observation.latency_ms);
+      if (observation.packet_loss_available) {
+        result.any_packet_loss_available = true;
+        result.max_packet_loss = std::max(result.max_packet_loss, observation.packet_loss);
+      }
+      result.control_channel_packet_loss = std::max(
+        result.control_channel_packet_loss,
+        observation.control_channel_packet_loss
+      );
+      result.control_channel_samples = std::max(
+        result.control_channel_samples,
+        observation.control_channel_samples
+      );
+      result.any_network_risk = result.any_network_risk || observation.network_risk;
+    }
+    if (!first || !last) return result;
+
+    result.last_revision = last->revision;
+    result.first_delay_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      first->received_at - applied_at
+    ).count();
+    result.last_delay_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      last->received_at - applied_at
+    ).count();
+    result.span_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      last->received_at - first->received_at
+    ).count();
+    result.last_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now - last->received_at
+    ).count();
+    result.latency_ms = last->latency_ms;
+    result.packet_loss = last->packet_loss;
+    result.packet_loss_available = last->packet_loss_available;
+    result.network_risk = last->network_risk;
+    const auto required_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      required_duration
+    ).count();
+    const auto latest_required_ms = std::max<std::int64_t>(0, required_ms - 1000);
+    const auto minimum_span_ms = std::max<std::int64_t>(0, required_ms - 3000);
+    result.complete = result.sample_count >= 2 &&
+      result.first_delay_ms <= 2000 &&
+      result.last_delay_ms >= latest_required_ms &&
+      result.span_ms >= minimum_span_ms &&
+      result.last_age_ms <= 2000;
+    return result;
+  }
+
+#ifdef POLARIS_TESTS
+  void spread_network_verification_window_for_tests(
+      std::uint64_t after_revision,
+      std::chrono::steady_clock::time_point applied_at,
+      std::chrono::steady_clock::time_point completed_at) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    std::vector<primary_network_observation_t *> eligible;
+    for (auto &observation : primary_network_observations) {
+      if (observation.revision > after_revision) eligible.push_back(&observation);
+    }
+    if (eligible.size() < 2) return;
+    const auto first_at = applied_at + std::chrono::seconds(1);
+    const auto span = completed_at - first_at;
+    for (std::size_t i = 0; i < eligible.size(); ++i) {
+      eligible[i]->received_at = first_at + span * i / (eligible.size() - 1);
+    }
+  }
+#endif
 
   void update_runtime_state(const platf::runtime_state_t &state) {
     std::lock_guard<std::mutex> lock(stats_mutex);
@@ -2461,17 +2602,29 @@ namespace stream_stats {
     result.avg_frame_age_ms = hot_avg_frame_age_ms.load(std::memory_order_relaxed);
     result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
     result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
-    result.latency_ms = hot_latency_ms.load(std::memory_order_relaxed);
-    result.packet_loss = hot_packet_loss.load(std::memory_order_relaxed);
-    result.packet_loss_available = hot_packet_loss_available.load(std::memory_order_relaxed);
+    {
+      // Keep the complete network group on one host-received observation.
+      // Doctor must never pair a new revision with stale loss/RTT fields.
+      std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+      if (!primary_network_observations.empty()) {
+        const auto &network = primary_network_observations.back();
+        result.latency_ms = network.latency_ms;
+        result.packet_loss = network.packet_loss;
+        result.packet_loss_available = network.packet_loss_available;
+        result.control_channel_packet_loss = network.control_channel_packet_loss;
+        result.control_channel_samples = network.control_channel_samples;
+        result.network_sample_revision = network.revision;
+        result.network_risk = network.network_risk;
+        result.bytes_sent = network.bytes_sent;
+      } else {
+        result.network_sample_revision = hot_network_sample_revision.load(std::memory_order_acquire);
+      }
+    }
     result.packet_loss_source = result.packet_loss_available ? "media_transport" : "unavailable";
-    result.control_channel_packet_loss = hot_control_channel_packet_loss.load(std::memory_order_relaxed);
-    result.control_channel_samples = hot_control_channel_samples.load(std::memory_order_relaxed);
-    result.network_sample_revision = hot_network_sample_revision.load(std::memory_order_acquire);
-    result.network_risk = hot_network_risk.load(std::memory_order_relaxed);
-    result.bytes_sent = hot_bytes_sent.load(std::memory_order_relaxed);
     result.idr_requests_total = hot_idr_requests_total.load(std::memory_order_relaxed);
     result.invalidate_ref_frames_requests_total = hot_invalidate_ref_frames_requests_total.load(std::memory_order_relaxed);
+    result.doctor_live_action_scope_available =
+      hot_doctor_live_action_scope_available.load(std::memory_order_acquire);
 
     return result;
   }

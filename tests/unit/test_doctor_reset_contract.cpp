@@ -61,6 +61,26 @@ TEST(DoctorResetContract, FinalResolverCannotReadHistoryOrAiSettings) {
   EXPECT_NE(resolver.find("launch_profile::resolve"), std::string::npos);
 }
 
+TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLock) {
+  const auto launch_parser = between(
+    source("src/nvhttp.cpp"),
+    "launch_session->resolved_profile_from_client =",
+    "launch_session->scale_factor ="
+  );
+  EXPECT_NE(
+    launch_parser.find(
+      "launch_session->user_locked_display_mode = launch_session->resolved_profile_from_client;"
+    ),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    launch_parser.find(
+      "launch_session->resolved_profile_from_client || !named_cert_p->display_mode.empty()"
+    ),
+    std::string::npos
+  );
+}
+
 TEST(DoctorResetContract, LegacyLaunchOverlayHelpersAreRemoved) {
   const auto nvhttp = source("src/nvhttp.cpp");
   EXPECT_EQ(nvhttp.find("append_optimization_json"), std::string::npos);
@@ -90,4 +110,39 @@ TEST(DoctorResetContract, LegacyRecoveryApplyFailsDeprecated) {
   const auto actions = source("src/doctor_actions.cpp");
   EXPECT_NE(actions.find("unsupported_deprecated"), std::string::npos);
   EXPECT_NE(actions.find("Next-launch recovery profiles are observational legacy records"), std::string::npos);
+}
+
+TEST(DoctorResetContract, LegacyAiSurfacesAreExplanationOnly) {
+  const auto config_http = source("src/confighttp.cpp");
+  const auto ai_serializer = between(
+    config_http,
+    "void appendAiExplanationJson(",
+    "void scrubAiSettingFields("
+  );
+  const auto device_suggestion = between(
+    config_http,
+    "void getDeviceSuggestion(",
+    "// ---- AI Optimizer API ----"
+  );
+  const auto legacy_optimize = between(
+    config_http,
+    "void triggerAiOptimize(",
+    "void explainDoctorWithAi("
+  );
+  for (const auto *forbidden : {
+         "display_mode", "target_bitrate_kbps", "preferred_codec",
+         "virtual_display", "nvenc_tune"
+       }) {
+    EXPECT_EQ(ai_serializer.find(forbidden), std::string::npos) << forbidden;
+  }
+  EXPECT_NE(ai_serializer.find("explanation_only"), std::string::npos);
+  EXPECT_EQ(device_suggestion.find("ai_optimizer::get_cached"), std::string::npos);
+  EXPECT_EQ(legacy_optimize.find("request_sync"), std::string::npos);
+  EXPECT_NE(legacy_optimize.find("ai_launch_policy_removed"), std::string::npos);
+
+  const auto ui = source("src_assets/common/assets/web/configs/tabs/AiOptimizer.vue");
+  EXPECT_EQ(ui.find("AI Auto Quality"), std::string::npos);
+  EXPECT_EQ(ui.find("testResult.payload.display_mode"), std::string::npos);
+  EXPECT_EQ(ui.find("testResult.payload.target_bitrate_kbps"), std::string::npos);
+  EXPECT_NE(ui.find("AI explanations"), std::string::npos);
 }

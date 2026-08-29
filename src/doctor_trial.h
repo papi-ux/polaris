@@ -57,18 +57,18 @@ namespace doctor_trial {
                         const std::string &run_id,
                         std::int64_t now);
 
-  /** Consume a queued proposal once on a fresh launch of the exact owner/app. */
+  /** Consume a queued proposal once on a fresh launch instance of the exact owner/app. */
   std::optional<launch_override_t> begin_launch(const std::filesystem::path &path,
                                                  const std::string &owner_uuid,
                                                  const std::string &app_uuid,
                                                  const std::string &launch_instance_id,
-                                                 std::uint64_t launch_generation,
                                                  std::int64_t now);
 
   /** Advance collecting/terminal state from a full post-warmup v2 window. */
   nlohmann::json observe(const std::filesystem::path &path,
                          const std::string &owner_uuid,
                          const std::string &app_uuid,
+                         const std::string &launch_instance_id,
                          const nlohmann::json &doctor_status,
                          const effective_settings_t &settings,
                          bool crashed,
