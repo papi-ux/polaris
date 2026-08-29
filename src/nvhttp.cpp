@@ -4388,6 +4388,10 @@ namespace nvhttp {
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
           BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
+        } else if (launch_session->resolved_profile_from_client) {
+          BOOST_LOG(warning) << "Rejecting exact resolved launch streamMode ["sv
+                             << requested_mode << "]: "sv << reject_reason;
+          return nullptr;
         } else {
           BOOST_LOG(warning) << "Ignoring streamMode ["sv << requested_mode << "]: "sv << reject_reason << "; the host default applies"sv;
         }
@@ -8987,10 +8991,11 @@ namespace nvhttp {
       std::string profile_preference = normalize_profile_preference(
         args.count("preference") ? args.find("preference")->second : std::string {"auto"}
       );
-      auto reply_bad_request = [&](std::string code) {
+      auto reply_bad_request = [&](std::string code,
+                                   std::string error = "Explicit launch fields must be complete and within supported bounds.") {
         nlohmann::json output {
           {"status", false}, {"code", std::move(code)},
-          {"error", "Explicit launch fields must be complete and within supported bounds."}
+          {"error", std::move(error)}
         };
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
@@ -9104,8 +9109,24 @@ namespace nvhttp {
       const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
       const bool paired_virtual_lock =
         named_cert_p->always_use_virtual_display && !topology_locked;
-      const std::string requested_selection = paired_virtual_lock ?
+      std::string requested_selection = paired_virtual_lock ?
         std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
+      if (!mirror_desktop && !requested_selection.empty()) {
+        std::string topology_reject_reason;
+        auto accepted_selection = accepted_session_stream_mode(
+          requested_selection,
+          topology_reject_reason
+        );
+        if (accepted_selection.empty()) {
+          reply_bad_request(
+            "invalid_or_unavailable_topology",
+            topology_reject_reason.empty() ?
+              "The requested stream topology is unavailable." : topology_reject_reason
+          );
+          return;
+        }
+        requested_selection = std::move(accepted_selection);
+      }
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         requested_selection,
         mirror_desktop,
