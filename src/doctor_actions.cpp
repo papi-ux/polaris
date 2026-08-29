@@ -34,6 +34,7 @@ namespace doctor_actions {
 
     constexpr auto verification_delay = 8s;
     constexpr auto recheck_window = 3s;
+    constexpr auto initial_network_evidence_max_age = 2s;
 
     struct action_run_t {
       bool active = false;
@@ -168,6 +169,7 @@ namespace doctor_actions {
         {"packet_loss_source", stats.packet_loss_source},
         {"control_channel_packet_loss_pct", stats.control_channel_packet_loss},
         {"network_sample_revision", stats.network_sample_revision},
+        {"last_received_age_ms", stats.network_last_received_age_ms},
         {"latency_ms", stats.latency_ms},
         {"bitrate_kbps", current_live_bitrate(stats)},
         {"paired_target_bitrate_kbps", stats.paired_target_bitrate_kbps},
@@ -179,7 +181,14 @@ namespace doctor_actions {
     bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
       const bool network_evidence_available =
         stats.packet_loss_available || stats.control_channel_samples > 0;
-      return stats.streaming && network_evidence_available && !stats.network_risk &&
+      const bool host_observation_fresh = stats.network_sample_revision > 0 &&
+        stats.network_last_received_age_ms >= 0 &&
+        stats.network_last_received_age_ms <=
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            initial_network_evidence_max_age
+          ).count();
+      return stats.streaming && host_observation_fresh &&
+        network_evidence_available && !stats.network_risk &&
         stats.packet_loss <= 2.0 && stats.latency_ms < 45.0;
     }
 
@@ -376,7 +385,13 @@ namespace doctor_actions {
   }  // namespace
 
   bool network_pressure_confirmed(const stream_stats::stats_t &stats) {
-    return stats.streaming && stats.network_risk &&
+    const bool host_observation_fresh = stats.network_sample_revision > 0 &&
+      stats.network_last_received_age_ms >= 0 &&
+      stats.network_last_received_age_ms <=
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+          initial_network_evidence_max_age
+        ).count();
+    return stats.streaming && host_observation_fresh && stats.network_risk &&
       ((stats.packet_loss_available && stats.packet_loss > 2.0) || stats.latency_ms >= 45.0);
   }
 
@@ -866,7 +881,7 @@ namespace doctor_actions {
         {"state", "watching"},
         {"message", "Doctor restored one quality step and is watching live loss and latency before continuing."},
         {"run_id", run.run_id},
-        {"applied", {{"bitrate_kbps", target_bitrate_kbps}, {"target_bitrate_kbps", goal_bitrate_kbps}, {"adaptive_bitrate_enabled", true}}},
+        {"applied", {{"bitrate_kbps", target_bitrate_kbps}, {"target_bitrate_kbps", goal_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
         {"before", {{"bitrate_kbps", current_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
         {"verification", {{"delay_seconds", 8}, {"action_id", "verify"}, {"run_id", run.run_id}}},
         {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run.run_id}}},
@@ -966,7 +981,7 @@ namespace doctor_actions {
       {"changed", true},
       {"state", "watching"},
       {"run_id", run.run_id},
-      {"applied", {{"bitrate_kbps", target_bitrate_kbps}, {"adaptive_bitrate_enabled", true}}},
+      {"applied", {{"bitrate_kbps", target_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
       {"before", {{"bitrate_kbps", current_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
       {"verification", {{"delay_seconds", 8}, {"action_id", "verify"}, {"run_id", run.run_id}}},
       {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run.run_id}}},

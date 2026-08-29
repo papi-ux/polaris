@@ -439,6 +439,7 @@ namespace stream_stats {
     j["control_channel_samples"] = control_channel_samples;
     j["video_sample_revision"] = video_sample_revision;
     j["network_sample_revision"] = network_sample_revision;
+    j["network_last_received_age_ms"] = network_last_received_age_ms;
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
@@ -1777,6 +1778,15 @@ namespace stream_stats {
       eligible[i]->received_at = first_at + span * i / (eligible.size() - 1);
     }
   }
+
+  void age_latest_network_observation_for_tests(
+      std::chrono::steady_clock::duration age) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    if (primary_network_observations.empty()) return;
+    const auto aged_at = std::chrono::steady_clock::now() - age;
+    primary_network_observations.back().received_at = aged_at;
+    primary_network_state.received_at = aged_at;
+  }
 #endif
 
   void update_runtime_state(const platf::runtime_state_t &state) {
@@ -2621,6 +2631,12 @@ namespace stream_stats {
         result.control_channel_packet_loss = network.control_channel_packet_loss;
         result.control_channel_samples = network.control_channel_samples;
         result.network_sample_revision = network.revision;
+        result.network_last_received_age_ms = std::max<std::int64_t>(
+          0,
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - network.received_at
+          ).count()
+        );
         result.network_risk = network.network_risk;
         result.bytes_sent = network.bytes_sent;
       } else {

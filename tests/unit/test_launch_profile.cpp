@@ -256,3 +256,43 @@ TEST(LaunchProfileTests, ExplicitResolvedHdrWinsOverClientProfileHdr) {
   EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "requested_hdr_lock");
   EXPECT_TRUE(resolved.fields.at("hdr").at("locked").get<bool>());
 }
+
+TEST(LaunchProfileTests, HardRefreshCapsNormalizeTheFinalFpsWithProvenance) {
+  launch_profile::request_t request;
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 60000;
+  request.paired_width = 1920;
+  request.paired_height = 1080;
+  request.paired_fps = 120000;
+  request.client_max_fps = 90000;
+  request.host_max_fps = 60000;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_EQ(resolved.fps, 60000);
+  ASSERT_TRUE(resolved.fields.contains("target_fps"));
+  EXPECT_EQ(resolved.fields.at("target_fps").at("source"), "capability_validation");
+  EXPECT_EQ(resolved.fields.at("target_fps").at("reason_code"), "host_refresh_cap");
+  EXPECT_TRUE(resolved.fields.at("target_fps").at("normalized").get<bool>());
+}
+
+TEST(LaunchProfileTests, HostHdrCapabilityCanNormalizeAnExplicitRequest) {
+  launch_profile::request_t request;
+  request.device_name = "HDR-capable client";
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 60000;
+  request.display_locked = true;
+  request.hdr_requested = true;
+  request.hdr_locked = true;
+  request.host_hdr_capable = false;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_FALSE(resolved.hdr);
+  EXPECT_EQ(resolved.fields.at("hdr").at("source"), "capability_validation");
+  EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "host_encoder_hdr_unsupported");
+  EXPECT_TRUE(resolved.fields.at("hdr").at("locked").get<bool>());
+  EXPECT_TRUE(resolved.fields.at("hdr").at("normalized").get<bool>());
+}

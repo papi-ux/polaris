@@ -3516,7 +3516,7 @@ namespace video {
 
           // Check adaptive bitrate and update encoder if target has changed
           int effective_bitrate = config.bitrate;
-          if (adaptive_bitrate::is_enabled()) {
+          if (adaptive_bitrate::is_active()) {
             int target = adaptive_bitrate::get_target_bitrate_kbps();
             if (target > 0 && target != applied_adaptive_bitrate) {
               if (session->update_bitrate(target)) {

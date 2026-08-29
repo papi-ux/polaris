@@ -27,6 +27,10 @@ namespace launch_profile {
     int paired_width = 0;
     int paired_height = 0;
     int paired_fps = 0;
+    // Hard refresh capabilities supplied by the authenticated client and the
+    // current host. Values use the same milli-FPS representation as requested_fps.
+    std::optional<int> client_max_fps;
+    std::optional<int> host_max_fps;
 
     std::optional<int> paired_bitrate_kbps;
     std::optional<int> explicit_bitrate_kbps;
@@ -35,6 +39,7 @@ namespace launch_profile {
 
     bool hdr_requested = false;
     bool hdr_locked = false;
+    std::optional<bool> host_hdr_capable;
     std::optional<bool> client_profile_hdr;
     std::optional<int> color_range;
   };

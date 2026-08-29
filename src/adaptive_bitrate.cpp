@@ -27,6 +27,21 @@ namespace adaptive_bitrate {
   static std::atomic<bool> runtime_update_supported {false};
   static std::atomic<int> base_bitrate_kbps {0};
   static std::atomic<int> target_bitrate_kbps {0};
+  // A Doctor Auto Fix owns one fixed live target until it is undone,
+  // superseded, or the stream generation ends. It must not implicitly enable
+  // the adaptive feedback controller or permit telemetry to make additional
+  // bitrate mutations during that reversible transaction.
+  static std::atomic<bool> doctor_override_active {false};
+  // A direct paired-client bitrate write must also reach the live encoder when
+  // adaptive feedback is disabled. Unlike Doctor, this is not a reversible
+  // receipt; it remains the explicit live target until another controller
+  // writer or the next stream generation replaces it.
+  static std::atomic<bool> explicit_live_override_active {false};
+  // Doctor may install a temporary ceiling while restoring quality in guarded
+  // steps. Keep the pre-transaction ceiling inside the actuator so any newer
+  // explicit writer can retire Doctor completely before it clamps its value.
+  // Protected by state_mutex.
+  static int doctor_previous_max_bitrate_kbps = 0;
   // Protected by state_mutex. Explicit controller/configuration writers bump
   // this value; telemetry-driven target movement deliberately does not.
   static std::uint64_t operator_revision = 1;
@@ -63,6 +78,18 @@ namespace adaptive_bitrate {
     config.max_bitrate_kbps = config.min_bitrate_kbps;
   }
 
+  static void retire_doctor_override_locked() {
+    if (doctor_override_active.load(std::memory_order_relaxed) &&
+        doctor_previous_max_bitrate_kbps > 0) {
+      current_config.max_bitrate_kbps = std::max(
+        doctor_previous_max_bitrate_kbps,
+        current_config.min_bitrate_kbps
+      );
+    }
+    doctor_override_active.store(false, std::memory_order_relaxed);
+    doctor_previous_max_bitrate_kbps = 0;
+  }
+
   static int clamp_target(int target, int base) {
     target = std::clamp(target, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     return std::min(target, base);
@@ -78,11 +105,15 @@ namespace adaptive_bitrate {
   }
 
   void update_network_stats(double packet_loss_percent, double rtt_ms) {
-    if (!is_active()) {
+    if (!enabled.load(std::memory_order_relaxed) ||
+        !runtime_update_supported.load(std::memory_order_relaxed)) {
       return;
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
+    if (doctor_override_active.load(std::memory_order_relaxed)) {
+      return;
+    }
     auto now = std::chrono::steady_clock::now();
 
     if (!initialized) {
@@ -190,11 +221,15 @@ namespace adaptive_bitrate {
                             double frame_jitter_ms,
                             double encode_time_ms,
                             double avg_frame_age_ms) {
-    if (!is_active()) {
+    if (!enabled.load(std::memory_order_relaxed) ||
+        !runtime_update_supported.load(std::memory_order_relaxed)) {
       return;
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
+    if (doctor_override_active.load(std::memory_order_relaxed)) {
+      return;
+    }
     auto now = std::chrono::steady_clock::now();
     if (!initialized) {
       last_adjustment_time = now;
@@ -255,15 +290,23 @@ namespace adaptive_bitrate {
     state_t state;
     state.enabled = enabled.load(std::memory_order_relaxed);
     state.runtime_update_supported = runtime_update_supported.load(std::memory_order_relaxed);
-    state.active = state.enabled && state.runtime_update_supported;
+    const bool doctor_override = doctor_override_active.load(std::memory_order_relaxed);
+    const bool explicit_live_override =
+      explicit_live_override_active.load(std::memory_order_relaxed);
+    state.active = (state.enabled || doctor_override || explicit_live_override) &&
+      state.runtime_update_supported;
     state.base_bitrate_kbps = base_bitrate_kbps.load(std::memory_order_relaxed);
     state.target_bitrate_kbps = state.active ? target_bitrate_kbps.load(std::memory_order_relaxed) : 0;
     state.min_bitrate_kbps = current_config.min_bitrate_kbps;
     state.max_bitrate_kbps = current_config.max_bitrate_kbps;
     state.ewma_packet_loss = ewma_packet_loss;
     state.ewma_rtt_ms = ewma_rtt;
-    state.state = !state.enabled ? "disabled" : state.active ? controller_state : "unavailable";
-    state.reason = !state.enabled ? "disabled" : state.active ? controller_reason : runtime_update_reason;
+    state.state = doctor_override && state.active ? "doctor_override" :
+      explicit_live_override && state.active ? "explicit_live_target" :
+      !state.enabled ? "disabled" : state.active ? controller_state : "unavailable";
+    state.reason = doctor_override && state.active ? "doctor_action" :
+      explicit_live_override && state.active ? "paired_client_action" :
+      !state.enabled ? "disabled" : state.active ? controller_reason : runtime_update_reason;
     return state;
   }
 
@@ -271,6 +314,7 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     return {
       enabled.load(std::memory_order_relaxed),
+      explicit_live_override_active.load(std::memory_order_relaxed),
       runtime_update_supported.load(std::memory_order_relaxed),
       base_bitrate_kbps.load(std::memory_order_relaxed),
       target_bitrate_kbps.load(std::memory_order_relaxed),
@@ -290,6 +334,9 @@ namespace adaptive_bitrate {
       return std::nullopt;
     }
 
+    if (!doctor_override_active.load(std::memory_order_relaxed)) {
+      doctor_previous_max_bitrate_kbps = current_config.max_bitrate_kbps;
+    }
     if (temporary_max_bitrate_kbps) {
       current_config.max_bitrate_kbps = std::max(
         *temporary_max_bitrate_kbps,
@@ -303,7 +350,8 @@ namespace adaptive_bitrate {
     );
     base_bitrate_kbps.store(clamped, std::memory_order_relaxed);
     target_bitrate_kbps.store(clamped, std::memory_order_relaxed);
-    enabled.store(true, std::memory_order_relaxed);
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
+    doctor_override_active.store(true, std::memory_order_relaxed);
     set_controller_status("steady", "doctor_action");
     return ++operator_revision;
   }
@@ -316,6 +364,11 @@ namespace adaptive_bitrate {
       return false;
     }
 
+    retire_doctor_override_locked();
+    explicit_live_override_active.store(
+      previous_state.explicit_live_override_active,
+      std::memory_order_relaxed
+    );
     current_config.max_bitrate_kbps = std::max(
       previous_state.max_bitrate_kbps,
       current_config.min_bitrate_kbps
@@ -348,6 +401,8 @@ namespace adaptive_bitrate {
 
   void set_base_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    retire_doctor_override_locked();
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
     const int clamped = std::clamp(kbps, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     base_bitrate_kbps.store(clamped, std::memory_order_relaxed);
 
@@ -362,15 +417,22 @@ namespace adaptive_bitrate {
 
   void set_live_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    retire_doctor_override_locked();
+    explicit_live_override_active.store(
+      !enabled.load(std::memory_order_relaxed),
+      std::memory_order_relaxed
+    );
     const int clamped = std::clamp(kbps, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     base_bitrate_kbps.store(clamped, std::memory_order_relaxed);
     target_bitrate_kbps.store(clamped, std::memory_order_relaxed);
-    set_controller_status("steady", "doctor_action");
+    set_controller_status("steady", "paired_client_action");
     ++operator_revision;
   }
 
   void set_max_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    retire_doctor_override_locked();
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
     current_config.max_bitrate_kbps = std::max(kbps, current_config.min_bitrate_kbps);
 
     const int base = std::min(
@@ -388,6 +450,8 @@ namespace adaptive_bitrate {
 
   void set_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    retire_doctor_override_locked();
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
     config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
     ++operator_revision;
@@ -395,6 +459,8 @@ namespace adaptive_bitrate {
 
   void set_runtime_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    retire_doctor_override_locked();
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
     enabled.store(enable, std::memory_order_relaxed);
     ++operator_revision;
   }
@@ -414,12 +480,17 @@ namespace adaptive_bitrate {
   }
 
   bool is_active() {
-    return enabled.load(std::memory_order_relaxed) &&
+    return (enabled.load(std::memory_order_relaxed) ||
+            doctor_override_active.load(std::memory_order_relaxed) ||
+            explicit_live_override_active.load(std::memory_order_relaxed)) &&
       runtime_update_supported.load(std::memory_order_relaxed);
   }
 
   void load_config() {
     std::lock_guard<std::mutex> lock(state_mutex);
+    doctor_override_active.store(false, std::memory_order_relaxed);
+    doctor_previous_max_bitrate_kbps = 0;
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
 
     current_config.enabled = config::video.adaptive_bitrate.enabled;
     current_config.min_bitrate_kbps = config::video.adaptive_bitrate.min_bitrate_kbps;
@@ -438,6 +509,9 @@ namespace adaptive_bitrate {
 
   void reset() {
     std::lock_guard<std::mutex> lock(state_mutex);
+    doctor_override_active.store(false, std::memory_order_relaxed);
+    doctor_previous_max_bitrate_kbps = 0;
+    explicit_live_override_active.store(false, std::memory_order_relaxed);
 
     ewma_packet_loss = 0.0;
     ewma_rtt = 0.0;

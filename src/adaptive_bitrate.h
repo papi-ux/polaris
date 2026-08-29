@@ -44,11 +44,13 @@ namespace adaptive_bitrate {
    *        transaction.
    *
    * revision changes for explicit controller/configuration writers, but not
-   * for ordinary telemetry-driven adaptive adjustments. This lets Doctor
-   * restore its own change without overwriting a newer user or client choice.
+   * for ordinary telemetry. While Doctor owns a transaction, telemetry is
+   * observational and cannot move its fixed target. This lets Doctor restore
+   * its own change without overwriting a newer user or client choice.
    */
   struct doctor_state_t {
     bool enabled = false;
+    bool explicit_live_override_active = false;
     bool runtime_update_supported = false;
     int base_bitrate_kbps = 0;
     int live_bitrate_kbps = 0;
@@ -76,7 +78,8 @@ namespace adaptive_bitrate {
 
   /**
    * @brief Get the current recommended bitrate.
-   * @return Target bitrate in kbps, or 0 if adaptive bitrate is disabled.
+   * @return Target bitrate in kbps, or 0 if no adaptive, Doctor, or explicit
+   *         live target currently owns the runtime encoder actuator.
    */
   int get_target_bitrate_kbps();
 
@@ -93,8 +96,9 @@ namespace adaptive_bitrate {
    * has changed the controller since expected_revision.
    *
    * max_bitrate_kbps is a temporary in-memory ceiling for this stream only.
-   * The returned revision owns the mutation and must be supplied to advance
-   * or restore it.
+   * Applying the target does not enable adaptive feedback; the returned
+   * revision owns one fixed mutation and must be supplied to advance or
+   * restore it.
    */
   std::optional<std::uint64_t> set_doctor_bitrate_if_revision(
     std::uint64_t expected_revision,

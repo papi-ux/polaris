@@ -184,6 +184,29 @@ namespace launch_profile {
       fps_provenance = {"device_profile_v1", "stability_preset_selected", false, fps_normalized};
     }
 
+    if (result.fps > 0) {
+      std::optional<int> effective_fps_cap;
+      std::string fps_cap_reason;
+      if (request.client_max_fps && *request.client_max_fps > 0) {
+        effective_fps_cap = *request.client_max_fps;
+        fps_cap_reason = "client_refresh_cap";
+      }
+      if (request.host_max_fps && *request.host_max_fps > 0 &&
+          (!effective_fps_cap || *request.host_max_fps < *effective_fps_cap)) {
+        effective_fps_cap = *request.host_max_fps;
+        fps_cap_reason = "host_refresh_cap";
+      }
+      if (effective_fps_cap && result.fps > *effective_fps_cap) {
+        result.fps = *effective_fps_cap;
+        fps_provenance = {
+          "capability_validation",
+          fps_cap_reason,
+          fps_provenance.locked,
+          true,
+        };
+      }
+    }
+
     if (result.width > 0 && result.height > 0 && result.fps > 0) {
       add_field(result.fields, "display_width", result.width,
                 width_provenance.source, width_provenance.reason_code,
@@ -270,7 +293,11 @@ namespace launch_profile {
       result.hdr = *request.client_profile_hdr;
     }
     const bool resolved_hdr_locked = hdr_from_explicit_lock || hdr_from_client_profile;
-    if (result.hdr && device && !device->hdr_capable) {
+    if (result.hdr && request.host_hdr_capable == false) {
+      result.hdr = false;
+      add_field(result.fields, "hdr", false, "capability_validation",
+                "host_encoder_hdr_unsupported", resolved_hdr_locked, true);
+    } else if (result.hdr && device && !device->hdr_capable) {
       result.hdr = false;
       add_field(result.fields, "hdr", false, "capability_validation",
                 "paired_device_hdr_unsupported", resolved_hdr_locked, true);

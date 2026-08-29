@@ -154,6 +154,9 @@ namespace stream_stats {
     uint64_t video_sample_revision = 0;
     /// Monotonic count of primary media/control network observations.
     uint64_t network_sample_revision = 0;
+    /// Host monotonic age of the newest complete network observation, or -1
+    /// when no observation has been received. Client timestamps never feed it.
+    std::int64_t network_last_received_age_ms = -1;
     /// Debounced by network_risk_tracker_t; the single truth every reader serves.
     bool network_risk = false;
     uint64_t bytes_sent = 0;
@@ -438,6 +441,11 @@ namespace stream_stats {
     std::uint64_t after_revision,
     std::chrono::steady_clock::time_point applied_at,
     std::chrono::steady_clock::time_point completed_at
+  );
+
+  /** Age the newest host-received observation without sleeping. */
+  void age_latest_network_observation_for_tests(
+    std::chrono::steady_clock::duration age
   );
 #endif
 

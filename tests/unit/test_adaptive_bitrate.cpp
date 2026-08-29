@@ -83,7 +83,7 @@ TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget
   EXPECT_EQ(state.max_bitrate_kbps, 20000);
   EXPECT_EQ(state.base_bitrate_kbps, 9475);
   EXPECT_EQ(state.target_bitrate_kbps, 9475);
-  EXPECT_EQ(state.reason, "doctor_action");
+  EXPECT_EQ(state.reason, "paired_client_action");
   EXPECT_EQ(config::video.adaptive_bitrate.max_bitrate_kbps, configured_ceiling);
 }
 
@@ -154,7 +154,11 @@ TEST(AdaptiveBitrateController, DoctorTransactionRestoresExactOwnedState) {
     25000
   );
   ASSERT_TRUE(doctor_revision.has_value());
-  ASSERT_TRUE(adaptive_bitrate::get_doctor_state().enabled);
+  // Doctor owns one live target without changing the configured/runtime
+  // adaptive-controller mode.
+  ASSERT_FALSE(adaptive_bitrate::get_doctor_state().enabled);
+  ASSERT_TRUE(adaptive_bitrate::is_active());
+  ASSERT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 15000);
 
   ASSERT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
     *doctor_revision,
@@ -165,4 +169,58 @@ TEST(AdaptiveBitrateController, DoctorTransactionRestoresExactOwnedState) {
   EXPECT_EQ(after.base_bitrate_kbps, before.base_bitrate_kbps);
   EXPECT_EQ(after.live_bitrate_kbps, before.live_bitrate_kbps);
   EXPECT_EQ(after.max_bitrate_kbps, before.max_bitrate_kbps);
+}
+
+TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    16000,
+    20000
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+
+  adaptive_bitrate::update_network_stats(12.0, 120.0);
+  adaptive_bitrate::update_stream_health(0.70, 0.10, 0.20, 8.0, 18.0, 50.0);
+
+  const auto during = adaptive_bitrate::get_doctor_state();
+  EXPECT_FALSE(during.enabled);
+  EXPECT_EQ(during.base_bitrate_kbps, 16000);
+  EXPECT_EQ(during.live_bitrate_kbps, 16000);
+  EXPECT_EQ(during.revision, *doctor_revision);
+
+  ASSERT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  ));
+}
+
+TEST(AdaptiveBitrateController, NewerExplicitIncreaseReplacesDoctorTargetExactly) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    16000,
+    20000
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+
+  adaptive_bitrate::set_live_bitrate(30000);
+
+  EXPECT_FALSE(adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  ));
+  const auto after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.base_bitrate_kbps, 30000);
+  EXPECT_EQ(after.live_bitrate_kbps, 30000);
+  EXPECT_EQ(after.max_bitrate_kbps, before.max_bitrate_kbps);
+  EXPECT_TRUE(after.explicit_live_override_active);
+  EXPECT_TRUE(adaptive_bitrate::is_active());
+  EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 30000);
+  EXPECT_GT(after.revision, *doctor_revision);
 }

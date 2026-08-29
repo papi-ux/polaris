@@ -1153,6 +1153,8 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
   stats.network_risk = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
   stats.packet_loss = 0.4;
   stats.latency_ms = 20.0;
 
@@ -1166,6 +1168,49 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   stats.packet_loss_available = false;
   stats.latency_ms = 45.0;
   EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+
+  stats.network_last_received_age_ms = 2001;
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+}
+
+TEST(DoctorActionTests, StaleHostNetworkEvidenceCannotMutateBitrate) {
+  using namespace std::chrono_literals;
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_live_bitrate(10000);
+  adaptive_bitrate::set_base_bitrate(15000);
+  stream_stats::update_stream_active(true, "DoctorStaleEvidence", "203.0.113.21");
+  stream_stats::update_video_stats(60.0, 10000, 5.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 15000, 15000
+  );
+
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  stream_stats::age_latest_network_observation_for_tests(3s);
+  const auto stale_restore = doctor_actions::execute({{"action_id", "restore_quality"}});
+  EXPECT_FALSE(stale_restore.at("status").get<bool>());
+  EXPECT_EQ(stale_restore.at("state"), "evidence_changed");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
+
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(55.0, 3.5, 1000);
+  }
+  stream_stats::age_latest_network_observation_for_tests(3s);
+  const auto stale_reduce = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(stale_reduce.at("status").get<bool>());
+  EXPECT_EQ(stale_reduce.at("state"), "evidence_changed");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
+
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
 }
 
 TEST(DoctorActionTests, PacingRecheckWaitsForAFreshHostSampleWithoutMutation) {
