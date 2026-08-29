@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -32,6 +33,7 @@ namespace doctor_actions {
     };
 
     constexpr auto verification_delay = 8s;
+    constexpr auto recheck_window = 3s;
 
     struct action_run_t {
       bool active = false;
@@ -40,10 +42,8 @@ namespace doctor_actions {
       std::string owner_uuid;
       std::string app_uuid;
       std::uint64_t session_generation = 0;
-      bool previous_adaptive_enabled = false;
-      int previous_base_bitrate_kbps = 0;
-      int previous_live_bitrate_kbps = 0;
-      int previous_max_bitrate_kbps = 0;
+      adaptive_bitrate::doctor_state_t previous_controller;
+      std::uint64_t controller_revision = 0;
       int applied_bitrate_kbps = 0;
       int goal_bitrate_kbps = 0;
       std::uint64_t verification_step = 0;
@@ -102,6 +102,28 @@ namespace doctor_actions {
       return valid_live_scope_locked(context);
     }
 
+    bool valid_observation_scope_locked(const recovery_action_context_t *context) {
+      if (context == nullptr) return true;
+      if (!context->active_owner || !context->stats.streaming ||
+          context->session_generation == 0 || context->owner_uuid.empty() ||
+          context->app_uuid.empty()) {
+        return false;
+      }
+      return std::any_of(
+        controller_sessions.begin(),
+        controller_sessions.end(),
+        [context](const session_scope_t &scope) {
+          return scope.owner_uuid == context->owner_uuid &&
+            scope.session_generation == context->session_generation;
+        }
+      );
+    }
+
+    bool valid_observation_scope(const recovery_action_context_t *context) {
+      std::lock_guard<std::mutex> lock(action_mutex);
+      return valid_observation_scope_locked(context);
+    }
+
     nlohmann::json action_in_progress(const action_run_t &run) {
       return {
         {"status", false}, {"changed", false}, {"state", "action_in_progress"},
@@ -110,29 +132,26 @@ namespace doctor_actions {
       };
     }
 
-    int restore_bitrate_run_locked(action_run_t &run) {
-      const int restore_live_bitrate_kbps = run.previous_live_bitrate_kbps > 0 ?
-        run.previous_live_bitrate_kbps : run.previous_base_bitrate_kbps;
-      const int temporary_max_bitrate_kbps = std::max({
-        run.previous_max_bitrate_kbps,
-        run.previous_base_bitrate_kbps,
-        restore_live_bitrate_kbps
-      });
-      if (temporary_max_bitrate_kbps > 0) {
-        adaptive_bitrate::set_max_bitrate(temporary_max_bitrate_kbps);
-      }
-      if (restore_live_bitrate_kbps > 0) {
-        adaptive_bitrate::set_live_bitrate(restore_live_bitrate_kbps);
-      }
-      if (run.previous_base_bitrate_kbps > 0) {
-        adaptive_bitrate::set_base_bitrate(run.previous_base_bitrate_kbps);
-      }
-      adaptive_bitrate::set_runtime_enabled(run.previous_adaptive_enabled);
-      if (run.previous_max_bitrate_kbps > 0) {
-        adaptive_bitrate::set_max_bitrate(run.previous_max_bitrate_kbps);
-      }
+    std::optional<int> restore_bitrate_run_locked(action_run_t &run) {
+      const int restore_live_bitrate_kbps = run.previous_controller.live_bitrate_kbps > 0 ?
+        run.previous_controller.live_bitrate_kbps : run.previous_controller.base_bitrate_kbps;
+      const bool restored = adaptive_bitrate::restore_doctor_state_if_revision(
+        run.controller_revision,
+        run.previous_controller
+      );
       run.active = false;
-      return restore_live_bitrate_kbps;
+      return restored ? std::optional<int> {restore_live_bitrate_kbps} : std::nullopt;
+    }
+
+    nlohmann::json superseded_result(const std::string &run_id) {
+      return {
+        {"status", true},
+        {"changed", false},
+        {"state", "superseded"},
+        {"run_id", run_id},
+        {"message", "A newer explicit bitrate or controller change superseded this Doctor receipt; Doctor left the newer choice untouched."},
+        {"undo", {{"available", false}}}
+      };
     }
 
     int current_live_bitrate(const stream_stats::stats_t &stats) {
@@ -238,6 +257,13 @@ namespace doctor_actions {
 
       const auto stats = stream_stats::get_current();
       const auto adaptive_state = adaptive_bitrate::get_state();
+      const auto doctor_controller = adaptive_bitrate::get_doctor_state();
+      if (doctor_controller.revision != action_run.controller_revision) {
+        action_run = action_run_t {};
+        BOOST_LOG(info) << "Doctor: verification receipt was superseded by a newer explicit controller change run="sv
+                        << run_id;
+        return;
+      }
       const auto window = stream_stats::get_network_verification_window(
         action_run.network_sample_revision_at_apply,
         action_run.applied_at,
@@ -247,9 +273,14 @@ namespace doctor_actions {
         adaptive_state.runtime_update_supported &&
         verification_window_stable(window, action_run);
       if (!verification_passed) {
-        const int restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
-        BOOST_LOG(warning) << "Doctor: automatic verification failed; restored "sv
-                           << restored_bitrate_kbps << " kbps run=" << run_id;
+        const auto restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+        if (restored_bitrate_kbps) {
+          BOOST_LOG(warning) << "Doctor: automatic verification failed; restored "sv
+                             << *restored_bitrate_kbps << " kbps run=" << run_id;
+        } else {
+          BOOST_LOG(info) << "Doctor: automatic verification was superseded; left the newer controller target untouched run="sv
+                          << run_id;
+        }
         return;
       }
 
@@ -421,14 +452,18 @@ namespace doctor_actions {
         return {{"status", false}, {"changed", false}, {"error", "This Doctor undo is no longer available."}};
       }
 
-      const int restore_live_bitrate_kbps = restore_bitrate_run_locked(action_run);
+      const bool previous_adaptive_enabled = action_run.previous_controller.enabled;
+      const auto restore_live_bitrate_kbps = restore_bitrate_run_locked(action_run);
+      if (!restore_live_bitrate_kbps) {
+        return superseded_result(run_id);
+      }
       return {
         {"status", true},
         {"changed", true},
         {"state", "undone"},
         {"run_id", run_id},
-        {"restored_bitrate_kbps", restore_live_bitrate_kbps},
-        {"adaptive_bitrate_enabled", action_run.previous_adaptive_enabled}
+        {"restored_bitrate_kbps", *restore_live_bitrate_kbps},
+        {"adaptive_bitrate_enabled", previous_adaptive_enabled}
       };
     }
 
@@ -453,10 +488,15 @@ namespace doctor_actions {
     if (trusted_context != nullptr &&
         (action_id == "recheck_network" || action_id == "recheck_pacing" ||
          action_id == "lower_bitrate" || action_id == "restore_quality")) {
-      if (!valid_live_scope(trusted_context)) {
+      const bool recheck = action_id == "recheck_network" || action_id == "recheck_pacing";
+      const bool scope_valid = recheck ?
+        valid_observation_scope(trusted_context) : valid_live_scope(trusted_context);
+      if (!scope_valid) {
         return {
           {"status", false}, {"changed", false}, {"state", "scope_unavailable"},
-          {"error", "A complete active stream scope is required for this Doctor action."}
+          {"error", recheck ?
+            "A complete active stream scope is required for this read-only Doctor recheck." :
+            "A complete, unshared active stream scope is required for this Doctor Auto Fix."}
         };
       }
 
@@ -467,7 +507,7 @@ namespace doctor_actions {
       const auto trusted_health = trusted_context->health.is_object() ?
         trusted_context->health : nlohmann::json::object();
       const auto current_doctor = stream_stats::build_doctor_json(
-        trusted_context->stats,
+        stats,
         trusted_health,
         trusted_context->app_uuid
       );
@@ -501,17 +541,41 @@ namespace doctor_actions {
     }
 
     if (action_id == "recheck_network" || action_id == "recheck_pacing") {
-      const bool confirmed = network_pressure_confirmed(stats);
+      const bool pacing_recheck = action_id == "recheck_pacing";
+      const auto initial_revision = pacing_recheck ?
+        stats.video_sample_revision : stats.network_sample_revision;
+      std::this_thread::sleep_for(recheck_window);
+      const auto refreshed_stats = stream_stats::get_current();
+      const auto refreshed_revision = pacing_recheck ?
+        refreshed_stats.video_sample_revision : refreshed_stats.network_sample_revision;
+      if (!refreshed_stats.streaming || refreshed_revision <= initial_revision ||
+          !valid_observation_scope(trusted_context)) {
+        return {
+          {"status", false},
+          {"changed", false},
+          {"state", "no_fresh_sample"},
+          {"message", "Doctor did not receive a fresh matching telemetry sample during the read-only recheck window."},
+          {"evidence", network_evidence(refreshed_stats)}
+        };
+      }
+      const bool confirmed = network_pressure_confirmed(refreshed_stats);
+      const auto refreshed_health = trusted_context != nullptr && trusted_context->health.is_object() ?
+        trusted_context->health : nlohmann::json::object();
+      const auto refreshed_doctor = stream_stats::build_doctor_json(
+        refreshed_stats,
+        refreshed_health,
+        trusted_context != nullptr ? trusted_context->app_uuid : std::string {}
+      );
       return {
         {"status", true},
         {"changed", false},
         {"state", action_id == "recheck_pacing" ? "observed" : confirmed ? "confirmed_pressure" : "stable"},
-        {"message", action_id == "recheck_pacing" ?
+        {"message", pacing_recheck ?
           "Collected a fresh read-only pacing observation; no launch or game-process settings were changed." : confirmed ?
           "Current telemetry now confirms network pressure. Doctor can safely apply one bitrate step." :
           "Current loss and latency do not justify reducing bitrate."},
-        {"evidence", evidence},
-        {"doctor", nlohmann::json::parse(stats.to_json()).value("doctor", nlohmann::json::object())}
+        {"evidence", network_evidence(refreshed_stats)},
+        {"doctor", refreshed_doctor}
       };
     }
 
@@ -535,25 +599,32 @@ namespace doctor_actions {
       }
       const auto verification_stats = stream_stats::get_current();
       const auto verification_evidence = network_evidence(verification_stats);
-      auto verification_window = stream_stats::get_network_verification_window(
+      const auto current_verification_window = stream_stats::get_network_verification_window(
         action_run.network_sample_revision_at_apply,
         action_run.applied_at,
         verification_delay
       );
-      if (action_run.verification_passed) {
-        verification_window = action_run.verified_window;
+      const auto response_verification_window = action_run.verification_passed ?
+        action_run.verified_window : current_verification_window;
+      const auto doctor_controller = adaptive_bitrate::get_doctor_state();
+      if (doctor_controller.revision != action_run.controller_revision) {
+        action_run = action_run_t {};
+        return superseded_result(run_id);
       }
-      if (!adaptive_bitrate::get_state().runtime_update_supported) {
-        const int restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+      if (!doctor_controller.runtime_update_supported) {
+        const auto restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+        if (!restored_bitrate_kbps) {
+          return superseded_result(run_id);
+        }
         return {
           {"status", true},
           {"changed", true},
           {"run_id", run_id},
           {"state", "rolled_back"},
           {"message", "Live encoder updates became unavailable during verification, so Doctor restored the prior target and ended the fix."},
-          {"restored_bitrate_kbps", restored_bitrate_kbps},
+          {"restored_bitrate_kbps", *restored_bitrate_kbps},
           {"evidence", verification_evidence},
-          {"verification_window", verification_window_json(verification_window)}
+          {"verification_window", verification_window_json(response_verification_window)}
         };
       }
       const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
@@ -569,41 +640,61 @@ namespace doctor_actions {
           {"elapsed_seconds", elapsed_seconds},
           {"retry_after_seconds", verification_delay.count() - elapsed_seconds},
           {"evidence", verification_evidence},
-          {"verification_window", verification_window_json(verification_window)},
+          {"verification_window", verification_window_json(response_verification_window)},
           {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run_id}}}
         };
       }
+      const bool current_verification_stable = verification_window_stable(
+        current_verification_window,
+        action_run
+      );
       const bool verification_stable = action_run.verification_passed ||
-        verification_window_stable(verification_window, action_run);
+        current_verification_stable;
 
       if (action_run.kind == action_kind_e::restore_quality) {
-        if (!verification_stable) {
-          const int restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+        const bool another_mutation_required =
+          action_run.applied_bitrate_kbps < action_run.goal_bitrate_kbps;
+        // A cached watchdog pass is receipt history, not current authority.
+        // Every quality-restoration decision requires a complete, fresh,
+        // currently clean host-received window.
+        if (!current_verification_stable) {
+          const auto restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+          if (!restored_bitrate_kbps) {
+            return superseded_result(run_id);
+          }
           return {
             {"status", true},
             {"changed", true},
             {"run_id", run_id},
             {"state", "rolled_back"},
             {"message", "Verification did not receive enough clean post-change loss and latency evidence, so Doctor automatically restored the prior live target."},
-            {"restored_bitrate_kbps", restored_bitrate_kbps},
+            {"restored_bitrate_kbps", *restored_bitrate_kbps},
             {"elapsed_seconds", elapsed_seconds},
             {"evidence", verification_evidence},
-            {"verification_window", verification_window_json(verification_window)},
+            {"verification_window", verification_window_json(current_verification_window)},
             {"undo", {{"available", false}}}
           };
         }
 
-        if (action_run.applied_bitrate_kbps < action_run.goal_bitrate_kbps) {
+        if (another_mutation_required) {
           const int next_bitrate_kbps = guarded_quality_retry_target(
             action_run.applied_bitrate_kbps,
             action_run.goal_bitrate_kbps
           );
-          adaptive_bitrate::set_max_bitrate(action_run.goal_bitrate_kbps);
-          adaptive_bitrate::set_live_bitrate(next_bitrate_kbps);
-          adaptive_bitrate::set_runtime_enabled(true);
+          const auto next_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+            action_run.controller_revision,
+            next_bitrate_kbps,
+            action_run.goal_bitrate_kbps
+          );
+          if (!next_revision) {
+            action_run = action_run_t {};
+            return superseded_result(run_id);
+          }
+          action_run.controller_revision = *next_revision;
           action_run.applied_bitrate_kbps = next_bitrate_kbps;
           action_run.applied_at = std::chrono::steady_clock::now();
-          action_run.network_sample_revision_at_apply = verification_stats.network_sample_revision;
+          action_run.network_sample_revision_at_apply =
+            stream_stats::get_current().network_sample_revision;
           action_run.verification_passed = false;
           action_run.verified_window = {};
           ++action_run.verification_step;
@@ -626,7 +717,7 @@ namespace doctor_actions {
             {"applied", {{"bitrate_kbps", next_bitrate_kbps}, {"target_bitrate_kbps", action_run.goal_bitrate_kbps}}},
             {"verification", {{"delay_seconds", 8}, {"action_id", "verify"}, {"run_id", run_id}}},
             {"evidence", verification_evidence},
-            {"verification_window", verification_window_json(verification_window)},
+            {"verification_window", verification_window_json(current_verification_window)},
             {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run_id}}}
           };
         }
@@ -639,24 +730,27 @@ namespace doctor_actions {
           {"message", "The capability-validated launch bitrate ceiling is restored and live network evidence remains stable."},
           {"elapsed_seconds", elapsed_seconds},
           {"evidence", verification_evidence},
-          {"verification_window", verification_window_json(verification_window)},
+          {"verification_window", verification_window_json(response_verification_window)},
           {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run_id}}}
         };
       }
 
       const bool resolved = verification_stable;
       if (!resolved) {
-        const int restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+        const auto restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+        if (!restored_bitrate_kbps) {
+          return superseded_result(run_id);
+        }
         return {
           {"status", true},
           {"changed", true},
           {"run_id", run_id},
           {"state", "rolled_back"},
           {"message", "Verification did not clear the network evidence, so Doctor automatically restored the prior live target."},
-          {"restored_bitrate_kbps", restored_bitrate_kbps},
+          {"restored_bitrate_kbps", *restored_bitrate_kbps},
           {"elapsed_seconds", elapsed_seconds},
           {"evidence", verification_evidence},
-          {"verification_window", verification_window_json(verification_window)},
+          {"verification_window", verification_window_json(current_verification_window)},
           {"undo", {{"available", false}}}
         };
       }
@@ -668,13 +762,15 @@ namespace doctor_actions {
         {"state", resolved ? "resolved" : "watching"},
         {"elapsed_seconds", elapsed_seconds},
         {"evidence", verification_evidence},
-        {"verification_window", verification_window_json(verification_window)},
+        {"verification_window", verification_window_json(response_verification_window)},
         {"undo", {{"available", true}, {"action_id", "undo"}, {"run_id", run_id}}}
       };
     }
 
     if (action_id == "restore_quality") {
-      const int current_bitrate_kbps = current_live_bitrate(stats);
+      const auto adaptive_state = adaptive_bitrate::get_doctor_state();
+      const int current_bitrate_kbps = adaptive_state.live_bitrate_kbps > 0 ?
+        adaptive_state.live_bitrate_kbps : current_live_bitrate(stats);
       const int effective_target_bitrate_kbps = effective_quality_restore_target(stats);
       const bool reversible_live_reduction =
         effective_target_bitrate_kbps > current_bitrate_kbps;
@@ -688,7 +784,6 @@ namespace doctor_actions {
         };
       }
 
-      const auto adaptive_state = adaptive_bitrate::get_state();
       if (!adaptive_state.runtime_update_supported) {
         return {
           {"status", false},
@@ -721,16 +816,11 @@ namespace doctor_actions {
         run.app_uuid = trusted_context->app_uuid;
         run.session_generation = trusted_context->session_generation;
       }
-      run.previous_adaptive_enabled = adaptive_state.enabled;
-      run.previous_base_bitrate_kbps = adaptive_state.base_bitrate_kbps;
-      run.previous_live_bitrate_kbps = current_bitrate_kbps;
-      run.previous_max_bitrate_kbps = adaptive_state.max_bitrate_kbps;
+      run.previous_controller = adaptive_state;
       run.applied_bitrate_kbps = target_bitrate_kbps;
       run.goal_bitrate_kbps = goal_bitrate_kbps;
       run.verification_step = 1;
-      run.network_sample_revision_at_apply = stats.network_sample_revision;
       run.requires_media_sample = false;
-      run.applied_at = std::chrono::steady_clock::now();
       {
         std::lock_guard<std::mutex> lock(action_mutex);
         if (!valid_live_scope_locked(trusted_context)) {
@@ -740,9 +830,21 @@ namespace doctor_actions {
           };
         }
         if (action_run.active) return action_in_progress(action_run);
-        adaptive_bitrate::set_max_bitrate(goal_bitrate_kbps);
-        adaptive_bitrate::set_live_bitrate(target_bitrate_kbps);
-        adaptive_bitrate::set_runtime_enabled(true);
+        const auto applied_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+          adaptive_state.revision,
+          target_bitrate_kbps,
+          goal_bitrate_kbps
+        );
+        if (!applied_revision) {
+          return {
+            {"status", false}, {"changed", false}, {"state", "controller_changed"},
+            {"error", "The live bitrate controller changed while Doctor prepared this step. Recheck before applying it."}
+          };
+        }
+        run.controller_revision = *applied_revision;
+        run.applied_at = std::chrono::steady_clock::now();
+        run.network_sample_revision_at_apply =
+          stream_stats::get_current().network_sample_revision;
         action_run = run;
         if (trusted_context != nullptr) {
           schedule_verification_watchdog(
@@ -787,7 +889,7 @@ namespace doctor_actions {
       };
     }
 
-    const auto adaptive_state = adaptive_bitrate::get_state();
+    const auto adaptive_state = adaptive_bitrate::get_doctor_state();
     if (!adaptive_state.runtime_update_supported) {
       return {
         {"status", false},
@@ -797,7 +899,8 @@ namespace doctor_actions {
         {"evidence", evidence}
       };
     }
-    const int current_bitrate_kbps = current_live_bitrate(stats);
+    const int current_bitrate_kbps = adaptive_state.live_bitrate_kbps > 0 ?
+      adaptive_state.live_bitrate_kbps : current_live_bitrate(stats);
     const int target_bitrate_kbps = guarded_bitrate_target(
       current_bitrate_kbps,
       request.value("target_bitrate_kbps", 0),
@@ -816,16 +919,11 @@ namespace doctor_actions {
       run.app_uuid = trusted_context->app_uuid;
       run.session_generation = trusted_context->session_generation;
     }
-    run.previous_adaptive_enabled = adaptive_state.enabled;
-    run.previous_base_bitrate_kbps = adaptive_state.base_bitrate_kbps;
-    run.previous_live_bitrate_kbps = current_bitrate_kbps;
-    run.previous_max_bitrate_kbps = adaptive_state.max_bitrate_kbps;
+    run.previous_controller = adaptive_state;
     run.applied_bitrate_kbps = target_bitrate_kbps;
     run.goal_bitrate_kbps = target_bitrate_kbps;
     run.verification_step = 1;
-    run.network_sample_revision_at_apply = stats.network_sample_revision;
     run.requires_media_sample = stats.packet_loss_available && stats.packet_loss > 2.0;
-    run.applied_at = std::chrono::steady_clock::now();
     {
       std::lock_guard<std::mutex> lock(action_mutex);
       if (!valid_live_scope_locked(trusted_context)) {
@@ -835,8 +933,20 @@ namespace doctor_actions {
         };
       }
       if (action_run.active) return action_in_progress(action_run);
-      adaptive_bitrate::set_live_bitrate(target_bitrate_kbps);
-      adaptive_bitrate::set_runtime_enabled(true);
+      const auto applied_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+        adaptive_state.revision,
+        target_bitrate_kbps
+      );
+      if (!applied_revision) {
+        return {
+          {"status", false}, {"changed", false}, {"state", "controller_changed"},
+          {"error", "The live bitrate controller changed while Doctor prepared this step. Recheck before applying it."}
+        };
+      }
+      run.controller_revision = *applied_revision;
+      run.applied_at = std::chrono::steady_clock::now();
+      run.network_sample_revision_at_apply =
+        stream_stats::get_current().network_sample_revision;
       action_run = run;
       if (trusted_context != nullptr) {
         schedule_verification_watchdog(
@@ -883,9 +993,11 @@ namespace doctor_actions {
     std::lock_guard<std::mutex> lock(action_mutex);
     if (action_run.active) {
       const auto run_id = action_run.run_id;
-      const int restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
-      BOOST_LOG(info) << "Doctor: new stream boundary restored "sv
-                      << restored_bitrate_kbps << " kbps and retired run=" << run_id;
+      const auto restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+      BOOST_LOG(info) << "Doctor: new stream boundary "sv
+                      << (restored_bitrate_kbps ? "restored "sv : "retired superseded run without restoring "sv)
+                      << (restored_bitrate_kbps ? std::to_string(*restored_bitrate_kbps) + " kbps" : std::string {})
+                      << " run=" << run_id;
     }
 
     controller_sessions.erase(
@@ -926,9 +1038,11 @@ namespace doctor_actions {
     if (action_run.active && action_run.session_generation == session_generation &&
         action_run.owner_uuid == owner_uuid) {
       const auto run_id = action_run.run_id;
-      const int restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
-      BOOST_LOG(info) << "Doctor: stream ended; restored "sv << restored_bitrate_kbps
-                      << " kbps and retired run=" << run_id;
+      const auto restored_bitrate_kbps = restore_bitrate_run_locked(action_run);
+      BOOST_LOG(info) << "Doctor: stream ended; "sv
+                      << (restored_bitrate_kbps ? "restored "sv : "retired superseded run without restoring "sv)
+                      << (restored_bitrate_kbps ? std::to_string(*restored_bitrate_kbps) + " kbps" : std::string {})
+                      << " run=" << run_id;
     }
 
     controller_sessions.erase(

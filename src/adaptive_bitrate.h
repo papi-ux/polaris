@@ -10,6 +10,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <optional>
 #include <string>
 
 namespace adaptive_bitrate {
@@ -35,6 +37,24 @@ namespace adaptive_bitrate {
     double ewma_rtt_ms = 0.0;
     std::string state = "disabled";
     std::string reason = "disabled";
+  };
+
+  /**
+   * @brief Exact operator-owned controller state used by a reversible Doctor
+   *        transaction.
+   *
+   * revision changes for explicit controller/configuration writers, but not
+   * for ordinary telemetry-driven adaptive adjustments. This lets Doctor
+   * restore its own change without overwriting a newer user or client choice.
+   */
+  struct doctor_state_t {
+    bool enabled = false;
+    bool runtime_update_supported = false;
+    int base_bitrate_kbps = 0;
+    int live_bitrate_kbps = 0;
+    int min_bitrate_kbps = 0;
+    int max_bitrate_kbps = 0;
+    std::uint64_t revision = 0;
   };
 
   /**
@@ -64,6 +84,29 @@ namespace adaptive_bitrate {
    * @brief Get the current controller state for status APIs and HUDs.
    */
   state_t get_state();
+
+  /** Return a coherent snapshot for a conditional Doctor transaction. */
+  doctor_state_t get_doctor_state();
+
+  /**
+   * Atomically apply a Doctor-owned bitrate target when no explicit writer
+   * has changed the controller since expected_revision.
+   *
+   * max_bitrate_kbps is a temporary in-memory ceiling for this stream only.
+   * The returned revision owns the mutation and must be supplied to advance
+   * or restore it.
+   */
+  std::optional<std::uint64_t> set_doctor_bitrate_if_revision(
+    std::uint64_t expected_revision,
+    int target_bitrate_kbps,
+    std::optional<int> max_bitrate_kbps = std::nullopt
+  );
+
+  /** Restore an exact pre-action snapshot only while Doctor still owns it. */
+  bool restore_doctor_state_if_revision(
+    std::uint64_t expected_revision,
+    const doctor_state_t &previous_state
+  );
 
   /**
    * @brief Set the base bitrate from client request.

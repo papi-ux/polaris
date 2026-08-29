@@ -15,6 +15,13 @@ namespace launch_profile {
       int fps = 0;
     };
 
+    struct field_provenance_t {
+      std::string source;
+      std::string reason_code;
+      bool locked = false;
+      bool normalized = false;
+    };
+
     std::optional<display_mode_t> parse_display_mode(const std::string &value) {
       std::stringstream input(value);
       std::string segment;
@@ -120,30 +127,32 @@ namespace launch_profile {
       request.requested_height > 0 && request.requested_fps > 0;
     const bool paired_display_complete = request.paired_width > 0 &&
       request.paired_height > 0 && request.paired_fps > 0;
-    std::string display_source;
-    std::string display_reason;
-    bool display_field_locked = false;
+    field_provenance_t width_provenance;
+    field_provenance_t height_provenance;
+    field_provenance_t fps_provenance;
+    const auto set_display_provenance = [&](const std::string &source,
+                                            const std::string &reason,
+                                            bool locked) {
+      width_provenance = {source, reason, locked, false};
+      height_provenance = width_provenance;
+      fps_provenance = width_provenance;
+    };
 
     if (request.display_locked && requested_display_complete) {
       result.width = request.requested_width;
       result.height = request.requested_height;
       result.fps = request.requested_fps;
-      display_source = "explicit_launch_request";
-      display_reason = "requested_display_lock";
-      display_field_locked = true;
+      set_display_provenance("explicit_launch_request", "requested_display_lock", true);
     } else if (paired_display_complete) {
       result.width = request.paired_width;
       result.height = request.paired_height;
       result.fps = request.paired_fps;
-      display_source = "paired_client";
-      display_reason = "paired_display_setting";
+      set_display_provenance("paired_client", "paired_display_setting", false);
     } else if (requested_display_complete) {
       result.width = request.requested_width;
       result.height = request.requested_height;
       result.fps = request.requested_fps;
-      display_source = "client_launch_request";
-      display_reason = result.preset == "high_fps" ?
-        "high_fps_cadence_lock" : "requested_display_setting";
+      set_display_provenance("client_launch_request", "requested_display_setting", false);
     }
 
     if (result.preset == "high_fps" && request.requested_fps > 0 &&
@@ -152,40 +161,55 @@ namespace launch_profile {
       // height still win at their precedence layer, while the launch request's
       // FPS remains exact.
       result.fps = request.requested_fps;
-      display_source = "client_launch_request";
-      display_reason = "high_fps_cadence_lock";
-    }
-
-    if (result.width > 0 && result.height > 0 && result.fps > 0) {
-      add_field(
-        result.fields,
-        "display_mode",
-        format_display_mode({result.width, result.height, result.fps}),
-        display_source,
-        display_reason,
-        display_field_locked
-      );
-      if (result.preset == "high_fps" && !display_field_locked) {
-        result.fields["display_mode"]["locked_components"] = {"fps"};
-      }
+      fps_provenance = {
+        "client_launch_request",
+        "high_fps_cadence_lock",
+        true,
+        false,
+      };
     }
 
     if (result.preset == "stability" && !request.display_locked) {
       const auto stable = conservative_mode(
         request, device, {result.width, result.height, result.fps}
       );
-      const bool normalized = stable.width != result.width || stable.height != result.height || stable.fps != result.fps;
+      const bool width_normalized = stable.width != result.width;
+      const bool height_normalized = stable.height != result.height;
+      const bool fps_normalized = stable.fps != result.fps;
       result.width = stable.width;
       result.height = stable.height;
       result.fps = stable.fps;
+      width_provenance = {"device_profile_v1", "stability_preset_selected", false, width_normalized};
+      height_provenance = {"device_profile_v1", "stability_preset_selected", false, height_normalized};
+      fps_provenance = {"device_profile_v1", "stability_preset_selected", false, fps_normalized};
+    }
+
+    if (result.width > 0 && result.height > 0 && result.fps > 0) {
+      add_field(result.fields, "display_width", result.width,
+                width_provenance.source, width_provenance.reason_code,
+                width_provenance.locked, width_provenance.normalized);
+      add_field(result.fields, "display_height", result.height,
+                height_provenance.source, height_provenance.reason_code,
+                height_provenance.locked, height_provenance.normalized);
+      add_field(result.fields, "target_fps", static_cast<double>(result.fps) / 1000.0,
+                fps_provenance.source, fps_provenance.reason_code,
+                fps_provenance.locked, fps_provenance.normalized);
+
+      const bool uniform_provenance =
+        width_provenance.source == height_provenance.source &&
+        width_provenance.source == fps_provenance.source &&
+        width_provenance.reason_code == height_provenance.reason_code &&
+        width_provenance.reason_code == fps_provenance.reason_code &&
+        width_provenance.locked == height_provenance.locked &&
+        width_provenance.locked == fps_provenance.locked;
       add_field(
         result.fields,
         "display_mode",
-        format_display_mode(stable),
-        "device_profile_v1",
-        "stability_preset_selected",
-        false,
-        normalized
+        format_display_mode({result.width, result.height, result.fps}),
+        uniform_provenance ? width_provenance.source : "composed_display_components",
+        uniform_provenance ? width_provenance.reason_code : "mixed_display_provenance",
+        uniform_provenance && width_provenance.locked,
+        width_provenance.normalized || height_provenance.normalized || fps_provenance.normalized
       );
     }
 
@@ -240,15 +264,25 @@ namespace launch_profile {
                 "device_profile_v1", "preset_encoder_tuning", false);
     }
 
-    if (request.hdr_requested && device && !device->hdr_capable) {
+    const bool hdr_from_explicit_lock = request.hdr_locked;
+    const bool hdr_from_client_profile = !hdr_from_explicit_lock && request.client_profile_hdr.has_value();
+    if (hdr_from_client_profile) {
+      result.hdr = *request.client_profile_hdr;
+    }
+    const bool resolved_hdr_locked = hdr_from_explicit_lock || hdr_from_client_profile;
+    if (result.hdr && device && !device->hdr_capable) {
       result.hdr = false;
       add_field(result.fields, "hdr", false, "capability_validation",
-                "paired_device_hdr_unsupported", request.hdr_locked, true);
+                "paired_device_hdr_unsupported", resolved_hdr_locked, true);
+    } else if (hdr_from_explicit_lock) {
+      add_field(result.fields, "hdr", result.hdr,
+                "explicit_launch_request", "requested_hdr_lock", true);
+    } else if (hdr_from_client_profile) {
+      add_field(result.fields, "hdr", result.hdr,
+                "client_profile", "client_profile_hdr_lock", true);
     } else {
       add_field(result.fields, "hdr", result.hdr,
-                request.hdr_locked ? "client_profile" : "explicit_launch_request",
-                request.hdr_locked ? "client_profile_hdr_lock" : "requested_hdr_setting",
-                request.hdr_locked);
+                "client_launch_request", "requested_hdr_setting", false);
     }
 
     if (result.color_range) {

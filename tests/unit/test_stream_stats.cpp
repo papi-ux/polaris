@@ -12,9 +12,11 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #ifdef __linux__
   #include <unistd.h>
 #endif
@@ -1166,6 +1168,30 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
 }
 
+TEST(DoctorActionTests, PacingRecheckWaitsForAFreshHostSampleWithoutMutation) {
+  using namespace std::chrono_literals;
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true, "DoctorRecheck", "203.0.113.17");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+
+  std::thread publisher([] {
+    std::this_thread::sleep_for(250ms);
+    stream_stats::update_video_stats(59.0, 20000, 5.0, "hevc", 1920, 1080);
+  });
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = doctor_actions::execute({{"action_id", "recheck_pacing"}});
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  publisher.join();
+
+  EXPECT_TRUE(result.at("status").get<bool>());
+  EXPECT_FALSE(result.at("changed").get<bool>());
+  EXPECT_EQ(result.at("state"), "observed");
+  EXPECT_GE(elapsed, 2500ms);
+  EXPECT_TRUE(result.contains("doctor"));
+
+  stream_stats::update_stream_active(false);
+}
+
 TEST(DoctorActionTests, NeverDropsMoreThanOneGuardedBitrateStep) {
   EXPECT_EQ(doctor_actions::guarded_bitrate_target(20000, 7580, 2000), 16000);
   EXPECT_EQ(doctor_actions::guarded_bitrate_target(20000, 18000, 2000), 18000);
@@ -1226,6 +1252,94 @@ TEST(DoctorActionTests, QualityRestoreUsesCapturedLaunchCeilingInsteadOfCurrentB
   stream_stats::update_stream_active(false);
 }
 
+TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterDegradation) {
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_live_bitrate(7580);
+  adaptive_bitrate::set_base_bitrate(15000);
+
+  stream_stats::update_stream_active(true, "DoctorRestoreFreshness", "203.0.113.18");
+  stream_stats::update_video_stats(60.0, 7580, 5.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 20000, 15000
+  );
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+
+  const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  ASSERT_EQ(applied.at("applied").at("bitrate_kbps"), 9475);
+  const auto run_id = applied.at("run_id").get<std::string>();
+
+  for (int i = 0; i < 2; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  doctor_actions::run_verification_watchdog_for_tests();
+
+  // The watchdog's clean result is receipt history only. New current
+  // degradation must prevent the next restoration step and roll the entire
+  // reversible transaction back to its captured target.
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(55.0, 3.5, 1000);
+  }
+  const auto degraded = doctor_actions::execute({
+    {"action_id", "verify"}, {"run_id", run_id}
+  });
+  EXPECT_TRUE(degraded.at("status").get<bool>());
+  EXPECT_TRUE(degraded.at("changed").get<bool>());
+  EXPECT_EQ(degraded.at("state"), "rolled_back");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 7580);
+
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, NewerExplicitBitrateSupersedesUndoWithoutBeingOverwritten) {
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(20000);
+  adaptive_bitrate::set_enabled(false);
+
+  stream_stats::update_stream_active(true, "DoctorExplicitWriter", "203.0.113.19");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  ASSERT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+  const auto run_id = applied.at("run_id").get<std::string>();
+
+  adaptive_bitrate::set_base_bitrate(10000);
+  const auto undo = doctor_actions::execute({
+    {"action_id", "undo"}, {"run_id", run_id}
+  });
+  EXPECT_TRUE(undo.at("status").get<bool>());
+  EXPECT_FALSE(undo.at("changed").get<bool>());
+  EXPECT_EQ(undo.at("state"), "superseded");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().base_bitrate_kbps, 10000);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
+
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+}
+
 TEST(DoctorActionTests, ExecuteRefusesLiveTuningAndStaleUndoWithoutAStream) {
   stream_stats::update_stream_active(false);
 
@@ -1245,11 +1359,13 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // Earlier suites in this binary leave adaptive_bitrate process state
   // behind; normalize the two pieces this arc depends on before seeding
   // telemetry. The same-stream ceiling no longer mutates saved config.
+  config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
-  adaptive_bitrate::set_max_bitrate(100000);
-  adaptive_bitrate::set_enabled(false);
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
   adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(20000);
 
   stream_stats::update_stream_active(true, "DoctorContractTest", "203.0.113.7");
   stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);

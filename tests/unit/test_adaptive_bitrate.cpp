@@ -117,3 +117,52 @@ TEST(AdaptiveBitrateController, NormalizesMaxBelowMinBeforeClampingBase) {
   EXPECT_EQ(state.min_bitrate_kbps, state.base_bitrate_kbps);
   EXPECT_EQ(0, state.target_bitrate_kbps);
 }
+
+TEST(AdaptiveBitrateController, DoctorRollbackNeverOverwritesANewerExplicitWriter) {
+  enable_controller(20000);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    20000
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 15000);
+
+  adaptive_bitrate::set_base_bitrate(10000);
+  EXPECT_FALSE(adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  ));
+
+  const auto after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.base_bitrate_kbps, 10000);
+  EXPECT_EQ(after.live_bitrate_kbps, 10000);
+  EXPECT_GT(after.revision, *doctor_revision);
+}
+
+TEST(AdaptiveBitrateController, DoctorTransactionRestoresExactOwnedState) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  ASSERT_FALSE(before.enabled);
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    25000
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  ASSERT_TRUE(adaptive_bitrate::get_doctor_state().enabled);
+
+  ASSERT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  ));
+  const auto after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.enabled, before.enabled);
+  EXPECT_EQ(after.base_bitrate_kbps, before.base_bitrate_kbps);
+  EXPECT_EQ(after.live_bitrate_kbps, before.live_bitrate_kbps);
+  EXPECT_EQ(after.max_bitrate_kbps, before.max_bitrate_kbps);
+}

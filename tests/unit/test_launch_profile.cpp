@@ -21,6 +21,9 @@ TEST(LaunchProfileTests, AutoPreservesUnlockedClientRequestWithoutDeviceMutation
   EXPECT_FALSE(resolved.preferred_codec.has_value());
   EXPECT_EQ(resolved.fields.at("display_mode").at("source"), "client_launch_request");
   EXPECT_FALSE(resolved.fields.at("display_mode").at("locked").get<bool>());
+  EXPECT_EQ(resolved.fields.at("display_width").at("source"), "client_launch_request");
+  EXPECT_EQ(resolved.fields.at("display_height").at("source"), "client_launch_request");
+  EXPECT_EQ(resolved.fields.at("target_fps").at("source"), "client_launch_request");
 }
 
 TEST(LaunchProfileTests, StabilityNormalizesPairedBitrateButPreservesExplicitDisplayLock) {
@@ -208,6 +211,48 @@ TEST(LaunchProfileTests, HighFpsLocksRequestedCadence) {
   EXPECT_EQ(resolved.height, 720);
   EXPECT_EQ(resolved.fps, 120000);
   EXPECT_FALSE(resolved.fields.at("display_mode").at("locked"));
-  EXPECT_EQ(resolved.fields.at("display_mode").at("reason_code"), "high_fps_cadence_lock");
-  EXPECT_EQ(resolved.fields.at("display_mode").at("locked_components").at(0), "fps");
+  EXPECT_EQ(resolved.fields.at("display_mode").at("source"), "composed_display_components");
+  EXPECT_EQ(resolved.fields.at("display_mode").at("reason_code"), "mixed_display_provenance");
+  EXPECT_EQ(resolved.fields.at("display_width").at("source"), "paired_client");
+  EXPECT_EQ(resolved.fields.at("display_height").at("source"), "paired_client");
+  EXPECT_FALSE(resolved.fields.at("display_width").at("locked").get<bool>());
+  EXPECT_FALSE(resolved.fields.at("display_height").at("locked").get<bool>());
+  EXPECT_EQ(resolved.fields.at("target_fps").at("source"), "client_launch_request");
+  EXPECT_EQ(resolved.fields.at("target_fps").at("reason_code"), "high_fps_cadence_lock");
+  EXPECT_TRUE(resolved.fields.at("target_fps").at("locked").get<bool>());
+}
+
+TEST(LaunchProfileTests, ClientProfileHdrWinsOnlyWhenLaunchDoesNotLockHdr) {
+  launch_profile::request_t request;
+  request.device_name = "HDR-capable client";
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 60000;
+  request.hdr_requested = false;
+  request.client_profile_hdr = true;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_TRUE(resolved.hdr);
+  EXPECT_EQ(resolved.fields.at("hdr").at("source"), "client_profile");
+  EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "client_profile_hdr_lock");
+  EXPECT_TRUE(resolved.fields.at("hdr").at("locked").get<bool>());
+}
+
+TEST(LaunchProfileTests, ExplicitResolvedHdrWinsOverClientProfileHdr) {
+  launch_profile::request_t request;
+  request.device_name = "HDR-capable client";
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 60000;
+  request.hdr_requested = false;
+  request.hdr_locked = true;
+  request.client_profile_hdr = true;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_FALSE(resolved.hdr);
+  EXPECT_EQ(resolved.fields.at("hdr").at("source"), "explicit_launch_request");
+  EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "requested_hdr_lock");
+  EXPECT_TRUE(resolved.fields.at("hdr").at("locked").get<bool>());
 }

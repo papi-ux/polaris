@@ -82,6 +82,8 @@ namespace stream_stats {
     std::atomic<bool> hot_packet_loss_available {false};
     std::atomic<double> hot_control_channel_packet_loss {0.0};
     std::atomic<uint64_t> hot_control_channel_samples {0};
+    // Process-lifetime monotonic revision used by read-only pacing Recheck.
+    std::atomic<uint64_t> hot_video_sample_revision {0};
     // Process-lifetime monotonic revision. Doctor uses this to prove that a
     // verification decision includes measurements received after its change.
     std::atomic<uint64_t> hot_network_sample_revision {0};
@@ -189,7 +191,7 @@ namespace stream_stats {
       hot_packet_loss_available.store(false, std::memory_order_relaxed);
       hot_control_channel_packet_loss.store(0.0, std::memory_order_relaxed);
       hot_control_channel_samples.store(0, std::memory_order_relaxed);
-      // network_sample_revision intentionally survives stream resets so an
+      // Video/network sample revisions intentionally survive stream resets so an
       // old receipt cannot mistake a new generation's first samples for its
       // own baseline. Authenticated session generation still fences actions.
       {
@@ -435,6 +437,7 @@ namespace stream_stats {
     j["packet_loss_source"] = packet_loss_source;
     j["control_channel_packet_loss"] = control_channel_packet_loss;
     j["control_channel_samples"] = control_channel_samples;
+    j["video_sample_revision"] = video_sample_revision;
     j["network_sample_revision"] = network_sample_revision;
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
@@ -1501,6 +1504,7 @@ namespace stream_stats {
     hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
     hot_width.store(width, std::memory_order_relaxed);
     hot_height.store(height, std::memory_order_relaxed);
+    hot_video_sample_revision.fetch_add(1, std::memory_order_release);
 
     // Multi-client mirror: bounded by active client count (typically 1),
     // and the only reason this call still needs stats_mutex at all.
@@ -1539,6 +1543,7 @@ namespace stream_stats {
       hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
       hot_width.store(width, std::memory_order_relaxed);
       hot_height.store(height, std::memory_order_relaxed);
+      hot_video_sample_revision.fetch_add(1, std::memory_order_release);
     }
   }
 
@@ -1579,6 +1584,7 @@ namespace stream_stats {
     hot_dropped_frame_ratio.store(dropped_frame_ratio, std::memory_order_relaxed);
     hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
     hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
+    hot_video_sample_revision.fetch_add(1, std::memory_order_release);
   }
 
   double packet_loss_percent(uint64_t scaled_loss, uint64_t scale) {
@@ -2602,6 +2608,7 @@ namespace stream_stats {
     result.avg_frame_age_ms = hot_avg_frame_age_ms.load(std::memory_order_relaxed);
     result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
     result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
+    result.video_sample_revision = hot_video_sample_revision.load(std::memory_order_acquire);
     {
       // Keep the complete network group on one host-received observation.
       // Doctor must never pair a new revision with stale loss/RTT fields.

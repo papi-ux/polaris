@@ -443,7 +443,12 @@
     "optimization_resolved_field": {
       "$comment": [
         "One entry in resolved_profile.fields. Nova rejects the value unless",
-        "all provenance metadata is present with the expected primitive types."
+        "all provenance metadata is present with the expected primitive types.",
+        "A trusted launch envelope requires display_mode plus display_width,",
+        "display_height, target_fps, target_bitrate_kbps, and hdr. Component",
+        "display provenance is authoritative when a preset composes paired",
+        "dimensions with an explicit cadence lock. Source is allowlisted and",
+        "history or AI provenance is never accepted as launch authority."
       ],
       "fields": [
         "locked",
@@ -509,6 +514,12 @@
         "capture",
         "runtime",
         "topology"
+      ],
+      "optimization": [
+        "display_mode",
+        "preferred_codec",
+        "profile_state",
+        "target_bitrate_kbps"
       ]
     },
     "$detail": {
@@ -533,10 +544,9 @@
         "today is one Nova already maps."
       ],
       "optimization": [
-        "The containment resolver now serves profile_state, stability, and",
-        "resolved_profile directly from deterministic policy. Nova temporarily keeps",
-        "fallback reads for older AI and recovery fields; those reads are listed as",
-        "known missing until the compatibility window closes. None can affect launch."
+        "The containment resolver serves resolved_profile directly from deterministic",
+        "policy. Remaining top-level compatibility fields are informational only; Nova",
+        "requires the typed resolved-profile envelope before they can affect launch."
       ]
     }
   }

@@ -734,8 +734,6 @@ namespace proc {
     bool allow_client_commands = false;
     int initial_color_range = 0;
     int initial_nvenc_tune = 0;
-    int initial_max_bitrate = 0;
-    int initial_adaptive_max_bitrate = 0;
     bool initial_video_config_saved = false;
     // Session-scoped linux_display override bookkeeping (/launch streamMode):
     // host values saved by execute(), restored in terminate_impl after teardown.
