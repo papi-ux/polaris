@@ -1715,19 +1715,38 @@ namespace stream_stats {
                                             double loss,
                                             uint64_t bytes_sent) {
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
-      primary_network_state.received_at = std::chrono::steady_clock::now();
+      const auto received_at = std::chrono::steady_clock::now();
+      primary_network_state.received_at = received_at;
       primary_network_state.media_sample = media_sample;
       primary_network_state.latency_ms = latency_ms;
       primary_network_state.bytes_sent = bytes_sent;
       if (media_sample) {
         primary_network_state.packet_loss = loss;
         primary_network_state.packet_loss_available = true;
+        primary_network_state.media_loss_received_at = received_at;
       } else {
         primary_network_state.control_channel_packet_loss = loss;
         ++primary_network_state.control_channel_samples;
       }
+
+      // A control-channel ping contributes host-observed RTT, but it says
+      // nothing about video delivery. Keep a current confirmed media-loss
+      // reading in the shared debounce input until the next media report (or
+      // until its host-received freshness expires). Otherwise the usually
+      // faster clean ping cadence clears real media loss between Nova's
+      // one-second counter reports and Doctor never offers the safe bitrate
+      // fix. This does not refresh media provenance: the original timestamp
+      // below remains authoritative for action eligibility.
+      const bool current_media_loss =
+        primary_network_state.packet_loss_available &&
+        primary_network_state.media_loss_received_at !=
+          std::chrono::steady_clock::time_point {} &&
+        received_at - primary_network_state.media_loss_received_at <=
+          std::chrono::milliseconds(DOCTOR_CURRENT_NETWORK_MAX_AGE_MS);
+      const double confirmed_media_loss = current_media_loss ?
+        primary_network_state.packet_loss : 0.0;
       primary_network_state.network_risk = network_risk_tracker.update(
-        media_sample ? loss : 0.0,
+        confirmed_media_loss,
         latency_ms
       );
       const bool suppresses_quality_restore =
@@ -1747,7 +1766,6 @@ namespace stream_stats {
         hot_network_sample_revision.fetch_add(1, std::memory_order_release) + 1;
       if (media_sample) {
         primary_network_state.media_loss_revision = primary_network_state.revision;
-        primary_network_state.media_loss_received_at = primary_network_state.received_at;
       }
 
       hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
