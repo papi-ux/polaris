@@ -8837,7 +8837,9 @@ namespace nvhttp {
         }
 
         nlohmann::json trial_crash = {{"status", true}, {"state", "none"}};
-        if (end_reason == "decoder_crash" && proc::proc.is_session_owner(named_cert_p->uuid)) {
+        if (doctor_v2::trials_enabled() &&
+            end_reason == "decoder_crash" &&
+            proc::proc.is_session_owner(named_cert_p->uuid)) {
           const auto app_uuid = proc::proc.get_running_app_uuid();
           if (!app_uuid.empty()) {
             trial_crash = doctor_trial::observe(
