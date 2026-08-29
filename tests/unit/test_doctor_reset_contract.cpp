@@ -379,8 +379,14 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
     launch_gate
   );
   const auto fail_closed = launch_parser.find("return nullptr;", exact_rejection);
+  const auto expected_topology = launch_parser.find("expectedTopology");
+  const auto fresh_parser_probe = launch_parser.find(
+    "stream_display_policy::selection_valid_fresh("
+  );
   ASSERT_NE(launch_gate, std::string::npos);
   ASSERT_NE(exact_rejection, std::string::npos);
+  ASSERT_NE(expected_topology, std::string::npos);
+  ASSERT_NE(fresh_parser_probe, std::string::npos);
   EXPECT_NE(fail_closed, std::string::npos);
 
   const auto optimize = between(
@@ -400,7 +406,7 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
     "effective_session_selection_for_launch("
   );
   const auto effective_availability = optimize.find(
-    "stream_display_policy::selection_valid(",
+    "stream_display_policy::selection_valid_fresh(",
     effective_topology
   );
   ASSERT_NE(effective_topology, std::string::npos);
@@ -414,7 +420,10 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
     "++_session_generation;"
   );
   const auto final_validity = final_apply.find(
-    "stream_display_policy::selection_valid("
+    "stream_display_policy::selection_valid_fresh("
+  );
+  const auto expected_binding = final_apply.find(
+    "launch_session->expected_stream_mode != session_mode"
   );
   const auto companion_match = final_apply.find(
     "stream_display_policy::selection_companion_state_matches("
@@ -426,12 +435,15 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
   );
   const auto conflict = final_apply.find("return 409;", resolved);
   ASSERT_NE(final_validity, std::string::npos);
+  ASSERT_NE(expected_binding, std::string::npos);
   ASSERT_NE(companion_match, std::string::npos);
   ASSERT_NE(apply, std::string::npos);
   ASSERT_NE(resolved, std::string::npos);
   EXPECT_LT(final_validity, companion_match)
     << "availability must be re-probed even when the companion state already matches";
   EXPECT_NE(conflict, std::string::npos);
+  EXPECT_LT(expected_binding, final_validity)
+    << "the exact optimize result must match before the selected topology is applied";
   EXPECT_NE(
     final_apply.find("restore_prelaunch_display_policy();"),
     std::string::npos
@@ -460,6 +472,9 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   const auto lifecycle_lock = client_settings.find(
     "proc::proc.acquire_session_lifecycle_lock()"
   );
+  const auto standalone_gate = client_settings.find(
+    "standalone_topology_required"
+  );
   const auto controller_lock = client_settings.find(
     "doctor_actions::acquire_paired_global_control("
   );
@@ -473,10 +488,13 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
     "topology_lifecycle_guard.unlock()"
   );
   ASSERT_NE(lifecycle_lock, std::string::npos);
+  ASSERT_NE(standalone_gate, std::string::npos);
   ASSERT_NE(active_generation_gate, std::string::npos);
   ASSERT_NE(controller_lock, std::string::npos);
   ASSERT_NE(topology_apply, std::string::npos);
   ASSERT_NE(lifecycle_unlock, std::string::npos);
+  EXPECT_LT(standalone_gate, lifecycle_lock)
+    << "topology persistence must not share a request with a later fallible paired update";
   EXPECT_LT(lifecycle_lock, controller_lock)
     << "topology writers must preserve lifecycle-to-controller lock order";
   EXPECT_LT(lifecycle_lock, active_generation_gate);
@@ -491,6 +509,33 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
     process.find(
       "std::unique_lock<std::recursive_mutex> proc_t::acquire_session_lifecycle_lock() const"
     ),
+    std::string::npos
+  );
+}
+
+TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {
+  const auto virtual_display = source("src/platform/linux/virtual_display.cpp");
+  EXPECT_NE(
+    virtual_display.find("std::mutex backend_detection_mutex"),
+    std::string::npos
+  );
+  const auto detector = between(
+    virtual_display,
+    "backend_e detect_backend_with_cache_policy(",
+    "bool backend_has_required_configuration("
+  );
+  EXPECT_NE(detector.find("std::lock_guard cache_lock"), std::string::npos);
+  EXPECT_NE(detector.find("!force_refresh && cached_backend.has_value()"), std::string::npos);
+  EXPECT_NE(detector.find("detect_backend_with_cache_policy(true)"), std::string::npos);
+
+  const auto policy = source("src/platform/linux/stream_display_policy.cpp");
+  const auto fresh_validator = between(
+    policy,
+    "bool selection_valid_fresh(",
+    "bool selection_companion_state_matches("
+  );
+  EXPECT_NE(
+    fresh_validator.find("virtual_display::is_available_fresh()"),
     std::string::npos
   );
 }

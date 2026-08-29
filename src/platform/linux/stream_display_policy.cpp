@@ -352,6 +352,15 @@ namespace stream_display_policy {
     );
   }
 
+  bool selection_valid_fresh(std::string_view selection, std::string &error) {
+    const auto key = to_lower_copy(selection);
+    return selection_valid_for_capabilities(
+      key,
+      key != k_host_virtual_display || virtual_display::is_available_fresh(),
+      error
+    );
+  }
+
   bool selection_companion_state_matches(std::string_view selection) {
     const auto key = to_lower_copy(selection);
     const auto &linux_display = config::video.linux_display;
@@ -375,9 +384,11 @@ namespace stream_display_policy {
         return false;
       }
 
-      if (key == k_host_virtual_display && linux_display.auto_manage_displays) {
+      if (key != stream_path::k_headless_dongle &&
+          linux_display.auto_manage_displays) {
         return false;
       }
+
       if (key == k_host_virtual_display &&
           config::video.capture != capture_for_host_virtual_display_backend(
                                      virtual_display::detect_backend(),
@@ -405,12 +416,21 @@ namespace stream_display_policy {
   }
 
   bool apply_selection(std::string_view selection, std::string &error) {
-    if (!selection_valid(selection, error)) {
+    if (!selection_valid_fresh(selection, error)) {
       return false;
     }
     const auto key = to_lower_copy(selection);
 
     auto &linux_display = config::video.linux_display;
+
+    // Connector ownership is exclusive to the canonical dongle mode. Preserve
+    // configured connector names for a later switch back, but make them inert
+    // for every other explicit mode so Desktop cannot inherit a stale display
+    // actuator from a previous dongle selection.
+    if (key != stream_path::k_headless_dongle) {
+      linux_display.auto_manage_displays = false;
+      linux_display.headless_swap_mode.clear();
+    }
 
     if (key == k_host_virtual_display) {
       normalize_host_virtual_display_state();
@@ -489,6 +509,10 @@ namespace stream_display_policy {
         }
         if (path->id == k_host_virtual_display) {
           normalize_host_virtual_display_state();
+        }
+        if (path->id != stream_path::k_headless_dongle) {
+          linux_display.auto_manage_displays = false;
+          linux_display.headless_swap_mode.clear();
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.

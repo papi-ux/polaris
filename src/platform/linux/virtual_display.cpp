@@ -52,6 +52,7 @@ namespace fs = std::filesystem;
 namespace virtual_display {
   namespace {
     constexpr auto backend_detection_cache_ttl = 30s;
+    std::mutex backend_detection_mutex;
     std::optional<backend_e> cached_backend;
     std::chrono::steady_clock::time_point cached_backend_time {};
     backend_detection_log_cache_t backend_detection_log_cache;
@@ -1769,37 +1770,52 @@ namespace virtual_display {
     }
   }
 
-  backend_e detect_backend() {
-    const auto now = std::chrono::steady_clock::now();
-    if (cached_backend.has_value() && (now - cached_backend_time) <= backend_detection_cache_ttl) {
-      return *cached_backend;
-    }
-
-    backend_e backend = backend_e::NONE;
-
-    // Priority 1: EVDI — creates true virtual connectors. Module + library
-    // presence alone is not enough to advertise it: creation must actually be
-    // possible, or the mode is offered and then silently fails at launch.
-    if (evdi::is_module_loaded() || evdi::load_module()) {
-      if (evdi::load_library() && evdi::can_create()) {
-        backend = backend_e::EVDI;
+  namespace {
+    backend_e detect_backend_with_cache_policy(bool force_refresh) {
+      // Detection touches both the cache and lazily initialized backend state
+      // (including the EVDI library handle). Keep the full probe serialized,
+      // rather than protecting only the two cache assignments.
+      std::lock_guard cache_lock {backend_detection_mutex};
+      const auto now = std::chrono::steady_clock::now();
+      if (!force_refresh && cached_backend.has_value() &&
+          (now - cached_backend_time) <= backend_detection_cache_ttl) {
+        return *cached_backend;
       }
-    }
 
-    // Priority 2: Wayland compositor headless outputs
-    if (backend == backend_e::NONE && wayland_wlr::is_available()) {
-      backend = backend_e::WAYLAND_WLR;
-    }
+      backend_e backend = backend_e::NONE;
 
-    // Priority 3: kscreen-doctor (KDE Plasma)
-    if (backend == backend_e::NONE && kscreen::is_available()) {
-      backend = backend_e::KSCREEN_DOCTOR;
-    }
+      // Priority 1: EVDI — creates true virtual connectors. Module + library
+      // presence alone is not enough to advertise it: creation must actually be
+      // possible, or the mode is offered and then silently fails at launch.
+      if (evdi::is_module_loaded() || evdi::load_module()) {
+        if (evdi::load_library() && evdi::can_create()) {
+          backend = backend_e::EVDI;
+        }
+      }
 
-    cached_backend = backend;
-    cached_backend_time = now;
-    log_detected_backend(backend);
-    return backend;
+      // Priority 2: Wayland compositor headless outputs
+      if (backend == backend_e::NONE && wayland_wlr::is_available()) {
+        backend = backend_e::WAYLAND_WLR;
+      }
+
+      // Priority 3: kscreen-doctor (KDE Plasma)
+      if (backend == backend_e::NONE && kscreen::is_available()) {
+        backend = backend_e::KSCREEN_DOCTOR;
+      }
+
+      cached_backend = backend;
+      cached_backend_time = now;
+      log_detected_backend(backend);
+      return backend;
+    }
+  }  // namespace
+
+  backend_e detect_backend() {
+    return detect_backend_with_cache_policy(false);
+  }
+
+  backend_e detect_backend_fresh() {
+    return detect_backend_with_cache_policy(true);
   }
 
   bool backend_has_required_configuration(backend_e backend, const std::string &streaming_output) {
@@ -1817,6 +1833,11 @@ namespace virtual_display {
 
   bool is_available() {
     const auto backend = detect_backend();
+    return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
+  }
+
+  bool is_available_fresh() {
+    const auto backend = detect_backend_fresh();
     return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
   }
 

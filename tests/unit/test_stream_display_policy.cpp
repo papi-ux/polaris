@@ -5,7 +5,9 @@
 
 #include <src/platform/linux/stream_display_policy.h>
 #include <src/platform/linux/virtual_display.h>
+#include <src/platform/linux/display_topology.h>
 #include <src/config.h>
+#include <src/nvhttp.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -364,6 +366,70 @@ TEST(StreamDisplayPolicyTests, HeadlessDongleCompanionStateIncludesConditionalDe
   config::video.capture = "portal";
   config::video.output_name.clear();
   EXPECT_FALSE(stream_display_policy::selection_companion_state_matches("headless_dongle"));
+}
+
+TEST(StreamDisplayPolicyTests, LeavingDongleMakesStoredConnectorsInert) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = false;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
+  EXPECT_FALSE(linux_display.auto_manage_displays);
+  EXPECT_TRUE(linux_display.headless_swap_mode.empty());
+  EXPECT_EQ(linux_display.streaming_output, "DP-1");
+  EXPECT_EQ(linux_display.primary_output, "eDP-1");
+  EXPECT_FALSE(display_topology::should_manage_host_topology());
+  EXPECT_TRUE(stream_display_policy::selection_companion_state_matches("desktop_display"));
+}
+
+TEST(StreamDisplayPolicyTests, FailedDurableSelectionRestoresEveryLiveField) {
+  LinuxDisplayPolicyGuard guard;
+  auto &linux_display = config::video.linux_display;
+  linux_display.stream_mode = "headless_dongle";
+  linux_display.private_runtime = "legacy-runtime";
+  linux_display.headless_mode = true;
+  linux_display.use_cage_compositor = false;
+  linux_display.prefer_gpu_native_capture = true;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "DP-1";
+  linux_display.primary_output = "eDP-1";
+  config::video.capture = "portal";
+  config::video.output_name = "DP-1";
+  const auto before_linux_display = linux_display;
+  const auto before_capture = config::video.capture;
+  const auto before_output_name = config::video.output_name;
+
+  std::string error;
+  EXPECT_FALSE(nvhttp::apply_stream_display_mode_selection_for_tests(
+    "desktop_display",
+    false,
+    error
+  ));
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(linux_display.stream_mode, before_linux_display.stream_mode);
+  EXPECT_EQ(linux_display.private_runtime, before_linux_display.private_runtime);
+  EXPECT_EQ(linux_display.headless_mode, before_linux_display.headless_mode);
+  EXPECT_EQ(linux_display.use_cage_compositor, before_linux_display.use_cage_compositor);
+  EXPECT_EQ(
+    linux_display.prefer_gpu_native_capture,
+    before_linux_display.prefer_gpu_native_capture
+  );
+  EXPECT_EQ(linux_display.auto_manage_displays, before_linux_display.auto_manage_displays);
+  EXPECT_EQ(linux_display.headless_swap_mode, before_linux_display.headless_swap_mode);
+  EXPECT_EQ(linux_display.streaming_output, before_linux_display.streaming_output);
+  EXPECT_EQ(linux_display.primary_output, before_linux_display.primary_output);
+  EXPECT_EQ(config::video.capture, before_capture);
+  EXPECT_EQ(config::video.output_name, before_output_name);
 }
 
 TEST(StreamDisplayPolicyTests, GamescopeStreamRegisteredWithGamescopeRuntime) {
