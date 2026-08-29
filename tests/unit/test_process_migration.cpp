@@ -321,6 +321,8 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   EXPECT_NE(status_handler.find("get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("auto status_view = proc::proc.get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("const auto &status_snapshot = status_view.snapshot"), std::string::npos);
+  EXPECT_NE(status_handler.find("display_mode[\"mirror_desktop\"] = status_snapshot.mirror_desktop"), std::string::npos);
+  EXPECT_NE(status_handler.find("status_snapshot.force_private_after_desktop_steam_shutdown"), std::string::npos);
   const auto status_view_claim = status_handler.find("get_session_status_view(");
   const auto status_stats_read = status_handler.find("stream_stats::get_current()");
   ASSERT_NE(status_view_claim, std::string::npos);
@@ -617,6 +619,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(snapshot_guard.find("finish_snapshot()"), std::string::npos);
   EXPECT_NE(header.find("session_snapshot_guard_t guard;"), std::string::npos);
   EXPECT_NE(status_snapshot.find("snapshot.viewer_count = rtsp_snapshot.viewer_count"), std::string::npos);
+  EXPECT_NE(status_snapshot.find("snapshot.mirror_desktop = _launch_session && _launch_session->mirror_desktop"), std::string::npos);
+  EXPECT_NE(status_snapshot.find("snapshot.force_private_after_desktop_steam_shutdown"), std::string::npos);
   const auto stop_snapshot_locked = function_source_between(
     source,
     "session_stop_snapshot_t proc_t::get_session_stop_snapshot_locked(",

@@ -43,10 +43,12 @@ namespace adaptive_bitrate {
    * @brief Exact operator-owned controller state used by a reversible Doctor
    *        transaction.
    *
-   * revision changes for explicit controller/configuration writers, but not
-   * for ordinary telemetry. While Doctor owns a transaction, telemetry is
-   * observational and cannot move its fixed target. This lets Doctor restore
-   * its own change without overwriting a newer user or client choice.
+   * revision changes for explicit controller/configuration writers,
+   * autonomous target movement, and host network-evidence arrival before a
+   * Doctor transaction is acquired. While Doctor owns a transaction,
+   * telemetry is observational and cannot move its fixed target. This lets
+   * Doctor restore its own change without overwriting a newer user, client,
+   * controller, or evidence decision.
    */
   struct doctor_state_t {
     bool enabled = false;
@@ -71,6 +73,17 @@ namespace adaptive_bitrate {
    * @param rtt_ms Round-trip time in milliseconds.
    */
   void update_network_stats(double packet_loss_percent, double rtt_ms);
+
+  /**
+   * @brief Linearize a newly received host network observation with Doctor.
+   *
+   * Call this while serializing the observation and before publishing its
+   * fields. It invalidates a not-yet-applied Doctor controller snapshot even
+   * when adaptive feedback is disabled or its adjustment interval has not
+   * elapsed. Evidence remains observational once Doctor or its rollback owns
+   * the actuator.
+   */
+  void note_network_evidence_arrival();
 
   /**
    * @brief Feed local stream health so bitrate can react to host pacing pressure.

@@ -56,6 +56,65 @@ TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot
   ));
 }
 
+TEST(AdaptiveBitrateController, NetworkPressureAtFloorInvalidatesAStaleDoctorSnapshot) {
+  enable_controller(2000);
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before_pressure = adaptive_bitrate::get_doctor_state();
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(8.0, 8.0);
+
+  const auto after_pressure = adaptive_bitrate::get_doctor_state();
+  ASSERT_EQ(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
+  ASSERT_GT(after_pressure.revision, before_pressure.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before_pressure.revision,
+    3000,
+    before_pressure.max_bitrate_kbps
+  ));
+}
+
+TEST(AdaptiveBitrateController, HostEvidenceInsideAdjustmentIntervalInvalidatesAStaleDoctorSnapshot) {
+  enable_controller();
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before_observation = adaptive_bitrate::get_doctor_state();
+  // Production publishes the host evidence epoch before feeding the adaptive
+  // loop. No interval sleep is intentional: this covers the early-return path.
+  adaptive_bitrate::note_network_evidence_arrival();
+  adaptive_bitrate::update_network_stats(0.0, 55.0);
+
+  const auto after_observation = adaptive_bitrate::get_doctor_state();
+  ASSERT_EQ(after_observation.live_bitrate_kbps, before_observation.live_bitrate_kbps);
+  ASSERT_GT(after_observation.revision, before_observation.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before_observation.revision,
+    25000,
+    before_observation.max_bitrate_kbps
+  ));
+}
+
+TEST(AdaptiveBitrateController, VerificationEvidenceDoesNotSupersedeAnOwnedDoctorTarget) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_enabled(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    16000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+
+  adaptive_bitrate::note_network_evidence_arrival();
+
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, *doctor_revision);
+  EXPECT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  ).has_value());
+  adaptive_bitrate::reset();
+}
+
 TEST(AdaptiveBitrateController, ReportsFramePacingWithoutLoweringBitrate) {
   enable_controller();
 
@@ -92,6 +151,19 @@ TEST(AdaptiveBitrateController, EncoderPressureMovementAdvancesControllerRevisio
 
   const auto after_pressure = adaptive_bitrate::get_doctor_state();
   EXPECT_LT(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
+  EXPECT_GT(after_pressure.revision, before_pressure.revision);
+}
+
+TEST(AdaptiveBitrateController, EncoderPressureAtFloorAdvancesControllerRevision) {
+  enable_controller(2000);
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before_pressure = adaptive_bitrate::get_doctor_state();
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_stream_health(0.96, 0.0, 0.0, 1.0, 12.0, 20.0);
+
+  const auto after_pressure = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
   EXPECT_GT(after_pressure.revision, before_pressure.revision);
 }
 

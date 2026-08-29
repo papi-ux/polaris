@@ -48,10 +48,11 @@ namespace adaptive_bitrate {
   // explicit writer can retire Doctor completely before it clamps its value.
   // Protected by state_mutex.
   static int doctor_previous_max_bitrate_kbps = 0;
-  // Protected by state_mutex. Every target writer, including autonomous
-  // telemetry feedback, bumps this value. Doctor snapshots it and performs an
-  // exact compare-and-set so a feedback reduction that lands before Doctor
-  // acquires the actuator cannot be overwritten by a stale quality increase.
+  // Protected by state_mutex. Every target writer, autonomous telemetry
+  // decision, and host network-evidence arrival before Doctor acquisition
+  // bumps this value. Doctor snapshots it and performs an exact compare-and-
+  // set so a newer controller or evidence decision cannot be overwritten by
+  // a stale quality increase.
   static std::uint64_t operator_revision = 1;
   // The encoder thread is the only authority for what was actually applied.
   // Protected by state_mutex.
@@ -117,6 +118,21 @@ namespace adaptive_bitrate {
     return true;
   }
 
+  void note_network_evidence_arrival() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    // Post-change telemetry verifies the fixed Doctor target; it must not
+    // supersede the transaction or its one-shot encoder rollback. Before
+    // ownership begins, however, every host-received observation invalidates
+    // a controller snapshot so the initial mutation and evidence publication
+    // share one monotonic transaction epoch.
+    if (doctor_override_active.load(std::memory_order_relaxed) ||
+        pending_live_update_active.load(std::memory_order_relaxed)) {
+      return;
+    }
+    ++operator_revision;
+    state_changed.notify_all();
+  }
+
   void update_network_stats(double packet_loss_percent, double rtt_ms) {
     if (!enabled.load(std::memory_order_relaxed) ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
@@ -175,7 +191,8 @@ namespace adaptive_bitrate {
     // treat it as congestion and reduce bitrate immediately
     bool rtt_spike = (rtt_sample_count > 5) && (rtt_ms > avg_rtt * 2.0) && (avg_rtt > 0);
 
-    if (ewma_packet_loss > 1.0 || rtt_spike) {
+    const bool network_pressure = ewma_packet_loss > 1.0 || rtt_spike;
+    if (network_pressure) {
       // Network is congested -- reduce bitrate
 
       // Scale reduction by severity of the loss
@@ -228,6 +245,12 @@ namespace adaptive_bitrate {
     const int clamped_target = clamp_target(new_target, base);
     if (clamped_target != current_target) {
       target_bitrate_kbps.store(clamped_target, std::memory_order_relaxed);
+    }
+    // Keep direct controller callers safe at the floor too. Production network
+    // observations already advance the common evidence/controller epoch before
+    // this callback; this additional bump records a controller pressure
+    // decision that could not move the clamped target.
+    if (clamped_target != current_target || network_pressure) {
       ++operator_revision;
       state_changed.notify_all();
     }
@@ -293,9 +316,12 @@ namespace adaptive_bitrate {
                        << "ms, encode=" << encode_time_ms
                        << "ms, age=" << avg_frame_age_ms << "ms)";
       target_bitrate_kbps.store(new_target, std::memory_order_relaxed);
-      ++operator_revision;
-      state_changed.notify_all();
     }
+    // Encoder pressure is still a newer controller decision at the bitrate
+    // floor. Advance the revision so Doctor cannot raise quality from a clean
+    // snapshot taken before this sample was published.
+    ++operator_revision;
+    state_changed.notify_all();
   }
 
   int get_target_bitrate_kbps() {

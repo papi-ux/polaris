@@ -96,6 +96,39 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
   EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
 }
 
+TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
+  const auto stream = source("src/stream.cpp");
+  const auto periodic_ping = between(
+    stream,
+    "server->map(packetTypes[IDX_PERIODIC_PING]",
+    "server->map(packetTypes[IDX_START_A]"
+  );
+  const auto loss_stats = between(
+    stream,
+    "server->map(packetTypes[IDX_LOSS_STATS]",
+    "server->map(packetTypes[IDX_REQUEST_IDR_FRAME]"
+  );
+  for (const auto *handler : {&periodic_ping, &loss_stats}) {
+    const auto evidence = handler->find("record_network_stats(");
+    const auto feedback = handler->find("adaptive_bitrate::update_network_stats(");
+    ASSERT_NE(evidence, std::string::npos);
+    ASSERT_NE(feedback, std::string::npos);
+    EXPECT_LT(evidence, feedback);
+  }
+
+  const auto stats = source("src/stream_stats.cpp");
+  const auto publication = between(
+    stats,
+    "void record_primary_network_observation(",
+    "}  // namespace"
+  );
+  const auto epoch = publication.find("adaptive_bitrate::note_network_evidence_arrival()");
+  const auto fields = publication.find("primary_network_state.received_at");
+  ASSERT_NE(epoch, std::string::npos);
+  ASSERT_NE(fields, std::string::npos);
+  EXPECT_LT(epoch, fields);
+}
+
 TEST(DoctorResetContract, PairedGlobalAdaptiveToggleRequiresTheSoleActiveOwner) {
   const auto nvhttp = source("src/nvhttp.cpp");
   const auto adaptive_route = between(

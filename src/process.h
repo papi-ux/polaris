@@ -649,6 +649,8 @@ namespace proc {
     bool mangohud_configured = false;
     bool virtual_display = false;
     bool display_mode_explicit = false;
+    bool mirror_desktop = false;
+    bool force_private_after_desktop_steam_shutdown = false;
   };
 
   session_stop_outcome_t evaluate_session_stop_request(
