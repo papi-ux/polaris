@@ -38,6 +38,24 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   EXPECT_EQ("network_pressure", state.state);
 }
 
+TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot) {
+  enable_controller();
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before_pressure = adaptive_bitrate::get_doctor_state();
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(8.0, 8.0);
+
+  const auto after_pressure = adaptive_bitrate::get_doctor_state();
+  ASSERT_LT(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
+  ASSERT_GT(after_pressure.revision, before_pressure.revision);
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before_pressure.revision,
+    before_pressure.live_bitrate_kbps,
+    before_pressure.max_bitrate_kbps
+  ));
+}
+
 TEST(AdaptiveBitrateController, ReportsFramePacingWithoutLoweringBitrate) {
   enable_controller();
 
@@ -62,6 +80,19 @@ TEST(AdaptiveBitrateController, ReducesTargetOnEncoderPressure) {
   EXPECT_TRUE(state.enabled);
   EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
   EXPECT_EQ("encoder_pressure", state.state);
+}
+
+TEST(AdaptiveBitrateController, EncoderPressureMovementAdvancesControllerRevision) {
+  enable_controller();
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before_pressure = adaptive_bitrate::get_doctor_state();
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_stream_health(0.96, 0.0, 0.0, 1.0, 12.0, 20.0);
+
+  const auto after_pressure = adaptive_bitrate::get_doctor_state();
+  EXPECT_LT(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
+  EXPECT_GT(after_pressure.revision, before_pressure.revision);
 }
 
 TEST(AdaptiveBitrateController, ClampsBaseToConfiguredBounds) {

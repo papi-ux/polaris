@@ -48,8 +48,10 @@ namespace adaptive_bitrate {
   // explicit writer can retire Doctor completely before it clamps its value.
   // Protected by state_mutex.
   static int doctor_previous_max_bitrate_kbps = 0;
-  // Protected by state_mutex. Explicit controller/configuration writers bump
-  // this value; telemetry-driven target movement deliberately does not.
+  // Protected by state_mutex. Every target writer, including autonomous
+  // telemetry feedback, bumps this value. Doctor snapshots it and performs an
+  // exact compare-and-set so a feedback reduction that lands before Doctor
+  // acquires the actuator cannot be overwritten by a stale quality increase.
   static std::uint64_t operator_revision = 1;
   // The encoder thread is the only authority for what was actually applied.
   // Protected by state_mutex.
@@ -223,7 +225,12 @@ namespace adaptive_bitrate {
       set_controller_status("steady", "healthy");
     }
 
-    target_bitrate_kbps.store(clamp_target(new_target, base), std::memory_order_relaxed);
+    const int clamped_target = clamp_target(new_target, base);
+    if (clamped_target != current_target) {
+      target_bitrate_kbps.store(clamped_target, std::memory_order_relaxed);
+      ++operator_revision;
+      state_changed.notify_all();
+    }
   }
 
   void update_stream_health(double fps_ratio,
@@ -286,6 +293,8 @@ namespace adaptive_bitrate {
                        << "ms, encode=" << encode_time_ms
                        << "ms, age=" << avg_frame_age_ms << "ms)";
       target_bitrate_kbps.store(new_target, std::memory_order_relaxed);
+      ++operator_revision;
+      state_changed.notify_all();
     }
   }
 
