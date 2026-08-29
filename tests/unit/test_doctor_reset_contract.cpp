@@ -122,11 +122,17 @@ TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
     "void record_primary_network_observation(",
     "}  // namespace"
   );
-  const auto epoch = publication.find("adaptive_bitrate::note_network_evidence_arrival()");
+  const auto policy = publication.find("const bool suppresses_quality_restore");
+  const auto epoch = publication.find("adaptive_bitrate::note_network_evidence_arrival(");
   const auto fields = publication.find("primary_network_state.received_at");
+  const auto revision = publication.find("primary_network_state.revision");
+  ASSERT_NE(policy, std::string::npos);
   ASSERT_NE(epoch, std::string::npos);
   ASSERT_NE(fields, std::string::npos);
-  EXPECT_LT(epoch, fields);
+  ASSERT_NE(revision, std::string::npos);
+  EXPECT_LT(fields, policy);
+  EXPECT_LT(policy, epoch);
+  EXPECT_LT(epoch, revision);
 }
 
 TEST(DoctorResetContract, HostVideoEvidenceLinearizesBeforeAdaptiveFeedbackAndPublication) {
@@ -346,6 +352,48 @@ TEST(DoctorResetContract, ExplicitTopologyPrecedesPairedAlwaysVirtualDefault) {
     optimize.find("launch_profile::resolve_non_linux_topology("),
     std::string::npos
   );
+  EXPECT_NE(optimize.find("topology_source"), std::string::npos);
+  EXPECT_NE(optimize.find("topology_reason_code"), std::string::npos);
+
+  const auto final_validation = between(
+    source("src/process.cpp"),
+    "int validate_resolved_launch_profile_for_app(",
+    "int proc_t::execute("
+  );
+  EXPECT_NE(
+    final_validation.find("launch_profile::resolve_non_linux_topology("),
+    std::string::npos
+  );
+}
+
+TEST(DoctorResetContract, DisabledTrialsNeverExposeOrMutateRetainedReceipts) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto session_status = between(
+    nvhttp,
+    "const auto doctor_v2_status = doctor_v2::status(",
+    "auto recovery_records ="
+  );
+  const auto disabled_status = session_status.find("if (!doctor_v2::trials_enabled())");
+  const auto retained_status = session_status.find("doctor_trial::status(");
+  ASSERT_NE(disabled_status, std::string::npos);
+  ASSERT_NE(retained_status, std::string::npos);
+  EXPECT_LT(disabled_status, retained_status);
+  EXPECT_NE(session_status.find("{\"state\", \"disabled\"}"), std::string::npos);
+  EXPECT_NE(session_status.find("{\"cancellable\", false}"), std::string::npos);
+
+  const auto route = between(
+    nvhttp,
+    "auto polarisDoctorTrial =",
+    "auto polarisDoctorAction ="
+  );
+  const auto disabled_gate = route.find("if (!doctor_v2::trials_enabled())");
+  const auto get_route = route.find("if (request->method == \"GET\")");
+  const auto cancel = route.find("doctor_trial::cancel(");
+  ASSERT_NE(disabled_gate, std::string::npos);
+  ASSERT_NE(get_route, std::string::npos);
+  ASSERT_NE(cancel, std::string::npos);
+  EXPECT_LT(disabled_gate, get_route);
+  EXPECT_LT(disabled_gate, cancel);
 }
 
 TEST(DoctorResetContract, LegacyLaunchOverlayHelpersAreRemoved) {

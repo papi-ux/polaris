@@ -6448,12 +6448,29 @@ namespace proc {
       }
       launch_owns_refresh_rate =
         stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
-#elif defined(_WIN32)
-      launch_owns_refresh_rate =
+#else
+      bool virtual_display_supported = false;
+      bool host_requires_virtual_display = false;
+#if defined(_WIN32)
+      virtual_display_supported =
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
+        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::UNKNOWN;
+      host_requires_virtual_display =
         config::video.linux_display.headless_mode ||
-        launch_session->virtual_display ||
-        (!launch_session->user_locked_virtual_display && app.virtual_display) ||
         !video::allow_encoder_probing();
+#endif
+      const std::string requested_topology = launch_session->virtual_display ?
+        "host_virtual_display" :
+        launch_session->user_locked_virtual_display ? "desktop_display" : "";
+      const auto topology = launch_profile::resolve_non_linux_topology(
+        requested_topology,
+        launch_session->user_locked_virtual_display,
+        false,
+        !launch_session->user_locked_virtual_display && app.virtual_display,
+        virtual_display_supported,
+        host_requires_virtual_display
+      );
+      launch_owns_refresh_rate = topology.launch_owns_refresh_rate;
 #endif
       launch_session->host_max_fps.reset();
       if (launch_owns_refresh_rate) {

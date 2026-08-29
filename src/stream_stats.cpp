@@ -1703,11 +1703,6 @@ namespace stream_stats {
                                             double loss,
                                             uint64_t bytes_sent) {
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
-      // Advance the controller's Doctor transaction epoch before exposing any
-      // part of this observation. A concurrent action therefore sees either
-      // the complete prior observation and prior epoch, or the complete new
-      // observation and new epoch; it cannot CAS from stale clean evidence.
-      adaptive_bitrate::note_network_evidence_arrival();
       primary_network_state.received_at = std::chrono::steady_clock::now();
       primary_network_state.media_sample = media_sample;
       primary_network_state.latency_ms = latency_ms;
@@ -1722,6 +1717,19 @@ namespace stream_stats {
       primary_network_state.network_risk = network_risk_tracker.update(
         media_sample ? loss : 0.0,
         latency_ms
+      );
+      const bool suppresses_quality_restore =
+        primary_network_state.network_risk ||
+        (primary_network_state.packet_loss_available &&
+         primary_network_state.packet_loss > 2.0) ||
+        primary_network_state.latency_ms >= 45.0;
+      // Advance or latch Doctor policy before exposing this complete
+      // observation. Before a change, the controller epoch rejects a stale
+      // action. During a guarded quality transaction, a regression is latched
+      // atomically with the actuator so it cannot slip between verification
+      // and the next step.
+      adaptive_bitrate::note_network_evidence_arrival(
+        suppresses_quality_restore
       );
       primary_network_state.revision =
         hot_network_sample_revision.fetch_add(1, std::memory_order_release) + 1;
