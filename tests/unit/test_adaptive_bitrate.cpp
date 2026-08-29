@@ -159,16 +159,34 @@ TEST(AdaptiveBitrateController, DoctorTransactionRestoresExactOwnedState) {
   ASSERT_FALSE(adaptive_bitrate::get_doctor_state().enabled);
   ASSERT_TRUE(adaptive_bitrate::is_active());
   ASSERT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 15000);
+  adaptive_bitrate::acknowledge_live_bitrate_applied(*doctor_revision, 15000);
 
-  ASSERT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(
+  const auto restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
     *doctor_revision,
     before
-  ));
+  );
+  ASSERT_TRUE(restore_revision.has_value());
+  const auto rollback_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(rollback_request.has_value());
+  EXPECT_EQ(rollback_request->revision, *restore_revision);
+  EXPECT_EQ(rollback_request->target_bitrate_kbps, before.live_bitrate_kbps);
+  EXPECT_TRUE(adaptive_bitrate::get_state().active);
+  EXPECT_EQ(adaptive_bitrate::get_state().state, "rollback_pending");
+
+  adaptive_bitrate::acknowledge_live_bitrate_applied(
+    rollback_request->revision,
+    rollback_request->target_bitrate_kbps
+  );
   const auto after = adaptive_bitrate::get_doctor_state();
   EXPECT_EQ(after.enabled, before.enabled);
   EXPECT_EQ(after.base_bitrate_kbps, before.base_bitrate_kbps);
   EXPECT_EQ(after.live_bitrate_kbps, before.live_bitrate_kbps);
   EXPECT_EQ(after.max_bitrate_kbps, before.max_bitrate_kbps);
+  EXPECT_FALSE(adaptive_bitrate::is_active());
+  EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(
+    *restore_revision,
+    before.live_bitrate_kbps
+  ).has_value());
 }
 
 TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {

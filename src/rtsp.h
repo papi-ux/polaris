@@ -62,6 +62,10 @@ namespace rtsp_stream {
     // locks, avoiding dependence on a prior paired-settings persistence call.
     bool resolved_profile_from_client = false;
     std::optional<int> explicit_target_bitrate_kbps;
+    // Hard capabilities captured after authenticated topology/client-profile
+    // selection and re-applied by the final deterministic resolver.
+    std::optional<int> host_max_fps;
+    std::optional<bool> host_hdr_capable;
     std::string session_token;
     crypto::PERM perm;
     bool watch_only;

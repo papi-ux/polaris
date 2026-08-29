@@ -3257,7 +3257,11 @@ namespace video {
       return;
     }
 
-    adaptive_bitrate::set_runtime_update_supported(session->supports_runtime_bitrate_update());
+    adaptive_bitrate::set_runtime_update_supported(
+      session->supports_runtime_bitrate_update(),
+      {},
+      config.bitrate
+    );
     auto runtime_bitrate_guard = util::fail_guard([] {
       adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
     });
@@ -3515,19 +3519,25 @@ namespace video {
           }
 
           // Check adaptive bitrate and update encoder if target has changed
-          int effective_bitrate = config.bitrate;
-          if (adaptive_bitrate::is_active()) {
-            int target = adaptive_bitrate::get_target_bitrate_kbps();
-            if (target > 0 && target != applied_adaptive_bitrate) {
-              if (session->update_bitrate(target)) {
-                applied_adaptive_bitrate = target;
-                effective_bitrate = target;
+          int effective_bitrate = applied_adaptive_bitrate;
+          if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+            if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
+              if (session->update_bitrate(request->target_bitrate_kbps)) {
+                applied_adaptive_bitrate = request->target_bitrate_kbps;
+                adaptive_bitrate::acknowledge_live_bitrate_applied(
+                  request->revision,
+                  applied_adaptive_bitrate
+                );
+                effective_bitrate = applied_adaptive_bitrate;
               } else {
                 BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
                 adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
               }
-            } else if (target > 0) {
-              effective_bitrate = applied_adaptive_bitrate;
+            } else {
+              adaptive_bitrate::acknowledge_live_bitrate_applied(
+                request->revision,
+                applied_adaptive_bitrate
+              );
             }
           }
 

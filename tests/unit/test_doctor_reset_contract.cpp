@@ -83,7 +83,7 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
     "auto polarisSetBitrate =",
     "auto polarisSetAdaptiveBitrate ="
   );
-  EXPECT_NE(live_route.find("adaptive_bitrate::set_live_bitrate"), std::string::npos);
+  EXPECT_NE(live_route.find("doctor_actions::set_owner_live_bitrate"), std::string::npos);
   EXPECT_EQ(live_route.find("adaptive_bitrate::set_base_bitrate"), std::string::npos);
 
   const auto video = source("src/video.cpp");
@@ -92,7 +92,22 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
     "// Check adaptive bitrate and update encoder if target has changed",
     "stream_stats::update_frame_delivery("
   );
-  EXPECT_NE(runtime_update.find("adaptive_bitrate::is_active()"), std::string::npos);
+  EXPECT_NE(runtime_update.find("adaptive_bitrate::get_live_bitrate_request()"), std::string::npos);
+  EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
+}
+
+TEST(DoctorResetContract, PairedGlobalAdaptiveToggleRequiresTheSoleActiveOwner) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto adaptive_route = between(
+    nvhttp,
+    "auto polarisSetAdaptiveBitrate =",
+    "auto polarisSetAiOptimizer ="
+  );
+  EXPECT_NE(
+    adaptive_route.find("doctor_actions::acquire_paired_global_control"),
+    std::string::npos
+  );
+  EXPECT_NE(adaptive_route.find("active_owner_required"), std::string::npos);
 }
 
 TEST(DoctorResetContract, ResolvedLaunchRequiresAnExactResolvedHdrValue) {
@@ -117,21 +132,58 @@ TEST(DoctorResetContract, OptimizeOwnsHardRefreshAndHdrCapabilityValidation) {
     "auto polarisClientSupportReport ="
   );
   EXPECT_NE(handler.find("client_max_fps"), std::string::npos);
-  EXPECT_NE(handler.find("advertised_max_launch_refresh_rate_for_http"), std::string::npos);
+  EXPECT_NE(handler.find("topology_max_launch_refresh_rate_for_http"), std::string::npos);
+  EXPECT_NE(handler.find("launch_owned_display"), std::string::npos);
+  EXPECT_NE(handler.find("selected_output_name"), std::string::npos);
+  EXPECT_NE(handler.find("topology_locked"), std::string::npos);
+  EXPECT_NE(handler.find("find_app_for_optimization_game"), std::string::npos);
   EXPECT_NE(handler.find("advertised_codec_support_for_http"), std::string::npos);
   EXPECT_NE(handler.find("host_hdr_capable"), std::string::npos);
 }
 
-TEST(DoctorResetContract, ResolvedLaunchFailsClosedWhenHostCapsChanged) {
-  const auto launch_parser = between(
+TEST(DoctorResetContract, FutureLaunchOwnedDisplayIsNotCappedByCurrentPhysicalRefresh) {
+  const auto helper = between(
     source("src/nvhttp.cpp"),
-    "if (launch_session->resolved_profile_from_client) {",
-    "launch_session->watch_only ="
+    "std::optional<int> topology_max_launch_refresh_rate_for_http(",
+    "int advertised_max_launch_refresh_rate_for_http()"
   );
-  EXPECT_NE(launch_parser.find("above the current host refresh cap"), std::string::npos);
-  EXPECT_NE(launch_parser.find("above the configured host bitrate cap"), std::string::npos);
-  EXPECT_NE(launch_parser.find("current encoder lacks HDR support"), std::string::npos);
-  EXPECT_NE(launch_parser.find("return nullptr"), std::string::npos);
+  EXPECT_NE(helper.find("if (launch_owned_display)"), std::string::npos);
+  EXPECT_NE(helper.find("return 120"), std::string::npos);
+  EXPECT_EQ(helper.find("return 60"), std::string::npos);
+}
+
+TEST(DoctorResetContract, FinalResolverRevalidatesPostProfileRefreshAndHdrCaps) {
+  const auto capability_snapshot = between(
+    source("src/process.cpp"),
+    "Resolve hard output capabilities only after the previous generation",
+    "++_session_generation"
+  );
+  EXPECT_NE(capability_snapshot.find("get_client_profile"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("active_refresh_rate_hz_hint"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("effective_session_selection_for_launch"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("selection_owns_launch_refresh_rate"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("advertised_codec_capability_state"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("return 409"), std::string::npos);
+
+  const auto process = between(
+    source("src/process.cpp"),
+    "Resolve session overrides in a strict, evidence-independent order",
+    "const bool mirror_desktop_session"
+  );
+  EXPECT_NE(process.find("preset_request.host_max_fps = launch_session->host_max_fps"), std::string::npos);
+  EXPECT_NE(process.find("preset_request.host_hdr_capable = launch_session->host_hdr_capable"), std::string::npos);
+}
+
+TEST(DoctorResetContract, ResolvedLaunchFailsClosedWhenHostCapsChanged) {
+  const auto final_capability_gate = between(
+    source("src/process.cpp"),
+    "if (launch_session->resolved_profile_from_client) {",
+    "++_session_generation"
+  );
+  EXPECT_NE(final_capability_gate.find("above final output refresh cap"), std::string::npos);
+  EXPECT_NE(final_capability_gate.find("above configured bitrate cap"), std::string::npos);
+  EXPECT_NE(final_capability_gate.find("final encoder lacks HDR support"), std::string::npos);
+  EXPECT_NE(final_capability_gate.find("return 409"), std::string::npos);
 }
 
 TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLock) {
@@ -150,6 +202,34 @@ TEST(DoctorResetContract, PairedDisplaySettingIsNotPromotedToAnExplicitLaunchLoc
     launch_parser.find(
       "launch_session->resolved_profile_from_client || !named_cert_p->display_mode.empty()"
     ),
+    std::string::npos
+  );
+}
+
+TEST(DoctorResetContract, ExplicitTopologyPrecedesPairedAlwaysVirtualDefault) {
+  const auto launch_parser = between(
+    source("src/nvhttp.cpp"),
+    "const bool client_display_mode_explicit =",
+    "launch_session->scale_factor ="
+  );
+  EXPECT_NE(
+    launch_parser.find(
+      "!client_display_mode_explicit &&\n        named_cert_p->always_use_virtual_display"
+    ),
+    std::string::npos
+  );
+
+  const auto optimize = between(
+    source("src/nvhttp.cpp"),
+    "auto polarisOptimize =",
+    "auto polarisClientSupportReport ="
+  );
+  EXPECT_NE(
+    optimize.find("named_cert_p->always_use_virtual_display && !topology_locked"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    optimize.find("(!topology_locked && named_cert_p->always_use_virtual_display)"),
     std::string::npos
   );
 }

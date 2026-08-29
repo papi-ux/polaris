@@ -6,8 +6,10 @@
 
 #include <filesystem>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -40,6 +42,47 @@ namespace doctor_actions {
                             std::string_view run_id,
                             bool active_owner_present,
                             bool caller_is_active_owner);
+
+  /**
+   * Sole-owner transaction guard for process-global paired-client controls.
+   *
+   * The held guard serializes the authorization decision and the caller's
+   * mutation with stream generation handoff. A false guard owns no lock.
+   */
+  class paired_global_control_guard_t {
+   public:
+    paired_global_control_guard_t() = default;
+    paired_global_control_guard_t(const paired_global_control_guard_t &) = delete;
+    paired_global_control_guard_t &operator=(const paired_global_control_guard_t &) = delete;
+    paired_global_control_guard_t(paired_global_control_guard_t &&) noexcept = default;
+    paired_global_control_guard_t &operator=(paired_global_control_guard_t &&) noexcept = default;
+
+    explicit operator bool() const noexcept { return authorized_; }
+    void release() noexcept {
+      if (lock_.owns_lock()) lock_.unlock();
+    }
+
+   private:
+    friend paired_global_control_guard_t acquire_paired_global_control(
+      std::string_view owner_uuid
+    );
+
+    paired_global_control_guard_t(std::unique_lock<std::mutex> lock,
+                                  bool authorized) noexcept:
+        lock_(std::move(lock)),
+        authorized_(authorized) {
+    }
+
+    std::unique_lock<std::mutex> lock_;
+    bool authorized_ = false;
+  };
+
+  paired_global_control_guard_t acquire_paired_global_control(
+    std::string_view owner_uuid
+  );
+
+  /** Atomically apply a live paired-client bitrate only for the sole owner. */
+  bool set_owner_live_bitrate(std::string_view owner_uuid, int bitrate_kbps);
 
   /** Clamp a proposed bitrate to one guarded reduction step. */
   int guarded_bitrate_target(int current_bitrate_kbps,

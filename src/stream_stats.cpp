@@ -99,6 +99,8 @@ namespace stream_stats {
     struct primary_network_observation_t {
       std::uint64_t revision = 0;
       std::chrono::steady_clock::time_point received_at {};
+      std::uint64_t media_loss_revision = 0;
+      std::chrono::steady_clock::time_point media_loss_received_at {};
       bool media_sample = false;
       double latency_ms = 0.0;
       double packet_loss = 0.0;
@@ -110,6 +112,7 @@ namespace stream_stats {
     };
 
     constexpr std::size_t NETWORK_OBSERVATION_CAPACITY = 256;
+    constexpr std::int64_t DOCTOR_CURRENT_NETWORK_MAX_AGE_MS = 2000;
     std::deque<primary_network_observation_t> primary_network_observations;
     primary_network_observation_t primary_network_state;
 
@@ -440,6 +443,8 @@ namespace stream_stats {
     j["video_sample_revision"] = video_sample_revision;
     j["network_sample_revision"] = network_sample_revision;
     j["network_last_received_age_ms"] = network_last_received_age_ms;
+    j["media_loss_sample_revision"] = media_loss_sample_revision;
+    j["media_loss_last_received_age_ms"] = media_loss_last_received_age_ms;
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
@@ -1076,11 +1081,24 @@ namespace stream_stats {
     // Packet-loss actions require an explicitly confirmed media source. ENet's
     // peer->packetLoss is a reliable control-channel EWMA: useful context, but
     // not a measurement of video packets dropped at the client.
-    const bool confirmed_media_loss = stats.packet_loss_available && stats.packet_loss > 2.0;
-    const bool network_fail = stats.network_risk && (confirmed_media_loss || stats.latency_ms >= 45.0);
-    const bool network_watch = stats.network_risk && !network_fail;
+    const bool current_network_observation =
+      stats.network_sample_revision > 0 &&
+      stats.network_last_received_age_ms >= 0 &&
+      stats.network_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
+    const bool current_media_loss_observation =
+      stats.media_loss_sample_revision > 0 &&
+      stats.media_loss_last_received_age_ms >= 0 &&
+      stats.media_loss_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
+    const bool confirmed_media_loss = current_media_loss_observation &&
+      stats.packet_loss_available && stats.packet_loss > 2.0;
+    const bool network_fail = stats.network_risk &&
+      (confirmed_media_loss ||
+       (current_network_observation && stats.latency_ms >= 45.0));
+    const bool network_watch = current_network_observation &&
+      stats.network_risk && !network_fail;
     const bool control_channel_observation =
       stats.streaming &&
+      current_network_observation &&
       stats.control_channel_samples > 0 &&
       stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
@@ -1089,11 +1107,12 @@ namespace stream_stats {
       stats.paired_target_bitrate_kbps > 0 && stats.effective_launch_bitrate_kbps > 0 ?
         std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps) :
         0;
-    const bool network_evidence_available =
-      stats.packet_loss_available || stats.control_channel_samples > 0;
+    const bool network_evidence_available = current_network_observation &&
+      (current_media_loss_observation || stats.control_channel_samples > 0);
     const bool quality_reduced_live =
       stats.streaming && network_evidence_available && !stats.network_risk &&
-      stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
+      (!current_media_loss_observation || stats.packet_loss <= 2.0) &&
+      stats.latency_ms < 45.0 &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
     const bool single_session_scope = stats.clients.size() <= 1 &&
       stats.doctor_live_action_scope_available;
@@ -1223,13 +1242,13 @@ namespace stream_stats {
       evidence,
       "packet_loss",
       "Video packet loss",
-      stats.packet_loss_available ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr),
+      current_media_loss_observation ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr),
       "%",
-      !stats.packet_loss_available ? "unknown" : confirmed_media_loss ? "fail" : "pass",
-      stats.packet_loss_source,
-      stats.packet_loss_available ?
+      !current_media_loss_observation ? "unknown" : confirmed_media_loss ? "fail" : "pass",
+      current_media_loss_observation ? stats.packet_loss_source : "unavailable",
+      current_media_loss_observation ?
         "Packet loss confirmed by media-path telemetry." :
-        "No confirmed media packet-loss measurement is available for this live stream."
+        "No current confirmed media packet-loss measurement is available for this live stream."
     );
     append_doctor_evidence(
       evidence,
@@ -1618,6 +1637,10 @@ namespace stream_stats {
       );
       primary_network_state.revision =
         hot_network_sample_revision.fetch_add(1, std::memory_order_release) + 1;
+      if (media_sample) {
+        primary_network_state.media_loss_revision = primary_network_state.revision;
+        primary_network_state.media_loss_received_at = primary_network_state.received_at;
+      }
 
       hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
       hot_packet_loss.store(primary_network_state.packet_loss, std::memory_order_relaxed);
@@ -1786,6 +1809,10 @@ namespace stream_stats {
     const auto aged_at = std::chrono::steady_clock::now() - age;
     primary_network_observations.back().received_at = aged_at;
     primary_network_state.received_at = aged_at;
+    if (primary_network_observations.back().media_sample) {
+      primary_network_observations.back().media_loss_received_at = aged_at;
+      primary_network_state.media_loss_received_at = aged_at;
+    }
   }
 #endif
 
@@ -2637,6 +2664,15 @@ namespace stream_stats {
             std::chrono::steady_clock::now() - network.received_at
           ).count()
         );
+        result.media_loss_sample_revision = network.media_loss_revision;
+        if (network.media_loss_received_at != std::chrono::steady_clock::time_point {}) {
+          result.media_loss_last_received_age_ms = std::max<std::int64_t>(
+            0,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - network.media_loss_received_at
+            ).count()
+          );
+        }
         result.network_risk = network.network_risk;
         result.bytes_sent = network.bytes_sent;
       } else {

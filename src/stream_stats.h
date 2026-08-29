@@ -157,6 +157,10 @@ namespace stream_stats {
     /// Host monotonic age of the newest complete network observation, or -1
     /// when no observation has been received. Client timestamps never feed it.
     std::int64_t network_last_received_age_ms = -1;
+    /// Host age/revision of the last confirmed media-loss observation. A
+    /// newer control-channel sample never refreshes these fields.
+    uint64_t media_loss_sample_revision = 0;
+    std::int64_t media_loss_last_received_age_ms = -1;
     /// Debounced by network_risk_tracker_t; the single truth every reader serves.
     bool network_risk = false;
     uint64_t bytes_sent = 0;

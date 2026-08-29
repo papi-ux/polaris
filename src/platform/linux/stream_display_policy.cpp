@@ -18,20 +18,6 @@ namespace stream_display_policy {
 
     using stream_path::to_lower_copy;
 
-    std::string configured_selection_id() {
-      auto &linux_display = config::video.linux_display;
-      if (!linux_display.stream_mode.empty()) {
-        if (stream_path::find(linux_display.stream_mode)) {
-          return to_lower_copy(linux_display.stream_mode);
-        }
-      }
-      return selection_from_legacy_booleans({
-        linux_display.headless_mode,
-        linux_display.use_cage_compositor,
-        linux_display.prefer_gpu_native_capture,
-      });
-    }
-
     void normalize_host_virtual_display_state() {
       auto &linux_display = config::video.linux_display;
       linux_display.auto_manage_displays = false;
@@ -42,6 +28,26 @@ namespace stream_display_policy {
     }
 
   }  // namespace
+
+  std::string configured_selection() {
+    auto &linux_display = config::video.linux_display;
+    if (!linux_display.stream_mode.empty() && stream_path::find(linux_display.stream_mode)) {
+      return stream_path::to_lower_copy(linux_display.stream_mode);
+    }
+    return selection_from_legacy_booleans({
+      linux_display.headless_mode,
+      linux_display.use_cage_compositor,
+      linux_display.prefer_gpu_native_capture,
+    });
+  }
+
+  bool selection_owns_launch_refresh_rate(std::string_view selection) {
+    const auto key = stream_path::to_lower_copy(selection);
+    return key == k_headless_stream ||
+           key == k_windowed_stream ||
+           key == k_host_virtual_display ||
+           key == k_gamescope_stream;
+  }
 
   std::string label_for_selection(std::string_view selection) {
     if (const auto *path = stream_path::find(selection)) {
@@ -159,15 +165,23 @@ namespace stream_display_policy {
     if (mirror_desktop) {
       return std::string {k_desktop_display};
     }
-    if (!requested_selection.empty()) {
-      return std::string {requested_selection};
-    }
-    if (launch_virtual_display) {
-      return std::string {k_host_virtual_display};
+    if (virtual_display_user_locked) {
+      if (!requested_selection.empty()) {
+        return std::string {requested_selection};
+      }
+      if (launch_virtual_display) {
+        return std::string {k_host_virtual_display};
+      }
     }
     if (!virtual_display_optimization_present &&
         app_virtual_display &&
         !virtual_display_user_locked) {
+      return std::string {k_host_virtual_display};
+    }
+    if (!requested_selection.empty()) {
+      return std::string {requested_selection};
+    }
+    if (launch_virtual_display) {
       return std::string {k_host_virtual_display};
     }
     return {};
@@ -197,7 +211,7 @@ namespace stream_display_policy {
   }
 
   resolved_t resolve(const input_t &input) {
-    const auto selection = configured_selection_id();
+    const auto selection = configured_selection();
     const auto *path = stream_path::find(selection);
     stream_path::descriptor_t desc {};
     if (path) {

@@ -148,9 +148,24 @@ TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClie
     "desktop_display"
   ) << "mirrorDesktop must override a host_virtual_display default for this session";
   EXPECT_EQ(
-    effective_session_selection_for_launch("headless_stream", false, true, true, false),
+    effective_session_selection_for_launch("headless_stream", false, true, true, true),
     "headless_stream"
   ) << "an explicit accepted streamMode remains authoritative";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("headless_stream", false, false, true, false),
+    "host_virtual_display"
+  ) << "an unlocked paired mode must not override the app's display semantic";
+}
+
+TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) {
+  using stream_display_policy::selection_owns_launch_refresh_rate;
+
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("headless_stream"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("windowed_stream"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("host_virtual_display"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("gamescope_stream"));
+  EXPECT_FALSE(selection_owns_launch_refresh_rate("desktop_display"));
+  EXPECT_FALSE(selection_owns_launch_refresh_rate("headless_dongle"));
 }
 
 TEST(StreamDisplayPolicyTests, HostVirtualClearsStaleAutoManage) {

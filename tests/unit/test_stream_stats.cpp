@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -80,7 +81,39 @@ namespace {
     const auto doctor = stream_stats::build_doctor_json(
       context.stats, health, context.app_uuid
     );
-    return doctor.at("safe_recovery_action").at("payload_preview");
+    auto payload = doctor.at("safe_recovery_action").at("payload_preview");
+    static std::uint64_t request_sequence = 0;
+    payload["request_id"] = "test-doctor-request-" +
+      std::to_string(++request_sequence);
+    return payload;
+  }
+
+  template<typename Callable>
+  nlohmann::json execute_with_encoder_ack(int expected_bitrate_kbps,
+                                          Callable &&callable) {
+    std::atomic<bool> acknowledged {false};
+    std::thread encoder([&] {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+      while (std::chrono::steady_clock::now() < deadline) {
+        if (const auto request = adaptive_bitrate::get_live_bitrate_request();
+            request && request->target_bitrate_kbps == expected_bitrate_kbps) {
+          adaptive_bitrate::acknowledge_live_bitrate_applied(
+            request->revision,
+            request->target_bitrate_kbps
+          );
+          acknowledged.store(true, std::memory_order_release);
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+
+    auto result = callable();
+    encoder.join();
+    EXPECT_TRUE(acknowledged.load(std::memory_order_acquire))
+      << "The test encoder did not observe the expected "
+      << expected_bitrate_kbps << " kbps request";
+    return result;
   }
 }  // namespace
 
@@ -844,6 +877,10 @@ TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClea
   stats.encode_time_ms = 4.0;
   stats.packet_loss = 0.0;
   stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 3.8;
   stats.network_risk = false;
 
@@ -871,6 +908,9 @@ TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.network_risk = true;
   stats.packet_loss = 0.4;
+  stats.control_channel_samples = 1;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
   stats.latency_ms = 20.0;
 
   const auto doctor = stream_stats::build_doctor_json(
@@ -905,6 +945,8 @@ TEST(StreamStatsDoctorTests, ControlLossIsInformationalAndCannotReduceQuality) {
   stats.packet_loss_source = "unavailable";
   stats.control_channel_packet_loss = 8.72039794921875;
   stats.control_channel_samples = 42;
+  stats.network_sample_revision = 42;
+  stats.network_last_received_age_ms = 0;
   stats.latency_ms = 4.0;
   stats.network_risk = false;
 
@@ -947,6 +989,11 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.network_risk = true;
   stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 52.0;
   stats.adaptive_runtime_update_supported = true;
 
@@ -979,6 +1026,11 @@ TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNo
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.network_risk = true;
   stats.packet_loss = 21.8;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 52.0;
 
   const auto doctor = stream_stats::build_doctor_json(
@@ -1020,6 +1072,10 @@ TEST(StreamStatsDoctorTests, CleanLiveReductionOffersCapabilityBoundedQualityRes
   stats.encode_time_ms = 4.0;
   stats.packet_loss = 0.0;
   stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 3.8;
   stats.network_risk = false;
   stats.adaptive_runtime_update_supported = true;
@@ -1162,6 +1218,8 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
 
   stats.packet_loss = 3.4;
   stats.packet_loss_available = true;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
   EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
 
   stats.packet_loss = 0.0;
@@ -1171,6 +1229,45 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
 
   stats.network_last_received_age_ms = 2001;
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+}
+
+TEST(DoctorActionTests, FreshControlObservationCannotRefreshStaleMediaLoss) {
+  using namespace std::chrono_literals;
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true, "DoctorMediaProvenance", "203.0.113.22");
+
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(35.0, 3.4, 1000);
+  }
+  stream_stats::age_latest_network_observation_for_tests(3s);
+  stream_stats::update_control_channel_stats(35.0, 0.0, 1000);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.network_risk);
+  EXPECT_GE(stats.media_loss_last_received_age_ms, 2000);
+  EXPECT_LT(stats.network_last_received_age_ms, 2000);
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    nlohmann::json::object(),
+    "media-provenance-app"
+  );
+  EXPECT_NE(doctor.at("primary_issue"), "network_jitter");
+  const auto packet_loss_evidence = std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) {
+      return item.value("id", std::string {}) == "packet_loss";
+    }
+  );
+  ASSERT_NE(packet_loss_evidence, doctor.at("evidence").end());
+  EXPECT_EQ(packet_loss_evidence->at("status"), "unknown");
+  EXPECT_TRUE(packet_loss_evidence->at("value").is_null());
+
+  stream_stats::update_stream_active(false);
 }
 
 TEST(DoctorActionTests, StaleHostNetworkEvidenceCannotMutateBitrate) {
@@ -1281,13 +1378,21 @@ TEST(DoctorActionTests, QualityRestoreUsesCapturedLaunchCeilingInsteadOfCurrentB
 
   const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
-  EXPECT_EQ(applied.at("applied").at("bitrate_kbps"), 9475);
-  EXPECT_EQ(applied.at("applied").at("target_bitrate_kbps"), 15000);
+  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 9475);
+  EXPECT_EQ(applied.at("requested").at("target_bitrate_kbps"), 15000);
   EXPECT_EQ(applied.at("evidence").at("effective_launch_bitrate_kbps"), 15000);
 
   const auto run_id = applied.at("run_id").get<std::string>();
-  const auto undone = doctor_actions::execute({
-    {"action_id", "undo"}, {"run_id", run_id}
+  const auto apply_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(apply_request.has_value());
+  adaptive_bitrate::acknowledge_live_bitrate_applied(
+    apply_request->revision,
+    apply_request->target_bitrate_kbps
+  );
+  const auto undone = execute_with_encoder_ack(7580, [&] {
+    return doctor_actions::execute({
+      {"action_id", "undo"}, {"run_id", run_id}
+    });
   });
   EXPECT_TRUE(undone.at("status").get<bool>());
   EXPECT_EQ(adaptive_bitrate::get_state().base_bitrate_kbps, 15000);
@@ -1320,7 +1425,7 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
 
   const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
-  ASSERT_EQ(applied.at("applied").at("bitrate_kbps"), 9475);
+  ASSERT_EQ(applied.at("requested").at("bitrate_kbps"), 9475);
   const auto run_id = applied.at("run_id").get<std::string>();
 
   for (int i = 0; i < 2; ++i) {
@@ -1335,8 +1440,10 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
   for (int i = 0; i < 3; ++i) {
     stream_stats::update_network_stats(55.0, 3.5, 1000);
   }
-  const auto degraded = doctor_actions::execute({
-    {"action_id", "verify"}, {"run_id", run_id}
+  const auto degraded = execute_with_encoder_ack(7580, [&] {
+    return doctor_actions::execute({
+      {"action_id", "verify"}, {"run_id", run_id}
+    });
   });
   EXPECT_TRUE(degraded.at("status").get<bool>());
   EXPECT_TRUE(degraded.at("changed").get<bool>());
@@ -1379,6 +1486,44 @@ TEST(DoctorActionTests, NewerExplicitBitrateSupersedesUndoWithoutBeingOverwritte
   EXPECT_FALSE(undo.at("changed").get<bool>());
   EXPECT_EQ(undo.at("state"), "superseded");
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().base_bitrate_kbps, 10000);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
+
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, WatchdogRetainsSupersededTerminalReceipt) {
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(20000);
+  adaptive_bitrate::set_enabled(false);
+
+  stream_stats::update_stream_active(true, "DoctorWatchdogSupersede", "203.0.113.20");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+
+  adaptive_bitrate::set_base_bitrate(10000);
+  doctor_actions::run_verification_watchdog_for_tests();
+
+  const auto receipt = doctor_actions::execute({
+    {"action_id", "verify"}, {"run_id", run_id}
+  });
+  EXPECT_TRUE(receipt.at("status").get<bool>());
+  EXPECT_FALSE(receipt.at("changed").get<bool>());
+  EXPECT_EQ(receipt.at("state"), "superseded");
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
 
   adaptive_bitrate::set_enabled(false);
@@ -1444,8 +1589,8 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
   EXPECT_TRUE(applied.at("changed").get<bool>());
-  EXPECT_EQ(applied.at("state"), "watching");
-  EXPECT_EQ(applied.at("applied").at("bitrate_kbps"), 16000);
+  EXPECT_EQ(applied.at("state"), "applying");
+  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 16000);
   EXPECT_EQ(applied.at("before").at("bitrate_kbps"), 20000);
   EXPECT_EQ(applied.at("verification").at("delay_seconds"), 8);
   const auto run_id = applied.at("run_id").get<std::string>();
@@ -1466,7 +1611,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   const auto watching = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
   EXPECT_TRUE(watching.at("status").get<bool>());
   EXPECT_FALSE(watching.at("changed").get<bool>());
-  EXPECT_EQ(watching.at("state"), "watching");
+  EXPECT_EQ(watching.at("state"), "applying");
   EXPECT_GT(watching.at("retry_after_seconds").get<int>(), 0);
   EXPECT_TRUE(watching.at("undo").at("available").get<bool>());
 
@@ -1474,8 +1619,10 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // network observations, the guarded change rolls back instead of accepting
   // stale pre-change evidence.
   doctor_actions::make_verification_due_for_tests();
-  const auto no_fresh_evidence = doctor_actions::execute({
-    {"action_id", "verify"}, {"run_id", run_id}
+  const auto no_fresh_evidence = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({
+      {"action_id", "verify"}, {"run_id", run_id}
+    });
   });
   EXPECT_TRUE(no_fresh_evidence.at("status").get<bool>());
   EXPECT_TRUE(no_fresh_evidence.at("changed").get<bool>());
@@ -1492,8 +1639,10 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   }
   ASSERT_FALSE(stream_stats::get_current().network_risk);
   doctor_actions::make_verification_due_for_tests();
-  const auto clustered = doctor_actions::execute({
-    {"action_id", "verify"}, {"run_id", clustered_run_id}
+  const auto clustered = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({
+      {"action_id", "verify"}, {"run_id", clustered_run_id}
+    });
   });
   EXPECT_TRUE(clustered.at("status").get<bool>());
   EXPECT_TRUE(clustered.at("changed").get<bool>());
@@ -1521,8 +1670,10 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_TRUE(verified.at("verification_window").at("complete").get<bool>());
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 16000);
 
-  const auto undone = doctor_actions::execute({
-    {"action_id", "undo"}, {"run_id", verified_run_id}
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({
+      {"action_id", "undo"}, {"run_id", verified_run_id}
+    });
   });
   EXPECT_TRUE(undone.at("status").get<bool>());
   EXPECT_TRUE(undone.at("changed").get<bool>());
@@ -1574,7 +1725,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
 
   scoped_context.host_tuning_allowed = false;
   const auto shutdown_blocked = doctor_actions::execute(
-    {{"action_id", "lower_bitrate"}}, scoped_context
+    {{"action_id", "lower_bitrate"}, {"request_id", "test-shutdown-blocked"}}, scoped_context
   );
   EXPECT_FALSE(shutdown_blocked.at("status").get<bool>());
   EXPECT_EQ(shutdown_blocked.at("state"), "scope_unavailable");
@@ -1582,7 +1733,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
 
   scoped_context.host_tuning_allowed = true;
   const auto forged_scoped = doctor_actions::execute(
-    {{"action_id", "lower_bitrate"}}, scoped_context
+    {{"action_id", "lower_bitrate"}, {"request_id", "test-forged-envelope"}}, scoped_context
   );
   EXPECT_FALSE(forged_scoped.at("status").get<bool>());
   EXPECT_EQ(forged_scoped.at("code"), "stale_action_envelope");
@@ -1609,7 +1760,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
     {"action_id", "verify"}, {"run_id", scoped_run_id}
   }, scoped_context);
   EXPECT_TRUE(still_owned.at("status").get<bool>());
-  EXPECT_EQ(still_owned.at("state"), "watching");
+  EXPECT_EQ(still_owned.at("state"), "applying");
 
   // Simulate teardown restoring the next stream's own target. A receipt from
   // generation 101 must reject generation 102 without clearing the owned run
@@ -1759,6 +1910,10 @@ TEST(StreamStatsDoctorTests, MultipleSessionsNeverOfferProcessGlobalAutoFix) {
   stats.network_risk = true;
   stats.packet_loss_available = true;
   stats.packet_loss = 3.5;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 50.0;
   stats.bitrate_kbps = 20000;
   stats.adaptive_runtime_update_supported = true;
@@ -1793,13 +1948,98 @@ TEST(DoctorActionTests, OlderStreamCannotAutoFixAfterTheNewestViewerLeaves) {
   context.session_generation = 401;
   context.stats = stream_stats::get_current();
 
-  const auto blocked = doctor_actions::execute({{"action_id", "lower_bitrate"}}, context);
+  const auto blocked = doctor_actions::execute({
+    {"action_id", "lower_bitrate"}, {"request_id", "test-retired-owner"}
+  }, context);
   EXPECT_FALSE(blocked.at("status").get<bool>());
   EXPECT_EQ(blocked.at("state"), "scope_unavailable");
   EXPECT_FALSE(stream_stats::get_current().doctor_live_action_scope_available);
 
   doctor_actions::session_ended("client-owner", 401);
   stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(true, "DoctorIdempotent", "203.0.113.23");
+  stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 421;
+  doctor_actions::session_started("client-owner", generation, 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  stream_stats::start_session_timing("client-owner", generation);
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.session_generation = generation;
+  context.stats = stream_stats::get_current();
+  const auto request = trusted_doctor_action_request(context);
+
+  const auto applied = doctor_actions::execute(request, context);
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  ASSERT_EQ(applied.at("state"), "applying");
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto request_id = request.at("request_id").get<std::string>();
+
+  const auto repeated = doctor_actions::execute(request, context);
+  EXPECT_TRUE(repeated.at("status").get<bool>());
+  EXPECT_FALSE(repeated.at("changed").get<bool>());
+  EXPECT_EQ(repeated.at("run_id"), run_id);
+  EXPECT_EQ(repeated.at("request_id"), request_id);
+  EXPECT_FALSE(doctor_actions::set_owner_live_bitrate("client-viewer", 18000));
+
+  ASSERT_TRUE(doctor_actions::set_owner_live_bitrate("client-owner", 18000));
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
+  const auto stale_retry = doctor_actions::execute(request, context);
+  EXPECT_TRUE(stale_retry.at("status").get<bool>());
+  EXPECT_EQ(stale_retry.at("state"), "superseded");
+  EXPECT_EQ(stale_retry.at("request_id"), request_id);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
+
+  doctor_actions::session_ended("client-owner", generation);
+  stream_stats::stop_session_timing("client-owner", generation);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, GlobalControlAuthorizationSerializesStreamHandoff) {
+  doctor_actions::session_started("client-owner", 431, 20000);
+  auto guard = doctor_actions::acquire_paired_global_control("client-owner");
+  ASSERT_TRUE(static_cast<bool>(guard));
+
+  std::atomic<bool> handoff_entered {false};
+  std::atomic<bool> handoff_finished {false};
+  std::thread handoff([&] {
+    handoff_entered.store(true, std::memory_order_release);
+    doctor_actions::session_started("client-viewer", 432, 18000);
+    handoff_finished.store(true, std::memory_order_release);
+  });
+  while (!handoff_entered.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_FALSE(handoff_finished.load(std::memory_order_acquire));
+
+  guard.release();
+  handoff.join();
+  EXPECT_TRUE(handoff_finished.load(std::memory_order_acquire));
+
+  auto stale_owner_guard = doctor_actions::acquire_paired_global_control("client-owner");
+  EXPECT_FALSE(static_cast<bool>(stale_owner_guard));
+  doctor_actions::session_ended("client-owner", 431);
+  doctor_actions::session_ended("client-viewer", 432);
 }
 
 TEST(DoctorActionTests, NewestStreamCannotAutoFixAfterTheOlderViewerLeaves) {
@@ -1816,7 +2056,9 @@ TEST(DoctorActionTests, NewestStreamCannotAutoFixAfterTheOlderViewerLeaves) {
   context.session_generation = 412;
   context.stats = stream_stats::get_current();
 
-  const auto blocked = doctor_actions::execute({{"action_id", "lower_bitrate"}}, context);
+  const auto blocked = doctor_actions::execute({
+    {"action_id", "lower_bitrate"}, {"request_id", "test-retired-viewer"}
+  }, context);
   EXPECT_FALSE(blocked.at("status").get<bool>());
   EXPECT_EQ(blocked.at("state"), "scope_unavailable");
   EXPECT_FALSE(stream_stats::get_current().doctor_live_action_scope_available);
@@ -1990,6 +2232,9 @@ TEST(StreamStatsDoctorTests, CaptureLatencyFailOutranksNetworkWatch) {
   stats.avg_frame_age_ms = 26.5;
   stats.network_risk = true;
   stats.packet_loss = 0.5;
+  stats.control_channel_samples = 1;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
   stats.latency_ms = 20.0;
 
   const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());

@@ -59,6 +59,12 @@ namespace adaptive_bitrate {
     std::uint64_t revision = 0;
   };
 
+  /** One encoder-visible bitrate request owned by a controller revision. */
+  struct live_bitrate_request_t {
+    int target_bitrate_kbps = 0;
+    std::uint64_t revision = 0;
+  };
+
   /**
    * @brief Feed network statistics from client loss reports.
    * @param packet_loss_percent Packet loss percentage (0-100).
@@ -106,10 +112,38 @@ namespace adaptive_bitrate {
     std::optional<int> max_bitrate_kbps = std::nullopt
   );
 
-  /** Restore an exact pre-action snapshot only while Doctor still owns it. */
-  bool restore_doctor_state_if_revision(
+  /**
+   * Restore an exact pre-action snapshot only while Doctor still owns it.
+   *
+   * The returned revision remains encoder-visible as a one-shot update even
+   * when the restored adaptive policy is disabled. Callers must confirm that
+   * revision before reporting rollback complete.
+   */
+  std::optional<std::uint64_t> restore_doctor_state_if_revision(
     std::uint64_t expected_revision,
     const doctor_state_t &previous_state
+  );
+
+  /** Return the current encoder request, including one-shot rollback work. */
+  std::optional<live_bitrate_request_t> get_live_bitrate_request();
+
+  /** Record a successful encoder application of an exact controller request. */
+  void acknowledge_live_bitrate_applied(
+    std::uint64_t revision,
+    int bitrate_kbps
+  );
+
+  /** Host-monotonic application time for an exact target/revision, if known. */
+  std::optional<std::chrono::steady_clock::time_point> live_bitrate_applied_at(
+    std::uint64_t revision,
+    int bitrate_kbps
+  );
+
+  /** Wait for an exact encoder application without changing controller state. */
+  bool wait_for_live_bitrate_applied(
+    std::uint64_t revision,
+    int bitrate_kbps,
+    std::chrono::milliseconds timeout
   );
 
   /**
@@ -162,7 +196,11 @@ namespace adaptive_bitrate {
    * The controller remains configured when this is false, but it must not
    * consume telemetry or publish an encoder target that was never applied.
    */
-  void set_runtime_update_supported(bool supported, const std::string &reason = {});
+  void set_runtime_update_supported(
+    bool supported,
+    const std::string &reason = {},
+    int initial_encoder_bitrate_kbps = 0
+  );
 
   /**
    * @brief Check whether adaptive bitrate is configured and usable live.
