@@ -141,6 +141,16 @@ namespace stream_display_policy {
   std::string selection_from_legacy_booleans(const legacy_booleans_t &booleans);
 
   /**
+   * @brief Return the configured selection after legacy-boolean normalization.
+   */
+  std::string configured_selection();
+
+  /**
+   * @brief Whether a mode creates/owns the stream output refresh rate.
+   */
+  bool selection_owns_launch_refresh_rate(std::string_view selection);
+
+  /**
    * @brief Map a selection id to the legacy boolean triple used by older clients.
    */
   legacy_booleans_t legacy_booleans_for_selection(std::string_view selection);

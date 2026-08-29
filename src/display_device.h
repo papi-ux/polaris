@@ -7,6 +7,9 @@
 // standard includes
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 
 // lib includes
 #include <display_device/types.h>
@@ -132,6 +135,16 @@ namespace display_device {
    * @examples_end
    */
   [[nodiscard]] EnumeratedDeviceList enumerate_devices();
+
+  /**
+   * @brief Return the active refresh rate for a configured output, when known.
+   *
+   * The configured output is matched first. If it cannot be mapped to an
+   * active device, the primary active display (or any active display) is used
+   * as a conservative hint. Launch-owned virtual/private outputs must not call
+   * this helper because their refresh rate is created by the launch itself.
+   */
+  [[nodiscard]] std::optional<int> active_refresh_rate_hz_hint(std::string_view output_name = {});
 
   /**
    * @brief A tag structure indicating that configuration parsing has failed.

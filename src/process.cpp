@@ -6607,6 +6607,71 @@ namespace proc {
     }
 #endif
 
+    // Resolve hard output capabilities only after the previous generation has
+    // been torn down, but before installing any state for the new generation.
+    // The paired output profile and app topology semantics are immutable local
+    // snapshots for the rest of this launch, so /optimize and the final process
+    // resolver cannot observe different outputs mid-flight.
+    const auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
+    const std::string selected_output_name =
+      client_profile && !client_profile->output_name.empty() ?
+        client_profile->output_name : config::video.output_name;
+    bool launch_owns_refresh_rate = false;
+#ifdef __linux__
+    auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
+      launch_session->stream_mode,
+      launch_session->mirror_desktop || app.desktop_mirror,
+      launch_session->virtual_display,
+      app.virtual_display,
+      launch_session->user_locked_virtual_display,
+      false
+    );
+    if (effective_selection.empty()) {
+      effective_selection = stream_display_policy::configured_selection();
+    }
+    launch_owns_refresh_rate =
+      stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
+#elif defined(_WIN32)
+    launch_owns_refresh_rate =
+      config::video.linux_display.headless_mode ||
+      launch_session->virtual_display ||
+      (!launch_session->user_locked_virtual_display && app.virtual_display) ||
+      !video::allow_encoder_probing();
+#endif
+    launch_session->host_max_fps.reset();
+    if (launch_owns_refresh_rate) {
+      // The stock containment presets do not create modes above 120 Hz.
+      launch_session->host_max_fps = 120000;
+    } else if (const auto refresh_rate =
+                 display_device::active_refresh_rate_hz_hint(selected_output_name)) {
+      launch_session->host_max_fps = *refresh_rate * 1000;
+    }
+
+    const auto current_codec_support = video::advertised_codec_capability_state();
+    launch_session->host_hdr_capable =
+      current_codec_support.hevc_mode >= 3 || current_codec_support.av1_mode >= 3;
+
+    if (launch_session->resolved_profile_from_client) {
+      if (launch_session->host_max_fps &&
+          launch_session->requested_fps > *launch_session->host_max_fps) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved profile above final output refresh cap: "sv
+                           << launch_session->requested_fps << " > " << *launch_session->host_max_fps;
+        return 409;
+      }
+      if (config::video.max_bitrate > 0 &&
+          launch_session->explicit_target_bitrate_kbps &&
+          *launch_session->explicit_target_bitrate_kbps > config::video.max_bitrate) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved profile above configured bitrate cap: "sv
+                           << *launch_session->explicit_target_bitrate_kbps
+                           << " > " << config::video.max_bitrate;
+        return 409;
+      }
+      if (launch_session->enable_hdr && launch_session->host_hdr_capable == false) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved HDR profile because the final encoder lacks HDR support"sv;
+        return 409;
+      }
+    }
+
     ++_session_generation;
     capture_generation.generation_id = _session_generation;
 #ifdef __linux__
@@ -6706,7 +6771,6 @@ namespace proc {
                       << *launch_session->paired_target_bitrate_kbps << " kbps";
     }
 
-    auto client_profile = client_profiles::get_client_profile(launch_session->device_name);
     if (client_profile) {
       BOOST_LOG(info) << "Applying client profile for \""sv << launch_session->device_name << '"';
 
@@ -6738,6 +6802,7 @@ namespace proc {
     preset_request.requested_width = launch_session->requested_width;
     preset_request.requested_height = launch_session->requested_height;
     preset_request.requested_fps = launch_session->requested_fps;
+    preset_request.host_max_fps = launch_session->host_max_fps;
     preset_request.display_locked = optimization_locks.display_mode;
     preset_request.paired_bitrate_kbps = launch_session->paired_target_bitrate_kbps;
     preset_request.explicit_bitrate_kbps = launch_session->explicit_target_bitrate_kbps;
@@ -6748,6 +6813,7 @@ namespace proc {
     preset_request.hdr_requested = launch_session->enable_hdr;
     preset_request.hdr_locked = launch_session->resolved_profile_from_client;
     preset_request.client_profile_hdr = client_profile_hdr;
+    preset_request.host_hdr_capable = launch_session->host_hdr_capable;
     if (resolved_optimization.color_range) {
       preset_request.color_range = resolved_optimization.color_range;
     }
@@ -6865,14 +6931,7 @@ namespace proc {
     const bool virtual_display_requested_before_mode =
       launch_session->virtual_display ||
       (_app.virtual_display && !launch_session->user_locked_virtual_display);
-    const std::string session_mode = stream_display_policy::effective_session_selection_for_launch(
-      launch_session ? std::string_view {launch_session->stream_mode} : std::string_view {},
-      launch_session && launch_session->mirror_desktop,
-      launch_session && launch_session->virtual_display,
-      _app.virtual_display,
-      launch_session && launch_session->user_locked_virtual_display,
-      false
-    );
+    const std::string session_mode = effective_selection;
     if (!session_mode.empty()) {
       launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
     }

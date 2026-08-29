@@ -2477,77 +2477,21 @@ namespace nvhttp {
       return video::advertised_codec_capability_state();
     }
 
-    std::optional<int> rounded_refresh_rate_hz(const display_device::FloatingPoint &value) {
-      return std::visit(
-        [](const auto &refresh_rate) -> std::optional<int> {
-          using value_t = std::decay_t<decltype(refresh_rate)>;
-          if constexpr (std::is_same_v<value_t, display_device::Rational>) {
-            if (refresh_rate.m_denominator == 0) {
-              return std::nullopt;
-            }
-
-            return static_cast<int>(std::lround(static_cast<double>(refresh_rate.m_numerator) /
-                                                static_cast<double>(refresh_rate.m_denominator)));
-          } else {
-            return static_cast<int>(std::lround(refresh_rate));
-          }
-        },
-        value
-      );
-    }
-
-    std::optional<int> active_output_refresh_rate_hz_hint() {
-      const auto configured_display_name = display_device::map_output_name(config::video.output_name);
-      const auto enumerated_devices = display_device::enumerate_devices();
-
-      std::optional<int> primary_refresh_rate;
-      std::optional<int> any_active_refresh_rate;
-
-      for (const auto &device : enumerated_devices) {
-        if (!device.m_info) {
-          continue;
-        }
-
-        const auto refresh_rate_hz = rounded_refresh_rate_hz(device.m_info->m_refresh_rate);
-        if (!refresh_rate_hz || *refresh_rate_hz <= 0) {
-          continue;
-        }
-
-        const bool matches_configured_output = !configured_display_name.empty() &&
-                                              (device.m_display_name == configured_display_name ||
-                                               device.m_device_id == config::video.output_name);
-        if (matches_configured_output) {
-          return refresh_rate_hz;
-        }
-
-        if (device.m_info->m_primary &&
-            (!primary_refresh_rate || *refresh_rate_hz > *primary_refresh_rate)) {
-          primary_refresh_rate = refresh_rate_hz;
-        }
-
-        if (!any_active_refresh_rate || *refresh_rate_hz > *any_active_refresh_rate) {
-          any_active_refresh_rate = refresh_rate_hz;
-        }
+    std::optional<int> topology_max_launch_refresh_rate_for_http(
+        bool launch_owned_display,
+        std::string_view output_name = {}) {
+      if (launch_owned_display) {
+        // Virtual/headless display creation owns the future mode. Keep the
+        // containment contract bounded to Nova's stock high-FPS ceiling.
+        return 120;
       }
-
-      return primary_refresh_rate ? primary_refresh_rate : any_active_refresh_rate;
+      const std::string selected_output = output_name.empty() ?
+        config::video.output_name : std::string {output_name};
+      return display_device::active_refresh_rate_hz_hint(selected_output);
     }
 
     int advertised_max_launch_refresh_rate_for_http() {
-#ifdef __linux__
-      if (config::video.linux_display.use_cage_compositor &&
-          config::video.linux_display.headless_mode) {
-        // Headless cage sessions aren't tied to a physical panel refresh, so advertise the
-        // highest stock launch rate Nova currently exposes without custom entry.
-        return 120;
-      }
-#endif
-
-      if (const auto refresh_rate_hz = active_output_refresh_rate_hz_hint()) {
-        return *refresh_rate_hz;
-      }
-
-      return 60;
+      return topology_max_launch_refresh_rate_for_http(false).value_or(120);
     }
 
     std::string_view codec_name_for_video_format(int video_format) {
@@ -4274,6 +4218,9 @@ namespace nvhttp {
     launch_session->profile_preference = launch_profile::normalize_preset(
       get_arg(args, "profilePreference", "auto")
     );
+    const auto launch_host_codecs = advertised_codec_support_for_http(true);
+    launch_session->host_hdr_capable =
+      launch_host_codecs.hevc_mode >= 3 || launch_host_codecs.av1_mode >= 3;
     if (launch_session->resolved_profile_from_client) {
       const auto raw_bitrate = get_arg(args, "bitrateKbps", "");
       try {
@@ -4298,15 +4245,10 @@ namespace nvhttp {
         return nullptr;
       }
 
-      // A resolved profile is an exact deterministic envelope. If hard host
-      // capabilities changed after /optimize, fail closed instead of silently
-      // rewriting an authenticated value while claiming it was preserved.
-      const int host_max_fps = advertised_max_launch_refresh_rate_for_http() * 1000;
-      if (host_max_fps > 0 && launch_session->fps > host_max_fps) {
-        BOOST_LOG(warning) << "Rejecting resolved launch profile above the current host refresh cap: "sv
-                           << launch_session->fps << " > " << host_max_fps;
-        return nullptr;
-      }
+      // Final refresh validation is deferred to process::execute_impl(), after
+      // app topology semantics and the paired output profile are both known.
+      // That resolver fails a stale exact envelope closed before a new process
+      // generation is installed.
       if (config::video.max_bitrate > 0 &&
           *launch_session->explicit_target_bitrate_kbps > config::video.max_bitrate) {
         BOOST_LOG(warning) << "Rejecting resolved launch profile above the configured host bitrate cap: "sv
@@ -4315,8 +4257,7 @@ namespace nvhttp {
         return nullptr;
       }
       if (launch_session->enable_hdr) {
-        const auto host_codecs = advertised_codec_support_for_http(true);
-        if (host_codecs.hevc_mode < 3 && host_codecs.av1_mode < 3) {
+        if (launch_session->host_hdr_capable && !*launch_session->host_hdr_capable) {
           BOOST_LOG(warning) << "Rejecting resolved HDR launch profile because the current encoder lacks HDR support"sv;
           return nullptr;
         }
@@ -4353,7 +4294,20 @@ namespace nvhttp {
     launch_session->mirror_desktop = false;
     launch_session->force_private_after_desktop_steam_shutdown = false;
     #endif
-    launch_session->virtual_display = !launch_session->mirror_desktop && (client_requested_virtual_display || named_cert_p->always_use_virtual_display);
+    // An explicit per-launch topology wins over the lower-precedence paired
+    // default. When the client did not lock topology, normalize the paired
+    // always-virtual preference into the canonical selection so the final
+    // process resolver and /optimize observe the same input.
+#if defined(__linux__)
+    if (!launch_session->mirror_desktop &&
+        !client_display_mode_explicit &&
+        named_cert_p->always_use_virtual_display) {
+      launch_session->stream_mode = std::string {stream_display_policy::k_host_virtual_display};
+    }
+#endif
+    launch_session->virtual_display = !launch_session->mirror_desktop &&
+      (client_requested_virtual_display ||
+       (!client_display_mode_explicit && named_cert_p->always_use_virtual_display));
     // A host-resolved envelope is an explicit per-launch lock. The paired
     // display mode is the input at the paired-settings precedence layer, so a
     // selected stability preset may still conservatively normalize it.
@@ -6787,6 +6741,22 @@ namespace nvhttp {
           std::string body_str(std::istreambuf_iterator<char>(request->content), {});
           const auto body = body_str.empty() ? nlohmann::json::object() : nlohmann::json::parse(body_str);
 
+          const bool changes_global_host_control =
+            body.contains("adaptive_bitrate_enabled") ||
+            body.contains("disconnect_resume_timeout_seconds") ||
+            body.contains("stream_display_mode");
+          auto global_control_guard = changes_global_host_control ?
+            doctor_actions::acquire_paired_global_control(named_cert_p->uuid) :
+            doctor_actions::paired_global_control_guard_t {};
+          if (changes_global_host_control && !global_control_guard) {
+            write_json(
+              {{"status", false}, {"changed", false}, {"state", "active_owner_required"},
+               {"error", "Only the sole active stream owner may change host-global stream controls while a stream is running."}},
+              SimpleWeb::StatusCode::client_error_forbidden
+            );
+            return;
+          }
+
           std::optional<std::string> stream_display_mode;
           if (body.contains("stream_display_mode")) {
             if (!body["stream_display_mode"].is_string()) {
@@ -6920,6 +6890,10 @@ namespace nvhttp {
               return;
             }
           }
+          // Global host mutations above were authorized and applied under the
+          // same lock used by stream generation handoff. Per-client durable
+          // settings and the separately owner-gated live bitrate follow.
+          global_control_guard.release();
 
           const auto update_result = update_device_info_result(
             named_cert_p->uuid,
@@ -6949,7 +6923,10 @@ namespace nvhttp {
             // A paired client setting is an explicit newer operator choice.
             // Apply it exactly to the live target instead of preserving an
             // older Doctor/adaptive reduction beneath the new base.
-            adaptive_bitrate::set_live_bitrate(target_bitrate_kbps);
+            (void) doctor_actions::set_owner_live_bitrate(
+              named_cert_p->uuid,
+              target_bitrate_kbps
+            );
           }
         }
 
@@ -8264,11 +8241,21 @@ namespace nvhttp {
         // This endpoint is an explicit live target, not merely a new adaptive
         // ceiling. A newer client increase must supersede an older Doctor
         // reduction in both the base and the encoder-visible target.
-        adaptive_bitrate::set_live_bitrate(bitrate_kbps);
+        if (!doctor_actions::set_owner_live_bitrate(named_cert_p->uuid, bitrate_kbps)) {
+          nlohmann::json err {
+            {"status", false}, {"changed", false},
+            {"state", "active_owner_required"},
+            {"error", "The active stream owner or generation changed before the live bitrate could be updated."}
+          };
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_conflict, err.dump(), headers);
+          return;
+        }
         const int applied_bitrate_kbps =
           adaptive_bitrate::get_doctor_state().live_bitrate_kbps;
-        BOOST_LOG(info) << "Client requested bitrate change: " << bitrate_kbps
-                        << " kbps; applied " << applied_bitrate_kbps << " kbps";
+        BOOST_LOG(info) << "Active owner requested bitrate change: " << bitrate_kbps
+                        << " kbps; controller target " << applied_bitrate_kbps << " kbps";
 
         nlohmann::json output;
         output["status"] = true;
@@ -8316,6 +8303,19 @@ namespace nvhttp {
         }
 
         const bool enabled = body["enabled"].get<bool>();
+        auto global_control_guard =
+          doctor_actions::acquire_paired_global_control(named_cert_p->uuid);
+        if (!global_control_guard) {
+          nlohmann::json err {
+            {"status", false}, {"changed", false},
+            {"state", "active_owner_required"},
+            {"error", "Only the sole active stream owner may change the global adaptive bitrate controller while a stream is running."}
+          };
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(SimpleWeb::StatusCode::client_error_forbidden, err.dump(), headers);
+          return;
+        }
         if (!persist_config_values({
               {"adaptive_bitrate_enabled", bool_config_value(enabled)}
             })) {
@@ -8852,6 +8852,7 @@ namespace nvhttp {
       };
       const bool display_locked = exact_flag("display_locked");
       const bool bitrate_locked = exact_flag("bitrate_locked");
+      const bool topology_locked = exact_flag("topology_locked");
       std::optional<bool> explicit_hdr;
       if (const auto it = args.find("hdr"); it != args.end()) {
         const auto value = lower_copy(it->second);
@@ -8876,6 +8877,44 @@ namespace nvhttp {
 
       // /optimize is a deterministic resolver. It does not read session
       // history, recovery records, or AI-generated settings.
+      const auto client_profile = client_profiles::get_client_profile(device);
+      const std::string selected_output_name =
+        client_profile && !client_profile->output_name.empty() ?
+          client_profile->output_name : config::video.output_name;
+      const auto requested_topology = lower_copy(
+        args.count("mode") ? args.find("mode")->second : std::string {}
+      );
+      const auto optimization_app = find_app_for_optimization_game(game);
+      bool launch_owned_display = false;
+#if defined(__linux__)
+      const bool mirror_desktop = optimization_app && optimization_app->desktop_mirror;
+      const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
+      const bool paired_virtual_lock =
+        named_cert_p->always_use_virtual_display && !topology_locked;
+      const std::string requested_selection = paired_virtual_lock ?
+        std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
+      auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
+        requested_selection,
+        mirror_desktop,
+        requested_selection == stream_display_policy::k_host_virtual_display,
+        app_virtual_display,
+        topology_locked || paired_virtual_lock,
+        false
+      );
+      if (effective_selection.empty()) {
+        effective_selection = stream_display_policy::configured_selection();
+      }
+      launch_owned_display =
+        stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
+#else
+      launch_owned_display =
+        (!topology_locked && named_cert_p->always_use_virtual_display) ||
+        requested_topology == "host_virtual_display" ||
+        requested_topology == "headless_stream" ||
+        requested_topology == "windowed_stream" ||
+        requested_topology == "gamescope_stream" ||
+        (optimization_app && optimization_app->virtual_display && !topology_locked);
+#endif
       launch_profile::request_t preset_request;
       preset_request.device_name = device;
       preset_request.app_name = game;
@@ -8885,8 +8924,12 @@ namespace nvhttp {
       preset_request.paired_bitrate_kbps = named_cert_p->target_bitrate_kbps > 0 ?
         std::optional<int> {named_cert_p->target_bitrate_kbps} : std::nullopt;
       preset_request.client_max_fps = client_max_fps;
-      preset_request.host_max_fps =
-        advertised_max_launch_refresh_rate_for_http() * 1000;
+      if (const auto host_max_fps = topology_max_launch_refresh_rate_for_http(
+            launch_owned_display,
+            selected_output_name
+          )) {
+        preset_request.host_max_fps = *host_max_fps * 1000;
+      }
       const auto host_codecs = advertised_codec_support_for_http(true);
       preset_request.host_hdr_capable =
         host_codecs.hevc_mode >= 3 || host_codecs.av1_mode >= 3;
@@ -8910,7 +8953,7 @@ namespace nvhttp {
           preset_request.paired_fps = static_cast<int>(std::round(paired_fps * 1000.0));
         }
       }
-      if (const auto client_profile = client_profiles::get_client_profile(device)) {
+      if (client_profile) {
         preset_request.client_profile_hdr = client_profile->hdr;
         preset_request.color_range = client_profile->color_range;
       }
