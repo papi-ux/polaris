@@ -2821,6 +2821,60 @@ TEST(StreamStatsHotFieldTests, ClientMediaCountersPublishHostScopedDerivedLoss) 
   stream_stats::update_stream_active(false);
 }
 
+TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMediaLoss) {
+  adaptive_bitrate::set_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true);
+  stream_stats::set_doctor_live_action_scope_available(true);
+
+  // Arm the RTT warm-up with a proven-calm LAN before media loss begins.
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  }
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-interleaved",
+    .app_session_id = "app-session-interleaved",
+    .session_generation = 42,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 1'000,
+    .frames_received = 1'000,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 1'100;
+  sample.frames_received = 1'080;
+  sample.frames_lost = 20;
+  const auto loss = stream_stats::ingest_client_media_counters(sample);
+  ASSERT_TRUE(loss.accepted);
+  ASSERT_TRUE(loss.observation_published);
+  ASSERT_DOUBLE_EQ(loss.media_loss_pct, 20.0);
+
+  // Production pings arrive between Nova's one-second counter reports. They
+  // carry no media-loss measurement, so their clean control-channel loss must
+  // not be interpreted as clean video delivery.
+  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.network_risk);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 20.0);
+  EXPECT_EQ(stats.packet_loss_source, "media_transport");
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    nlohmann::json::object()
+  );
+  EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
+
+  adaptive_bitrate::set_runtime_update_supported(false);
+  stream_stats::update_stream_active(false);
+}
+
 TEST(StreamStatsHotFieldTests, ClientMediaCounterRestartNeedsANewBaseline) {
   adaptive_bitrate::set_enabled(false);
   stream_stats::update_stream_active(false);
