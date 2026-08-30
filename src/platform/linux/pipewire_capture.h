@@ -229,6 +229,7 @@ namespace pipewire_capture {
     bool negotiated_ = false;
     bool negotiated_dmabuf_ = false;
     bool running_ = false;
+    enum pw_stream_state stream_state_ = PW_STREAM_STATE_UNCONNECTED;
     wait_result_e terminal_result_ = wait_result_e::timeout;
     std::uint64_t sequence_ = 0;
   };
