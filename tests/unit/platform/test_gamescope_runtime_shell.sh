@@ -51,6 +51,12 @@ write_process() {
   write_process_with_group "$pid" "$ppid" "$pid" "$pid" "$start_time" "$exe" "$@"
 }
 
+# Production /proc always includes init and may include kernel-owned sessions
+# whose process/session groups are not valid negative-signal authorities. They
+# must be ignored by private-session enumeration without weakening the strict
+# marker/generation validator used before signalling.
+write_process_with_group 1 0 1 1 14 /usr/lib/systemd/systemd --system
+
 write_unix_header() {
   printf 'Num RefCount Protocol Flags Type St Inode Path\n' >"$POLARIS_PROC_NET_UNIX"
 }

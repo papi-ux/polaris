@@ -7,7 +7,7 @@ polaris_proc_root() { printf '%s\n' "${POLARIS_PROC_ROOT:-/proc}"; }
 polaris_proc_net_unix() { printf '%s\n' "${POLARIS_PROC_NET_UNIX:-/proc/net/unix}"; }
 polaris_x11_socket_dir() { printf '%s\n' "${POLARIS_X11_SOCKET_DIR:-/tmp/.X11-unix}"; }
 
-polaris_process_fields() {
+polaris_read_process_stat_fields() {
   local pid="$1" stat rest
   [ -r "$(polaris_proc_root)/$pid/stat" ] || return 1
   IFS= read -r stat <"$(polaris_proc_root)/$pid/stat" || return 1
@@ -30,9 +30,13 @@ polaris_process_fields() {
   case "$POLARIS_PROCESS_PPID:$POLARIS_PROCESS_PGID:$POLARIS_PROCESS_SESSION_ID:$POLARIS_PROCESS_START_TIME" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
+  [ "$POLARIS_PROCESS_START_TIME" != 0 ]
+}
+
+polaris_process_fields() {
+  polaris_read_process_stat_fields "$1" || return 1
   [ "$POLARIS_PROCESS_PGID" -gt 1 ] 2>/dev/null \
-    && [ "$POLARIS_PROCESS_SESSION_ID" -gt 1 ] 2>/dev/null \
-    && [ "$POLARIS_PROCESS_START_TIME" != 0 ]
+    && [ "$POLARIS_PROCESS_SESSION_ID" -gt 1 ] 2>/dev/null
 }
 
 polaris_read_marker() {
@@ -499,7 +503,7 @@ polaris_private_session_alive() {
     seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 2
     fi
@@ -525,7 +529,7 @@ polaris_process_group_alive() {
     seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 2
     fi
@@ -550,7 +554,7 @@ polaris_wait_process_group_stopped() {
       [ -d "$process" ] || continue
       pid="${process##*/}"
       case "$pid" in ''|*[!0-9]*) continue ;; esac
-      if ! polaris_process_fields "$pid"; then
+      if ! polaris_read_process_stat_fields "$pid"; then
         [ ! -e "$process" ] && continue
         return 1
       fi
@@ -578,7 +582,7 @@ polaris_private_session_has_no_live_siblings() {
     seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 2
     fi
@@ -651,7 +655,7 @@ polaris_kill_private_session_groups() {
     [ -d "$process" ] || continue
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 1
     fi
@@ -699,7 +703,7 @@ polaris_kill_private_session_groups() {
     [ -d "$process" ] || continue
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 1
     fi
