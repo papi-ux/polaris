@@ -67,6 +67,9 @@ namespace rtsp_stream {
     std::optional<int> host_max_fps;
     std::optional<bool> host_hdr_capable;
     std::string session_token;
+    // Lifecycle generation admitted by authenticated /launch or /resume.
+    // RTSP SETUP must claim this exact generation before starting media.
+    std::optional<std::uint64_t> lifecycle_generation;
     crypto::PERM perm;
     bool watch_only;
 

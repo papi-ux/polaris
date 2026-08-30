@@ -548,6 +548,7 @@ import { useToast } from '../composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
 import { resolveAutoQualityState } from '../auto-quality-state'
+import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import {
   buildLiveSummary,
@@ -1322,6 +1323,7 @@ const doctorActionStatus = computed(() => {
     case 'stable': return t('dashboard.doctor_action_stable')
     case 'confirmed_pressure': return t('dashboard.doctor_action_confirmed')
     case 'needs_attention': return t('dashboard.doctor_action_needs_attention')
+    case 'rollback_unconfirmed': return t('dashboard.doctor_action_rollback_unconfirmed')
     case 'undone': return t('dashboard.doctor_action_undone')
     default: return ''
   }
@@ -1335,10 +1337,7 @@ async function postDoctorAction(payload) {
     body: JSON.stringify(payload),
   })
   const result = await response.json().catch(() => ({}))
-  if (!response.ok || result.status === false) {
-    throw new Error(result.error || `HTTP ${response.status}`)
-  }
-  return result
+  return resolveDoctorActionHttpResponse(response, result)
 }
 
 function requestDoctorSafeAction() {
@@ -1363,6 +1362,8 @@ async function verifyDoctorAction(verification) {
       showToast(t('dashboard.doctor_action_resolved'), 'success')
     } else if (result.state === 'needs_attention') {
       showToast(t('dashboard.doctor_action_needs_attention'), 'warning')
+    } else if (result.state === 'rollback_unconfirmed') {
+      showToast(t('dashboard.doctor_action_rollback_unconfirmed'), 'warning')
     }
     if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
     if (result.verification?.run_id) {
@@ -1389,7 +1390,11 @@ async function runDoctorSafeAction() {
     }
     const result = await postDoctorAction(payload)
     doctorActionResult.value = result
-    showToast(result.message || t('dashboard.doctor_action_success') + action.label, 'success')
+    if (result.state === 'rollback_unconfirmed') {
+      showToast(t('dashboard.doctor_action_rollback_unconfirmed'), 'warning')
+    } else {
+      showToast(result.message || t('dashboard.doctor_action_success') + action.label, 'success')
+    }
     if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
     if (result.verification?.run_id) {
       const delayMs = Math.max(1, Number(result.verification.delay_seconds) || 8) * 1000
@@ -1408,13 +1413,18 @@ async function undoDoctorAction() {
   doctorActionPending.value = true
   if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
   try {
-    doctorActionResult.value = await postDoctorAction({
+    const result = await postDoctorAction({
       action_id: undo.action_id || 'undo',
       run_id: undo.run_id,
       app_session_id: undo.app_session_id,
       session_generation: undo.session_generation,
     })
-    showToast(t('dashboard.doctor_action_undone'), 'success')
+    doctorActionResult.value = result
+    if (result.state === 'rollback_unconfirmed') {
+      showToast(t('dashboard.doctor_action_rollback_unconfirmed'), 'warning')
+    } else {
+      showToast(t('dashboard.doctor_action_undone'), 'success')
+    }
   } catch (e) {
     showToast(t('dashboard.doctor_action_error') + e.message, 'error')
   } finally {

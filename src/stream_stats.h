@@ -40,6 +40,10 @@ namespace stream_stats {
   struct client_stats_t {
     std::string name;
     std::string ip;
+    // Internal lifecycle identity. This is deliberately not serialized: the
+    // public client contract remains name/IP/telemetry, while overlapping
+    // reconnects from the same address can still be removed independently.
+    std::uint64_t session_generation = 0;
 
     // Video
     double fps = 0;
@@ -168,7 +172,11 @@ namespace stream_stats {
 
     // Adaptive bitrate
     int adaptive_target_bitrate_kbps = 0;
+    /// True when the user-selected Auto Safe feedback policy is enabled.
+    bool adaptive_bitrate_enabled = false;
     bool adaptive_bitrate_active = false;
+    /// Current deterministic actuator owner/state (for example network_pressure).
+    std::string adaptive_bitrate_state = "disabled";
     bool adaptive_runtime_update_supported = false;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;
@@ -296,16 +304,23 @@ namespace stream_stats {
 
   /**
    * @brief Add a new client session to the stats tracker.
-   * @param client_ip IP address used as session key.
+   * @param client_ip IP address of the client.
    * @param client_name Display name of the client.
+   * @param session_generation Process-unique stream-session identity. Zero
+   * keeps the legacy IP-keyed behavior for callers without a session object.
    */
-  void add_client(const std::string &client_ip, const std::string &client_name);
+  void add_client(const std::string &client_ip,
+                  const std::string &client_name,
+                  std::uint64_t session_generation = 0);
 
   /**
    * @brief Remove a client session from the stats tracker.
    * @param client_ip IP address of the client to remove.
+   * @param session_generation Process-unique stream-session identity. Zero
+   * keeps the legacy IP-keyed behavior for callers without a session object.
    */
-  void remove_client(const std::string &client_ip);
+  void remove_client(const std::string &client_ip,
+                     std::uint64_t session_generation = 0);
 
   /**
    * @brief Update video statistics (backward-compatible single-client API).
@@ -462,6 +477,51 @@ namespace stream_stats {
    * @return Packet loss percentage clamped to [0.0, 100.0].
    */
   double packet_loss_percent(uint64_t scaled_loss, uint64_t scale);
+
+  /** Raw cumulative media counters reported by the authenticated stream owner. */
+  struct client_media_counters_t {
+    std::string owner_uuid;
+    std::string app_session_id;
+    std::uint64_t session_generation = 0;
+    std::uint64_t client_monotonic_ms = 0;
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_received = 0;
+    std::uint64_t frames_lost = 0;
+  };
+
+  enum class client_media_ingest_state_e {
+    baseline,
+    observed,
+    waiting_for_frames,
+    coverage_gap_reset,
+    counter_epoch_reset,
+    non_monotonic,
+    scope_mismatch,
+    invalid
+  };
+
+  struct client_media_ingest_result_t {
+    client_media_ingest_state_e state = client_media_ingest_state_e::invalid;
+    bool accepted = false;
+    bool observation_published = false;
+    double media_loss_pct = 0.0;
+  };
+
+  /**
+   * Fold one owner- and generation-bound raw counter sample into live Doctor
+   * network evidence. Polaris derives loss from counter deltas and combines it
+   * only with host-observed RTT; no client diagnosis or RTT is accepted here.
+   */
+  client_media_ingest_result_t ingest_client_media_counters(
+    const client_media_counters_t &sample);
+
+  std::string_view from_client_media_ingest_state(
+    client_media_ingest_state_e state);
+
+#ifdef POLARIS_TESTS
+  void age_client_media_counter_baseline_for_tests(
+    std::chrono::steady_clock::duration age);
+#endif
 
   /**
    * @brief Debounced elevated/normal state behind the served network_risk.
@@ -812,7 +872,7 @@ namespace stream_stats {
   void bind_doctor_action_scope(nlohmann::json &doctor,
                                 std::string_view app_session_id,
                                 std::uint64_t session_generation,
-                                std::uint64_t controller_revision,
+                                std::uint64_t action_authority_revision,
                                 std::uint64_t network_evidence_revision,
                                 std::uint64_t video_evidence_revision);
 

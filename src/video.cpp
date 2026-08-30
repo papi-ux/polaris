@@ -1286,6 +1286,15 @@ namespace video {
     ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread
   };
 
+  bool ffmpeg_nvenc_runtime_bitrate_supported(
+      std::string_view encoder_name,
+      std::string_view codec_name) {
+    return encoder_name == "nvenc"sv &&
+      (codec_name == "h264_nvenc"sv ||
+       codec_name == "hevc_nvenc"sv ||
+       codec_name == "av1_nvenc"sv);
+  }
+
   class avcodec_encode_session_t: public encode_session_t {
   public:
     avcodec_encode_session_t() = default;
@@ -1294,12 +1303,14 @@ namespace video {
       avcodec_ctx_t &&avcodec_ctx,
       std::unique_ptr<encode_device_frame_converter_t<platf::avcodec_encode_device_t>> converter,
       conversion_request_t conversion_request,
-      int inject
+      int inject,
+      bool runtime_bitrate_supported
     ):
         avcodec_ctx {std::move(avcodec_ctx)},
         converter {std::move(converter)},
         conversion_request {conversion_request},
-        inject {inject} {
+        inject {inject},
+        runtime_bitrate_supported {runtime_bitrate_supported} {
     }
 
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
@@ -1326,6 +1337,7 @@ namespace video {
 
       conversion_request = other.conversion_request;
       inject = other.inject;
+      runtime_bitrate_supported = other.runtime_bitrate_supported;
 
       return *this;
     }
@@ -1363,6 +1375,23 @@ namespace video {
       request_idr_frame();
     }
 
+    bool supports_runtime_bitrate_update() const override {
+      return runtime_bitrate_supported;
+    }
+
+    bitrate_update_e update_bitrate(int new_bitrate_kbps) override {
+      if (!runtime_bitrate_supported || !avcodec_ctx || new_bitrate_kbps <= 0 ||
+          new_bitrate_kbps > std::numeric_limits<int>::max() / 1000) {
+        return bitrate_update_e::rejected;
+      }
+
+      // FFmpeg's NVENC reconfigure callback does not report whether
+      // nvEncReconfigureEncoder() succeeded. Recreate only the encoder session
+      // with the requested bitrate; a successful avcodec open then becomes the
+      // authoritative application acknowledgement.
+      return bitrate_update_e::recreate_session;
+    }
+
     avcodec_ctx_t avcodec_ctx;
     std::unique_ptr<encode_device_frame_converter_t<platf::avcodec_encode_device_t>> converter;
     conversion_request_t conversion_request;
@@ -1374,6 +1403,7 @@ namespace video {
 
     // inject sps/vps data into idr pictures
     int inject;
+    bool runtime_bitrate_supported = false;
   };
 
   class nvenc_encode_session_t: public encode_session_t {
@@ -1428,12 +1458,13 @@ namespace video {
       return result;
     }
 
-    bool update_bitrate(int new_bitrate_kbps) override {
+    bitrate_update_e update_bitrate(int new_bitrate_kbps) override {
       auto *encode_device = device();
       if (!encode_device || !encode_device->nvenc) {
-        return false;
+        return bitrate_update_e::rejected;
       }
-      return encode_device->nvenc->update_bitrate(new_bitrate_kbps);
+      return encode_device->nvenc->update_bitrate(new_bitrate_kbps) ?
+        bitrate_update_e::applied : bitrate_update_e::rejected;
     }
 
     bool supports_runtime_bitrate_update() const override {
@@ -3179,13 +3210,18 @@ namespace video {
       conversion_request->target_format
     );
 
+    const auto runtime_bitrate_supported = ffmpeg_nvenc_runtime_bitrate_supported(
+      encoder.name,
+      ctx->codec && ctx->codec->name ? std::string_view {ctx->codec->name} : std::string_view {}
+    );
     auto session = std::make_unique<avcodec_encode_session_t>(
       std::move(ctx),
       std::move(converter),
       *conversion_request,
 
       // 0 ==> don't inject, 1 ==> inject for h264, 2 ==> inject for hevc
-      config.videoFormat <= 1 ? (1 - (int) video_format[encoder_t::VUI_PARAMETERS]) * (1 + config.videoFormat) : 0
+      config.videoFormat <= 1 ? (1 - (int) video_format[encoder_t::VUI_PARAMETERS]) * (1 + config.videoFormat) : 0,
+      runtime_bitrate_supported
     );
 
     return session;
@@ -3243,7 +3279,7 @@ namespace video {
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
     img_event_t images,
-    config_t config,
+    config_t &config,
     std::shared_ptr<platf::display_t> disp,
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
@@ -3254,16 +3290,23 @@ namespace video {
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
+      adaptive_bitrate::set_runtime_update_supported(
+        false,
+        "encoder_session_init_failed"
+      );
       return;
     }
 
+    bool bitrate_session_recreation_pending = false;
     adaptive_bitrate::set_runtime_update_supported(
       session->supports_runtime_bitrate_update(),
       {},
       config.bitrate
     );
-    auto runtime_bitrate_guard = util::fail_guard([] {
-      adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
+    auto runtime_bitrate_guard = util::fail_guard([&bitrate_session_recreation_pending] {
+      if (!bitrate_session_recreation_pending) {
+        adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
+      }
     });
 
     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
@@ -3535,16 +3578,35 @@ namespace video {
           int effective_bitrate = applied_adaptive_bitrate;
           if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
             if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
-              if (session->update_bitrate(request->target_bitrate_kbps)) {
-                applied_adaptive_bitrate = request->target_bitrate_kbps;
-                adaptive_bitrate::acknowledge_live_bitrate_applied(
-                  request->revision,
-                  applied_adaptive_bitrate
-                );
-                effective_bitrate = applied_adaptive_bitrate;
-              } else {
-                BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
-                adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
+              switch (session->update_bitrate(request->target_bitrate_kbps)) {
+                case encode_session_t::bitrate_update_e::applied:
+                  applied_adaptive_bitrate = request->target_bitrate_kbps;
+                  adaptive_bitrate::acknowledge_live_bitrate_applied(
+                    request->revision,
+                    applied_adaptive_bitrate
+                  );
+                  effective_bitrate = applied_adaptive_bitrate;
+                  break;
+                case encode_session_t::bitrate_update_e::recreate_session:
+                  if (!adaptive_bitrate::begin_live_bitrate_session_recreation(
+                        request->revision,
+                        request->target_bitrate_kbps
+                      )) {
+                    // A newer owner/controller decision won before the old
+                    // session was retired. Poll that target without
+                    // recreating for this stale request.
+                    break;
+                  }
+                  BOOST_LOG(info)
+                    << "Recreating the encoder session to apply bitrate "sv
+                    << request->target_bitrate_kbps << " kbps"sv;
+                  config.bitrate = request->target_bitrate_kbps;
+                  bitrate_session_recreation_pending = true;
+                  return;
+                case encode_session_t::bitrate_update_e::rejected:
+                  BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
+                  adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
+                  break;
               }
             } else {
               adaptive_bitrate::acknowledge_live_bitrate_applied(
@@ -4063,6 +4125,9 @@ namespace video {
       images->stop();
       shutdown_event->raise(true);
     });
+    auto runtime_bitrate_lifetime_guard = util::fail_guard([] {
+      adaptive_bitrate::set_runtime_update_supported(false, "capture_session_ended");
+    });
 
     auto ref = capture_thread_async.ref();
     if (!ref) {
@@ -4105,6 +4170,13 @@ namespace video {
       }
 
       auto &encoder = *chosen_encoder;
+
+      // A rollback or newer paired target can arrive while an FFmpeg NVENC
+      // session is being torn down. Build the replacement directly at the
+      // latest exact target; successful session open remains the ack boundary.
+      if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+        config.bitrate = request->target_bitrate_kbps;
+      }
 
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {

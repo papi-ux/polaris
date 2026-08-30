@@ -96,15 +96,6 @@ run_without_session_operation_lock() {
   exec "$@"
 }
 
-wait_for_nested_gamescope_exit() {
-  local _
-  for _ in $(seq 1 "${POLARIS_NESTED_GRACE_STEPS:-20}"); do
-    polaris_validate_marker "$marker" nested || return 0
-    sleep 0.1
-  done
-  ! polaris_validate_marker "$marker" nested
-}
-
 publish_nested_claim() (
   local new_state="$1" expected_state="${2:-absent}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}" tmp current_state=absent
@@ -274,27 +265,174 @@ session_steam_absent() {
   [ "$rc" -eq 1 ]
 }
 
-kill_session_steam() {
-  local pid pids start_time kill_bin="${POLARIS_KILL_BIN:-kill}" session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
+session_xwayland_pids() {
+  local p pids rc envf env_lines session_id="${POLARIS_SESSION_INSTANCE_ID:-}" proc_root
+  [ -n "$session_id" ] || return 2
+  proc_root="$(polaris_proc_root)"
+  if pids="$(pgrep -x Xwayland 2>/dev/null)"; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return 2
+    pids=""
+  fi
+  for p in $pids; do
+    case "$p" in ''|*[!0-9]*) return 2 ;; esac
+    envf="$proc_root/$p/environ"
+    if [ ! -r "$envf" ]; then
+      [ ! -e "$proc_root/$p" ] && continue
+      return 2
+    fi
+    polaris_xwayland_pid "$p" || {
+      [ ! -e "$proc_root/$p" ] && continue
+      return 2
+    }
+    env_lines="$(tr '\0' '\n' <"$envf" 2>/dev/null)" || return 2
+    grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" <<<"$env_lines" || continue
+    printf '%s\n' "$p"
+  done
+}
+
+session_xwayland_alive() {
+  local pids
+  pids="$(session_xwayland_pids)" || return 2
+  [ -n "$pids" ]
+}
+
+session_xwayland_absent() {
+  local rc
+  if session_xwayland_alive; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ]
+}
+
+signal_session_xwayland() {
+  local signal="$1" pid pids start_time env_lines proc_root
+  local kill_bin="${POLARIS_KILL_BIN:-kill}" session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
   [ -n "$session_id" ] || return 1
+  proc_root="$(polaris_proc_root)"
+  pids="$(session_xwayland_pids)" || return 1
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    start_time="$POLARIS_PROCESS_START_TIME"
+    if ! polaris_xwayland_pid "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! env_lines="$(tr '\0' '\n' <"$proc_root/$pid/environ" 2>/dev/null)"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" <<<"$env_lines" || return 1
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_START_TIME" = "$start_time" ] || return 1
+    if ! polaris_xwayland_pid "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    if ! env_lines="$(tr '\0' '\n' <"$proc_root/$pid/environ" 2>/dev/null)"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" <<<"$env_lines" || return 1
+    if ! "$kill_bin" "$signal" "$pid" 2>/dev/null; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+  done <<<"$pids"
+}
+
+retire_session_xwayland() {
+  local rc
+  session_xwayland_absent && return 0
+  rc=$?
+  [ "$rc" -eq 1 ] || return 1
+  signal_session_xwayland -TERM || return 1
+  for _ in $(seq 1 "${POLARIS_XWAYLAND_TERM_STEPS:-40}"); do
+    if session_xwayland_alive; then
+      sleep 0.25
+      continue
+    else
+      rc=$?
+      [ "$rc" -eq 1 ] || return 1
+      return 0
+    fi
+  done
+  signal_session_xwayland -KILL || return 1
+  for _ in $(seq 1 "${POLARIS_XWAYLAND_KILL_STEPS:-20}"); do
+    if session_xwayland_alive; then
+      sleep 0.1
+      continue
+    else
+      rc=$?
+      [ "$rc" -eq 1 ] || return 1
+      return 0
+    fi
+  done
+  session_xwayland_absent
+}
+
+signal_session_steam() {
+  local signal="$1" pid pids start_time env_lines proc_root
+  local kill_bin="${POLARIS_KILL_BIN:-kill}" session_id="${POLARIS_SESSION_INSTANCE_ID:-}"
+  [ -n "$session_id" ] || return 1
+  proc_root="$(polaris_proc_root)"
   pids="$(session_steam_pids)" || return 1
   while read -r pid; do
     [ -n "$pid" ] || continue
-    polaris_process_fields "$pid" || return 1
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
     start_time="$POLARIS_PROCESS_START_TIME"
     # Bind the numeric PID and environment classification immediately before
     # signaling. Desktop Steam lacks this exact session credential and survives.
-    polaris_process_fields "$pid" \
-      && [ "$POLARIS_PROCESS_START_TIME" = "$start_time" ] \
-      && tr '\0' '\n' <"$(polaris_proc_root)/$pid/environ" 2>/dev/null |
-           grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" \
-      || return 1
-    "$kill_bin" -TERM "$pid" 2>/dev/null || return 1
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_START_TIME" = "$start_time" ] || return 1
+    if ! env_lines="$(tr '\0' '\n' <"$proc_root/$pid/environ" 2>/dev/null)"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    grep -qxF "POLARIS_SESSION_INSTANCE_ID=$session_id" <<<"$env_lines" || return 1
+    if ! "$kill_bin" "$signal" "$pid" 2>/dev/null; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
   done <<<"$pids"
-  for _ in $(seq 1 40); do
+}
+
+kill_session_steam() {
+  local rc
+  session_steam_absent && return 0
+  rc=$?
+  [ "$rc" -eq 1 ] || return 1
+  signal_session_steam -TERM || return 1
+  for _ in $(seq 1 "${POLARIS_STEAM_TERM_STEPS:-40}"); do
     session_steam_absent && return 0
     session_steam_alive || [ "$?" -eq 1 ] || return 1
     sleep 0.25
+  done
+  # A credential-bound session Steam that ignores TERM must not strand the
+  # compositor generation and hand teardown back to an unfenced outer kill.
+  # Re-enumerate and revalidate immediately before the exact KILL fallback.
+  signal_session_steam -KILL || return 1
+  for _ in $(seq 1 "${POLARIS_STEAM_KILL_STEPS:-20}"); do
+    session_steam_absent && return 0
+    session_steam_alive || [ "$?" -eq 1 ] || return 1
+    sleep 0.1
   done
   session_steam_absent
 }
@@ -850,25 +988,20 @@ case "${1:-}" in
           ;;
         1|nested)
           echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
-          if ! kill_session_steam || ! session_steam_absent; then
-            echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
-            exit 1
-          fi
           if polaris_validate_marker "$marker" nested; then
-            if wait_for_nested_gamescope_exit; then
-              echo "polaris-gamescope-session: nested gamescope exited after exact-session Steam shutdown" >&2
-              if ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-                echo "polaris-gamescope-session: nested exit left non-reclaimable sockets; retaining recovery claim" >&2
-                exit 1
-              fi
-            else
-              echo "polaris-gamescope-session: nested gamescope did not exit after child shutdown; using exact-generation fallback" >&2
-              if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
-                echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
-                exit 1
-              fi
+            # Gamescope 3.16 can fault in CVulkanDevice teardown when its
+            # primary Steam child exits. The marker already proves the private
+            # process-group generation, so fence and retire that exact group
+            # before its destructor can race outer process cleanup.
+            if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+              echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
+              exit 1
             fi
           else
+            if ! kill_session_steam || ! session_steam_absent; then
+              echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
+              exit 1
+            fi
             # Nested generation already dead (host hang dump, gamescope crash, or
             # kill raced marker validation). Only advance when sockets are absent
             # or reclaimable — live foreign ownership must keep the durable claim
@@ -878,6 +1011,10 @@ case "${1:-}" in
               exit 1
             fi
             echo "polaris-gamescope-session: nested marker invalid/dead; sockets orphan or absent — restoring idle" >&2
+          fi
+          if ! retire_session_xwayland || ! session_xwayland_absent; then
+            echo "polaris-gamescope-session: exact-session Xwayland did not reach terminal state; retaining recovery claim" >&2
+            exit 1
           fi
           publish_nested_claim restore-idle "$claim_state" || {
             echo "polaris-gamescope-session: transition claim changed before idle restoration" >&2

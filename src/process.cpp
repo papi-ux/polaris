@@ -199,7 +199,8 @@ namespace proc {
   void session_lifecycle_gate_t::begin_launch() {
     std::unique_lock lock(_mutex);
     _changed.wait(lock, [this]() {
-      return _state == state_e::idle && !_stop_waiting && !_launch_to_stop_handoff;
+      return _state == state_e::idle && !_stop_waiting && !_launch_to_stop_handoff &&
+             _rtsp_setups_in_flight == 0;
     });
     _state = state_e::launching;
   }
@@ -207,7 +208,8 @@ namespace proc {
   std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation() const {
     std::unique_lock lock(_mutex);
     _changed.wait(lock, [this]() {
-      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
+             _rtsp_setups_in_flight == 0;
     });
     if (_state != state_e::idle || _stop_waiting) {
       return std::nullopt;
@@ -218,7 +220,8 @@ namespace proc {
   bool session_lifecycle_gate_t::try_begin_rtsp_launch() {
     std::unique_lock lock(_mutex);
     _changed.wait(lock, [this]() {
-      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
+             _rtsp_setups_in_flight == 0;
     });
     if (_state != state_e::idle || _stop_waiting) {
       return false;
@@ -230,13 +233,37 @@ namespace proc {
   bool session_lifecycle_gate_t::try_begin_rtsp_launch(std::uint64_t expected_generation) {
     std::unique_lock lock(_mutex);
     _changed.wait(lock, [this]() {
-      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
+             _rtsp_setups_in_flight == 0;
     });
     if (_state != state_e::idle || _stop_waiting || _generation != expected_generation) {
       return false;
     }
     _state = state_e::launching;
     return true;
+  }
+
+  bool session_lifecycle_gate_t::try_begin_rtsp_setup(
+      std::uint64_t expected_generation) {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _state != state_e::snapshotting && !_launch_to_stop_handoff;
+    });
+    if (_state != state_e::idle || _stop_waiting ||
+        _generation != expected_generation) {
+      return false;
+    }
+    ++_rtsp_setups_in_flight;
+    return true;
+  }
+
+  void session_lifecycle_gate_t::finish_rtsp_setup() {
+    std::lock_guard lock(_mutex);
+    if (_rtsp_setups_in_flight == 0) {
+      return;
+    }
+    --_rtsp_setups_in_flight;
+    _changed.notify_all();
   }
 
   bool session_lifecycle_gate_t::begin_stop() {
@@ -252,10 +279,30 @@ namespace proc {
     ++_generation;
     _changed.notify_all();
     _changed.wait(lock, [this]() {
-      return _state != state_e::launching;
+      return _state != state_e::launching && _rtsp_setups_in_flight == 0;
     });
     _stop_waiting = false;
     _state = state_e::stopping;
+    return true;
+  }
+
+  bool session_lifecycle_gate_t::begin_stop_if(
+      const std::function<bool()> &condition) {
+    std::unique_lock lock(_mutex);
+    _changed.wait(lock, [this]() {
+      return _stop_waiting ||
+             _state == state_e::stopping ||
+             (_state == state_e::idle && !_launch_to_stop_handoff &&
+              _rtsp_setups_in_flight == 0);
+    });
+    if (_state != state_e::idle || _stop_waiting || _launch_to_stop_handoff ||
+        !condition()) {
+      return false;
+    }
+    _last_stop_committed = false;
+    ++_generation;
+    _state = state_e::stopping;
+    _changed.notify_all();
     return true;
   }
 
@@ -6398,7 +6445,11 @@ namespace proc {
 
   bool proc_t::launch_input_only_and_raise(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     launch_input_only_impl(launch_session);
-    return rtsp_stream::launch_session_raise(std::move(launch_session));
+    if (!rtsp_stream::launch_session_raise(std::move(launch_session))) {
+      return false;
+    }
+    stream::session::cancel_disconnect_resume_timeout();
+    return true;
   }
 
   void proc_t::launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
@@ -6535,7 +6586,11 @@ namespace proc {
     const bool no_active_sessions_at_launch = rtsp_stream::session_count() == 0;
     const auto err = execute_impl(app, launch_session, no_active_sessions_at_launch);
     if (!err) {
-      return rtsp_stream::launch_session_raise(std::move(launch_session)) ? 0 : 409;
+      if (!rtsp_stream::launch_session_raise(std::move(launch_session))) {
+        return 409;
+      }
+      stream::session::cancel_disconnect_resume_timeout();
+      return 0;
     }
     return err;
   }
@@ -6616,7 +6671,11 @@ namespace proc {
   }
 
   bool proc_t::raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
-    return rtsp_stream::launch_session_raise(std::move(launch_session));
+    if (!rtsp_stream::launch_session_raise(std::move(launch_session))) {
+      return false;
+    }
+    stream::session::cancel_disconnect_resume_timeout();
+    return true;
   }
 
   std::optional<std::uint64_t> proc_t::capture_session_launch_generation() const {
@@ -6636,6 +6695,14 @@ namespace proc {
 
   void proc_t::finish_session_launch() {
     _session_lifecycle_gate->finish_launch();
+  }
+
+  bool proc_t::try_begin_rtsp_setup(std::uint64_t expected_generation) {
+    return _session_lifecycle_gate->try_begin_rtsp_setup(expected_generation);
+  }
+
+  void proc_t::finish_rtsp_setup() {
+    _session_lifecycle_gate->finish_rtsp_setup();
   }
 
   std::unique_lock<std::recursive_mutex> proc_t::acquire_session_lifecycle_lock() const {
@@ -9168,6 +9235,24 @@ namespace proc {
     terminate_impl(immediate, needs_refresh);
   }
 
+  bool proc_t::terminate_if(
+      const std::function<bool()> &condition,
+      const std::function<void()> &before_terminate) {
+    if (!_session_lifecycle_gate->begin_stop_if(condition)) {
+      return false;
+    }
+    bool committed = false;
+    auto release_stop = util::fail_guard([this, &committed]() {
+      _session_lifecycle_gate->finish_stop(committed);
+    });
+    if (before_terminate) {
+      before_terminate();
+    }
+    terminate_impl(false, true);
+    committed = true;
+    return true;
+  }
+
   void proc_t::terminate_from_admitted_launch() {
     if (!_session_lifecycle_gate->transition_launch_to_stop()) {
       return;
@@ -9455,6 +9540,10 @@ namespace proc {
 #endif
 
   void proc_t::terminate_impl(bool immediate, bool needs_refresh) {
+    // Any committed teardown retires a paused-session timeout. Without this,
+    // an explicit End session can finish before the detached timeout wakes and
+    // the stale timer would enter a second stop transaction.
+    stream::session::cancel_disconnect_resume_timeout();
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     std::error_code ec;

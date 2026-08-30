@@ -150,6 +150,19 @@ namespace stream_stats {
     network_risk_tracker_t network_risk_tracker;
     std::mutex network_risk_mutex;
 
+    constexpr auto CLIENT_MEDIA_COUNTER_MAX_GAP = std::chrono::seconds(5);
+    struct client_media_counter_epoch_t {
+      client_media_counters_t sample;
+      std::chrono::steady_clock::time_point received_at {};
+    };
+    // Serializes one authenticated counter ingest (including evidence
+    // publication) with the stream-generation reset. It must always be taken
+    // before stats_mutex; the narrower counter mutex is never held while
+    // acquiring stats or network-risk state.
+    std::mutex client_media_ingest_mutex;
+    std::mutex client_media_counter_mutex;
+    std::optional<client_media_counter_epoch_t> last_client_media_counter_epoch;
+
     struct primary_network_observation_t {
       std::uint64_t revision = 0;
       std::chrono::steady_clock::time_point received_at {};
@@ -260,6 +273,10 @@ namespace stream_stats {
         network_risk_tracker.reset();
         primary_network_observations.clear();
         primary_network_state = primary_network_observation_t {};
+      }
+      {
+        std::lock_guard<std::mutex> media_lock(client_media_counter_mutex);
+        last_client_media_counter_epoch.reset();
       }
       hot_network_risk.store(false, std::memory_order_relaxed);
       hot_bytes_sent.store(0, std::memory_order_relaxed);
@@ -507,7 +524,9 @@ namespace stream_stats {
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
+    j["adaptive_bitrate_enabled"] = adaptive_bitrate_enabled;
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
+    j["adaptive_bitrate_state"] = adaptive_bitrate_state;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
     j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
     j["idr_requests_total"] = idr_requests_total;
@@ -558,7 +577,9 @@ namespace stream_stats {
       const auto controller = adaptive_bitrate::get_doctor_state();
       bind_doctor_action_scope(
         j["doctor"], identity->session_token, identity->session_generation,
-        controller.revision, network_sample_revision, video_sample_revision
+        controller.action_authority_revision,
+        network_sample_revision,
+        video_sample_revision
       );
     }
 
@@ -906,7 +927,8 @@ namespace stream_stats {
                                          const std::string &summary,
                                          const nlohmann::json &health,
                                          bool live_bitrate_tunable,
-                                         bool single_session_scope) {
+                                         bool single_session_scope,
+                                         bool auto_safe_managing) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -918,7 +940,11 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
       } else if (primary_issue == "network_jitter") {
-        if (live_bitrate_tunable) {
+        if (auto_safe_managing) {
+          body = "Confirmed network pressure is affecting this stream, and Auto Safe already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
+          next_step = "Recheck Auto Safe";
+          expected = "Auto Safe should lower the encoder target until loss and latency return to the stable range.";
+        } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
           expected = "Packet loss and latency should return to the stable range without changing encoder or display settings.";
@@ -941,7 +967,11 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "Visible media loss or sustained RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_reduced_live") {
-        if (live_bitrate_tunable) {
+        if (auto_safe_managing) {
+          body = "The current network is clean and Auto Safe is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
+          next_step = "Recheck Auto Safe";
+          expected = "Auto Safe should recover quality gradually while keeping the stream inside the measured network budget.";
+        } else if (live_bitrate_tunable) {
           body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
           next_step = "Restore and verify";
           expected = "Bitrate should climb toward the capability-validated launch ceiling while Doctor stops immediately if live loss or latency returns.";
@@ -998,6 +1028,7 @@ namespace stream_stats {
                                       int paired_target_bitrate_kbps,
                                       bool live_bitrate_tunable,
                                       bool single_session_scope,
+                                      bool auto_safe_managing,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid) {
       std::string id = "none";
@@ -1016,7 +1047,24 @@ namespace stream_stats {
         {"success_when", nlohmann::json::array()}
       };
 
-      if (primary_issue == "network_jitter" && live_bitrate_tunable) {
+      const bool auto_safe_network_management = auto_safe_managing &&
+        (primary_issue == "network_jitter" || primary_issue == "quality_reduced_live");
+      if (auto_safe_network_management) {
+        id = "recheck_network";
+        label = "Recheck";
+        kind = "verification";
+        endpoint = "/api/doctor/action";
+        method = "POST";
+        payload["action_id"] = id;
+        payload["source_result_id"] = source_result_id;
+        rollback = "This check does not change bitrate or stream settings. Auto Safe remains the only live bitrate controller.";
+        verification = {
+          {"mode", "live_telemetry"},
+          {"delay_seconds", 3},
+          {"endpoint", "/api/doctor/action"},
+          {"success_when", nlohmann::json::array({"Auto Safe remains the live bitrate owner", "current loss and latency are measured again"})}
+        };
+      } else if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
         label = "Auto Fix";
         kind = "live_tuning";
@@ -1184,6 +1232,13 @@ namespace stream_stats {
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
       stats.adaptive_runtime_update_supported && single_session_scope;
+    // Auto Safe ownership is a policy choice, not a momentary actuator state.
+    // FFmpeg bitrate changes can briefly recreate the encoder, and explicit or
+    // rollback hand-offs can temporarily change the controller-state label.
+    // None of those transitions authorizes Doctor to become a second writer.
+    // While Auto Safe is enabled, Doctor may observe/recheck the live result;
+    // only disabling Auto Safe can make a guarded Doctor mutation available.
+    const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -1341,6 +1396,21 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
     append_doctor_evidence(
       evidence,
+      "live_bitrate_owner",
+      "Live bitrate owner",
+      auto_safe_managing ? nlohmann::json("auto_safe") :
+        live_bitrate_tunable ? nlohmann::json("doctor_available") : nlohmann::json("fixed_session"),
+      "",
+      auto_safe_managing || live_bitrate_tunable ? "pass" : "watch",
+      "deterministic_controller",
+      auto_safe_managing ?
+        "Auto Safe owns continuous live bitrate adjustment. Doctor measures it and does not offer a competing mutation." :
+      live_bitrate_tunable ?
+        "Auto Safe is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
+        "The current stream has no safe, exclusive live bitrate actuator. Doctor remains observational."
+    );
+    append_doctor_evidence(
+      evidence,
       "live_bitrate_control",
       "Live bitrate control",
       stats.adaptive_runtime_update_supported,
@@ -1467,7 +1537,8 @@ namespace stream_stats {
     doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.control_channel_samples}, {"seconds", 0}}}};
     doctor["summary"] = summary;
     doctor["recommendation"] = doctor_recommendation(
-      primary_issue, summary, health, live_bitrate_tunable, single_session_scope
+      primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
+      auto_safe_managing
     );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
@@ -1478,6 +1549,7 @@ namespace stream_stats {
       effective_quality_target_kbps,
       live_bitrate_tunable,
       single_session_scope,
+      auto_safe_managing,
       doctor["result_id"].get<std::string>(),
       app_uuid
     );
@@ -1499,6 +1571,7 @@ namespace stream_stats {
   }
 
   void update_stream_active(bool active, const std::string &client_name, const std::string &client_ip) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.streaming = active;
@@ -1533,7 +1606,9 @@ namespace stream_stats {
     }
   }
 
-  void add_client(const std::string &client_ip, const std::string &client_name) {
+  void add_client(const std::string &client_ip,
+                  const std::string &client_name,
+                  std::uint64_t session_generation) {
     // Every call is a real attach from rtsp_stream::start() - bump the
     // population revision unconditionally, matching measurement-spec-v1.md
     // 6.1's "increments on every client attach or detach" (the dedup guard
@@ -1543,14 +1618,22 @@ namespace stream_stats {
 
     std::lock_guard<std::mutex> lock(stats_mutex);
 
-    // Check if client already exists
+    // Real RTSP sessions carry a process-unique generation, so an old and a
+    // replacement session from the same device/IP remain distinct until the
+    // old join completes. Legacy/test callers that omit it retain the prior
+    // IP-keyed behavior.
     auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
-      [&client_ip](const client_stats_t &c) { return c.ip == client_ip; });
+      [&client_ip, session_generation](const client_stats_t &c) {
+        return session_generation > 0 ?
+          c.session_generation == session_generation :
+          c.session_generation == 0 && c.ip == client_ip;
+      });
 
     if (it == current_stats.clients.end()) {
       client_stats_t client;
       client.name = client_name;
       client.ip = client_ip;
+      client.session_generation = session_generation;
       current_stats.clients.push_back(std::move(client));
     }
 
@@ -1562,14 +1645,19 @@ namespace stream_stats {
     }
   }
 
-  void remove_client(const std::string &client_ip) {
+  void remove_client(const std::string &client_ip,
+                     std::uint64_t session_generation) {
     client_population_revision_counter.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.clients.erase(
       std::remove_if(current_stats.clients.begin(), current_stats.clients.end(),
-        [&client_ip](const client_stats_t &c) { return c.ip == client_ip; }),
+        [&client_ip, session_generation](const client_stats_t &c) {
+          return session_generation > 0 ?
+            c.session_generation == session_generation :
+            c.session_generation == 0 && c.ip == client_ip;
+        }),
       current_stats.clients.end());
 
     if (current_stats.clients.empty()) {
@@ -1703,19 +1791,38 @@ namespace stream_stats {
                                             double loss,
                                             uint64_t bytes_sent) {
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
-      primary_network_state.received_at = std::chrono::steady_clock::now();
+      const auto received_at = std::chrono::steady_clock::now();
+      primary_network_state.received_at = received_at;
       primary_network_state.media_sample = media_sample;
       primary_network_state.latency_ms = latency_ms;
       primary_network_state.bytes_sent = bytes_sent;
       if (media_sample) {
         primary_network_state.packet_loss = loss;
         primary_network_state.packet_loss_available = true;
+        primary_network_state.media_loss_received_at = received_at;
       } else {
         primary_network_state.control_channel_packet_loss = loss;
         ++primary_network_state.control_channel_samples;
       }
+
+      // A control-channel ping contributes host-observed RTT, but it says
+      // nothing about video delivery. Keep a current confirmed media-loss
+      // reading in the shared debounce input until the next media report (or
+      // until its host-received freshness expires). Otherwise the usually
+      // faster clean ping cadence clears real media loss between Nova's
+      // one-second counter reports and Doctor never offers the safe bitrate
+      // fix. This does not refresh media provenance: the original timestamp
+      // below remains authoritative for action eligibility.
+      const bool current_media_loss =
+        primary_network_state.packet_loss_available &&
+        primary_network_state.media_loss_received_at !=
+          std::chrono::steady_clock::time_point {} &&
+        received_at - primary_network_state.media_loss_received_at <=
+          std::chrono::milliseconds(DOCTOR_CURRENT_NETWORK_MAX_AGE_MS);
+      const double confirmed_media_loss = current_media_loss ?
+        primary_network_state.packet_loss : 0.0;
       primary_network_state.network_risk = network_risk_tracker.update(
-        media_sample ? loss : 0.0,
+        confirmed_media_loss,
         latency_ms
       );
       const bool suppresses_quality_restore =
@@ -1735,7 +1842,6 @@ namespace stream_stats {
         hot_network_sample_revision.fetch_add(1, std::memory_order_release) + 1;
       if (media_sample) {
         primary_network_state.media_loss_revision = primary_network_state.revision;
-        primary_network_state.media_loss_received_at = primary_network_state.received_at;
       }
 
       hot_latency_ms.store(latency_ms, std::memory_order_relaxed);
@@ -1781,6 +1887,133 @@ namespace stream_stats {
       record_primary_network_observation(true, latency_ms, packet_loss, bytes_sent);
     }
   }
+
+  std::string_view from_client_media_ingest_state(
+      client_media_ingest_state_e state) {
+    switch (state) {
+      case client_media_ingest_state_e::baseline: return "baseline";
+      case client_media_ingest_state_e::observed: return "observed";
+      case client_media_ingest_state_e::waiting_for_frames: return "waiting_for_frames";
+      case client_media_ingest_state_e::coverage_gap_reset: return "coverage_gap_reset";
+      case client_media_ingest_state_e::counter_epoch_reset: return "counter_epoch_reset";
+      case client_media_ingest_state_e::non_monotonic: return "non_monotonic";
+      case client_media_ingest_state_e::scope_mismatch: return "scope_mismatch";
+      case client_media_ingest_state_e::invalid: return "invalid";
+    }
+    return "invalid";
+  }
+
+  client_media_ingest_result_t ingest_client_media_counters(
+      const client_media_counters_t &sample) {
+    client_media_ingest_result_t result;
+    if (sample.owner_uuid.empty() || sample.app_session_id.empty() ||
+        sample.session_generation == 0 || sample.client_monotonic_ms == 0 ||
+        sample.frames_received > sample.frames_expected ||
+        sample.frames_lost != sample.frames_expected - sample.frames_received) {
+      return result;
+    }
+
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
+    {
+      // The route's first check can race a disconnect/reconnect while this
+      // request waits behind another ingest. Recheck the exact owner, token,
+      // and generation under the same serialization used by timing-scope
+      // start/stop and stream reset before accepting even a baseline.
+      std::lock_guard<std::mutex> timing_lock(frame_timing_mutex);
+      const auto *active = find_session_timing_locked(sample.owner_uuid);
+      if (!active || active->session_generation != sample.session_generation ||
+          active->session_token != sample.app_session_id) {
+        result.state = client_media_ingest_state_e::scope_mismatch;
+        return result;
+      }
+    }
+    {
+      std::lock_guard<std::mutex> stats_lock(stats_mutex);
+      if (!current_stats.streaming) {
+        result.state = client_media_ingest_state_e::scope_mismatch;
+        return result;
+      }
+    }
+    {
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      const auto received_at = std::chrono::steady_clock::now();
+      const bool same_scope = last_client_media_counter_epoch &&
+        last_client_media_counter_epoch->sample.owner_uuid == sample.owner_uuid &&
+        last_client_media_counter_epoch->sample.app_session_id == sample.app_session_id &&
+        last_client_media_counter_epoch->sample.session_generation == sample.session_generation;
+      if (!same_scope) {
+        last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+        result.state = client_media_ingest_state_e::baseline;
+        result.accepted = true;
+        return result;
+      }
+
+      const auto previous_epoch = *last_client_media_counter_epoch;
+      const auto &previous = previous_epoch.sample;
+      if (sample.client_monotonic_ms <= previous.client_monotonic_ms) {
+        result.state = client_media_ingest_state_e::non_monotonic;
+        return result;
+      }
+
+      const auto client_gap = std::chrono::milliseconds(
+        sample.client_monotonic_ms - previous.client_monotonic_ms
+      );
+      if (received_at - previous_epoch.received_at > CLIENT_MEDIA_COUNTER_MAX_GAP ||
+          client_gap > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+        last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+        result.state = client_media_ingest_state_e::coverage_gap_reset;
+        result.accepted = true;
+        return result;
+      }
+
+      if (sample.frames_expected < previous.frames_expected ||
+          sample.frames_received < previous.frames_received ||
+          sample.frames_lost < previous.frames_lost) {
+        last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+        result.state = client_media_ingest_state_e::counter_epoch_reset;
+        result.accepted = true;
+        return result;
+      }
+
+      const auto expected_delta = sample.frames_expected - previous.frames_expected;
+      const auto received_delta = sample.frames_received - previous.frames_received;
+      const auto lost_delta = sample.frames_lost - previous.frames_lost;
+      if (received_delta > expected_delta || lost_delta != expected_delta - received_delta) {
+        result.state = client_media_ingest_state_e::invalid;
+        return result;
+      }
+      last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+      result.accepted = true;
+      if (expected_delta == 0) {
+        result.state = client_media_ingest_state_e::waiting_for_frames;
+        return result;
+      }
+      result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
+      result.state = client_media_ingest_state_e::observed;
+    }
+
+    // Serialize counter advancement with evidence publication so concurrent
+    // authenticated requests cannot publish an older delta after a newer one.
+    // The media counters prove loss. RTT and byte totals remain host-owned.
+    const auto host = get_current();
+    update_network_stats(host.latency_ms, result.media_loss_pct, host.bytes_sent);
+    if (adaptive_bitrate::is_enabled()) {
+      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
+    }
+    result.observation_published = true;
+    return result;
+  }
+
+#ifdef POLARIS_TESTS
+  void age_client_media_counter_baseline_for_tests(
+      std::chrono::steady_clock::duration age) {
+    std::lock_guard<std::mutex> lock(client_media_counter_mutex);
+    if (last_client_media_counter_epoch) {
+      last_client_media_counter_epoch->received_at =
+        std::chrono::steady_clock::now() - age;
+    }
+  }
+#endif
 
   void update_control_channel_stats(double latency_ms, double control_packet_loss, uint64_t bytes_sent) {
     // RTT describes the shared path. The ENet loss EWMA describes only its
@@ -2152,6 +2385,7 @@ namespace stream_stats {
   void start_session_timing(const std::string &device_uuid,
                             std::uint64_t session_generation,
                             std::string session_token) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
@@ -2166,6 +2400,7 @@ namespace stream_stats {
   }
 
   void stop_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
@@ -2232,7 +2467,7 @@ namespace stream_stats {
   void bind_doctor_action_scope(nlohmann::json &doctor,
                                 std::string_view app_session_id,
                                 std::uint64_t session_generation,
-                                std::uint64_t controller_revision,
+                                std::uint64_t action_authority_revision,
                                 std::uint64_t network_evidence_revision,
                                 std::uint64_t video_evidence_revision) {
     if (!doctor.is_object() || app_session_id.empty() || session_generation == 0) {
@@ -2250,7 +2485,7 @@ namespace stream_stats {
     (*payload)["app_session_id"] = app_session_id;
     (*payload)["session_generation"] = session_generation;
     if (action_id == "lower_bitrate" || action_id == "restore_quality") {
-      (*payload)["controller_revision"] = controller_revision;
+      (*payload)["controller_revision"] = action_authority_revision;
       (*payload)["evidence_revision"] = network_evidence_revision;
     }
     (void) video_evidence_revision;
@@ -2803,7 +3038,9 @@ namespace stream_stats {
       std::lock_guard<std::mutex> lock(stats_mutex);
       const auto target_bitrate = adaptive_state.target_bitrate_kbps;
       current_stats.adaptive_target_bitrate_kbps = target_bitrate;
+      current_stats.adaptive_bitrate_enabled = adaptive_state.enabled;
       current_stats.adaptive_bitrate_active = adaptive_state.active;
+      current_stats.adaptive_bitrate_state = adaptive_state.state;
       current_stats.adaptive_runtime_update_supported = adaptive_state.runtime_update_supported;
 
       // Also update adaptive bitrate for all clients

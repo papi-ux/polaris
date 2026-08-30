@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -86,7 +87,7 @@ namespace {
       doctor,
       context.launch_instance_id,
       context.session_generation,
-      controller.revision,
+      controller.action_authority_revision,
       context.stats.network_sample_revision,
       context.stats.video_sample_revision
     );
@@ -1074,6 +1075,100 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   EXPECT_TRUE(action.at("undo").at("supported"));
 }
 
+TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompetingAutoFix) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.adaptive_target_bitrate_kbps = 16000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_bitrate_state = "network_pressure";
+  stats.adaptive_runtime_update_supported = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.network_risk = true;
+  stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 52.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+  );
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(action.at("id"), "recheck_network");
+  EXPECT_EQ(action.at("capability"), "recheck");
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_NE(
+    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
+    std::string::npos
+  );
+  const auto &evidence = doctor.at("evidence");
+  const auto owner = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+    return item.at("id") == "live_bitrate_owner";
+  });
+  ASSERT_NE(owner, evidence.end());
+  EXPECT_EQ(owner->at("value"), "auto_safe");
+}
+
+TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuatorStates) {
+  const std::array<std::string, 4> transient_states {
+    "recreating_encoder",
+    "doctor_override",
+    "explicit_live_target",
+    "rollback_pending",
+  };
+
+  for (const auto &state : transient_states) {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.fps = 60.0;
+    stats.encode_target_fps = 60.0;
+    stats.bitrate_kbps = 20000;
+    stats.adaptive_target_bitrate_kbps = 13000;
+    stats.adaptive_bitrate_enabled = true;
+    stats.adaptive_bitrate_active = state != "recreating_encoder";
+    stats.adaptive_bitrate_state = state;
+    stats.adaptive_runtime_update_supported = state != "recreating_encoder";
+    stats.capture_transport = platf::frame_transport_e::dmabuf;
+    stats.capture_residency = platf::frame_residency_e::gpu;
+    stats.encode_target_residency = platf::frame_residency_e::gpu;
+    stats.network_risk = true;
+    stats.packet_loss = 3.4;
+    stats.packet_loss_available = true;
+    stats.network_sample_revision = 1;
+    stats.network_last_received_age_ms = 0;
+    stats.media_loss_sample_revision = 1;
+    stats.media_loss_last_received_age_ms = 0;
+    stats.latency_ms = 52.0;
+
+    const auto doctor = stream_stats::build_doctor_json(
+      stats,
+      {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+    );
+    const auto &action = doctor.at("safe_recovery_action");
+
+    EXPECT_EQ(action.at("id"), "recheck_network") << state;
+    EXPECT_EQ(action.at("capability"), "recheck") << state;
+    EXPECT_FALSE(action.at("undo").at("supported").get<bool>()) << state;
+    const auto &evidence = doctor.at("evidence");
+    const auto owner = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+      return item.at("id") == "live_bitrate_owner";
+    });
+    ASSERT_NE(owner, evidence.end()) << state;
+    EXPECT_EQ(owner->at("value"), "auto_safe") << state;
+  }
+}
+
 TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNoLiveFix) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -1156,6 +1251,44 @@ TEST(StreamStatsDoctorTests, CleanLiveReductionOffersCapabilityBoundedQualityRes
   EXPECT_FALSE(action.at("requires_confirmation"));
   EXPECT_TRUE(action.at("undo").at("supported"));
   ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+}
+
+TEST(StreamStatsDoctorTests, AutoSafeOwnsCleanQualityRecoveryWithoutCompetingAutoFix) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 15000;
+  stats.adaptive_target_bitrate_kbps = 9000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_bitrate_state = "recovering";
+  stats.adaptive_runtime_update_supported = true;
+  stats.paired_target_bitrate_kbps = 20000;
+  stats.effective_launch_bitrate_kbps = 15000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.packet_loss = 0.0;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 4.0;
+  stats.network_risk = false;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
+  EXPECT_EQ(action.at("id"), "recheck_network");
+  EXPECT_EQ(action.at("capability"), "recheck");
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_NE(
+    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
+    std::string::npos
+  );
 }
 
 TEST(StreamStatsDoctorTests, QualityRestoreWaitsForMeasuredCleanNetworkEvidence) {
@@ -1291,6 +1424,13 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
 
   stats.network_last_received_age_ms = 2001;
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+}
+
+TEST(DoctorActionTests, HttpStatusContractUsesConflictForTypedActionFailures) {
+  EXPECT_EQ(doctor_actions::http_status_code({{"status", true}}), 200);
+  EXPECT_EQ(doctor_actions::http_status_code({{"status", false}}), 409);
+  EXPECT_EQ(doctor_actions::http_status_code({{"status", "false"}}), 409);
+  EXPECT_EQ(doctor_actions::http_status_code(nlohmann::json::object()), 409);
 }
 
 TEST(DoctorActionTests, HostNetworkPublicationInvalidatesDoctorSnapshotWithAdaptiveDisabled) {
@@ -1825,6 +1965,15 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_TRUE(no_fresh_evidence.at("changed").get<bool>());
   EXPECT_EQ(no_fresh_evidence.at("state"), "rolled_back");
 
+  const auto rolled_back_undo = doctor_actions::execute({
+    {"action_id", "undo"}, {"run_id", run_id}
+  });
+  EXPECT_TRUE(rolled_back_undo.at("status").get<bool>());
+  EXPECT_TRUE(rolled_back_undo.at("changed").get<bool>());
+  EXPECT_EQ(rolled_back_undo.at("state"), "rolled_back");
+  EXPECT_EQ(rolled_back_undo.at("run_id"), run_id);
+  EXPECT_FALSE(rolled_back_undo.at("undo").at("available").get<bool>());
+
   const auto clustered_run = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(clustered_run.at("status").get<bool>());
   const auto clustered_run_id = clustered_run.at("run_id").get<std::string>();
@@ -1864,6 +2013,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_TRUE(verified.at("status").get<bool>());
   EXPECT_FALSE(verified.at("changed").get<bool>());
   EXPECT_EQ(verified.at("state"), "resolved");
+  EXPECT_NE(verified.at("message").get<std::string>().find("verified"), std::string::npos);
   EXPECT_TRUE(verified.at("verification_window").at("complete").get<bool>());
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 16000);
 
@@ -1900,11 +2050,26 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   const auto unavailable_during_verification = doctor_actions::execute({
     {"action_id", "verify"}, {"run_id", second_run_id}
   });
-  EXPECT_TRUE(unavailable_during_verification.at("status").get<bool>());
+  EXPECT_FALSE(unavailable_during_verification.at("status").get<bool>());
   EXPECT_TRUE(unavailable_during_verification.at("changed").get<bool>());
-  EXPECT_EQ(unavailable_during_verification.at("state"), "rolled_back");
-  EXPECT_EQ(unavailable_during_verification.at("restored_bitrate_kbps"), 20000);
+  EXPECT_EQ(unavailable_during_verification.at("state"), "rollback_unconfirmed");
+  EXPECT_EQ(
+    unavailable_during_verification.at("requested_restore_bitrate_kbps"),
+    20000
+  );
+  EXPECT_FALSE(
+    unavailable_during_verification.at("undo").at("available").get<bool>()
+  );
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 0);
+
+  const auto unconfirmed_undo = doctor_actions::execute({
+    {"action_id", "undo"}, {"run_id", second_run_id}
+  });
+  EXPECT_FALSE(unconfirmed_undo.at("status").get<bool>());
+  EXPECT_TRUE(unconfirmed_undo.at("changed").get<bool>());
+  EXPECT_EQ(unconfirmed_undo.at("state"), "rollback_unconfirmed");
+  EXPECT_EQ(unconfirmed_undo.at("run_id"), second_run_id);
+  EXPECT_FALSE(unconfirmed_undo.at("undo").at("available").get<bool>());
   adaptive_bitrate::set_runtime_update_supported(true);
 
   doctor_actions::recovery_action_context_t scoped_context;
@@ -2223,6 +2388,22 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   EXPECT_EQ(stale_retry.at("request_id"), request_id);
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
 
+  // The explicit owner write retired the live run, but a durable client may
+  // still present its Undo receipt afterward. Replay the exact terminal result
+  // so the client can retire that stale Undo without touching the newer target.
+  const auto retired_undo = doctor_actions::execute({
+    {"action_id", "undo"},
+    {"run_id", run_id},
+    {"app_session_id", context.launch_instance_id},
+    {"session_generation", generation}
+  }, context);
+  EXPECT_TRUE(retired_undo.at("status").get<bool>());
+  EXPECT_FALSE(retired_undo.at("changed").get<bool>());
+  EXPECT_EQ(retired_undo.at("state"), "superseded");
+  EXPECT_EQ(retired_undo.at("run_id"), run_id);
+  EXPECT_FALSE(retired_undo.at("undo").at("available").get<bool>());
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
+
   doctor_actions::session_ended("client-owner", generation);
   stream_stats::stop_session_timing("client-owner", generation);
   stream_stats::update_stream_active(false);
@@ -2267,6 +2448,97 @@ TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) 
   EXPECT_EQ(rejected.at("state"), "evidence_changed");
   EXPECT_EQ(rejected.at("code"), "stale_action_envelope");
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+
+  doctor_actions::session_ended("client-owner", generation);
+  stream_stats::stop_session_timing("client-owner", generation);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(
+    true, "DoctorFreshTelemetry", "203.0.113.26"
+  );
+  stream_stats::update_video_stats(
+    60.0, 20000, 5.0, "hevc", 1920, 1080
+  );
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 426;
+  doctor_actions::session_started(
+    "client-owner", generation, "launch-426", 20000
+  );
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  stream_stats::start_session_timing(
+    "client-owner", generation, "launch-426"
+  );
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.enforce_request_scope = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-426";
+  context.session_generation = generation;
+  context.stats = stream_stats::get_current();
+  ASSERT_TRUE(context.stats.network_risk);
+  const auto request = trusted_doctor_action_request(context);
+  ASSERT_EQ(request.at("action_id"), "lower_bitrate");
+  ASSERT_EQ(request.at("target_bitrate_kbps"), 16000);
+
+  const auto displayed_controller = adaptive_bitrate::get_doctor_state();
+  const auto displayed_evidence_revision =
+    context.stats.network_sample_revision;
+
+  // A fresh clean control ping moves the host evidence epoch, but the current
+  // confirmed media-loss sample remains fresh and derives the same guarded
+  // 20 -> 16 Mbps action. This routine telemetry must not make a human-speed
+  // button click stale.
+  stream_stats::update_control_channel_stats(5.0, 0.0, 1000);
+  const auto refreshed_stats = stream_stats::get_current();
+  const auto refreshed_controller = adaptive_bitrate::get_doctor_state();
+  ASSERT_GT(
+    refreshed_stats.network_sample_revision,
+    displayed_evidence_revision
+  );
+  ASSERT_GT(refreshed_controller.revision, displayed_controller.revision);
+  ASSERT_EQ(
+    refreshed_controller.action_authority_revision,
+    displayed_controller.action_authority_revision
+  );
+  ASSERT_TRUE(refreshed_stats.network_risk);
+
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(request, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  EXPECT_TRUE(applied.at("changed").get<bool>());
+  EXPECT_EQ(applied.at("state"), "applying");
+  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 16000);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({
+      {"action_id", "undo"},
+      {"run_id", run_id},
+      {"app_session_id", "launch-426"},
+      {"session_generation", generation}
+    }, context);
+  });
+  ASSERT_TRUE(undone.at("status").get<bool>());
+  EXPECT_EQ(undone.at("state"), "undone");
+  EXPECT_EQ(undone.at("restored_bitrate_kbps"), 20000);
 
   doctor_actions::session_ended("client-owner", generation);
   stream_stats::stop_session_timing("client-owner", generation);
@@ -2772,6 +3044,297 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
   EXPECT_EQ(stats.packet_loss_source, "media_transport");
   EXPECT_EQ(stats.bytes_sent, 123456789ull);
 
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCountersPublishHostScopedDerivedLoss) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-a", 41, "app-session-a");
+  stream_stats::update_stream_active(true);
+  stream_stats::update_control_channel_stats(12.0, 9.0, 777);
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-a",
+    .app_session_id = "app-session-a",
+    .session_generation = 41,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 100,
+    .frames_received = 100,
+    .frames_lost = 0
+  };
+  const auto baseline = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(baseline.accepted);
+  EXPECT_FALSE(baseline.observation_published);
+  EXPECT_EQ(baseline.state, stream_stats::client_media_ingest_state_e::baseline);
+  EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 200;
+  sample.frames_received = 196;
+  sample.frames_lost = 4;
+  const auto observed = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(observed.accepted);
+  EXPECT_TRUE(observed.observation_published);
+  EXPECT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_DOUBLE_EQ(observed.media_loss_pct, 4.0);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.latency_ms, 12.0)
+    << "client media telemetry must preserve host-observed RTT";
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 4.0);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_EQ(stats.packet_loss_source, "media_transport");
+  EXPECT_EQ(stats.bytes_sent, 777u);
+
+  const auto replay = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_FALSE(replay.accepted);
+  EXPECT_EQ(replay.state, stream_stats::client_media_ingest_state_e::non_monotonic);
+
+  stream_stats::stop_session_timing("owner-a", 41);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, ConcurrentClientMediaIngestAndStreamResetLeaveNoStaleEvidence) {
+  adaptive_bitrate::set_enabled(false);
+
+  for (std::uint64_t round = 1; round <= 64; ++round) {
+    stream_stats::update_stream_active(false);
+    stream_stats::start_session_timing(
+      "owner-concurrent-reset",
+      round,
+      "app-session-concurrent-reset"
+    );
+    stream_stats::update_stream_active(true);
+
+    stream_stats::client_media_counters_t sample {
+      .owner_uuid = "owner-concurrent-reset",
+      .app_session_id = "app-session-concurrent-reset",
+      .session_generation = round,
+      .client_monotonic_ms = 1'000,
+      .frames_expected = 100,
+      .frames_received = 100,
+      .frames_lost = 0
+    };
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+    sample.client_monotonic_ms = 2'000;
+    sample.frames_expected = 200;
+    sample.frames_received = 180;
+    sample.frames_lost = 20;
+
+    std::atomic<bool> start {false};
+    std::thread ingest_thread([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      (void) stream_stats::ingest_client_media_counters(sample);
+    });
+    std::thread reset_thread([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      stream_stats::update_stream_active(false);
+    });
+
+    start.store(true, std::memory_order_release);
+    ingest_thread.join();
+    reset_thread.join();
+
+    const auto stats = stream_stats::get_current();
+    EXPECT_FALSE(stats.streaming);
+    EXPECT_FALSE(stats.packet_loss_available);
+    EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+    stream_stats::stop_session_timing("owner-concurrent-reset", round);
+  }
+}
+
+TEST(StreamStatsHotFieldTests, StaleGenerationCannotRebaselineOrPublishAfterReconnect) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-reconnect", 71, "app-session-old");
+  stream_stats::update_stream_active(true);
+
+  stream_stats::client_media_counters_t stale {
+    .owner_uuid = "owner-reconnect",
+    .app_session_id = "app-session-old",
+    .session_generation = 71,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 100,
+    .frames_received = 100,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(stale).accepted);
+
+  stream_stats::stop_session_timing("owner-reconnect", 71);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-reconnect", 72, "app-session-new");
+  stream_stats::update_stream_active(true);
+
+  stale.client_monotonic_ms = 2'000;
+  stale.frames_expected = 200;
+  stale.frames_received = 180;
+  stale.frames_lost = 20;
+  const auto first_stale = stream_stats::ingest_client_media_counters(stale);
+  EXPECT_FALSE(first_stale.accepted);
+  EXPECT_FALSE(first_stale.observation_published);
+  EXPECT_EQ(
+    first_stale.state,
+    stream_stats::client_media_ingest_state_e::scope_mismatch
+  );
+
+  stale.client_monotonic_ms = 3'000;
+  stale.frames_expected = 300;
+  stale.frames_received = 270;
+  stale.frames_lost = 30;
+  const auto second_stale = stream_stats::ingest_client_media_counters(stale);
+  EXPECT_FALSE(second_stale.accepted);
+  EXPECT_FALSE(second_stale.observation_published);
+  EXPECT_EQ(
+    second_stale.state,
+    stream_stats::client_media_ingest_state_e::scope_mismatch
+  );
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.streaming);
+  EXPECT_FALSE(stats.packet_loss_available);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+
+  stream_stats::stop_session_timing("owner-reconnect", 72);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMediaLoss) {
+  adaptive_bitrate::set_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-interleaved", 42, "app-session-interleaved");
+  stream_stats::update_stream_active(true);
+  stream_stats::set_doctor_live_action_scope_available(true);
+
+  // Arm the RTT warm-up with a proven-calm LAN before media loss begins.
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  }
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-interleaved",
+    .app_session_id = "app-session-interleaved",
+    .session_generation = 42,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 1'000,
+    .frames_received = 1'000,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 1'100;
+  sample.frames_received = 1'080;
+  sample.frames_lost = 20;
+  const auto loss = stream_stats::ingest_client_media_counters(sample);
+  ASSERT_TRUE(loss.accepted);
+  ASSERT_TRUE(loss.observation_published);
+  ASSERT_DOUBLE_EQ(loss.media_loss_pct, 20.0);
+
+  // Production pings arrive between Nova's one-second counter reports. They
+  // carry no media-loss measurement, so their clean control-channel loss must
+  // not be interpreted as clean video delivery.
+  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.network_risk);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 20.0);
+  EXPECT_EQ(stats.packet_loss_source, "media_transport");
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    nlohmann::json::object()
+  );
+  EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
+
+  adaptive_bitrate::set_runtime_update_supported(false);
+  stream_stats::stop_session_timing("owner-interleaved", 42);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCounterRestartNeedsANewBaseline) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-b", 52, "app-session-b");
+  stream_stats::update_stream_active(true);
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-b",
+    .app_session_id = "app-session-b",
+    .session_generation = 52,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 1'000,
+    .frames_received = 990,
+    .frames_lost = 10
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 20;
+  sample.frames_received = 20;
+  sample.frames_lost = 0;
+  const auto reset = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(reset.accepted);
+  EXPECT_FALSE(reset.observation_published);
+  EXPECT_EQ(reset.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+
+  sample.client_monotonic_ms = 3'000;
+  sample.frames_expected = 120;
+  sample.frames_received = 120;
+  const auto clean = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(clean.observation_published);
+  EXPECT_DOUBLE_EQ(clean.media_loss_pct, 0.0);
+
+  stream_stats::stop_session_timing("owner-b", 52);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCoverageGapCannotRefreshOldLoss) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-c", 63, "app-session-c");
+  stream_stats::update_stream_active(true);
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-c",
+    .app_session_id = "app-session-c",
+    .session_generation = 63,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 100,
+    .frames_received = 100,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+  stream_stats::age_client_media_counter_baseline_for_tests(
+    std::chrono::seconds(6)
+  );
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 200;
+  sample.frames_received = 190;
+  sample.frames_lost = 10;
+  const auto gap = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(gap.accepted);
+  EXPECT_FALSE(gap.observation_published);
+  EXPECT_EQ(gap.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+
+  sample.client_monotonic_ms = 3'000;
+  sample.frames_expected = 300;
+  sample.frames_received = 290;
+  const auto current = stream_stats::ingest_client_media_counters(sample);
+  EXPECT_TRUE(current.observation_published);
+  EXPECT_DOUBLE_EQ(current.media_loss_pct, 0.0);
+
+  stream_stats::stop_session_timing("owner-c", 63);
   stream_stats::update_stream_active(false);
 }
 

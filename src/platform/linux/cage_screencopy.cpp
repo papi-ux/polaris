@@ -28,6 +28,7 @@
 #include <wlr-screencopy-unstable-v1.h>
 
 #include "src/logging.h"
+#include "src/stream_stats.h"
 
 using namespace std::literals;
 
@@ -366,6 +367,12 @@ namespace cage_screencopy {
         }
       }
       img_out->frame_timestamp = std::chrono::steady_clock::now();
+      img_out->frame_metadata = {
+        .transport = platf::frame_transport_e::shm,
+        .residency = platf::frame_residency_e::cpu,
+        .format = platf::frame_format_e::bgra8,
+      };
+      stream_stats::update_capture_metadata(img_out->frame_metadata);
 
       if (!push_cb(std::move(img_out), true)) {
         break;
