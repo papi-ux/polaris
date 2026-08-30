@@ -214,17 +214,61 @@ TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) 
     "}  // namespace"
   );
 
-  const auto boundary = timeout.find("session::stream_generation_boundary_mutex");
+  const auto conditional_stop = timeout.find("proc::proc.terminate_if(");
   const auto generation_check = timeout.find("disconnect_resume_timeout_generation.load");
   const auto active_check = timeout.find("session::running_sessions.load");
-  const auto terminate = timeout.find("proc::proc.terminate()");
-  ASSERT_NE(boundary, std::string::npos);
+  ASSERT_NE(conditional_stop, std::string::npos);
   ASSERT_NE(generation_check, std::string::npos);
   ASSERT_NE(active_check, std::string::npos);
-  ASSERT_NE(terminate, std::string::npos);
-  EXPECT_LT(boundary, generation_check);
-  EXPECT_LT(generation_check, terminate);
-  EXPECT_LT(active_check, terminate);
+  EXPECT_EQ(timeout.find("session::stream_generation_boundary_mutex"), std::string::npos);
+  EXPECT_EQ(timeout.find("proc::proc.terminate()"), std::string::npos);
+  EXPECT_LT(generation_check, conditional_stop);
+  EXPECT_LT(active_check, conditional_stop);
+
+  const auto process = source("src/process.cpp");
+  for (const auto &wrapper : {
+         between(process,
+           "bool proc_t::launch_input_only_and_raise(",
+           "void proc_t::launch_input_only_impl("),
+         between(process,
+           "int proc_t::execute_and_raise(",
+           "int proc_t::validate_resolved_profile_for_running_app("),
+         between(process,
+           "bool proc_t::raise_session_for_admitted_launch(",
+           "std::optional<std::uint64_t> proc_t::capture_session_launch_generation(")
+       }) {
+    const auto raise = wrapper.find("rtsp_stream::launch_session_raise");
+    const auto cancel = wrapper.find("cancel_disconnect_resume_timeout");
+    ASSERT_NE(raise, std::string::npos);
+    ASSERT_NE(cancel, std::string::npos);
+    EXPECT_LT(raise, cancel);
+  }
+
+  const auto nvhttp = source("src/nvhttp.cpp");
+  constexpr std::string_view lifecycle_binding =
+    "launch_session->lifecycle_generation = *launch_generation;";
+  const auto first_binding = nvhttp.find(lifecycle_binding);
+  ASSERT_NE(first_binding, std::string::npos);
+  const auto second_binding = nvhttp.find(lifecycle_binding, first_binding + 1);
+  ASSERT_NE(second_binding, std::string::npos);
+  EXPECT_EQ(nvhttp.find(lifecycle_binding, second_binding + 1), std::string::npos);
+
+  const auto rtsp = source("src/rtsp.cpp");
+  const auto setup = between(
+    rtsp,
+    "insert_start_result_e insert_and_start_if_not_cancelled(",
+    "int run_setup_insert_for_tests("
+  );
+  const auto lifecycle_claim = setup.find("proc::proc.try_begin_rtsp_setup(");
+  const auto slot_insert = setup.find("_session_slots->emplace(session)");
+  const auto stream_start = setup.find("stream::session::start(");
+  const auto lifecycle_release = setup.find("proc::proc.finish_rtsp_setup()");
+  ASSERT_NE(lifecycle_claim, std::string::npos);
+  ASSERT_NE(slot_insert, std::string::npos);
+  ASSERT_NE(stream_start, std::string::npos);
+  ASSERT_NE(lifecycle_release, std::string::npos);
+  EXPECT_LT(lifecycle_claim, slot_insert);
+  EXPECT_LT(lifecycle_claim, stream_start);
 }
 
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {

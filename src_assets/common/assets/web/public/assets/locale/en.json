@@ -879,6 +879,7 @@
     "doctor_action_stable": "Verified: current network evidence is stable, so Doctor left bitrate unchanged.",
     "doctor_action_confirmed": "The recheck now confirms sustained network pressure. Run Fix and verify to apply one guarded bitrate step.",
     "doctor_action_needs_attention": "The guarded change did not clear the issue. Doctor stopped after one step; review the evidence before changing anything else.",
+    "doctor_action_rollback_unconfirmed": "Needs attention: Doctor requested the previous bitrate, but the encoder did not confirm it. Reconnect the stream before applying another fix.",
     "doctor_action_undo": "Undo",
     "doctor_action_undone": "Doctor restored the previous live bitrate and Auto Quality state.",
     "quick_controls": "Quick Controls",

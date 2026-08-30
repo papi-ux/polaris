@@ -1607,6 +1607,12 @@ namespace doctor_actions {
     );
   }
 
+  int http_status_code(const nlohmann::json &result) {
+    const auto status = result.find("status");
+    return status != result.end() && status->is_boolean() && status->get<bool>() ?
+      200 : 409;
+  }
+
   void session_started(std::string_view owner_uuid,
                        std::uint64_t session_generation,
                        std::string_view launch_instance_id,

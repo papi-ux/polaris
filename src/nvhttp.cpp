@@ -5604,6 +5604,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "A launch parameter is malformed");
       return;
     }
+    launch_session->lifecycle_generation = *launch_generation;
     const bool watch_only = launch_session->watch_only;
     bool launch_session_raised = false;
 #ifdef __linux__
@@ -5998,6 +5999,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "A resume parameter is malformed");
       return;
     }
+    launch_session->lifecycle_generation = *launch_generation;
     const bool watch_only = launch_session->watch_only;
 
     if (watch_only && no_active_sessions) {
@@ -8894,9 +8896,7 @@ namespace nvhttp {
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(
-          output.value("status", false) ?
-            SimpleWeb::StatusCode::success_ok :
-            SimpleWeb::StatusCode::client_error_conflict,
+          static_cast<SimpleWeb::StatusCode>(doctor_actions::http_status_code(output)),
           output.dump(),
           headers
         );
