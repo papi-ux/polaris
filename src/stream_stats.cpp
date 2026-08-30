@@ -1829,6 +1829,7 @@ namespace stream_stats {
       case client_media_ingest_state_e::coverage_gap_reset: return "coverage_gap_reset";
       case client_media_ingest_state_e::counter_epoch_reset: return "counter_epoch_reset";
       case client_media_ingest_state_e::non_monotonic: return "non_monotonic";
+      case client_media_ingest_state_e::scope_mismatch: return "scope_mismatch";
       case client_media_ingest_state_e::invalid: return "invalid";
     }
     return "invalid";
@@ -1845,6 +1846,26 @@ namespace stream_stats {
     }
 
     std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
+    {
+      // The route's first check can race a disconnect/reconnect while this
+      // request waits behind another ingest. Recheck the exact owner, token,
+      // and generation under the same serialization used by timing-scope
+      // start/stop and stream reset before accepting even a baseline.
+      std::lock_guard<std::mutex> timing_lock(frame_timing_mutex);
+      const auto *active = find_session_timing_locked(sample.owner_uuid);
+      if (!active || active->session_generation != sample.session_generation ||
+          active->session_token != sample.app_session_id) {
+        result.state = client_media_ingest_state_e::scope_mismatch;
+        return result;
+      }
+    }
+    {
+      std::lock_guard<std::mutex> stats_lock(stats_mutex);
+      if (!current_stats.streaming) {
+        result.state = client_media_ingest_state_e::scope_mismatch;
+        return result;
+      }
+    }
     {
       std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
       const auto received_at = std::chrono::steady_clock::now();
@@ -2296,6 +2317,7 @@ namespace stream_stats {
   void start_session_timing(const std::string &device_uuid,
                             std::uint64_t session_generation,
                             std::string session_token) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
@@ -2310,6 +2332,7 @@ namespace stream_stats {
   }
 
   void stop_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::lock_guard<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),

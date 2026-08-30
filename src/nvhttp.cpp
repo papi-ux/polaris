@@ -8695,7 +8695,9 @@ namespace nvhttp {
         });
         const auto state = stream_stats::from_client_media_ingest_state(result.state);
         if (!result.accepted) {
-          const auto code = result.state == stream_stats::client_media_ingest_state_e::non_monotonic ?
+          const auto code =
+            (result.state == stream_stats::client_media_ingest_state_e::non_monotonic ||
+             result.state == stream_stats::client_media_ingest_state_e::scope_mismatch) ?
             SimpleWeb::StatusCode::client_error_conflict :
             SimpleWeb::StatusCode::client_error_bad_request;
           write_json(code, {
@@ -8887,10 +8889,18 @@ namespace nvhttp {
         const auto output = doctor_actions::execute(body, recovery_context);
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
-        response->write(output.dump(), headers);
+        response->write(
+          output.value("status", false) ?
+            SimpleWeb::StatusCode::success_ok :
+            SimpleWeb::StatusCode::client_error_conflict,
+          output.dump(),
+          headers
+        );
       } catch (const std::exception &e) {
         nlohmann::json err;
         err["status"] = false;
+        err["changed"] = false;
+        err["state"] = "rejected";
         err["error"] = e.what();
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");

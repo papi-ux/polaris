@@ -596,6 +596,28 @@ namespace adaptive_bitrate {
     return live_bitrate_request_t {target, operator_revision};
   }
 
+  bool begin_live_bitrate_session_recreation(
+      std::uint64_t revision,
+      int bitrate_kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (revision != operator_revision ||
+        bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed) ||
+        !runtime_update_supported.load(std::memory_order_relaxed)) {
+      return false;
+    }
+
+    // The retiring encoder no longer proves any bitrate, including a later
+    // rollback to the value it used before Doctor acted. Keep runtime support
+    // available so an in-flight rollback can wait for the replacement session
+    // instead of failing immediately as unsupported.
+    encoder_applied_bitrate_kbps = 0;
+    encoder_applied_revision = 0;
+    encoder_applied_at = {};
+    pending_live_update_active.store(true, std::memory_order_relaxed);
+    state_changed.notify_all();
+    return true;
+  }
+
   void acknowledge_live_bitrate_applied(
       std::uint64_t revision,
       int bitrate_kbps) {
@@ -741,6 +763,10 @@ namespace adaptive_bitrate {
         encoder_applied_at = std::chrono::steady_clock::now();
       }
       set_controller_status("steady", "encoder_ready");
+    } else {
+      encoder_applied_bitrate_kbps = 0;
+      encoder_applied_revision = 0;
+      encoder_applied_at = {};
     }
     state_changed.notify_all();
   }

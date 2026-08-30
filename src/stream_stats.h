@@ -481,6 +481,7 @@ namespace stream_stats {
     coverage_gap_reset,
     counter_epoch_reset,
     non_monotonic,
+    scope_mismatch,
     invalid
   };
 

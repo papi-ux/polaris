@@ -2869,6 +2869,7 @@ TEST(StreamStatsHotFieldTests, UpdateNetworkStatsIsVisibleThroughGetCurrent) {
 TEST(StreamStatsHotFieldTests, ClientMediaCountersPublishHostScopedDerivedLoss) {
   adaptive_bitrate::set_enabled(false);
   stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-a", 41, "app-session-a");
   stream_stats::update_stream_active(true);
   stream_stats::update_control_channel_stats(12.0, 9.0, 777);
 
@@ -2909,6 +2910,7 @@ TEST(StreamStatsHotFieldTests, ClientMediaCountersPublishHostScopedDerivedLoss) 
   EXPECT_FALSE(replay.accepted);
   EXPECT_EQ(replay.state, stream_stats::client_media_ingest_state_e::non_monotonic);
 
+  stream_stats::stop_session_timing("owner-a", 41);
   stream_stats::update_stream_active(false);
 }
 
@@ -2917,6 +2919,11 @@ TEST(StreamStatsHotFieldTests, ConcurrentClientMediaIngestAndStreamResetLeaveNoS
 
   for (std::uint64_t round = 1; round <= 64; ++round) {
     stream_stats::update_stream_active(false);
+    stream_stats::start_session_timing(
+      "owner-concurrent-reset",
+      round,
+      "app-session-concurrent-reset"
+    );
     stream_stats::update_stream_active(true);
 
     stream_stats::client_media_counters_t sample {
@@ -2957,13 +2964,70 @@ TEST(StreamStatsHotFieldTests, ConcurrentClientMediaIngestAndStreamResetLeaveNoS
     EXPECT_FALSE(stats.streaming);
     EXPECT_FALSE(stats.packet_loss_available);
     EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+    stream_stats::stop_session_timing("owner-concurrent-reset", round);
   }
+}
+
+TEST(StreamStatsHotFieldTests, StaleGenerationCannotRebaselineOrPublishAfterReconnect) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-reconnect", 71, "app-session-old");
+  stream_stats::update_stream_active(true);
+
+  stream_stats::client_media_counters_t stale {
+    .owner_uuid = "owner-reconnect",
+    .app_session_id = "app-session-old",
+    .session_generation = 71,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 100,
+    .frames_received = 100,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(stale).accepted);
+
+  stream_stats::stop_session_timing("owner-reconnect", 71);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-reconnect", 72, "app-session-new");
+  stream_stats::update_stream_active(true);
+
+  stale.client_monotonic_ms = 2'000;
+  stale.frames_expected = 200;
+  stale.frames_received = 180;
+  stale.frames_lost = 20;
+  const auto first_stale = stream_stats::ingest_client_media_counters(stale);
+  EXPECT_FALSE(first_stale.accepted);
+  EXPECT_FALSE(first_stale.observation_published);
+  EXPECT_EQ(
+    first_stale.state,
+    stream_stats::client_media_ingest_state_e::scope_mismatch
+  );
+
+  stale.client_monotonic_ms = 3'000;
+  stale.frames_expected = 300;
+  stale.frames_received = 270;
+  stale.frames_lost = 30;
+  const auto second_stale = stream_stats::ingest_client_media_counters(stale);
+  EXPECT_FALSE(second_stale.accepted);
+  EXPECT_FALSE(second_stale.observation_published);
+  EXPECT_EQ(
+    second_stale.state,
+    stream_stats::client_media_ingest_state_e::scope_mismatch
+  );
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.streaming);
+  EXPECT_FALSE(stats.packet_loss_available);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+
+  stream_stats::stop_session_timing("owner-reconnect", 72);
+  stream_stats::update_stream_active(false);
 }
 
 TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMediaLoss) {
   adaptive_bitrate::set_enabled(false);
   adaptive_bitrate::set_runtime_update_supported(true);
   stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-interleaved", 42, "app-session-interleaved");
   stream_stats::update_stream_active(true);
   stream_stats::set_doctor_live_action_scope_available(true);
 
@@ -3011,12 +3075,14 @@ TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMedia
   EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
 
   adaptive_bitrate::set_runtime_update_supported(false);
+  stream_stats::stop_session_timing("owner-interleaved", 42);
   stream_stats::update_stream_active(false);
 }
 
 TEST(StreamStatsHotFieldTests, ClientMediaCounterRestartNeedsANewBaseline) {
   adaptive_bitrate::set_enabled(false);
   stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-b", 52, "app-session-b");
   stream_stats::update_stream_active(true);
 
   stream_stats::client_media_counters_t sample {
@@ -3046,12 +3112,14 @@ TEST(StreamStatsHotFieldTests, ClientMediaCounterRestartNeedsANewBaseline) {
   EXPECT_TRUE(clean.observation_published);
   EXPECT_DOUBLE_EQ(clean.media_loss_pct, 0.0);
 
+  stream_stats::stop_session_timing("owner-b", 52);
   stream_stats::update_stream_active(false);
 }
 
 TEST(StreamStatsHotFieldTests, ClientMediaCoverageGapCannotRefreshOldLoss) {
   adaptive_bitrate::set_enabled(false);
   stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-c", 63, "app-session-c");
   stream_stats::update_stream_active(true);
 
   stream_stats::client_media_counters_t sample {
@@ -3085,6 +3153,7 @@ TEST(StreamStatsHotFieldTests, ClientMediaCoverageGapCannotRefreshOldLoss) {
   EXPECT_TRUE(current.observation_published);
   EXPECT_DOUBLE_EQ(current.media_loss_pct, 0.0);
 
+  stream_stats::stop_session_timing("owner-c", 63);
   stream_stats::update_stream_active(false);
 }
 

@@ -93,6 +93,10 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
     "stream_stats::update_frame_delivery("
   );
   EXPECT_NE(runtime_update.find("adaptive_bitrate::get_live_bitrate_request()"), std::string::npos);
+  EXPECT_NE(
+    runtime_update.find("begin_live_bitrate_session_recreation"),
+    std::string::npos
+  );
   EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
   EXPECT_NE(runtime_update.find("bitrate_update_e::recreate_session"), std::string::npos);
   EXPECT_NE(runtime_update.find("config.bitrate = request->target_bitrate_kbps"), std::string::npos);
@@ -118,6 +122,20 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
   EXPECT_EQ(encode_success.find("acknowledge_live_bitrate_applied"), std::string::npos);
 }
 
+TEST(DoctorResetContract, PairedDoctorFailuresUseTypedNonSuccessHttpStatus) {
+  const auto route = between(
+    source("src/nvhttp.cpp"),
+    "auto polarisDoctorAction =",
+    "auto polarisSetBitrate ="
+  );
+  EXPECT_NE(route.find("output.value(\"status\", false)"), std::string::npos);
+  EXPECT_NE(
+    route.find("SimpleWeb::StatusCode::client_error_conflict"),
+    std::string::npos
+  );
+  EXPECT_NE(route.find("err[\"changed\"] = false"), std::string::npos);
+}
+
 TEST(DoctorResetContract, MediaCounterIngestAndStreamResetUseOneLockOrder) {
   const auto stats = source("src/stream_stats.cpp");
   const auto reset = between(
@@ -132,6 +150,9 @@ TEST(DoctorResetContract, MediaCounterIngestAndStreamResetUseOneLockOrder) {
   );
 
   EXPECT_LT(reset.find("client_media_ingest_mutex"), reset.find("stats_mutex"));
+  EXPECT_LT(ingest.find("frame_timing_mutex"), ingest.find("client_media_counter_mutex"));
+  EXPECT_NE(ingest.find("active->session_token != sample.app_session_id"), std::string::npos);
+  EXPECT_NE(ingest.find("client_media_ingest_state_e::scope_mismatch"), std::string::npos);
   EXPECT_LT(ingest.find("client_media_ingest_mutex"), ingest.find("client_media_counter_mutex"));
   EXPECT_LT(ingest.find("client_media_counter_mutex"), ingest.find("const auto host = get_current()"));
   EXPECT_NE(ingest.find("    }\n\n    // Serialize counter advancement"), std::string::npos)
