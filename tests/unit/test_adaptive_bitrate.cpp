@@ -434,6 +434,32 @@ TEST(AdaptiveBitrateController, DoctorTransactionRestoresExactOwnedState) {
   ).has_value());
 }
 
+TEST(AdaptiveBitrateController, RecreatedEncoderSessionAcknowledgesTheExactPendingRevision) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *doctor_revision,
+    15000
+  ).has_value());
+
+  // The FFmpeg path recreates only its encoder session. A successful open at
+  // the requested config reports that exact target and current controller
+  // revision through this existing session-ready handshake.
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 15000);
+  EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(
+    *doctor_revision,
+    15000
+  ).has_value());
+}
+
 TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
   enable_controller(20000);
   adaptive_bitrate::set_runtime_enabled(false);

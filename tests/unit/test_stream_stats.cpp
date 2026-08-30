@@ -2912,6 +2912,54 @@ TEST(StreamStatsHotFieldTests, ClientMediaCountersPublishHostScopedDerivedLoss) 
   stream_stats::update_stream_active(false);
 }
 
+TEST(StreamStatsHotFieldTests, ConcurrentClientMediaIngestAndStreamResetLeaveNoStaleEvidence) {
+  adaptive_bitrate::set_enabled(false);
+
+  for (std::uint64_t round = 1; round <= 64; ++round) {
+    stream_stats::update_stream_active(false);
+    stream_stats::update_stream_active(true);
+
+    stream_stats::client_media_counters_t sample {
+      .owner_uuid = "owner-concurrent-reset",
+      .app_session_id = "app-session-concurrent-reset",
+      .session_generation = round,
+      .client_monotonic_ms = 1'000,
+      .frames_expected = 100,
+      .frames_received = 100,
+      .frames_lost = 0
+    };
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+
+    sample.client_monotonic_ms = 2'000;
+    sample.frames_expected = 200;
+    sample.frames_received = 180;
+    sample.frames_lost = 20;
+
+    std::atomic<bool> start {false};
+    std::thread ingest_thread([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      (void) stream_stats::ingest_client_media_counters(sample);
+    });
+    std::thread reset_thread([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      stream_stats::update_stream_active(false);
+    });
+
+    start.store(true, std::memory_order_release);
+    ingest_thread.join();
+    reset_thread.join();
+
+    const auto stats = stream_stats::get_current();
+    EXPECT_FALSE(stats.streaming);
+    EXPECT_FALSE(stats.packet_loss_available);
+    EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  }
+}
+
 TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMediaLoss) {
   adaptive_bitrate::set_enabled(false);
   adaptive_bitrate::set_runtime_update_supported(true);
