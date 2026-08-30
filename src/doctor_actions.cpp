@@ -385,14 +385,16 @@ namespace doctor_actions {
       }
       const bool live_mutation =
         action_id == "lower_bitrate" || action_id == "restore_quality";
+      const bool read_only_recheck =
+        action_id == "recheck_network" || action_id == "recheck_pacing";
       for (auto it = expected_payload.begin(); it != expected_payload.end(); ++it) {
         // These fields identify the telemetry snapshot that rendered the
         // button, not user authority. A paired click is allowed to cross a
         // newer equivalent observation only when the current host still
-        // derives the same action, target, stream scope, and controller
-        // authority below. The mutation path rechecks current evidence and
-        // uses a fresh internal controller revision atomically.
-        if (live_mutation &&
+        // derives the same action and stream scope. Mutations also recheck the
+        // target and controller authority below, then use a fresh internal
+        // controller revision atomically; Recheck never mutates the actuator.
+        if ((live_mutation || read_only_recheck) &&
             (it.key() == "source_result_id" ||
              it.key() == "evidence_revision")) {
           continue;

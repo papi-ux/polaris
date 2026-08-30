@@ -1074,6 +1074,51 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   EXPECT_TRUE(action.at("undo").at("supported"));
 }
 
+TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompetingAutoFix) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.adaptive_target_bitrate_kbps = 16000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_bitrate_state = "network_pressure";
+  stats.adaptive_runtime_update_supported = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.network_risk = true;
+  stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 52.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+  );
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(action.at("id"), "recheck_network");
+  EXPECT_EQ(action.at("capability"), "recheck");
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_NE(
+    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
+    std::string::npos
+  );
+  const auto &evidence = doctor.at("evidence");
+  const auto owner = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+    return item.at("id") == "live_bitrate_owner";
+  });
+  ASSERT_NE(owner, evidence.end());
+  EXPECT_EQ(owner->at("value"), "auto_safe");
+}
+
 TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNoLiveFix) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -1156,6 +1201,44 @@ TEST(StreamStatsDoctorTests, CleanLiveReductionOffersCapabilityBoundedQualityRes
   EXPECT_FALSE(action.at("requires_confirmation"));
   EXPECT_TRUE(action.at("undo").at("supported"));
   ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+}
+
+TEST(StreamStatsDoctorTests, AutoSafeOwnsCleanQualityRecoveryWithoutCompetingAutoFix) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 15000;
+  stats.adaptive_target_bitrate_kbps = 9000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_bitrate_state = "recovering";
+  stats.adaptive_runtime_update_supported = true;
+  stats.paired_target_bitrate_kbps = 20000;
+  stats.effective_launch_bitrate_kbps = 15000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.packet_loss = 0.0;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 4.0;
+  stats.network_risk = false;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto &action = doctor.at("safe_recovery_action");
+
+  EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
+  EXPECT_EQ(action.at("id"), "recheck_network");
+  EXPECT_EQ(action.at("capability"), "recheck");
+  EXPECT_FALSE(action.at("undo").at("supported"));
+  EXPECT_NE(
+    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
+    std::string::npos
+  );
 }
 
 TEST(StreamStatsDoctorTests, QualityRestoreWaitsForMeasuredCleanNetworkEvidence) {
