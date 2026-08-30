@@ -729,6 +729,7 @@ TEST(PipeWireCapturePolicyTests, DmaBufEligibilityRequiresSupportedEncoderAndExp
     .capture_render_node = "/dev/dri/renderD128",
     .encoder_render_node = "/dev/dri/renderD128",
     .mem_type = platf::mem_type_e::cuda,
+    .encoder_import_supported = true,
     .egl_import_supported = true,
   };
 
@@ -769,6 +770,10 @@ TEST(PipeWireCapturePolicyTests, DmaBufEligibilityRequiresSupportedEncoderAndExp
   auto no_egl = eligible;
   no_egl.egl_import_supported = false;
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(no_egl));
+
+  auto no_encoder_import = eligible;
+  no_encoder_import.encoder_import_supported = false;
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(no_encoder_import));
 
   auto noncanonical = eligible;
   noncanonical.capture_render_node = "renderD128";

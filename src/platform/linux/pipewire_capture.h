@@ -74,6 +74,9 @@ namespace pipewire_capture {
     std::optional<std::string> capture_render_node;
     std::string encoder_render_node;
     platf::mem_type_e mem_type = platf::mem_type_e::system;
+    // A matching GPU and importable EGL modifier are insufficient when this
+    // binary was built without the encoder-specific DMA-BUF import path.
+    bool encoder_import_supported = false;
     bool egl_import_supported = false;
   };
 

@@ -212,6 +212,25 @@ namespace portal {
     return pipewire_capture::dmabuf_override_from_env(std::getenv("POLARIS_PORTAL_DMABUF"));
   }
 
+  static bool encoder_dmabuf_import_compiled(platf::mem_type_e mem_type) {
+    switch (mem_type) {
+      case platf::mem_type_e::cuda:
+#ifdef POLARIS_BUILD_CUDA
+        return true;
+#else
+        return false;
+#endif
+      case platf::mem_type_e::vaapi:
+#ifdef POLARIS_BUILD_VAAPI
+        return true;
+#else
+        return false;
+#endif
+      default:
+        return false;
+    }
+  }
+
   static void log_dmabuf_policy(
     platf::mem_type_e mem_type,
     pipewire_capture::dmabuf_override_e override,
@@ -271,6 +290,7 @@ namespace portal {
     const auto encoder_render_node = encoder_render_node_for_dmabuf(generation.adapter_name);
     std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
     bool may_use_dmabuf = false;
+    const bool encoder_import_supported = encoder_dmabuf_import_compiled(mem_type);
     const bool prefer_hdr = portal_prefer_hdr_formats(client_dynamic_range, generation.stream_mode);
     const bool prefer_sdr = portal_prefer_sdr_formats(client_dynamic_range);
     const auto dmabuf_override = portal_dmabuf_override();
@@ -279,11 +299,15 @@ namespace portal {
         .capture_render_node = encoder_render_node,
         .encoder_render_node = *encoder_render_node,
         .mem_type = mem_type,
+        .encoder_import_supported = encoder_import_supported,
         .egl_import_supported = true,
       };
       may_use_dmabuf = pipewire_capture::may_offer_dmabuf(eligibility, dmabuf_override);
     }
     log_dmabuf_policy(mem_type, dmabuf_override, "local_graph"sv);
+    if (encoder_render_node && !encoder_import_supported) {
+      BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
+    }
     if (may_use_dmabuf) {
       // LINEAR always for gamescope (only allocates LINEAR on PW node).
       dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
@@ -628,6 +652,7 @@ namespace portal {
         bool may_use_dmabuf = false;
         const auto dmabuf_override = portal_dmabuf_override();
         const bool allow_vaapi = dmabuf_override == pipewire_capture::dmabuf_override_e::allow_vaapi;
+        const bool encoder_import_supported = encoder_dmabuf_import_compiled(mem_type);
         log_dmabuf_policy(mem_type, dmabuf_override, "portal_remote"sv);
         if (dmabuf_override == pipewire_capture::dmabuf_override_e::force_cpu ||
             (mem_type == platf::mem_type_e::vaapi && !allow_vaapi)) {
@@ -640,6 +665,8 @@ namespace portal {
         } else if (*session->capture_render_node != *encoder_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because capture render node ["sv << *session->capture_render_node
                           << "] does not match encoder adapter ["sv << *encoder_render_node << ']';
+        } else if (!encoder_import_supported) {
+          BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
         } else if (mem_type != platf::mem_type_e::cuda &&
                    !(allow_vaapi && mem_type == platf::mem_type_e::vaapi)) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because encoder memory type is neither CUDA nor explicitly enabled VAAPI"sv;
@@ -697,6 +724,7 @@ namespace portal {
             .capture_render_node = session->capture_render_node,
             .encoder_render_node = *encoder_render_node,
             .mem_type = mem_type,
+            .encoder_import_supported = encoder_import_supported,
             .egl_import_supported = !dmabuf_formats.empty(),
           };
           may_use_dmabuf = pipewire_capture::may_offer_dmabuf(eligibility, dmabuf_override);
