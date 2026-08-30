@@ -3,6 +3,10 @@
 This page covers the fastest recovery steps for the public Polaris host flow. Use the web UI's
 Troubleshooting screen first when it is still reachable.
 
+If the stream is running but looks slow, unstable, or blurry, start with
+[Fix a bad stream with Doctor](doctor.md). Keeping the affected stream open lets Doctor separate
+network, host, and client evidence before you change anything.
+
 ## Web UI credentials
 
 Reset the web UI username and password:

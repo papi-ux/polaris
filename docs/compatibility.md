@@ -46,7 +46,7 @@ Polaris is Linux-only by design. Windows and macOS host ports are not planned.
 | Nova-aware launch contract | Supported | Lets Nova show Private Stream, Host Virtual Display, Mirror Desktop, watch and resume, and safety state before launch. |
 | Mission Control | Supported | Shows runtime, capture path, encoder, clients, stream health, and host actions in one cockpit. |
 | Game Control pairing preset | Supported | Trusted clients can browse, launch, and send input without broad server-admin permissions. |
-| AI Auto Quality | Optional | Provider-configured tuning and recovery guidance; core streaming requires no AI or cloud service. |
+| Doctor and optional AI explanation | Supported / optional | Deterministic telemetry drives diagnosis and safe actions. AI may explain that evidence, but cannot define launch settings or Doctor actions. |
 
 ## Best-tested first setup
 
