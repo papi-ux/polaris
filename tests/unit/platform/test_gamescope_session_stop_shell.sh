@@ -20,6 +20,7 @@ polaris_process_fields() {
   [ -r "$POLARIS_PROC_ROOT/$1/start" ] || return 1
   POLARIS_PROCESS_START_TIME="$(<"$POLARIS_PROC_ROOT/$1/start")"
 }
+polaris_xwayland_pid() { [ -e "$POLARIS_PROC_ROOT/$1/xwayland" ]; }
 polaris_validate_marker() {
   case "${2:-}" in
     nested) [ "${NESTED_VALID:-0}" = 1 ] && [ ! -e "$POLARIS_ACTIONS.nested-stopped" ] ;;
@@ -29,6 +30,7 @@ polaris_validate_marker() {
 }
 polaris_stop_marked_gamescope() {
   printf 'stop-nested\n' >>"$POLARIS_ACTIONS"
+  printf 'stop-credential=%s\n' "${POLARIS_SESSION_INSTANCE_ID:-}" >>"$POLARIS_ACTIONS"
   if [ -n "${STOP_DELAY:-}" ]; then
     sleep "$STOP_DELAY"
   fi
@@ -65,18 +67,28 @@ printf 'busctl\n' >>"$POLARIS_ACTIONS"
 EOF
 cat >"$work/bin/pgrep" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "${POLARIS_PGREP_OUTPUT:-}"
-exit "${POLARIS_PGREP_STATUS:-0}"
+case "$*" in
+  '-x steam')
+    printf '%s\n' "${POLARIS_PGREP_OUTPUT:-}"
+    exit "${POLARIS_PGREP_STATUS:-0}"
+    ;;
+  '-x Xwayland')
+    printf '%s\n' "${POLARIS_XWAYLAND_PGREP_OUTPUT:-}"
+    exit "${POLARIS_XWAYLAND_PGREP_STATUS:-0}"
+    ;;
+esac
+exit 2
 EOF
 cat >"$work/bin/kill" <<'EOF'
 #!/usr/bin/env bash
 printf 'kill %s\n' "$*" >>"$POLARIS_ACTIONS"
+signal="${1:-}"
 pid="${2:-}"
 case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
-rm -rf "$POLARIS_PROC_ROOT/$pid"
-if [ "${NESTED_DIES_WITH_STEAM:-0}" = 1 ]; then
-  : >"$POLARIS_ACTIONS.nested-stopped"
+if [ "$signal" = -TERM ] && [ "${STEAM_IGNORES_TERM:-0}" = 1 ]; then
+  exit 0
 fi
+rm -rf "$POLARIS_PROC_ROOT/$pid"
 EOF
 chmod +x "$work/bin/"*
 
@@ -92,10 +104,14 @@ run_stop() {
     POLARIS_SESSION_INSTANCE_ID="${POLARIS_SESSION_INSTANCE_ID-session-test}" \
     POLARIS_PGREP_OUTPUT="${POLARIS_PGREP_OUTPUT:-}" \
     POLARIS_PGREP_STATUS="${POLARIS_PGREP_STATUS:-0}" \
+    POLARIS_XWAYLAND_PGREP_OUTPUT="${POLARIS_XWAYLAND_PGREP_OUTPUT:-}" \
+    POLARIS_XWAYLAND_PGREP_STATUS="${POLARIS_XWAYLAND_PGREP_STATUS:-0}" \
+    POLARIS_STEAM_TERM_STEPS=1 POLARIS_STEAM_KILL_STEPS=1 \
+    POLARIS_XWAYLAND_TERM_STEPS=1 POLARIS_XWAYLAND_KILL_STEPS=1 \
     POLARIS_IDLE_WAIT_STEPS=2 POLARIS_PORTAL_WAIT_STEPS=2 \
-    POLARIS_NESTED_GRACE_STEPS=1 \
     NESTED_VALID="${NESTED_VALID:-0}" STOP_OK="${STOP_OK:-0}" \
-    STOP_DELAY="${STOP_DELAY:-}" NESTED_DIES_WITH_STEAM="${NESTED_DIES_WITH_STEAM:-0}" \
+    STOP_DELAY="${STOP_DELAY:-}" \
+    STEAM_IGNORES_TERM="${STEAM_IGNORES_TERM:-0}" \
     RECLAIM_OK="${RECLAIM_OK:-0}" IDLE_VALID="${IDLE_VALID:-0}" \
     IDLE_OWNS_SOCKET="${IDLE_OWNS_SOCKET:-0}" WRITE_ENV_OK="${WRITE_ENV_OK:-0}" \
     IDLE_START_OK="${IDLE_START_OK:-1}" PORTAL_RESTART_OK="${PORTAL_RESTART_OK:-1}" \
@@ -184,6 +200,43 @@ grep -qx 'unmask-idle' "$actions" || fail "standalone cleanup retained runtime m
 ! grep -Eq 'start polaris-gamescope-idle|restart polaris-portal|busctl' "$actions" ||
   fail "standalone cleanup tried to start absent Nix services"
 
+# A dead compositor may leave credential-bound Xwayland children behind. Drain
+# only that exact generation before declaring standalone recovery complete.
+reset_state
+printf 'session-A nested standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+mkdir -p "$work/proc/200" "$work/proc/201"
+printf '20\n' >"$work/proc/200/start"
+printf '21\n' >"$work/proc/201/start"
+: >"$work/proc/200/xwayland"
+: >"$work/proc/201/xwayland"
+printf 'HOME=/srv/example\0' >"$work/proc/200/environ"
+printf 'HOME=/srv/example\0POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/201/environ"
+POLARIS_SESSION_INSTANCE_ID='' NESTED_VALID=0 RECLAIM_OK=1 \
+  IDLE_LOAD_STATE=not-found PORTAL_LOAD_STATE=not-found \
+  POLARIS_XWAYLAND_PGREP_OUTPUT=$'200\n201' run_stop >/dev/null 2>&1 ||
+  fail "standalone exact-session Xwayland cleanup failed"
+grep -qx 'kill -TERM 201' "$actions" || fail "exact-session Xwayland was not signalled"
+! grep -q 'kill .*200' "$actions" || fail "foreign Xwayland was signalled"
+[ -d "$work/proc/200" ] || fail "foreign Xwayland process was removed"
+[ ! -d "$work/proc/201" ] || fail "exact-session Xwayland survived recovery"
+[ ! -e "$work/run/polaris-gamescope-session-state" ] ||
+  fail "exact-session Xwayland cleanup retained standalone state"
+
+# Unknown Xwayland enumeration is not evidence that recovery is complete.
+reset_state
+printf 'session-A nested standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+if POLARIS_SESSION_INSTANCE_ID='' NESTED_VALID=0 RECLAIM_OK=1 \
+    IDLE_LOAD_STATE=not-found PORTAL_LOAD_STATE=not-found \
+    POLARIS_XWAYLAND_PGREP_STATUS=2 run_stop >/dev/null 2>&1; then
+  fail "Xwayland enumeration failure was treated as an empty generation"
+fi
+[ -e "$work/run/polaris-gamescope-session-state" ] ||
+  fail "Xwayland enumeration failure cleared the recovery state"
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
+  fail "Xwayland enumeration failure advanced the recovery claim"
+
 # If the installed service model changes during a launch, do not reinterpret
 # that generation. Keep its exact recovery claim for operator remediation.
 reset_state
@@ -240,7 +293,7 @@ fi
 
 # Enumeration and procfs failures are unknown ownership, never "no Steam".
 reset_state
-if POLARIS_PGREP_STATUS=2 NESTED_VALID=1 STOP_OK=1 run_stop >/dev/null 2>&1; then
+if POLARIS_PGREP_STATUS=2 NESTED_VALID=0 STOP_OK=1 run_stop >/dev/null 2>&1; then
   fail "pgrep failure was treated as an empty exact-session drain"
 fi
 [ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
@@ -249,14 +302,15 @@ fi
 reset_state
 mkdir -p "$work/proc/102"
 printf '12\n' >"$work/proc/102/start"
-if POLARIS_PGREP_OUTPUT=102 NESTED_VALID=1 STOP_OK=1 run_stop >/dev/null 2>&1; then
+if POLARIS_PGREP_OUTPUT=102 NESTED_VALID=0 STOP_OK=1 run_stop >/dev/null 2>&1; then
   fail "unreadable Steam environment was treated as unowned"
 fi
 [ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = 1 ] ||
   fail "unreadable Steam metadata advanced the recovery claim"
 rm -rf "$work/proc/102"
 
-# Only Steam carrying the exact Polaris session credential may be signalled.
+# A live nested generation is retired through the exact process-group fence.
+# Desktop Steam is neither signalled nor removed by session teardown.
 reset_state
 mkdir -p "$work/proc/100" "$work/proc/101"
 printf '10\n' >"$work/proc/100/start"
@@ -266,27 +320,23 @@ printf 'HOME=/srv/example\0POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc
 POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=$'100\n101' \
   NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
   PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "exact-session Steam handoff failed"
-grep -qx 'kill -TERM 101' "$actions" || fail "exact-session Steam was not signalled"
+grep -qx 'stop-nested' "$actions" || fail "nested generation did not use its fenced stop"
+! grep -q 'kill .*101' "$actions" || fail "nested teardown bypassed its process-group fence"
 ! grep -q 'kill .*100' "$actions" || fail "desktop Steam was signalled"
 [ -d "$work/proc/100" ] || fail "desktop Steam process was removed"
-steam_line="$(grep -nFx 'kill -TERM 101' "$actions" | head -n1 | cut -d: -f1)"
-stop_line="$(grep -nFx 'stop-nested' "$actions" | head -n1 | cut -d: -f1)"
-[ -n "$steam_line" ] && [ -n "$stop_line" ] && [ "$steam_line" -lt "$stop_line" ] ||
-  fail "nested compositor fallback ran before exact-session Steam shutdown"
 
-# A primary-child exit may terminate gamescope naturally. Reclaim its orphaned
-# endpoints and never signal the compositor group in that case.
+# Even when child exit would normally terminate Gamescope, nested teardown uses
+# the fence so the known Vulkan destructor path cannot produce a fresh core.
 reset_state
 mkdir -p "$work/proc/101"
 printf '11\n' >"$work/proc/101/start"
 printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
 POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=101 \
-  NESTED_VALID=1 STOP_OK=1 NESTED_DIES_WITH_STEAM=1 RECLAIM_OK=1 \
+  NESTED_VALID=1 STOP_OK=1 \
   IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 \
-  run_stop >/dev/null 2>&1 || fail "natural nested exit handoff failed"
-grep -qx 'kill -TERM 101' "$actions" || fail "natural exit did not request exact-session Steam shutdown"
-! grep -qx 'stop-nested' "$actions" || fail "natural exit still signalled the compositor group"
-grep -qx 'reclaim' "$actions" || fail "natural exit did not reclaim orphaned endpoints"
+  run_stop >/dev/null 2>&1 || fail "fenced nested exit handoff failed"
+grep -qx 'stop-nested' "$actions" || fail "fenced exit did not retire the compositor group"
+! grep -q 'kill .*101' "$actions" || fail "fenced exit separately signalled Steam"
 
 # Overlapping stop attempts serialize on one lifecycle lock. The first consumes
 # the durable state; the waiter then observes an idempotently completed stop.
@@ -318,7 +368,8 @@ printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
 POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 \
   NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
   PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "persisted-session recovery failed"
-grep -qx 'kill -TERM 101' "$actions" || fail "recovery did not use persisted exact-session credential"
+grep -qx 'stop-credential=session-A' "$actions" ||
+  fail "recovery did not load the persisted exact-session credential"
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "successful recovery retained session credential"
 
 # Persisted attach mode is also a durable recovery claim: exact-session Steam
@@ -336,6 +387,26 @@ POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 run_stop >/dev/null 2>&1 |
 grep -qx 'kill -TERM 101' "$actions" || fail "attach recovery did not terminate exact-session Steam"
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "attach recovery cleared no credential"
 [ ! -e "$work/run/polaris-gamescope-session-mode" ] || fail "attach recovery retained mode"
+
+# Attach mode has no owned compositor group. If its exact Steam ignores TERM,
+# revalidate and KILL only that credential-bound process; desktop Steam stays.
+reset_state
+rm -f "$work/run/polaris-gamescope-wsi-nested"
+printf 'session-A attach standalone\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+mkdir -p "$work/proc/100" "$work/proc/101"
+printf '10\n' >"$work/proc/100/start"
+printf '11\n' >"$work/proc/101/start"
+printf 'HOME=/srv/example\0' >"$work/proc/100/environ"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=$'100\n101' STEAM_IGNORES_TERM=1 \
+  IDLE_LOAD_STATE=not-found PORTAL_LOAD_STATE=not-found run_stop >/dev/null 2>&1 ||
+  fail "attach exact-session Steam KILL fallback failed"
+grep -qx 'kill -TERM 101' "$actions" || fail "attach fallback did not try TERM first"
+grep -qx 'kill -KILL 101' "$actions" || fail "attach fallback did not KILL exact Steam"
+! grep -q 'kill .*100' "$actions" || fail "attach fallback signalled desktop Steam"
+[ -d "$work/proc/100" ] || fail "attach fallback removed desktop Steam"
+[ ! -d "$work/proc/101" ] || fail "attach fallback left exact-session Steam alive"
 
 # New credentials publish ID+mode as one atomic record; stop must consume that
 # record and clear it only after exact-session Steam is absent.
@@ -521,7 +592,9 @@ grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
   fail "portal handoff is not finalized under the ownership lock"
 grep -Fq 'acquire_session_operation_lock' "$script" ||
   fail "nested lifecycle operations are not serialized"
-grep -Fq 'wait_for_nested_gamescope_exit' "$script" ||
-  fail "nested stop has no graceful compositor-exit window"
+! grep -Fq 'wait_for_nested_gamescope_exit' "$script" ||
+  fail "nested stop still enters the crashing graceful compositor-exit window"
+grep -Fq 'polaris_stop_marked_gamescope "$marker" nested "$rt"' "$script" ||
+  fail "nested stop does not use the exact-generation compositor fence"
 
 echo "PASS: gamescope session stop state machine"

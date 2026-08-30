@@ -1880,6 +1880,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_TRUE(verified.at("status").get<bool>());
   EXPECT_FALSE(verified.at("changed").get<bool>());
   EXPECT_EQ(verified.at("state"), "resolved");
+  EXPECT_NE(verified.at("message").get<std::string>().find("verified"), std::string::npos);
   EXPECT_TRUE(verified.at("verification_window").at("complete").get<bool>());
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 16000);
 

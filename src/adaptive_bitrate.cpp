@@ -188,7 +188,8 @@ namespace adaptive_bitrate {
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
-    if (doctor_override_active.load(std::memory_order_relaxed)) {
+    if (doctor_override_active.load(std::memory_order_relaxed) ||
+        pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
     }
     auto now = std::chrono::steady_clock::now();
@@ -317,7 +318,8 @@ namespace adaptive_bitrate {
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
-    if (doctor_override_active.load(std::memory_order_relaxed)) {
+    if (doctor_override_active.load(std::memory_order_relaxed) ||
+        pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
     }
     auto now = std::chrono::steady_clock::now();

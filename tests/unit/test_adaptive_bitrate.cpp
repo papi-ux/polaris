@@ -627,6 +627,48 @@ TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
   ));
 }
 
+TEST(AdaptiveBitrateController, RollbackTargetCannotDriftBeforeEncoderAcknowledgement) {
+  enable_controller(20000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(before.enabled);
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    16000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  adaptive_bitrate::acknowledge_live_bitrate_applied(*doctor_revision, 16000);
+
+  const auto restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  );
+  ASSERT_TRUE(restore_revision.has_value());
+  ASSERT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 20000);
+
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(12.0, 120.0);
+  adaptive_bitrate::update_stream_health(0.70, 0.10, 0.20, 8.0, 18.0, 50.0);
+
+  const auto pending = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(pending.live_bitrate_kbps, 20000);
+  EXPECT_EQ(pending.revision, *restore_revision);
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *restore_revision,
+    20000
+  ).has_value());
+
+  adaptive_bitrate::acknowledge_live_bitrate_applied(*restore_revision, 20000);
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(12.0, 120.0);
+
+  const auto resumed = adaptive_bitrate::get_doctor_state();
+  EXPECT_LT(resumed.live_bitrate_kbps, 20000);
+  EXPECT_GT(resumed.revision, *restore_revision);
+}
+
 TEST(AdaptiveBitrateController, NewerExplicitIncreaseReplacesDoctorTargetExactly) {
   enable_controller(20000);
   adaptive_bitrate::set_runtime_enabled(false);
