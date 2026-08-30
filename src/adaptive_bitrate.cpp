@@ -448,18 +448,6 @@ namespace adaptive_bitrate {
       };
     }
 
-    // Production encoder startup registers the launch bitrate explicitly.
-    // Preserve a coherent baseline for embedders/tests that enabled runtime
-    // support after constructing an already-running controller.
-    if (encoder_applied_bitrate_kbps <= 0) {
-      const int prior_target = target_bitrate_kbps.load(std::memory_order_relaxed);
-      if (prior_target > 0) {
-        encoder_applied_bitrate_kbps = prior_target;
-        encoder_applied_revision = operator_revision;
-        encoder_applied_at = std::chrono::steady_clock::now();
-      }
-    }
-
     if (!doctor_override_active.load(std::memory_order_relaxed)) {
       doctor_previous_max_bitrate_kbps = current_config.max_bitrate_kbps;
       doctor_video_policy_regressed_during_override = false;
