@@ -172,7 +172,11 @@ namespace stream_stats {
 
     // Adaptive bitrate
     int adaptive_target_bitrate_kbps = 0;
+    /// True when the user-selected Auto Safe feedback policy is enabled.
+    bool adaptive_bitrate_enabled = false;
     bool adaptive_bitrate_active = false;
+    /// Current deterministic actuator owner/state (for example network_pressure).
+    std::string adaptive_bitrate_state = "disabled";
     bool adaptive_runtime_update_supported = false;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;

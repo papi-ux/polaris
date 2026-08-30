@@ -524,7 +524,9 @@ namespace stream_stats {
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
+    j["adaptive_bitrate_enabled"] = adaptive_bitrate_enabled;
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
+    j["adaptive_bitrate_state"] = adaptive_bitrate_state;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
     j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
     j["idr_requests_total"] = idr_requests_total;
@@ -925,7 +927,8 @@ namespace stream_stats {
                                          const std::string &summary,
                                          const nlohmann::json &health,
                                          bool live_bitrate_tunable,
-                                         bool single_session_scope) {
+                                         bool single_session_scope,
+                                         bool auto_safe_managing) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -937,7 +940,11 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
       } else if (primary_issue == "network_jitter") {
-        if (live_bitrate_tunable) {
+        if (auto_safe_managing) {
+          body = "Confirmed network pressure is affecting this stream, and Auto Safe already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
+          next_step = "Recheck Auto Safe";
+          expected = "Auto Safe should lower the encoder target until loss and latency return to the stable range.";
+        } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
           expected = "Packet loss and latency should return to the stable range without changing encoder or display settings.";
@@ -960,7 +967,11 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "Visible media loss or sustained RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_reduced_live") {
-        if (live_bitrate_tunable) {
+        if (auto_safe_managing) {
+          body = "The current network is clean and Auto Safe is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
+          next_step = "Recheck Auto Safe";
+          expected = "Auto Safe should recover quality gradually while keeping the stream inside the measured network budget.";
+        } else if (live_bitrate_tunable) {
           body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
           next_step = "Restore and verify";
           expected = "Bitrate should climb toward the capability-validated launch ceiling while Doctor stops immediately if live loss or latency returns.";
@@ -1017,6 +1028,7 @@ namespace stream_stats {
                                       int paired_target_bitrate_kbps,
                                       bool live_bitrate_tunable,
                                       bool single_session_scope,
+                                      bool auto_safe_managing,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid) {
       std::string id = "none";
@@ -1035,7 +1047,24 @@ namespace stream_stats {
         {"success_when", nlohmann::json::array()}
       };
 
-      if (primary_issue == "network_jitter" && live_bitrate_tunable) {
+      const bool auto_safe_network_management = auto_safe_managing &&
+        (primary_issue == "network_jitter" || primary_issue == "quality_reduced_live");
+      if (auto_safe_network_management) {
+        id = "recheck_network";
+        label = "Recheck";
+        kind = "verification";
+        endpoint = "/api/doctor/action";
+        method = "POST";
+        payload["action_id"] = id;
+        payload["source_result_id"] = source_result_id;
+        rollback = "This check does not change bitrate or stream settings. Auto Safe remains the only live bitrate controller.";
+        verification = {
+          {"mode", "live_telemetry"},
+          {"delay_seconds", 3},
+          {"endpoint", "/api/doctor/action"},
+          {"success_when", nlohmann::json::array({"Auto Safe remains the live bitrate owner", "current loss and latency are measured again"})}
+        };
+      } else if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
         label = "Auto Fix";
         kind = "live_tuning";
@@ -1203,6 +1232,12 @@ namespace stream_stats {
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
       stats.adaptive_runtime_update_supported && single_session_scope;
+    const bool auto_safe_managing =
+      stats.adaptive_bitrate_enabled && stats.adaptive_bitrate_active &&
+      stats.adaptive_runtime_update_supported &&
+      stats.adaptive_bitrate_state != "doctor_override" &&
+      stats.adaptive_bitrate_state != "explicit_live_target" &&
+      stats.adaptive_bitrate_state != "rollback_pending";
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -1360,6 +1395,21 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
     append_doctor_evidence(
       evidence,
+      "live_bitrate_owner",
+      "Live bitrate owner",
+      auto_safe_managing ? nlohmann::json("auto_safe") :
+        live_bitrate_tunable ? nlohmann::json("doctor_available") : nlohmann::json("fixed_session"),
+      "",
+      auto_safe_managing || live_bitrate_tunable ? "pass" : "watch",
+      "deterministic_controller",
+      auto_safe_managing ?
+        "Auto Safe owns continuous live bitrate adjustment. Doctor measures it and does not offer a competing mutation." :
+      live_bitrate_tunable ?
+        "Auto Safe is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
+        "The current stream has no safe, exclusive live bitrate actuator. Doctor remains observational."
+    );
+    append_doctor_evidence(
+      evidence,
       "live_bitrate_control",
       "Live bitrate control",
       stats.adaptive_runtime_update_supported,
@@ -1486,7 +1536,8 @@ namespace stream_stats {
     doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.control_channel_samples}, {"seconds", 0}}}};
     doctor["summary"] = summary;
     doctor["recommendation"] = doctor_recommendation(
-      primary_issue, summary, health, live_bitrate_tunable, single_session_scope
+      primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
+      auto_safe_managing
     );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
@@ -1497,6 +1548,7 @@ namespace stream_stats {
       effective_quality_target_kbps,
       live_bitrate_tunable,
       single_session_scope,
+      auto_safe_managing,
       doctor["result_id"].get<std::string>(),
       app_uuid
     );
@@ -2985,7 +3037,9 @@ namespace stream_stats {
       std::lock_guard<std::mutex> lock(stats_mutex);
       const auto target_bitrate = adaptive_state.target_bitrate_kbps;
       current_stats.adaptive_target_bitrate_kbps = target_bitrate;
+      current_stats.adaptive_bitrate_enabled = adaptive_state.enabled;
       current_stats.adaptive_bitrate_active = adaptive_state.active;
+      current_stats.adaptive_bitrate_state = adaptive_state.state;
       current_stats.adaptive_runtime_update_supported = adaptive_state.runtime_update_supported;
 
       // Also update adaptive bitrate for all clients
