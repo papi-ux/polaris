@@ -1,6 +1,7 @@
 # Changelog
 
 - Fixed verified Doctor bitrate receipts so they include a terminal explanation, and froze adaptive feedback only while an exact rollback target is awaiting encoder acknowledgement. Undo can now restore the measured prior target without a concurrent controller step moving it first; normal adaptation resumes after acknowledgement.
+- Fixed CUDA-disabled NVIDIA packages accepting PipeWire DMA-BUF frames without a compiled encoder import path. They now fail closed to SHM/CPU capture, so the first stream frame always has storage the selected encoder can consume.
 - Fixed nested Gamescope teardown on affected 3.16 hosts by fencing and retiring the exact marked private process group before Gamescope enters its crashing Vulkan destructor. Attach-mode Steam still receives a graceful exact-session TERM, with a credential-revalidated KILL fallback that cannot touch desktop Steam.
 - Fixed non-cage detached Steam teardown so shutdown is forwarded through Steam's no-bootstrap remote client instead of running `steam -shutdown`. A live desktop or stale private singleton still receives shutdown, while a vanished listener cannot cause a replacement Steam client to start; incomplete generation or singleton cleanup retains retry authority.
 - Fixed Gamescope session recovery on distro-package hosts by restoring their empty compositor baseline without requiring Nix-only idle/portal units, and made failed prior-session recovery retain its exact claim instead of forcing unsafe socket cleanup.

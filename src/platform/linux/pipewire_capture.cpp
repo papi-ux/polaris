@@ -162,7 +162,9 @@ namespace pipewire_capture {
     // testing opt-in on hosts where the operator has already proved it works.
     const bool supported_encoder = eligibility.mem_type == platf::mem_type_e::cuda ||
                                    (override == dmabuf_override_e::allow_vaapi && eligibility.mem_type == platf::mem_type_e::vaapi);
-    if (override == dmabuf_override_e::force_cpu || !supported_encoder) {
+    if (override == dmabuf_override_e::force_cpu ||
+        !supported_encoder ||
+        !eligibility.encoder_import_supported) {
       return false;
     }
     if (!eligibility.capture_render_node) {
