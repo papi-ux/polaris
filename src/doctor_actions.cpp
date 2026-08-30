@@ -1341,6 +1341,7 @@ namespace doctor_actions {
         {"changed", false},
         {"run_id", run_id},
         {"state", resolved ? "resolved" : "watching"},
+        {"message", "Doctor verified the guarded bitrate step against fresh stream and encoder evidence."},
         {"elapsed_seconds", elapsed_seconds},
         {"evidence", verification_evidence},
         {"verification_window", verification_window_json(response_verification_window)},
