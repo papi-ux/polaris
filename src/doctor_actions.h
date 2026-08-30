@@ -112,6 +112,9 @@ namespace doctor_actions {
   nlohmann::json execute(const nlohmann::json &request,
                          const recovery_action_context_t &recovery_context);
 
+  /** Map a typed Doctor result to the shared web/paired HTTP contract. */
+  int http_status_code(const nlohmann::json &result);
+
   /**
    * Serialize global controller initialization with Doctor rollback and track
    * the exact sessions that can observe that process-global actuator.

@@ -1293,6 +1293,13 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
 }
 
+TEST(DoctorActionTests, HttpStatusContractUsesConflictForTypedActionFailures) {
+  EXPECT_EQ(doctor_actions::http_status_code({{"status", true}}), 200);
+  EXPECT_EQ(doctor_actions::http_status_code({{"status", false}}), 409);
+  EXPECT_EQ(doctor_actions::http_status_code({{"status", "false"}}), 409);
+  EXPECT_EQ(doctor_actions::http_status_code(nlohmann::json::object()), 409);
+}
+
 TEST(DoctorActionTests, HostNetworkPublicationInvalidatesDoctorSnapshotWithAdaptiveDisabled) {
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;

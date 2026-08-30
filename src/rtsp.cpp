@@ -33,6 +33,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "process.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -852,6 +853,15 @@ namespace rtsp_stream {
       , const std::function<int()> &start_override = {}
 #endif
     ) {
+      if (!launch_session.lifecycle_generation ||
+          !proc::proc.try_begin_rtsp_setup(*launch_session.lifecycle_generation)) {
+        launch_session.cancel();
+        return insert_start_result_e::cancelled;
+      }
+      auto finish_rtsp_setup = util::fail_guard([]() {
+        proc::proc.finish_rtsp_setup();
+      });
+
       if (!launch_session.try_begin_setup_handoff()) {
         return insert_start_result_e::cancelled;
       }

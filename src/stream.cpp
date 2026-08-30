@@ -103,11 +103,15 @@ namespace stream {
 
   namespace {
     std::atomic_uint64_t disconnect_resume_timeout_generation {0};
+  }
 
+  namespace session {
     void cancel_disconnect_resume_timeout() {
       ++disconnect_resume_timeout_generation;
     }
+  }  // namespace session
 
+  namespace {
     void schedule_disconnect_resume_timeout(std::string app_name) {
       const auto timeout = config::stream.disconnect_resume_timeout;
       if (timeout.count() <= 0) {
@@ -121,25 +125,26 @@ namespace stream {
       std::thread([generation, timeout, app_name = std::move(app_name)] {
         std::this_thread::sleep_for(timeout);
 
-        // Admission and timeout termination are one boundary transaction.
-        // If reconnect wins, it cancels this generation and increments the
-        // active count before we can inspect them. If timeout wins, no new
-        // stream can be admitted between this final check and termination.
-        std::unique_lock<std::mutex> generation_boundary_lock {
-          session::stream_generation_boundary_mutex
+        // Wait for any admitted launch to resolve without queueing a competing
+        // stop. A successful launch cancels this generation before it releases
+        // admission; a failed launch leaves the generation current so this
+        // timeout can atomically claim the lifecycle stop.
+        const auto timeout_is_current_and_idle = [generation]() {
+          return disconnect_resume_timeout_generation.load(std::memory_order_relaxed) == generation &&
+                 session::running_sessions.load(std::memory_order_relaxed) == 0;
         };
-        if (disconnect_resume_timeout_generation.load(std::memory_order_relaxed) != generation ||
-            session::running_sessions.load(std::memory_order_relaxed) != 0 ||
-            !proc::proc.running() ||
-            proc::proc.session_shutdown_requested()) {
+        const bool terminated = proc::proc.terminate_if(
+          timeout_is_current_and_idle,
+          [&app_name]() {
+            BOOST_LOG(info) << "Paused session resume timeout expired for ["sv << app_name
+                            << "]; terminating app"sv;
+            confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+            confighttp::emit_session_event("stream_resume_timeout", "Paused session timed out");
+          }
+        );
+        if (!terminated) {
           return;
         }
-
-        BOOST_LOG(info) << "Paused session resume timeout expired for ["sv << app_name
-                        << "]; terminating app"sv;
-        confighttp::set_session_state(confighttp::session_state_e::tearing_down);
-        confighttp::emit_session_event("stream_resume_timeout", "Paused session timed out");
-        proc::proc.terminate();
         confighttp::set_session_state(confighttp::session_state_e::idle);
         confighttp::emit_session_event("stream_ended", "Paused session timed out");
       }).detach();
@@ -2429,7 +2434,7 @@ namespace stream {
           confighttp::emit_session_event("stream_paused", "Session paused; reconnect to resume");
           schedule_disconnect_resume_timeout(proc::proc.get_last_run_app_name());
         } else {
-          cancel_disconnect_resume_timeout();
+          session::cancel_disconnect_resume_timeout();
           confighttp::set_session_state(confighttp::session_state_e::idle);
           confighttp::emit_session_event("stream_ended", "All sessions ended");
         }

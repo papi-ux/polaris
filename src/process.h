@@ -682,7 +682,10 @@ namespace proc {
     std::optional<std::uint64_t> capture_launch_generation() const;
     bool try_begin_rtsp_launch();
     bool try_begin_rtsp_launch(std::uint64_t expected_generation);
+    bool try_begin_rtsp_setup(std::uint64_t expected_generation);
+    void finish_rtsp_setup();
     bool begin_stop();
+    bool begin_stop_if(const std::function<bool()> &condition);
     bool transition_launch_to_stop();
     void begin_snapshot();
     bool try_begin_snapshot();
@@ -705,6 +708,7 @@ namespace proc {
     bool _stop_waiting = false;
     bool _launch_to_stop_handoff = false;
     bool _last_stop_committed = false;
+    std::uint32_t _rtsp_setups_in_flight = 0;
     std::uint64_t _generation = 1;
   };
 
@@ -778,6 +782,8 @@ namespace proc {
     std::optional<std::uint64_t> capture_session_launch_generation() const;
     bool try_begin_session_launch(std::uint64_t expected_generation);
     void finish_session_launch();
+    bool try_begin_rtsp_setup(std::uint64_t expected_generation);
+    void finish_rtsp_setup();
     std::unique_lock<std::recursive_mutex> acquire_session_lifecycle_lock() const;
 
     /**
@@ -816,6 +822,8 @@ namespace proc {
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
+    bool terminate_if(const std::function<bool()> &condition,
+                      const std::function<void()> &before_terminate);
     void terminate_from_admitted_launch();
     bool reload_configuration_from_file(const std::string &file_name);
     void reload_configuration(proc_t &&parsed);
