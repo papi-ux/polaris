@@ -5,6 +5,10 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## Unreleased
+
+- Made direct wlroots capture logs identify the exact selected connector even when the compositor supplies no human-readable description, and pinned the Host Virtual Display regression where a physical monitor is enumerated before the generated `POLARIS-HEADLESS-*` output.
+
 ## v1.4.0 - 2026-09-01
 
 A matched feature release for Nova v1.4.0. Doctor turns measured stream evidence into a clear explanation and, only when the evidence supports it, a reversible same-stream fix. Launch fields come from deterministic presets with field-level provenance, while history and AI remain unable to silently change a launch or inject a game-process limiter.
