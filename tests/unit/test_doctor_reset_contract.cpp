@@ -134,6 +134,15 @@ TEST(DoctorResetContract, PairedDoctorFailuresUseTypedNonSuccessHttpStatus) {
     std::string::npos
   );
   EXPECT_NE(route.find("err[\"changed\"] = false"), std::string::npos);
+  const auto owner_rejection = between(
+    route,
+    "if (!doctor_actions::paired_route_allowed(",
+    "const auto stats = stream_stats::get_current()"
+  );
+  EXPECT_NE(owner_rejection.find("err[\"status\"] = false"), std::string::npos);
+  EXPECT_NE(owner_rejection.find("err[\"changed\"] = false"), std::string::npos);
+  EXPECT_NE(owner_rejection.find("err[\"state\"] = \"rejected\""), std::string::npos);
+  EXPECT_NE(owner_rejection.find("err[\"code\"] = \"active_owner_required\""), std::string::npos);
 }
 
 TEST(DoctorResetContract, MediaCounterIngestAndStreamResetUseOneLockOrder) {

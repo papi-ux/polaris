@@ -549,6 +549,57 @@ TEST(AdaptiveBitrateController, SupersededRequestCannotRetireTheCurrentEncoderSe
   ).has_value());
 }
 
+TEST(AdaptiveBitrateController, RetryBeforeReplacementCannotSynthesizeEncoderProof) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto first_doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(first_doctor_revision.has_value());
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(
+    *first_doctor_revision,
+    15000
+  ));
+
+  const auto first_restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *first_doctor_revision,
+    before
+  );
+  ASSERT_TRUE(first_restore_revision.has_value());
+  ASSERT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *first_restore_revision,
+    20000
+  ).has_value());
+
+  const auto retry_before = adaptive_bitrate::get_doctor_state();
+  const auto retry_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    retry_before.revision,
+    16000,
+    retry_before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(retry_revision.has_value());
+  const auto retry_restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *retry_revision,
+    retry_before
+  );
+  ASSERT_TRUE(retry_restore_revision.has_value());
+
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *retry_restore_revision,
+    20000
+  ).has_value());
+  EXPECT_FALSE(adaptive_bitrate::wait_for_live_bitrate_applied(
+    *retry_restore_revision,
+    20000,
+    1ms
+  ));
+}
+
 TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
   enable_controller(20000);
   adaptive_bitrate::set_runtime_enabled(false);

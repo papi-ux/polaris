@@ -8855,6 +8855,10 @@ namespace nvhttp {
               active_owner
             )) {
           nlohmann::json err;
+          err["status"] = false;
+          err["changed"] = false;
+          err["state"] = "rejected";
+          err["code"] = "active_owner_required";
           err["error"] = "Only the active session owner can run Doctor actions; a disconnected owner may only undo its own queued recovery run.";
           SimpleWeb::CaseInsensitiveMultimap headers;
           headers.emplace("Content-Type", "application/json");
@@ -8901,6 +8905,7 @@ namespace nvhttp {
         err["status"] = false;
         err["changed"] = false;
         err["state"] = "rejected";
+        err["code"] = "invalid_doctor_action_request";
         err["error"] = e.what();
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
