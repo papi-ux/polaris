@@ -369,7 +369,9 @@ namespace doctor_actions {
       auto current_doctor = stream_stats::build_doctor_json(
         stats, trusted_health, context->app_uuid
       );
-      bind_current_action_scope(current_doctor, stats, context, controller.revision);
+      bind_current_action_scope(
+        current_doctor, stats, context, controller.action_authority_revision
+      );
       if (current_doctor_out != nullptr) *current_doctor_out = current_doctor;
       const auto current_action = current_doctor.value(
         "safe_recovery_action", nlohmann::json::object()
@@ -381,7 +383,22 @@ namespace doctor_actions {
           !expected_payload.is_object()) {
         return false;
       }
+      const bool live_mutation =
+        action_id == "lower_bitrate" || action_id == "restore_quality";
+      const bool read_only_recheck =
+        action_id == "recheck_network" || action_id == "recheck_pacing";
       for (auto it = expected_payload.begin(); it != expected_payload.end(); ++it) {
+        // These fields identify the telemetry snapshot that rendered the
+        // button, not user authority. A paired click is allowed to cross a
+        // newer equivalent observation only when the current host still
+        // derives the same action and stream scope. Mutations also recheck the
+        // target and controller authority below, then use a fresh internal
+        // controller revision atomically; Recheck never mutates the actuator.
+        if ((live_mutation || read_only_recheck) &&
+            (it.key() == "source_result_id" ||
+             it.key() == "evidence_revision")) {
+          continue;
+        }
         const auto actual = request.find(it.key());
         if (actual == request.end() || *actual != it.value()) return false;
       }
@@ -868,7 +885,10 @@ namespace doctor_actions {
               {"error", "This Doctor undo receipt belongs to a different stream scope."}
             };
           }
-          if (terminal->result.value("state", std::string {}) == "undone") {
+          const auto terminal_state = terminal->result.value("state", std::string {});
+          if (terminal_state == "undone" || terminal_state == "superseded" ||
+              terminal_state == "rolled_back" ||
+              terminal_state == "rollback_unconfirmed") {
             return terminal->result;
           }
         }
@@ -896,7 +916,8 @@ namespace doctor_actions {
         {"state", "undone"},
         {"run_id", run_id},
         {"restored_bitrate_kbps", outcome.bitrate_kbps},
-        {"adaptive_bitrate_enabled", previous_adaptive_enabled}
+        {"adaptive_bitrate_enabled", previous_adaptive_enabled},
+        {"undo", {{"available", false}}}
       };
       remember_terminal_locked(run_snapshot, result);
       return terminal_action.result;
@@ -1098,7 +1119,8 @@ namespace doctor_actions {
           {"state", "rolled_back"},
           {"message", "Live encoder updates became unavailable during verification, so Doctor restored the prior target and ended the fix."},
           {"restored_bitrate_kbps", outcome.bitrate_kbps},
-          {"evidence", verification_evidence}
+          {"evidence", verification_evidence},
+          {"undo", {{"available", false}}}
         };
         remember_terminal_locked(run_snapshot, result);
         return terminal_action.result;
@@ -1321,6 +1343,7 @@ namespace doctor_actions {
         {"changed", false},
         {"run_id", run_id},
         {"state", resolved ? "resolved" : "watching"},
+        {"message", "Doctor verified the guarded bitrate step against fresh stream and encoder evidence."},
         {"elapsed_seconds", elapsed_seconds},
         {"evidence", verification_evidence},
         {"verification_window", verification_window_json(response_verification_window)},
@@ -1344,8 +1367,8 @@ namespace doctor_actions {
           };
         }
         if (action_run.active) return action_in_progress(action_run);
-        const auto mutation_stats = stream_stats::get_current();
         adaptive_state = adaptive_bitrate::get_doctor_state();
+        const auto mutation_stats = stream_stats::get_current();
         mutation_evidence = network_evidence(mutation_stats);
         if (!deterministic_action_envelope_matches(
               request, action_id, mutation_stats, trusted_context, adaptive_state
@@ -1465,8 +1488,8 @@ namespace doctor_actions {
         };
       }
       if (action_run.active) return action_in_progress(action_run);
-      const auto mutation_stats = stream_stats::get_current();
       adaptive_state = adaptive_bitrate::get_doctor_state();
+      const auto mutation_stats = stream_stats::get_current();
       mutation_evidence = network_evidence(mutation_stats);
       if (!deterministic_action_envelope_matches(
             request, action_id, mutation_stats, trusted_context, adaptive_state
@@ -1585,6 +1608,12 @@ namespace doctor_actions {
     return bind_result_scope(
       execute_live_action(request, &recovery_context), recovery_context
     );
+  }
+
+  int http_status_code(const nlohmann::json &result) {
+    const auto status = result.find("status");
+    return status != result.end() && status->is_boolean() && status->get<bool>() ?
+      200 : 409;
   }
 
   void session_started(std::string_view owner_uuid,

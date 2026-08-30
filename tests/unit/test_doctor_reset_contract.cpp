@@ -93,7 +93,181 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
     "stream_stats::update_frame_delivery("
   );
   EXPECT_NE(runtime_update.find("adaptive_bitrate::get_live_bitrate_request()"), std::string::npos);
+  EXPECT_NE(
+    runtime_update.find("begin_live_bitrate_session_recreation"),
+    std::string::npos
+  );
   EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
+  EXPECT_NE(runtime_update.find("bitrate_update_e::recreate_session"), std::string::npos);
+  EXPECT_NE(runtime_update.find("config.bitrate = request->target_bitrate_kbps"), std::string::npos);
+  EXPECT_EQ(runtime_update.find("pending_bitrate_confirmation"), std::string::npos);
+  EXPECT_NE(video.find("codec_name == \"h264_nvenc\""), std::string::npos);
+  EXPECT_NE(video.find("codec_name == \"hevc_nvenc\""), std::string::npos);
+  EXPECT_NE(video.find("codec_name == \"av1_nvenc\""), std::string::npos);
+
+  const auto ffmpeg_update = between(
+    video,
+    "bitrate_update_e update_bitrate(int new_bitrate_kbps) override",
+    "avcodec_ctx_t avcodec_ctx"
+  );
+  EXPECT_NE(ffmpeg_update.find("return bitrate_update_e::recreate_session"), std::string::npos);
+  EXPECT_EQ(ffmpeg_update.find("avcodec_ctx->bit_rate ="), std::string::npos);
+  EXPECT_EQ(ffmpeg_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
+
+  const auto encode_success = between(
+    video,
+    "if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp))",
+    "auto encode_end = std::chrono::steady_clock::now()"
+  );
+  EXPECT_EQ(encode_success.find("acknowledge_live_bitrate_applied"), std::string::npos);
+}
+
+TEST(DoctorResetContract, PairedDoctorFailuresUseTypedNonSuccessHttpStatus) {
+  const auto route = between(
+    source("src/nvhttp.cpp"),
+    "auto polarisDoctorAction =",
+    "auto polarisSetBitrate ="
+  );
+  EXPECT_NE(
+    route.find("doctor_actions::http_status_code(output)"),
+    std::string::npos
+  );
+  EXPECT_NE(route.find("err[\"changed\"] = false"), std::string::npos);
+  const auto owner_rejection = between(
+    route,
+    "if (!doctor_actions::paired_route_allowed(",
+    "const auto stats = stream_stats::get_current()"
+  );
+  EXPECT_NE(owner_rejection.find("err[\"status\"] = false"), std::string::npos);
+  EXPECT_NE(owner_rejection.find("err[\"changed\"] = false"), std::string::npos);
+  EXPECT_NE(owner_rejection.find("err[\"state\"] = \"rejected\""), std::string::npos);
+  EXPECT_NE(owner_rejection.find("err[\"code\"] = \"active_owner_required\""), std::string::npos);
+}
+
+TEST(DoctorResetContract, MediaCounterIngestAndStreamResetUseOneLockOrder) {
+  const auto stats = source("src/stream_stats.cpp");
+  const auto reset = between(
+    stats,
+    "void update_stream_active(bool active",
+    "void add_client("
+  );
+  const auto ingest = between(
+    stats,
+    "client_media_ingest_result_t ingest_client_media_counters(",
+    "#ifdef POLARIS_TESTS"
+  );
+
+  EXPECT_LT(reset.find("client_media_ingest_mutex"), reset.find("stats_mutex"));
+  EXPECT_LT(ingest.find("frame_timing_mutex"), ingest.find("client_media_counter_mutex"));
+  EXPECT_NE(ingest.find("active->session_token != sample.app_session_id"), std::string::npos);
+  EXPECT_NE(ingest.find("client_media_ingest_state_e::scope_mismatch"), std::string::npos);
+  EXPECT_LT(ingest.find("client_media_ingest_mutex"), ingest.find("client_media_counter_mutex"));
+  EXPECT_LT(ingest.find("client_media_counter_mutex"), ingest.find("const auto host = get_current()"));
+  EXPECT_NE(ingest.find("    }\n\n    // Serialize counter advancement"), std::string::npos)
+    << "the counter mutex must be released before stats/network publication";
+}
+
+TEST(DoctorResetContract, ReconnectSerializesOldEvidenceResetWithNewDoctorScope) {
+  const auto stream = source("src/stream.cpp");
+  const auto join = between(
+    stream,
+    "void join(session_t &session)",
+    "int start(session_t &session"
+  );
+  const auto start = between(
+    stream,
+    "int start(session_t &session",
+    "std::shared_ptr<session_t> alloc("
+  );
+
+  const auto join_lock = join.find("stream_generation_boundary_mutex");
+  const auto old_scope_retired = join.find("doctor_actions::session_ended");
+  const auto old_count_retired = join.find("--running_sessions");
+  const auto old_evidence_reset = join.find("stream_stats::update_stream_active(false)");
+  ASSERT_NE(join_lock, std::string::npos);
+  ASSERT_NE(old_scope_retired, std::string::npos);
+  ASSERT_NE(old_count_retired, std::string::npos);
+  ASSERT_NE(old_evidence_reset, std::string::npos);
+  EXPECT_LT(join_lock, old_scope_retired);
+  EXPECT_LT(old_scope_retired, old_count_retired);
+  EXPECT_LT(old_count_retired, old_evidence_reset);
+
+  const auto start_lock = start.find("stream_generation_boundary_mutex");
+  const auto new_scope_started = start.find("doctor_actions::session_started");
+  const auto new_count_started = start.find("++running_sessions");
+  const auto start_unlock = start.find("generation_boundary_lock.unlock()");
+  ASSERT_NE(start_lock, std::string::npos);
+  ASSERT_NE(new_scope_started, std::string::npos);
+  ASSERT_NE(new_count_started, std::string::npos);
+  ASSERT_NE(start_unlock, std::string::npos);
+  EXPECT_LT(start_lock, new_scope_started);
+  EXPECT_LT(new_scope_started, new_count_started);
+  EXPECT_LT(new_count_started, start_unlock);
+}
+
+TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) {
+  const auto stream = source("src/stream.cpp");
+  const auto timeout = between(
+    stream,
+    "void schedule_disconnect_resume_timeout(std::string app_name)",
+    "}  // namespace"
+  );
+
+  const auto conditional_stop = timeout.find("proc::proc.terminate_if(");
+  const auto generation_check = timeout.find("disconnect_resume_timeout_generation.load");
+  const auto active_check = timeout.find("session::running_sessions.load");
+  ASSERT_NE(conditional_stop, std::string::npos);
+  ASSERT_NE(generation_check, std::string::npos);
+  ASSERT_NE(active_check, std::string::npos);
+  EXPECT_EQ(timeout.find("session::stream_generation_boundary_mutex"), std::string::npos);
+  EXPECT_EQ(timeout.find("proc::proc.terminate()"), std::string::npos);
+  EXPECT_LT(generation_check, conditional_stop);
+  EXPECT_LT(active_check, conditional_stop);
+
+  const auto process = source("src/process.cpp");
+  for (const auto &wrapper : {
+         between(process,
+           "bool proc_t::launch_input_only_and_raise(",
+           "void proc_t::launch_input_only_impl("),
+         between(process,
+           "int proc_t::execute_and_raise(",
+           "int proc_t::validate_resolved_profile_for_running_app("),
+         between(process,
+           "bool proc_t::raise_session_for_admitted_launch(",
+           "std::optional<std::uint64_t> proc_t::capture_session_launch_generation(")
+       }) {
+    const auto raise = wrapper.find("rtsp_stream::launch_session_raise");
+    const auto cancel = wrapper.find("cancel_disconnect_resume_timeout");
+    ASSERT_NE(raise, std::string::npos);
+    ASSERT_NE(cancel, std::string::npos);
+    EXPECT_LT(raise, cancel);
+  }
+
+  const auto nvhttp = source("src/nvhttp.cpp");
+  constexpr std::string_view lifecycle_binding =
+    "launch_session->lifecycle_generation = *launch_generation;";
+  const auto first_binding = nvhttp.find(lifecycle_binding);
+  ASSERT_NE(first_binding, std::string::npos);
+  const auto second_binding = nvhttp.find(lifecycle_binding, first_binding + 1);
+  ASSERT_NE(second_binding, std::string::npos);
+  EXPECT_EQ(nvhttp.find(lifecycle_binding, second_binding + 1), std::string::npos);
+
+  const auto rtsp = source("src/rtsp.cpp");
+  const auto setup = between(
+    rtsp,
+    "insert_start_result_e insert_and_start_if_not_cancelled(",
+    "int run_setup_insert_for_tests("
+  );
+  const auto lifecycle_claim = setup.find("proc::proc.try_begin_rtsp_setup(");
+  const auto slot_insert = setup.find("_session_slots->emplace(session)");
+  const auto stream_start = setup.find("stream::session::start(");
+  const auto lifecycle_release = setup.find("proc::proc.finish_rtsp_setup()");
+  ASSERT_NE(lifecycle_claim, std::string::npos);
+  ASSERT_NE(slot_insert, std::string::npos);
+  ASSERT_NE(stream_start, std::string::npos);
+  ASSERT_NE(lifecycle_release, std::string::npos);
+  EXPECT_LT(lifecycle_claim, slot_insert);
+  EXPECT_LT(lifecycle_claim, stream_start);
 }
 
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
@@ -133,6 +307,40 @@ TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   EXPECT_LT(fields, policy);
   EXPECT_LT(policy, epoch);
   EXPECT_LT(epoch, revision);
+}
+
+TEST(DoctorResetContract, LiveMediaTelemetryIsEvidenceOnlyAndGenerationBound) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto capabilities = between(
+    nvhttp,
+    "auto polarisCapabilities =",
+    "auto polarisSessionTiming ="
+  );
+  EXPECT_NE(capabilities.find("live_media_telemetry_v1"), std::string::npos);
+
+  const auto route = between(
+    nvhttp,
+    "auto polarisSessionTelemetry =",
+    "// Paired, active-owner raw evidence ingress for Doctor v2 shadow mode."
+  );
+  EXPECT_NE(route.find("parse_request_stream_scope"), std::string::npos);
+  EXPECT_NE(route.find("stop.owned_by_client"), std::string::npos);
+  EXPECT_NE(route.find("requested_scope->app_session_id != stop.session_token"), std::string::npos);
+  EXPECT_NE(route.find("requested_scope->session_generation != timing.session_generation"), std::string::npos);
+  EXPECT_NE(route.find("stream_stats::ingest_client_media_counters"), std::string::npos);
+  EXPECT_NE(route.find("frames_expected"), std::string::npos);
+  EXPECT_NE(route.find("frames_received"), std::string::npos);
+  EXPECT_NE(route.find("frames_lost"), std::string::npos);
+  EXPECT_EQ(route.find("safe_settings"), route.rfind("safe_settings"))
+    << "safe_settings may appear only in the explicit forbidden-field list";
+  EXPECT_EQ(route.find("target_bitrate_kbps"), std::string::npos);
+  EXPECT_EQ(route.find("rtt_ms"), std::string::npos)
+    << "client RTT must not become live Doctor authority";
+
+  EXPECT_NE(
+    nvhttp.find("^/polaris/v1/session/telemetry$"),
+    std::string::npos
+  );
 }
 
 TEST(DoctorResetContract, HostVideoEvidenceLinearizesBeforeAdaptiveFeedbackAndPublication) {

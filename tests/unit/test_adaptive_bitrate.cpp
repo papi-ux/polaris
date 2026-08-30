@@ -49,6 +49,10 @@ TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot
   const auto after_pressure = adaptive_bitrate::get_doctor_state();
   ASSERT_LT(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
   ASSERT_GT(after_pressure.revision, before_pressure.revision);
+  EXPECT_GT(
+    after_pressure.action_authority_revision,
+    before_pressure.action_authority_revision
+  );
   EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
     before_pressure.revision,
     before_pressure.live_bitrate_kbps,
@@ -87,6 +91,10 @@ TEST(AdaptiveBitrateController, HostEvidenceInsideAdjustmentIntervalInvalidatesA
   const auto after_observation = adaptive_bitrate::get_doctor_state();
   ASSERT_EQ(after_observation.live_bitrate_kbps, before_observation.live_bitrate_kbps);
   ASSERT_GT(after_observation.revision, before_observation.revision);
+  EXPECT_EQ(
+    after_observation.action_authority_revision,
+    before_observation.action_authority_revision
+  );
   EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
     before_observation.revision,
     25000,
@@ -426,6 +434,172 @@ TEST(AdaptiveBitrateController, DoctorTransactionRestoresExactOwnedState) {
   ).has_value());
 }
 
+TEST(AdaptiveBitrateController, RecreatedEncoderSessionAcknowledgesTheExactPendingRevision) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *doctor_revision,
+    15000
+  ).has_value());
+
+  // The FFmpeg path recreates only its encoder session. A successful open at
+  // the requested config reports that exact target and current controller
+  // revision through this existing session-ready handshake.
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 15000);
+  EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(
+    *doctor_revision,
+    15000
+  ).has_value());
+}
+
+TEST(AdaptiveBitrateController, EncoderSessionLossInvalidatesItsApplicationProof) {
+  enable_controller(20000);
+  const auto state = adaptive_bitrate::get_doctor_state();
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  ASSERT_TRUE(adaptive_bitrate::live_bitrate_applied_at(
+    state.revision,
+    20000
+  ).has_value());
+
+  adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    state.revision,
+    20000
+  ).has_value());
+}
+
+TEST(AdaptiveBitrateController, RollbackDuringEncoderRecreationWaitsForTheReplacementSession) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(
+    *doctor_revision,
+    15000
+  ));
+
+  const auto restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  );
+  ASSERT_TRUE(restore_revision.has_value());
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *restore_revision,
+    20000
+  ).has_value());
+  EXPECT_FALSE(adaptive_bitrate::wait_for_live_bitrate_applied(
+    *restore_revision,
+    20000,
+    1ms
+  ));
+
+  const auto rollback_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(rollback_request.has_value());
+  EXPECT_EQ(rollback_request->revision, *restore_revision);
+  EXPECT_EQ(rollback_request->target_bitrate_kbps, 20000);
+
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  EXPECT_TRUE(adaptive_bitrate::wait_for_live_bitrate_applied(
+    *restore_revision,
+    20000,
+    1ms
+  ));
+}
+
+TEST(AdaptiveBitrateController, SupersededRequestCannotRetireTheCurrentEncoderSession) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  const auto restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  );
+  ASSERT_TRUE(restore_revision.has_value());
+
+  EXPECT_FALSE(adaptive_bitrate::begin_live_bitrate_session_recreation(
+    *doctor_revision,
+    15000
+  ));
+  EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(
+    *restore_revision,
+    20000
+  ).has_value());
+}
+
+TEST(AdaptiveBitrateController, RetryBeforeReplacementCannotSynthesizeEncoderProof) {
+  enable_controller(20000);
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto before = adaptive_bitrate::get_doctor_state();
+
+  const auto first_doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    15000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(first_doctor_revision.has_value());
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(
+    *first_doctor_revision,
+    15000
+  ));
+
+  const auto first_restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *first_doctor_revision,
+    before
+  );
+  ASSERT_TRUE(first_restore_revision.has_value());
+  ASSERT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *first_restore_revision,
+    20000
+  ).has_value());
+
+  const auto retry_before = adaptive_bitrate::get_doctor_state();
+  const auto retry_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    retry_before.revision,
+    16000,
+    retry_before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(retry_revision.has_value());
+  const auto retry_restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *retry_revision,
+    retry_before
+  );
+  ASSERT_TRUE(retry_restore_revision.has_value());
+
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *retry_restore_revision,
+    20000
+  ).has_value());
+  EXPECT_FALSE(adaptive_bitrate::wait_for_live_bitrate_applied(
+    *retry_restore_revision,
+    20000,
+    1ms
+  ));
+}
+
 TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
   enable_controller(20000);
   adaptive_bitrate::set_runtime_enabled(false);
@@ -451,6 +625,48 @@ TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
     *doctor_revision,
     before
   ));
+}
+
+TEST(AdaptiveBitrateController, RollbackTargetCannotDriftBeforeEncoderAcknowledgement) {
+  enable_controller(20000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before = adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(before.enabled);
+
+  const auto doctor_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
+    before.revision,
+    16000,
+    before.max_bitrate_kbps
+  );
+  ASSERT_TRUE(doctor_revision.has_value());
+  adaptive_bitrate::acknowledge_live_bitrate_applied(*doctor_revision, 16000);
+
+  const auto restore_revision = adaptive_bitrate::restore_doctor_state_if_revision(
+    *doctor_revision,
+    before
+  );
+  ASSERT_TRUE(restore_revision.has_value());
+  ASSERT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 20000);
+
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(12.0, 120.0);
+  adaptive_bitrate::update_stream_health(0.70, 0.10, 0.20, 8.0, 18.0, 50.0);
+
+  const auto pending = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(pending.live_bitrate_kbps, 20000);
+  EXPECT_EQ(pending.revision, *restore_revision);
+  EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(
+    *restore_revision,
+    20000
+  ).has_value());
+
+  adaptive_bitrate::acknowledge_live_bitrate_applied(*restore_revision, 20000);
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(12.0, 120.0);
+
+  const auto resumed = adaptive_bitrate::get_doctor_state();
+  EXPECT_LT(resumed.live_bitrate_kbps, 20000);
+  EXPECT_GT(resumed.revision, *restore_revision);
 }
 
 TEST(AdaptiveBitrateController, NewerExplicitIncreaseReplacesDoctorTargetExactly) {

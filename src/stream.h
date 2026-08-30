@@ -85,6 +85,7 @@ namespace stream {
     void stop(session_t &session);
     void graceful_stop(session_t& session);
     void join(session_t &session);
+    void cancel_disconnect_resume_timeout();
     state_e state(session_t &session);
 #ifdef POLARIS_TESTS
     void set_state_for_tests(session_t &session, state_e state);

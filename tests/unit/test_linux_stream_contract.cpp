@@ -40,6 +40,32 @@ TEST(LinuxStreamContractTests, ReconnectRetiresOldPipeWireGenerationBeforeReplac
   EXPECT_NE(pipewire.find("active_dmabuf_leases_ == 0"), std::string::npos);
 }
 
+TEST(LinuxStreamContractTests, PipeWireDisconnectWaitsForBoundedProducerPause) {
+  const auto source = read_source("src/platform/linux/pipewire_capture.cpp");
+  ASSERT_FALSE(source.empty());
+
+  const auto shutdown = source.find("void capture_t::shutdown()");
+  const auto shutdown_end = source.find("bool capture_t::start()", shutdown);
+  ASSERT_NE(shutdown, std::string::npos);
+  ASSERT_NE(shutdown_end, std::string::npos);
+  const auto body = source.substr(shutdown, shutdown_end - shutdown);
+
+  const auto deactivate = body.find("pw_stream_set_active(stream_, false)");
+  const auto pause_wait = body.find("stream_state_ == PW_STREAM_STATE_PAUSED", deactivate);
+  const auto bounded_wait = body.find("frame_cv_.wait_for", deactivate);
+  const auto flush = body.find("pw_stream_flush(stream_, false)", pause_wait);
+  const auto disconnect = body.find("pw_stream_disconnect(stream_)", flush);
+  ASSERT_NE(deactivate, std::string::npos);
+  ASSERT_NE(bounded_wait, std::string::npos);
+  ASSERT_NE(pause_wait, std::string::npos);
+  ASSERT_NE(flush, std::string::npos);
+  ASSERT_NE(disconnect, std::string::npos);
+  EXPECT_LT(deactivate, bounded_wait);
+  EXPECT_LT(bounded_wait, pause_wait);
+  EXPECT_LT(pause_wait, flush);
+  EXPECT_LT(flush, disconnect);
+}
+
 TEST(LinuxStreamContractTests, DmaBufIdentityTracksPipeWireBufferAllocationLifecycle) {
   const auto source = read_source("src/platform/linux/pipewire_capture.cpp");
   ASSERT_FALSE(source.empty());

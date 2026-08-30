@@ -51,6 +51,12 @@ write_process() {
   write_process_with_group "$pid" "$ppid" "$pid" "$pid" "$start_time" "$exe" "$@"
 }
 
+# Production /proc always includes init and may include kernel-owned sessions
+# whose process/session groups are not valid negative-signal authorities. They
+# must be ignored by private-session enumeration without weakening the strict
+# marker/generation validator used before signalling.
+write_process_with_group 1 0 1 1 14 /usr/lib/systemd/systemd --system
+
 write_unix_header() {
   printf 'Num RefCount Protocol Flags Type St Inode Path\n' >"$POLARIS_PROC_NET_UNIX"
 }
@@ -421,6 +427,8 @@ printf '0000000000000000: 00000002 00000000 00010000 0001 01 604 %s\n' "$POLARIS
 printf '410 9001 idle /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
 
 polaris_validate_marker "$work/run/polaris-gamescope.pid" idle || fail "valid marker rejected"
+[ "$(polaris_xwayland_candidates | sort -n | tr '\n' ' ')" = "411 413 " ] ||
+  fail "Xwayland candidate prefilter included unrelated executables"
 [ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
   fail "did not select owned Xwayland :4"
 polaris_process_has_argument "$work/run/polaris-gamescope.pid" idle --hdr-enabled ||

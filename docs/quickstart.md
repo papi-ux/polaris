@@ -94,6 +94,10 @@ in Mission Control to confirm the active runtime and encoder path. Polaris repor
 it actually used, so if it fell back to system memory you will see that rather than having to infer
 it from logs.
 
+If the video is connected but does not feel right, keep the stream running and open Doctor. The
+[Doctor guide](doctor.md) explains its Network / Host / Client verdicts and the exact difference
+between Auto Fix, Recheck, Manual guidance, and Undo.
+
 ## If something does not work
 
 [Troubleshooting](troubleshooting.md) covers the common failure modes, the log markers worth

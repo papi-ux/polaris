@@ -7,6 +7,7 @@
 #include <fstream>
 #include <future>
 #include <atomic>
+#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -97,15 +98,20 @@ using namespace std::literals;
 namespace stream {
   namespace session {
     extern std::atomic_uint running_sessions;
+    extern std::mutex stream_generation_boundary_mutex;
   }
 
   namespace {
     std::atomic_uint64_t disconnect_resume_timeout_generation {0};
+  }
 
+  namespace session {
     void cancel_disconnect_resume_timeout() {
       ++disconnect_resume_timeout_generation;
     }
+  }  // namespace session
 
+  namespace {
     void schedule_disconnect_resume_timeout(std::string app_name) {
       const auto timeout = config::stream.disconnect_resume_timeout;
       if (timeout.count() <= 0) {
@@ -119,18 +125,26 @@ namespace stream {
       std::thread([generation, timeout, app_name = std::move(app_name)] {
         std::this_thread::sleep_for(timeout);
 
-        if (disconnect_resume_timeout_generation.load(std::memory_order_relaxed) != generation ||
-            session::running_sessions.load(std::memory_order_relaxed) != 0 ||
-            !proc::proc.running() ||
-            proc::proc.session_shutdown_requested()) {
+        // Wait for any admitted launch to resolve without queueing a competing
+        // stop. A successful launch cancels this generation before it releases
+        // admission; a failed launch leaves the generation current so this
+        // timeout can atomically claim the lifecycle stop.
+        const auto timeout_is_current_and_idle = [generation]() {
+          return disconnect_resume_timeout_generation.load(std::memory_order_relaxed) == generation &&
+                 session::running_sessions.load(std::memory_order_relaxed) == 0;
+        };
+        const bool terminated = proc::proc.terminate_if(
+          timeout_is_current_and_idle,
+          [&app_name]() {
+            BOOST_LOG(info) << "Paused session resume timeout expired for ["sv << app_name
+                            << "]; terminating app"sv;
+            confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+            confighttp::emit_session_event("stream_resume_timeout", "Paused session timed out");
+          }
+        );
+        if (!terminated) {
           return;
         }
-
-        BOOST_LOG(info) << "Paused session resume timeout expired for ["sv << app_name
-                        << "]; terminating app"sv;
-        confighttp::set_session_state(confighttp::session_state_e::tearing_down);
-        confighttp::emit_session_event("stream_resume_timeout", "Paused session timed out");
-        proc::proc.terminate();
         confighttp::set_session_state(confighttp::session_state_e::idle);
         confighttp::emit_session_event("stream_ended", "Paused session timed out");
       }).detach();
@@ -2202,6 +2216,11 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+    // The last old generation must finish retiring its Doctor scope and
+    // clearing per-stream evidence before the first new generation can become
+    // Auto-Fix eligible. Without one boundary lock, concurrent RTSP cleanup
+    // and reconnect can briefly expose old loss as current evidence.
+    std::mutex stream_generation_boundary_mutex;
 
     // Source of session_t::session_generation. Starts at 1 so 0 stays
     // available as an obviously-invalid/unset sentinel.
@@ -2367,9 +2386,19 @@ namespace stream {
         exec_thread.detach();
       }
 
+      // Serialize the last-generation teardown with the next generation's
+      // admission. Either the new stream joins the still-shared generation
+      // and remains ineligible for Auto Fix, or it starts after this block has
+      // cleared every per-stream observation.
+      std::unique_lock<std::mutex> generation_boundary_lock {
+        stream_generation_boundary_mutex
+      };
+
       // Remove this client from multi-client stats
       doctor_actions::session_ended(session.device_uuid, session.session_generation);
-      stream_stats::remove_client(session.control.expected_peer_address);
+      stream_stats::remove_client(
+        session.control.expected_peer_address, session.session_generation
+      );
       stream_stats::stop_session_timing(session.device_uuid, session.session_generation);
 
       // If this is the last session, invoke the platform callbacks
@@ -2405,7 +2434,7 @@ namespace stream {
           confighttp::emit_session_event("stream_paused", "Session paused; reconnect to resume");
           schedule_disconnect_resume_timeout(proc::proc.get_last_run_app_name());
         } else {
-          cancel_disconnect_resume_timeout();
+          session::cancel_disconnect_resume_timeout();
           confighttp::set_session_state(confighttp::session_state_e::idle);
           confighttp::emit_session_event("stream_ended", "All sessions ended");
         }
@@ -2413,6 +2442,10 @@ namespace stream {
     }
 
     int start(session_t &session, const std::string &addr_string) {
+      std::unique_lock<std::mutex> generation_boundary_lock {
+        stream_generation_boundary_mutex
+      };
+
       // Enforce max_sessions limit
       auto max_sessions = config::stream.max_sessions;
       if (max_sessions > 0) {
@@ -2469,7 +2502,9 @@ namespace stream {
       stream_recorder::set_active_video_format(session.config.monitor.videoFormat);
 
       // Track this client in multi-client stats
-      stream_stats::add_client(addr_string, session.device_name);
+      stream_stats::add_client(
+        addr_string, session.device_name, session.session_generation
+      );
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token
       );
@@ -2517,6 +2552,7 @@ namespace stream {
         platf::streaming_will_start();
         proc::proc.resume();
       }
+      generation_boundary_lock.unlock();
 
       BOOST_LOG(info) << "Session started for ["sv << session.device_name << "] from "sv << addr_string
                       << " [active sessions: "sv << session_num << "]"sv;

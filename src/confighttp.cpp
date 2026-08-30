@@ -1154,6 +1154,14 @@ namespace confighttp {
     response->write(output_tree.dump(), headers);
   }
 
+  void send_response(resp_https_t response,
+                     SimpleWeb::StatusCode status_code,
+                     const nlohmann::json &output_tree) {
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(status_code, output_tree.dump(), headers);
+  }
+
   /**
    * @brief Send a 401 Unauthorized response.
    * @param response The HTTP response object.
@@ -3724,9 +3732,24 @@ namespace confighttp {
         .stats = stats,
         .health = health,
       };
-      send_response(response, doctor_actions::execute(body, recovery_context));
+      const auto output = doctor_actions::execute(body, recovery_context);
+      send_response(
+        response,
+        static_cast<SimpleWeb::StatusCode>(doctor_actions::http_status_code(output)),
+        output
+      );
     } catch (const std::exception &e) {
-      send_response(response, {{"status", false}, {"changed", false}, {"error", e.what()}});
+      send_response(
+        response,
+        SimpleWeb::StatusCode::client_error_bad_request,
+        {
+          {"status", false},
+          {"changed", false},
+          {"state", "rejected"},
+          {"code", "invalid_doctor_action_request"},
+          {"error", e.what()}
+        }
+      );
     }
   }
 

@@ -236,7 +236,8 @@ TEST(SessionStopContractTests, CancelAnswersClientBeforeNestedTeardown) {
 }
 
 TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
-  // SB-2: destroy without disconnect under lock races state_changed → SEGV.
+  // SB-2: pause acknowledgement keeps Gamescope's cross-thread buffer handoff
+  // out of remove_buffer; destroy without disconnect under lock races callbacks.
   // Dtor lives in pipewire_capture (extracted from portal_grab).
   const auto source = read_source_for_contract("src/platform/linux/pipewire_capture.cpp");
   ASSERT_FALSE(source.empty());
@@ -245,14 +246,23 @@ TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
   const auto dtor_end = source.find("bool capture_t::start()", dtor);
   ASSERT_NE(dtor_end, std::string::npos);
   const auto body = source.substr(dtor, dtor_end - dtor);
+  const auto deactivate = body.find("pw_stream_set_active(stream_, false)");
+  const auto pause_wait = body.find("stream_state_ == PW_STREAM_STATE_PAUSED", deactivate);
+  const auto flush = body.find("pw_stream_flush(stream_, false)", pause_wait);
   const auto stop = body.find("pw_thread_loop_stop(");
   const auto lock = body.find("pw_thread_loop_lock(");
   const auto disconnect = body.find("pw_stream_disconnect(");
   const auto destroy = body.find("pw_stream_destroy(");
+  ASSERT_NE(deactivate, std::string::npos);
+  ASSERT_NE(pause_wait, std::string::npos);
+  ASSERT_NE(flush, std::string::npos);
   EXPECT_NE(stop, std::string::npos);
   ASSERT_NE(lock, std::string::npos);
   ASSERT_NE(disconnect, std::string::npos);
   ASSERT_NE(destroy, std::string::npos);
+  EXPECT_LT(deactivate, pause_wait);
+  EXPECT_LT(pause_wait, flush);
+  EXPECT_LT(flush, disconnect);
   EXPECT_LT(lock, disconnect);
   EXPECT_LT(disconnect, destroy);
   EXPECT_LT(destroy, stop);
@@ -1224,6 +1234,8 @@ TEST(RtspLaunchHandoffTests, CancellationAfterRealSlotInsertionRollsBackBeforeCo
   launch.id = 5101;
   launch.unique_id = "insert-cancel";
   launch.session_token = "insert-cancel-token";
+  launch.lifecycle_generation = proc::proc.capture_session_launch_generation();
+  ASSERT_TRUE(launch.lifecycle_generation.has_value());
 
   const auto result = rtsp_stream::run_setup_insert_for_tests(launch, true, 0);
   EXPECT_EQ(result, rtsp_stream::setup_insert_result_e::cancelled);
@@ -1240,6 +1252,8 @@ TEST(RtspLaunchHandoffTests, StartFailureAfterCommitCancelsAndRollsBackRealSlot)
   launch.id = 5102;
   launch.unique_id = "insert-start-failure";
   launch.session_token = "insert-start-failure-token";
+  launch.lifecycle_generation = proc::proc.capture_session_launch_generation();
+  ASSERT_TRUE(launch.lifecycle_generation.has_value());
 
   const auto result = rtsp_stream::run_setup_insert_for_tests(launch, false, 1);
   EXPECT_EQ(result, rtsp_stream::setup_insert_result_e::failed);
@@ -1484,6 +1498,125 @@ TEST(SessionLifecycleGateTests, CompletedStopInvalidatesLaunchGenerationCaptured
   EXPECT_NE(*fresh_generation, *stale_generation);
   EXPECT_TRUE(gate.try_begin_rtsp_launch(*fresh_generation));
   gate.finish_launch();
+}
+
+TEST(SessionLifecycleGateTests, ConditionalStopYieldsToACommittedLaunchCancellation) {
+  using namespace std::chrono_literals;
+
+  proc::session_lifecycle_gate_t gate;
+  std::atomic_bool timeout_current {true};
+  gate.begin_launch();
+
+  auto timeout = std::async(std::launch::async, [&]() {
+    return gate.begin_stop_if([&]() {
+      return timeout_current.load(std::memory_order_acquire);
+    });
+  });
+
+  EXPECT_EQ(timeout.wait_for(20ms), std::future_status::timeout);
+  timeout_current.store(false, std::memory_order_release);
+  gate.finish_launch();
+
+  ASSERT_EQ(timeout.wait_for(1s), std::future_status::ready);
+  EXPECT_FALSE(timeout.get());
+  EXPECT_FALSE(gate.stop_in_progress());
+  EXPECT_TRUE(gate.try_begin_rtsp_launch());
+  gate.finish_launch();
+}
+
+TEST(SessionLifecycleGateTests, ConditionalStopClaimsTeardownAfterFailedLaunch) {
+  using namespace std::chrono_literals;
+
+  proc::session_lifecycle_gate_t gate;
+  gate.begin_launch();
+
+  auto timeout = std::async(std::launch::async, [&]() {
+    return gate.begin_stop_if([]() {
+      return true;
+    });
+  });
+
+  EXPECT_EQ(timeout.wait_for(20ms), std::future_status::timeout);
+  gate.finish_launch();
+
+  ASSERT_EQ(timeout.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(timeout.get());
+  EXPECT_TRUE(gate.stop_in_progress());
+  EXPECT_FALSE(gate.try_begin_rtsp_launch());
+  gate.finish_stop();
+}
+
+TEST(SessionLifecycleGateTests, ConditionalStopInvalidatesARequestCapturedBeforeExpiry) {
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation.has_value());
+
+  ASSERT_TRUE(gate.begin_stop_if([]() {
+    return true;
+  }));
+  EXPECT_FALSE(gate.try_begin_rtsp_launch(*generation));
+  gate.finish_stop();
+
+  EXPECT_FALSE(gate.try_begin_rtsp_launch(*generation));
+}
+
+TEST(SessionLifecycleGateTests, InFlightRtspSetupLetsACommittedReconnectCancelTimeout) {
+  using namespace std::chrono_literals;
+
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation.has_value());
+  ASSERT_TRUE(gate.try_begin_rtsp_setup(*generation));
+
+  std::atomic_bool timeout_current {true};
+  auto timeout = std::async(std::launch::async, [&]() {
+    return gate.begin_stop_if([&]() {
+      return timeout_current.load(std::memory_order_acquire);
+    });
+  });
+
+  EXPECT_EQ(timeout.wait_for(20ms), std::future_status::timeout);
+  timeout_current.store(false, std::memory_order_release);
+  gate.finish_rtsp_setup();
+
+  ASSERT_EQ(timeout.wait_for(1s), std::future_status::ready);
+  EXPECT_FALSE(timeout.get());
+  EXPECT_FALSE(gate.stop_in_progress());
+}
+
+TEST(SessionLifecycleGateTests, FailedRtspSetupReleasesWaitingTimeout) {
+  using namespace std::chrono_literals;
+
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation.has_value());
+  ASSERT_TRUE(gate.try_begin_rtsp_setup(*generation));
+
+  auto timeout = std::async(std::launch::async, [&]() {
+    return gate.begin_stop_if([]() {
+      return true;
+    });
+  });
+
+  EXPECT_EQ(timeout.wait_for(20ms), std::future_status::timeout);
+  gate.finish_rtsp_setup();
+
+  ASSERT_EQ(timeout.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(timeout.get());
+  EXPECT_TRUE(gate.stop_in_progress());
+  gate.finish_stop();
+}
+
+TEST(SessionLifecycleGateTests, ExpiredTimeoutRejectsLateRtspSetup) {
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation.has_value());
+
+  ASSERT_TRUE(gate.begin_stop_if([]() {
+    return true;
+  }));
+  EXPECT_FALSE(gate.try_begin_rtsp_setup(*generation));
+  gate.finish_stop();
 }
 
 TEST(SessionLifecycleGateTests, RequestCapturedDuringStopCannotBecomeLaunchableAfterStopCompletes) {

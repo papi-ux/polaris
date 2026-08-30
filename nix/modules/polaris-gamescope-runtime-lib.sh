@@ -7,7 +7,7 @@ polaris_proc_root() { printf '%s\n' "${POLARIS_PROC_ROOT:-/proc}"; }
 polaris_proc_net_unix() { printf '%s\n' "${POLARIS_PROC_NET_UNIX:-/proc/net/unix}"; }
 polaris_x11_socket_dir() { printf '%s\n' "${POLARIS_X11_SOCKET_DIR:-/tmp/.X11-unix}"; }
 
-polaris_process_fields() {
+polaris_read_process_stat_fields() {
   local pid="$1" stat rest
   [ -r "$(polaris_proc_root)/$pid/stat" ] || return 1
   IFS= read -r stat <"$(polaris_proc_root)/$pid/stat" || return 1
@@ -30,9 +30,13 @@ polaris_process_fields() {
   case "$POLARIS_PROCESS_PPID:$POLARIS_PROCESS_PGID:$POLARIS_PROCESS_SESSION_ID:$POLARIS_PROCESS_START_TIME" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
+  [ "$POLARIS_PROCESS_START_TIME" != 0 ]
+}
+
+polaris_process_fields() {
+  polaris_read_process_stat_fields "$1" || return 1
   [ "$POLARIS_PROCESS_PGID" -gt 1 ] 2>/dev/null \
-    && [ "$POLARIS_PROCESS_SESSION_ID" -gt 1 ] 2>/dev/null \
-    && [ "$POLARIS_PROCESS_START_TIME" != 0 ]
+    && [ "$POLARIS_PROCESS_SESSION_ID" -gt 1 ] 2>/dev/null
 }
 
 polaris_read_marker() {
@@ -385,8 +389,29 @@ polaris_unique_unix_socket_inode() {
   printf '%s\n' "$selected"
 }
 
+# Candidate enumeration is only a performance prefilter. Every returned PID is
+# still authenticated below by executable/cmdline identity, exact process
+# generation, private-session ancestry, and ownership of the selected socket.
+# Scanning every /proc executable twice made readiness depend on total host
+# process count and could outlive the compositor's initial listener generation.
+polaris_xwayland_candidates() {
+  local proc_root process pid exe_path pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
+  proc_root="$(polaris_proc_root)"
+  if [ "$proc_root" = /proc ] && command -v "$pgrep_bin" >/dev/null 2>&1; then
+    "$pgrep_bin" -x Xwayland 2>/dev/null || true
+    return 0
+  fi
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    exe_path="$(readlink "$process/exe" 2>/dev/null || true)"
+    [ "${exe_path##*/}" = Xwayland ] && printf '%s\n' "$pid"
+  done
+}
+
 polaris_discover_xwayland_display() {
-  local marker="$1" expected_role="${2:-}" xdir socket name display inode process pid final_inode
+  local marker="$1" expected_role="${2:-}" xdir socket name display inode pid final_inode
   local best='' best_pid='' best_start='' best_inode='' best_socket='' marker_line
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local root_pid="$POLARIS_MARKER_PID" root_start="$POLARIS_MARKER_START_TIME" root_executable="$POLARIS_MARKER_EXECUTABLE"
@@ -400,9 +425,7 @@ polaris_discover_xwayland_display() {
     # Duplicate pathname generations are ambiguous after unlink/rebind. The
     # process may hold an old inode while clients route to an unrelated new one.
     inode="$(polaris_unique_unix_socket_inode "$socket")" || continue
-    for process in "$(polaris_proc_root)"/[0-9]*; do
-      [ -d "$process" ] || continue
-      pid="${process##*/}"
+    while IFS= read -r pid; do
       case "$pid" in ''|*[!0-9]*) continue ;; esac
       [ "$pid" != "$root_pid" ] || continue
       if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
@@ -416,7 +439,7 @@ polaris_discover_xwayland_display() {
           best_socket="$socket"
         fi
       fi
-    done
+    done < <(polaris_xwayland_candidates)
   done
   [ -n "$best" ] || return 1
   # Revalidate both process generations and the exact socket ownership after
@@ -499,7 +522,7 @@ polaris_private_session_alive() {
     seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 2
     fi
@@ -525,7 +548,7 @@ polaris_process_group_alive() {
     seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 2
     fi
@@ -550,7 +573,7 @@ polaris_wait_process_group_stopped() {
       [ -d "$process" ] || continue
       pid="${process##*/}"
       case "$pid" in ''|*[!0-9]*) continue ;; esac
-      if ! polaris_process_fields "$pid"; then
+      if ! polaris_read_process_stat_fields "$pid"; then
         [ ! -e "$process" ] && continue
         return 1
       fi
@@ -578,7 +601,7 @@ polaris_private_session_has_no_live_siblings() {
     seen=1
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 2
     fi
@@ -651,7 +674,7 @@ polaris_kill_private_session_groups() {
     [ -d "$process" ] || continue
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 1
     fi
@@ -699,7 +722,7 @@ polaris_kill_private_session_groups() {
     [ -d "$process" ] || continue
     pid="${process##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    if ! polaris_process_fields "$pid"; then
+    if ! polaris_read_process_stat_fields "$pid"; then
       [ ! -e "$process" ] && continue
       return 1
     fi

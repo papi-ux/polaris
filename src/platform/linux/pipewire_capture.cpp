@@ -162,7 +162,9 @@ namespace pipewire_capture {
     // testing opt-in on hosts where the operator has already proved it works.
     const bool supported_encoder = eligibility.mem_type == platf::mem_type_e::cuda ||
                                    (override == dmabuf_override_e::allow_vaapi && eligibility.mem_type == platf::mem_type_e::vaapi);
-    if (override == dmabuf_override_e::force_cpu || !supported_encoder) {
+    if (override == dmabuf_override_e::force_cpu ||
+        !supported_encoder ||
+        !eligibility.encoder_import_supported) {
       return false;
     }
     if (!eligibility.capture_render_node) {
@@ -513,14 +515,49 @@ namespace pipewire_capture {
       frame_cv_.wait(lk, [this] { return active_dmabuf_leases_ == 0; });
     }
 
+    // Gamescope 3.16.x owns PipeWire buffers on both its PipeWire thread and
+    // steamcompmgr thread. Removing the consumer while one of those buffers is
+    // crossing that handoff can make gamescope's remove callback free it before
+    // its PipeWire thread consumes the pending pointer. Deactivate first and
+    // wait for PipeWire to acknowledge PAUSED before buffers are removed. This
+    // is bounded because a broken producer must never hang stream teardown.
+    if (loop_ && stream_) {
+      pw_thread_loop_lock(loop_);
+      const int deactivate_result = pw_stream_set_active(stream_, false);
+      pw_thread_loop_unlock(loop_);
+
+      if (deactivate_result >= 0) {
+        constexpr auto quiesce_budget = std::chrono::milliseconds(400);
+        std::unique_lock lk(frame_mtx_);
+        const bool quiesced = frame_cv_.wait_for(lk, quiesce_budget, [this] {
+          return stream_state_ == PW_STREAM_STATE_PAUSED ||
+                 stream_state_ == PW_STREAM_STATE_UNCONNECTED ||
+                 stream_state_ == PW_STREAM_STATE_ERROR;
+        });
+        if (!quiesced) {
+          BOOST_LOG(warning) << "portal: PipeWire producer did not pause within "sv
+                             << quiesce_budget.count()
+                             << "ms; continuing bounded disconnect"sv;
+        }
+      }
+      else {
+        BOOST_LOG(warning) << "portal: failed to deactivate PipeWire capture before disconnect: "sv
+                           << spa_strerror(deactivate_result);
+      }
+    }
+
     // Sunshine-style teardown: hold the loop lock while disconnecting the stream
-    // and core, then stop/destroy the loop. Avoids racing callbacks and matches
-    // LizardByte/Sunshine pipewire.cpp (W1 micro-adopt).
+    // and core, then stop/destroy the loop. Flush after the acknowledged pause
+    // so PipeWire retires queued work before remove_buffer callbacks run.
     if (loop_) {
       pw_thread_loop_lock(loop_);
     }
     if (stream_) {
-      pw_stream_set_active(stream_, false);
+      const int flush_result = pw_stream_flush(stream_, false);
+      if (flush_result < 0) {
+        BOOST_LOG(warning) << "portal: failed to flush paused PipeWire capture: "sv
+                           << spa_strerror(flush_result);
+      }
       pw_stream_disconnect(stream_);
       pw_stream_destroy(stream_);
       stream_ = nullptr;
@@ -1208,7 +1245,17 @@ namespace pipewire_capture {
 
   void capture_t::on_state_changed(void *userdata, pw_stream_state old, pw_stream_state state, const char *errmsg) noexcept {
     auto *cap = static_cast<capture_t *>(userdata);
-    if (!cap || !cap->running()) {
+    if (!cap) {
+      return;
+    }
+    bool report_state = false;
+    {
+      std::lock_guard lk(cap->frame_mtx_);
+      cap->stream_state_ = state;
+      report_state = cap->running_;
+    }
+    cap->frame_cv_.notify_all();
+    if (!report_state) {
       return;
     }
     try {
