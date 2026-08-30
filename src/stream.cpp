@@ -7,6 +7,7 @@
 #include <fstream>
 #include <future>
 #include <atomic>
+#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -2202,6 +2203,11 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+    // The last old generation must finish retiring its Doctor scope and
+    // clearing per-stream evidence before the first new generation can become
+    // Auto-Fix eligible. Without one boundary lock, concurrent RTSP cleanup
+    // and reconnect can briefly expose old loss as current evidence.
+    std::mutex stream_generation_boundary_mutex;
 
     // Source of session_t::session_generation. Starts at 1 so 0 stays
     // available as an obviously-invalid/unset sentinel.
@@ -2367,6 +2373,14 @@ namespace stream {
         exec_thread.detach();
       }
 
+      // Serialize the last-generation teardown with the next generation's
+      // admission. Either the new stream joins the still-shared generation
+      // and remains ineligible for Auto Fix, or it starts after this block has
+      // cleared every per-stream observation.
+      std::unique_lock<std::mutex> generation_boundary_lock {
+        stream_generation_boundary_mutex
+      };
+
       // Remove this client from multi-client stats
       doctor_actions::session_ended(session.device_uuid, session.session_generation);
       stream_stats::remove_client(session.control.expected_peer_address);
@@ -2413,6 +2427,10 @@ namespace stream {
     }
 
     int start(session_t &session, const std::string &addr_string) {
+      std::unique_lock<std::mutex> generation_boundary_lock {
+        stream_generation_boundary_mutex
+      };
+
       // Enforce max_sessions limit
       auto max_sessions = config::stream.max_sessions;
       if (max_sessions > 0) {
@@ -2517,6 +2535,7 @@ namespace stream {
         platf::streaming_will_start();
         proc::proc.resume();
       }
+      generation_boundary_lock.unlock();
 
       BOOST_LOG(info) << "Session started for ["sv << session.device_name << "] from "sv << addr_string
                       << " [active sessions: "sv << session_num << "]"sv;
