@@ -1825,6 +1825,15 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_TRUE(no_fresh_evidence.at("changed").get<bool>());
   EXPECT_EQ(no_fresh_evidence.at("state"), "rolled_back");
 
+  const auto rolled_back_undo = doctor_actions::execute({
+    {"action_id", "undo"}, {"run_id", run_id}
+  });
+  EXPECT_TRUE(rolled_back_undo.at("status").get<bool>());
+  EXPECT_TRUE(rolled_back_undo.at("changed").get<bool>());
+  EXPECT_EQ(rolled_back_undo.at("state"), "rolled_back");
+  EXPECT_EQ(rolled_back_undo.at("run_id"), run_id);
+  EXPECT_FALSE(rolled_back_undo.at("undo").at("available").get<bool>());
+
   const auto clustered_run = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(clustered_run.at("status").get<bool>());
   const auto clustered_run_id = clustered_run.at("run_id").get<std::string>();
@@ -1911,6 +1920,15 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
     unavailable_during_verification.at("undo").at("available").get<bool>()
   );
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 0);
+
+  const auto unconfirmed_undo = doctor_actions::execute({
+    {"action_id", "undo"}, {"run_id", second_run_id}
+  });
+  EXPECT_FALSE(unconfirmed_undo.at("status").get<bool>());
+  EXPECT_TRUE(unconfirmed_undo.at("changed").get<bool>());
+  EXPECT_EQ(unconfirmed_undo.at("state"), "rollback_unconfirmed");
+  EXPECT_EQ(unconfirmed_undo.at("run_id"), second_run_id);
+  EXPECT_FALSE(unconfirmed_undo.at("undo").at("available").get<bool>());
   adaptive_bitrate::set_runtime_update_supported(true);
 
   doctor_actions::recovery_action_context_t scoped_context;

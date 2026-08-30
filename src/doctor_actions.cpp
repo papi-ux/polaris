@@ -884,7 +884,9 @@ namespace doctor_actions {
             };
           }
           const auto terminal_state = terminal->result.value("state", std::string {});
-          if (terminal_state == "undone" || terminal_state == "superseded") {
+          if (terminal_state == "undone" || terminal_state == "superseded" ||
+              terminal_state == "rolled_back" ||
+              terminal_state == "rollback_unconfirmed") {
             return terminal->result;
           }
         }
@@ -912,7 +914,8 @@ namespace doctor_actions {
         {"state", "undone"},
         {"run_id", run_id},
         {"restored_bitrate_kbps", outcome.bitrate_kbps},
-        {"adaptive_bitrate_enabled", previous_adaptive_enabled}
+        {"adaptive_bitrate_enabled", previous_adaptive_enabled},
+        {"undo", {{"available", false}}}
       };
       remember_terminal_locked(run_snapshot, result);
       return terminal_action.result;
@@ -1114,7 +1117,8 @@ namespace doctor_actions {
           {"state", "rolled_back"},
           {"message", "Live encoder updates became unavailable during verification, so Doctor restored the prior target and ended the fix."},
           {"restored_bitrate_kbps", outcome.bitrate_kbps},
-          {"evidence", verification_evidence}
+          {"evidence", verification_evidence},
+          {"undo", {{"available", false}}}
         };
         remember_terminal_locked(run_snapshot, result);
         return terminal_action.result;
