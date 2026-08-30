@@ -883,7 +883,8 @@ namespace doctor_actions {
               {"error", "This Doctor undo receipt belongs to a different stream scope."}
             };
           }
-          if (terminal->result.value("state", std::string {}) == "undone") {
+          const auto terminal_state = terminal->result.value("state", std::string {});
+          if (terminal_state == "undone" || terminal_state == "superseded") {
             return terminal->result;
           }
         }
