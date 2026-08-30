@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -1117,6 +1118,55 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   });
   ASSERT_NE(owner, evidence.end());
   EXPECT_EQ(owner->at("value"), "auto_safe");
+}
+
+TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuatorStates) {
+  const std::array<std::string, 4> transient_states {
+    "recreating_encoder",
+    "doctor_override",
+    "explicit_live_target",
+    "rollback_pending",
+  };
+
+  for (const auto &state : transient_states) {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.fps = 60.0;
+    stats.encode_target_fps = 60.0;
+    stats.bitrate_kbps = 20000;
+    stats.adaptive_target_bitrate_kbps = 13000;
+    stats.adaptive_bitrate_enabled = true;
+    stats.adaptive_bitrate_active = state != "recreating_encoder";
+    stats.adaptive_bitrate_state = state;
+    stats.adaptive_runtime_update_supported = state != "recreating_encoder";
+    stats.capture_transport = platf::frame_transport_e::dmabuf;
+    stats.capture_residency = platf::frame_residency_e::gpu;
+    stats.encode_target_residency = platf::frame_residency_e::gpu;
+    stats.network_risk = true;
+    stats.packet_loss = 3.4;
+    stats.packet_loss_available = true;
+    stats.network_sample_revision = 1;
+    stats.network_last_received_age_ms = 0;
+    stats.media_loss_sample_revision = 1;
+    stats.media_loss_last_received_age_ms = 0;
+    stats.latency_ms = 52.0;
+
+    const auto doctor = stream_stats::build_doctor_json(
+      stats,
+      {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
+    );
+    const auto &action = doctor.at("safe_recovery_action");
+
+    EXPECT_EQ(action.at("id"), "recheck_network") << state;
+    EXPECT_EQ(action.at("capability"), "recheck") << state;
+    EXPECT_FALSE(action.at("undo").at("supported").get<bool>()) << state;
+    const auto &evidence = doctor.at("evidence");
+    const auto owner = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+      return item.at("id") == "live_bitrate_owner";
+    });
+    ASSERT_NE(owner, evidence.end()) << state;
+    EXPECT_EQ(owner->at("value"), "auto_safe") << state;
+  }
 }
 
 TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNoLiveFix) {

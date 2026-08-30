@@ -1232,12 +1232,13 @@ namespace stream_stats {
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
       stats.adaptive_runtime_update_supported && single_session_scope;
-    const bool auto_safe_managing =
-      stats.adaptive_bitrate_enabled && stats.adaptive_bitrate_active &&
-      stats.adaptive_runtime_update_supported &&
-      stats.adaptive_bitrate_state != "doctor_override" &&
-      stats.adaptive_bitrate_state != "explicit_live_target" &&
-      stats.adaptive_bitrate_state != "rollback_pending";
+    // Auto Safe ownership is a policy choice, not a momentary actuator state.
+    // FFmpeg bitrate changes can briefly recreate the encoder, and explicit or
+    // rollback hand-offs can temporarily change the controller-state label.
+    // None of those transitions authorizes Doctor to become a second writer.
+    // While Auto Safe is enabled, Doctor may observe/recheck the live result;
+    // only disabling Auto Safe can make a guarded Doctor mutation available.
+    const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
