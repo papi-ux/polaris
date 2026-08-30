@@ -1553,7 +1553,9 @@ namespace stream_stats {
     }
   }
 
-  void add_client(const std::string &client_ip, const std::string &client_name) {
+  void add_client(const std::string &client_ip,
+                  const std::string &client_name,
+                  std::uint64_t session_generation) {
     // Every call is a real attach from rtsp_stream::start() - bump the
     // population revision unconditionally, matching measurement-spec-v1.md
     // 6.1's "increments on every client attach or detach" (the dedup guard
@@ -1563,14 +1565,22 @@ namespace stream_stats {
 
     std::lock_guard<std::mutex> lock(stats_mutex);
 
-    // Check if client already exists
+    // Real RTSP sessions carry a process-unique generation, so an old and a
+    // replacement session from the same device/IP remain distinct until the
+    // old join completes. Legacy/test callers that omit it retain the prior
+    // IP-keyed behavior.
     auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
-      [&client_ip](const client_stats_t &c) { return c.ip == client_ip; });
+      [&client_ip, session_generation](const client_stats_t &c) {
+        return session_generation > 0 ?
+          c.session_generation == session_generation :
+          c.session_generation == 0 && c.ip == client_ip;
+      });
 
     if (it == current_stats.clients.end()) {
       client_stats_t client;
       client.name = client_name;
       client.ip = client_ip;
+      client.session_generation = session_generation;
       current_stats.clients.push_back(std::move(client));
     }
 
@@ -1582,14 +1592,19 @@ namespace stream_stats {
     }
   }
 
-  void remove_client(const std::string &client_ip) {
+  void remove_client(const std::string &client_ip,
+                     std::uint64_t session_generation) {
     client_population_revision_counter.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.clients.erase(
       std::remove_if(current_stats.clients.begin(), current_stats.clients.end(),
-        [&client_ip](const client_stats_t &c) { return c.ip == client_ip; }),
+        [&client_ip, session_generation](const client_stats_t &c) {
+          return session_generation > 0 ?
+            c.session_generation == session_generation :
+            c.session_generation == 0 && c.ip == client_ip;
+        }),
       current_stats.clients.end());
 
     if (current_stats.clients.empty()) {

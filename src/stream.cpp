@@ -98,6 +98,7 @@ using namespace std::literals;
 namespace stream {
   namespace session {
     extern std::atomic_uint running_sessions;
+    extern std::mutex stream_generation_boundary_mutex;
   }
 
   namespace {
@@ -120,6 +121,13 @@ namespace stream {
       std::thread([generation, timeout, app_name = std::move(app_name)] {
         std::this_thread::sleep_for(timeout);
 
+        // Admission and timeout termination are one boundary transaction.
+        // If reconnect wins, it cancels this generation and increments the
+        // active count before we can inspect them. If timeout wins, no new
+        // stream can be admitted between this final check and termination.
+        std::unique_lock<std::mutex> generation_boundary_lock {
+          session::stream_generation_boundary_mutex
+        };
         if (disconnect_resume_timeout_generation.load(std::memory_order_relaxed) != generation ||
             session::running_sessions.load(std::memory_order_relaxed) != 0 ||
             !proc::proc.running() ||
@@ -2383,7 +2391,9 @@ namespace stream {
 
       // Remove this client from multi-client stats
       doctor_actions::session_ended(session.device_uuid, session.session_generation);
-      stream_stats::remove_client(session.control.expected_peer_address);
+      stream_stats::remove_client(
+        session.control.expected_peer_address, session.session_generation
+      );
       stream_stats::stop_session_timing(session.device_uuid, session.session_generation);
 
       // If this is the last session, invoke the platform callbacks
@@ -2487,7 +2497,9 @@ namespace stream {
       stream_recorder::set_active_video_format(session.config.monitor.videoFormat);
 
       // Track this client in multi-client stats
-      stream_stats::add_client(addr_string, session.device_name);
+      stream_stats::add_client(
+        addr_string, session.device_name, session.session_generation
+      );
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token
       );

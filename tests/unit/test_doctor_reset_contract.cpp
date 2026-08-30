@@ -206,6 +206,27 @@ TEST(DoctorResetContract, ReconnectSerializesOldEvidenceResetWithNewDoctorScope)
   EXPECT_LT(new_count_started, start_unlock);
 }
 
+TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) {
+  const auto stream = source("src/stream.cpp");
+  const auto timeout = between(
+    stream,
+    "void schedule_disconnect_resume_timeout(std::string app_name)",
+    "}  // namespace"
+  );
+
+  const auto boundary = timeout.find("session::stream_generation_boundary_mutex");
+  const auto generation_check = timeout.find("disconnect_resume_timeout_generation.load");
+  const auto active_check = timeout.find("session::running_sessions.load");
+  const auto terminate = timeout.find("proc::proc.terminate()");
+  ASSERT_NE(boundary, std::string::npos);
+  ASSERT_NE(generation_check, std::string::npos);
+  ASSERT_NE(active_check, std::string::npos);
+  ASSERT_NE(terminate, std::string::npos);
+  EXPECT_LT(boundary, generation_check);
+  EXPECT_LT(generation_check, terminate);
+  EXPECT_LT(active_check, terminate);
+}
+
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   const auto stream = source("src/stream.cpp");
   const auto periodic_ping = between(

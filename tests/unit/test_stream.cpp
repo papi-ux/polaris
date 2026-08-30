@@ -231,6 +231,31 @@ TEST(StreamNetworkStatsTests, SecondaryClientReportDoesNotReplacePrimaryTelemetr
   stream_stats::update_stream_active(false);
 }
 
+TEST(StreamNetworkStatsTests, SameAddressReconnectKeepsReplacementSessionActive) {
+  constexpr auto client_ip = "203.0.113.123";
+  constexpr std::uint64_t old_generation = 41;
+  constexpr std::uint64_t replacement_generation = 42;
+
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client(client_ip, "RetroidPocket6", old_generation);
+  stream_stats::add_client(client_ip, "RetroidPocket6", replacement_generation);
+
+  auto overlapping = stream_stats::get_current();
+  ASSERT_EQ(overlapping.clients.size(), 2u);
+  EXPECT_TRUE(overlapping.streaming);
+
+  stream_stats::remove_client(client_ip, old_generation);
+
+  const auto replacement = stream_stats::get_current();
+  ASSERT_EQ(replacement.clients.size(), 1u);
+  EXPECT_EQ(replacement.clients.front().session_generation, replacement_generation);
+  EXPECT_TRUE(replacement.streaming);
+  EXPECT_EQ(replacement.client_ip, client_ip);
+
+  stream_stats::remove_client(client_ip, replacement_generation);
+  stream_stats::update_stream_active(false);
+}
+
 TEST(ProcHostPauseClassificationTests, HighRefreshNearTargetDeliveryRemainsSteady) {
   const auto classification = proc::classify_host_pause_session_for_tests(
     stable_gpu_native_stats(115.6, 120.0),
