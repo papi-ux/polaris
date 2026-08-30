@@ -1900,10 +1900,16 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   const auto unavailable_during_verification = doctor_actions::execute({
     {"action_id", "verify"}, {"run_id", second_run_id}
   });
-  EXPECT_TRUE(unavailable_during_verification.at("status").get<bool>());
+  EXPECT_FALSE(unavailable_during_verification.at("status").get<bool>());
   EXPECT_TRUE(unavailable_during_verification.at("changed").get<bool>());
-  EXPECT_EQ(unavailable_during_verification.at("state"), "rolled_back");
-  EXPECT_EQ(unavailable_during_verification.at("restored_bitrate_kbps"), 20000);
+  EXPECT_EQ(unavailable_during_verification.at("state"), "rollback_unconfirmed");
+  EXPECT_EQ(
+    unavailable_during_verification.at("requested_restore_bitrate_kbps"),
+    20000
+  );
+  EXPECT_FALSE(
+    unavailable_during_verification.at("undo").at("available").get<bool>()
+  );
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 0);
   adaptive_bitrate::set_runtime_update_supported(true);
 
