@@ -168,6 +168,44 @@ TEST(DoctorResetContract, MediaCounterIngestAndStreamResetUseOneLockOrder) {
     << "the counter mutex must be released before stats/network publication";
 }
 
+TEST(DoctorResetContract, ReconnectSerializesOldEvidenceResetWithNewDoctorScope) {
+  const auto stream = source("src/stream.cpp");
+  const auto join = between(
+    stream,
+    "void join(session_t &session)",
+    "int start(session_t &session"
+  );
+  const auto start = between(
+    stream,
+    "int start(session_t &session",
+    "std::shared_ptr<session_t> alloc("
+  );
+
+  const auto join_lock = join.find("stream_generation_boundary_mutex");
+  const auto old_scope_retired = join.find("doctor_actions::session_ended");
+  const auto old_count_retired = join.find("--running_sessions");
+  const auto old_evidence_reset = join.find("stream_stats::update_stream_active(false)");
+  ASSERT_NE(join_lock, std::string::npos);
+  ASSERT_NE(old_scope_retired, std::string::npos);
+  ASSERT_NE(old_count_retired, std::string::npos);
+  ASSERT_NE(old_evidence_reset, std::string::npos);
+  EXPECT_LT(join_lock, old_scope_retired);
+  EXPECT_LT(old_scope_retired, old_count_retired);
+  EXPECT_LT(old_count_retired, old_evidence_reset);
+
+  const auto start_lock = start.find("stream_generation_boundary_mutex");
+  const auto new_scope_started = start.find("doctor_actions::session_started");
+  const auto new_count_started = start.find("++running_sessions");
+  const auto start_unlock = start.find("generation_boundary_lock.unlock()");
+  ASSERT_NE(start_lock, std::string::npos);
+  ASSERT_NE(new_scope_started, std::string::npos);
+  ASSERT_NE(new_count_started, std::string::npos);
+  ASSERT_NE(start_unlock, std::string::npos);
+  EXPECT_LT(start_lock, new_scope_started);
+  EXPECT_LT(new_scope_started, new_count_started);
+  EXPECT_LT(new_count_started, start_unlock);
+}
+
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   const auto stream = source("src/stream.cpp");
   const auto periodic_ping = between(
