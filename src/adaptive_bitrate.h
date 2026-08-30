@@ -191,6 +191,16 @@ namespace adaptive_bitrate {
   /** Return the current encoder request, including one-shot rollback work. */
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
 
+  /**
+   * Invalidate the retiring encoder session before recreating it for an exact
+   * live request. Returns false when the request was superseded before the
+   * encoder reached the recreation boundary.
+   */
+  bool begin_live_bitrate_session_recreation(
+    std::uint64_t revision,
+    int bitrate_kbps
+  );
+
   /** Record a successful encoder application of an exact controller request. */
   void acknowledge_live_bitrate_applied(
     std::uint64_t revision,

@@ -3588,6 +3588,15 @@ namespace video {
                   effective_bitrate = applied_adaptive_bitrate;
                   break;
                 case encode_session_t::bitrate_update_e::recreate_session:
+                  if (!adaptive_bitrate::begin_live_bitrate_session_recreation(
+                        request->revision,
+                        request->target_bitrate_kbps
+                      )) {
+                    // A newer owner/controller decision won before the old
+                    // session was retired. Poll that target without
+                    // recreating for this stale request.
+                    break;
+                  }
                   BOOST_LOG(info)
                     << "Recreating the encoder session to apply bitrate "sv
                     << request->target_bitrate_kbps << " kbps"sv;
@@ -4161,6 +4170,13 @@ namespace video {
       }
 
       auto &encoder = *chosen_encoder;
+
+      // A rollback or newer paired target can arrive while an FFmpeg NVENC
+      // session is being torn down. Build the replacement directly at the
+      // latest exact target; successful session open remains the ack boundary.
+      if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+        config.bitrate = request->target_bitrate_kbps;
+      }
 
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {
