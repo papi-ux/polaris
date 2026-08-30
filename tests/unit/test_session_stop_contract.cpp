@@ -236,7 +236,8 @@ TEST(SessionStopContractTests, CancelAnswersClientBeforeNestedTeardown) {
 }
 
 TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
-  // SB-2: destroy without disconnect under lock races state_changed → SEGV.
+  // SB-2: pause acknowledgement keeps Gamescope's cross-thread buffer handoff
+  // out of remove_buffer; destroy without disconnect under lock races callbacks.
   // Dtor lives in pipewire_capture (extracted from portal_grab).
   const auto source = read_source_for_contract("src/platform/linux/pipewire_capture.cpp");
   ASSERT_FALSE(source.empty());
@@ -245,14 +246,23 @@ TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
   const auto dtor_end = source.find("bool capture_t::start()", dtor);
   ASSERT_NE(dtor_end, std::string::npos);
   const auto body = source.substr(dtor, dtor_end - dtor);
+  const auto deactivate = body.find("pw_stream_set_active(stream_, false)");
+  const auto pause_wait = body.find("stream_state_ == PW_STREAM_STATE_PAUSED", deactivate);
+  const auto flush = body.find("pw_stream_flush(stream_, false)", pause_wait);
   const auto stop = body.find("pw_thread_loop_stop(");
   const auto lock = body.find("pw_thread_loop_lock(");
   const auto disconnect = body.find("pw_stream_disconnect(");
   const auto destroy = body.find("pw_stream_destroy(");
+  ASSERT_NE(deactivate, std::string::npos);
+  ASSERT_NE(pause_wait, std::string::npos);
+  ASSERT_NE(flush, std::string::npos);
   EXPECT_NE(stop, std::string::npos);
   ASSERT_NE(lock, std::string::npos);
   ASSERT_NE(disconnect, std::string::npos);
   ASSERT_NE(destroy, std::string::npos);
+  EXPECT_LT(deactivate, pause_wait);
+  EXPECT_LT(pause_wait, flush);
+  EXPECT_LT(flush, disconnect);
   EXPECT_LT(lock, disconnect);
   EXPECT_LT(disconnect, destroy);
   EXPECT_LT(destroy, stop);
