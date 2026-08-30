@@ -94,18 +94,48 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
   );
   EXPECT_NE(runtime_update.find("adaptive_bitrate::get_live_bitrate_request()"), std::string::npos);
   EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
-  EXPECT_NE(runtime_update.find("bitrate_update_e::pending_frame"), std::string::npos);
+  EXPECT_NE(runtime_update.find("bitrate_update_e::recreate_session"), std::string::npos);
+  EXPECT_NE(runtime_update.find("config.bitrate = request->target_bitrate_kbps"), std::string::npos);
+  EXPECT_EQ(runtime_update.find("pending_bitrate_confirmation"), std::string::npos);
   EXPECT_NE(video.find("codec_name == \"h264_nvenc\""), std::string::npos);
   EXPECT_NE(video.find("codec_name == \"hevc_nvenc\""), std::string::npos);
   EXPECT_NE(video.find("codec_name == \"av1_nvenc\""), std::string::npos);
+
+  const auto ffmpeg_update = between(
+    video,
+    "bitrate_update_e update_bitrate(int new_bitrate_kbps) override",
+    "avcodec_ctx_t avcodec_ctx"
+  );
+  EXPECT_NE(ffmpeg_update.find("return bitrate_update_e::recreate_session"), std::string::npos);
+  EXPECT_EQ(ffmpeg_update.find("avcodec_ctx->bit_rate ="), std::string::npos);
+  EXPECT_EQ(ffmpeg_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
 
   const auto encode_success = between(
     video,
     "if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp))",
     "auto encode_end = std::chrono::steady_clock::now()"
   );
-  EXPECT_NE(encode_success.find("pending_bitrate_confirmation"), std::string::npos);
-  EXPECT_NE(encode_success.find("acknowledge_live_bitrate_applied"), std::string::npos);
+  EXPECT_EQ(encode_success.find("acknowledge_live_bitrate_applied"), std::string::npos);
+}
+
+TEST(DoctorResetContract, MediaCounterIngestAndStreamResetUseOneLockOrder) {
+  const auto stats = source("src/stream_stats.cpp");
+  const auto reset = between(
+    stats,
+    "void update_stream_active(bool active",
+    "void add_client("
+  );
+  const auto ingest = between(
+    stats,
+    "client_media_ingest_result_t ingest_client_media_counters(",
+    "#ifdef POLARIS_TESTS"
+  );
+
+  EXPECT_LT(reset.find("client_media_ingest_mutex"), reset.find("stats_mutex"));
+  EXPECT_LT(ingest.find("client_media_ingest_mutex"), ingest.find("client_media_counter_mutex"));
+  EXPECT_LT(ingest.find("client_media_counter_mutex"), ingest.find("const auto host = get_current()"));
+  EXPECT_NE(ingest.find("    }\n\n    // Serialize counter advancement"), std::string::npos)
+    << "the counter mutex must be released before stats/network publication";
 }
 
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {

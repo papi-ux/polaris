@@ -155,6 +155,11 @@ namespace stream_stats {
       client_media_counters_t sample;
       std::chrono::steady_clock::time_point received_at {};
     };
+    // Serializes one authenticated counter ingest (including evidence
+    // publication) with the stream-generation reset. It must always be taken
+    // before stats_mutex; the narrower counter mutex is never held while
+    // acquiring stats or network-risk state.
+    std::mutex client_media_ingest_mutex;
     std::mutex client_media_counter_mutex;
     std::optional<client_media_counter_epoch_t> last_client_media_counter_epoch;
 
@@ -1513,6 +1518,7 @@ namespace stream_stats {
   }
 
   void update_stream_active(bool active, const std::string &client_name, const std::string &client_ip) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     current_stats.streaming = active;
@@ -1838,61 +1844,64 @@ namespace stream_stats {
       return result;
     }
 
-    std::lock_guard<std::mutex> lock(client_media_counter_mutex);
-    const auto received_at = std::chrono::steady_clock::now();
-    const bool same_scope = last_client_media_counter_epoch &&
-      last_client_media_counter_epoch->sample.owner_uuid == sample.owner_uuid &&
-      last_client_media_counter_epoch->sample.app_session_id == sample.app_session_id &&
-      last_client_media_counter_epoch->sample.session_generation == sample.session_generation;
-    if (!same_scope) {
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
+    {
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      const auto received_at = std::chrono::steady_clock::now();
+      const bool same_scope = last_client_media_counter_epoch &&
+        last_client_media_counter_epoch->sample.owner_uuid == sample.owner_uuid &&
+        last_client_media_counter_epoch->sample.app_session_id == sample.app_session_id &&
+        last_client_media_counter_epoch->sample.session_generation == sample.session_generation;
+      if (!same_scope) {
+        last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+        result.state = client_media_ingest_state_e::baseline;
+        result.accepted = true;
+        return result;
+      }
+
+      const auto previous_epoch = *last_client_media_counter_epoch;
+      const auto &previous = previous_epoch.sample;
+      if (sample.client_monotonic_ms <= previous.client_monotonic_ms) {
+        result.state = client_media_ingest_state_e::non_monotonic;
+        return result;
+      }
+
+      const auto client_gap = std::chrono::milliseconds(
+        sample.client_monotonic_ms - previous.client_monotonic_ms
+      );
+      if (received_at - previous_epoch.received_at > CLIENT_MEDIA_COUNTER_MAX_GAP ||
+          client_gap > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+        last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+        result.state = client_media_ingest_state_e::coverage_gap_reset;
+        result.accepted = true;
+        return result;
+      }
+
+      if (sample.frames_expected < previous.frames_expected ||
+          sample.frames_received < previous.frames_received ||
+          sample.frames_lost < previous.frames_lost) {
+        last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
+        result.state = client_media_ingest_state_e::counter_epoch_reset;
+        result.accepted = true;
+        return result;
+      }
+
+      const auto expected_delta = sample.frames_expected - previous.frames_expected;
+      const auto received_delta = sample.frames_received - previous.frames_received;
+      const auto lost_delta = sample.frames_lost - previous.frames_lost;
+      if (received_delta > expected_delta || lost_delta != expected_delta - received_delta) {
+        result.state = client_media_ingest_state_e::invalid;
+        return result;
+      }
       last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
-      result.state = client_media_ingest_state_e::baseline;
       result.accepted = true;
-      return result;
+      if (expected_delta == 0) {
+        result.state = client_media_ingest_state_e::waiting_for_frames;
+        return result;
+      }
+      result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
+      result.state = client_media_ingest_state_e::observed;
     }
-
-    const auto previous_epoch = *last_client_media_counter_epoch;
-    const auto &previous = previous_epoch.sample;
-    if (sample.client_monotonic_ms <= previous.client_monotonic_ms) {
-      result.state = client_media_ingest_state_e::non_monotonic;
-      return result;
-    }
-
-    const auto client_gap = std::chrono::milliseconds(
-      sample.client_monotonic_ms - previous.client_monotonic_ms
-    );
-    if (received_at - previous_epoch.received_at > CLIENT_MEDIA_COUNTER_MAX_GAP ||
-        client_gap > CLIENT_MEDIA_COUNTER_MAX_GAP) {
-      last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
-      result.state = client_media_ingest_state_e::coverage_gap_reset;
-      result.accepted = true;
-      return result;
-    }
-
-    if (sample.frames_expected < previous.frames_expected ||
-        sample.frames_received < previous.frames_received ||
-        sample.frames_lost < previous.frames_lost) {
-      last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
-      result.state = client_media_ingest_state_e::counter_epoch_reset;
-      result.accepted = true;
-      return result;
-    }
-
-    const auto expected_delta = sample.frames_expected - previous.frames_expected;
-    const auto received_delta = sample.frames_received - previous.frames_received;
-    const auto lost_delta = sample.frames_lost - previous.frames_lost;
-    if (received_delta > expected_delta || lost_delta != expected_delta - received_delta) {
-      result.state = client_media_ingest_state_e::invalid;
-      return result;
-    }
-    last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
-    result.accepted = true;
-    if (expected_delta == 0) {
-      result.state = client_media_ingest_state_e::waiting_for_frames;
-      return result;
-    }
-    result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
-    result.state = client_media_ingest_state_e::observed;
 
     // Serialize counter advancement with evidence publication so concurrent
     // authenticated requests cannot publish an older delta after a newer one.

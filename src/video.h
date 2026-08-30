@@ -309,7 +309,7 @@ namespace video {
     enum class bitrate_update_e {
       rejected,
       applied,
-      pending_frame
+      recreate_session
     };
 
     virtual ~encode_session_t() = default;
@@ -333,7 +333,7 @@ namespace video {
      * @brief Dynamically update the encoder bitrate at runtime.
      * @param new_bitrate_kbps New target bitrate in kilobits per second.
      * @return Whether the encoder rejected the request, applied it immediately,
-     *         or accepted it for confirmation on the next encoded frame.
+     *         or requires an encoder-session recreation before confirmation.
      */
     virtual bitrate_update_e update_bitrate(int new_bitrate_kbps) {
       return bitrate_update_e::rejected;
