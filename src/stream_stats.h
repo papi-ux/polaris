@@ -40,6 +40,10 @@ namespace stream_stats {
   struct client_stats_t {
     std::string name;
     std::string ip;
+    // Internal lifecycle identity. This is deliberately not serialized: the
+    // public client contract remains name/IP/telemetry, while overlapping
+    // reconnects from the same address can still be removed independently.
+    std::uint64_t session_generation = 0;
 
     // Video
     double fps = 0;
@@ -296,16 +300,23 @@ namespace stream_stats {
 
   /**
    * @brief Add a new client session to the stats tracker.
-   * @param client_ip IP address used as session key.
+   * @param client_ip IP address of the client.
    * @param client_name Display name of the client.
+   * @param session_generation Process-unique stream-session identity. Zero
+   * keeps the legacy IP-keyed behavior for callers without a session object.
    */
-  void add_client(const std::string &client_ip, const std::string &client_name);
+  void add_client(const std::string &client_ip,
+                  const std::string &client_name,
+                  std::uint64_t session_generation = 0);
 
   /**
    * @brief Remove a client session from the stats tracker.
    * @param client_ip IP address of the client to remove.
+   * @param session_generation Process-unique stream-session identity. Zero
+   * keeps the legacy IP-keyed behavior for callers without a session object.
    */
-  void remove_client(const std::string &client_ip);
+  void remove_client(const std::string &client_ip,
+                     std::uint64_t session_generation = 0);
 
   /**
    * @brief Update video statistics (backward-compatible single-client API).
