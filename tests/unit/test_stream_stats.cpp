@@ -2229,6 +2229,22 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   EXPECT_EQ(stale_retry.at("request_id"), request_id);
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
 
+  // The explicit owner write retired the live run, but a durable client may
+  // still present its Undo receipt afterward. Replay the exact terminal result
+  // so the client can retire that stale Undo without touching the newer target.
+  const auto retired_undo = doctor_actions::execute({
+    {"action_id", "undo"},
+    {"run_id", run_id},
+    {"app_session_id", context.launch_instance_id},
+    {"session_generation", generation}
+  }, context);
+  EXPECT_TRUE(retired_undo.at("status").get<bool>());
+  EXPECT_FALSE(retired_undo.at("changed").get<bool>());
+  EXPECT_EQ(retired_undo.at("state"), "superseded");
+  EXPECT_EQ(retired_undo.at("run_id"), run_id);
+  EXPECT_FALSE(retired_undo.at("undo").at("available").get<bool>());
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 18000);
+
   doctor_actions::session_ended("client-owner", generation);
   stream_stats::stop_session_timing("client-owner", generation);
   stream_stats::update_stream_active(false);
