@@ -128,9 +128,8 @@ TEST(DoctorResetContract, PairedDoctorFailuresUseTypedNonSuccessHttpStatus) {
     "auto polarisDoctorAction =",
     "auto polarisSetBitrate ="
   );
-  EXPECT_NE(route.find("output.value(\"status\", false)"), std::string::npos);
   EXPECT_NE(
-    route.find("SimpleWeb::StatusCode::client_error_conflict"),
+    route.find("doctor_actions::http_status_code(output)"),
     std::string::npos
   );
   EXPECT_NE(route.find("err[\"changed\"] = false"), std::string::npos);
