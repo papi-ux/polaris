@@ -100,8 +100,10 @@ traditional flow.
 No. Core streaming, pairing, library management, and diagnostics work without AI and without a cloud
 account.
 
-### How does the AI optimizer work?
+### What does AI do in Doctor and launch optimization?
 
-The AI optimizer is optional and disabled by default. When enabled, it sends device specs, app
-metadata, and recent session history to the provider you configure: Anthropic, OpenAI, Gemini, or a
-local OpenAI-compatible endpoint such as Ollama or LM Studio. Results are cached locally.
+Launch presets and Doctor actions are deterministic and work without AI. When AI explanations are
+enabled, Polaris sends a bounded structured evidence bundle to the provider you configure:
+Anthropic, OpenAI, Gemini, or a local OpenAI-compatible endpoint such as Ollama or LM Studio. The
+response can explain the evidence in plain language, but it cannot define an action, target setting,
+Doctor confidence override, or launch policy. See [Fix a bad stream with Doctor](doctor.md).
