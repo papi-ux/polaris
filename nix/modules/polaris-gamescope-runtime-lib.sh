@@ -625,6 +625,137 @@ polaris_wait_process_group_stopped() {
   return 1
 }
 
+# Emergency parent-death fence for an already-proven private session. The
+# surviving wrapper is the immutable authority while every other live session
+# member is stopped and killed by positive PID. This deliberately avoids a
+# negative-PGID signal when a sibling group has lost its leader, while still
+# preventing that leaderless group from escaping after Gamescope dies.
+polaris_kill_private_session_members_with_authority() {
+  local session_id="$1" authority_pid="$2" authority_start="$3" authority_group="$4"
+  local kill_bin="${POLARIS_KILL_BIN:-kill}" proc_root process pid index
+  local target_start target_group remaining=0
+  local freeze_steps="${POLARIS_FREEZE_WAIT_STEPS:-100}"
+  local kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
+  local pids=() starts=() groups=()
+  proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 1
+
+  polaris_process_fields "$authority_pid" || return 1
+  [ "$POLARIS_PROCESS_START_TIME" = "$authority_start" ] \
+    && [ "$POLARIS_PROCESS_PGID" = "$authority_group" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
+    && [ "$POLARIS_PROCESS_STATE" != Z ] || return 1
+
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_read_process_stat_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    [ "$pid" != "$authority_pid" ] || continue
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    pids+=("$pid")
+    starts+=("$POLARIS_PROCESS_START_TIME")
+    groups+=("$POLARIS_PROCESS_PGID")
+  done
+  [ "${#pids[@]}" -gt 0 ] || return 0
+
+  # Stop each exact member first. Once the captured parents are stopped they
+  # cannot create more descendants; a later pass catches anything that raced
+  # the enumeration before those stops committed.
+  for index in "${!pids[@]}"; do
+    pid="${pids[$index]}"
+    target_start="${starts[$index]}"
+    target_group="${groups[$index]}"
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    if ! "$kill_bin" -STOP "$pid" 2>/dev/null; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    for _ in $(seq 1 "$freeze_steps"); do
+      if ! polaris_process_fields "$pid"; then
+        [ ! -e "$proc_root/$pid" ] && break
+        return 1
+      fi
+      [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+        && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+      case "$POLARIS_PROCESS_STATE" in
+        T|t|Z) break ;;
+      esac
+      sleep 0.01
+    done
+    if polaris_process_fields "$pid"; then
+      [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+        && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+      case "$POLARIS_PROCESS_STATE" in
+        T|t|Z) ;;
+        *) return 1 ;;
+      esac
+    elif [ -e "$proc_root/$pid" ]; then
+      return 1
+    fi
+  done
+
+  # Revalidate every still-present target immediately before the destructive
+  # positive-PID signal. A vanished target is already terminal; a changed
+  # generation is never signalled.
+  for index in "${!pids[@]}"; do
+    pid="${pids[$index]}"
+    target_start="${starts[$index]}"
+    target_group="${groups[$index]}"
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    case "$POLARIS_PROCESS_STATE" in T|t) ;; *) return 1 ;; esac
+    if ! "$kill_bin" -KILL "$pid" 2>/dev/null; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+  done
+
+  for _ in $(seq 1 "$kill_steps"); do
+    polaris_process_fields "$authority_pid" || return 1
+    [ "$POLARIS_PROCESS_START_TIME" = "$authority_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$authority_group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
+      && [ "$POLARIS_PROCESS_STATE" != Z ] || return 1
+    remaining=0
+    for process in "$proc_root"/[0-9]*; do
+      [ -d "$process" ] || continue
+      pid="${process##*/}"
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      if ! polaris_read_process_stat_fields "$pid"; then
+        [ ! -e "$process" ] && continue
+        return 1
+      fi
+      [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+      [ "$pid" != "$authority_pid" ] || continue
+      [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+      remaining=1
+    done
+    [ "$remaining" = 0 ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 polaris_private_session_has_no_live_siblings() {
   local session_id="$1" proc_root process pid seen=0
   proc_root="$(polaris_proc_root)"

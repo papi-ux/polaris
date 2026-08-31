@@ -460,6 +460,8 @@ run_nested_primary_child() {
   local steam_pid="" steam_rc=0 wait_pid="" steam_spawn_started=0
   local primary_parent_pid="$PPID" primary_parent_start_time=""
   local primary_group_id="" primary_session_id=""
+  local primary_wrapper_pid="$$" primary_wrapper_start_time=""
+  local primary_fence_armed=0
   local kill_bin="${POLARIS_KILL_BIN:-kill}"
   [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
     echo "polaris-gamescope-session: primary child requires an explicit session credential" >&2
@@ -489,17 +491,22 @@ run_nested_primary_child() {
     # process group and session. Keep this wrapper alive through TERM so it can
     # retire the complete group, including Steam descendants which outlive the
     # direct launcher. The final KILL intentionally includes this wrapper.
-    if [ -n "$primary_group_id" ]; then
+    if [ "$primary_fence_armed" = 1 ]; then
       trap '' TERM INT HUP
       signal_session_steam -TERM || true
       "$kill_bin" -TERM "-$primary_group_id" 2>/dev/null || true
       for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
         sleep 0.05
       done
-      # Steam may create sibling process groups while retaining the private
-      # Gamescope session. Fence those exact groups before killing the original
-      # group; a failed best-effort pass must not prevent the original fence.
-      polaris_kill_private_session_groups "$primary_session_id" || true
+      # Gamescope is already gone, so no durable compositor marker remains for
+      # a later retry. Keep this exact wrapper alive and positively fence every
+      # other member of the private session. This also covers a sibling process
+      # group whose leader exited before the parent-death signal arrived.
+      while ! polaris_kill_private_session_members_with_authority \
+          "$primary_session_id" "$primary_wrapper_pid" \
+          "$primary_wrapper_start_time" "$primary_group_id"; do
+        sleep 0.05
+      done
       signal_session_steam -KILL || true
       "$kill_bin" -KILL "-$primary_group_id" 2>/dev/null || true
       exit 0
@@ -559,6 +566,18 @@ run_nested_primary_child() {
       echo "polaris-gamescope-session: primary child lost its private Gamescope generation before Steam launch" >&2
       return 1
     fi
+    if ! polaris_process_fields "$primary_wrapper_pid" \
+        || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ] \
+        || [ "$POLARIS_PROCESS_STATE" = Z ]; then
+      trap - TERM INT HUP
+      echo "polaris-gamescope-session: primary child could not prove its cleanup wrapper" >&2
+      return 1
+    fi
+    primary_wrapper_start_time="$POLARIS_PROCESS_START_TIME"
+    # Publish the complete cleanup identity to the asynchronous parent-death
+    # handler only after every component has been validated and captured.
+    primary_fence_armed=1
   elif [ -z "${POLARIS_TEST_GAMESCOPE_PID:-}" ]; then
     trap - TERM INT HUP
     echo "polaris-gamescope-session: primary child could not prove its private Gamescope group" >&2

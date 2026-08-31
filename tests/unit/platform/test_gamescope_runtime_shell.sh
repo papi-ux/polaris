@@ -440,6 +440,34 @@ grep -qx -- '-KILL -400' "$work/kills" || fail "retry did not terminate the reta
 [ ! -e "$work/run/polaris-gamescope.pid" ] || fail "successful retry retained marker authority"
 rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
 
+# Once Gamescope has already died, its primary-child wrapper is the remaining
+# immutable authority. Drain a leaderless sibling group through exact positive
+# PIDs so the wrapper never has to guess at an ambiguous negative PGID.
+write_process_with_group 400 1 400 400 9260 /usr/bin/bash primary-child
+write_process_with_group 421 400 420 400 9261 /usr/bin/sleep infinity
+cat >"$work/bin/kill-leaderless-member" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ] && [ "\${2:-}" = 421 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 421 T
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = 421 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 421 Z
+fi
+EOF
+chmod +x "$work/bin/kill-leaderless-member"
+: >"$work/kills"
+POLARIS_KILL_BIN="$work/bin/kill-leaderless-member" POLARIS_KILL_WAIT_STEPS=1 \
+  polaris_kill_private_session_members_with_authority 400 400 9260 400 ||
+  fail "exact wrapper did not drain a leaderless session member"
+grep -qx -- '-STOP 421' "$work/kills" || fail "leaderless member was not positively frozen"
+grep -qx -- '-KILL 421' "$work/kills" || fail "leaderless member was not positively killed"
+! grep -q -- ' -420$' "$work/kills" || fail "leaderless member used an ambiguous group signal"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/421/stat")" = Z ] ||
+  fail "leaderless member did not reach terminal state"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/400/stat")" = S ] ||
+  fail "exact cleanup wrapper lost authority during member drain"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/421"
+
 # If the private-session leader generation changes after the destructive group
 # signal, numeric PGID authority is lost and cleanup must fail closed.
 write_process_with_group 400 1 400 400 9300 /usr/bin/sleep infinity
