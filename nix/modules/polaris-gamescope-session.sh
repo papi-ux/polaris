@@ -467,6 +467,42 @@ wait_for_nested_gamescope_exit() {
   return 2
 }
 
+retire_marked_nested_gamescope_child_first() {
+  local graceful_exit=0
+  polaris_validate_marker "$marker" nested || return 1
+  if ! kill_session_steam || ! session_steam_absent; then
+    echo "polaris-gamescope-session: exact-session Steam did not reach terminal state" >&2
+    return 1
+  fi
+
+  wait_for_nested_gamescope_exit || graceful_exit=$?
+  case "$graceful_exit" in
+    0)
+      echo "polaris-gamescope-session: nested owner exited after exact-session Steam" >&2
+      return 0
+      ;;
+    1)
+      echo "polaris-gamescope-session: nested owner exceeded graceful exit window; using exact-generation fence" >&2
+      if polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+        return 0
+      fi
+      # The generation may finish between the last wait probe and the fenced
+      # helper's first identity check. Accept only the same safe dead/orphan
+      # proof used by the graceful path.
+      if polaris_validate_marker "$marker" nested \
+          || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+        return 1
+      fi
+      echo "polaris-gamescope-session: nested owner exited while the fallback was acquiring authority" >&2
+      return 0
+      ;;
+    *)
+      echo "polaris-gamescope-session: nested ownership changed during graceful exit" >&2
+      return 1
+      ;;
+  esac
+}
+
 # True while a real game process for $1 (Steam appid) is running.
 # Steam client / webhelper also inherit SteamAppId — exclude those so
 # Big Picture alone does not count as "game still up".
@@ -776,7 +812,7 @@ case "${1:-}" in
       if [ "$nested_marked" != 1 ]; then
         echo "polaris-gamescope-session: failed to record an exact nested gamescope generation in its private setsid group" >&2
         if [ -f "$marker" ] && polaris_validate_marker "$marker" nested; then
-          polaris_stop_marked_gamescope "$marker" nested "$rt" || true
+          retire_marked_nested_gamescope_child_first || true
         fi
         # Without an exact marker plus PGID/SID proof there is no safe numeric
         # fallback. Preserve the recovery claim and let service/cgroup teardown
@@ -795,7 +831,7 @@ case "${1:-}" in
       done
       if [ "$ready" != 1 ]; then
         echo "polaris-gamescope-session: owned nested gamescope-0/Xwayland not ready — see $steam_log" >&2
-        polaris_stop_marked_gamescope "$marker" nested "$rt" || true
+        retire_marked_nested_gamescope_child_first || true
         exit 1
       fi
       publish_nested_claim nested nested || {
@@ -1024,35 +1060,10 @@ case "${1:-}" in
             # X11 I/O abort path. Signal only credential-bound session Steam,
             # then give the exact compositor generation a bounded graceful
             # exit before using the process-group fence as a fallback.
-            if ! kill_session_steam || ! session_steam_absent; then
-              echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
+            if ! retire_marked_nested_gamescope_child_first; then
+              echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
               exit 1
             fi
-            graceful_exit=0
-            wait_for_nested_gamescope_exit || graceful_exit=$?
-            case "$graceful_exit" in
-              0)
-                echo "polaris-gamescope-session: nested owner exited after exact-session Steam" >&2
-                ;;
-              1)
-                echo "polaris-gamescope-session: nested owner exceeded graceful exit window; using exact-generation fence" >&2
-                if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
-                  # The generation may finish between the last wait probe and
-                  # the fenced helper's first identity check. Accept only the
-                  # same safe dead/orphan proof used by the graceful path.
-                  if polaris_validate_marker "$marker" nested \
-                      || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-                    echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
-                    exit 1
-                  fi
-                  echo "polaris-gamescope-session: nested owner exited while the fallback was acquiring authority" >&2
-                fi
-                ;;
-              *)
-                echo "polaris-gamescope-session: nested ownership changed during graceful exit; retaining recovery claim" >&2
-                exit 1
-                ;;
-            esac
           else
             if ! kill_session_steam || ! session_steam_absent; then
               echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
