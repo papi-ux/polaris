@@ -458,6 +458,9 @@ publish_nested_primary_child_exit() (
 
 run_nested_primary_child() {
   local steam_pid="" steam_rc=0 wait_pid="" steam_spawn_started=0
+  local primary_parent_pid="$PPID" primary_parent_start_time=""
+  local primary_group_id="" primary_session_id=""
+  local kill_bin="${POLARIS_KILL_BIN:-kill}"
   [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
     echo "polaris-gamescope-session: primary child requires an explicit session credential" >&2
     return 1
@@ -482,6 +485,29 @@ run_nested_primary_child() {
 
   nested_primary_parent_gone() {
     local child_pid=""
+    # Production nested Gamescope is the immutable leader of a private
+    # process group and session. Keep this wrapper alive through TERM so it can
+    # retire the complete group, including Steam descendants which outlive the
+    # direct launcher. The final KILL intentionally includes this wrapper.
+    if [ -n "$primary_group_id" ]; then
+      trap '' TERM INT HUP
+      signal_session_steam -TERM || true
+      "$kill_bin" -TERM "-$primary_group_id" 2>/dev/null || true
+      for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
+        sleep 0.05
+      done
+      # Steam may create sibling process groups while retaining the private
+      # Gamescope session. Fence those exact groups before killing the original
+      # group; a failed best-effort pass must not prevent the original fence.
+      polaris_kill_private_session_groups "$primary_session_id" || true
+      signal_session_steam -KILL || true
+      "$kill_bin" -KILL "-$primary_group_id" 2>/dev/null || true
+      exit 0
+    fi
+
+    # Cross-platform unit helpers do not own a real Linux process group. They
+    # retain the bounded direct-child fallback while production requires the
+    # private group proof below before Steam can start.
     trap - TERM INT HUP
     if [ "$steam_spawn_started" = 1 ]; then
       child_pid="$steam_pid"
@@ -490,13 +516,13 @@ run_nested_primary_child() {
       [ -n "$child_pid" ] || child_pid="${!:-}"
     fi
     if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
-      kill -TERM "$child_pid" 2>/dev/null || true
+      "$kill_bin" -TERM "$child_pid" 2>/dev/null || true
       for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
         kill -0 "$child_pid" 2>/dev/null || break
         sleep 0.05
       done
       if kill -0 "$child_pid" 2>/dev/null; then
-        kill -KILL "$child_pid" 2>/dev/null || true
+        "$kill_bin" -KILL "$child_pid" 2>/dev/null || true
       fi
     fi
     [ -z "$child_pid" ] || wait "$child_pid" 2>/dev/null || true
@@ -509,9 +535,33 @@ run_nested_primary_child() {
   # PR_SET_PDEATHSIG cannot report a parent that died before setpriv armed the
   # signal. Re-prove the immediate parent after exec and before Steam starts;
   # a later parent death is covered by the already-installed trap above.
-  if ! polaris_headless_gamescope_pid "$PPID"; then
+  if ! polaris_headless_gamescope_pid "$primary_parent_pid"; then
     trap - TERM INT HUP
     echo "polaris-gamescope-session: primary child lost its exact Gamescope parent before Steam launch" >&2
+    return 1
+  fi
+  if polaris_process_fields "$primary_parent_pid" 2>/dev/null; then
+    primary_parent_start_time="$POLARIS_PROCESS_START_TIME"
+    [ "$POLARIS_PROCESS_PGID" = "$primary_parent_pid" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$primary_parent_pid" ] || {
+        trap - TERM INT HUP
+        echo "polaris-gamescope-session: primary child refused a non-private Gamescope parent" >&2
+        return 1
+      }
+    primary_group_id="$POLARIS_PROCESS_PGID"
+    primary_session_id="$POLARIS_PROCESS_SESSION_ID"
+    if ! polaris_headless_gamescope_pid "$primary_parent_pid" \
+        || ! polaris_process_fields "$primary_parent_pid" \
+        || [ "$POLARIS_PROCESS_START_TIME" != "$primary_parent_start_time" ] \
+        || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ]; then
+      trap - TERM INT HUP
+      echo "polaris-gamescope-session: primary child lost its private Gamescope generation before Steam launch" >&2
+      return 1
+    fi
+  elif [ -z "${POLARIS_TEST_GAMESCOPE_PID:-}" ]; then
+    trap - TERM INT HUP
+    echo "polaris-gamescope-session: primary child could not prove its private Gamescope group" >&2
     return 1
   fi
 

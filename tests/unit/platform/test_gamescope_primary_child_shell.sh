@@ -10,6 +10,7 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/polaris-gamescope-primary-child.XXXXXX")"
 keeper_pid=""
 parent_death_child_pid=""
 parent_death_steam_pid=""
+parent_death_descendant_pid=""
 cleanup() {
   if [ -n "$keeper_pid" ] && kill -0 "$keeper_pid" 2>/dev/null; then
     kill -TERM "$keeper_pid" 2>/dev/null || true
@@ -20,6 +21,9 @@ cleanup() {
   fi
   if [ -n "$parent_death_steam_pid" ] && kill -0 "$parent_death_steam_pid" 2>/dev/null; then
     kill -KILL "$parent_death_steam_pid" 2>/dev/null || true
+  fi
+  if [ -n "$parent_death_descendant_pid" ] && kill -0 "$parent_death_descendant_pid" 2>/dev/null; then
+    kill -KILL "$parent_death_descendant_pid" 2>/dev/null || true
   fi
   rm -rf "$work"
 }
@@ -34,6 +38,13 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\\n" "$@" >"$POLARIS_STEAM_ARGS"' \
   'if [ "${POLARIS_STEAM_HOLD:-0}" = 1 ]; then' \
+  '  if [ "${POLARIS_STEAM_FORK_DESCENDANT:-0}" = 1 ]; then' \
+  '    (' \
+  '      trap '\''exit 0'\'' TERM INT HUP' \
+  '      printf "%s\\n" "$BASHPID" >"$POLARIS_STEAM_DESCENDANT_PID_FILE"' \
+  '      while :; do sleep 0.05; done' \
+  '    ) &' \
+  '  fi' \
   '  printf "%s\\n" "$$" >"$POLARIS_STEAM_PID_FILE"' \
   '  : >"$POLARIS_STEAM_STARTED_FILE"' \
   '  trap '\''exit 0'\'' TERM INT HUP' \
@@ -133,8 +144,10 @@ if [ "$(uname -s)" = Linux ] && command -v setpriv >/dev/null 2>&1 && [ -r "/pro
   POLARIS_GAMESCOPE_RUNTIME_LIB="$POLARIS_SOURCE_DIR/nix/modules/polaris-gamescope-runtime-lib.sh" \
   POLARIS_FAKE_CHILD_PID_FILE="$work/parent-death-child.pid" \
   POLARIS_STEAM_HOLD=1 \
+  POLARIS_STEAM_FORK_DESCENDANT=1 \
   POLARIS_STEAM_STARTED_FILE="$work/parent-death-steam.started" \
   POLARIS_STEAM_PID_FILE="$work/parent-death-steam.pid" \
+  POLARIS_STEAM_DESCENDANT_PID_FILE="$work/parent-death-descendant.pid" \
   POLARIS_STEAM_ARGS="$work/parent-death-steam.args" \
   PATH="$work/bin:/usr/bin:/bin" \
   POLARIS_SESSION_PATH="$work/bin:/usr/bin:/bin" \
@@ -145,6 +158,7 @@ if [ "$(uname -s)" = Linux ] && command -v setpriv >/dev/null 2>&1 && [ -r "/pro
 
   parent_death_child_pid="$(tr -d '\r\n' <"$work/parent-death-child.pid")"
   parent_death_steam_pid="$(tr -d '\r\n' <"$work/parent-death-steam.pid")"
+  parent_death_descendant_pid="$(tr -d '\r\n' <"$work/parent-death-descendant.pid")"
   for _ in $(seq 1 200); do
     process_is_live_non_zombie "$parent_death_child_pid" || break
     sleep 0.02
@@ -157,8 +171,15 @@ if [ "$(uname -s)" = Linux ] && command -v setpriv >/dev/null 2>&1 && [ -r "/pro
   done
   process_is_live_non_zombie "$parent_death_steam_pid" &&
     fail "Steam survived its Gamescope parent"
+  for _ in $(seq 1 200); do
+    process_is_live_non_zombie "$parent_death_descendant_pid" || break
+    sleep 0.02
+  done
+  process_is_live_non_zombie "$parent_death_descendant_pid" &&
+    fail "Steam descendant survived its Gamescope parent"
   parent_death_child_pid=""
   parent_death_steam_pid=""
+  parent_death_descendant_pid=""
 fi
 
 # The production launch must bind wrapper lifetime directly to Gamescope.
