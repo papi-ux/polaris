@@ -837,6 +837,9 @@ TEST(DoctorResetContract, ClientSettingsPersistencePreservesExistingConfigAtomic
   EXPECT_NE(persistence.find("input.bad()"), std::string::npos);
   EXPECT_NE(persistence.find("input.close()"), std::string::npos);
   EXPECT_NE(persistence.find("input.fail()"), std::string::npos);
+  EXPECT_NE(persistence.find("const bool unchanged = std::all_of"), std::string::npos);
+  EXPECT_NE(persistence.find("if (unchanged)"), std::string::npos);
+  EXPECT_NE(persistence.find("config_file_update::apply"), std::string::npos);
   EXPECT_NE(persistence.find("private_state_file::write_atomic"), std::string::npos);
   EXPECT_NE(
     persistence.find("private_state_file::write_status_e::not_committed"),
