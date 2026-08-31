@@ -437,70 +437,31 @@ kill_session_steam() {
   session_steam_absent
 }
 
-# Give Gamescope a bounded opportunity to finish its normal teardown after the
-# credential-bound Steam child exits. Return 0 only when the exact marker is no
-# longer live and every old socket is absent or safely reclaimable; return 1
-# when the exact generation remains live for the fenced fallback; return 2 when
-# ownership became ambiguous and no destructive fallback is authorized.
-wait_for_nested_gamescope_exit() {
-  local rc
-  for _ in $(seq 1 "${POLARIS_NESTED_EXIT_WAIT_STEPS:-50}"); do
-    if polaris_validate_marker "$marker" nested; then
-      sleep "${POLARIS_NESTED_EXIT_WAIT_INTERVAL:-0.1}"
-      continue
-    fi
-    if polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-      return 0
-    fi
-    return 2
-  done
-
-  if polaris_validate_marker "$marker" nested; then
-    return 1
-  else
-    rc=$?
-  fi
-  [ "$rc" -eq 1 ] || return 2
-  if polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-    return 0
-  fi
-  return 2
-}
-
 retire_marked_nested_gamescope_child_first() {
-  local graceful_exit=0
   polaris_validate_marker "$marker" nested || return 1
   if ! kill_session_steam || ! session_steam_absent; then
     echo "polaris-gamescope-session: exact-session Steam did not reach terminal state" >&2
     return 1
   fi
 
-  wait_for_nested_gamescope_exit || graceful_exit=$?
-  case "$graceful_exit" in
-    0)
-      echo "polaris-gamescope-session: nested owner exited after exact-session Steam" >&2
-      return 0
-      ;;
-    1)
-      echo "polaris-gamescope-session: nested owner exceeded graceful exit window; using exact-generation fence" >&2
-      if polaris_stop_marked_gamescope "$marker" nested "$rt"; then
-        return 0
-      fi
-      # The generation may finish between the last wait probe and the fenced
-      # helper's first identity check. Accept only the same safe dead/orphan
-      # proof used by the graceful path.
-      if polaris_validate_marker "$marker" nested \
-          || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-        return 1
-      fi
-      echo "polaris-gamescope-session: nested owner exited while the fallback was acquiring authority" >&2
-      return 0
-      ;;
-    *)
-      echo "polaris-gamescope-session: nested ownership changed during graceful exit" >&2
-      return 1
-      ;;
-  esac
+  # Gamescope 3.16 can fault in CVulkanDevice teardown after its primary child
+  # exits. Once credential-bound Steam is terminal, immediately freeze and
+  # retire the still-exact private process group instead of waiting for the
+  # compositor to enter that destructor path.
+  if polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+    echo "polaris-gamescope-session: exact nested generation fenced after exact-session Steam" >&2
+    return 0
+  fi
+  # The compositor may finish in the narrow interval between the Steam check
+  # and the fenced helper's first identity check. Accept only a dead marker and
+  # the same safe orphan-socket proof used by recovery; otherwise retain the
+  # durable claim for an exact retry.
+  if polaris_validate_marker "$marker" nested \
+      || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+    return 1
+  fi
+  echo "polaris-gamescope-session: nested owner exited while the exact-generation fence was acquiring authority" >&2
+  return 0
 }
 
 # True while a real game process for $1 (Steam appid) is running.
@@ -1056,10 +1017,10 @@ case "${1:-}" in
           echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
           if polaris_validate_marker "$marker" nested; then
             # Normal teardown is child-first. Killing/freezing the compositor
-            # while its XWM/Xwayland children are active can drive Gamescope's
-            # X11 I/O abort path. Signal only credential-bound session Steam,
-            # then give the exact compositor generation a bounded graceful
-            # exit before using the process-group fence as a fallback.
+            # before credential-bound Steam is terminal can drive Gamescope's
+            # X11 I/O abort path. Once Steam is gone, immediately retire the
+            # exact compositor group so Gamescope cannot enter its known-bad
+            # Vulkan destructor path.
             if ! retire_marked_nested_gamescope_child_first; then
               echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
               exit 1
