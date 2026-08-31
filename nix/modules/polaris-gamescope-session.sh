@@ -457,7 +457,7 @@ publish_nested_primary_child_exit() (
 )
 
 run_nested_primary_child() {
-  local steam_pid="" steam_rc=0 wait_pid=""
+  local steam_pid="" steam_rc=0 wait_pid="" steam_spawn_started=0
   [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
     echo "polaris-gamescope-session: primary child requires an explicit session credential" >&2
     return 1
@@ -480,27 +480,44 @@ run_nested_primary_child() {
     return 2
   }
 
-  "$@" &
-  steam_pid=$!
   nested_primary_parent_gone() {
+    local child_pid=""
     trap - TERM INT HUP
-    if kill -0 "$steam_pid" 2>/dev/null; then
-      kill -TERM "$steam_pid" 2>/dev/null || true
+    if [ "$steam_spawn_started" = 1 ]; then
+      child_pid="$steam_pid"
+      # Bash updates $! as part of starting the asynchronous command. Use it
+      # when TERM arrives in the narrow interval before the explicit copy.
+      [ -n "$child_pid" ] || child_pid="${!:-}"
+    fi
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+      kill -TERM "$child_pid" 2>/dev/null || true
       for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
-        kill -0 "$steam_pid" 2>/dev/null || break
+        kill -0 "$child_pid" 2>/dev/null || break
         sleep 0.05
       done
-      if kill -0 "$steam_pid" 2>/dev/null; then
-        kill -KILL "$steam_pid" 2>/dev/null || true
+      if kill -0 "$child_pid" 2>/dev/null; then
+        kill -KILL "$child_pid" 2>/dev/null || true
       fi
     fi
-    wait "$steam_pid" 2>/dev/null || true
+    [ -z "$child_pid" ] || wait "$child_pid" 2>/dev/null || true
     exit 0
   }
   # setpriv gives this wrapper a parent-death signal from Gamescope. If the
   # compositor itself dies, retire the direct Steam launcher rather than
   # leaving a keepalive orphan behind.
   trap nested_primary_parent_gone TERM INT HUP
+  # PR_SET_PDEATHSIG cannot report a parent that died before setpriv armed the
+  # signal. Re-prove the immediate parent after exec and before Steam starts;
+  # a later parent death is covered by the already-installed trap above.
+  if ! polaris_headless_gamescope_pid "$PPID"; then
+    trap - TERM INT HUP
+    echo "polaris-gamescope-session: primary child lost its exact Gamescope parent before Steam launch" >&2
+    return 1
+  fi
+
+  steam_spawn_started=1
+  "$@" &
+  steam_pid=$!
   if wait "$steam_pid"; then
     steam_rc=0
   else
