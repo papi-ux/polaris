@@ -53,6 +53,7 @@ session_id_file="$rt/polaris-gamescope-session-id"
 session_mode_file="$rt/polaris-gamescope-session-mode"
 session_state_file="$rt/polaris-gamescope-session-state"
 session_operation_lock="$rt/polaris-gamescope-session-operation.lock"
+nested_primary_exit_file="$rt/polaris-gamescope-primary-child-exit"
 
 polaris_gamescope_service_mode() {
   local idle_state portal_state
@@ -437,6 +438,95 @@ kill_session_steam() {
   session_steam_absent
 }
 
+publish_nested_primary_child_exit() (
+  local tmp
+  load_session_instance_id || return 1
+  [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || return 1
+  tmp="$nested_primary_exit_file.tmp.$$"
+  trap 'rm -f -- "$tmp"' EXIT
+  printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$tmp" || return 1
+  mv -f -- "$tmp" "$nested_primary_exit_file"
+)
+
+run_nested_primary_child() {
+  local steam_pid="" steam_rc=0 wait_pid=""
+  [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
+    echo "polaris-gamescope-session: primary child requires an explicit session credential" >&2
+    return 1
+  }
+  load_session_instance_id || {
+    echo "polaris-gamescope-session: primary child lacks an exact session credential" >&2
+    return 1
+  }
+  [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || {
+    echo "polaris-gamescope-session: primary child is not bound to a nested session" >&2
+    return 1
+  }
+  [ "${1:-}" = -- ] && [ "$#" -ge 2 ] || {
+    echo "polaris-gamescope-session: primary child requires a Steam command" >&2
+    return 2
+  }
+  shift
+  [ "$1" = steam ] || {
+    echo "polaris-gamescope-session: primary child refused a non-Steam command" >&2
+    return 2
+  }
+
+  "$@" &
+  steam_pid=$!
+  nested_primary_parent_gone() {
+    trap - TERM INT HUP
+    if kill -0 "$steam_pid" 2>/dev/null; then
+      kill -TERM "$steam_pid" 2>/dev/null || true
+      for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
+        kill -0 "$steam_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if kill -0 "$steam_pid" 2>/dev/null; then
+        kill -KILL "$steam_pid" 2>/dev/null || true
+      fi
+    fi
+    wait "$steam_pid" 2>/dev/null || true
+    exit 0
+  }
+  # setpriv gives this wrapper a parent-death signal from Gamescope. If the
+  # compositor itself dies, retire the direct Steam launcher rather than
+  # leaving a keepalive orphan behind.
+  trap nested_primary_parent_gone TERM INT HUP
+  if wait "$steam_pid"; then
+    steam_rc=0
+  else
+    steam_rc=$?
+  fi
+  trap - TERM INT HUP
+
+  if publish_nested_primary_child_exit; then
+    echo "polaris-gamescope-session: exact-session Steam exited (rc=$steam_rc); primary child holding for fenced compositor teardown" >&2
+  else
+    echo "polaris-gamescope-session: exact-session Steam exited but its terminal marker could not be published; holding for explicit teardown" >&2
+  fi
+
+  # Do not return to Gamescope here. Gamescope 3.16 can fault in Vulkan global
+  # destruction when its primary child exits. Polaris's exact stop path freezes
+  # and SIGKILLs the private generation, so this keeper remains until that
+  # already-authorized fence commits. SIGKILL never enters Gamescope's broken
+  # exit handlers.
+  nested_primary_keeper_exit() {
+    trap - TERM INT HUP
+    if [ -n "$wait_pid" ]; then
+      kill -TERM "$wait_pid" 2>/dev/null || true
+      wait "$wait_pid" 2>/dev/null || true
+    fi
+    exit 0
+  }
+  trap nested_primary_keeper_exit TERM INT HUP
+  while :; do
+    sleep 3600 &
+    wait_pid=$!
+    wait "$wait_pid" || true
+  done
+}
+
 retire_marked_nested_gamescope_child_first() {
   polaris_validate_marker "$marker" nested || return 1
   if ! kill_session_steam || ! session_steam_absent; then
@@ -498,6 +588,9 @@ steam_app_game_alive() {
 }
 
 case "${1:-}" in
+  nested-primary-child)
+    run_nested_primary_child "${@:2}"
+    ;;
   start)
     acquire_session_operation_lock || {
       echo "polaris-gamescope-session: could not serialize session start" >&2
@@ -518,6 +611,7 @@ case "${1:-}" in
       POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
       export POLARIS_SESSION_INSTANCE_ID
     fi
+    rm -f -- "$nested_primary_exit_file"
     # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
     # Polaris claims sink-sunshine-* as the session default (stream capture);
     # do not point children at EasyEffects and do not re-pin sink-inputs here.
@@ -599,7 +693,10 @@ case "${1:-}" in
       }
     fi
 
-    # Nested WSI: gamescope --steam with Steam as primary child.
+    # Nested WSI: a session-owned keeper is Gamescope's primary child and
+    # launches Steam beneath it. Steam may then reach terminal state without
+    # returning from Gamescope's primary child and triggering the known-bad
+    # Gamescope 3.16 Vulkan destructor path.
     # Plain "-silent -applaunch" creates a WSI surface but often no
     # PipeWire paint (black stream). BP works because -gamepadui owns
     # focus; direct titles use the same UI + applaunch.
@@ -632,7 +729,7 @@ case "${1:-}" in
 
     if [ "$want_wsi" = 1 ]; then
       # --- Nested WSI path (games as gamescope child) ---
-      echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
+      echo "polaris-gamescope-session: WSI nested mode — exact-session keeper owns ${POLARIS_GAMESCOPE_BIN:-gamescope} primary-child lifetime" >&2
       # Publish a fenced transition before masking/stopping idle ownership so no
       # readiness actor can interpret the destructive handoff as an unowned gap.
       publish_nested_claim transition absent || {
@@ -712,7 +809,10 @@ case "${1:-}" in
       fi
 
       steam_log="$(mktemp "$rt/polaris-gamescope-steam-wsi.XXXXXX.log")"
-      # gamescope runs Steam as primary child; portal still captures gamescope-0.
+      # The keeper launches Steam in Gamescope's WSI environment but remains
+      # alive after Steam exits so the exact stop fence, not Gamescope's natural
+      # destructor path, owns compositor retirement. Portal still captures
+      # gamescope-0.
       # Omit --expose-wayland so children stay on XWayland + GAMESCOPE_WAYLAND_DISPLAY
       # (WSI X11 path). Portal uses compositor socket gamescope-0, not child WAYLAND.
       # env -u: drop host KWin Wayland/DISPLAY inherited from polaris user session.
@@ -733,7 +833,8 @@ case "${1:-}" in
           "${hdr_flags[@]}" \
           -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
           -w "$gs_width" -h "$gs_height" \
-          -- "${steam_launch[@]}"
+          -- setpriv --pdeathsig TERM -- \
+          bash "$0" nested-primary-child -- "${steam_launch[@]}"
       ) >"$steam_log" 2>&1 &
       nested_launch_pid=$!
 
@@ -916,6 +1017,16 @@ case "${1:-}" in
     seen=0
     gone=0
     while :; do
+      if [ -e "$nested_primary_exit_file" ] || [ -L "$nested_primary_exit_file" ]; then
+        if [ -f "$nested_primary_exit_file" ] \
+            && [ ! -L "$nested_primary_exit_file" ] \
+            && [ "$(tr -d '\r\n' <"$nested_primary_exit_file")" = "$POLARIS_SESSION_INSTANCE_ID" ]; then
+          echo "polaris-gamescope-session: exact-session Steam primary command exited — releasing wait" >&2
+          exit 0
+        fi
+        echo "polaris-gamescope-session: invalid nested primary-child terminal marker" >&2
+        exit 1
+      fi
       if [ -n "$appid" ] && steam_app_game_alive "$appid"; then
         if [ "$seen" = 0 ]; then
           echo "polaris-gamescope-session: game process for appid=$appid seen" >&2
@@ -1162,7 +1273,7 @@ case "${1:-}" in
         systemctl --user restart polaris-gamescope-idle.service || true
       fi
     fi
-    rm -f "$session_state_file" "$session_mode_file" "$session_id_file"
+    rm -f "$session_state_file" "$session_mode_file" "$session_id_file" "$nested_primary_exit_file"
     ;;
   *)
     echo "usage: polaris-gamescope-session start [steam_appid]|wait|stop" >&2
