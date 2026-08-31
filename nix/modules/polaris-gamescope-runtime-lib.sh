@@ -392,15 +392,37 @@ polaris_unique_unix_socket_inode() {
 # Candidate enumeration is only a performance prefilter. Every returned PID is
 # still authenticated below by executable/cmdline identity, exact process
 # generation, private-session ancestry, and ownership of the selected socket.
-# Scanning every /proc executable twice made readiness depend on total host
-# process count and could outlive the compositor's initial listener generation.
-polaris_xwayland_candidates() {
-  local proc_root process pid exe_path pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
+polaris_xwayland_fast_candidates_available() {
+  local proc_root pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
   proc_root="$(polaris_proc_root)"
-  if [ "$proc_root" = /proc ] && command -v "$pgrep_bin" >/dev/null 2>&1; then
-    "$pgrep_bin" -x Xwayland 2>/dev/null || true
-    return 0
-  fi
+  # An explicit binary permits the production fast-path/fallback contract to be
+  # exercised against a synthetic proc root. Production never trusts a custom
+  # proc tree merely because the host pgrep can see unrelated real processes.
+  [ "$proc_root" = /proc ] || [ -n "${POLARIS_PGREP_BIN:-}" ] || return 1
+  command -v "$pgrep_bin" >/dev/null 2>&1
+}
+
+polaris_xwayland_candidates() {
+  local mode="${1:-fast}" proc_root process pid exe_path pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
+  proc_root="$(polaris_proc_root)"
+  case "$mode" in
+    fast)
+      if polaris_xwayland_fast_candidates_available; then
+        {
+          "$pgrep_bin" -x Xwayland 2>/dev/null || true
+          # Some launchers change the short comm while retaining the exact
+          # Xwayland executable/argv identity validated below.
+          "$pgrep_bin" -f '(^|/)Xwayland([[:space:]]|$)' 2>/dev/null || true
+        } | awk '!seen[$0]++'
+        return 0
+      fi
+      ;;
+    authoritative) ;;
+    *) return 2 ;;
+  esac
+  # A fast snapshot can race exec/comm publication or fail independently of
+  # procfs. Scan executable identities once before rejecting an otherwise live
+  # compositor generation. The caller reuses this snapshot for every X socket.
   for process in "$proc_root"/[0-9]*; do
     [ -d "$process" ] || continue
     pid="${process##*/}"
@@ -411,35 +433,46 @@ polaris_xwayland_candidates() {
 }
 
 polaris_discover_xwayland_display() {
-  local marker="$1" expected_role="${2:-}" xdir socket name display inode pid final_inode
+  local marker="$1" expected_role="${2:-}" xdir socket name display inode pid final_inode candidate_mode
   local best='' best_pid='' best_start='' best_inode='' best_socket='' marker_line
+  local candidates=()
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local root_pid="$POLARIS_MARKER_PID" root_start="$POLARIS_MARKER_START_TIME" root_executable="$POLARIS_MARKER_EXECUTABLE"
   marker_line="$(<"$marker")"
   xdir="$(polaris_x11_socket_dir)"
-  for socket in "$xdir"/X*; do
-    [ -e "$socket" ] || continue
-    name="${socket##*/}"
-    display="${name#X}"
-    case "$display" in ''|*[!0-9]*) continue ;; esac
-    # Duplicate pathname generations are ambiguous after unlink/rebind. The
-    # process may hold an old inode while clients route to an unrelated new one.
-    inode="$(polaris_unique_unix_socket_inode "$socket")" || continue
-    while IFS= read -r pid; do
-      case "$pid" in ''|*[!0-9]*) continue ;; esac
-      [ "$pid" != "$root_pid" ] || continue
-      if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
-          && polaris_pid_holds_inode "$pid" "$inode" \
-          && polaris_process_fields "$pid"; then
-        if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
-          best="$display"
-          best_pid="$pid"
-          best_start="$POLARIS_PROCESS_START_TIME"
-          best_inode="$inode"
-          best_socket="$socket"
+  for candidate_mode in fast authoritative; do
+    candidates=()
+    mapfile -t candidates < <(polaris_xwayland_candidates "$candidate_mode")
+    for socket in "$xdir"/X*; do
+      [ -e "$socket" ] || continue
+      name="${socket##*/}"
+      display="${name#X}"
+      case "$display" in ''|*[!0-9]*) continue ;; esac
+      # Duplicate pathname generations are ambiguous after unlink/rebind. The
+      # process may hold an old inode while clients route to an unrelated new one.
+      inode="$(polaris_unique_unix_socket_inode "$socket")" || continue
+      for pid in "${candidates[@]}"; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ "$pid" != "$root_pid" ] || continue
+        if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
+            && polaris_pid_holds_inode "$pid" "$inode" \
+            && polaris_process_fields "$pid"; then
+          if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
+            best="$display"
+            best_pid="$pid"
+            best_start="$POLARIS_PROCESS_START_TIME"
+            best_inode="$inode"
+            best_socket="$socket"
+          fi
         fi
-      fi
-    done < <(polaris_xwayland_candidates)
+      done
+    done
+    [ -z "$best" ] || break
+    # When fast lookup was unavailable it already used the authoritative scan.
+    # Otherwise one exact procfs fallback is required before failing closed.
+    if [ "$candidate_mode" != fast ] || ! polaris_xwayland_fast_candidates_available; then
+      break
+    fi
   done
   [ -n "$best" ] || return 1
   # Revalidate both process generations and the exact socket ownership after

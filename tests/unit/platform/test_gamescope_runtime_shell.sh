@@ -529,6 +529,21 @@ polaris_validate_marker "$work/run/polaris-gamescope.pid" idle || fail "valid ma
   fail "Xwayland candidate prefilter included unrelated executables"
 [ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
   fail "did not select owned Xwayland :4"
+
+# Production fast discovery is only a hint. A valid owned Xwayland omitted by
+# pgrep during exec/comm publication must be recovered by one authoritative
+# procfs snapshot before readiness is rejected.
+cat >"$work/bin/pgrep-miss-owned" <<'EOF'
+#!/usr/bin/env bash
+printf '413\n'
+EOF
+chmod +x "$work/bin/pgrep-miss-owned"
+POLARIS_PGREP_BIN="$work/bin/pgrep-miss-owned"
+export POLARIS_PGREP_BIN
+[ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
+  fail "authoritative Xwayland fallback did not recover a fast-lookup miss"
+unset POLARIS_PGREP_BIN
+
 polaris_process_has_argument "$work/run/polaris-gamescope.pid" idle --hdr-enabled ||
   fail "exact owner argument was not found"
 polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run" ||
