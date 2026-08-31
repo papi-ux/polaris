@@ -53,7 +53,7 @@ credentials exist, **https://localhost:47990** opens the normal console.
 ## 3. Confirm the recommended Linux path
 
 In the first-run setup, put games in a private runtime instead of on your desktop: under
-**Configuration → Audio/Video → Launch mode and capture path**, pick **Private Stream**. On an
+**Settings → Audio/Video → Where games run**, pick **Private Stream**. On an
 NVIDIA card, pick **Private Stream (GPU-native)** instead; it is the best-tested path and keeps
 capture on the GPU. In the config file, those two cards correspond to:
 
@@ -72,7 +72,7 @@ linux_prefer_gpu_native_capture = enabled
 > intentionally empty screen (right-click opens the session menu) until you launch a game from your
 > client. Wanting your actual desktop on the stream is a different mode: `desktop_display` mirrors
 > the host desktop at host resolution, and `host_virtual_display` adds an extra display sized to the
-> client. Both are one click in the web UI under Configuration → Audio/Video.
+> client. Both are one click in the web UI under Settings → Audio/Video.
 
 To pick a different mode later, such as Gamescope, a virtual display, or a dummy plug, see
 [Launch modes and capture paths](launch-modes.md). [Configuration](configuration.md) explains every

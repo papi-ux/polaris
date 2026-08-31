@@ -38,17 +38,20 @@
             v-for="item in section.items"
             :key="item.to"
             :to="item.to"
-            :aria-label="item.label"
+            :aria-label="item.badge ? `${item.label}, ${item.badge}` : item.label"
             class="sidebar-link group"
             active-class="active"
-            :title="sidebarCollapsed ? item.label : ''"
+            :title="sidebarCollapsed ? `${item.label}${item.badge ? ` · ${item.badge}` : ''}` : ''"
             @click="sidebarOpen = false"
           >
             <div aria-hidden="true" v-html="item.icon" class="w-5 h-5 shrink-0"></div>
             <span v-if="!sidebarCollapsed">{{ item.label }}</span>
-            <kbd v-if="!sidebarCollapsed" class="ml-auto hidden text-[11px] text-storm/40 transition-opacity duration-150 lg:inline group-hover:opacity-70 group-focus-within:opacity-70" :class="$route.path === item.to ? 'opacity-70' : 'opacity-0'">
-              {{ item.shortcut }}
-            </kbd>
+            <span
+              v-if="!sidebarCollapsed && item.badge"
+              class="ml-auto rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-eyebrow text-warning-bright"
+            >
+              {{ item.badge }}
+            </span>
           </router-link>
         </div>
       </nav>
@@ -158,7 +161,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
@@ -168,11 +171,10 @@ import { initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
 import { webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
-import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
+import { createNavSections, getNavItemByPath } from './nav-metadata.js'
 import { buildUpdateCenterState, updateStatusLightClass } from './update-center.js'
 
 const route = useRoute()
-const router = useRouter()
 const commandPaletteOpen = ref(false)
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
@@ -197,7 +199,6 @@ try {
 }
 
 const navSections = computed(() => createNavSections(t))
-const navItems = computed(() => flattenNavItems(navSections.value))
 const currentNavItem = computed(() => getNavItemByPath(navSections.value, route.path))
 const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
 const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')
@@ -313,15 +314,6 @@ function handleKeydown(e) {
     }
   }
 
-  // Number keys 1-7 for nav (only when not in an input)
-  const tag = document.activeElement?.tagName?.toLowerCase()
-  if (tag === 'input' || tag === 'textarea' || tag === 'select') return
-  if (commandPaletteOpen.value) return
-
-  const num = parseInt(e.key)
-  if (num >= 1 && num <= navItems.value.length) {
-    router.push(navItems.value[num - 1].to)
-  }
 }
 
 // Page enter animation on route change
