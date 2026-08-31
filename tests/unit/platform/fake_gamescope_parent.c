@@ -18,6 +18,13 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  /* Production launches Gamescope as the leader of a private session and
+   * process group. Model that boundary so the child can safely fence the
+   * complete group when this fake compositor exits. */
+  if (setsid() < 0) {
+    return 8;
+  }
+
   pid_t child = fork();
   if (child < 0) {
     return 3;
