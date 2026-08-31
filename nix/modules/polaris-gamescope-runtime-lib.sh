@@ -762,13 +762,64 @@ polaris_kill_private_session_groups() {
   polaris_private_session_has_no_live_siblings "$session_id"
 }
 
+# Pause only the exact marked compositor while its primary-child wrapper is
+# still runnable. This closes the interval where Steam/Xwayland can disappear
+# and drive Gamescope's X11 I/O abort before the full private group fence owns
+# teardown. A failed pre-commit proof resumes only the same immutable process;
+# success deliberately leaves it stopped for polaris_stop_marked_gamescope().
+polaris_freeze_marked_gamescope() (
+  local marker="$1" expected_role="$2" runtime_dir="$3"
+  local kill_bin="${POLARIS_KILL_BIN:-kill}" lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  local marker_line pid start_time executable_path pgid session_id
+  local freeze_requested=0 freeze_committed=0
+  umask 077
+  if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
+    exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
+    "$lock_bin" -x 9 || return 1
+  fi
+  polaris_validate_marker "$marker" "$expected_role" || return 1
+  marker_line="$(<"$marker")"
+  pid="$POLARIS_MARKER_PID"
+  start_time="$POLARIS_MARKER_START_TIME"
+  executable_path="$POLARIS_MARKER_EXECUTABLE"
+  pgid="$POLARIS_PROCESS_PGID"
+  session_id="$POLARIS_PROCESS_SESSION_ID"
+  [ "$pgid" -gt 1 ] 2>/dev/null && [ "$session_id" = "$pgid" ] || return 1
+  polaris_process_fields "$pgid" || return 1
+  [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+
+  trap '
+    if [ "$freeze_committed" = 0 ] \
+        && [ "$freeze_requested" = 1 ] \
+        && polaris_validate_process_generation "$pid" "$start_time" "$executable_path" \
+        && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ]; then
+      "$kill_bin" -CONT "$pid" 2>/dev/null || true
+    fi
+  ' EXIT
+  polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
+  [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  freeze_requested=1
+  "$kill_bin" -STOP "$pid" 2>/dev/null || return 1
+  polaris_wait_gamescope_stopped \
+    "$pid" "$start_time" "$executable_path" "$pgid" "$session_id" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  freeze_committed=1
+)
+
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   local marker_line pid start_time executable_path pgid session_id group_leader_start group_leader_executable socket inode entry current_inode
   local owned_sockets=() kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   local group_stop_requested=0 destructive_signal_armed=0 group_rc
+  local pre_frozen="${POLARIS_GAMESCOPE_PREFROZEN:-0}"
   umask 077
+  case "$pre_frozen" in 0|1) ;; *) return 1 ;; esac
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
@@ -801,12 +852,18 @@ polaris_stop_marked_gamescope() (
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  if [ "$pre_frozen" = 1 ]; then
+    polaris_wait_gamescope_stopped \
+      "$pid" "$start_time" "$executable_path" "$pgid" "$session_id" || return 1
+    # The caller has already committed to retiring the primary child while the
+    # exact compositor is paused. No later failure may resume that compositor
+    # over a dead Xwayland connection.
+    destructive_signal_armed=1
+  fi
   # Freeze the complete private process group and prove that both the immutable
   # group leader and the exact marked compositor reached kernel stop state.
-  # This removes the Xwayland-disappears-while-Gamescope-runs failure mode even
-  # when setsid owns a wrapper and Gamescope is its child. Before teardown is
-  # committed, a failure resumes only the still-exact group. Once committed,
-  # every failure leaves the marker generation stopped for a safe retry.
+  # A normal call may resume an exact group if pre-commit proof fails. A
+  # pre-frozen call is already committed and must remain stopped for retry.
   trap '
     if [ "$destructive_signal_armed" = 0 ] \
         && [ "$group_stop_requested" = 1 ] \
