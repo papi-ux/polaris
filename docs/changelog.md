@@ -7,6 +7,7 @@
 - Fixed Gamescope session recovery on distro-package hosts by restoring their empty compositor baseline without requiring Nix-only idle/portal units, and made failed prior-session recovery retain its exact claim instead of forcing unsafe socket cleanup.
 - Fixed Linux host-virtual-display ownership across launch, capture reinitialization, and teardown. The bundled legacy Desktop entry is migrated to an explicit mirror semantic that overrides paired virtual-display preferences; wlroots capture remains bound to the immutable private-compositor generation; and failed output removal retains durable retry state. KScreen restores and reads back the exact pre-launch output state instead of assuming that disable succeeded.
 - Fixed Heroic library launches for native and Flatpak GOG/Epic installs by using Heroic's current query protocol (`gog` or `legendary` runner), deriving commands from validated scanner metadata, and migrating only exact legacy Polaris imports without changing UUIDs, artwork, profiles, or unrelated commands.
+- Clarified Settings navigation, Linux launch modes, and capture paths around player impact. Headless Dongle remains a host-wide choice, planned modes stay visibly non-selectable, and backend details remain available without leading the decision.
 
 This file tracks the public Polaris release line.
 
