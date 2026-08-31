@@ -12,6 +12,9 @@ parent_death_child_pid=""
 parent_death_steam_pid=""
 parent_death_descendant_pid=""
 parent_death_leaderless_pid=""
+keeper_death_child_pid=""
+keeper_death_descendant_pid=""
+keeper_death_leaderless_pid=""
 cleanup() {
   if [ -n "$keeper_pid" ] && kill -0 "$keeper_pid" 2>/dev/null; then
     kill -TERM "$keeper_pid" 2>/dev/null || true
@@ -29,6 +32,15 @@ cleanup() {
   if [ -n "$parent_death_leaderless_pid" ] && kill -0 "$parent_death_leaderless_pid" 2>/dev/null; then
     kill -KILL "$parent_death_leaderless_pid" 2>/dev/null || true
   fi
+  if [ -n "$keeper_death_child_pid" ] && kill -0 "$keeper_death_child_pid" 2>/dev/null; then
+    kill -KILL "$keeper_death_child_pid" 2>/dev/null || true
+  fi
+  if [ -n "$keeper_death_descendant_pid" ] && kill -0 "$keeper_death_descendant_pid" 2>/dev/null; then
+    kill -KILL "$keeper_death_descendant_pid" 2>/dev/null || true
+  fi
+  if [ -n "$keeper_death_leaderless_pid" ] && kill -0 "$keeper_death_leaderless_pid" 2>/dev/null; then
+    kill -KILL "$keeper_death_leaderless_pid" 2>/dev/null || true
+  fi
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -41,7 +53,7 @@ printf '%s\n' \
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\\n" "$@" >"$POLARIS_STEAM_ARGS"' \
-  'if [ "${POLARIS_STEAM_HOLD:-0}" = 1 ]; then' \
+  'spawn_test_descendants() {' \
   '  if [ "${POLARIS_STEAM_FORK_DESCENDANT:-0}" = 1 ]; then' \
   '    (' \
   '      trap '\''exit 0'\'' TERM INT HUP' \
@@ -56,8 +68,12 @@ printf '%s\n' \
   '    [ ! -e "/proc/$leaderless_group" ] || exit 91' \
   '    [ "$(awk '\''{ print $5 }'\'' "/proc/$leaderless_member/stat")" = "$leaderless_group" ] || exit 92' \
   '  fi' \
+  '}' \
+  'if [ "${POLARIS_STEAM_HOLD:-0}" = 1 ] || [ "${POLARIS_STEAM_EXIT_WITH_DESCENDANTS:-0}" = 1 ]; then' \
+  '  spawn_test_descendants' \
   '  printf "%s\\n" "$$" >"$POLARIS_STEAM_PID_FILE"' \
   '  : >"$POLARIS_STEAM_STARTED_FILE"' \
+  '  [ "${POLARIS_STEAM_EXIT_WITH_DESCENDANTS:-0}" != 1 ] || exit 0' \
   '  trap '\''exit 0'\'' TERM INT HUP' \
   '  while :; do sleep 0.05; done' \
   'fi' \
@@ -206,6 +222,57 @@ if [ "$(uname -s)" = Linux ] && command -v setpriv >/dev/null 2>&1 && [ -r "/pro
   parent_death_steam_pid=""
   parent_death_descendant_pid=""
   parent_death_leaderless_pid=""
+
+  # Steam's primary command may return while same-session helpers remain.
+  # Wait until the wrapper publishes that terminal state, then kill Gamescope;
+  # the retained parent-death authority must still drain both an ordinary
+  # descendant and a stubborn member of a now-leaderless sibling group.
+  rm -f -- "$exit_marker"
+  POLARIS_GAMESCOPE_RUNTIME_LIB="$POLARIS_SOURCE_DIR/nix/modules/polaris-gamescope-runtime-lib.sh" \
+  POLARIS_FAKE_CHILD_PID_FILE="$work/keeper-death-child.pid" \
+  POLARIS_FAKE_PARENT_EXIT_GATE_FILE="$exit_marker" \
+  POLARIS_STEAM_EXIT_WITH_DESCENDANTS=1 \
+  POLARIS_STEAM_FORK_DESCENDANT=1 \
+  POLARIS_STEAM_FORK_LEADERLESS=1 \
+  POLARIS_STEAM_LEADERLESS_HELPER="$work/bin/leaderless-session-member" \
+  POLARIS_STEAM_LEADERLESS_GROUP_FILE="$work/keeper-death-leaderless-group.pid" \
+  POLARIS_STEAM_LEADERLESS_MEMBER_FILE="$work/keeper-death-leaderless-member.pid" \
+  POLARIS_STEAM_STARTED_FILE="$work/keeper-death-steam.started" \
+  POLARIS_STEAM_PID_FILE="$work/keeper-death-steam.pid" \
+  POLARIS_STEAM_DESCENDANT_PID_FILE="$work/keeper-death-descendant.pid" \
+  POLARIS_STEAM_ARGS="$work/keeper-death-steam.args" \
+  PATH="$work/bin:/usr/bin:/bin" \
+  POLARIS_SESSION_PATH="$work/bin:/usr/bin:/bin" \
+  XDG_RUNTIME_DIR="$work/run" \
+  POLARIS_SESSION_INSTANCE_ID=session-A \
+    "$work/bin/gamescope" --backend headless -- \
+      setpriv --pdeathsig TERM -- bash "$script" nested-primary-child -- steam -gamepadui
+
+  [ -f "$exit_marker" ] || fail "keeper did not publish Steam terminal state before Gamescope death"
+  keeper_death_child_pid="$(tr -d '\r\n' <"$work/keeper-death-child.pid")"
+  keeper_death_descendant_pid="$(tr -d '\r\n' <"$work/keeper-death-descendant.pid")"
+  keeper_death_leaderless_pid="$(tr -d '\r\n' <"$work/keeper-death-leaderless-member.pid")"
+  for _ in $(seq 1 200); do
+    process_is_live_non_zombie "$keeper_death_child_pid" || break
+    sleep 0.02
+  done
+  process_is_live_non_zombie "$keeper_death_child_pid" &&
+    fail "terminal-state keeper survived its Gamescope parent"
+  for _ in $(seq 1 200); do
+    process_is_live_non_zombie "$keeper_death_descendant_pid" || break
+    sleep 0.02
+  done
+  process_is_live_non_zombie "$keeper_death_descendant_pid" &&
+    fail "Steam descendant survived Gamescope death after primary command exit"
+  for _ in $(seq 1 200); do
+    process_is_live_non_zombie "$keeper_death_leaderless_pid" || break
+    sleep 0.02
+  done
+  process_is_live_non_zombie "$keeper_death_leaderless_pid" &&
+    fail "leaderless Steam helper survived Gamescope death after primary command exit"
+  keeper_death_child_pid=""
+  keeper_death_descendant_pid=""
+  keeper_death_leaderless_pid=""
 fi
 
 # The production launch must bind wrapper lifetime directly to Gamescope.

@@ -6,6 +6,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static int wait_for_file(const char *path) {
+  for (int i = 0; i < 500; ++i) {
+    if (access(path, F_OK) == 0) {
+      return 0;
+    }
+    usleep(10000);
+  }
+  return -1;
+}
+
 int main(int argc, char **argv) {
   int separator = -1;
   for (int i = 1; i < argc; ++i) {
@@ -36,6 +46,7 @@ int main(int argc, char **argv) {
 
   const char *pid_file = getenv("POLARIS_FAKE_CHILD_PID_FILE");
   const char *started_file = getenv("POLARIS_STEAM_STARTED_FILE");
+  const char *exit_gate_file = getenv("POLARIS_FAKE_PARENT_EXIT_GATE_FILE");
   if (pid_file == NULL || started_file == NULL) {
     return 4;
   }
@@ -48,11 +59,9 @@ int main(int argc, char **argv) {
     return 6;
   }
 
-  for (int i = 0; i < 500; ++i) {
-    if (access(started_file, F_OK) == 0) {
-      return 0;
-    }
-    usleep(10000);
+  if (wait_for_file(started_file) == 0
+      && (exit_gate_file == NULL || wait_for_file(exit_gate_file) == 0)) {
+    return 0;
   }
   kill(child, SIGKILL);
   waitpid(child, NULL, 0);

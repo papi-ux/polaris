@@ -535,6 +535,14 @@ run_nested_primary_child() {
     [ -z "$child_pid" ] || wait "$child_pid" 2>/dev/null || true
     exit 0
   }
+  nested_primary_keeper_exit() {
+    trap - TERM INT HUP
+    if [ -n "$wait_pid" ]; then
+      kill -TERM "$wait_pid" 2>/dev/null || true
+      wait "$wait_pid" 2>/dev/null || true
+    fi
+    exit 0
+  }
   # setpriv gives this wrapper a parent-death signal from Gamescope. If the
   # compositor itself dies, retire the direct Steam launcher rather than
   # leaving a keepalive orphan behind.
@@ -592,7 +600,6 @@ run_nested_primary_child() {
   else
     steam_rc=$?
   fi
-  trap - TERM INT HUP
 
   if publish_nested_primary_child_exit; then
     echo "polaris-gamescope-session: exact-session Steam exited (rc=$steam_rc); primary child holding for fenced compositor teardown" >&2
@@ -605,15 +612,13 @@ run_nested_primary_child() {
   # and SIGKILLs the private generation, so this keeper remains until that
   # already-authorized fence commits. SIGKILL never enters Gamescope's broken
   # exit handlers.
-  nested_primary_keeper_exit() {
-    trap - TERM INT HUP
-    if [ -n "$wait_pid" ]; then
-      kill -TERM "$wait_pid" 2>/dev/null || true
-      wait "$wait_pid" 2>/dev/null || true
-    fi
-    exit 0
-  }
-  trap nested_primary_keeper_exit TERM INT HUP
+  # Production must retain the exact parent-death fence after Steam's primary
+  # command returns: Steam may leave helpers in the private session, including
+  # a leaderless sibling group. Cross-platform tests without Linux process
+  # identity retain the bounded keeper-only exit path.
+  if [ "$primary_fence_armed" != 1 ]; then
+    trap nested_primary_keeper_exit TERM INT HUP
+  fi
   while :; do
     sleep 3600 &
     wait_pid=$!
