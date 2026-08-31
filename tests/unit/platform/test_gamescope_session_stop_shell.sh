@@ -321,6 +321,7 @@ printf '10\n' >"$work/proc/100/start"
 printf '11\n' >"$work/proc/101/start"
 printf 'HOME=/srv/example\0' >"$work/proc/100/environ"
 printf 'HOME=/srv/example\0POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+printf 'session-A\n' >"$work/run/polaris-gamescope-primary-child-exit"
 POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=$'100\n101' \
   NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
   PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "exact-session Steam handoff failed"
@@ -328,6 +329,8 @@ grep -qx 'kill -TERM 101' "$actions" || fail "nested teardown did not ask exact-
 grep -qx 'stop-nested' "$actions" || fail "nested generation did not use its fenced stop"
 ! grep -q 'kill .*100' "$actions" || fail "desktop Steam was signalled"
 [ -d "$work/proc/100" ] || fail "desktop Steam process was removed"
+[ ! -e "$work/run/polaris-gamescope-primary-child-exit" ] ||
+  fail "successful nested handoff retained the primary-child terminal marker"
 steam_line="$(grep -nFx 'kill -TERM 101' "$actions" | head -n1 | cut -d: -f1)"
 fence_line="$(grep -nFx 'stop-nested' "$actions" | head -n1 | cut -d: -f1)"
 [ "$steam_line" -lt "$fence_line" ] || fail "nested compositor fence ran before exact-session Steam exit"
