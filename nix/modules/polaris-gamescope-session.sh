@@ -28,6 +28,14 @@ polaris_valid_refresh() {
     [[ ! "${1:-}" =~ ^0+([.]0+)?$ ]]
 }
 
+polaris_runtime_ready_timeout_seconds() {
+  local candidate="${POLARIS_GAMESCOPE_READY_TIMEOUT_SECONDS:-30}"
+  if ! polaris_valid_dimension "$candidate" || [ "$candidate" -gt 120 ] 2>/dev/null; then
+    candidate=30
+  fi
+  printf '%s\n' "$candidate"
+}
+
 polaris_first_valid_geometry_value() {
   local validator="$1" candidate
   shift
@@ -926,7 +934,9 @@ case "${1:-}" in
       fi
 
       ready=0
-      for _ in $(seq 1 300); do
+      ready_timeout="$(polaris_runtime_ready_timeout_seconds)"
+      ready_deadline=$((SECONDS + ready_timeout))
+      while [ "$SECONDS" -lt "$ready_deadline" ]; do
         if polaris_write_runtime_env "$marker" gamescope-0 nested "$rt"; then
           ready=1
           break
@@ -989,7 +999,9 @@ case "${1:-}" in
       fi
 
       attach_ready=0
-      for _ in $(seq 1 300); do
+      ready_timeout="$(polaris_runtime_ready_timeout_seconds)"
+      ready_deadline=$((SECONDS + ready_timeout))
+      while [ "$SECONDS" -lt "$ready_deadline" ]; do
         if polaris_write_runtime_env "$marker" gamescope-0 idle "$rt"; then
           attach_ready=1
           break
