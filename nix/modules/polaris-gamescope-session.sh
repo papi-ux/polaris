@@ -437,6 +437,36 @@ kill_session_steam() {
   session_steam_absent
 }
 
+# Give Gamescope a bounded opportunity to finish its normal teardown after the
+# credential-bound Steam child exits. Return 0 only when the exact marker is no
+# longer live and every old socket is absent or safely reclaimable; return 1
+# when the exact generation remains live for the fenced fallback; return 2 when
+# ownership became ambiguous and no destructive fallback is authorized.
+wait_for_nested_gamescope_exit() {
+  local rc
+  for _ in $(seq 1 "${POLARIS_NESTED_EXIT_WAIT_STEPS:-50}"); do
+    if polaris_validate_marker "$marker" nested; then
+      sleep "${POLARIS_NESTED_EXIT_WAIT_INTERVAL:-0.1}"
+      continue
+    fi
+    if polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+      return 0
+    fi
+    return 2
+  done
+
+  if polaris_validate_marker "$marker" nested; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ] || return 2
+  if polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+    return 0
+  fi
+  return 2
+}
+
 # True while a real game process for $1 (Steam appid) is running.
 # Steam client / webhelper also inherit SteamAppId — exclude those so
 # Big Picture alone does not count as "game still up".
@@ -989,14 +1019,40 @@ case "${1:-}" in
         1|nested)
           echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
           if polaris_validate_marker "$marker" nested; then
-            # Gamescope 3.16 can fault in CVulkanDevice teardown when its
-            # primary Steam child exits. The marker already proves the private
-            # process-group generation, so fence and retire that exact group
-            # before its destructor can race outer process cleanup.
-            if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
-              echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
+            # Normal teardown is child-first. Killing/freezing the compositor
+            # while its XWM/Xwayland children are active can drive Gamescope's
+            # X11 I/O abort path. Signal only credential-bound session Steam,
+            # then give the exact compositor generation a bounded graceful
+            # exit before using the process-group fence as a fallback.
+            if ! kill_session_steam || ! session_steam_absent; then
+              echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2
               exit 1
             fi
+            graceful_exit=0
+            wait_for_nested_gamescope_exit || graceful_exit=$?
+            case "$graceful_exit" in
+              0)
+                echo "polaris-gamescope-session: nested owner exited after exact-session Steam" >&2
+                ;;
+              1)
+                echo "polaris-gamescope-session: nested owner exceeded graceful exit window; using exact-generation fence" >&2
+                if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+                  # The generation may finish between the last wait probe and
+                  # the fenced helper's first identity check. Accept only the
+                  # same safe dead/orphan proof used by the graceful path.
+                  if polaris_validate_marker "$marker" nested \
+                      || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+                    echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
+                    exit 1
+                  fi
+                  echo "polaris-gamescope-session: nested owner exited while the fallback was acquiring authority" >&2
+                fi
+                ;;
+              *)
+                echo "polaris-gamescope-session: nested ownership changed during graceful exit; retaining recovery claim" >&2
+                exit 1
+                ;;
+            esac
           else
             if ! kill_session_steam || ! session_steam_absent; then
               echo "polaris-gamescope-session: exact-session Steam did not reach terminal state; retaining recovery claim" >&2

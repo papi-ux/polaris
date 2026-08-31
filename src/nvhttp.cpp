@@ -55,6 +55,7 @@
 
 // local includes
 #include "config.h"
+#include "config_file_update.h"
 #include "display_device.h"
 #include "display_planner.h"
 #include "entry_handler.h"
@@ -1289,20 +1290,27 @@ namespace nvhttp {
         return false;
       }
 
-      auto vars = config::parse_config(existing_config);
-      for (const auto &[key, value] : updates) {
-        vars[key] = value;
-      }
-
-      std::stringstream config_stream;
-      for (const auto &[key, value] : vars) {
-        if (value.empty()) {
-          continue;
+      const auto vars = config::parse_config(existing_config);
+      const bool unchanged = std::all_of(
+        updates.begin(), updates.end(),
+        [&](const auto &update) {
+          const auto existing_value = vars.find(update.first);
+          if (update.second.empty()) {
+            return existing_value == vars.end();
+          }
+          return existing_value != vars.end() && existing_value->second == update.second;
         }
-        config_stream << key << " = " << value << std::endl;
+      );
+      if (unchanged) {
+        return true;
       }
 
-      const auto persisted = private_state_file::write_atomic(target, config_stream.str());
+      const auto updated = config_file_update::apply(existing_config, updates);
+      if (!updated.changed) {
+        return true;
+      }
+
+      const auto persisted = private_state_file::write_atomic(target, updated.content);
       if (persisted.status == private_state_file::write_status_e::not_committed) {
         BOOST_LOG(error) << "client_settings: atomic config replacement did not commit: "sv << target;
         return false;

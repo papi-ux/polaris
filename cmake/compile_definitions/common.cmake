@@ -126,6 +126,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/game_artwork_provider.cpp"
         "${CMAKE_SOURCE_DIR}/src/config.h"
         "${CMAKE_SOURCE_DIR}/src/config.cpp"
+        "${CMAKE_SOURCE_DIR}/src/config_file_update.h"
+        "${CMAKE_SOURCE_DIR}/src/config_file_update.cpp"
         "${CMAKE_SOURCE_DIR}/src/crash_report.cpp"
         "${CMAKE_SOURCE_DIR}/src/crash_report.h"
         "${CMAKE_SOURCE_DIR}/src/client_support_report.cpp"
