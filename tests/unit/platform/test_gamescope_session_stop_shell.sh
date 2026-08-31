@@ -604,10 +604,12 @@ grep -Fq 'acquire_session_operation_lock' "$script" ||
 grep -Fq 'wait_for_nested_gamescope_exit' "$script" ||
   fail "nested stop does not provide a bounded graceful compositor-exit window"
 steam_stop_line="$(grep -nF 'if ! kill_session_steam || ! session_steam_absent; then' "$script" | head -n1 | cut -d: -f1)"
-fenced_stop_line="$(grep -nF 'if ! polaris_stop_marked_gamescope "$marker" nested "$rt"; then' "$script" | head -n1 | cut -d: -f1)"
+fenced_stop_line="$(grep -nF 'if polaris_stop_marked_gamescope "$marker" nested "$rt"; then' "$script" | head -n1 | cut -d: -f1)"
 [ -n "$steam_stop_line" ] && [ -n "$fenced_stop_line" ] && [ "$steam_stop_line" -lt "$fenced_stop_line" ] ||
   fail "nested stop does not order exact-session Steam before compositor fallback"
 grep -Fq 'polaris_stop_marked_gamescope "$marker" nested "$rt"' "$script" ||
   fail "nested stop does not use the exact-generation compositor fence"
+[ "$(grep -cF 'retire_marked_nested_gamescope_child_first' "$script")" -ge 4 ] ||
+  fail "nested startup failures do not share child-first teardown"
 
 echo "PASS: gamescope session stop state machine"
