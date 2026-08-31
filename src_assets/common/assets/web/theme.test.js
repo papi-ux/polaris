@@ -231,6 +231,8 @@ describe('theme picker', () => {
     setTheme('miami')
     const wrapper = mount(ThemeToggle, { attachTo: document.body })
 
+    expect(wrapper.find('button[aria-haspopup="listbox"]').text()).toContain('Appearance')
+
     expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
     await wrapper.find('button[aria-haspopup="listbox"]').trigger('click')
 
