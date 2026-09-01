@@ -175,6 +175,16 @@ TEST(VirtualDisplayTests, KscreenDoctorRequiresConfiguredStreamingOutput) {
     "HDMI-A-1"));
 }
 
+TEST(VirtualDisplayTests, InstalledKscreenIsDetectedBeforeItsConnectorIsConfigured) {
+  using virtual_display::backend_e;
+  EXPECT_EQ(virtual_display::select_preferred_backend(false, false, true), backend_e::KSCREEN_DOCTOR);
+  EXPECT_FALSE(virtual_display::backend_has_required_configuration(backend_e::KSCREEN_DOCTOR, ""));
+  EXPECT_TRUE(virtual_display::backend_has_required_configuration(backend_e::KSCREEN_DOCTOR, "HDMI-A-2"));
+
+  EXPECT_EQ(virtual_display::select_preferred_backend(false, true, true), backend_e::WAYLAND_WLR);
+  EXPECT_EQ(virtual_display::select_preferred_backend(true, true, true), backend_e::EVDI);
+}
+
 TEST(VirtualDisplayTests, WaylandProbeAllowsPreInitWaylandEnvironment) {
   EXPECT_TRUE(virtual_display::wayland_backend_probe_allowed(false, "wayland-1"));
   EXPECT_TRUE(virtual_display::wayland_backend_probe_allowed(true, ""));
