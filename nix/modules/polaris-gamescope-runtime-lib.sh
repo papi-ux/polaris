@@ -85,6 +85,36 @@ polaris_headless_gamescope_pid() {
   POLARIS_GAMESCOPE_EXECUTABLE="$exe_path"
 }
 
+# Gamescope 3.16 does not exec the command after `--` as its direct child.
+# It starts gamescopereaper, which becomes a subreaper and then starts the
+# primary command. Keep that process explicit in the ownership chain: treating
+# the command wrapper as a direct Gamescope child rejects the normal upstream
+# launch shape and makes Gamescope enter its unsafe primary-child shutdown.
+polaris_gamescope_reaper_pid() {
+  local pid="$1" arg first=1 executable=""
+  local exe_path exe_name
+  exe_path="$(readlink "$(polaris_proc_root)/$pid/exe" 2>/dev/null)" || return 1
+  exe_name="${exe_path##*/}"
+  case "$exe_name" in
+    gamescopereaper|.gamescopereaper-wrapped) ;;
+    *) return 1 ;;
+  esac
+  while IFS= read -r arg; do
+    if [ "$first" = 1 ]; then
+      executable="${arg##*/}"
+      first=0
+      break
+    fi
+  done < <(tr '\0' '\n' <"$(polaris_proc_root)/$pid/cmdline" 2>/dev/null) || return 1
+  case "$executable" in
+    gamescopereaper|.gamescopereaper-wrapped) ;;
+    *) return 1 ;;
+  esac
+  # Consumed by the session helper after sourcing this library.
+  # shellcheck disable=SC2034
+  POLARIS_GAMESCOPE_REAPER_EXECUTABLE="$exe_path"
+}
+
 # Nix wrapProgram: /proc/pid/exe may be ".../bin/gamescope" or
 # ".../bin/.gamescope-wrapped" depending on when we sample.
 polaris_gamescope_executables_match() {
