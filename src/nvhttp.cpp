@@ -3095,11 +3095,23 @@ namespace nvhttp {
     void promote_local_artwork_poster(const proc::ctx_t &app) {
       const auto appdata = platf::appdata();
       const auto candidates = local_artwork_candidates(app);
-      if (!candidates.empty() && game_artwork::needs_source_upgrade(
-            appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source)) {
+      const bool bundled_utility = uses_bundled_utility_artwork(app);
+      bool candidate_already_cached = false;
+      if (bundled_utility && !candidates.empty()) {
+        const auto cached_before = game_artwork::scan_cached_assets(appdata, app.uuid);
+        candidate_already_cached = std::any_of(
+          cached_before.begin(), cached_before.end(), [&](const auto &asset) {
+            return asset.kind == game_artwork::kind_e::poster &&
+                   asset.source == candidates.front().source;
+          });
+      }
+      if (!candidates.empty() &&
+          ((bundled_utility && !candidate_already_cached) ||
+           game_artwork::needs_source_upgrade(
+             appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source))) {
         (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
       }
-      if (uses_bundled_utility_artwork(app)) {
+      if (bundled_utility) {
         const auto assets = game_artwork::scan_cached_assets(appdata, app.uuid);
         const bool bundled_poster_ready = std::any_of(assets.begin(), assets.end(), [](const auto &asset) {
           return asset.kind == game_artwork::kind_e::poster &&
