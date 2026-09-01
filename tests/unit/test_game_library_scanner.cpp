@@ -669,7 +669,7 @@ TEST(HeroicLibraryScannerTests, JoinsRealGogInstalledAndCacheShapes) {
 
 TEST(HeroicLibraryScannerTests, ParsesOnlyInstalledNonDlcLegendaryCacheEntries) {
   const auto games = game_library::parse_heroic_cache_json(R"json({"library":[
-    {"app_name":"Installed","title":"Installed Game","is_installed":true,"install":{"is_dlc":false}},
+    {"app_name":"Installed","title":"Installed Game","is_installed":true,"install":{"is_dlc":false},"art_square":"https://cdn1.epicgames.com/item/installed/poster","art_cover":"https://cdn1.epicgames.com/item/installed/hero"},
     {"app_name":"InstalledDlc","title":"Installed DLC","is_installed":true,"install":{"is_dlc":true}},
     {"app_name":"CloudOnly","title":"Cloud Game","is_installed":false,"install":{"is_dlc":false}},
     {"app_name":"WrongShape","title":"Wrong Shape","is_installed":"yes","install":{"is_dlc":false}}
@@ -678,6 +678,35 @@ TEST(HeroicLibraryScannerTests, ParsesOnlyInstalledNonDlcLegendaryCacheEntries) 
   ASSERT_EQ(games.size(), 1u);
   EXPECT_EQ(games[0].app_name, "Installed");
   EXPECT_EQ(games[0].runner, "legendary");
+  EXPECT_EQ(games[0].poster_url, "https://cdn1.epicgames.com/item/installed/poster");
+  EXPECT_EQ(games[0].hero_url, "https://cdn1.epicgames.com/item/installed/hero");
+}
+
+TEST(HeroicLibraryScannerTests, ResolvesArtworkFromTheExactHeroicInstallAndIdentity) {
+  const auto home = lutris_test_root("heroic_cached_artwork");
+  const auto cache = home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache/legendary_library.json";
+  std::filesystem::create_directories(cache.parent_path());
+  write_text(cache, R"json({"library":[
+    {"app_name":"AlanWake2","title":"Alan Wake 2","is_installed":true,"install":{"is_dlc":false},"art_square":"https://cdn1.epicgames.com/item/alan-wake-2/poster","art_cover":"https://cdn1.epicgames.com/item/alan-wake-2/hero"}
+  ]})json");
+
+  const auto game = game_library::find_heroic_cached_game(
+    {home},
+    "AlanWake2",
+    "epic",
+    game_library::launcher_install_t::flatpak
+  );
+  ASSERT_TRUE(game.has_value());
+  EXPECT_EQ(game->name, "Alan Wake 2");
+  EXPECT_EQ(game->poster_url, "https://cdn1.epicgames.com/item/alan-wake-2/poster");
+  EXPECT_EQ(game->hero_url, "https://cdn1.epicgames.com/item/alan-wake-2/hero");
+
+  EXPECT_FALSE(game_library::find_heroic_cached_game(
+    {home},
+    "AlanWake2",
+    "epic",
+    game_library::launcher_install_t::native
+  ).has_value());
 }
 
 TEST(HeroicLibraryScannerTests, RefusesAppNamesThatWouldReachTheShell) {

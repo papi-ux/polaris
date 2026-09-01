@@ -120,6 +120,8 @@ TEST(GameArtworkAllowlist, RequiresHttpsAndExactProviderHosts) {
     provider_e::steamgriddb, "https://cdn2.steamgriddb.com/hero/abc.jpg"));
   EXPECT_TRUE(game_artwork::is_allowed_provider_url(
     provider_e::steamgriddb, "https://www.steamgriddb.com/api/v2/heroes/game/1"));
+  EXPECT_TRUE(game_artwork::is_allowed_provider_url(
+    provider_e::epic, "https://cdn1.epicgames.com/item/catalog-id/portrait"));
 
   EXPECT_FALSE(game_artwork::is_allowed_provider_url(
     provider_e::steam, "http://cdn.akamai.steamstatic.com/steam/apps/10/library_hero.jpg"));
@@ -131,6 +133,10 @@ TEST(GameArtworkAllowlist, RequiresHttpsAndExactProviderHosts) {
     provider_e::steam, "https://cdn.akamai.steamstatic.com@evil.example/steam/apps/10/library_hero.jpg"));
   EXPECT_FALSE(game_artwork::is_allowed_provider_url(
     provider_e::steamgriddb, "https://cdn2.steamgriddb.com:443/hero/abc.jpg"));
+  EXPECT_FALSE(game_artwork::is_allowed_provider_url(
+    provider_e::epic, "http://cdn1.epicgames.com/item/catalog-id/portrait"));
+  EXPECT_FALSE(game_artwork::is_allowed_provider_url(
+    provider_e::epic, "https://cdn1.epicgames.com.evil.example/item/catalog-id/portrait"));
 }
 
 TEST(GameArtworkLocalPoster, PrefersConfiguredImageThenHostUuidThenLegacySteamCover) {

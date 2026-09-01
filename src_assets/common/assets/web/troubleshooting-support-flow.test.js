@@ -7,6 +7,14 @@ function webSource(relativePath) {
 }
 
 describe('Troubleshooting self-service support flow', () => {
+  it('uses Doctor & Support as the canonical page name and player-facing self-test copy', () => {
+    const source = webSource('views/TroubleshootingView.vue')
+
+    expect(source).toContain("$t('navbar.troubleshoot')")
+    expect(source).toContain('Start with quick player checks')
+    expect(source).not.toContain('nerd-sniping')
+  })
+
   it('shows the plain Doctor diagnosis before advanced/raw evidence', () => {
     const source = webSource('views/TroubleshootingView.vue')
 
@@ -17,6 +25,14 @@ describe('Troubleshooting self-service support flow', () => {
     expect(advancedDetails).toBeGreaterThan(-1)
     expect(plainDiagnosis).toBeLessThan(advancedDetails)
     expect(source).toContain('<details')
+  })
+
+  it('keeps the no-session Doctor state compact until live evidence exists', () => {
+    const source = webSource('views/TroubleshootingView.vue')
+
+    expect(source).toContain('doctorDiagnosisIdle ? \'doctor-diagnosis-idle p-3\' : \'p-4\'')
+    expect(source).toContain('v-if="!doctorDiagnosisIdle" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist')
+    expect(source).toContain('v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20')
   })
 
   it('offers copy and download issue draft actions without public GitHub mutation', () => {

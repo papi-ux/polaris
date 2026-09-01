@@ -2,7 +2,7 @@
   <div class="page-shell pb-2">
     <section class="page-header">
       <div class="page-heading">
-        <h1 class="page-title">{{ $t('troubleshooting.troubleshooting') }}</h1>
+        <h1 class="page-title">{{ $t('navbar.troubleshoot') }}</h1>
         <p class="page-subtitle">{{ $t('troubleshooting.overview') }}</p>
       </div>
       <div class="page-meta">
@@ -47,12 +47,16 @@
           {{ $t('troubleshooting.export_anonymized_diagnostics') }}
         </button>
       </div>
-      <div class="surface-subtle border border-storm/20 p-4" data-doctor-diagnosis>
+      <div
+        class="surface-subtle border border-storm/20"
+        :class="doctorDiagnosisIdle ? 'doctor-diagnosis-idle p-3' : 'p-4'"
+        data-doctor-diagnosis
+      >
         <div class="section-kicker">{{ $t('troubleshooting.doctor_plain_diagnosis') }}</div>
         <h3 class="mt-1 text-lg font-semibold text-silver">{{ doctorPlainDiagnosis.title }}</h3>
         <p class="mt-2 text-sm leading-relaxed text-storm">{{ doctorPlainDiagnosis.detail }}</p>
         <p class="mt-3 text-xs leading-relaxed text-ice">{{ doctorPlainDiagnosis.action }}</p>
-        <details class="mt-4 rounded-xl border border-storm/20 bg-deep/35 p-3">
+        <details v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-storm/20 bg-deep/35 p-3">
           <summary class="cursor-pointer text-sm font-medium text-silver">{{ $t('troubleshooting.advanced_diagnostics') }}</summary>
           <div class="mt-3 grid gap-2 sm:grid-cols-2">
             <div v-for="item in doctorAdvancedItems" :key="item.label" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
@@ -61,7 +65,7 @@
             </div>
           </div>
         </details>
-        <div class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation>
+        <div v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="text-[11px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
@@ -89,7 +93,7 @@
           </div>
         </div>
       </div>
-      <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div v-if="!doctorDiagnosisIdle" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist>
         <div
           v-for="item in fixMyStreamChecklist"
           :key="item.key"
@@ -113,7 +117,7 @@
         <div>
           <div class="section-kicker">Built-in self tests</div>
           <h2 class="section-title">Network, controller, and post-session report</h2>
-          <p class="section-copy">Quick normal-user checks first; expandable evidence keeps the nerd-sniping below the fold where it belongs.</p>
+          <p class="section-copy">Start with quick player checks. Open the supporting evidence only when you need a deeper diagnosis.</p>
         </div>
         <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="copySupportSelfTests">
           Copy self-test summary
@@ -690,6 +694,7 @@ const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
 }))
 
 const doctorPayload = computed(() => streamStats.value?.doctor || null)
+const doctorDiagnosisIdle = computed(() => !streamStats.value?.streaming && !doctorPayload.value)
 const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
 const doctorPlainDiagnosis = computed(() => {
   const doctor = doctorPayload.value

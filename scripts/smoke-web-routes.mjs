@@ -15,7 +15,7 @@ const routes = [
   { name: 'pairing', hash: '#/pin', heading: /pair/i },
   { name: 'browser-stream', hash: '#/browser-stream', heading: /^Browser Stream$/i },
   { name: 'webrtc-alias', hash: '#/webrtc', heading: /^Browser Stream$/i },
-  { name: 'troubleshooting', hash: '#/troubleshooting', heading: /^Troubleshooting$/i },
+  { name: 'troubleshooting', hash: '#/troubleshooting', heading: /^Doctor & Support$/i },
   { name: 'welcome', hash: '#/welcome', heading: /Welcome to Polaris/i },
 ]
 
