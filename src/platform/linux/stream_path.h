@@ -69,6 +69,7 @@ namespace stream_path {
    */
   struct host_capabilities_t {
     bool labwc_present = false;
+    bool wlr_randr_present = false;
     bool gamescope_present = false;
     bool virtual_display_available = false;
     /// Capture backend currently configured (e.g. "portal", "kms", "wlr").
@@ -136,6 +137,12 @@ namespace stream_path {
    *        expensive probes may cache internally later.
    */
   host_capabilities_t probe_host_capabilities();
+
+  /** @brief Whether every executable required by the labwc runtime is on PATH. */
+  bool labwc_runtime_available(const host_capabilities_t &caps);
+
+  /** @brief Exact missing-runtime reason served to selectors and launch validation. */
+  std::string labwc_runtime_unavailable_reason(const host_capabilities_t &caps);
 
   /**
    * @brief Map a path + live flags to a fully resolved session description.

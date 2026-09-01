@@ -20,7 +20,7 @@ Every card under **Settings → Audio/Video → Where games run** starts with wh
 | Several family members at once | Not available yet, see [Family Mode](#family-mode-isolated) |
 
 > [!TIP]
-> When in doubt, pick **Private Stream**. Select the card and save it for the next launch; an active stream may keep the previous mode until relaunch. You can change the saved choice back later, and Mission Control [shows you what Polaris actually started](#check-what-your-stream-is-using).
+> When in doubt, pick **Private Stream** when its card is available. A grey card names the missing host tool instead of accepting a launch that cannot work. Select the card and save it for the next launch; an active stream may keep the previous mode until relaunch. You can change the saved choice back later, and Mission Control [shows you what Polaris actually started](#check-what-your-stream-is-using).
 
 ## The modes
 
@@ -29,7 +29,7 @@ Every card under **Settings → Audio/Video → Where games run** starts with wh
 Your game runs in its own invisible session. Your desktop never flickers, resizes, or shows the game, and nothing you do on the desktop leaks into the stream. It even works on a host with no monitor attached and nobody logged in: pair it with `sudo -H polaris --setup-host --enable-headless-boot` for a console-style box that streams straight from power-on ([Bazzite guide](bazzite.md#headless-boot-and-deck-images) has the walkthrough).
 
 - **Best for:** most setups, and the preferred path when you stream to a handheld.
-- **One caveat:** the built-in Desktop entry looks like an empty screen until you launch something into it. That is normal, not broken. Right-click the empty screen to open the session menu, or use Mirror Desktop if you actually wanted your desktop.
+- **One caveat:** it requires both `labwc` and `wlr-randr` on the host `PATH`; the card is greyed out and names the missing tool until both are ready. Once running, the built-in Desktop entry looks like an empty screen until you launch something into it. That is normal, not broken. Right-click the empty screen to open the session menu, or use Mirror Desktop if you actually wanted your desktop.
 
 ### Private Stream (GPU-native)
 
@@ -62,10 +62,10 @@ Not selectable yet. It appears under **Planned modes** and is reserved for the s
 
 ### Headless Dongle
 
-For hosts with a dummy plug (an HDMI or DisplayPort dongle): the desktop moves onto the dongle. In **Privacy** mode the real panel goes dark; in **Off** mode the panel stays primary and the desktop extends onto the dongle.
+For hosts with a dummy plug (an HDMI or DisplayPort dongle): the desktop moves onto the dongle. In **Privacy** mode the real panel goes dark after one-time portal approval is saved; Polaris keeps it on during that approval so the picker remains visible. In **Off** mode the panel stays primary and the desktop extends onto the dongle.
 
 - **Best for:** a dedicated streaming PC, with optional panel blanking when privacy matters.
-- **One caveat:** it needs the dongle plugged in and both a streaming output and a primary output configured. Clients also cannot switch a Headless Dongle host into another mode for a single launch, because the layout is physical.
+- **One caveat:** it needs the dongle plugged in and both a streaming output and a primary output configured. Headless Dongle itself is a host setting, so a client cannot turn that physical swap on for one game. A client may choose another supported mode for one launch; Polaris leaves the dongle swap inactive for that session and restores the host default afterward.
 
 ### Mirror Desktop
 
@@ -124,7 +124,7 @@ If a stream misbehaves, the exact reason codes and what to do about them are in 
 
 You do not need to change the host mode to briefly share your desktop. Any Moonlight-protocol client can add `mirrorDesktop=1` to a launch request to mirror the desktop for that single session, and Nova exposes this as a launch option. The host configuration is untouched.
 
-The exception is Headless Dongle: its layout is physical, so per-launch overrides are ignored there.
+Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session; the saved host setting returns on the next normal launch.
 
 > [!TIP]
 > The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.

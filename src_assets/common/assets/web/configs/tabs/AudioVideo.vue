@@ -101,7 +101,7 @@ const streamDisplayModeDefinitions = [
     title: 'Headless Dongle',
     badge: 'Host default',
     group: 'host',
-    copy: 'Moves the desktop onto a physical dummy plug. Privacy mode also blanks the real panel.',
+    copy: 'Moves the desktop onto a physical dummy plug. Privacy mode blanks the real panel after the one-time portal approval is saved; the panel stays on during that approval.',
     impact: 'Configure it once as the host default; Off mode keeps the real panel active, and clients cannot enable it for one game.',
     technical: 'Runtime: host desktop · Capture: portal by default, optional KMS · Requires streaming and primary outputs plus automatic display management',
   },
@@ -564,7 +564,7 @@ function updateDisplayPlannerSource(event) {
                   v-model="config.headless_swap_mode"
                   class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
                 >
-                  <option value="privacy">privacy — dongle primary, blank panel</option>
+                  <option value="privacy">privacy — blank panel after portal approval</option>
                   <option value="off">off — extended, panel stays primary</option>
                 </select>
               </label>

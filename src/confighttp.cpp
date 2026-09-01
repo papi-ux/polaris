@@ -3864,10 +3864,14 @@ namespace confighttp {
       return label.empty() ? "Mirror Desktop"s : std::string {label};
     };
     const auto stats = stream_stats::get_current();
-    // Shared resolve snapshot: one vdisplay probe, one labwc state, configured + effective.
+    // Shared resolve snapshot: one cached vdisplay probe, launch-equivalent
+    // backend configuration, one labwc state, configured + effective.
     const auto labwc = snapshot_labwc();
     const auto vd_backend = virtual_display::detect_backend();
-    const bool vd_available = vd_backend != virtual_display::backend_e::NONE;
+    const bool vd_available = virtual_display::backend_has_required_configuration(
+      vd_backend,
+      config::video.linux_display.streaming_output
+    );
     const auto configured_policy = stream_display_policy::resolve(stream_display_policy::input_t {
       vd_available,
       false,
@@ -3964,6 +3968,12 @@ namespace confighttp {
       output_tree["stream_display_mode_options"] = nlohmann::json::array();
       for (const auto &option : stream_display_policy::mode_options(vd_available)) {
         auto unavailable_reason = option.available ? std::string {} : option.unavailable_reason;
+        if (!option.available && option.value == "host_virtual_display") {
+          const auto backend_reason = virtual_display::unavailable_reason();
+          if (!backend_reason.empty()) {
+            unavailable_reason = backend_reason;
+          }
+        }
         if (!option.available && unavailable_reason.empty()) {
           unavailable_reason = "This mode is not available on this host right now.";
         }
