@@ -674,6 +674,23 @@ TEST(StreamDisplayPolicyTests, LabwcPathsRequireLabwcAndWlrRandr) {
   EXPECT_TRUE(headless->unavailable_reason.empty());
 }
 
+TEST(StreamDisplayPolicyTests, ModeOptionsOwnDynamicRuntimeUnavailableReasons) {
+  stream_path::host_capabilities_t caps;
+  caps.labwc_present = false;
+  caps.wlr_randr_present = false;
+
+  const auto options = stream_path::options_for_host(caps);
+  const auto headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+
+  // The catalog outlives the probe's temporary result and is serialized later
+  // by the HTTP/UI layers. This copy must never read a dangling string_view.
+  const std::string serialized_reason = headless->unavailable_reason;
+  EXPECT_EQ(serialized_reason, "labwc and wlr-randr binaries not found on PATH");
+}
+
 TEST(StreamDisplayPolicyTests, ModeOptionsMatchSelectionAvailableForGamescope) {
   // Dual-truth footgun: mode_options must apply the same gamescope_present
   // probe as selection_available / apply_selection.

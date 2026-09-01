@@ -50,7 +50,9 @@ describe('virtual display status presentation', () => {
             available: false,
             backend_detected: true,
             backend: 'kscreen-doctor',
-            policy_mode: 'host_virtual_display',
+            // Private Stream does not need a virtual display, but its disabled
+            // Host Virtual card must still expose the setup path.
+            policy_mode: 'headless_stream',
             unavailable_reason: 'kscreen-doctor backend needs linux_streaming_output set to the output it may reconfigure.',
           }
         : { backends: [] },
@@ -61,6 +63,7 @@ describe('virtual display status presentation', () => {
     })
 
     await flushPromises()
+    expect(wrapper.find('[data-kscreen-configuration]').exists()).toBe(true)
     const connector = wrapper.find('[data-kscreen-streaming-output]')
     expect(connector.exists()).toBe(true)
     await connector.setValue('HDMI-A-2')

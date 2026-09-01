@@ -101,8 +101,9 @@ onMounted(async () => {
         </div>
 
         <div
-          v-if="presentation.kind === 'unconfigured' && vdStatus.backend === 'kscreen-doctor'"
+          v-if="vdStatus.backend_detected && vdStatus.backend === 'kscreen-doctor' && !vdStatus.available"
           class="mt-3 rounded-xl border border-storm/20 bg-deep/40 p-3 text-sm text-storm space-y-2"
+          data-kscreen-configuration
         >
           <div class="text-silver font-medium text-xs uppercase tracking-wide">kscreen-doctor Configuration</div>
           <p>
