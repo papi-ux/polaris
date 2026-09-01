@@ -108,6 +108,7 @@ set(TEST_AUDIT_SUPPORT_SOURCES
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_benchmark_control_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_builtin_artwork_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_confighttp_benchmark_auth.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_download_contract.cpp
