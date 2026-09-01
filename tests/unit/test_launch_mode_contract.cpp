@@ -62,6 +62,29 @@ TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHo
   #include <src/platform/linux/stream_display_policy.h>
 
 namespace {
+  class ScopedPath {
+  public:
+    explicit ScopedPath(const char *replacement) {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+      setenv("PATH", replacement, 1);
+    }
+
+    ~ScopedPath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+  };
+
   std::unique_ptr<crypto::named_cert_t> launch_client_cert() {
     auto cert = std::make_unique<crypto::named_cert_t>();
     cert->name = "topology-test-client";
@@ -89,6 +112,28 @@ namespace {
     }
     return args;
   }
+}
+
+TEST(LaunchModeContractTests, RecommendationAlwaysBelongsToAllowedModesWithoutPrivateRuntime) {
+  ScopedPath path {"/polaris-test/no-runtime-binaries"};
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests(
+    false,
+    "Control",
+    false,
+    false
+  );
+
+  EXPECT_EQ(contract.at("recommended_mode"), "desktop_display");
+  bool recommendation_allowed = false;
+  for (const auto &mode : contract.at("allowed_modes")) {
+    recommendation_allowed = recommendation_allowed ||
+      mode == contract.at("recommended_mode");
+  }
+  EXPECT_TRUE(recommendation_allowed);
+  EXPECT_NE(
+    contract.at("mode_reason").get<std::string>().find("not launch-ready"),
+    std::string::npos
+  );
 }
 
 // The client-settings POST validator used to hardcode four ids while
