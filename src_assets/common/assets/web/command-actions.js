@@ -34,7 +34,7 @@ function createNavigationActions(t, router) {
   return flattenNavItems(createNavSections(t)).map((item) => ({
     id: item.commandId,
     group: 'Navigation',
-    icon: item.shortcut,
+    icon: '→',
     label: item.label,
     description: item.description,
     hint: item.to,
