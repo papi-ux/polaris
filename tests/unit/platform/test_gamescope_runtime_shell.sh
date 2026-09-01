@@ -57,6 +57,23 @@ write_process() {
 # marker/generation validator used before signalling.
 write_process_with_group 1 0 1 1 14 /usr/lib/systemd/systemd --system
 
+# Gamescope's primary command is parented by gamescopereaper, not directly by
+# the compositor. Accept only that exact executable/argv identity so the
+# session helper can prove the complete upstream ownership chain.
+write_process_with_group 409 410 410 410 8999 /usr/bin/gamescopereaper -- steam
+polaris_gamescope_reaper_pid 409 || fail "exact gamescopereaper was rejected"
+[ "$POLARIS_GAMESCOPE_REAPER_EXECUTABLE" = /usr/bin/gamescopereaper ] ||
+  fail "gamescopereaper executable identity was not published"
+write_process_with_group 409 410 410 410 8999 /usr/bin/gamescopereaper-wrapper -- steam
+if polaris_gamescope_reaper_pid 409; then
+  fail "lookalike gamescopereaper executable was accepted"
+fi
+write_process_with_group 409 410 410 410 8999 /usr/bin/gamescopereaper-wrapper gamescopereaper -- steam
+if polaris_gamescope_reaper_pid 409; then
+  fail "gamescopereaper argv spoof was accepted"
+fi
+rm -rf "$POLARIS_PROC_ROOT/409"
+
 write_unix_header() {
   printf 'Num RefCount Protocol Flags Type St Inode Path\n' >"$POLARIS_PROC_NET_UNIX"
 }

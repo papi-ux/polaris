@@ -48,7 +48,7 @@ mkdir -p "$work/bin" "$work/run"
 
 printf '%s\n' \
   'polaris_validate_marker() { return 1; }' \
-  'polaris_headless_gamescope_pid() { [ "${1:-}" = "${POLARIS_TEST_GAMESCOPE_PID:-}" ]; }' \
+  'polaris_gamescope_reaper_pid() { [ "${1:-}" = "${POLARIS_TEST_GAMESCOPE_PID:-}" ]; }' \
   >"$work/runtime-stub.sh"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -167,6 +167,9 @@ if [ "$(uname -s)" = Linux ] && command -v setpriv >/dev/null 2>&1 && [ -r "/pro
   "${CC:-cc}" -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Werror \
     "$POLARIS_SOURCE_DIR/tests/unit/platform/fake_gamescope_parent.c" \
     -o "$work/bin/gamescope"
+  "${CC:-cc}" -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Werror \
+    "$POLARIS_SOURCE_DIR/tests/unit/platform/fake_gamescope_parent.c" \
+    -o "$work/bin/gamescopereaper"
   "${CC:-cc}" -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Werror \
     "$POLARIS_SOURCE_DIR/tests/unit/platform/fake_leaderless_session_member.c" \
     -o "$work/bin/leaderless-session-member"
