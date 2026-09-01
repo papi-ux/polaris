@@ -46,6 +46,11 @@ namespace stream_display_policy {
         if (!path->available) {
           return false;
         }
+        if (path->runtime == stream_path::runtime_kind_e::LABWC) {
+          return stream_path::labwc_runtime_available(
+            stream_path::probe_host_capabilities()
+          );
+        }
         if (path->id == stream_path::k_gamescope_stream) {
           return stream_path::probe_host_capabilities().gamescope_present;
         }
@@ -62,6 +67,12 @@ namespace stream_display_policy {
       bool virtual_display_available
     ) {
       if (const auto *path = stream_path::find(selection)) {
+        if (path->runtime == stream_path::runtime_kind_e::LABWC) {
+          const auto caps = stream_path::probe_host_capabilities();
+          if (!stream_path::labwc_runtime_available(caps)) {
+            return stream_path::labwc_runtime_unavailable_reason(caps);
+          }
+        }
         if (path->id == stream_path::k_gamescope_stream &&
             !stream_path::probe_host_capabilities().gamescope_present) {
           return "gamescope binary not found on PATH";

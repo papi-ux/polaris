@@ -631,12 +631,47 @@ TEST(StreamDisplayPolicyTests, NormalizeConfigDerivesStreamModeFromLegacyBoolean
 
 TEST(StreamDisplayPolicyTests, AllowedLaunchModesExcludeUnavailableByDefault) {
   const auto allowed = stream_display_policy::allowed_launch_modes(true, false);
-  EXPECT_NE(std::find(allowed.begin(), allowed.end(), "headless_stream"), allowed.end());
+  const bool headless_listed =
+    std::find(allowed.begin(), allowed.end(), "headless_stream") != allowed.end();
+  EXPECT_EQ(headless_listed, stream_display_policy::selection_available("headless_stream"));
   EXPECT_NE(std::find(allowed.begin(), allowed.end(), "host_virtual_display"), allowed.end());
   // gamescope_stream is available when gamescope is on PATH (may or may not be listed).
   // Unwired reserved path ids are not registered.
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "family_isolated"), allowed.end());
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "headless_evdi"), allowed.end());
+}
+
+TEST(StreamDisplayPolicyTests, LabwcPathsRequireLabwcAndWlrRandr) {
+  stream_path::host_capabilities_t caps;
+  caps.labwc_present = true;
+  caps.wlr_randr_present = false;
+
+  auto options = stream_path::options_for_host(caps);
+  auto headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_FALSE(headless->available);
+  EXPECT_EQ(headless->unavailable_reason, "wlr-randr binary not found on PATH");
+
+  caps.labwc_present = false;
+  caps.wlr_randr_present = true;
+  options = stream_path::options_for_host(caps);
+  headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_FALSE(headless->available);
+  EXPECT_EQ(headless->unavailable_reason, "labwc binary not found on PATH");
+
+  caps.labwc_present = true;
+  options = stream_path::options_for_host(caps);
+  headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_TRUE(headless->available);
+  EXPECT_TRUE(headless->unavailable_reason.empty());
 }
 
 TEST(StreamDisplayPolicyTests, ModeOptionsMatchSelectionAvailableForGamescope) {
@@ -672,7 +707,10 @@ TEST(StreamDisplayPolicyTests, ModeOptionsExposeRuntimeCaptureTopologyForPlugins
   ASSERT_NE(headless, options.end());
   EXPECT_EQ(headless->runtime, "labwc");
   EXPECT_EQ(headless->capture, "wlroots");
-  EXPECT_TRUE(headless->available);
+  EXPECT_EQ(headless->available, stream_display_policy::selection_available("headless_stream"));
+  if (!headless->available) {
+    EXPECT_FALSE(headless->unavailable_reason.empty());
+  }
 }
 
 TEST(StreamDisplayPolicyTests, DesktopPathReportsHonestPortalOrHostBackend) {

@@ -61,6 +61,26 @@ TEST(DoctorResetContract, FinalResolverCannotReadHistoryOrAiSettings) {
   EXPECT_NE(resolver.find("launch_profile::resolve"), std::string::npos);
 }
 
+TEST(DoctorResetContract, WebLaunchModeCatalogUsesLaunchEquivalentVirtualDisplayCapability) {
+  const auto get_config = between(
+    source("src/confighttp.cpp"),
+    "void getConfig(",
+    "void getLocale("
+  );
+  EXPECT_NE(
+    get_config.find("virtual_display::backend_has_required_configuration("),
+    std::string::npos
+  );
+  EXPECT_NE(
+    get_config.find("config::video.linux_display.streaming_output"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    get_config.find("vd_backend != virtual_display::backend_e::NONE"),
+    std::string::npos
+  );
+}
+
 TEST(DoctorResetContract, RunningSessionCannotRewriteTheConfiguredHostBitrateCap) {
   const auto process = source("src/process.cpp");
   EXPECT_EQ(process.find("config::video.max_bitrate ="), std::string::npos);
