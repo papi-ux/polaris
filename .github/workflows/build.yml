@@ -32,6 +32,7 @@ jobs:
     outputs:
       commit: ${{ steps.source.outputs.commit }}
       native_required: ${{ steps.source.outputs.native_required }}
+      version: ${{ steps.source.outputs.version }}
 
     steps:
       - uses: actions/checkout@v7
@@ -51,6 +52,7 @@ jobs:
           set -euo pipefail
 
           source_commit="$(git rev-parse HEAD)"
+          build_version="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
           native_required=true
           if [ "$EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags --depth=1 origin "$BASE_COMMIT"
@@ -61,6 +63,10 @@ jobs:
             release_tag="${POLARIS_PACKAGE_REF_NAME}"
             if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "Release tag must match vMAJOR.MINOR.PATCH: $release_tag" >&2
+              exit 1
+            fi
+            if [ "$release_tag" != "v${build_version}" ]; then
+              echo "Release tag $release_tag does not match source version v${build_version}" >&2
               exit 1
             fi
 
@@ -76,6 +82,7 @@ jobs:
 
           echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
           echo "native_required=$native_required" >> "$GITHUB_OUTPUT"
+          echo "version=$build_version" >> "$GITHUB_OUTPUT"
 
   web-checks:
     name: Web checks
@@ -833,6 +840,8 @@ jobs:
     env:
       CCACHE_DIR: ~/.cache/ccache
       CCACHE_COMPILERCHECK: content
+      BRANCH: ${{ github.head_ref || inputs.release_tag || github.ref_name }}
+      BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}
 
     steps:
       - uses: actions/checkout@v7
@@ -979,6 +988,17 @@ jobs:
             exit 1
           fi
 
+          package_name="$(dpkg-deb --field "$deb_path" Package)"
+          package_version="$(dpkg-deb --field "$deb_path" Version)"
+          package_architecture="$(dpkg-deb --field "$deb_path" Architecture)"
+          package_identity="${package_name}|${package_version}|${package_architecture}"
+          expected_package_identity="polaris|${BUILD_VERSION}|amd64"
+          printf '%s\n' "$package_identity" | tee build/cpack_artifacts/package-identity.txt
+          if [ "$package_identity" != "$expected_package_identity" ]; then
+            echo "Ubuntu package identity mismatch: expected '$expected_package_identity', got '$package_identity'" >&2
+            exit 1
+          fi
+
           dpkg-deb --info "$deb_path" | tee build/cpack_artifacts/package-info.txt
           dpkg-deb --field "$deb_path" Depends | tee build/cpack_artifacts/package-depends.txt
           dpkg-deb --contents "$deb_path" | tee build/cpack_artifacts/package-files.txt
@@ -1080,6 +1100,8 @@ jobs:
       NPM_CONFIG_CACHE: /github/home/.npm
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      BRANCH: ${{ github.head_ref || inputs.release_tag || github.ref_name }}
+      BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}
 
     steps:
       - name: Bootstrap Fedora container
@@ -1292,6 +1314,14 @@ jobs:
           rpm_path="$(find build/cpack_artifacts -maxdepth 1 -type f -name '*.rpm' ! -name '*.src.rpm' | sort | head -n 1)"
           if [ -z "$rpm_path" ]; then
             echo "No binary RPM was produced" >&2
+            exit 1
+          fi
+
+          package_identity="$(rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}\n' "$rpm_path")"
+          expected_package_identity="polaris|${BUILD_VERSION}|1|x86_64"
+          printf '%s\n' "$package_identity" | tee build/cpack_artifacts/package-identity.txt
+          if [ "$package_identity" != "$expected_package_identity" ]; then
+            echo "Fedora package identity mismatch: expected '$expected_package_identity', got '$package_identity'" >&2
             exit 1
           fi
 
