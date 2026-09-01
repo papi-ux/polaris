@@ -35,6 +35,7 @@ namespace game_artwork {
   enum class provider_e {
     steam,
     steamgriddb,
+    epic,
   };
 
   struct asset_t {

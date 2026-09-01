@@ -6,9 +6,7 @@
         <p class="page-subtitle max-w-2xl">{{ $t('config.configuration_desc') }}</p>
       </div>
       <div v-if="config" class="page-meta" role="status" aria-live="polite" aria-atomic="true">
-        <span class="meta-pill">{{ visibleTabCountLabel }}</span>
         <span class="meta-pill">{{ activePanelTitle }}</span>
-        <span class="meta-pill">{{ activePanelGroupLabel }}</span>
         <span class="meta-pill" :class="hasUnsavedChanges ? 'border-warning/40 bg-warning/10 text-warning' : 'border-success/30 bg-success/10 text-success'">
           {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
         </span>
@@ -19,17 +17,12 @@
     <section class="section-card settings-command-bar sticky top-4 z-20" role="region" :aria-label="$t('config.action_center')">
       <div class="settings-command-copy">
         <div class="section-kicker">{{ $t('config.action_center') }}</div>
-        <div class="settings-command-title">
-          {{ commandCenterTitle }}
-        </div>
-        <div class="settings-command-note">
-          {{ commandCenterNote }}
-        </div>
+        <div class="settings-command-title">{{ commandCenterTitle }}</div>
+        <div class="settings-command-note">{{ commandCenterNote }}</div>
       </div>
 
       <div class="settings-command-tools">
         <div class="settings-command-meta">
-          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
           <span v-if="hasUnsavedChanges" class="meta-pill border-warning/40 bg-warning/10 text-warning">{{ $t('config.pending_badge') }}</span>
           <span v-else class="meta-pill border-success/30 bg-success/10 text-success">{{ $t('config.synced_badge') }}</span>
         </div>
@@ -56,13 +49,13 @@
       </div>
     </section>
 
-    <section v-if="config" class="section-card settings-pending-review">
+    <section v-if="config && pendingChanges.length" class="section-card settings-pending-review">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="min-w-0">
           <div class="section-kicker">{{ $t('config.pending_changes_kicker') }}</div>
-          <h2 class="section-title">{{ pendingChanges.length ? $t('config.pending_changes_title') : $t('config.pending_changes_empty_title') }}</h2>
+          <h2 class="section-title">{{ $t('config.pending_changes_title') }}</h2>
           <p class="section-copy" role="status" aria-live="polite" aria-atomic="true">
-            {{ pendingChanges.length ? $t('config.pending_changes_desc', { count: pendingChanges.length }) : $t('config.pending_changes_empty_desc') }}
+            {{ $t('config.pending_changes_desc', { count: pendingChanges.length }) }}
           </p>
         </div>
         <button class="focus-ring settings-action-button settings-action-button-secondary" @click="resetLocalChanges" :disabled="!hasUnsavedChanges || saving || restarting">
@@ -70,7 +63,7 @@
         </button>
       </div>
 
-      <div v-if="pendingChanges.length" class="mt-4 grid gap-3">
+      <div class="mt-4 grid gap-3">
         <article
           v-for="change in pendingChanges"
           :key="change.key"
@@ -159,11 +152,8 @@
           <p class="settings-tab-copy">{{ activePanelHeroCopy }}</p>
         </div>
         <div class="settings-tab-meta">
-          <span class="meta-pill">{{ visibleTabCountLabel }}</span>
-          <span class="meta-pill">{{ activePanelGroupLabel }}</span>
           <span v-if="currentTabIsEncoder" class="meta-pill">{{ activeTabMeta?.name }}</span>
           <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
-          <span class="meta-pill">{{ hasUnsavedChanges ? $t('config.pending_badge') : $t('config.synced_badge') }}</span>
         </div>
       </section>
 
@@ -639,7 +629,6 @@ const tabGroups = computed(() => {
     )
 })
 const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.items))
-const visibleTabCountLabel = computed(() => i18n.t('config.visible_tabs', { count: matchingTabs.value.length, total: tabs.value.length }))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
 const searchHasResults = computed(() => matchingTabs.value.length > 0)
 const sectionHashTabs = {

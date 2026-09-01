@@ -10,7 +10,8 @@
           </div>
 
           <div class="mt-6 max-w-2xl">
-            <p class="text-sm leading-relaxed text-storm">
+            <h1 class="text-3xl font-bold text-silver">{{ $t('welcome.greeting') }}</h1>
+            <p class="mt-2 text-sm leading-relaxed text-storm">
               Sign in to manage pairing, library entries, host health, and stream configuration. This is the control surface for the machine, not just a passive dashboard.
             </p>
           </div>

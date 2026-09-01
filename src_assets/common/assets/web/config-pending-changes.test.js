@@ -106,6 +106,19 @@ describe('ConfigView pending changes review', () => {
     delete global.fetch
   })
 
+  it('keeps the pending review out of the way until a setting changes', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    expect(wrapper.find('.settings-pending-review').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('No local edits yet')
+
+    wrapper.vm.config.sunshine_name = 'Changed Host'
+    await nextTick()
+
+    expect(wrapper.find('.settings-pending-review').exists()).toBe(true)
+  })
+
   it('summarizes dirty settings with before/after values and impact', async () => {
     const wrapper = mountConfigView()
     await flushConfigLoad()

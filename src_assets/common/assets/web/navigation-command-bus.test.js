@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
@@ -12,6 +14,7 @@ const labels = {
   'navbar.group_streaming': 'Streaming',
   'navbar.group_host': 'Host',
   'navbar.group_support': 'Support',
+  'navbar.group_labs': 'Labs',
   'navbar.dashboard': 'Mission Control',
   'navbar.library': 'Library',
   'navbar.pairing': 'Devices',
@@ -39,27 +42,34 @@ describe('navigation metadata shell', () => {
     const sections = createNavSections(t)
     const items = flattenNavItems(sections)
 
-    expect(sections.map((section) => section.key)).toEqual(['streaming', 'host', 'support'])
+    expect(sections.map((section) => section.key)).toEqual(['streaming', 'host', 'support', 'labs'])
     expect(items.every((item) => item.shortcut === undefined)).toBe(true)
     expect(items.map((item) => item.to)).toEqual([
       '/',
       '/apps',
       '/pin',
-      '/browser-stream',
       '/config',
       '/password',
       '/info',
       '/troubleshooting',
+      '/browser-stream',
     ])
 
     const browserStream = getNavItemByPath(sections, '/browser-stream')
     expect(browserStream).toMatchObject({
       label: 'Browser Stream',
-      sectionLabel: 'Streaming',
+      sectionLabel: 'Labs',
       commandId: 'browser-stream',
       badge: 'Experimental',
     })
     expect(browserStream.aliases).toEqual(expect.arrayContaining(['moonlight', 'stream', 'streaming', 'webrtc']))
+  })
+
+  it('keeps Labs metadata searchable without repeating the experimental badge in the narrow sidebar', () => {
+    const app = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/App.vue'), 'utf8')
+
+    expect(app).toContain("item.badge && section.key !== 'labs'")
+    expect(app).toContain(':aria-label="item.badge ? `${item.label}, ${item.badge}` : item.label"')
   })
 })
 
@@ -72,11 +82,11 @@ describe('command action registry', () => {
       'dashboard',
       'apps',
       'pairing',
-      'browser-stream',
       'config',
       'password',
       'info',
       'troubleshooting',
+      'browser-stream',
     ])
 
     expect(filterCommandActions(actions, 'moonlight')[0]).toMatchObject({ id: 'browser-stream', hint: '/browser-stream' })

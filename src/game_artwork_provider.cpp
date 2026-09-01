@@ -184,7 +184,15 @@ namespace game_artwork::providers {
     }
 
     source_e source_for_provider(provider_e provider) {
-      return provider == provider_e::steam ? source_e::steam : source_e::steamgriddb;
+      switch (provider) {
+        case provider_e::steam:
+          return source_e::steam;
+        case provider_e::steamgriddb:
+          return source_e::steamgriddb;
+        case provider_e::epic:
+          return source_e::host;
+      }
+      return source_e::host;
     }
 
     std::string extension_for_mime(std::string_view mime_type) {
