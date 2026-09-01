@@ -201,7 +201,7 @@ namespace doctor_v2 {
 #ifdef POLARIS_ENABLE_DOCTOR_TRIALS
     return flag_enabled("POLARIS_DOCTOR_TRIALS");
 #else
-    // v1.3.14 is a containment release. Keep the authenticated trial contract
+    // v1.4.0 keeps the authenticated trial contract in shadow mode. Keep it
     // compiled for unit coverage and follow-up development, but do not let a
     // runtime environment variable turn a shadow observer into launch policy.
     return false;

@@ -1,26 +1,18 @@
 # Changelog
 
-- Fixed verified Doctor bitrate receipts so they include a terminal explanation, and froze adaptive feedback only while an exact rollback target is awaiting encoder acknowledgement. Undo can now restore the measured prior target without a concurrent controller step moving it first; normal adaptation resumes after acknowledgement.
-- Fixed CUDA-disabled NVIDIA packages accepting PipeWire DMA-BUF frames without a compiled encoder import path. They now fail closed to SHM/CPU capture, so the first stream frame always has storage the selected encoder can consume.
-- Fixed nested Gamescope teardown on affected 3.16 hosts by launching Steam beneath a session-owned primary-child keeper. Polaris first pauses the exact marked compositor, then lets only the session-owned Steam wrapper publish terminal state before committing the complete private-group fence. Gamescope is never resumed over a retired Xwayland connection and never enters its crashing X11 or Vulkan teardown paths. Attach-mode Steam still receives a graceful exact-session TERM, with a credential-revalidated KILL fallback that cannot touch desktop Steam.
-- Fixed non-cage detached Steam teardown so shutdown is forwarded through Steam's no-bootstrap remote client instead of running `steam -shutdown`. A live desktop or stale private singleton still receives shutdown, while a vanished listener cannot cause a replacement Steam client to start; incomplete generation or singleton cleanup retains retry authority.
-- Fixed Gamescope session recovery on distro-package hosts by restoring their empty compositor baseline without requiring Nix-only idle/portal units, and made failed prior-session recovery retain its exact claim instead of forcing unsafe socket cleanup.
-- Fixed Linux host-virtual-display ownership across launch, capture reinitialization, and teardown. The bundled legacy Desktop entry is migrated to an explicit mirror semantic that overrides paired virtual-display preferences; wlroots capture remains bound to the immutable private-compositor generation; and failed output removal retains durable retry state. KScreen restores and reads back the exact pre-launch output state instead of assuming that disable succeeded.
-- Fixed Heroic library launches for native and Flatpak GOG/Epic installs by using Heroic's current query protocol (`gog` or `legendary` runner), deriving commands from validated scanner metadata, and migrating only exact legacy Polaris imports without changing UUIDs, artwork, profiles, or unrelated commands.
-
 This file tracks the public Polaris release line.
 
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
-## v1.3.14 - 2026-08-26
+## v1.4.0 - 2026-09-01
 
-A matched Doctor containment patch for Nova v1.3.9. Frame-pacing diagnosis is observational, launch fields come from deterministic presets with field-level provenance, and neither history nor AI output can silently change a launch or inject a game-process limiter.
+A matched feature release for Nova v1.4.0. Doctor turns measured stream evidence into a clear explanation and, only when the evidence supports it, a reversible same-stream fix. Launch fields come from deterministic presets with field-level provenance, while history and AI remain unable to silently change a launch or inject a game-process limiter.
 
 - Reports frame-pacing Watch evidence under the compatibility reason code `frame_pacing`, without contradictory Stable state or unsupported network/bitrate blame; static and duplicate-only content is not treated as a pacing fault without source-cadence evidence
 - Removes history, recovery, and AI launch overlays; the legacy `apply_recovery_profile_next_launch` action is disabled, old recovery records are deprecated, non-applicable, and cancellable, and old apply/verify calls fail as `unsupported_deprecated`
 - Resolves `auto`, `quality`, `high_fps`, and `stability` deterministically and returns source, reason code, lock, and normalization provenance for every resolved launch field, including separate width, height, and FPS provenance for mixed `high_fps` profiles
-- Advertises the deterministic resolved-profile contract so Nova v1.3.9 refuses older Polaris launch policy rather than failing open to legacy history or AI settings
+- Advertises the deterministic resolved-profile contract so Nova v1.4.0 refuses older Polaris launch policy rather than failing open to legacy history or AI settings
 - Keeps topology exclusively under explicit app/client display semantics and stops synthesizing MangoHud, DXVK, or VKD3D frame limiters for game processes
 - Binds optimize results to the canonical app UUID or ID and exact host-default, mirror, or private topology choice, advertises the versioned topology-assertion contract, and revalidates the complete deterministic profile before both fresh launch and resume
 - Keeps Auto Fix only for same-stream bitrate changes with measured verification, conditional controller ownership, and automatic rollback that never overwrites a newer user/client bitrate; pacing uses Recheck or manual guidance
@@ -34,6 +26,9 @@ A matched Doctor containment patch for Nova v1.3.9. Frame-pacing diagnosis is ob
 - Keeps Steam Input manual and read-only without changing VDF files, Steam state, live streams, or launch policy
 - Launches imported Heroic GOG and Epic titles through the matching native or Flatpak install using Heroic's current protocol, rejects browser-tampered runner/install metadata, deduplicates current and legacy command forms, and narrowly migrates Heroic entries generated by older Polaris releases
 - Prevents wrapped nested Gamescope teardown from entering the affected 3.16 Vulkan destructor by keeping a session-owned primary child alive after exact-session Steam exits, then freezing and killing the exact marked private group; verifies whole-group kernel stop state first and positively drains separately grouped or leaderless private-session members while the keeper retains cleanup authority
+- Refuses PipeWire DMA-BUF frames when the running package has no matching encoder importer; CUDA-disabled NVIDIA packages fall back to SHM/CPU capture before the first unusable GPU-only frame can reach the encoder
+- Forwards non-cage detached Steam shutdown through Steam's no-bootstrap remote client, preventing a vanished listener from starting a replacement client while preserving retry authority when generation cleanup is incomplete
+- Restores distro-package Gamescope sessions to their empty compositor baseline without requiring Nix-only services, and retains the exact recovery claim when safe cleanup cannot be proven
 - Restricts AI and Codex CLI output to typed explanatory text that cannot define settings, actions, confidence overrides, or launch policy; subscription `deterministic-fallback` remains informational and quiet
 - Retains the GCC 16, Ubuntu snapshot, exact release-source, sanitizer, Arch, public-hygiene, and CodeQL gates from the protected release base
 - Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
