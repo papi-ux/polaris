@@ -59,7 +59,9 @@ namespace stream_path {
     bool request_headless = false;
     /// Path is shipped but not ready to select (or host probe failed).
     bool available = true;
-    std::string_view unavailable_reason;
+    // Availability probes can produce dynamic text. Keep ownership with each
+    // descriptor so callers may safely retain and serialize the catalog.
+    std::string unavailable_reason;
     /// UI group hint: private | host | advanced | experimental
     std::string_view group;
   };
