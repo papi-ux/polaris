@@ -51,7 +51,7 @@ Polaris defaults to Mirror Desktop, which streams the visible Desktop Mode sessi
 
 The Private Stream paths need `labwc` on `PATH`, and labwc cannot be installed on SteamOS 3.8 without breaking the system. labwc 0.9.0 in `extra-3.8.1x` depends on wlroots0.19, which requires `libdisplay-info.so.2` from libdisplay-info 0.2.0. SteamOS installs libdisplay-info 0.3.0 from `holo-3.8.1x`, which provides `libdisplay-info.so.3`, and KWin, Mesa, and Vulkan link against that. Installing labwc therefore downgrades a library the desktop depends on and breaks Desktop Mode.
 
-Polaris does not depend on labwc for this reason, and links nothing from it. Selecting a Private Stream path on SteamOS reports `Private Stream requires labwc on PATH.` and streams nothing. Use Mirror Desktop or Gamescope Stream instead.
+Polaris does not depend on labwc for this reason, and links nothing from it. Private Stream cards are greyed out on SteamOS and name the missing `labwc` tool; a pre-existing Private Stream configuration also fails closed at launch. Use Mirror Desktop or Gamescope Stream instead.
 
 ## Update
 

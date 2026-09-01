@@ -11,9 +11,59 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
+  class ScopedPrivateRuntimePath {
+  public:
+    ScopedPrivateRuntimePath() {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+
+      char path_template[] = "/tmp/polaris-stream-policy-runtime-XXXXXX";
+      const char *created = mkdtemp(path_template);
+      if (!created) {
+        throw std::runtime_error("failed to create stream-policy runtime test directory");
+      }
+      directory = created;
+
+      for (const char *binary : {"labwc", "wlr-randr"}) {
+        const auto path = std::filesystem::path {directory} / binary;
+        std::ofstream script {path};
+        script << "#!/bin/sh\nexit 0\n";
+        script.close();
+        if (!script || chmod(path.c_str(), 0700) != 0) {
+          throw std::runtime_error("failed to create stream-policy runtime test executable");
+        }
+      }
+      if (setenv("PATH", directory.c_str(), 1) != 0) {
+        throw std::runtime_error("failed to set stream-policy runtime test PATH");
+      }
+    }
+
+    ~ScopedPrivateRuntimePath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+    std::string directory;
+  };
+
   struct LinuxDisplayPolicyGuard {
     LinuxDisplayPolicyGuard():
         headless_mode {config::video.linux_display.headless_mode},
@@ -222,6 +272,7 @@ TEST(StreamDisplayPolicyTests, HostVirtualCaptureFollowsTheVirtualDisplayBackend
 }
 
 TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
+  ScopedPrivateRuntimePath runtime_path;
   LinuxDisplayPolicyGuard guard;
   std::string error;
 
@@ -239,6 +290,7 @@ TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
 }
 
 TEST(StreamDisplayPolicyTests, ReapplyingHeadlessSelectionClearsStaleCompanionState) {
+  ScopedPrivateRuntimePath runtime_path;
   LinuxDisplayPolicyGuard guard;
   auto &linux_display = config::video.linux_display;
 
@@ -631,12 +683,64 @@ TEST(StreamDisplayPolicyTests, NormalizeConfigDerivesStreamModeFromLegacyBoolean
 
 TEST(StreamDisplayPolicyTests, AllowedLaunchModesExcludeUnavailableByDefault) {
   const auto allowed = stream_display_policy::allowed_launch_modes(true, false);
-  EXPECT_NE(std::find(allowed.begin(), allowed.end(), "headless_stream"), allowed.end());
+  const bool headless_listed =
+    std::find(allowed.begin(), allowed.end(), "headless_stream") != allowed.end();
+  EXPECT_EQ(headless_listed, stream_display_policy::selection_available("headless_stream"));
   EXPECT_NE(std::find(allowed.begin(), allowed.end(), "host_virtual_display"), allowed.end());
   // gamescope_stream is available when gamescope is on PATH (may or may not be listed).
   // Unwired reserved path ids are not registered.
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "family_isolated"), allowed.end());
   EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "headless_evdi"), allowed.end());
+}
+
+TEST(StreamDisplayPolicyTests, LabwcPathsRequireLabwcAndWlrRandr) {
+  stream_path::host_capabilities_t caps;
+  caps.labwc_present = true;
+  caps.wlr_randr_present = false;
+
+  auto options = stream_path::options_for_host(caps);
+  auto headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_FALSE(headless->available);
+  EXPECT_EQ(headless->unavailable_reason, "wlr-randr binary not found on PATH");
+
+  caps.labwc_present = false;
+  caps.wlr_randr_present = true;
+  options = stream_path::options_for_host(caps);
+  headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_FALSE(headless->available);
+  EXPECT_EQ(headless->unavailable_reason, "labwc binary not found on PATH");
+
+  caps.labwc_present = true;
+  options = stream_path::options_for_host(caps);
+  headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+  EXPECT_TRUE(headless->available);
+  EXPECT_TRUE(headless->unavailable_reason.empty());
+}
+
+TEST(StreamDisplayPolicyTests, ModeOptionsOwnDynamicRuntimeUnavailableReasons) {
+  stream_path::host_capabilities_t caps;
+  caps.labwc_present = false;
+  caps.wlr_randr_present = false;
+
+  const auto options = stream_path::options_for_host(caps);
+  const auto headless = std::find_if(options.begin(), options.end(), [](const auto &opt) {
+    return opt.id == stream_path::k_headless_stream;
+  });
+  ASSERT_NE(headless, options.end());
+
+  // The catalog outlives the probe's temporary result and is serialized later
+  // by the HTTP/UI layers. This copy must never read a dangling string_view.
+  const std::string serialized_reason = headless->unavailable_reason;
+  EXPECT_EQ(serialized_reason, "labwc and wlr-randr binaries not found on PATH");
 }
 
 TEST(StreamDisplayPolicyTests, ModeOptionsMatchSelectionAvailableForGamescope) {
@@ -672,7 +776,10 @@ TEST(StreamDisplayPolicyTests, ModeOptionsExposeRuntimeCaptureTopologyForPlugins
   ASSERT_NE(headless, options.end());
   EXPECT_EQ(headless->runtime, "labwc");
   EXPECT_EQ(headless->capture, "wlroots");
-  EXPECT_TRUE(headless->available);
+  EXPECT_EQ(headless->available, stream_display_policy::selection_available("headless_stream"));
+  if (!headless->available) {
+    EXPECT_FALSE(headless->unavailable_reason.empty());
+  }
 }
 
 TEST(StreamDisplayPolicyTests, DesktopPathReportsHonestPortalOrHostBackend) {

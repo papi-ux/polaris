@@ -983,6 +983,32 @@ namespace nvhttp {
       mode_reason = "This Polaris build supports desktop mirroring only.";
 #endif
 
+#ifdef __linux__
+      const auto mode_is_allowed = [&allowed_modes](std::string_view candidate) {
+        return std::any_of(
+          allowed_modes.begin(),
+          allowed_modes.end(),
+          [candidate](const nlohmann::json &mode) {
+            return mode.is_string() && mode.get_ref<const std::string &>() == candidate;
+          }
+        );
+      };
+      if (!mode_is_allowed(recommended_mode)) {
+        const auto unavailable_label = stream_display_policy::label_for_selection(recommended_mode);
+        const auto unavailable_copy = unavailable_label.empty() ?
+          "The preferred mode"s : unavailable_label;
+        if (mode_is_allowed("gamescope_stream")) {
+          recommended_mode = "gamescope_stream";
+          mode_reason = unavailable_copy +
+            " is not launch-ready on this host, so Gamescope Stream is recommended.";
+        } else {
+          recommended_mode = "desktop_display";
+          mode_reason = unavailable_copy +
+            " is not launch-ready on this host, so Polaris will mirror the desktop.";
+        }
+      }
+#endif
+
       nlohmann::json launch_mode;
       launch_mode["preferred_mode"] = preferred_mode;
       launch_mode["recommended_mode"] = recommended_mode;

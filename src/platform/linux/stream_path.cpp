@@ -128,7 +128,7 @@ namespace stream_path {
         k_headless_dongle,
         "Headless Dongle",
         "Physical dummy",
-        "Swap the desktop onto a physical dummy-plug connector, blank the panel (privacy), capture via host portal ScreenCast (default). KMS remains optional for CAP_SYS_ADMIN hosts. Requires linux_streaming_output + linux_primary_output + auto_manage.",
+        "Swap the desktop onto a physical dummy-plug connector. Privacy mode blanks the panel after one-time portal approval is saved; the approval session keeps it on. Off mode leaves it primary and extends onto the dongle. Capture via host portal ScreenCast (default). KMS remains optional for CAP_SYS_ADMIN hosts. Requires linux_streaming_output + linux_primary_output + auto_manage.",
         runtime_kind_e::NONE,
         capture_kind_e::PORTAL,
         topology_kind_e::SWAP_PRIMARY,
@@ -195,11 +195,29 @@ namespace stream_path {
   host_capabilities_t probe_host_capabilities() {
     host_capabilities_t caps;
     caps.labwc_present = binary_on_path("labwc");
+    caps.wlr_randr_present = binary_on_path("wlr-randr");
     caps.gamescope_present = binary_on_path("gamescope");
     caps.virtual_display_available = virtual_display::is_available();
     // Portal availability is environment-dependent; configured capture is the honest hint.
     caps.configured_capture = config::video.capture;
     return caps;
+  }
+
+  bool labwc_runtime_available(const host_capabilities_t &caps) {
+    return caps.labwc_present && caps.wlr_randr_present;
+  }
+
+  std::string labwc_runtime_unavailable_reason(const host_capabilities_t &caps) {
+    if (!caps.labwc_present && !caps.wlr_randr_present) {
+      return "labwc and wlr-randr binaries not found on PATH";
+    }
+    if (!caps.labwc_present) {
+      return "labwc binary not found on PATH";
+    }
+    if (!caps.wlr_randr_present) {
+      return "wlr-randr binary not found on PATH";
+    }
+    return {};
   }
 
   std::string backend_name_for_path(const descriptor_t &path, const host_capabilities_t &caps) {
@@ -267,9 +285,12 @@ namespace stream_path {
       config::video.linux_display.prefer_gpu_native_capture;
     out.backend_name = backend_name_for_path(path, caps);
 
-    // Soft availability: labwc path without binary stays selectable but truthfully notes it.
-    if (path.runtime == runtime_kind_e::LABWC && path.available && !caps.labwc_present) {
-      out.reason = "Private Stream requires labwc on PATH.";
+    if (path.runtime == runtime_kind_e::LABWC &&
+        path.available &&
+        !labwc_runtime_available(caps)) {
+      out.available = false;
+      out.unavailable_reason = labwc_runtime_unavailable_reason(caps);
+      out.reason = "Private Stream is unavailable: " + out.unavailable_reason + ".";
     }
     if (path.topology == topology_kind_e::HOST_VIRTUAL && !caps.virtual_display_available) {
       out.reason = "Host virtual display was requested, but no backend is currently available.";
@@ -323,9 +344,12 @@ namespace stream_path {
       if (!opt.available) {
         continue;
       }
-      // Gamescope is only selectable when the binary is on PATH (matches
-      // selection_available / resolve_path / apply_selection). Labwc paths stay
-      // listed when the binary is missing so the UI can guide install.
+      // Private runtimes are selectable only when every executable their start
+      // path requires is on PATH. Unavailable cards remain listed with guidance.
+      if (opt.runtime == runtime_kind_e::LABWC && !labwc_runtime_available(caps)) {
+        opt.available = false;
+        opt.unavailable_reason = labwc_runtime_unavailable_reason(caps);
+      }
       if (opt.runtime == runtime_kind_e::GAMESCOPE && !caps.gamescope_present) {
         opt.available = false;
         opt.unavailable_reason = "gamescope binary not found on PATH";
