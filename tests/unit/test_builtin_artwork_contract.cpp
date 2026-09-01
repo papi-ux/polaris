@@ -40,6 +40,8 @@ TEST(BuiltinArtworkContract, ResolvesThePackagedPosterAndRetiresOnlyAutomaticMat
 
   EXPECT_NE(policy.find("VIRTUAL_DISPLAY_UUID"), std::string::npos);
   EXPECT_NE(configured.find("proc::validate_app_image_path"), std::string::npos);
+  EXPECT_NE(promotion.find("candidate_already_cached"), std::string::npos);
+  EXPECT_NE(promotion.find("bundled_utility && !candidate_already_cached"), std::string::npos);
   EXPECT_NE(promotion.find("game_artwork::source_e::local"), std::string::npos);
   EXPECT_NE(promotion.find("remove_cached_source_assets"), std::string::npos);
   EXPECT_NE(promotion.find("game_artwork::source_e::steamgriddb"), std::string::npos);
