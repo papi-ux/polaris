@@ -94,6 +94,11 @@ namespace game_artwork {
     std::string_view uuid,
     const local_candidate_t &candidate
   );
+  [[nodiscard]] bool remove_cached_source_assets(
+    const std::filesystem::path &appdata,
+    std::string_view uuid,
+    source_e source
+  );
 
   [[nodiscard]] std::vector<asset_t> scan_cached_assets(
     const std::filesystem::path &appdata,

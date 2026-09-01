@@ -184,6 +184,35 @@ TEST(GameArtworkLocalPoster, PromotesLocalOverCachedSteamGridDb) {
   EXPECT_TRUE(fs::exists(*old));
 }
 
+TEST(GameArtworkCache, RetiresOneAutomaticSourceWithoutTouchingLocalOrManualAssets) {
+  temp_dir_t temp("retire-source");
+  const auto local_poster = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::local, ".png");
+  const auto automatic_poster = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::steamgriddb, ".png");
+  const auto automatic_hero = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::hero, game_artwork::source_e::steamgriddb, ".jpg");
+  const auto manual_logo = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::logo, game_artwork::source_e::override, ".png");
+  ASSERT_TRUE(local_poster.has_value());
+  ASSERT_TRUE(automatic_poster.has_value());
+  ASSERT_TRUE(automatic_hero.has_value());
+  ASSERT_TRUE(manual_logo.has_value());
+  write_png(*local_poster, 1);
+  write_png(*automatic_poster, 2);
+  write_jpeg(*automatic_hero, 3);
+  write_png(*manual_logo, 4);
+
+  EXPECT_TRUE(game_artwork::remove_cached_source_assets(
+    temp.path, GAME_UUID, game_artwork::source_e::steamgriddb));
+  EXPECT_TRUE(fs::exists(*local_poster));
+  EXPECT_TRUE(fs::exists(*manual_logo));
+  EXPECT_FALSE(fs::exists(*automatic_poster));
+  EXPECT_FALSE(fs::exists(*automatic_hero));
+  EXPECT_FALSE(game_artwork::remove_cached_source_assets(
+    temp.path, "../../not-a-uuid", game_artwork::source_e::steamgriddb));
+}
+
 TEST(GameArtworkManifest, SanitizesAssetMetadataAndSupportsPartialSuccess) {
   temp_dir_t temp("partial-manifest");
   const auto hero_path = temp.path / "artwork" / "v1" / GAME_UUID / "hero.steam.jpg";
