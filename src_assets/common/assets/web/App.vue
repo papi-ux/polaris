@@ -47,7 +47,7 @@
             <div aria-hidden="true" v-html="item.icon" class="w-5 h-5 shrink-0"></div>
             <span v-if="!sidebarCollapsed">{{ item.label }}</span>
             <span
-              v-if="!sidebarCollapsed && item.badge"
+              v-if="!sidebarCollapsed && item.badge && section.key !== 'labs'"
               class="ml-auto rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-eyebrow text-warning-bright"
             >
               {{ item.badge }}
@@ -72,30 +72,24 @@
           aria-hidden="true"
         ></span>
         <template v-if="!sidebarCollapsed">
-          <span class="min-w-0 flex-1">
-            <span class="block text-[10px] font-semibold uppercase tracking-eyebrow text-storm/70">Update</span>
-            <span class="block truncate text-sm font-medium text-silver">{{ sidebarUpdateLabel }}</span>
-            <span class="block truncate text-[11px] text-storm">{{ sidebarUpdateDetail }}</span>
-          </span>
+          <span class="min-w-0 flex-1 truncate text-xs font-medium text-silver">{{ sidebarUpdateLabel }}</span>
+          <span class="text-[11px] text-storm">Updates</span>
         </template>
       </router-link>
-      <div class="px-3 mb-1">
+      <div class="px-3">
         <ThemeToggle :collapsed="sidebarCollapsed" />
       </div>
-      <div class="px-3 mb-1">
+      <div class="px-3 pb-2">
         <button
           type="button"
-          class="focus-ring flex w-full items-center gap-2 rounded-lg border border-storm/20 bg-deep/30 px-3 py-2 text-left text-sm text-silver transition-[background-color,border-color,color] duration-200 hover:border-ice/25 hover:bg-twilight/35 hover:text-ice"
+          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
           :title="paletteShortcut"
           :aria-label="`Open command palette (${paletteShortcut})`"
           @click="commandPaletteOpen = true"
         >
           <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
           <template v-if="!sidebarCollapsed">
-            <div class="min-w-0 flex-1">
-              <div class="truncate font-medium">Command Palette</div>
-              <div class="mt-0.5 text-[11px] text-storm">Jump between pages and host actions.</div>
-            </div>
+            <span class="min-w-0 flex-1 truncate font-medium">Command Palette</span>
             <kbd class="rounded-md border border-storm/20 bg-void/60 px-2 py-1 text-[11px] text-storm">
               {{ isMac ? '\u2318K' : 'Ctrl+K' }}
             </kbd>
@@ -105,23 +99,17 @@
           </kbd>
         </button>
       </div>
-      <button
-        type="button"
-        class="focus-ring mx-3 mb-2 flex items-center justify-center rounded-lg p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
-        @click="toggleCollapse"
-        :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-        :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-      >
-        <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
-      </button>
-      <div class="border-t border-storm/20 p-3 text-sm text-storm" :class="{ 'text-center': sidebarCollapsed }">
-        <template v-if="!sidebarCollapsed">
-          <div>{{ displayVersion }} &middot; Polaris</div>
-          <div class="mt-1 text-xs text-storm/50">{{ paletteShortcut }}</div>
-        </template>
-        <template v-else>
-          <div class="text-xs">v{{ compactVersion }}</div>
-        </template>
+      <div class="flex items-center border-t border-storm/20 px-3 py-2 text-xs text-storm" :class="sidebarCollapsed ? 'justify-center' : 'justify-between'">
+        <span :title="`${displayVersion} · Polaris`">{{ sidebarCollapsed ? `v${compactVersion}` : displayVersion }}</span>
+        <button
+          type="button"
+          class="focus-ring inline-flex items-center justify-center rounded-lg p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
+          @click="toggleCollapse"
+          :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+          :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+        >
+          <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-180': sidebarCollapsed }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"/></svg>
+        </button>
       </div>
     </aside>
 

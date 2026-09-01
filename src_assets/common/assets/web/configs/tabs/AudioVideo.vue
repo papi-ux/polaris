@@ -185,9 +185,9 @@ const autoQualityPartial = computed(() => (
   config.value.adaptive_bitrate_enabled === 'enabled'
 ))
 const autoQualityBadge = computed(() => {
-  if (autoQualityEnabled.value) return 'Enabled'
-  if (autoQualityPartial.value) return 'Partial'
-  return 'Manual'
+  if (autoQualityEnabled.value) return 'Auto Quality: On'
+  if (autoQualityPartial.value) return 'Auto Quality: Partial'
+  return 'Auto Quality: Manual'
 })
 const autoQualityTone = computed(() => {
   if (autoQualityEnabled.value) return 'border-success/30 bg-success/10 text-success'
@@ -423,7 +423,7 @@ function updateDisplayPlannerSource(event) {
               :key="mode.id"
               class="overflow-hidden rounded-lg border transition"
               :class="[
-                streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40',
+                streamDisplayMode === mode.id ? 'border-ice bg-ice/12 shadow-[0_0_0_1px_rgba(224,230,237,0.18)]' : 'border-storm/40 bg-deep/40',
                 mode.available === false
                   ? 'opacity-60'
                   : 'hover:border-storm/70',
@@ -437,7 +437,16 @@ function updateDisplayPlannerSource(event) {
                 @click="setStreamDisplayMode(mode.id)"
               >
                 <span class="flex items-start justify-between gap-3">
-                  <span class="text-sm font-semibold text-silver">{{ mode.title }}</span>
+                  <span class="flex min-w-0 items-center gap-2.5">
+                    <span
+                      class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border"
+                      :class="streamDisplayMode === mode.id ? 'border-ice bg-ice text-void' : 'border-storm/50 bg-void/30 text-transparent'"
+                      aria-hidden="true"
+                    >
+                      <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="m5 12 4 4L19 6" /></svg>
+                    </span>
+                    <span class="text-sm font-semibold text-silver">{{ mode.title }}</span>
+                  </span>
                   <span
                     class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow"
                     :class="mode.id === 'headless_stream'
@@ -460,31 +469,29 @@ function updateDisplayPlannerSource(event) {
                   Unavailable: {{ mode.unavailableReason }}
                 </span>
               </button>
-              <details class="border-t border-storm/20 bg-void/20 px-4 py-2.5 text-xs text-storm">
-                <summary class="focus-ring cursor-pointer select-none font-medium text-silver">Technical details</summary>
-                <p class="mt-2 leading-relaxed">{{ mode.technical }}</p>
-              </details>
             </article>
           </div>
 
-          <div class="rounded-2xl border border-storm/30 bg-deep/40 p-4" data-capture-path-explainer>
-            <div class="section-kicker">How capture works</div>
-            <p class="mt-2 text-sm leading-relaxed text-storm">
-              Polaris selects capture automatically after the mode is chosen. GPU-native keeps frames on the GPU.
-              System-memory capture copies through RAM and can be the intended safe path on AMD and Intel.
-              Mission Control reports what actually happened.
-            </p>
-          </div>
-
-          <details class="rounded-2xl border border-storm/30 bg-deep/30 p-4" data-planned-stream-modes>
-            <summary class="focus-ring cursor-pointer select-none text-sm font-semibold text-silver">Planned modes</summary>
-            <div class="mt-3 grid gap-3 sm:grid-cols-2">
-              <div v-for="mode in plannedStreamDisplayModes" :key="mode.title" class="rounded-lg border border-storm/20 bg-void/20 p-3">
-                <div class="text-sm font-medium text-silver">{{ mode.title }}</div>
-                <div class="mt-1 text-xs leading-relaxed text-storm">{{ mode.copy }}</div>
+          <div class="rounded-xl border border-ice/25 bg-ice/5 p-4" data-selected-stream-path>
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <div class="section-kicker">Current path</div>
+                <h4 class="mt-1 text-base font-semibold text-silver">{{ selectedStreamDisplayMode.title }}</h4>
+                <p class="mt-2 text-sm leading-relaxed text-storm">{{ selectedStreamDisplayMode.copy }}</p>
+              </div>
+              <span class="meta-pill shrink-0 border-ice/25 bg-ice/10 text-ice">Selected</span>
+            </div>
+            <div class="mt-3 grid gap-3 lg:grid-cols-2">
+              <div class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2.5">
+                <div class="text-[11px] font-semibold text-silver">Player impact</div>
+                <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.impact }}</div>
+              </div>
+              <div class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2.5">
+                <div class="text-[11px] font-semibold text-silver">Capture path</div>
+                <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.technical }}</div>
               </div>
             </div>
-          </details>
+          </div>
 
           <div
             class="rounded-2xl border p-4 text-sm leading-relaxed"
@@ -582,146 +589,176 @@ function updateDisplayPlannerSource(event) {
             Save and restart Polaris after switching.
           </div>
 
-          <div class="settings-subtle-surface" data-linux-streaming-setup>
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div class="section-kicker">Linux Streaming Setup</div>
-                <h4 class="mt-2 text-sm font-semibold text-silver">Minimal checklist for this path</h4>
-                <div class="mt-1 text-sm leading-relaxed text-storm">
-                  Default is <strong class="text-silver">Private Stream (labwc)</strong>. Gamescope works when the host stack is ready.
-                  Only the steps for the selected path are shown.
-                </div>
-              </div>
-              <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
-            </div>
-
-            <div class="mt-4 grid gap-3 xl:grid-cols-2">
-              <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-3">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="text-sm font-semibold text-silver">{{ item.title }}</div>
-                  <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ item.status }}</span>
-                </div>
-                <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-subtle-surface">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div class="section-kicker">Nova Sync</div>
-                <div class="mt-2 text-sm leading-relaxed text-storm">{{ clientSettingsSyncCopy }}</div>
-              </div>
-              <span class="meta-pill shrink-0" :class="clientSettingsSyncTone">{{ clientSettingsSyncBadge }}</span>
-            </div>
-            <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-              <div v-for="row in clientSettingsRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
-                <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ row.label }}</div>
-                <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
-                <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="grid gap-3 xl:grid-cols-3">
-            <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-eyebrow text-accent">Isolation</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">
-                {{ isGamescopePath
-                  ? 'Gamescope Stream isolates paint in gamescope-0 (portal capture).'
-                  : 'Private Stream (labwc) keeps apps off your real desktop — the default stability target.' }}
-              </div>
-            </div>
-            <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-eyebrow text-success">GPU path</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">
-                {{ isLabwcPath
-                  ? 'GPU-native is a labwc capture preference. Force it only when diagnostics show CPU/SHM fallback.'
-                  : isGamescopePath
-                    ? 'Gamescope uses portal/PipeWire capture; labwc GPU-native flags do not apply.'
-                    : 'Capture backend follows the path (portal for mirror/dongle; KMS only if you set capture=kms).' }}
-              </div>
-            </div>
-            <div class="surface-muted p-3">
-              <div class="text-xs font-semibold uppercase tracking-eyebrow text-warning-bright">FPS target</div>
-              <div class="mt-2 text-sm leading-relaxed text-storm">A 120 FPS client target still needs the game/output to render above 60 FPS; Polaris will show the live gap on the dashboard.</div>
-            </div>
-          </div>
-
-          <details v-if="isLabwcPath" class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
+          <details class="settings-disclosure rounded-xl border border-storm/30 bg-deep/25" data-linux-path-details>
             <summary class="settings-disclosure-summary p-4">
               <div>
-                <div class="section-kicker">Advanced</div>
-                <h4 class="mt-2 text-sm font-semibold text-silver">labwc runtime flags</h4>
-                <div class="mt-1 text-sm text-storm">These keys only affect Private Stream / labwc paths. Hidden when Gamescope or host paths are selected.</div>
+                <div class="section-kicker">Advanced & diagnostics</div>
+                <h4 class="mt-1 text-sm font-semibold text-silver">Setup, client sync, and technical controls</h4>
+                <div class="mt-1 text-xs leading-relaxed text-storm">Open this when configuring a new path or investigating a stream that does not match the selected mode.</div>
               </div>
-              <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+              <svg class="settings-disclosure-chevron h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
             </summary>
 
-            <div class="grid gap-4 p-4 pt-0 xl:grid-cols-2">
-              <div class="surface-muted p-4">
-                <div class="text-sm font-medium text-silver">Hidden-output request</div>
-                <div class="mt-1 text-sm text-storm">Existing headless_mode config key. Enabled by Private Stream and Host Virtual Display.</div>
-                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_mode</div>
-                <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-eyebrow text-storm">Requested</span>
-                  <input
-                    type="checkbox"
-                    class="sr-only peer"
-                    :checked="config.headless_mode === 'enabled'"
-                    @change="config.headless_mode = $event.target.checked ? 'enabled' : 'disabled'"
-                  >
-                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-                </label>
+            <div class="space-y-3 border-t border-storm/20 p-4">
+              <div class="rounded-lg border border-storm/20 bg-void/25 p-3" data-capture-path-explainer>
+                <div class="text-sm font-semibold text-silver">How capture works</div>
+                <p class="mt-1 text-xs leading-relaxed text-storm">
+                  Polaris chooses capture after the launch mode is set. GPU-native keeps frames on the GPU; System-memory capture copies through RAM and can be the intended safe path on AMD and Intel. Mission Control reports the path actually used.
+                </p>
               </div>
 
-              <div class="surface-muted p-4">
-                <div class="text-sm font-medium text-silver">Private compositor runtime</div>
-                <div class="mt-1 text-sm text-storm">Existing linux_use_cage_compositor config key. Enabled by Private Stream and Private Stream (GPU-native).</div>
-                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_use_cage_compositor</div>
-                <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-eyebrow text-storm">Use labwc</span>
-                  <input
-                    type="checkbox"
-                    class="sr-only peer"
-                    :checked="config.linux_use_cage_compositor === 'enabled'"
-                    @change="config.linux_use_cage_compositor = $event.target.checked ? 'enabled' : 'disabled'"
-                  >
-                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-                </label>
+              <div class="settings-subtle-surface" data-linux-streaming-setup>
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div class="section-kicker">Linux Streaming Setup</div>
+                    <h4 class="mt-2 text-sm font-semibold text-silver">Minimal checklist for this path</h4>
+                    <div class="mt-1 text-sm leading-relaxed text-storm">
+                      Default is <strong class="text-silver">Private Stream (labwc)</strong>. Gamescope works when the host stack is ready.
+                      Only the steps for the selected path are shown.
+                    </div>
+                  </div>
+                  <span class="meta-pill shrink-0">{{ selectedStreamDisplayMode.title }}</span>
+                </div>
+
+                <div class="mt-4 grid gap-3 xl:grid-cols-2">
+                  <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-3">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="text-sm font-semibold text-silver">{{ item.title }}</div>
+                      <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ item.status }}</span>
+                    </div>
+                    <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
+                  </div>
+                </div>
               </div>
 
-              <div class="surface-muted p-4">
-                <div class="text-sm font-medium text-silver">GPU-native capture preference</div>
-                <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by Private Stream (GPU-native). When active, Polaris may force labwc windowed instead of hidden headless so capture can stay on the GPU if Private Stream would otherwise fall back.</div>
-                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
-                <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-eyebrow text-storm">Performance</span>
-                  <input
-                    type="checkbox"
-                    class="sr-only peer"
-                    :checked="config.linux_prefer_gpu_native_capture === 'enabled'"
-                    @change="config.linux_prefer_gpu_native_capture = $event.target.checked ? 'enabled' : 'disabled'"
-                  >
-                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-                </label>
+              <div class="settings-subtle-surface">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div class="section-kicker">Nova Sync</div>
+                    <div class="mt-2 text-sm leading-relaxed text-storm">{{ clientSettingsSyncCopy }}</div>
+                  </div>
+                  <span class="meta-pill shrink-0" :class="clientSettingsSyncTone">{{ clientSettingsSyncBadge }}</span>
+                </div>
+                <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                  <div v-for="row in clientSettingsRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
+                    <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ row.label }}</div>
+                    <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
+                    <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
+                  </div>
+                </div>
               </div>
 
-              <div class="surface-muted p-4">
-                <div class="text-sm font-medium text-silver">Capture telemetry profiling</div>
-                <div class="mt-1 text-sm text-storm">Emit timing summaries while validating capture backends.</div>
-                <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_capture_profile</div>
-                <label class="mt-4 flex items-center justify-between gap-4">
-                  <span class="text-xs uppercase tracking-eyebrow text-storm">Diagnostics</span>
-                  <input
-                    type="checkbox"
-                    class="sr-only peer"
-                    :checked="config.linux_capture_profile === 'enabled'"
-                    @change="config.linux_capture_profile = $event.target.checked ? 'enabled' : 'disabled'"
-                  >
-                  <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
-                </label>
+              <div class="grid gap-3 xl:grid-cols-3">
+                <div class="surface-muted p-3">
+                  <div class="text-xs font-semibold uppercase tracking-eyebrow text-accent">Isolation</div>
+                  <div class="mt-2 text-sm leading-relaxed text-storm">
+                    {{ isGamescopePath
+                      ? 'Gamescope Stream isolates paint in gamescope-0 (portal capture).'
+                      : 'Private Stream (labwc) keeps apps off your real desktop — the default stability target.' }}
+                  </div>
+                </div>
+                <div class="surface-muted p-3">
+                  <div class="text-xs font-semibold uppercase tracking-eyebrow text-success">GPU path</div>
+                  <div class="mt-2 text-sm leading-relaxed text-storm">
+                    {{ isLabwcPath
+                      ? 'GPU-native is a labwc capture preference. Force it only when diagnostics show CPU/SHM fallback.'
+                      : isGamescopePath
+                        ? 'Gamescope uses portal/PipeWire capture; labwc GPU-native flags do not apply.'
+                        : 'Capture backend follows the path (portal for mirror/dongle; KMS only if you set capture=kms).' }}
+                  </div>
+                </div>
+                <div class="surface-muted p-3">
+                  <div class="text-xs font-semibold uppercase tracking-eyebrow text-warning-bright">FPS target</div>
+                  <div class="mt-2 text-sm leading-relaxed text-storm">A 120 FPS client target still needs the game/output to render above 60 FPS; Polaris will show the live gap on the dashboard.</div>
+                </div>
               </div>
+
+              <details v-if="isLabwcPath" class="settings-disclosure rounded-lg border border-storm/30 bg-deep/30">
+                <summary class="settings-disclosure-summary p-4">
+                  <div>
+                    <div class="section-kicker">Advanced</div>
+                    <h4 class="mt-2 text-sm font-semibold text-silver">labwc runtime flags</h4>
+                    <div class="mt-1 text-sm text-storm">These keys only affect Private Stream / labwc paths. Hidden when Gamescope or host paths are selected.</div>
+                  </div>
+                  <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
+                </summary>
+
+                <div class="grid gap-4 p-4 pt-0 xl:grid-cols-2">
+                  <div class="surface-muted p-4">
+                    <div class="text-sm font-medium text-silver">Hidden-output request</div>
+                    <div class="mt-1 text-sm text-storm">Existing headless_mode config key. Enabled by Private Stream and Host Virtual Display.</div>
+                    <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">headless_mode</div>
+                    <label class="mt-4 flex items-center justify-between gap-4">
+                      <span class="text-xs uppercase tracking-eyebrow text-storm">Requested</span>
+                      <input
+                        type="checkbox"
+                        class="sr-only peer"
+                        :checked="config.headless_mode === 'enabled'"
+                        @change="config.headless_mode = $event.target.checked ? 'enabled' : 'disabled'"
+                      >
+                      <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                    </label>
+                  </div>
+
+                  <div class="surface-muted p-4">
+                    <div class="text-sm font-medium text-silver">Private compositor runtime</div>
+                    <div class="mt-1 text-sm text-storm">Existing linux_use_cage_compositor config key. Enabled by Private Stream and Private Stream (GPU-native).</div>
+                    <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_use_cage_compositor</div>
+                    <label class="mt-4 flex items-center justify-between gap-4">
+                      <span class="text-xs uppercase tracking-eyebrow text-storm">Use labwc</span>
+                      <input
+                        type="checkbox"
+                        class="sr-only peer"
+                        :checked="config.linux_use_cage_compositor === 'enabled'"
+                        @change="config.linux_use_cage_compositor = $event.target.checked ? 'enabled' : 'disabled'"
+                      >
+                      <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                    </label>
+                  </div>
+
+                  <div class="surface-muted p-4">
+                    <div class="text-sm font-medium text-silver">GPU-native capture preference</div>
+                    <div class="mt-1 text-sm text-storm">Existing linux_prefer_gpu_native_capture config key. Enabled by Private Stream (GPU-native). When active, Polaris may force labwc windowed instead of hidden headless so capture can stay on the GPU if Private Stream would otherwise fall back.</div>
+                    <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_prefer_gpu_native_capture</div>
+                    <label class="mt-4 flex items-center justify-between gap-4">
+                      <span class="text-xs uppercase tracking-eyebrow text-storm">Performance</span>
+                      <input
+                        type="checkbox"
+                        class="sr-only peer"
+                        :checked="config.linux_prefer_gpu_native_capture === 'enabled'"
+                        @change="config.linux_prefer_gpu_native_capture = $event.target.checked ? 'enabled' : 'disabled'"
+                      >
+                      <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                    </label>
+                  </div>
+
+                  <div class="surface-muted p-4">
+                    <div class="text-sm font-medium text-silver">Capture telemetry profiling</div>
+                    <div class="mt-1 text-sm text-storm">Emit timing summaries while validating capture backends.</div>
+                    <div class="mt-3 rounded bg-deep/60 px-2 py-1 font-mono text-xs text-storm">linux_capture_profile</div>
+                    <label class="mt-4 flex items-center justify-between gap-4">
+                      <span class="text-xs uppercase tracking-eyebrow text-storm">Diagnostics</span>
+                      <input
+                        type="checkbox"
+                        class="sr-only peer"
+                        :checked="config.linux_capture_profile === 'enabled'"
+                        @change="config.linux_capture_profile = $event.target.checked ? 'enabled' : 'disabled'"
+                      >
+                      <div class="relative h-5 w-9 rounded-full bg-storm/40 transition-colors peer-checked:bg-accent after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full"></div>
+                    </label>
+                  </div>
+                </div>
+              </details>
+
+              <details class="rounded-lg border border-storm/30 bg-deep/30 p-4" data-planned-stream-modes>
+                <summary class="focus-ring cursor-pointer select-none text-sm font-semibold text-silver">Planned modes</summary>
+                <div class="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div v-for="mode in plannedStreamDisplayModes" :key="mode.title" class="rounded-lg border border-storm/20 bg-void/20 p-3">
+                    <div class="text-sm font-medium text-silver">{{ mode.title }}</div>
+                    <div class="mt-1 text-xs leading-relaxed text-storm">{{ mode.copy }}</div>
+                  </div>
+                </div>
+              </details>
             </div>
           </details>
         </div>

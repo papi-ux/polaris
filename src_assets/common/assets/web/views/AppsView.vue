@@ -10,7 +10,7 @@
         </div>
         <p class="page-subtitle">Publish, order, import, and launch apps from one surface.</p>
       </div>
-      <div class="page-actions">
+      <div class="page-actions library-page-actions">
         <div class="page-actions-secondary">
           <Button variant="outline" @click="showImport = !showImport">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-8-4-4m0 0L8 8m4-4v12"/></svg>
@@ -308,7 +308,7 @@
               Favorite, recent, and launch-ready apps are ranked first so the Library feels familiar from the couch while still showing broken entries that need attention.
             </InfoHint>
           </div>
-          <p class="mt-2 text-sm text-storm">Moonlight-style shortcuts with Polaris host context, launch health, and repair paths in one rail.</p>
+          <p class="mt-2 text-sm text-storm">Favorites and recently played games, ready to launch.</p>
         </div>
         <span class="meta-pill">{{ quickLaunchReadyCount }} ready / {{ quickLaunchRailApps.length }} shown</span>
       </div>
@@ -320,8 +320,8 @@
           class="surface-subtle overflow-hidden p-0"
           :data-quick-launch-app="app.uuid"
         >
-          <div class="flex min-h-full gap-3 p-3">
-            <div class="relative h-24 w-16 shrink-0 overflow-hidden rounded-lg border border-storm/20 bg-void/60">
+          <div class="flex min-h-full gap-4 p-3">
+            <div class="relative h-28 w-20 shrink-0 overflow-hidden rounded-lg border border-storm/20 bg-void/60">
               <img
                 v-if="app['image-path']"
                 :src="'./api/covers/image?name=' + encodeURIComponent(app.name)"
@@ -349,7 +349,7 @@
               <div class="mt-auto pt-4">
                 <button
                   v-if="quickLaunchDetails(app).running"
-                  class="focus-ring dashboard-action-button dashboard-action-button-secondary w-full justify-center"
+                  class="focus-ring dashboard-action-button dashboard-action-button-secondary library-quick-launch-action"
                   type="button"
                   :disabled="actionDisabled"
                   @click="requestCloseApp(app)"
@@ -358,7 +358,7 @@
                 </button>
                 <a
                   v-else-if="quickLaunchDetails(app).launchReady"
-                  class="focus-ring dashboard-action-button dashboard-action-button-primary w-full justify-center no-underline"
+                  class="focus-ring dashboard-action-button dashboard-action-button-primary library-quick-launch-action no-underline"
                   :href="launchHref(app)"
                   @click.prevent="launchApp($event, app)"
                 >
@@ -366,7 +366,7 @@
                 </a>
                 <button
                   v-else
-                  class="focus-ring dashboard-action-button dashboard-action-button-secondary w-full justify-center"
+                  class="focus-ring dashboard-action-button dashboard-action-button-secondary library-quick-launch-action"
                   type="button"
                   @click="editApp(app)"
                 >
@@ -1301,9 +1301,6 @@ function quickLaunchDetails(app) {
 function quickLaunchStateLabel(app) {
   const details = quickLaunchDetails(app)
   if (details.running) return 'Live'
-  if (details.favorite && details.recent) return 'Favorite recent'
-  if (details.favorite) return 'Favorite'
-  if (details.recent) return 'Recent'
   if (details.launchReady) return 'Ready'
   return 'Needs fix'
 }

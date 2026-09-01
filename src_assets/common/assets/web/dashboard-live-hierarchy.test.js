@@ -60,5 +60,7 @@ describe('DashboardView hierarchy', () => {
     expectBefore(dashboard, 'data-dashboard-idle-hero', 'data-dashboard-play-rail')
     expect(dashboard).toContain('launchRecentApp(app)')
     expect(dashboard).toContain("$t('dashboard.open_priority_fix')")
+    expect(dashboard).toContain('dashboard-play-cover-fallback')
+    expect(dashboard).toContain(':alt="`${app.name} artwork`"')
   })
 })

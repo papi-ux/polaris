@@ -313,7 +313,7 @@
               <span v-if="lastSessionChip" class="data-pill">{{ lastSessionChip }}</span>
               <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
               <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
-              <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality' : 'Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
+              <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality: On' : 'Auto Quality: Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
             </div>
           </div>
           <div class="flex shrink-0 flex-col items-end gap-3">
@@ -430,11 +430,14 @@
           <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
             <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
               <div class="dashboard-play-cover">
-                <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" class="h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
+                <div class="dashboard-play-cover-fallback" aria-hidden="true">
+                  <svg class="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+                </div>
+                <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" :alt="`${app.name} artwork`" class="relative h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
               </div>
               <div class="mt-2 min-w-0">
                 <div class="truncate text-xs font-semibold text-silver">{{ app.name }}</div>
-                <div class="truncate font-mono text-[9px] uppercase tracking-eyebrow text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
+                <div class="truncate font-mono text-[11px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
               </div>
               <button
                 type="button"
