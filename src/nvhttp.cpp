@@ -988,7 +988,7 @@ namespace nvhttp {
         return std::any_of(
           allowed_modes.begin(),
           allowed_modes.end(),
-          [candidate](const auto &mode) {
+          [candidate](const nlohmann::json &mode) {
             return mode.is_string() && mode.get_ref<const std::string &>() == candidate;
           }
         );

@@ -92,7 +92,7 @@ namespace virtual_display {
    * Checks in priority order:
    *   1. EVDI module loaded and libevdi available
    *   2. Wayland compositor with headless output support
-   *   3. kscreen-doctor installed (fallback)
+   *   3. kscreen-doctor installed with a configured streaming output (fallback)
    */
   bool is_available();
 
@@ -106,13 +106,17 @@ namespace virtual_display {
   bool is_available_fresh();
 
   /**
-   * @brief Detect which backend is available and preferred.
-   * @return The best available backend for virtual display creation.
+   * @brief Detect which backend is installed and preferred.
+   * @return The best detected backend. Call backend_has_required_configuration()
+   *         before treating it as ready for virtual display creation.
    */
   backend_e detect_backend();
 
   /** @brief Detect the preferred backend after bypassing the probe cache. */
   backend_e detect_backend_fresh();
+
+  /** @brief Select the highest-priority detected backend from one probe snapshot. */
+  backend_e select_preferred_backend(bool evdi_ready, bool wayland_ready, bool kscreen_installed);
 
   /**
    * @brief Return whether a detected backend has the configuration it needs to create a display.
