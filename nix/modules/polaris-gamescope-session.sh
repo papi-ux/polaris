@@ -458,7 +458,10 @@ publish_nested_primary_child_exit() (
 
 run_nested_primary_child() {
   local steam_pid="" steam_rc=0 wait_pid="" steam_spawn_started=0
-  local primary_parent_pid="$PPID" primary_parent_start_time=""
+  local primary_reaper_pid="$PPID" primary_reaper_start_time=""
+  local primary_reaper_parent_pid="" primary_reaper_executable=""
+  local primary_gamescope_pid="" primary_gamescope_start_time=""
+  local primary_gamescope_executable=""
   local primary_group_id="" primary_session_id=""
   local primary_wrapper_pid="$$" primary_wrapper_start_time=""
   local primary_fence_armed=0
@@ -543,31 +546,58 @@ run_nested_primary_child() {
     fi
     exit 0
   }
-  # setpriv gives this wrapper a parent-death signal from Gamescope. If the
-  # compositor itself dies, retire the direct Steam launcher rather than
-  # leaving a keepalive orphan behind.
+  # setpriv gives this wrapper a parent-death signal from Gamescope's
+  # gamescopereaper. The reaper has its own parent-death signal from Gamescope,
+  # so compositor death is relayed through the exact upstream ownership chain.
   trap nested_primary_parent_gone TERM INT HUP
   # PR_SET_PDEATHSIG cannot report a parent that died before setpriv armed the
-  # signal. Re-prove the immediate parent after exec and before Steam starts;
-  # a later parent death is covered by the already-installed trap above.
-  if ! polaris_headless_gamescope_pid "$primary_parent_pid"; then
+  # signal. Re-prove Gamescope -> gamescopereaper -> this wrapper after exec and
+  # before Steam starts; later parent death is covered by the installed trap.
+  if ! polaris_gamescope_reaper_pid "$primary_reaper_pid"; then
     trap - TERM INT HUP
-    echo "polaris-gamescope-session: primary child lost its exact Gamescope parent before Steam launch" >&2
+    echo "polaris-gamescope-session: primary child lost its exact Gamescope reaper before Steam launch" >&2
     return 1
   fi
-  if polaris_process_fields "$primary_parent_pid" 2>/dev/null; then
-    primary_parent_start_time="$POLARIS_PROCESS_START_TIME"
-    [ "$POLARIS_PROCESS_PGID" = "$primary_parent_pid" ] \
-      && [ "$POLARIS_PROCESS_SESSION_ID" = "$primary_parent_pid" ] || {
-        trap - TERM INT HUP
-        echo "polaris-gamescope-session: primary child refused a non-private Gamescope parent" >&2
-        return 1
-      }
+  if polaris_process_fields "$primary_reaper_pid" 2>/dev/null; then
+    primary_reaper_start_time="$POLARIS_PROCESS_START_TIME"
+    primary_reaper_parent_pid="$POLARIS_PROCESS_PPID"
     primary_group_id="$POLARIS_PROCESS_PGID"
     primary_session_id="$POLARIS_PROCESS_SESSION_ID"
-    if ! polaris_headless_gamescope_pid "$primary_parent_pid" \
-        || ! polaris_process_fields "$primary_parent_pid" \
-        || [ "$POLARIS_PROCESS_START_TIME" != "$primary_parent_start_time" ] \
+    primary_reaper_executable="$POLARIS_GAMESCOPE_REAPER_EXECUTABLE"
+    primary_gamescope_pid="$primary_reaper_parent_pid"
+    if ! polaris_headless_gamescope_pid "$primary_gamescope_pid" \
+        || ! polaris_process_fields "$primary_gamescope_pid"; then
+      trap - TERM INT HUP
+      echo "polaris-gamescope-session: primary child lost its exact Gamescope generation before Steam launch" >&2
+      return 1
+    fi
+    primary_gamescope_start_time="$POLARIS_PROCESS_START_TIME"
+    primary_gamescope_executable="$POLARIS_GAMESCOPE_EXECUTABLE"
+    [ "$POLARIS_PROCESS_PGID" = "$primary_gamescope_pid" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$primary_gamescope_pid" ] \
+      && [ "$primary_group_id" = "$primary_gamescope_pid" ] \
+      && [ "$primary_session_id" = "$primary_gamescope_pid" ] || {
+        trap - TERM INT HUP
+        echo "polaris-gamescope-session: primary child refused a non-private Gamescope chain" >&2
+        return 1
+      }
+    if ! polaris_gamescope_reaper_pid "$primary_reaper_pid" \
+        || ! polaris_gamescope_executables_match \
+          "$POLARIS_GAMESCOPE_REAPER_EXECUTABLE" "$primary_reaper_executable" \
+        || ! polaris_process_fields "$primary_reaper_pid" \
+        || [ "$POLARIS_PROCESS_START_TIME" != "$primary_reaper_start_time" ] \
+        || [ "$POLARIS_PROCESS_PPID" != "$primary_gamescope_pid" ] \
+        || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ]; then
+      trap - TERM INT HUP
+      echo "polaris-gamescope-session: primary child lost its private Gamescope reaper before Steam launch" >&2
+      return 1
+    fi
+    if ! polaris_headless_gamescope_pid "$primary_gamescope_pid" \
+        || ! polaris_gamescope_executables_match \
+          "$POLARIS_GAMESCOPE_EXECUTABLE" "$primary_gamescope_executable" \
+        || ! polaris_process_fields "$primary_gamescope_pid" \
+        || [ "$POLARIS_PROCESS_START_TIME" != "$primary_gamescope_start_time" ] \
         || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
         || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ]; then
       trap - TERM INT HUP
@@ -575,6 +605,7 @@ run_nested_primary_child() {
       return 1
     fi
     if ! polaris_process_fields "$primary_wrapper_pid" \
+        || [ "$POLARIS_PROCESS_PPID" != "$primary_reaper_pid" ] \
         || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
         || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ] \
         || [ "$POLARIS_PROCESS_STATE" = Z ]; then
