@@ -1,8 +1,8 @@
-# Launch modes and capture paths
+# Choose where games run
 
-Which launch mode to pick for your GPU and setup, what each mode feels like in practice, and how to check what your stream is actually using.
+Choose what appears on the stream, whether the host monitors are used, and which option best fits your gaming PC.
 
-Every card under **Configuration → Audio/Video → Launch mode and capture path** answers three questions at once: where your game runs, how Polaris grabs the frames, and whether your monitors get touched. You do not need to configure those pieces separately. Pick the card that matches your setup and Polaris wires the rest.
+Every card under **Settings → Audio/Video → Where games run** starts with what the player will experience. Pick the card that matches your setup and Polaris chooses the capture method automatically. Backend names such as labwc, PipeWire, DMA-BUF, and SHM remain available under **Technical details**, but you do not need to understand them to make a safe choice.
 
 ## Which mode should I use?
 
@@ -20,7 +20,7 @@ Every card under **Configuration → Audio/Video → Launch mode and capture pat
 | Several family members at once | Not available yet, see [Family Mode](#family-mode-isolated) |
 
 > [!TIP]
-> When in doubt, pick **Private Stream**. Switching is one click in the web UI and fully reversible, and Polaris always [shows you what it actually started](#check-what-your-stream-is-using), so experimenting is cheap.
+> When in doubt, pick **Private Stream** when its card is available. A grey card names the missing host tool instead of accepting a launch that cannot work. Select the card and save it for the next launch; an active stream may keep the previous mode until relaunch. You can change the saved choice back later, and Mission Control [shows you what Polaris actually started](#check-what-your-stream-is-using).
 
 ## The modes
 
@@ -29,7 +29,7 @@ Every card under **Configuration → Audio/Video → Launch mode and capture pat
 Your game runs in its own invisible session. Your desktop never flickers, resizes, or shows the game, and nothing you do on the desktop leaks into the stream. It even works on a host with no monitor attached and nobody logged in: pair it with `sudo -H polaris --setup-host --enable-headless-boot` for a console-style box that streams straight from power-on ([Bazzite guide](bazzite.md#headless-boot-and-deck-images) has the walkthrough).
 
 - **Best for:** most setups, and the preferred path when you stream to a handheld.
-- **One caveat:** the built-in Desktop entry looks like an empty screen until you launch something into it. That is normal, not broken. Right-click the empty screen to open the session menu, or use Mirror Desktop if you actually wanted your desktop.
+- **One caveat:** it requires both `labwc` and `wlr-randr` on the host `PATH`; the card is greyed out and names the missing tool until both are ready. Once running, the built-in Desktop entry looks like an empty screen until you launch something into it. That is normal, not broken. Right-click the empty screen to open the session menu, or use Mirror Desktop if you actually wanted your desktop.
 
 ### Private Stream (GPU-native)
 
@@ -47,7 +47,7 @@ Gamescope is the small compositor Valve built for the Steam Deck's Game Mode: it
 
 ### Family Mode (isolated)
 
-Not selectable yet. The card is visible so the option has a home in the UI, but the per-person isolated sessions it describes are reserved for community work that has not landed ([PR #226](https://github.com/papi-ux/polaris/pull/226)). No dates promised. The closest thing today is Private Stream, which isolates the stream from the desktop but not one family member from another.
+Not selectable yet. It appears under the collapsed **Planned modes** section so the idea has a home without looking launch-ready. The per-person isolated sessions it describes are reserved for community work that has not landed ([PR #226](https://github.com/papi-ux/polaris/pull/226)). No dates promised. The closest thing today is Private Stream, which isolates the stream from the desktop but not one family member from another.
 
 ### Host Virtual Display
 
@@ -58,14 +58,14 @@ Adds an extra screen to your real desktop, sized to match the client, and stream
 
 ### Headless EVDI
 
-Not selectable yet. Reserved for the same community work as Family Mode ([PR #226](https://github.com/papi-ux/polaris/pull/226)).
+Not selectable yet. It appears under **Planned modes** and is reserved for the same community work as Family Mode ([PR #226](https://github.com/papi-ux/polaris/pull/226)).
 
 ### Headless Dongle
 
-For hosts with a dummy plug (an HDMI or DisplayPort dongle): the desktop moves onto the dongle and the real panel goes dark, so someone in the room sees a black screen while you stream.
+For hosts with a dummy plug (an HDMI or DisplayPort dongle): the desktop moves onto the dongle. In **Privacy** mode the real panel goes dark after one-time portal approval is saved; Polaris keeps it on during that approval so the picker remains visible. In **Off** mode the panel stays primary and the desktop extends onto the dongle.
 
-- **Best for:** a dedicated streaming PC in a shared room, where privacy matters.
-- **One caveat:** it needs the dongle plugged in and both a streaming output and a primary output configured. Clients also cannot switch a Headless Dongle host into another mode for a single launch, because the layout is physical.
+- **Best for:** a dedicated streaming PC, with optional panel blanking when privacy matters.
+- **One caveat:** it needs the dongle plugged in and both a streaming output and a primary output configured. Headless Dongle itself is a host setting, so a client cannot turn that physical swap on for one game. A client may choose another supported mode for one launch; Polaris leaves the dongle swap inactive for that session and restores the host default afterward.
 
 ### Mirror Desktop
 
@@ -100,14 +100,23 @@ Two practical settings:
 
 Same advice as AMD: Private Stream, Mesa VA-API, expect SHM capture. On an Arc discrete card, set `adapter_name` so Polaris picks the Arc GPU rather than the integrated one.
 
+## How capture works
+
+Polaris selects the capture path after the launch mode is chosen:
+
+- **GPU-native** keeps frames on the GPU from the game to the encoder. It is the fastest path when the host supports it.
+- **System-memory** copies frames through RAM. That can be the intended safe path on AMD and Intel, not a failure.
+
+You do not need to select either path separately. Mission Control reports the path that actually ran, and Doctor uses the measured result when explaining a bottleneck.
+
 ## Check what your stream is using
 
 Mission Control shows the mode Polaris actually started and the capture path it is using, and never pretends: if you asked for one thing and the host could only do another, both are shown.
 
 Reading the capture path:
 
-- **GPU-native** means frames stay on the GPU from game to encoder. This is the fast path.
-- **SHM** means frames take a copy through system memory. Slower, not broken, and the expected state on AMD and Intel hosts.
+- **GPU-native** means frames stay on the GPU from game to encoder.
+- **SHM** means frames take a copy through system memory. Slower, not broken, and often the expected state on AMD and Intel hosts.
 
 If a stream misbehaves, the exact reason codes and what to do about them are in [Troubleshooting](troubleshooting.md#vaapi-or-software-encode-fallback).
 
@@ -115,7 +124,7 @@ If a stream misbehaves, the exact reason codes and what to do about them are in 
 
 You do not need to change the host mode to briefly share your desktop. Any Moonlight-protocol client can add `mirrorDesktop=1` to a launch request to mirror the desktop for that single session, and Nova exposes this as a launch option. The host configuration is untouched.
 
-The exception is Headless Dongle: its layout is physical, so per-launch overrides are ignored there.
+Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session; the saved host setting returns on the next normal launch.
 
 > [!TIP]
 > The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.

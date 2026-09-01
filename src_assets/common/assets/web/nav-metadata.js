@@ -15,10 +15,10 @@ export const NAV_SECTION_DEFINITIONS = [
     labelKey: 'navbar.group_streaming',
     fallbackLabel: 'Streaming',
     items: [
-      { commandId: 'dashboard', to: '/', icon: ICONS.dashboard, labelKey: 'navbar.dashboard', fallbackLabel: 'Dashboard', aliases: ['home', 'overview', 'session', 'stream status'], description: 'Open the live control surface and active session overview.' },
+      { commandId: 'dashboard', to: '/', icon: ICONS.dashboard, labelKey: 'navbar.dashboard', fallbackLabel: 'Mission Control', aliases: ['dashboard', 'home', 'overview', 'session', 'stream status'], description: 'Open the live control surface and active session overview.' },
       { commandId: 'apps', to: '/apps', icon: ICONS.apps, labelKey: 'navbar.library', fallbackLabel: 'Library', aliases: ['apps', 'applications', 'games', 'game library', 'streamable apps'], description: 'Browse, edit, and import games or streamable applications.' },
-      { commandId: 'pairing', to: '/pin', icon: ICONS.pairing, labelKey: 'navbar.pairing', fallbackLabel: 'Pairing', aliases: ['pin', 'devices', 'clients', 'moonlight pairing'], description: 'Pair Moonlight clients and review trusted devices.' },
-      { commandId: 'browser-stream', to: '/browser-stream', icon: ICONS.browserStream, labelKey: 'navbar.browser_stream', fallbackLabel: 'Browser Stream', aliases: ['moonlight', 'stream', 'streaming', 'webrtc', 'web stream'], description: 'Open browser streaming tools using familiar Moonlight streaming terms.' },
+      { commandId: 'pairing', to: '/pin', icon: ICONS.pairing, labelKey: 'navbar.pairing', fallbackLabel: 'Devices', aliases: ['pairing', 'pin', 'devices', 'clients', 'moonlight pairing'], description: 'Pair clients and review devices trusted to use this host.' },
+      { commandId: 'browser-stream', to: '/browser-stream', icon: ICONS.browserStream, labelKey: 'navbar.browser_stream', fallbackLabel: 'Browser Stream', badge: 'Experimental', aliases: ['moonlight', 'stream', 'streaming', 'webrtc', 'web stream'], description: 'Try experimental browser streaming over WebTransport and WebCodecs.' },
     ],
   },
   {
@@ -35,8 +35,8 @@ export const NAV_SECTION_DEFINITIONS = [
     labelKey: 'navbar.group_support',
     fallbackLabel: 'Support',
     items: [
-      { commandId: 'info', to: '/info', icon: ICONS.info, labelKey: 'navbar.system', fallbackLabel: 'System', aliases: ['system', 'about', 'version', 'host info'], description: 'Review host system information and version details.' },
-      { commandId: 'troubleshooting', to: '/troubleshooting', icon: ICONS.troubleshooting, labelKey: 'navbar.troubleshoot', fallbackLabel: 'Troubleshooting', aliases: ['logs', 'diagnostics', 'support', 'runtime'], description: 'Open logs, runtime diagnostics, and support tools.' },
+      { commandId: 'info', to: '/info', icon: ICONS.info, labelKey: 'navbar.system', fallbackLabel: 'System & Updates', aliases: ['system', 'about', 'version', 'updates', 'host info'], description: 'Review host information, release status, and updates.' },
+      { commandId: 'troubleshooting', to: '/troubleshooting', icon: ICONS.troubleshooting, labelKey: 'navbar.troubleshoot', fallbackLabel: 'Doctor & Support', aliases: ['doctor', 'troubleshooting', 'logs', 'diagnostics', 'support', 'runtime'], description: 'Review Doctor evidence, logs, diagnostics, and support tools.' },
     ],
   },
 ]
@@ -48,7 +48,6 @@ function translate(t, key, fallback) {
 }
 
 export function createNavSections(t) {
-  let shortcut = 1
   return NAV_SECTION_DEFINITIONS.map((section) => {
     const sectionLabel = translate(t, section.labelKey, section.fallbackLabel)
     return {
@@ -59,7 +58,6 @@ export function createNavSections(t) {
         id: item.commandId,
         label: translate(t, item.labelKey, item.fallbackLabel),
         sectionLabel,
-        shortcut: shortcut++,
       })),
     }
   })

@@ -101,14 +101,26 @@ onMounted(async () => {
         </div>
 
         <div
-          v-if="presentation.kind === 'unconfigured' && vdStatus.backend === 'kscreen-doctor'"
+          v-if="vdStatus.backend_detected && vdStatus.backend === 'kscreen-doctor' && !vdStatus.available"
           class="mt-3 rounded-xl border border-storm/20 bg-deep/40 p-3 text-sm text-storm space-y-2"
+          data-kscreen-configuration
         >
           <div class="text-silver font-medium text-xs uppercase tracking-wide">kscreen-doctor Configuration</div>
           <p>
-            This backend manages an existing output instead of creating one. Set
-            <code class="text-ice bg-void/50 px-1 rounded">linux_streaming_output</code>
-            in the Audio/Video settings above (Output Name) or in the config file so Polaris knows which output it may reconfigure.
+            This backend manages an existing connector instead of creating one. Choose the exact connector Polaris may reconfigure, then save.
+          </p>
+          <label class="block text-xs font-medium text-storm">
+            Streaming connector
+            <input
+              v-model="config.linux_streaming_output"
+              data-kscreen-streaming-output
+              type="text"
+              class="mt-1 w-full rounded-lg border border-storm/40 bg-void/40 px-3 py-2 font-mono text-sm text-silver focus:border-ice focus:outline-none"
+              placeholder="e.g. HDMI-A-2"
+            />
+          </label>
+          <p class="text-xs">
+            This saves as <code class="text-ice bg-void/50 px-1 rounded">linux_streaming_output</code>. It is separate from the general capture Output Name field.
           </p>
         </div>
 

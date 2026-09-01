@@ -252,9 +252,12 @@ resolve_script = workflow_run_script(
 )
 resolve_tokens = shell_tokens(resolve_script)
 reject_heredoc(resolve_tokens, "exact-source resolver")
+if resolve_job.count("      version: ${{ steps.source.outputs.version }}\n") != 1:
+    raise AssertionError("exact-source resolver must publish one source-derived version output")
 for required_source_command in (
     ["set", "-euo", "pipefail"],
     ["source_commit=$(git rev-parse HEAD)"],
+    ["build_version=$(grep -Pom1 '^project\\(Polaris VERSION \\K[^ ]+' CMakeLists.txt)"],
     ["git", "fetch", "--no-tags", "--force", "origin", "refs/tags/${release_tag}:refs/tags/${release_tag}"],
     ["tag_commit=$(git rev-parse refs/tags/${release_tag}^{commit})"],
     [
@@ -263,11 +266,17 @@ for required_source_command in (
         "exit", "1", ";", "fi",
     ],
     [
+        "if", "[", "$release_tag", "!=", "v${build_version}", "]", ";", "then", ";",
+        "echo", "Release tag $release_tag does not match source version v${build_version}", ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
+    [
         "if", "[", "$tag_commit", "!=", "$source_commit", "]", ";", "then", ";",
         "echo", "Release tag $release_tag resolves to $tag_commit, not checked-out source $source_commit", ">", "&", "2", ";",
         "exit", "1", ";", "fi",
     ],
     ["echo", "commit=$source_commit", ">>", "$GITHUB_OUTPUT"],
+    ["echo", "version=$build_version", ">>", "$GITHUB_OUTPUT"],
 ):
     require_command(resolve_tokens, required_source_command, "exact-source resolver")
 
@@ -296,6 +305,17 @@ if len(re.findall(r"(?m)^  fedora-rpm-build:\s*$", workflow)) != 1:
     raise AssertionError("release workflow must define exactly one Fedora RPM job")
 fedora_clang_job = workflow_job(workflow, "fedora-clang-build")
 fedora_job = workflow_job(workflow, "fedora-rpm-build")
+ubuntu_job = workflow_job(workflow, "ubuntu-build")
+
+expected_package_version_env = (
+    "      BRANCH: ${{ github.head_ref || inputs.release_tag || github.ref_name }}\n"
+    "      BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}\n"
+)
+for job_name, job in (("Ubuntu DEB", ubuntu_job), ("Fedora RPM", fedora_job)):
+    if job.count(expected_package_version_env) != 1:
+        raise AssertionError(
+            f"{job_name} CI must bind BRANCH and BUILD_VERSION to the exact resolved source"
+        )
 
 fedora_clang_configure = workflow_step(fedora_clang_job, "Configure")
 fedora_clang_tokens = workflow_run_tokens(fedora_clang_configure)
@@ -335,6 +355,43 @@ for option, expected in (
         expected,
         "Fedora RPM CI",
     )
+
+package_identity_contracts = (
+    (
+        "Ubuntu DEB",
+        ubuntu_job,
+        "Smoke test Ubuntu DEB package",
+        (
+            'package_name="$(dpkg-deb --field "$deb_path" Package)"',
+            'package_version="$(dpkg-deb --field "$deb_path" Version)"',
+            'package_architecture="$(dpkg-deb --field "$deb_path" Architecture)"',
+            'package_identity="${package_name}|${package_version}|${package_architecture}"',
+            'expected_package_identity="polaris|${BUILD_VERSION}|amd64"',
+            "printf '%s\\n' \"$package_identity\" | tee build/cpack_artifacts/package-identity.txt",
+            'if [ "$package_identity" != "$expected_package_identity" ]; then',
+            'echo "Ubuntu package identity mismatch: expected \'$expected_package_identity\', got \'$package_identity\'" >&2',
+        ),
+    ),
+    (
+        "Fedora RPM",
+        fedora_job,
+        "Smoke test Fedora RPM package",
+        (
+            'package_identity="$(rpm -qp --qf \'%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}\\n\' "$rpm_path")"',
+            'expected_package_identity="polaris|${BUILD_VERSION}|1|x86_64"',
+            "printf '%s\\n' \"$package_identity\" | tee build/cpack_artifacts/package-identity.txt",
+            'if [ "$package_identity" != "$expected_package_identity" ]; then',
+            'echo "Fedora package identity mismatch: expected \'$expected_package_identity\', got \'$package_identity\'" >&2',
+        ),
+    ),
+)
+for job_name, job, step_name, required_lines in package_identity_contracts:
+    smoke_script = workflow_run_script(workflow_step(job, step_name))
+    for required_line in required_lines:
+        if required_line not in smoke_script:
+            raise AssertionError(
+                f"{job_name} smoke must execute exact package identity check: {required_line}"
+            )
 fedora_strategy = re.search(
     r"(?ms)^    strategy:\n.*?(?=^    env:\n)",
     fedora_job,

@@ -12,14 +12,14 @@ const labels = {
   'navbar.group_streaming': 'Streaming',
   'navbar.group_host': 'Host',
   'navbar.group_support': 'Support',
-  'navbar.dashboard': 'Dashboard',
+  'navbar.dashboard': 'Mission Control',
   'navbar.library': 'Library',
-  'navbar.pairing': 'Pairing',
+  'navbar.pairing': 'Devices',
   'navbar.browser_stream': 'Browser Stream',
   'navbar.settings': 'Settings',
   'navbar.security': 'Security',
-  'navbar.system': 'System',
-  'navbar.troubleshoot': 'Troubleshooting',
+  'navbar.system': 'System & Updates',
+  'navbar.troubleshoot': 'Doctor & Support',
   'command_palette.actions.audio': 'Audio settings',
   'command_palette.actions.display': 'Display settings',
   'command_palette.actions.ai': 'AI optimization',
@@ -40,7 +40,7 @@ describe('navigation metadata shell', () => {
     const items = flattenNavItems(sections)
 
     expect(sections.map((section) => section.key)).toEqual(['streaming', 'host', 'support'])
-    expect(items.map((item) => item.shortcut)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+    expect(items.every((item) => item.shortcut === undefined)).toBe(true)
     expect(items.map((item) => item.to)).toEqual([
       '/',
       '/apps',
@@ -57,6 +57,7 @@ describe('navigation metadata shell', () => {
       label: 'Browser Stream',
       sectionLabel: 'Streaming',
       commandId: 'browser-stream',
+      badge: 'Experimental',
     })
     expect(browserStream.aliases).toEqual(expect.arrayContaining(['moonlight', 'stream', 'streaming', 'webrtc']))
   })
@@ -80,7 +81,10 @@ describe('command action registry', () => {
 
     expect(filterCommandActions(actions, 'moonlight')[0]).toMatchObject({ id: 'browser-stream', hint: '/browser-stream' })
     expect(filterCommandActions(actions, 'game library')[0]).toMatchObject({ id: 'apps', hint: '/apps' })
+    expect(filterCommandActions(actions, 'pairing')[0]).toMatchObject({ id: 'pairing', label: 'Devices' })
+    expect(filterCommandActions(actions, 'doctor')[0]).toMatchObject({ id: 'troubleshooting', label: 'Doctor & Support' })
     expect(scoreCommandAction(actions.find((action) => action.id === 'apps'), 'library')).toBeGreaterThan(0)
+    expect(actions.filter((action) => action.group === 'Navigation').every((action) => action.icon === '→')).toBe(true)
   })
 
   it('requires confirmation before running dangerous host palette actions', async () => {

@@ -24,6 +24,14 @@ function linuxConfig(overrides = {}) {
     ai_enabled: 'disabled',
     max_bitrate: 0,
     client_settings_available: true,
+    stream_display_mode_options: [
+      'headless_stream',
+      'windowed_stream',
+      'gamescope_stream',
+      'host_virtual_display',
+      'headless_dongle',
+      'desktop_display',
+    ].map((value) => ({ value, available: true })),
     ...overrides,
   }
 }
@@ -65,6 +73,63 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Manual')
     expect(checklist.text()).toContain('labwc GPU-native capture')
     expect(checklist.text()).toContain('Safe default')
+  })
+
+  it('puts player impact first and keeps backend vocabulary in optional technical details', () => {
+    const wrapper = mountAudioVideo()
+    const picker = wrapper.find('[data-stream-display-mode-picker]')
+    const privateMode = picker.findAll('article').find((card) => card.text().includes('Private Stream'))
+    const dongleMode = picker.findAll('article').find((card) => card.text().includes('Headless Dongle'))
+
+    expect(wrapper.text()).toContain('Where games run')
+    expect(wrapper.text()).toContain('Polaris chooses the capture method automatically')
+    expect(privateMode).toBeDefined()
+    expect(privateMode.find('button').text()).toContain('without touching the host monitors')
+    expect(privateMode.find('button').text()).not.toContain('labwc')
+    expect(privateMode.find('details').text()).toContain('Technical details')
+    expect(privateMode.find('details').text()).toContain('Runtime: labwc')
+    expect(dongleMode.find('button').text()).toContain('Privacy mode blanks the real panel after the one-time portal approval is saved')
+    expect(dongleMode.find('button').text()).toContain('the panel stays on during that approval')
+    expect(dongleMode.find('button').text()).toContain('Off mode keeps the real panel active')
+    expect(wrapper.find('[data-capture-path-explainer]').text()).toContain('System-memory capture copies through RAM')
+  })
+
+  it('keeps planned modes visible without adding selectable launch buttons', () => {
+    const wrapper = mountAudioVideo()
+    const pickerButtons = wrapper.find('[data-stream-display-mode-picker]').findAll('button')
+    const planned = wrapper.find('[data-planned-stream-modes]')
+
+    expect(pickerButtons).toHaveLength(6)
+    expect(planned.text()).toContain('Family Mode (isolated)')
+    expect(planned.text()).toContain('Headless EVDI')
+    expect(pickerButtons.some((button) => button.text().includes('Family Mode'))).toBe(false)
+    expect(pickerButtons.some((button) => button.text().includes('Headless EVDI'))).toBe(false)
+  })
+
+  it('greys out modes the host reports unavailable and preserves the host reason', async () => {
+    const config = linuxConfig({
+      linux_stream_mode: 'desktop_display',
+      stream_display_mode_options: [
+        { value: 'headless_stream', available: true },
+        { value: 'windowed_stream', available: true },
+        {
+          value: 'gamescope_stream',
+          available: false,
+          unavailable_reason: 'Gamescope is not installed on this host.',
+        },
+        { value: 'host_virtual_display', available: true },
+        { value: 'headless_dongle', available: true },
+        { value: 'desktop_display', available: true },
+      ],
+    })
+    const wrapper = mountAudioVideo(config)
+    const gamescope = wrapper.findAll('article').find((card) => card.text().includes('Gamescope Stream'))
+
+    expect(gamescope).toBeDefined()
+    expect(gamescope.find('button').attributes('disabled')).toBeDefined()
+    expect(gamescope.text()).toContain('Unavailable: Gamescope is not installed on this host.')
+    await gamescope.find('button').trigger('click')
+    expect(config.linux_stream_mode).toBe('desktop_display')
   })
 
   it('reflects selected display pairing and GPU-native copy intent', () => {

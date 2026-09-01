@@ -11,8 +11,8 @@ import {
   applyStreamDisplayModeToConfig,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
+  resolveStreamDisplayModeAvailability,
   resolveStreamDisplayRuntimeNotice,
-  streamDisplayModeAvailable,
 } from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
 
@@ -56,88 +56,86 @@ watch(() => config.value.fallback_mode, (mode) => {
   plannerSourceMode.value = mode || ''
 }, { flush: 'sync' })
 
-// Path cards mirror the stream_path registry (runtime × capture × topology).
-// Reserved paths (gamescope ownership, Family Mode, EVDI/dongle) stay visible but disabled
-// so new modes plug into the same UI without reshaping the selector.
-const streamDisplayModes = [
+// Primary copy answers the player's question first. Backend vocabulary stays in the
+// technical disclosure, where it remains available for diagnosis without making
+// labwc/wlroots/portal knowledge a prerequisite for choosing a mode.
+const streamDisplayModeDefinitions = [
   {
     id: 'headless_stream',
     title: 'Private Stream',
-    badge: 'labwc',
-    available: true,
+    badge: 'Recommended',
     group: 'private',
-    copy: 'Private labwc compositor — apps stay off your physical desktop. Preferred handheld path.',
-    note: 'Runtime: labwc · Capture: wlroots · Topology: leave host alone',
+    copy: 'Recommended. Runs the game on a private display without touching the host monitors.',
+    impact: 'Best for handheld play and most gaming PCs.',
+    technical: 'Runtime: labwc · Capture: wlroots · Host display layout unchanged',
   },
   {
     id: 'windowed_stream',
     title: 'Private Stream (GPU-native)',
-    badge: 'labwc + GPU',
-    available: true,
+    badge: 'GPU-native',
     group: 'private',
-    copy: 'Same labwc private session, but prefer GPU-native capture (may run windowed under the host compositor).',
-    note: 'Runtime: labwc · Capture: wlroots · Prefer DMA-BUF',
+    copy: 'The same private session, keeping frames on the GPU when the host supports it.',
+    impact: 'Best for supported NVIDIA hosts; it may appear as a window on the host.',
+    technical: 'Runtime: labwc · Capture: wlroots · Prefers DMA-BUF GPU frames',
   },
   {
     id: 'gamescope_stream',
     title: 'Gamescope Stream',
-    badge: 'gamescope',
-    available: true,
+    badge: 'Deck-style',
     group: 'private',
-    copy: 'Attach to idle gamescope-0 or spawn an owned headless Gamescope. Portal/PipeWire captures the session.',
-    note: 'Runtime: gamescope · Capture: portal · Needs gamescope on PATH. Prefer idle unit attach on lea.',
-  },
-  {
-    id: 'family_isolated',
-    title: 'Family Mode (isolated)',
-    badge: 'Reserved',
-    available: false,
-    group: 'experimental',
-    copy: 'Per-app isolated labwc so the host desktop stays usable (community Family Mode / PR #226).',
-    note: 'Runtime: labwc (nested) · Capture: wlroots · Topology: leave host alone',
+    copy: 'Runs one game in a Steam Deck-style session that Polaris owns.',
+    impact: 'Best for Steam-first hosts. Gamescope must be installed.',
+    technical: 'Runtime: Gamescope · Capture: portal/PipeWire · Uses an idle or Polaris-owned compositor',
   },
   {
     id: 'host_virtual_display',
     title: 'Host Virtual Display',
-    badge: 'Host',
-    available: true,
+    badge: 'Adds a display',
     group: 'host',
-    copy: 'Host-visible virtual output (EVDI / wlr / kscreen). Desktop may rearrange.',
-    note: 'Runtime: none · Topology: host virtual',
-  },
-  {
-    id: 'headless_evdi',
-    title: 'Headless EVDI',
-    badge: 'Reserved',
-    available: false,
-    group: 'experimental',
-    copy: 'Promote desktop onto EVDI and capture it (community headless display / PR #226).',
-    note: 'Runtime: none · Capture: EVDI · Topology: swap primary',
+    copy: 'Adds a display to the host desktop and sizes it for the streaming client.',
+    impact: 'The physical desktop stays usable, but windows and icons may rearrange.',
+    technical: 'Runtime: host desktop · Backend: EVDI, wlroots, or KScreen · Adds and removes an output',
   },
   {
     id: 'headless_dongle',
     title: 'Headless Dongle',
-    badge: 'Physical dummy',
-    available: true,
+    badge: 'Host default',
     group: 'host',
-    copy: 'Swap the desktop onto a physical dummy-plug (HDMI/DP dongle), blank the real panel (privacy), capture via host portal ScreenCast.',
-    note: 'Runtime: none · Capture: portal (default; KMS optional) · Needs streaming + primary outputs + auto_manage',
+    copy: 'Moves the desktop onto a physical dummy plug. Privacy mode blanks the real panel after the one-time portal approval is saved; the panel stays on during that approval.',
+    impact: 'Configure it once as the host default; Off mode keeps the real panel active, and clients cannot enable it for one game.',
+    technical: 'Runtime: host desktop · Capture: portal by default, optional KMS · Requires streaming and primary outputs plus automatic display management',
   },
   {
     id: 'desktop_display',
     title: 'Mirror Desktop',
-    badge: 'Host / portal',
-    available: true,
+    badge: 'Visible on host',
     group: 'host',
-    copy: 'Stream the host desktop via portal. Prefer Private Stream (labwc) or Gamescope Stream for isolated apps.',
-    note: 'Runtime: none · Capture: portal · Host desktop only',
+    copy: 'Streams everything visible on the host desktop, including notifications.',
+    impact: 'Best for remote-desktop use and quick checks; it provides no privacy isolation.',
+    technical: 'Runtime: host desktop · Capture: portal/PipeWire · Uses the existing physical display',
+  },
+]
+
+const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => ({
+  ...mode,
+  ...resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options),
+})))
+
+const plannedStreamDisplayModes = [
+  {
+    title: 'Family Mode (isolated)',
+    copy: 'Separate per-person game sessions. Planned community work; not selectable yet.',
+  },
+  {
+    title: 'Headless EVDI',
+    copy: 'A dedicated headless EVDI desktop path. Planned community work; not selectable yet.',
   },
 ]
 
 const streamDisplayMode = computed(() => resolveStreamDisplayMode(config.value))
 
 const selectedStreamDisplayMode = computed(() => (
-  streamDisplayModes.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes[0]
+  streamDisplayModes.value.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes.value[0]
 ))
 
 const clientSettingsSync = computed(() => resolveClientSettingsSync(config.value))
@@ -344,7 +342,7 @@ async function refreshDongleOutputs() {
 }
 
 function setStreamDisplayMode(mode) {
-  if (!streamDisplayModeAvailable(mode)) {
+  if (streamDisplayModes.value.find((candidate) => candidate.id === mode)?.available !== true) {
     return
   }
   if (mode !== 'headless_dongle') {
@@ -400,17 +398,17 @@ function updateDisplayPlannerSource(event) {
   <div id="audio-video" class="config-page">
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Capture</div>
-        <h3 class="settings-section-title">Launch mode and capture path</h3>
+        <div class="section-kicker">Streaming</div>
+        <h3 class="settings-section-title">Where games run</h3>
       </div>
 
       <div class="settings-inline-stack">
         <div v-if="isLinux" class="settings-subtle-surface space-y-4">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <div class="section-kicker">Stream Display Mode</div>
+              <div class="section-kicker">Launch mode</div>
               <div class="mt-2 text-sm text-storm">
-                Choose where Polaris starts and captures Linux sessions.
+                Choose what appears on the stream and whether the host monitors are used. Polaris chooses the capture method automatically.
                 <a href="https://papi-ux.com/docs/launch-modes/" target="_blank" class="focus-ring text-ice hover:underline">Launch mode guide</a>
               </div>
             </div>
@@ -419,42 +417,74 @@ function updateDisplayPlannerSource(event) {
             </span>
           </div>
 
-          <div class="grid gap-3 xl:grid-cols-2">
-            <button
+          <div class="grid gap-3 xl:grid-cols-2" data-stream-display-mode-picker>
+            <article
               v-for="mode in streamDisplayModes"
               :key="mode.id"
-              type="button"
-              class="focus-ring min-h-[112px] rounded-lg border p-4 text-left transition"
-              :disabled="mode.available === false"
+              class="overflow-hidden rounded-lg border transition"
               :class="[
                 streamDisplayMode === mode.id ? 'border-ice/60 bg-ice/10' : 'border-storm/40 bg-deep/40',
                 mode.available === false
-                  ? 'cursor-not-allowed opacity-60'
+                  ? 'opacity-60'
                   : 'hover:border-storm/70',
               ]"
-              @click="setStreamDisplayMode(mode.id)"
             >
-              <div class="flex items-start justify-between gap-3">
-                <div class="text-sm font-semibold text-silver">{{ mode.title }}</div>
-                <span
-                  class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow"
-                  :class="mode.id === 'headless_stream'
-                    ? 'border-success/30 bg-success/10 text-success'
-                    : mode.id === 'windowed_stream'
-                      ? 'border-warning/40 bg-warning/10 text-warning-bright'
-                      : mode.id === 'gamescope_stream'
-                        ? 'border-ice/30 bg-ice/10 text-ice'
-                        : 'border-storm/40 bg-storm/10 text-storm'"
-                >
-                  {{ mode.badge }}
+              <button
+                type="button"
+                class="focus-ring min-h-[132px] w-full p-4 text-left"
+                :disabled="mode.available === false"
+                :aria-pressed="streamDisplayMode === mode.id"
+                @click="setStreamDisplayMode(mode.id)"
+              >
+                <span class="flex items-start justify-between gap-3">
+                  <span class="text-sm font-semibold text-silver">{{ mode.title }}</span>
+                  <span
+                    class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow"
+                    :class="mode.id === 'headless_stream'
+                      ? 'border-success/30 bg-success/10 text-success'
+                      : mode.id === 'windowed_stream'
+                        ? 'border-warning/40 bg-warning/10 text-warning-bright'
+                        : mode.id === 'gamescope_stream'
+                          ? 'border-ice/30 bg-ice/10 text-ice'
+                          : 'border-storm/40 bg-storm/10 text-storm'"
+                  >
+                    {{ mode.badge }}
+                  </span>
                 </span>
-              </div>
-              <div class="mt-3 text-sm leading-relaxed text-storm">{{ mode.copy }}</div>
-              <div class="mt-3 rounded-md border border-storm/20 bg-void/25 px-2.5 py-2 text-xs leading-relaxed text-storm">
-                {{ mode.note }}
-              </div>
-            </button>
+                <span class="mt-3 block text-sm leading-relaxed text-silver">{{ mode.copy }}</span>
+                <span class="mt-2 block text-xs leading-relaxed text-storm">{{ mode.impact }}</span>
+                <span
+                  v-if="mode.available === false"
+                  class="mt-2 block text-xs font-medium leading-relaxed text-warning-bright"
+                >
+                  Unavailable: {{ mode.unavailableReason }}
+                </span>
+              </button>
+              <details class="border-t border-storm/20 bg-void/20 px-4 py-2.5 text-xs text-storm">
+                <summary class="focus-ring cursor-pointer select-none font-medium text-silver">Technical details</summary>
+                <p class="mt-2 leading-relaxed">{{ mode.technical }}</p>
+              </details>
+            </article>
           </div>
+
+          <div class="rounded-2xl border border-storm/30 bg-deep/40 p-4" data-capture-path-explainer>
+            <div class="section-kicker">How capture works</div>
+            <p class="mt-2 text-sm leading-relaxed text-storm">
+              Polaris selects capture automatically after the mode is chosen. GPU-native keeps frames on the GPU.
+              System-memory capture copies through RAM and can be the intended safe path on AMD and Intel.
+              Mission Control reports what actually happened.
+            </p>
+          </div>
+
+          <details class="rounded-2xl border border-storm/30 bg-deep/30 p-4" data-planned-stream-modes>
+            <summary class="focus-ring cursor-pointer select-none text-sm font-semibold text-silver">Planned modes</summary>
+            <div class="mt-3 grid gap-3 sm:grid-cols-2">
+              <div v-for="mode in plannedStreamDisplayModes" :key="mode.title" class="rounded-lg border border-storm/20 bg-void/20 p-3">
+                <div class="text-sm font-medium text-silver">{{ mode.title }}</div>
+                <div class="mt-1 text-xs leading-relaxed text-storm">{{ mode.copy }}</div>
+              </div>
+            </div>
+          </details>
 
           <div
             class="rounded-2xl border p-4 text-sm leading-relaxed"
@@ -534,7 +564,7 @@ function updateDisplayPlannerSource(event) {
                   v-model="config.headless_swap_mode"
                   class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
                 >
-                  <option value="privacy">privacy — dongle primary, blank panel</option>
+                  <option value="privacy">privacy — blank panel after portal approval</option>
                   <option value="off">off — extended, panel stays primary</option>
                 </select>
               </label>

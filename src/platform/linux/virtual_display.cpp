@@ -1574,10 +1574,7 @@ namespace virtual_display {
   // ---------------------------------------------------------------------------
   namespace kscreen {
 
-    static bool is_available() {
-      if (!backend_has_required_configuration(backend_e::KSCREEN_DOCTOR, config::video.linux_display.streaming_output)) {
-        return false;
-      }
+    static bool is_installed() {
       return exec_cmd_rc("which kscreen-doctor >/dev/null 2>&1") == 0;
     }
 
@@ -1770,6 +1767,19 @@ namespace virtual_display {
     }
   }
 
+  backend_e select_preferred_backend(bool evdi_ready, bool wayland_ready, bool kscreen_installed) {
+    if (evdi_ready) {
+      return backend_e::EVDI;
+    }
+    if (wayland_ready) {
+      return backend_e::WAYLAND_WLR;
+    }
+    if (kscreen_installed) {
+      return backend_e::KSCREEN_DOCTOR;
+    }
+    return backend_e::NONE;
+  }
+
   namespace {
     backend_e detect_backend_with_cache_policy(
       bool force_refresh,
@@ -1804,19 +1814,16 @@ namespace virtual_display {
         evdi_library_ready = evdi::load_library();
         evdi_can_create = evdi_library_ready && evdi::can_create();
       }
-      if (evdi_can_create) {
-        backend = backend_e::EVDI;
-      }
-
-      // Priority 2: Wayland compositor headless outputs
-      if (backend == backend_e::NONE && wayland_wlr::is_available()) {
-        backend = backend_e::WAYLAND_WLR;
-      }
+      // Probe lower-priority candidates only when no earlier backend is ready.
+      const bool wayland_ready = !evdi_can_create && wayland_wlr::is_available();
 
       // Priority 3: kscreen-doctor (KDE Plasma)
-      if (backend == backend_e::NONE && kscreen::is_available()) {
-        backend = backend_e::KSCREEN_DOCTOR;
-      }
+      // Detect the installed backend even before its connector is configured.
+      // is_available() separately applies backend_has_required_configuration(),
+      // so launch admission stays fail-closed while the UI can explain how to
+      // make this fallback ready.
+      const bool kscreen_installed = !evdi_can_create && !wayland_ready && kscreen::is_installed();
+      backend = select_preferred_backend(evdi_can_create, wayland_ready, kscreen_installed);
 
       cached_backend = backend;
       cached_backend_time = now;

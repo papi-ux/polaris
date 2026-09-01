@@ -13,7 +13,65 @@
 
 #include <gtest/gtest.h>
 
+#ifdef __linux__
+  #include <filesystem>
+  #include <fstream>
+  #include <stdexcept>
+  #include <sys/stat.h>
+  #include <unistd.h>
+
+namespace {
+  class ScopedPrivateRuntimePath {
+  public:
+    ScopedPrivateRuntimePath() {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+
+      char path_template[] = "/tmp/polaris-private-runtime-XXXXXX";
+      const char *created = mkdtemp(path_template);
+      if (!created) {
+        throw std::runtime_error("failed to create private-runtime test directory");
+      }
+      directory = created;
+
+      for (const char *binary : {"labwc", "wlr-randr"}) {
+        const auto path = std::filesystem::path {directory} / binary;
+        std::ofstream script {path};
+        script << "#!/bin/sh\nexit 0\n";
+        script.close();
+        if (!script || chmod(path.c_str(), 0700) != 0) {
+          throw std::runtime_error("failed to create private-runtime test executable");
+        }
+      }
+      if (setenv("PATH", directory.c_str(), 1) != 0) {
+        throw std::runtime_error("failed to set private-runtime test PATH");
+      }
+    }
+
+    ~ScopedPrivateRuntimePath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+    std::string directory;
+  };
+}
+#endif
+
 TEST(LaunchModeContractTests, HostHeadlessConfigurationWinsOverPerGameVirtualDisplayPreference) {
+#ifdef __linux__
+  ScopedPrivateRuntimePath runtime_path;
+#endif
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
     true,
     "Indiana Jones and the Great Circle",
@@ -32,6 +90,9 @@ TEST(LaunchModeContractTests, HostHeadlessConfigurationWinsOverPerGameVirtualDis
 }
 
 TEST(LaunchModeContractTests, SteamBigPictureOnHeadlessHostExplainsPrivateDesktopSafety) {
+#ifdef __linux__
+  ScopedPrivateRuntimePath runtime_path;
+#endif
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
     true,
     "Steam Big Picture",
@@ -62,6 +123,29 @@ TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHo
   #include <src/platform/linux/stream_display_policy.h>
 
 namespace {
+  class ScopedPath {
+  public:
+    explicit ScopedPath(const char *replacement) {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+      setenv("PATH", replacement, 1);
+    }
+
+    ~ScopedPath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+  };
+
   std::unique_ptr<crypto::named_cert_t> launch_client_cert() {
     auto cert = std::make_unique<crypto::named_cert_t>();
     cert->name = "topology-test-client";
@@ -89,6 +173,28 @@ namespace {
     }
     return args;
   }
+}
+
+TEST(LaunchModeContractTests, RecommendationAlwaysBelongsToAllowedModesWithoutPrivateRuntime) {
+  ScopedPath path {"/polaris-test/no-runtime-binaries"};
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests(
+    false,
+    "Control",
+    false,
+    false
+  );
+
+  EXPECT_EQ(contract.at("recommended_mode"), "desktop_display");
+  bool recommendation_allowed = false;
+  for (const auto &mode : contract.at("allowed_modes")) {
+    recommendation_allowed = recommendation_allowed ||
+      mode == contract.at("recommended_mode");
+  }
+  EXPECT_TRUE(recommendation_allowed);
+  EXPECT_NE(
+    contract.at("mode_reason").get<std::string>().find("not launch-ready"),
+    std::string::npos
+  );
 }
 
 // The client-settings POST validator used to hardcode four ids while
@@ -141,9 +247,9 @@ TEST(LaunchModeContractTests, ReservedAndUnknownIdsAreRejectedWithGuidance) {
 }
 
 TEST(SessionStreamMode, AcceptsRegistryModesItCanRunPerSession) {
-  // Deterministic on CI: these registry paths are statically available and do
-  // not depend on host probes (gamescope/EVDI availability is environmental,
-  // so those ids are deliberately not asserted here).
+  ScopedPrivateRuntimePath runtime_path;
+  // Private modes are accepted only when both binaries used by their launch
+  // path are executable. The fixture makes that capability deterministic.
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("headless_stream"), "headless_stream");
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("windowed_stream"), "windowed_stream");
   EXPECT_EQ(nvhttp::accepted_session_stream_mode_for_tests("desktop_display"), "desktop_display");

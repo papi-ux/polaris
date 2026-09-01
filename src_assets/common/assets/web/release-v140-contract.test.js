@@ -12,35 +12,35 @@ const expectedAssets = [
 
 const currentChangelog = () => {
   const changelog = read('docs/changelog.md')
-  const start = changelog.indexOf('## v1.3.14 - 2026-08-26')
+  const start = changelog.indexOf('## v1.4.0 - 2026-09-01')
   const end = changelog.indexOf('## v1.3.13 - 2026-08-22')
   expect(start).toBeGreaterThanOrEqual(0)
   expect(end).toBeGreaterThan(start)
   return changelog.slice(start, end)
 }
 
-const installBlocks = () => [...read('docs/release-notes/v1.3.14.md').matchAll(/```bash\n([\s\S]*?)\n```/g)]
+const installBlocks = () => [...read('docs/release-notes/v1.4.0.md').matchAll(/```bash\n([\s\S]*?)\n```/g)]
   .map((match) => match[1])
   .filter((block) => block.includes('wget --output-document='))
 
-describe('v1.3.14 release contract', () => {
-  it('moves every current release identity to v1.3.14', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.3.14')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.3.14"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain('usr/bin/polaris-1.3.14')
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.3.14-1|x86_64'")
-    expect(read('src_assets/common/assets/web/packaging-contracts.test.js')).toContain("'polaris|1.3.14-1|x86_64'")
+describe('v1.4.0 release contract', () => {
+  it('moves every current release identity to v1.4.0', () => {
+    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.0')
+    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.0"')
+    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain('usr/bin/polaris-1.4.0')
+    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.0-1|x86_64'")
+    expect(read('src_assets/common/assets/web/packaging-contracts.test.js')).toContain("'polaris|1.4.0-1|x86_64'")
   })
 
-  it('retires v1.3.13 to a historical contract and makes v1.3.14 current', () => {
+  it('retires v1.3.13 to a historical contract and makes v1.4.0 current', () => {
     expect(read('src_assets/common/assets/web/release-v1313-contract.test.js')).toContain("describe('historical v1.3.13 release contract'")
     const gate = read('scripts/check-public-docs.sh')
-    expect(gate).toContain('docs/release-notes/v1.3.14.md')
-    expect(gate).toContain('"## v1.3.14 - 2026-08-26"')
+    expect(gate).toContain('docs/release-notes/v1.4.0.md')
+    expect(gate).toContain('"## v1.4.0 - 2026-09-01"')
   })
 
-  it('publishes only the approved v1.3.14 scope', () => {
-    const release = `${currentChangelog()}\n${read('docs/release-notes/v1.3.14.md')}`
+  it('publishes only the approved v1.4.0 scope', () => {
+    const release = `${currentChangelog()}\n${read('docs/release-notes/v1.4.0.md')}`
     for (const fact of [
       'frame-pacing',
       'apply_recovery_profile_next_launch',
@@ -51,28 +51,49 @@ describe('v1.3.14 release contract', () => {
       'automatic rollback',
       'Doctor v2',
       'Steam Input',
-      'Nova v1.3.9',
+      'Nova v1.4.0',
     ]) {
       expect(release, `release must include: ${fact}`).toContain(fact)
     }
     for (const excluded of [
-      'High FPS',
       'history_safe',
       'durable next-launch recovery profile',
-      '#532',
-      'Mirror desktop mode',
+      'AI Auto Quality Preference',
     ]) {
       expect(release, `release must exclude: ${excluded}`).not.toContain(excluded)
     }
   })
 
-  it('pins all four install commands to v1.3.14 and preserves platform safety', () => {
+  it('keeps the approved Heroic acceptance gate after release-note conflict resolution', () => {
+    const notes = read('docs/release-notes/v1.4.0.md')
+    expect(notes).toContain('one affected native or Flatpak GOG/Epic title')
+    expect(notes).toContain('approved host/account')
+    expect(notes).not.toContain('one native GOG title and one Flatpak Epic title')
+  })
+
+  it('binds Web launch-mode cards to the same host capability registry as launch', () => {
+    const configHttp = read('src/confighttp.cpp')
+    const audioVideo = read('src_assets/common/assets/web/configs/tabs/AudioVideo.vue')
+
+    expect(configHttp).toContain('stream_display_policy::mode_options(vd_available)')
+    expect(configHttp).toContain('output_tree["stream_display_mode_options"]')
+    expect(audioVideo).toContain('resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)')
+  })
+
+  it('keeps the Doctor navigation name in every shipped English locale', () => {
+    for (const locale of ['en.json', 'en_US.json', 'en_GB.json']) {
+      const strings = JSON.parse(read(`src_assets/common/assets/web/public/assets/locale/${locale}`))
+      expect(strings.navbar.troubleshoot, locale).toBe('Doctor & Support')
+    }
+  })
+
+  it('pins all four install commands to v1.4.0 and preserves platform safety', () => {
     const blocks = installBlocks()
     expect(blocks).toHaveLength(4)
     for (const asset of expectedAssets) {
       const matches = blocks.filter((block) => block.includes(`/${asset}`))
       expect(matches, `one command block for ${asset}`).toHaveLength(1)
-      expect(matches[0]).toContain(`releases/download/v1.3.14/${asset}`)
+      expect(matches[0]).toContain(`releases/download/v1.4.0/${asset}`)
       expect(matches[0]).toContain('sudo -H polaris --setup-host')
     }
 
@@ -93,7 +114,7 @@ describe('v1.3.14 release contract', () => {
     expect(steamOs).toContain('sudo steamos-readonly enable || exit $?')
     expect(steamOs).toContain('systemctl --user enable --now polaris')
 
-    const notes = read('docs/release-notes/v1.3.14.md')
+    const notes = read('docs/release-notes/v1.4.0.md')
     const listed = [...new Set(notes.match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? [])]
     expect(listed.sort()).toEqual(expectedAssets)
   })

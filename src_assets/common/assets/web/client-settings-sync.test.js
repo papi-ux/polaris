@@ -4,6 +4,7 @@ import {
   labelForStreamDisplayMode,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
+  resolveStreamDisplayModeAvailability,
   resolveStreamDisplayRuntimeNotice,
   streamDisplayModeAvailable,
   stripClientSettingsResponseOnly,
@@ -38,10 +39,9 @@ describe('client settings sync helpers', () => {
     })).toBe('desktop_display')
   })
 
-  it('registers gamescope_stream as selectable and maps private runtimes on apply', () => {
-    // Client-side allow-list: gamescope is selectable (host still probes PATH).
-    // Family/EVDI remain reserved until those paths ship.
-    expect(streamDisplayModeAvailable('gamescope_stream')).toBe(true)
+  it('maps private runtimes on apply while catalog-less availability stays fail closed', () => {
+    expect(streamDisplayModeAvailable('gamescope_stream')).toBe(false)
+    expect(streamDisplayModeAvailable('desktop_display')).toBe(true)
     expect(streamDisplayModeAvailable('family_isolated')).toBe(false)
     expect(streamDisplayModeAvailable('headless_evdi')).toBe(false)
     expect(labelForStreamDisplayMode('gamescope_stream')).toBe('Gamescope Stream')
@@ -66,6 +66,35 @@ describe('client settings sync helpers', () => {
     // Explicit kms is preserved for CAP_SYS_ADMIN hosts.
     const dongleKms = applyStreamDisplayModeToConfig({ capture: 'kms' }, 'headless_dongle')
     expect(dongleKms.capture).toBe('kms')
+  })
+
+  it('uses the host mode catalog as launch-mode availability authority', () => {
+    const options = [
+      {
+        value: 'gamescope_stream',
+        available: false,
+        unavailable_reason: 'Gamescope is not installed on this host.',
+      },
+      { value: 'desktop_display', available: true },
+    ]
+
+    expect(resolveStreamDisplayModeAvailability('gamescope_stream', options)).toEqual({
+      available: false,
+      unavailableReason: 'Gamescope is not installed on this host.',
+    })
+    expect(resolveStreamDisplayModeAvailability('desktop_display', options)).toEqual({
+      available: true,
+      unavailableReason: '',
+    })
+    expect(resolveStreamDisplayModeAvailability('host_virtual_display', options)).toEqual({
+      available: false,
+      unavailableReason: 'This mode was not advertised by this host.',
+    })
+
+    // Missing authority fails closed for runtime/display mutations; Desktop remains
+    // the recovery path because it does not create or rearrange a display.
+    expect(resolveStreamDisplayModeAvailability('gamescope_stream', undefined).available).toBe(false)
+    expect(resolveStreamDisplayModeAvailability('desktop_display', undefined).available).toBe(true)
   })
 
   it('normalizes stale capture and topology fields when switching stream paths', () => {
@@ -250,6 +279,7 @@ describe('client settings sync helpers', () => {
       runtime_effective_headless: true,
       runtime_gpu_native_override_active: false,
       stream_display_mode: 'Private Stream',
+      stream_display_mode_options: [{ value: 'gamescope_stream', available: false }],
       stream_path_id: 'headless_stream',
       stream_path_label: 'Private Stream',
       client_settings_available: true,
