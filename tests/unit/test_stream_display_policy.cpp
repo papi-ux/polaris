@@ -11,9 +11,59 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
+  class ScopedPrivateRuntimePath {
+  public:
+    ScopedPrivateRuntimePath() {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+
+      char path_template[] = "/tmp/polaris-stream-policy-runtime-XXXXXX";
+      const char *created = mkdtemp(path_template);
+      if (!created) {
+        throw std::runtime_error("failed to create stream-policy runtime test directory");
+      }
+      directory = created;
+
+      for (const char *binary : {"labwc", "wlr-randr"}) {
+        const auto path = std::filesystem::path {directory} / binary;
+        std::ofstream script {path};
+        script << "#!/bin/sh\nexit 0\n";
+        script.close();
+        if (!script || chmod(path.c_str(), 0700) != 0) {
+          throw std::runtime_error("failed to create stream-policy runtime test executable");
+        }
+      }
+      if (setenv("PATH", directory.c_str(), 1) != 0) {
+        throw std::runtime_error("failed to set stream-policy runtime test PATH");
+      }
+    }
+
+    ~ScopedPrivateRuntimePath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+    std::string directory;
+  };
+
   struct LinuxDisplayPolicyGuard {
     LinuxDisplayPolicyGuard():
         headless_mode {config::video.linux_display.headless_mode},
@@ -222,6 +272,7 @@ TEST(StreamDisplayPolicyTests, HostVirtualCaptureFollowsTheVirtualDisplayBackend
 }
 
 TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
+  ScopedPrivateRuntimePath runtime_path;
   LinuxDisplayPolicyGuard guard;
   std::string error;
 
@@ -239,6 +290,7 @@ TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
 }
 
 TEST(StreamDisplayPolicyTests, ReapplyingHeadlessSelectionClearsStaleCompanionState) {
+  ScopedPrivateRuntimePath runtime_path;
   LinuxDisplayPolicyGuard guard;
   auto &linux_display = config::video.linux_display;
 
