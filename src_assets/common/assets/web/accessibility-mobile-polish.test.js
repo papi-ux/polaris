@@ -21,6 +21,10 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(app).toContain(':aria-label="`Open command palette (${paletteShortcut})`"')
     expect(app).toContain(':aria-label="sidebarCollapsed ? \'Expand sidebar\' : \'Collapse sidebar\'"')
     expect(app).toContain('aria-hidden="true" v-html="item.icon"')
+    expect(app).toContain('item.badge ? `${item.label}, ${item.badge}` : item.label')
+    expect(app).not.toContain('{{ item.shortcut }}')
+    expect(app).not.toContain('parseInt(e.key)')
+    expect(themeToggle).toContain('>Appearance</span>')
   })
 
   it('keeps the mobile shell keyboard navigable with a landmark skip target and menu state', () => {

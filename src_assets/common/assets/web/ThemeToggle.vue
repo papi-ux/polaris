@@ -80,8 +80,9 @@ function moveFocus(delta) {
         :style="{ background: activeTheme.preview.accent }"
         aria-hidden="true"
       ></span>
-      <span v-if="!props.collapsed" class="truncate">{{ activeTheme.shortLabel }}</span>
-      <svg v-if="!props.collapsed" class="ml-auto h-3 w-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>
+      <span v-if="!props.collapsed" class="truncate font-medium">Appearance</span>
+      <span v-if="!props.collapsed" class="ml-auto truncate text-[11px] text-storm">{{ activeTheme.shortLabel }}</span>
+      <svg v-if="!props.collapsed" class="ml-1 h-3 w-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>
     </button>
 
     <div

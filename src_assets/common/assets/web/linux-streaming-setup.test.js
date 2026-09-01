@@ -67,6 +67,33 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Safe default')
   })
 
+  it('puts player impact first and keeps backend vocabulary in optional technical details', () => {
+    const wrapper = mountAudioVideo()
+    const picker = wrapper.find('[data-stream-display-mode-picker]')
+    const privateMode = picker.findAll('article').find((card) => card.text().includes('Private Stream'))
+
+    expect(wrapper.text()).toContain('Where games run')
+    expect(wrapper.text()).toContain('Polaris chooses the capture method automatically')
+    expect(privateMode).toBeDefined()
+    expect(privateMode.find('button').text()).toContain('without touching the host monitors')
+    expect(privateMode.find('button').text()).not.toContain('labwc')
+    expect(privateMode.find('details').text()).toContain('Technical details')
+    expect(privateMode.find('details').text()).toContain('Runtime: labwc')
+    expect(wrapper.find('[data-capture-path-explainer]').text()).toContain('System-memory capture copies through RAM')
+  })
+
+  it('keeps planned modes visible without adding selectable launch buttons', () => {
+    const wrapper = mountAudioVideo()
+    const pickerButtons = wrapper.find('[data-stream-display-mode-picker]').findAll('button')
+    const planned = wrapper.find('[data-planned-stream-modes]')
+
+    expect(pickerButtons).toHaveLength(6)
+    expect(planned.text()).toContain('Family Mode (isolated)')
+    expect(planned.text()).toContain('Headless EVDI')
+    expect(pickerButtons.some((button) => button.text().includes('Family Mode'))).toBe(false)
+    expect(pickerButtons.some((button) => button.text().includes('Headless EVDI'))).toBe(false)
+  })
+
   it('reflects selected display pairing and GPU-native copy intent', () => {
     const wrapper = mountAudioVideo(linuxConfig({
       adapter_name: 'NVIDIA RTX 4090',
