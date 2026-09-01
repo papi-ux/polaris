@@ -5066,12 +5066,13 @@ TEST(GamescopeNestedSessionContract, TeardownGetsTheSameBudgetAndVisibilityAsSta
   const auto collapsed_source = collapse_whitespace(source);
 
   // Startup got a dedicated budget. Teardown was left on the app's exit-timeout,
-  // which defaults to 5s, while the stop path in polaris-gamescope-session.sh
-  // waits up to about 15s of its own accord (POLARIS_IDLE_WAIT_STEPS plus
-  // POLARIS_PORTAL_WAIT_STEPS). A 5s caller could terminate it mid-drain and
-  // leave the session needing manual recovery. Both halves of the lifecycle get
-  // their own visible budget, or neither should.
-  EXPECT_NE(source.find("constexpr auto nested_gamescope_stop_timeout = 30s;"), std::string::npos);
+  // which defaults to 5s, while the nested stop serially fences Steam, private
+  // process groups, Xwayland, orphan sockets, and the runtime handoff. The old
+  // 30s budget was also shorter than a measured full-session teardown, so the
+  // caller could kill a healthy recovery transaction after its compositor fence
+  // committed. Both halves of the lifecycle need their own honest visible
+  // budget, with teardown still bounded well below startup.
+  EXPECT_NE(source.find("constexpr auto nested_gamescope_stop_timeout = 60s;"), std::string::npos);
   EXPECT_NE(
     collapsed_source.find(
       "const auto undo_timeout = critical_nested_session_undo ? nested_gamescope_stop_timeout : _app.exit_timeout;"
