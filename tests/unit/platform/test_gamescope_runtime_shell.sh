@@ -152,6 +152,104 @@ fi
 [ "$(<"$work/run/polaris-gamescope.lock")" = "lock-sentinel" ] || fail "owner lock open truncated existing data"
 write_process_with_group 999 1 999 999 9999 /usr/bin/sleep infinity
 
+# Pause only the exact compositor while leaving its primary-child wrapper and
+# session Steam runnable. The complete group fence then commits without ever
+# resuming the compositor over a retired Xwayland connection.
+write_process_with_group 400 1 400 400 8950 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 8951 /usr/bin/gamescope --backend headless
+write_process_with_group 411 410 400 400 8952 /usr/bin/bash primary-child
+write_process_with_group 412 411 400 400 8953 /usr/bin/steam -gamepadui
+printf '410 8951 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+write_unix_header
+cat >"$work/bin/kill-prefreeze" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ] && [ "\${2:-}" = 410 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 410 T
+elif [ "\${1:-}" = -STOP ] && [ "\${2:-}" = -400 ]; then
+  "$work/bin/fake-stop-state" "$POLARIS_PROC_ROOT" -400
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = -400 ]; then
+  rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" \
+    "$POLARIS_PROC_ROOT/411" "$POLARIS_PROC_ROOT/412"
+fi
+EOF
+chmod +x "$work/bin/kill-prefreeze"
+: >"$work/kills"
+POLARIS_KILL_BIN="$work/bin/kill-prefreeze" \
+  polaris_freeze_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
+  fail "exact compositor pre-freeze failed"
+grep -qx -- '-STOP 410' "$work/kills" || fail "pre-freeze did not signal the exact compositor"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/410/stat")" = T ] ||
+  fail "pre-freeze did not observe the compositor stop"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/411/stat")" = S ] ||
+  fail "pre-freeze stopped the primary-child wrapper"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/412/stat")" = S ] ||
+  fail "pre-freeze stopped session Steam"
+POLARIS_KILL_BIN="$work/bin/kill-prefreeze" POLARIS_GAMESCOPE_PREFROZEN=1 \
+  polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run" ||
+  fail "pre-frozen private group did not stop"
+grep -qx -- '-STOP -400' "$work/kills" || fail "pre-frozen group was not fully stopped"
+grep -qx -- '-KILL -400' "$work/kills" || fail "pre-frozen group was not killed"
+! grep -q -- '-CONT' "$work/kills" || fail "committed pre-frozen group was resumed"
+
+# Claiming a pre-frozen transaction without kernel stop-state proof must fail
+# before any group signal is authorized.
+write_process_with_group 400 1 400 400 8970 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 8971 /usr/bin/gamescope --backend headless
+printf '410 8971 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+: >"$work/kills"
+if POLARIS_KILL_BIN="$work/bin/kill-prefreeze" POLARIS_GAMESCOPE_PREFROZEN=1 \
+    POLARIS_FREEZE_WAIT_STEPS=1 \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "running compositor was accepted as pre-frozen"
+fi
+[ ! -s "$work/kills" ] || fail "unproved pre-frozen state authorized a group signal"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+
+# Once the compositor pre-fence is proven, an incomplete full-group freeze is
+# a committed recovery state. It must never SIGCONT Gamescope after Steam may
+# already have exited.
+write_process_with_group 400 1 400 400 8975 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 8976 /usr/bin/gamescope --backend headless
+write_process_with_group 411 410 400 400 8977 /usr/bin/Xwayland :2
+"$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 410 T
+printf '410 8976 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+cat >"$work/bin/kill-prefrozen-partial" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+EOF
+chmod +x "$work/bin/kill-prefrozen-partial"
+: >"$work/kills"
+if POLARIS_KILL_BIN="$work/bin/kill-prefrozen-partial" POLARIS_GAMESCOPE_PREFROZEN=1 \
+    POLARIS_FREEZE_WAIT_STEPS=1 \
+    polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "partial committed group freeze returned success"
+fi
+grep -qx -- '-STOP -400' "$work/kills" || fail "committed retry did not request full group stop"
+! grep -q -- '-CONT' "$work/kills" || fail "committed pre-fence resumed Gamescope"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "committed freeze failure cleared marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410" "$POLARIS_PROC_ROOT/411"
+
+# If the positive stop never becomes observable, resume only that same exact
+# compositor and retain marker authority for retry.
+write_process_with_group 400 1 400 400 8980 /usr/bin/sleep infinity
+write_process_with_group 410 400 400 400 8981 /usr/bin/gamescope --backend headless
+printf '410 8981 nested /usr/bin/gamescope\n' >"$work/run/polaris-gamescope.pid"
+cat >"$work/bin/kill-prefreeze-timeout" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+EOF
+chmod +x "$work/bin/kill-prefreeze-timeout"
+: >"$work/kills"
+if POLARIS_KILL_BIN="$work/bin/kill-prefreeze-timeout" POLARIS_FREEZE_WAIT_STEPS=1 \
+    polaris_freeze_marked_gamescope "$work/run/polaris-gamescope.pid" nested "$work/run"; then
+  fail "unobserved compositor stop was accepted"
+fi
+grep -qx -- '-STOP 410' "$work/kills" || fail "timeout fixture did not request compositor stop"
+grep -qx -- '-CONT 410' "$work/kills" || fail "failed pre-freeze did not resume the exact compositor"
+[ -e "$work/run/polaris-gamescope.pid" ] || fail "failed pre-freeze cleared marker authority"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
+
 # The exact compositor may be a child of the setsid launcher. Signal the
 # validated private process group, never assume compositor PID equals PGID.
 write_process_with_group 400 1 400 400 9000 /usr/bin/sleep infinity
@@ -342,6 +440,34 @@ grep -qx -- '-KILL -400' "$work/kills" || fail "retry did not terminate the reta
 [ ! -e "$work/run/polaris-gamescope.pid" ] || fail "successful retry retained marker authority"
 rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/410"
 
+# Once Gamescope has already died, its primary-child wrapper is the remaining
+# immutable authority. Drain a leaderless sibling group through exact positive
+# PIDs so the wrapper never has to guess at an ambiguous negative PGID.
+write_process_with_group 400 1 400 400 9260 /usr/bin/bash primary-child
+write_process_with_group 421 400 420 400 9261 /usr/bin/sleep infinity
+cat >"$work/bin/kill-leaderless-member" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/kills"
+if [ "\${1:-}" = -STOP ] && [ "\${2:-}" = 421 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 421 T
+elif [ "\${1:-}" = -KILL ] && [ "\${2:-}" = 421 ]; then
+  "$work/bin/fake-pid-state" "$POLARIS_PROC_ROOT" 421 Z
+fi
+EOF
+chmod +x "$work/bin/kill-leaderless-member"
+: >"$work/kills"
+POLARIS_KILL_BIN="$work/bin/kill-leaderless-member" POLARIS_KILL_WAIT_STEPS=1 \
+  polaris_kill_private_session_members_with_authority 400 400 9260 400 ||
+  fail "exact wrapper did not drain a leaderless session member"
+grep -qx -- '-STOP 421' "$work/kills" || fail "leaderless member was not positively frozen"
+grep -qx -- '-KILL 421' "$work/kills" || fail "leaderless member was not positively killed"
+! grep -q -- ' -420$' "$work/kills" || fail "leaderless member used an ambiguous group signal"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/421/stat")" = Z ] ||
+  fail "leaderless member did not reach terminal state"
+[ "$(awk '{ print $3 }' "$POLARIS_PROC_ROOT/400/stat")" = S ] ||
+  fail "exact cleanup wrapper lost authority during member drain"
+rm -rf "$POLARIS_PROC_ROOT/400" "$POLARIS_PROC_ROOT/421"
+
 # If the private-session leader generation changes after the destructive group
 # signal, numeric PGID authority is lost and cleanup must fail closed.
 write_process_with_group 400 1 400 400 9300 /usr/bin/sleep infinity
@@ -431,6 +557,21 @@ polaris_validate_marker "$work/run/polaris-gamescope.pid" idle || fail "valid ma
   fail "Xwayland candidate prefilter included unrelated executables"
 [ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
   fail "did not select owned Xwayland :4"
+
+# Production fast discovery is only a hint. A valid owned Xwayland omitted by
+# pgrep during exec/comm publication must be recovered by one authoritative
+# procfs snapshot before readiness is rejected.
+cat >"$work/bin/pgrep-miss-owned" <<'EOF'
+#!/usr/bin/env bash
+printf '413\n'
+EOF
+chmod +x "$work/bin/pgrep-miss-owned"
+POLARIS_PGREP_BIN="$work/bin/pgrep-miss-owned"
+export POLARIS_PGREP_BIN
+[ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
+  fail "authoritative Xwayland fallback did not recover a fast-lookup miss"
+unset POLARIS_PGREP_BIN
+
 polaris_process_has_argument "$work/run/polaris-gamescope.pid" idle --hdr-enabled ||
   fail "exact owner argument was not found"
 polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run" ||

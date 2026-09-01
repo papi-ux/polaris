@@ -36,6 +36,19 @@ resolve_geometry() {
     _ "$prelude"
 }
 
+resolve_ready_timeout() {
+  local value="$1"
+  local -a values=()
+  [ "$value" = unset ] || values+=("POLARIS_GAMESCOPE_READY_TIMEOUT_SECONDS=$value")
+
+  env -u POLARIS_GAMESCOPE_READY_TIMEOUT_SECONDS \
+    XDG_RUNTIME_DIR="$work/run" \
+    POLARIS_GAMESCOPE_RUNTIME_LIB="$runtime_stub" \
+    "${values[@]}" \
+    bash -c '. "$1"; polaris_runtime_ready_timeout_seconds' \
+    _ "$prelude"
+}
+
 [ "$(resolve_geometry 1920 1080 59.940 3840 2160 120)" = "1920x1080@59.940" ] ||
   fail "session geometry did not take precedence"
 [ "$(resolve_geometry unset unset unset 2560 1440 144)" = "2560x1440@144" ] ||
@@ -44,5 +57,13 @@ resolve_geometry() {
   fail "standalone defaults were not preserved"
 [ "$(resolve_geometry bad 0 0 invalid -1 nope)" = "3840x2160@120" ] ||
   fail "invalid geometry did not fail safely to defaults"
+[ "$(resolve_ready_timeout unset)" = 30 ] ||
+  fail "runtime readiness default is not 30 seconds"
+[ "$(resolve_ready_timeout 45)" = 45 ] ||
+  fail "valid runtime readiness timeout was not preserved"
+[ "$(resolve_ready_timeout 0)" = 30 ] ||
+  fail "zero runtime readiness timeout did not fail safely"
+[ "$(resolve_ready_timeout 121)" = 30 ] ||
+  fail "unbounded runtime readiness timeout was accepted"
 
 printf 'PASS: gamescope session geometry contract\n'

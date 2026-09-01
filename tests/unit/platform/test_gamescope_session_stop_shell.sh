@@ -28,9 +28,16 @@ polaris_validate_marker() {
     *) return 1 ;;
   esac
 }
+polaris_freeze_marked_gamescope() {
+  printf 'freeze-nested\n' >>"$POLARIS_ACTIONS"
+  [ "${FREEZE_OK:-1}" = 1 ] || return 1
+  : >"$POLARIS_ACTIONS.gamescope-frozen"
+}
 polaris_stop_marked_gamescope() {
   printf 'stop-nested\n' >>"$POLARIS_ACTIONS"
   printf 'stop-credential=%s\n' "${POLARIS_SESSION_INSTANCE_ID:-}" >>"$POLARIS_ACTIONS"
+  printf 'stop-prefrozen=%s\n' "${POLARIS_GAMESCOPE_PREFROZEN:-0}" >>"$POLARIS_ACTIONS"
+  [ "${POLARIS_GAMESCOPE_PREFROZEN:-0}" = 1 ] || return 1
   if [ -n "${STOP_DELAY:-}" ]; then
     sleep "$STOP_DELAY"
   fi
@@ -85,10 +92,16 @@ printf 'kill %s\n' "$*" >>"$POLARIS_ACTIONS"
 signal="${1:-}"
 pid="${2:-}"
 case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+if [ "${ABORT_IF_STEAM_BEFORE_FREEZE:-0}" = 1 ] && [ ! -e "$POLARIS_ACTIONS.gamescope-frozen" ]; then
+  : >"$POLARIS_ACTIONS.gamescope-abort"
+fi
 if [ "$signal" = -TERM ] && [ "${STEAM_IGNORES_TERM:-0}" = 1 ]; then
   exit 0
 fi
 rm -rf "$POLARIS_PROC_ROOT/$pid"
+if [ "${PUBLISH_PRIMARY_EXIT:-0}" = 1 ]; then
+  printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$XDG_RUNTIME_DIR/polaris-gamescope-primary-child-exit"
+fi
 if [ "${NESTED_EXITS_WITH_STEAM:-0}" = 1 ]; then
   : >"$POLARIS_ACTIONS.nested-stopped"
 fi
@@ -111,12 +124,15 @@ run_stop() {
     POLARIS_XWAYLAND_PGREP_STATUS="${POLARIS_XWAYLAND_PGREP_STATUS:-0}" \
     POLARIS_STEAM_TERM_STEPS=1 POLARIS_STEAM_KILL_STEPS=1 \
     POLARIS_XWAYLAND_TERM_STEPS=1 POLARIS_XWAYLAND_KILL_STEPS=1 \
-    POLARIS_NESTED_EXIT_WAIT_STEPS=1 POLARIS_NESTED_EXIT_WAIT_INTERVAL=0 \
     POLARIS_IDLE_WAIT_STEPS=2 POLARIS_PORTAL_WAIT_STEPS=2 \
     NESTED_VALID="${NESTED_VALID:-0}" STOP_OK="${STOP_OK:-0}" \
     STOP_DELAY="${STOP_DELAY:-}" \
     STEAM_IGNORES_TERM="${STEAM_IGNORES_TERM:-0}" \
     NESTED_EXITS_WITH_STEAM="${NESTED_EXITS_WITH_STEAM:-0}" \
+    FREEZE_OK="${FREEZE_OK:-1}" \
+    ABORT_IF_STEAM_BEFORE_FREEZE="${ABORT_IF_STEAM_BEFORE_FREEZE:-0}" \
+    PUBLISH_PRIMARY_EXIT="${PUBLISH_PRIMARY_EXIT:-0}" \
+    POLARIS_PRIMARY_EXIT_WAIT_STEPS="${POLARIS_PRIMARY_EXIT_WAIT_STEPS:-100}" \
     RECLAIM_OK="${RECLAIM_OK:-0}" IDLE_VALID="${IDLE_VALID:-0}" \
     IDLE_OWNS_SOCKET="${IDLE_OWNS_SOCKET:-0}" WRITE_ENV_OK="${WRITE_ENV_OK:-0}" \
     IDLE_START_OK="${IDLE_START_OK:-1}" PORTAL_RESTART_OK="${PORTAL_RESTART_OK:-1}" \
@@ -314,8 +330,25 @@ fi
   fail "unreadable Steam metadata advanced the recovery claim"
 rm -rf "$work/proc/102"
 
-# A live nested generation asks credential-bound Steam to exit before using the
-# exact process-group fence. Desktop Steam is never signalled or removed.
+# A pre-fence failure must not signal session Steam. Exact ownership remains
+# live and retryable because teardown never crossed its mutation boundary.
+reset_state
+mkdir -p "$work/proc/101"
+printf '11\n' >"$work/proc/101/start"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+if POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=101 \
+    NESTED_VALID=1 FREEZE_OK=0 STOP_OK=1 run_stop >/dev/null 2>&1; then
+  fail "failed exact compositor pre-fence returned success"
+fi
+grep -qx 'freeze-nested' "$actions" || fail "failed pre-fence was not attempted"
+! grep -q '^kill ' "$actions" || fail "failed pre-fence signalled session Steam"
+! grep -qx 'stop-nested' "$actions" || fail "failed pre-fence entered full teardown"
+[ -e "$work/run/polaris-gamescope-wsi-nested" ] || fail "failed pre-fence cleared recovery claim"
+rm -rf "$work/proc/101"
+
+# A live nested generation pauses the exact compositor before asking
+# credential-bound Steam to exit, then commits the process-group fence. Desktop
+# Steam is never signalled or removed.
 reset_state
 mkdir -p "$work/proc/100" "$work/proc/101"
 printf '10\n' >"$work/proc/100/start"
@@ -324,28 +357,54 @@ printf 'HOME=/srv/example\0' >"$work/proc/100/environ"
 printf 'HOME=/srv/example\0POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
 POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=$'100\n101' \
   NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
-  PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "exact-session Steam handoff failed"
+  PORTAL_READY=1 ABORT_IF_STEAM_BEFORE_FREEZE=1 PUBLISH_PRIMARY_EXIT=1 \
+  run_stop >/dev/null 2>&1 ||
+  fail "exact-session Steam handoff failed"
+grep -qx 'freeze-nested' "$actions" || fail "nested compositor was not pre-frozen"
 grep -qx 'kill -TERM 101' "$actions" || fail "nested teardown did not ask exact-session Steam to exit"
 grep -qx 'stop-nested' "$actions" || fail "nested generation did not use its fenced stop"
+grep -qx 'stop-prefrozen=1' "$actions" || fail "full fence did not inherit pre-frozen authority"
+[ ! -e "$actions.gamescope-abort" ] || fail "Steam exited before the compositor pre-fence"
 ! grep -q 'kill .*100' "$actions" || fail "desktop Steam was signalled"
 [ -d "$work/proc/100" ] || fail "desktop Steam process was removed"
+[ ! -e "$work/run/polaris-gamescope-primary-child-exit" ] ||
+  fail "successful nested handoff retained the primary-child terminal marker"
+freeze_line="$(grep -nFx 'freeze-nested' "$actions" | head -n1 | cut -d: -f1)"
 steam_line="$(grep -nFx 'kill -TERM 101' "$actions" | head -n1 | cut -d: -f1)"
 fence_line="$(grep -nFx 'stop-nested' "$actions" | head -n1 | cut -d: -f1)"
-[ "$steam_line" -lt "$fence_line" ] || fail "nested compositor fence ran before exact-session Steam exit"
+[ "$freeze_line" -lt "$steam_line" ] && [ "$steam_line" -lt "$fence_line" ] ||
+  fail "nested teardown did not pre-freeze, retire Steam, then commit the full fence"
 
-# When child exit terminates Gamescope normally, accept only a dead-marker plus
-# reclaimable-socket proof and never enter the destructive compositor fence.
+# If the direct primary child does not attest Steam's terminal state, retain
+# the claim with Gamescope paused rather than pretending the full fence ran.
+reset_state
+mkdir -p "$work/proc/101"
+printf '11\n' >"$work/proc/101/start"
+printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
+if POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=101 \
+    NESTED_VALID=1 STOP_OK=1 POLARIS_PRIMARY_EXIT_WAIT_STEPS=1 \
+    run_stop >/dev/null 2>&1; then
+  fail "missing primary-child terminal marker returned success"
+fi
+grep -qx 'freeze-nested' "$actions" || fail "missing marker path did not pre-freeze Gamescope"
+grep -qx 'kill -TERM 101' "$actions" || fail "missing marker path did not retire session Steam"
+! grep -qx 'stop-nested' "$actions" || fail "missing marker path entered full group teardown"
+[ -e "$work/run/polaris-gamescope-wsi-nested" ] || fail "missing marker cleared recovery claim"
+rm -rf "$work/proc/101"
+
+# Even when child exit wins the race, attempt the exact compositor fence first;
+# then accept only a dead-marker plus reclaimable-socket proof.
 reset_state
 mkdir -p "$work/proc/101"
 printf '11\n' >"$work/proc/101/start"
 printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
 POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_PGREP_OUTPUT=101 \
   NESTED_VALID=1 NESTED_EXITS_WITH_STEAM=1 STOP_OK=0 RECLAIM_OK=1 \
-  IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 \
-  run_stop >/dev/null 2>&1 || fail "graceful nested exit handoff failed"
-grep -qx 'kill -TERM 101' "$actions" || fail "graceful exit did not signal exact-session Steam"
-grep -qx 'reclaim' "$actions" || fail "graceful exit did not prove old sockets reclaimable"
-! grep -qx 'stop-nested' "$actions" || fail "graceful exit unnecessarily fenced the compositor"
+  IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 PORTAL_READY=1 PUBLISH_PRIMARY_EXIT=1 \
+  run_stop >/dev/null 2>&1 || fail "raced nested exit handoff failed"
+grep -qx 'kill -TERM 101' "$actions" || fail "raced exit did not signal exact-session Steam"
+grep -qx 'stop-nested' "$actions" || fail "raced exit bypassed the exact compositor fence"
+grep -qx 'reclaim' "$actions" || fail "raced exit did not prove old sockets reclaimable"
 
 # Overlapping stop attempts serialize on one lifecycle lock. The first consumes
 # the durable state; the waiter then observes an idempotently completed stop.
@@ -376,7 +435,8 @@ printf 'POLARIS_SESSION_INSTANCE_ID=session-A\0' >"$work/proc/101/environ"
 printf 'session-A\n' >"$work/run/polaris-gamescope-session-id"
 POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 \
   NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
-  PORTAL_READY=1 run_stop >/dev/null 2>&1 || fail "persisted-session recovery failed"
+  PORTAL_READY=1 PUBLISH_PRIMARY_EXIT=1 run_stop >/dev/null 2>&1 ||
+  fail "persisted-session recovery failed"
 grep -qx 'stop-credential=session-A' "$actions" ||
   fail "recovery did not load the persisted exact-session credential"
 [ ! -e "$work/run/polaris-gamescope-session-id" ] || fail "successful recovery retained session credential"
@@ -601,15 +661,20 @@ grep -Fq 'export POLARIS_GAMESCOPE_LOCK_HELD=1' "$script" ||
   fail "portal handoff is not finalized under the ownership lock"
 grep -Fq 'acquire_session_operation_lock' "$script" ||
   fail "nested lifecycle operations are not serialized"
-grep -Fq 'wait_for_nested_gamescope_exit' "$script" ||
-  fail "nested stop does not provide a bounded graceful compositor-exit window"
+if grep -Fq 'wait_for_nested_gamescope_exit' "$script"; then
+  fail "nested stop still waits for Gamescope's natural destructor path"
+fi
+prefreeze_line="$(grep -nF 'if ! polaris_freeze_marked_gamescope "$marker" nested "$rt"; then' "$script" | head -n1 | cut -d: -f1)"
 steam_stop_line="$(grep -nF 'if ! kill_session_steam || ! session_steam_absent; then' "$script" | head -n1 | cut -d: -f1)"
-fenced_stop_line="$(grep -nF 'if polaris_stop_marked_gamescope "$marker" nested "$rt"; then' "$script" | head -n1 | cut -d: -f1)"
-[ -n "$steam_stop_line" ] && [ -n "$fenced_stop_line" ] && [ "$steam_stop_line" -lt "$fenced_stop_line" ] ||
-  fail "nested stop does not order exact-session Steam before compositor fallback"
+fenced_stop_line="$(grep -nF 'polaris_stop_marked_gamescope "$marker" nested "$rt"; then' "$script" | head -n1 | cut -d: -f1)"
+[ -n "$prefreeze_line" ] && [ -n "$steam_stop_line" ] && [ -n "$fenced_stop_line" ] \
+  && [ "$prefreeze_line" -lt "$steam_stop_line" ] && [ "$steam_stop_line" -lt "$fenced_stop_line" ] ||
+  fail "nested stop does not pre-freeze Gamescope before retiring exact-session Steam"
+grep -Fq 'polaris_freeze_marked_gamescope "$marker" nested "$rt"' "$script" ||
+  fail "nested stop does not use the exact-compositor pre-fence"
 grep -Fq 'polaris_stop_marked_gamescope "$marker" nested "$rt"' "$script" ||
   fail "nested stop does not use the exact-generation compositor fence"
-[ "$(grep -cF 'retire_marked_nested_gamescope_child_first' "$script")" -ge 4 ] ||
-  fail "nested startup failures do not share child-first teardown"
+[ "$(grep -cF 'retire_marked_nested_gamescope_under_fence' "$script")" -ge 4 ] ||
+  fail "nested startup failures do not share fenced teardown"
 
 echo "PASS: gamescope session stop state machine"

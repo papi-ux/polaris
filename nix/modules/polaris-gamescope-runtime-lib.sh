@@ -392,15 +392,37 @@ polaris_unique_unix_socket_inode() {
 # Candidate enumeration is only a performance prefilter. Every returned PID is
 # still authenticated below by executable/cmdline identity, exact process
 # generation, private-session ancestry, and ownership of the selected socket.
-# Scanning every /proc executable twice made readiness depend on total host
-# process count and could outlive the compositor's initial listener generation.
-polaris_xwayland_candidates() {
-  local proc_root process pid exe_path pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
+polaris_xwayland_fast_candidates_available() {
+  local proc_root pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
   proc_root="$(polaris_proc_root)"
-  if [ "$proc_root" = /proc ] && command -v "$pgrep_bin" >/dev/null 2>&1; then
-    "$pgrep_bin" -x Xwayland 2>/dev/null || true
-    return 0
-  fi
+  # An explicit binary permits the production fast-path/fallback contract to be
+  # exercised against a synthetic proc root. Production never trusts a custom
+  # proc tree merely because the host pgrep can see unrelated real processes.
+  [ "$proc_root" = /proc ] || [ -n "${POLARIS_PGREP_BIN:-}" ] || return 1
+  command -v "$pgrep_bin" >/dev/null 2>&1
+}
+
+polaris_xwayland_candidates() {
+  local mode="${1:-fast}" proc_root process pid exe_path pgrep_bin="${POLARIS_PGREP_BIN:-pgrep}"
+  proc_root="$(polaris_proc_root)"
+  case "$mode" in
+    fast)
+      if polaris_xwayland_fast_candidates_available; then
+        {
+          "$pgrep_bin" -x Xwayland 2>/dev/null || true
+          # Some launchers change the short comm while retaining the exact
+          # Xwayland executable/argv identity validated below.
+          "$pgrep_bin" -f '(^|/)Xwayland([[:space:]]|$)' 2>/dev/null || true
+        } | awk '!seen[$0]++'
+        return 0
+      fi
+      ;;
+    authoritative) ;;
+    *) return 2 ;;
+  esac
+  # A fast snapshot can race exec/comm publication or fail independently of
+  # procfs. Scan executable identities once before rejecting an otherwise live
+  # compositor generation. The caller reuses this snapshot for every X socket.
   for process in "$proc_root"/[0-9]*; do
     [ -d "$process" ] || continue
     pid="${process##*/}"
@@ -411,35 +433,46 @@ polaris_xwayland_candidates() {
 }
 
 polaris_discover_xwayland_display() {
-  local marker="$1" expected_role="${2:-}" xdir socket name display inode pid final_inode
+  local marker="$1" expected_role="${2:-}" xdir socket name display inode pid final_inode candidate_mode
   local best='' best_pid='' best_start='' best_inode='' best_socket='' marker_line
+  local candidates=()
   polaris_validate_marker "$marker" "$expected_role" || return 1
   local root_pid="$POLARIS_MARKER_PID" root_start="$POLARIS_MARKER_START_TIME" root_executable="$POLARIS_MARKER_EXECUTABLE"
   marker_line="$(<"$marker")"
   xdir="$(polaris_x11_socket_dir)"
-  for socket in "$xdir"/X*; do
-    [ -e "$socket" ] || continue
-    name="${socket##*/}"
-    display="${name#X}"
-    case "$display" in ''|*[!0-9]*) continue ;; esac
-    # Duplicate pathname generations are ambiguous after unlink/rebind. The
-    # process may hold an old inode while clients route to an unrelated new one.
-    inode="$(polaris_unique_unix_socket_inode "$socket")" || continue
-    while IFS= read -r pid; do
-      case "$pid" in ''|*[!0-9]*) continue ;; esac
-      [ "$pid" != "$root_pid" ] || continue
-      if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
-          && polaris_pid_holds_inode "$pid" "$inode" \
-          && polaris_process_fields "$pid"; then
-        if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
-          best="$display"
-          best_pid="$pid"
-          best_start="$POLARIS_PROCESS_START_TIME"
-          best_inode="$inode"
-          best_socket="$socket"
+  for candidate_mode in fast authoritative; do
+    candidates=()
+    mapfile -t candidates < <(polaris_xwayland_candidates "$candidate_mode")
+    for socket in "$xdir"/X*; do
+      [ -e "$socket" ] || continue
+      name="${socket##*/}"
+      display="${name#X}"
+      case "$display" in ''|*[!0-9]*) continue ;; esac
+      # Duplicate pathname generations are ambiguous after unlink/rebind. The
+      # process may hold an old inode while clients route to an unrelated new one.
+      inode="$(polaris_unique_unix_socket_inode "$socket")" || continue
+      for pid in "${candidates[@]}"; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ "$pid" != "$root_pid" ] || continue
+        if polaris_xwayland_pid "$pid" && polaris_pid_related_to_root "$pid" "$root_pid" \
+            && polaris_pid_holds_inode "$pid" "$inode" \
+            && polaris_process_fields "$pid"; then
+          if [ -z "$best" ] || [ "$display" -lt "$best" ]; then
+            best="$display"
+            best_pid="$pid"
+            best_start="$POLARIS_PROCESS_START_TIME"
+            best_inode="$inode"
+            best_socket="$socket"
+          fi
         fi
-      fi
-    done < <(polaris_xwayland_candidates)
+      done
+    done
+    [ -z "$best" ] || break
+    # When fast lookup was unavailable it already used the authoritative scan.
+    # Otherwise one exact procfs fallback is required before failing closed.
+    if [ "$candidate_mode" != fast ] || ! polaris_xwayland_fast_candidates_available; then
+      break
+    fi
   done
   [ -n "$best" ] || return 1
   # Revalidate both process generations and the exact socket ownership after
@@ -588,6 +621,137 @@ polaris_wait_process_group_stopped() {
     [ "$seen" = 1 ] || return 1
     [ "$all_stopped" = 1 ] && return 0
     sleep 0.01
+  done
+  return 1
+}
+
+# Emergency parent-death fence for an already-proven private session. The
+# surviving wrapper is the immutable authority while every other live session
+# member is stopped and killed by positive PID. This deliberately avoids a
+# negative-PGID signal when a sibling group has lost its leader, while still
+# preventing that leaderless group from escaping after Gamescope dies.
+polaris_kill_private_session_members_with_authority() {
+  local session_id="$1" authority_pid="$2" authority_start="$3" authority_group="$4"
+  local kill_bin="${POLARIS_KILL_BIN:-kill}" proc_root process pid index
+  local target_start target_group remaining=0
+  local freeze_steps="${POLARIS_FREEZE_WAIT_STEPS:-100}"
+  local kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
+  local pids=() starts=() groups=()
+  proc_root="$(polaris_proc_root)"
+  [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 1
+
+  polaris_process_fields "$authority_pid" || return 1
+  [ "$POLARIS_PROCESS_START_TIME" = "$authority_start" ] \
+    && [ "$POLARIS_PROCESS_PGID" = "$authority_group" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
+    && [ "$POLARIS_PROCESS_STATE" != Z ] || return 1
+
+  for process in "$proc_root"/[0-9]*; do
+    [ -d "$process" ] || continue
+    pid="${process##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ! polaris_read_process_stat_fields "$pid"; then
+      [ ! -e "$process" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+    [ "$pid" != "$authority_pid" ] || continue
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    pids+=("$pid")
+    starts+=("$POLARIS_PROCESS_START_TIME")
+    groups+=("$POLARIS_PROCESS_PGID")
+  done
+  [ "${#pids[@]}" -gt 0 ] || return 0
+
+  # Stop each exact member first. Once the captured parents are stopped they
+  # cannot create more descendants; a later pass catches anything that raced
+  # the enumeration before those stops committed.
+  for index in "${!pids[@]}"; do
+    pid="${pids[$index]}"
+    target_start="${starts[$index]}"
+    target_group="${groups[$index]}"
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    if ! "$kill_bin" -STOP "$pid" 2>/dev/null; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    for _ in $(seq 1 "$freeze_steps"); do
+      if ! polaris_process_fields "$pid"; then
+        [ ! -e "$proc_root/$pid" ] && break
+        return 1
+      fi
+      [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+        && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+      case "$POLARIS_PROCESS_STATE" in
+        T|t|Z) break ;;
+      esac
+      sleep 0.01
+    done
+    if polaris_process_fields "$pid"; then
+      [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+        && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+      case "$POLARIS_PROCESS_STATE" in
+        T|t|Z) ;;
+        *) return 1 ;;
+      esac
+    elif [ -e "$proc_root/$pid" ]; then
+      return 1
+    fi
+  done
+
+  # Revalidate every still-present target immediately before the destructive
+  # positive-PID signal. A vanished target is already terminal; a changed
+  # generation is never signalled.
+  for index in "${!pids[@]}"; do
+    pid="${pids[$index]}"
+    target_start="${starts[$index]}"
+    target_group="${groups[$index]}"
+    if ! polaris_process_fields "$pid"; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+    [ "$POLARIS_PROCESS_START_TIME" = "$target_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$target_group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+    [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+    case "$POLARIS_PROCESS_STATE" in T|t) ;; *) return 1 ;; esac
+    if ! "$kill_bin" -KILL "$pid" 2>/dev/null; then
+      [ ! -e "$proc_root/$pid" ] && continue
+      return 1
+    fi
+  done
+
+  for _ in $(seq 1 "$kill_steps"); do
+    polaris_process_fields "$authority_pid" || return 1
+    [ "$POLARIS_PROCESS_START_TIME" = "$authority_start" ] \
+      && [ "$POLARIS_PROCESS_PGID" = "$authority_group" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] \
+      && [ "$POLARIS_PROCESS_STATE" != Z ] || return 1
+    remaining=0
+    for process in "$proc_root"/[0-9]*; do
+      [ -d "$process" ] || continue
+      pid="${process##*/}"
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      if ! polaris_read_process_stat_fields "$pid"; then
+        [ ! -e "$process" ] && continue
+        return 1
+      fi
+      [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || continue
+      [ "$pid" != "$authority_pid" ] || continue
+      [ "$POLARIS_PROCESS_STATE" = Z ] && continue
+      remaining=1
+    done
+    [ "$remaining" = 0 ] && return 0
+    sleep 0.1
   done
   return 1
 }
@@ -762,13 +926,64 @@ polaris_kill_private_session_groups() {
   polaris_private_session_has_no_live_siblings "$session_id"
 }
 
+# Pause only the exact marked compositor while its primary-child wrapper is
+# still runnable. This closes the interval where Steam/Xwayland can disappear
+# and drive Gamescope's X11 I/O abort before the full private group fence owns
+# teardown. A failed pre-commit proof resumes only the same immutable process;
+# success deliberately leaves it stopped for polaris_stop_marked_gamescope().
+polaris_freeze_marked_gamescope() (
+  local marker="$1" expected_role="$2" runtime_dir="$3"
+  local kill_bin="${POLARIS_KILL_BIN:-kill}" lock_bin="${POLARIS_FLOCK_BIN:-flock}"
+  local marker_line pid start_time executable_path pgid session_id
+  local freeze_requested=0 freeze_committed=0
+  umask 077
+  if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
+    exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
+    "$lock_bin" -x 9 || return 1
+  fi
+  polaris_validate_marker "$marker" "$expected_role" || return 1
+  marker_line="$(<"$marker")"
+  pid="$POLARIS_MARKER_PID"
+  start_time="$POLARIS_MARKER_START_TIME"
+  executable_path="$POLARIS_MARKER_EXECUTABLE"
+  pgid="$POLARIS_PROCESS_PGID"
+  session_id="$POLARIS_PROCESS_SESSION_ID"
+  [ "$pgid" -gt 1 ] 2>/dev/null && [ "$session_id" = "$pgid" ] || return 1
+  polaris_process_fields "$pgid" || return 1
+  [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+
+  trap '
+    if [ "$freeze_committed" = 0 ] \
+        && [ "$freeze_requested" = 1 ] \
+        && polaris_validate_process_generation "$pid" "$start_time" "$executable_path" \
+        && [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+        && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ]; then
+      "$kill_bin" -CONT "$pid" 2>/dev/null || true
+    fi
+  ' EXIT
+  polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
+  [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
+    && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  freeze_requested=1
+  "$kill_bin" -STOP "$pid" 2>/dev/null || return 1
+  polaris_wait_gamescope_stopped \
+    "$pid" "$start_time" "$executable_path" "$pgid" "$session_id" || return 1
+  [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
+  freeze_committed=1
+)
+
 polaris_stop_marked_gamescope() (
   local marker="$1" expected_role="$2" runtime_dir="$3" kill_bin="${POLARIS_KILL_BIN:-kill}"
   local lock_bin="${POLARIS_FLOCK_BIN:-flock}"
   local marker_line pid start_time executable_path pgid session_id group_leader_start group_leader_executable socket inode entry current_inode
   local owned_sockets=() kill_steps="${POLARIS_KILL_WAIT_STEPS:-20}"
   local group_stop_requested=0 destructive_signal_armed=0 group_rc
+  local pre_frozen="${POLARIS_GAMESCOPE_PREFROZEN:-0}"
   umask 077
+  case "$pre_frozen" in 0|1) ;; *) return 1 ;; esac
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$runtime_dir/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
@@ -801,12 +1016,18 @@ polaris_stop_marked_gamescope() (
   polaris_validate_process_generation "$pid" "$start_time" "$executable_path" || return 1
   [ "$POLARIS_PROCESS_PGID" = "$pgid" ] \
     && [ "$POLARIS_PROCESS_SESSION_ID" = "$session_id" ] || return 1
+  if [ "$pre_frozen" = 1 ]; then
+    polaris_wait_gamescope_stopped \
+      "$pid" "$start_time" "$executable_path" "$pgid" "$session_id" || return 1
+    # The caller has already committed to retiring the primary child while the
+    # exact compositor is paused. No later failure may resume that compositor
+    # over a dead Xwayland connection.
+    destructive_signal_armed=1
+  fi
   # Freeze the complete private process group and prove that both the immutable
   # group leader and the exact marked compositor reached kernel stop state.
-  # This removes the Xwayland-disappears-while-Gamescope-runs failure mode even
-  # when setsid owns a wrapper and Gamescope is its child. Before teardown is
-  # committed, a failure resumes only the still-exact group. Once committed,
-  # every failure leaves the marker generation stopped for a safe retry.
+  # A normal call may resume an exact group if pre-commit proof fails. A
+  # pre-frozen call is already committed and must remain stopped for retry.
   trap '
     if [ "$destructive_signal_armed" = 0 ] \
         && [ "$group_stop_requested" = 1 ] \
