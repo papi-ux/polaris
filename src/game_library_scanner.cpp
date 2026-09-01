@@ -570,7 +570,9 @@ namespace game_library {
       const std::string &app_name,
       const std::string &title,
       const std::string &store,
-      launcher_install_t install
+      launcher_install_t install,
+      std::string poster_url = {},
+      std::string hero_url = {}
     ) {
       const auto runner = heroic_runner_for_store(store);
       const auto command = heroic_launch_command(store, app_name, install);
@@ -585,6 +587,8 @@ namespace game_library {
         .runner = runner,
         .install = install,
         .command = command,
+        .poster_url = std::move(poster_url),
+        .hero_url = std::move(hero_url),
       };
     }
 
@@ -626,7 +630,14 @@ namespace game_library {
         return std::nullopt;
       }
 
-      return make_heroic_game(app_name, entry["title"].get<std::string>(), "epic", install);
+      return make_heroic_game(
+        app_name,
+        entry["title"].get<std::string>(),
+        "epic",
+        install,
+        entry.value("art_square", ""),
+        entry.value("art_cover", "")
+      );
     }
   }  // namespace
 
@@ -703,7 +714,14 @@ namespace game_library {
           continue;
         }
 
-        if (auto game = make_heroic_game(app_name, entry["title"].get<std::string>(), "gog", install)) {
+        if (auto game = make_heroic_game(
+              app_name,
+              entry["title"].get<std::string>(),
+              "gog",
+              install,
+              entry.value("art_square", ""),
+              entry.value("art_cover", "")
+            )) {
           games.push_back(std::move(*game));
         }
       }
@@ -738,6 +756,37 @@ namespace game_library {
       games.clear();
     }
     return games;
+  }
+
+  std::optional<heroic_game_t> find_heroic_cached_game(
+    const std::vector<std::filesystem::path> &home_roots,
+    const std::string &app_name,
+    const std::string &store,
+    launcher_install_t install
+  ) {
+    if (store != "epic" || !is_heroic_app_name_safe(app_name)) {
+      return std::nullopt;
+    }
+
+    for (const auto &library : heroic_cache_files(home_roots)) {
+      if (library.store != store || library.install != install) {
+        continue;
+      }
+
+      std::ifstream file(library.path);
+      if (!file) {
+        continue;
+      }
+      std::stringstream payload;
+      payload << file.rdbuf();
+      for (auto &entry : parse_heroic_cache_json(payload.str(), store, install)) {
+        if (entry.app_name == app_name) {
+          return entry;
+        }
+      }
+    }
+
+    return std::nullopt;
   }
 
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots) {

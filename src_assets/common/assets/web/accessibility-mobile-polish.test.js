@@ -62,4 +62,24 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(css).toContain('.settings-command-bar.sticky')
     expect(css).toContain('top: auto')
   })
+
+  it('keeps compact actions and state labels readable instead of wrapping them into tall pills', () => {
+    const css = webSource('app.css')
+    const audioVideo = webSource('configs/tabs/AudioVideo.vue')
+
+    expect(css).toMatch(/\.system-footer-link\s*\{[^}]*gap:\s*0\.375rem[^}]*white-space:\s*nowrap/s)
+    expect(css).toMatch(/\.troubleshooting-action-button\s*\{[^}]*whitespace-nowrap/s)
+    expect(audioVideo).toContain('class="shrink-0 whitespace-nowrap rounded-full')
+  })
+
+  it('lays out pairing context as separate readable groups and stacks them on phones', () => {
+    const css = webSource('app.css')
+    const pairing = webSource('views/PinView.vue')
+
+    expect(pairing).toContain('class="pairing-flow-strip mt-5"')
+    expect(css).toMatch(/\.pairing-flow-strip\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*space-between/s)
+    expect(css).toMatch(/\.pairing-flow-copy\s*\{[^}]*min-width:\s*0/s)
+    expect(css).toMatch(/\.pairing-inline-note\s*\{[^}]*border-left:/s)
+    expect(css).toMatch(/@media \(max-width: 47\.99rem\)[\s\S]*?\.pairing-flow-strip\s*\{[^}]*flex-direction:\s*column/)
+  })
 })

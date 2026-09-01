@@ -903,6 +903,65 @@ namespace confighttp {
       return std::nullopt;
     }
 
+    bool heroic_artwork_url_allowed(std::string_view url) {
+      return game_artwork::is_allowed_provider_url(game_artwork::provider_e::epic, url);
+    }
+
+    std::optional<std::string> download_best_heroic_cover(
+      const std::string &poster_url,
+      const std::string &hero_url,
+      const fs::path &coverdir,
+      const std::string &stem
+    ) {
+      std::error_code error;
+      fs::create_directories(coverdir, error);
+      if (error) {
+        return std::nullopt;
+      }
+
+      for (const auto extension : {".png", ".jpg", ".webp"}) {
+        const auto cached_path = coverdir / (stem + extension);
+        if (game_artwork::image_mime_type(cached_path)) {
+          return cached_path.string();
+        }
+      }
+
+      for (const auto &url : {poster_url, hero_url}) {
+        if (url.empty() || !heroic_artwork_url_allowed(url)) {
+          continue;
+        }
+
+        const auto temporary_path = coverdir / (stem + ".download");
+        fs::remove(temporary_path, error);
+        error.clear();
+        if (!http::download_file(url, temporary_path.string(), heroic_artwork_url_allowed)) {
+          continue;
+        }
+
+        const auto mime = game_artwork::image_mime_type(temporary_path);
+        const auto extension = !mime ? std::string {} :
+          *mime == "image/jpeg" ? ".jpg" :
+          *mime == "image/png" ? ".png" :
+          *mime == "image/webp" ? ".webp" : "";
+        if (extension.empty()) {
+          fs::remove(temporary_path, error);
+          continue;
+        }
+
+        const auto final_path = coverdir / (stem + extension);
+        fs::remove(final_path, error);
+        error.clear();
+        fs::rename(temporary_path, final_path, error);
+        if (!error && game_artwork::image_mime_type(final_path)) {
+          return final_path.string();
+        }
+        fs::remove(temporary_path, error);
+        fs::remove(final_path, error);
+      }
+
+      return std::nullopt;
+    }
+
     std::optional<fs::path> executable_dir() {
 #ifdef _WIN32
       wchar_t path[MAX_PATH];
@@ -2937,6 +2996,19 @@ namespace confighttp {
     // Scan Heroic Games Launcher (GOG + Epic via Legendary), native and Flatpak installs
     nlohmann::json heroic_games = nlohmann::json::array();
     std::set<std::string> seen_heroic_keys;
+    const auto heroic_cache_key = [](game_library::launcher_install_t install,
+                                     const std::string &store,
+                                     const std::string &app_name) {
+      return game_library::heroic_install_name(install) + "/" + store + "/" + app_name;
+    };
+    const auto append_heroic_artwork = [](nlohmann::json &game, const game_library::heroic_game_t &entry) {
+      if (!entry.poster_url.empty()) {
+        game["poster_url"] = entry.poster_url;
+      }
+      if (!entry.hero_url.empty()) {
+        game["hero_url"] = entry.hero_url;
+      }
+    };
     const auto heroic_already_imported = [&existing_cmds, &existing_heroic_keys](
                                            const std::string &store,
                                            const std::string &app_name
@@ -2957,6 +3029,27 @@ namespace confighttp {
     };
 
     if (!home_roots.empty()) {
+      // Legendary's installed manifest owns launch truth but does not include artwork.
+      // Join its entries to the same-install store cache before de-duplicating the two
+      // sources so an installed title keeps Heroic's official portrait and hero art.
+      std::unordered_map<std::string, game_library::heroic_game_t> heroic_cache_metadata;
+      for (const auto &[cache_path, store, install] : game_library::heroic_cache_files(home_roots)) {
+        if (store != "epic" || !std::filesystem::exists(cache_path)) {
+          continue;
+        }
+        try {
+          std::ifstream cache_file(cache_path);
+          std::stringstream cache_payload;
+          cache_payload << cache_file.rdbuf();
+          for (auto &entry : game_library::parse_heroic_cache_json(cache_payload.str(), store, install)) {
+            heroic_cache_metadata.emplace(
+              heroic_cache_key(entry.install, entry.store, entry.app_name),
+              std::move(entry)
+            );
+          }
+        } catch (...) {}
+      }
+
       for (const auto &[library_path, store, install] : game_library::heroic_installed_files(home_roots)) {
         if (!std::filesystem::exists(library_path)) continue;
         try {
@@ -2977,7 +3070,14 @@ namespace confighttp {
             entries = game_library::parse_heroic_installed_json(payload.str(), store, install);
           }
 
-          for (const auto &entry : entries) {
+          for (auto &entry : entries) {
+            if (const auto cached = heroic_cache_metadata.find(
+                  heroic_cache_key(entry.install, entry.store, entry.app_name)
+                ); cached != heroic_cache_metadata.end()) {
+              entry.poster_url = cached->second.poster_url;
+              entry.hero_url = cached->second.hero_url;
+            }
+
             // Both installs can hold the same title, and the launch command follows the
             // install this entry came from.
             if (!seen_heroic_keys.insert(entry.store + "/" + entry.app_name).second) continue;
@@ -2991,6 +3091,7 @@ namespace confighttp {
             game["cmd"] = entry.command;
             game["source"] = "heroic";
             game["already_imported"] = heroic_already_imported(entry.store, entry.app_name);
+            append_heroic_artwork(game, entry);
             heroic_games.push_back(game);
           }
         } catch (const std::exception &e) {
@@ -3021,6 +3122,7 @@ namespace confighttp {
             game["cmd"] = entry.command;
             game["source"] = "heroic";
             game["already_imported"] = heroic_already_imported(entry.store, entry.app_name);
+            append_heroic_artwork(game, entry);
             heroic_games.push_back(game);
           }
         } catch (...) {}
@@ -3203,6 +3305,23 @@ namespace confighttp {
           app["heroic-store"] = store;
           app["heroic-runner"] = heroic->runner;
           app["heroic-install"] = install_name;
+
+          if (const auto cached = game_library::find_heroic_cached_game(
+                game_library::library_home_roots(),
+                app_name,
+                store,
+                heroic->install
+              ); cached) {
+            const fs::path coverdir = platf::appdata() / "covers";
+            if (const auto cover_path = download_best_heroic_cover(
+                  cached->poster_url,
+                  cached->hero_url,
+                  coverdir,
+                  "heroic_" + store + "_" + app_name
+                ); cover_path) {
+              app["image-path"] = *cover_path;
+            }
+          }
         }
 
         // Persist game classification metadata

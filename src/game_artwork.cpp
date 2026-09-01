@@ -448,7 +448,18 @@ namespace game_artwork {
       "cdn2.steamgriddb.com",
       "www.steamgriddb.com",
     };
-    return provider == provider_e::steam ? steam_hosts.count(*host) != 0 : steamgriddb_hosts.count(*host) != 0;
+    static const std::set<std::string> epic_hosts {
+      "cdn1.epicgames.com",
+    };
+    switch (provider) {
+      case provider_e::steam:
+        return steam_hosts.count(*host) != 0;
+      case provider_e::steamgriddb:
+        return steamgriddb_hosts.count(*host) != 0;
+      case provider_e::epic:
+        return epic_hosts.count(*host) != 0;
+    }
+    return false;
   }
 
   std::vector<asset_t> resolve_missing_assets(const resolve_request_t &request) {
