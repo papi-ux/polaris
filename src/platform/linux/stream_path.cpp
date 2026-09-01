@@ -128,7 +128,7 @@ namespace stream_path {
         k_headless_dongle,
         "Headless Dongle",
         "Physical dummy",
-        "Swap the desktop onto a physical dummy-plug connector, blank the panel (privacy), capture via host portal ScreenCast (default). KMS remains optional for CAP_SYS_ADMIN hosts. Requires linux_streaming_output + linux_primary_output + auto_manage.",
+        "Swap the desktop onto a physical dummy-plug connector. Privacy mode blanks the panel; off mode leaves it primary and extends onto the dongle. Capture via host portal ScreenCast (default). KMS remains optional for CAP_SYS_ADMIN hosts. Requires linux_streaming_output + linux_primary_output + auto_manage.",
         runtime_kind_e::NONE,
         capture_kind_e::PORTAL,
         topology_kind_e::SWAP_PRIMARY,

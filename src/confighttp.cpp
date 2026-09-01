@@ -3961,7 +3961,28 @@ namespace confighttp {
       output_tree["runtime_gpu_native_override_active"] = labwc.state.gpu_native_override_active;
       output_tree["stream_path_id"] = policy.selection;
       output_tree["stream_path_label"] = policy.label;
+      output_tree["stream_display_mode_options"] = nlohmann::json::array();
+      for (const auto &option : stream_display_policy::mode_options(vd_available)) {
+        auto unavailable_reason = option.available ? std::string {} : option.unavailable_reason;
+        if (!option.available && unavailable_reason.empty()) {
+          unavailable_reason = "This mode is not available on this host right now.";
+        }
+        output_tree["stream_display_mode_options"].push_back({
+          {"value", option.value},
+          {"label", option.label},
+          {"available", option.available},
+          {"unavailable_reason", unavailable_reason},
+          {"reason", option.reason},
+          {"group", option.group},
+          {"runtime", option.runtime},
+          {"capture", option.capture},
+          {"topology", option.topology},
+          {"session_overridable", stream_display_policy::selection_session_overridable(option.value)},
+        });
+      }
     }
+#else
+    output_tree["stream_display_mode_options"] = nlohmann::json::array();
 #endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     for (auto &[name, value] : vars) {
@@ -4048,6 +4069,7 @@ namespace confighttp {
                key == "runtime_requested_headless"sv ||
                key == "runtime_effective_headless"sv ||
                key == "runtime_gpu_native_override_active"sv ||
+               key == "stream_display_mode_options"sv ||
                key == "client_settings_available"sv ||
                key == "client_settings_v1"sv ||
                key == "client_settings_endpoint"sv ||

@@ -20,7 +20,7 @@ Every card under **Settings → Audio/Video → Where games run** starts with wh
 | Several family members at once | Not available yet, see [Family Mode](#family-mode-isolated) |
 
 > [!TIP]
-> When in doubt, pick **Private Stream**. Switching is one click in the web UI and fully reversible, and Mission Control [shows you what Polaris actually started](#check-what-your-stream-is-using).
+> When in doubt, pick **Private Stream**. Select the card and save it for the next launch; an active stream may keep the previous mode until relaunch. You can change the saved choice back later, and Mission Control [shows you what Polaris actually started](#check-what-your-stream-is-using).
 
 ## The modes
 
@@ -62,9 +62,9 @@ Not selectable yet. It appears under **Planned modes** and is reserved for the s
 
 ### Headless Dongle
 
-For hosts with a dummy plug (an HDMI or DisplayPort dongle): the desktop moves onto the dongle and the real panel goes dark, so someone in the room sees a black screen while you stream.
+For hosts with a dummy plug (an HDMI or DisplayPort dongle): the desktop moves onto the dongle. In **Privacy** mode the real panel goes dark; in **Off** mode the panel stays primary and the desktop extends onto the dongle.
 
-- **Best for:** a dedicated streaming PC in a shared room, where privacy matters.
+- **Best for:** a dedicated streaming PC, with optional panel blanking when privacy matters.
 - **One caveat:** it needs the dongle plugged in and both a streaming output and a primary output configured. Clients also cannot switch a Headless Dongle host into another mode for a single launch, because the layout is physical.
 
 ### Mirror Desktop
