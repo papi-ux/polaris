@@ -122,14 +122,16 @@ namespace proc {
 
   constexpr auto nested_gamescope_start_timeout = 120s;
 
-  // Teardown gets its own, much shorter budget than startup. The stop path in
-  // polaris-gamescope-session.sh waits up to about 15s of its own accord
-  // (POLARIS_IDLE_WAIT_STEPS and POLARIS_PORTAL_WAIT_STEPS, both at 0.1s), so a
-  // 5s caller can terminate it mid-drain. This leaves headroom over that budget
-  // while staying far below the startup timeout, because undo runs while the
-  // session lifecycle lock is held and a two-minute teardown would be worse than
-  // the stall it prevents.
-  constexpr auto nested_gamescope_stop_timeout = 30s;
+  // Teardown gets its own bounded budget below startup. The nested stop phases
+  // are deliberately sequential: retire exact-session Steam and its primary
+  // child, fence every private Gamescope group, retire exact-session Xwayland,
+  // prove orphan sockets safe, then commit the standalone/managed handoff. A
+  // physical full-session teardown exhausted the old 30s caller budget after
+  // the compositor fence had already committed, so Polaris killed a healthy
+  // recovery transaction before it could publish completion. Sixty seconds
+  // covers the helper's default bounded waits and ownership scans without
+  // permitting the two-minute startup budget to become a teardown stall.
+  constexpr auto nested_gamescope_stop_timeout = 60s;
 
   session_stop_outcome_t evaluate_session_stop_request(
     bool can_launch,
