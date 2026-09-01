@@ -3059,12 +3059,32 @@ namespace nvhttp {
       return (configured_parent.empty() ? platf::appdata() : configured_parent) / "covers";
     }
 
+    bool uses_bundled_utility_artwork(const proc::ctx_t &app) {
+      return app.uuid == VIRTUAL_DISPLAY_UUID ||
+             app.uuid == FALLBACK_DESKTOP_UUID ||
+             app.uuid == REMOTE_INPUT_UUID ||
+             app.uuid == TERMINATE_APP_UUID;
+    }
+
+    fs::path configured_artwork_image(const proc::ctx_t &app) {
+      const fs::path configured = app.image_path;
+      if (!uses_bundled_utility_artwork(app) || configured.empty() || configured.is_absolute()) {
+        return configured;
+      }
+
+      // Runtime-injected entries carry a bundled filename rather than an
+      // absolute path. Artwork resolution must use the same validated path as
+      // the legacy cover endpoint; otherwise a title such as "Virtual Display"
+      // falls through to a coincidental SteamGridDB game match.
+      return proc::validate_app_image_path(app.image_path);
+    }
+
     std::vector<game_artwork::local_candidate_t> local_artwork_candidates(const proc::ctx_t &app) {
       const auto candidate = game_artwork::select_legacy_poster(
         legacy_covers_directory(),
         app.uuid,
         app.steam_appid,
-        fs::path(app.image_path)
+        configured_artwork_image(app)
       );
       if (!candidate) {
         return {};
@@ -3075,9 +3095,36 @@ namespace nvhttp {
     void promote_local_artwork_poster(const proc::ctx_t &app) {
       const auto appdata = platf::appdata();
       const auto candidates = local_artwork_candidates(app);
-      if (!candidates.empty() && game_artwork::needs_source_upgrade(
-            appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source)) {
+      const bool bundled_utility = uses_bundled_utility_artwork(app);
+      bool candidate_already_cached = false;
+      if (bundled_utility && !candidates.empty()) {
+        const auto cached_before = game_artwork::scan_cached_assets(appdata, app.uuid);
+        candidate_already_cached = std::any_of(
+          cached_before.begin(), cached_before.end(), [&](const auto &asset) {
+            return asset.kind == game_artwork::kind_e::poster &&
+                   asset.source == candidates.front().source;
+          });
+      }
+      if (!candidates.empty() &&
+          ((bundled_utility && !candidate_already_cached) ||
+           game_artwork::needs_source_upgrade(
+             appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source))) {
         (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
+      }
+      if (bundled_utility) {
+        const auto assets = game_artwork::scan_cached_assets(appdata, app.uuid);
+        const bool bundled_poster_ready = std::any_of(assets.begin(), assets.end(), [](const auto &asset) {
+          return asset.kind == game_artwork::kind_e::poster &&
+                 asset.source == game_artwork::source_e::local;
+        });
+        if (bundled_poster_ready) {
+          // Old builds searched utility titles as if they were games (for
+          // example Virtual Display -> Virtual Boy: Wario Land). Retire only
+          // that automatic cache; an explicit Artwork Studio override remains
+          // authoritative and can still be cleared back to the bundled image.
+          (void) game_artwork::remove_cached_source_assets(
+            appdata, app.uuid, game_artwork::source_e::steamgriddb);
+        }
       }
     }
   }  // namespace
@@ -7735,17 +7782,8 @@ namespace nvhttp {
       const auto appdata = platf::appdata();
       const auto api_key = config::sunshine.steamgriddb_api_key;
       const auto transport = make_artwork_transport(api_key);
-      game_artwork::resolve_request_t resolve_request {
-        appdata,
-        app->uuid,
-        app->name,
-        app->steam_appid,
-        local_artwork_candidates(*app),
-        api_key,
-      };
-
       // Promote existing host artwork before attempting either remote provider.
-      (void) game_artwork::resolve_missing_assets(resolve_request);
+      promote_local_artwork_poster(*app);
 
       if (game_artwork::is_valid_steam_appid(app->steam_appid)) {
         (void) game_artwork::providers::execute_download_plan(
@@ -7765,18 +7803,20 @@ namespace nvhttp {
         game_artwork::kind_e::logo,
         game_artwork::kind_e::icon,
       };
+      const bool bundled_utility = uses_bundled_utility_artwork(*app);
       // Whatever is still missing once local promotion and the free Steam assets have run is
       // exactly the set this request goes on to ask a remote provider for, so it is also what
       // the response reports as requested.
       std::vector<game_artwork::kind_e> requested_kinds;
       for (const auto kind : resolvable_kinds) {
+        if (bundled_utility && kind != game_artwork::kind_e::poster) continue;
         if (kind_is_missing(kind)) {
           requested_kinds.push_back(kind);
         }
       }
       const bool any_kind_missing = !requested_kinds.empty();
 
-      if (any_kind_missing && nonblank_artwork_api_key(api_key)) {
+      if (any_kind_missing && !bundled_utility && nonblank_artwork_api_key(api_key)) {
         try {
           const auto search_request = game_artwork::providers::plan_steamgriddb_search(app->name);
           if (search_request) {

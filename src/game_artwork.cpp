@@ -337,6 +337,36 @@ namespace game_artwork {
     return asset_t {kind_e::poster, candidate.source, *destination, *mime};
   }
 
+  bool remove_cached_source_assets(
+    const fs::path &appdata,
+    std::string_view uuid,
+    source_e source
+  ) {
+    if (!is_valid_uuid(uuid)) return false;
+    bool success = true;
+    for (const auto kind : std::array {kind_e::poster, kind_e::hero, kind_e::logo, kind_e::icon}) {
+      for (const auto extension : image_extensions) {
+        const auto candidate = cache_asset_path(appdata, uuid, kind, source, extension);
+        if (!candidate) {
+          success = false;
+          continue;
+        }
+        std::error_code error;
+        const auto status = fs::symlink_status(*candidate, error);
+        if (error == std::errc::no_such_file_or_directory || (!error && !fs::exists(status))) {
+          continue;
+        }
+        if (error || (!fs::is_regular_file(status) && !fs::is_symlink(status))) {
+          success = false;
+          continue;
+        }
+        fs::remove(*candidate, error);
+        if (error) success = false;
+      }
+    }
+    return success;
+  }
+
   std::vector<asset_t> scan_cached_assets(const fs::path &appdata, std::string_view uuid) {
     std::vector<asset_t> assets;
     if (!is_valid_uuid(uuid)) return assets;
