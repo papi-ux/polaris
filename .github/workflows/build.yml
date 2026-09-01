@@ -225,7 +225,7 @@ jobs:
         # executable in both this build list and the anchored ctest expression;
         # narrow deliberately only if a suite earns it.
         run: |
-          ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_audio|test_polaris_audit|test_polaris_config|test_polaris_http|test_polaris_input|test_polaris_network|test_polaris_pairing|test_polaris_platform|test_polaris_steam_shutdown|test_polaris_stream|test_polaris_video|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell)$'
+          ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_polaris|test_polaris_audio|test_polaris_audit|test_polaris_config|test_polaris_http|test_polaris_input|test_polaris_network|test_polaris_pairing|test_polaris_platform|test_polaris_steam_shutdown|test_polaris_stream|test_polaris_video|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell|polaris_gamescope_session_geometry_shell|polaris_gamescope_primary_child_shell)$'
 
   arch-build:
     name: Arch build

@@ -28,6 +28,14 @@ polaris_valid_refresh() {
     [[ ! "${1:-}" =~ ^0+([.]0+)?$ ]]
 }
 
+polaris_runtime_ready_timeout_seconds() {
+  local candidate="${POLARIS_GAMESCOPE_READY_TIMEOUT_SECONDS:-30}"
+  if ! polaris_valid_dimension "$candidate" || [ "$candidate" -gt 120 ] 2>/dev/null; then
+    candidate=30
+  fi
+  printf '%s\n' "$candidate"
+}
+
 polaris_first_valid_geometry_value() {
   local validator="$1" candidate
   shift
@@ -53,6 +61,7 @@ session_id_file="$rt/polaris-gamescope-session-id"
 session_mode_file="$rt/polaris-gamescope-session-mode"
 session_state_file="$rt/polaris-gamescope-session-state"
 session_operation_lock="$rt/polaris-gamescope-session-operation.lock"
+nested_primary_exit_file="$rt/polaris-gamescope-primary-child-exit"
 
 polaris_gamescope_service_mode() {
   local idle_state portal_state
@@ -437,71 +446,255 @@ kill_session_steam() {
   session_steam_absent
 }
 
-# Give Gamescope a bounded opportunity to finish its normal teardown after the
-# credential-bound Steam child exits. Return 0 only when the exact marker is no
-# longer live and every old socket is absent or safely reclaimable; return 1
-# when the exact generation remains live for the fenced fallback; return 2 when
-# ownership became ambiguous and no destructive fallback is authorized.
-wait_for_nested_gamescope_exit() {
-  local rc
-  for _ in $(seq 1 "${POLARIS_NESTED_EXIT_WAIT_STEPS:-50}"); do
-    if polaris_validate_marker "$marker" nested; then
-      sleep "${POLARIS_NESTED_EXIT_WAIT_INTERVAL:-0.1}"
-      continue
-    fi
-    if polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-      return 0
-    fi
-    return 2
-  done
+publish_nested_primary_child_exit() (
+  local tmp
+  load_session_instance_id || return 1
+  [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || return 1
+  tmp="$nested_primary_exit_file.tmp.$$"
+  trap 'rm -f -- "$tmp"' EXIT
+  printf '%s\n' "$POLARIS_SESSION_INSTANCE_ID" >"$tmp" || return 1
+  mv -f -- "$tmp" "$nested_primary_exit_file"
+)
 
-  if polaris_validate_marker "$marker" nested; then
+run_nested_primary_child() {
+  local steam_pid="" steam_rc=0 wait_pid="" steam_spawn_started=0
+  local primary_parent_pid="$PPID" primary_parent_start_time=""
+  local primary_group_id="" primary_session_id=""
+  local primary_wrapper_pid="$$" primary_wrapper_start_time=""
+  local primary_fence_armed=0
+  local kill_bin="${POLARIS_KILL_BIN:-kill}"
+  [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ] || {
+    echo "polaris-gamescope-session: primary child requires an explicit session credential" >&2
     return 1
+  }
+  load_session_instance_id || {
+    echo "polaris-gamescope-session: primary child lacks an exact session credential" >&2
+    return 1
+  }
+  [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || {
+    echo "polaris-gamescope-session: primary child is not bound to a nested session" >&2
+    return 1
+  }
+  [ "${1:-}" = -- ] && [ "$#" -ge 2 ] || {
+    echo "polaris-gamescope-session: primary child requires a Steam command" >&2
+    return 2
+  }
+  shift
+  [ "$1" = steam ] || {
+    echo "polaris-gamescope-session: primary child refused a non-Steam command" >&2
+    return 2
+  }
+
+  nested_primary_parent_gone() {
+    local child_pid=""
+    # Production nested Gamescope is the immutable leader of a private
+    # process group and session. Keep this wrapper alive through TERM so it can
+    # retire the complete group, including Steam descendants which outlive the
+    # direct launcher. The final KILL intentionally includes this wrapper.
+    if [ "$primary_fence_armed" = 1 ]; then
+      trap '' TERM INT HUP
+      signal_session_steam -TERM || true
+      "$kill_bin" -TERM "-$primary_group_id" 2>/dev/null || true
+      for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
+        sleep 0.05
+      done
+      # Gamescope is already gone, so no durable compositor marker remains for
+      # a later retry. Keep this exact wrapper alive and positively fence every
+      # other member of the private session. This also covers a sibling process
+      # group whose leader exited before the parent-death signal arrived.
+      while ! polaris_kill_private_session_members_with_authority \
+          "$primary_session_id" "$primary_wrapper_pid" \
+          "$primary_wrapper_start_time" "$primary_group_id"; do
+        sleep 0.05
+      done
+      signal_session_steam -KILL || true
+      "$kill_bin" -KILL "-$primary_group_id" 2>/dev/null || true
+      exit 0
+    fi
+
+    # Cross-platform unit helpers do not own a real Linux process group. They
+    # retain the bounded direct-child fallback while production requires the
+    # private group proof below before Steam can start.
+    trap - TERM INT HUP
+    if [ "$steam_spawn_started" = 1 ]; then
+      child_pid="$steam_pid"
+      # Bash updates $! as part of starting the asynchronous command. Use it
+      # when TERM arrives in the narrow interval before the explicit copy.
+      [ -n "$child_pid" ] || child_pid="${!:-}"
+    fi
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+      "$kill_bin" -TERM "$child_pid" 2>/dev/null || true
+      for _ in $(seq 1 "${POLARIS_PRIMARY_STEAM_TERM_STEPS:-20}"); do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if kill -0 "$child_pid" 2>/dev/null; then
+        "$kill_bin" -KILL "$child_pid" 2>/dev/null || true
+      fi
+    fi
+    [ -z "$child_pid" ] || wait "$child_pid" 2>/dev/null || true
+    exit 0
+  }
+  nested_primary_keeper_exit() {
+    trap - TERM INT HUP
+    if [ -n "$wait_pid" ]; then
+      kill -TERM "$wait_pid" 2>/dev/null || true
+      wait "$wait_pid" 2>/dev/null || true
+    fi
+    exit 0
+  }
+  # setpriv gives this wrapper a parent-death signal from Gamescope. If the
+  # compositor itself dies, retire the direct Steam launcher rather than
+  # leaving a keepalive orphan behind.
+  trap nested_primary_parent_gone TERM INT HUP
+  # PR_SET_PDEATHSIG cannot report a parent that died before setpriv armed the
+  # signal. Re-prove the immediate parent after exec and before Steam starts;
+  # a later parent death is covered by the already-installed trap above.
+  if ! polaris_headless_gamescope_pid "$primary_parent_pid"; then
+    trap - TERM INT HUP
+    echo "polaris-gamescope-session: primary child lost its exact Gamescope parent before Steam launch" >&2
+    return 1
+  fi
+  if polaris_process_fields "$primary_parent_pid" 2>/dev/null; then
+    primary_parent_start_time="$POLARIS_PROCESS_START_TIME"
+    [ "$POLARIS_PROCESS_PGID" = "$primary_parent_pid" ] \
+      && [ "$POLARIS_PROCESS_SESSION_ID" = "$primary_parent_pid" ] || {
+        trap - TERM INT HUP
+        echo "polaris-gamescope-session: primary child refused a non-private Gamescope parent" >&2
+        return 1
+      }
+    primary_group_id="$POLARIS_PROCESS_PGID"
+    primary_session_id="$POLARIS_PROCESS_SESSION_ID"
+    if ! polaris_headless_gamescope_pid "$primary_parent_pid" \
+        || ! polaris_process_fields "$primary_parent_pid" \
+        || [ "$POLARIS_PROCESS_START_TIME" != "$primary_parent_start_time" ] \
+        || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ]; then
+      trap - TERM INT HUP
+      echo "polaris-gamescope-session: primary child lost its private Gamescope generation before Steam launch" >&2
+      return 1
+    fi
+    if ! polaris_process_fields "$primary_wrapper_pid" \
+        || [ "$POLARIS_PROCESS_PGID" != "$primary_group_id" ] \
+        || [ "$POLARIS_PROCESS_SESSION_ID" != "$primary_session_id" ] \
+        || [ "$POLARIS_PROCESS_STATE" = Z ]; then
+      trap - TERM INT HUP
+      echo "polaris-gamescope-session: primary child could not prove its cleanup wrapper" >&2
+      return 1
+    fi
+    primary_wrapper_start_time="$POLARIS_PROCESS_START_TIME"
+    # Publish the complete cleanup identity to the asynchronous parent-death
+    # handler only after every component has been validated and captured.
+    primary_fence_armed=1
+  elif [ -z "${POLARIS_TEST_GAMESCOPE_PID:-}" ]; then
+    trap - TERM INT HUP
+    echo "polaris-gamescope-session: primary child could not prove its private Gamescope group" >&2
+    return 1
+  fi
+
+  steam_spawn_started=1
+  "$@" &
+  steam_pid=$!
+  if wait "$steam_pid"; then
+    steam_rc=0
   else
-    rc=$?
+    steam_rc=$?
   fi
-  [ "$rc" -eq 1 ] || return 2
-  if polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-    return 0
+
+  if publish_nested_primary_child_exit; then
+    echo "polaris-gamescope-session: exact-session Steam exited (rc=$steam_rc); primary child holding for fenced compositor teardown" >&2
+  else
+    echo "polaris-gamescope-session: exact-session Steam exited but its terminal marker could not be published; holding for explicit teardown" >&2
   fi
-  return 2
+
+  # Do not return to Gamescope here. Gamescope 3.16 can fault in Vulkan global
+  # destruction when its primary child exits. Polaris's exact stop path freezes
+  # and SIGKILLs the private generation, so this keeper remains until that
+  # already-authorized fence commits. SIGKILL never enters Gamescope's broken
+  # exit handlers.
+  # Production must retain the exact parent-death fence after Steam's primary
+  # command returns: Steam may leave helpers in the private session, including
+  # a leaderless sibling group. Cross-platform tests without Linux process
+  # identity retain the bounded keeper-only exit path.
+  if [ "$primary_fence_armed" != 1 ]; then
+    trap nested_primary_keeper_exit TERM INT HUP
+  fi
+  while :; do
+    sleep 3600 &
+    wait_pid=$!
+    wait "$wait_pid" || true
+  done
 }
 
-retire_marked_nested_gamescope_child_first() {
-  local graceful_exit=0
+nested_primary_child_exit_matches() {
+  [ -f "$nested_primary_exit_file" ] \
+    && [ ! -L "$nested_primary_exit_file" ] \
+    && [ "$(tr -d '\r\n' <"$nested_primary_exit_file")" = "${POLARIS_SESSION_INSTANCE_ID:-}" ]
+}
+
+wait_for_nested_primary_child_exit() {
+  for _ in $(seq 1 "${POLARIS_PRIMARY_EXIT_WAIT_STEPS:-100}"); do
+    nested_primary_child_exit_matches && return 0
+    if [ -e "$nested_primary_exit_file" ] || [ -L "$nested_primary_exit_file" ]; then
+      return 1
+    fi
+    sleep 0.02
+  done
+  nested_primary_child_exit_matches
+}
+
+retire_marked_nested_gamescope_under_fence() (
+  local lock_bin="${POLARIS_FLOCK_BIN:-flock}" rc steam_was_present=0
+  if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
+    exec 9>>"$rt/polaris-gamescope.lock" || return 1
+    "$lock_bin" -x 9 || return 1
+    export POLARIS_GAMESCOPE_LOCK_HELD=1
+  fi
   polaris_validate_marker "$marker" nested || return 1
+  if session_steam_alive; then
+    steam_was_present=1
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return 1
+  fi
+
+  # Stop the exact compositor before asking session Steam to exit. The direct
+  # primary-child wrapper remains runnable and can publish its exact terminal
+  # marker, while Gamescope cannot observe Xwayland disappearing and enter its
+  # X11 I/O abort path.
+  if ! polaris_freeze_marked_gamescope "$marker" nested "$rt"; then
+    echo "polaris-gamescope-session: exact nested compositor did not enter the pre-teardown fence" >&2
+    return 1
+  fi
+  echo "polaris-gamescope-session: exact nested compositor paused before exact-session Steam exit" >&2
   if ! kill_session_steam || ! session_steam_absent; then
     echo "polaris-gamescope-session: exact-session Steam did not reach terminal state" >&2
     return 1
   fi
+  if [ "$steam_was_present" = 1 ] && ! wait_for_nested_primary_child_exit; then
+    echo "polaris-gamescope-session: exact-session Steam exited without a matching primary-child terminal marker" >&2
+    return 1
+  fi
 
-  wait_for_nested_gamescope_exit || graceful_exit=$?
-  case "$graceful_exit" in
-    0)
-      echo "polaris-gamescope-session: nested owner exited after exact-session Steam" >&2
-      return 0
-      ;;
-    1)
-      echo "polaris-gamescope-session: nested owner exceeded graceful exit window; using exact-generation fence" >&2
-      if polaris_stop_marked_gamescope "$marker" nested "$rt"; then
-        return 0
-      fi
-      # The generation may finish between the last wait probe and the fenced
-      # helper's first identity check. Accept only the same safe dead/orphan
-      # proof used by the graceful path.
-      if polaris_validate_marker "$marker" nested \
-          || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
-        return 1
-      fi
-      echo "polaris-gamescope-session: nested owner exited while the fallback was acquiring authority" >&2
-      return 0
-      ;;
-    *)
-      echo "polaris-gamescope-session: nested ownership changed during graceful exit" >&2
-      return 1
-      ;;
-  esac
-}
+  # Commit the already-paused compositor to the complete private-group fence.
+  # The pre-frozen contract prevents any failure from resuming Gamescope over
+  # the now-terminal Steam/Xwayland generation.
+  if POLARIS_GAMESCOPE_PREFROZEN=1 \
+      polaris_stop_marked_gamescope "$marker" nested "$rt"; then
+    echo "polaris-gamescope-session: exact nested generation fenced after exact-session Steam" >&2
+    return 0
+  fi
+  # The compositor may finish in the narrow interval between the Steam check
+  # and the fenced helper's first identity check. Accept only a dead marker and
+  # the same safe orphan-socket proof used by recovery; otherwise retain the
+  # durable claim for an exact retry.
+  if polaris_validate_marker "$marker" nested \
+      || ! polaris_reclaim_orphan_gamescope_sockets "$rt"; then
+    return 1
+  fi
+  echo "polaris-gamescope-session: nested owner exited while the exact-generation fence was acquiring authority" >&2
+  return 0
+)
 
 # True while a real game process for $1 (Steam appid) is running.
 # Steam client / webhelper also inherit SteamAppId — exclude those so
@@ -537,6 +730,9 @@ steam_app_game_alive() {
 }
 
 case "${1:-}" in
+  nested-primary-child)
+    run_nested_primary_child "${@:2}"
+    ;;
   start)
     acquire_session_operation_lock || {
       echo "polaris-gamescope-session: could not serialize session start" >&2
@@ -557,6 +753,7 @@ case "${1:-}" in
       POLARIS_SESSION_INSTANCE_ID="$requested_session_id"
       export POLARIS_SESSION_INSTANCE_ID
     fi
+    rm -f -- "$nested_primary_exit_file"
     # Soft env hint for nested games (PULSE_SINK / PIPEWIRE_NODE).
     # Polaris claims sink-sunshine-* as the session default (stream capture);
     # do not point children at EasyEffects and do not re-pin sink-inputs here.
@@ -638,7 +835,10 @@ case "${1:-}" in
       }
     fi
 
-    # Nested WSI: gamescope --steam with Steam as primary child.
+    # Nested WSI: a session-owned keeper is Gamescope's primary child and
+    # launches Steam beneath it. Steam may then reach terminal state without
+    # returning from Gamescope's primary child and triggering the known-bad
+    # Gamescope 3.16 Vulkan destructor path.
     # Plain "-silent -applaunch" creates a WSI surface but often no
     # PipeWire paint (black stream). BP works because -gamepadui owns
     # focus; direct titles use the same UI + applaunch.
@@ -671,7 +871,7 @@ case "${1:-}" in
 
     if [ "$want_wsi" = 1 ]; then
       # --- Nested WSI path (games as gamescope child) ---
-      echo "polaris-gamescope-session: WSI nested mode — Steam is ${POLARIS_GAMESCOPE_BIN:-gamescope} primary child" >&2
+      echo "polaris-gamescope-session: WSI nested mode — exact-session keeper owns ${POLARIS_GAMESCOPE_BIN:-gamescope} primary-child lifetime" >&2
       # Publish a fenced transition before masking/stopping idle ownership so no
       # readiness actor can interpret the destructive handoff as an unowned gap.
       publish_nested_claim transition absent || {
@@ -751,7 +951,10 @@ case "${1:-}" in
       fi
 
       steam_log="$(mktemp "$rt/polaris-gamescope-steam-wsi.XXXXXX.log")"
-      # gamescope runs Steam as primary child; portal still captures gamescope-0.
+      # The keeper launches Steam in Gamescope's WSI environment but remains
+      # alive after Steam exits so the exact stop fence, not Gamescope's natural
+      # destructor path, owns compositor retirement. Portal still captures
+      # gamescope-0.
       # Omit --expose-wayland so children stay on XWayland + GAMESCOPE_WAYLAND_DISPLAY
       # (WSI X11 path). Portal uses compositor socket gamescope-0, not child WAYLAND.
       # env -u: drop host KWin Wayland/DISPLAY inherited from polaris user session.
@@ -772,7 +975,8 @@ case "${1:-}" in
           "${hdr_flags[@]}" \
           -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
           -w "$gs_width" -h "$gs_height" \
-          -- "${steam_launch[@]}"
+          -- setpriv --pdeathsig TERM -- \
+          bash "$0" nested-primary-child -- "${steam_launch[@]}"
       ) >"$steam_log" 2>&1 &
       nested_launch_pid=$!
 
@@ -812,7 +1016,7 @@ case "${1:-}" in
       if [ "$nested_marked" != 1 ]; then
         echo "polaris-gamescope-session: failed to record an exact nested gamescope generation in its private setsid group" >&2
         if [ -f "$marker" ] && polaris_validate_marker "$marker" nested; then
-          retire_marked_nested_gamescope_child_first || true
+          retire_marked_nested_gamescope_under_fence || true
         fi
         # Without an exact marker plus PGID/SID proof there is no safe numeric
         # fallback. Preserve the recovery claim and let service/cgroup teardown
@@ -821,7 +1025,9 @@ case "${1:-}" in
       fi
 
       ready=0
-      for _ in $(seq 1 300); do
+      ready_timeout="$(polaris_runtime_ready_timeout_seconds)"
+      ready_deadline=$((SECONDS + ready_timeout))
+      while [ "$SECONDS" -lt "$ready_deadline" ]; do
         if polaris_write_runtime_env "$marker" gamescope-0 nested "$rt"; then
           ready=1
           break
@@ -831,7 +1037,7 @@ case "${1:-}" in
       done
       if [ "$ready" != 1 ]; then
         echo "polaris-gamescope-session: owned nested gamescope-0/Xwayland not ready — see $steam_log" >&2
-        retire_marked_nested_gamescope_child_first || true
+        retire_marked_nested_gamescope_under_fence || true
         exit 1
       fi
       publish_nested_claim nested nested || {
@@ -884,7 +1090,9 @@ case "${1:-}" in
       fi
 
       attach_ready=0
-      for _ in $(seq 1 300); do
+      ready_timeout="$(polaris_runtime_ready_timeout_seconds)"
+      ready_deadline=$((SECONDS + ready_timeout))
+      while [ "$SECONDS" -lt "$ready_deadline" ]; do
         if polaris_write_runtime_env "$marker" gamescope-0 idle "$rt"; then
           attach_ready=1
           break
@@ -955,6 +1163,16 @@ case "${1:-}" in
     seen=0
     gone=0
     while :; do
+      if [ -e "$nested_primary_exit_file" ] || [ -L "$nested_primary_exit_file" ]; then
+        if [ -f "$nested_primary_exit_file" ] \
+            && [ ! -L "$nested_primary_exit_file" ] \
+            && [ "$(tr -d '\r\n' <"$nested_primary_exit_file")" = "$POLARIS_SESSION_INSTANCE_ID" ]; then
+          echo "polaris-gamescope-session: exact-session Steam primary command exited — releasing wait" >&2
+          exit 0
+        fi
+        echo "polaris-gamescope-session: invalid nested primary-child terminal marker" >&2
+        exit 1
+      fi
       if [ -n "$appid" ] && steam_app_game_alive "$appid"; then
         if [ "$seen" = 0 ]; then
           echo "polaris-gamescope-session: game process for appid=$appid seen" >&2
@@ -1055,12 +1273,11 @@ case "${1:-}" in
         1|nested)
           echo "polaris-gamescope-session: tearing down marked nested WSI gamescope" >&2
           if polaris_validate_marker "$marker" nested; then
-            # Normal teardown is child-first. Killing/freezing the compositor
-            # while its XWM/Xwayland children are active can drive Gamescope's
-            # X11 I/O abort path. Signal only credential-bound session Steam,
-            # then give the exact compositor generation a bounded graceful
-            # exit before using the process-group fence as a fallback.
-            if ! retire_marked_nested_gamescope_child_first; then
+            # Pause the exact compositor first, retire credential-bound Steam
+            # while the primary wrapper remains runnable, then commit the full
+            # private-group fence. This prevents both X11 I/O abort and Vulkan
+            # destructor paths without touching desktop Steam.
+            if ! retire_marked_nested_gamescope_under_fence; then
               echo "polaris-gamescope-session: nested owner did not reach terminal state; retaining recovery claim" >&2
               exit 1
             fi
@@ -1201,7 +1418,7 @@ case "${1:-}" in
         systemctl --user restart polaris-gamescope-idle.service || true
       fi
     fi
-    rm -f "$session_state_file" "$session_mode_file" "$session_id_file"
+    rm -f "$session_state_file" "$session_mode_file" "$session_id_file" "$nested_primary_exit_file"
     ;;
   *)
     echo "usage: polaris-gamescope-session start [steam_appid]|wait|stop" >&2
