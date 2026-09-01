@@ -64,6 +64,29 @@ describe('v1.4.0 release contract', () => {
     }
   })
 
+  it('keeps the approved Heroic acceptance gate after release-note conflict resolution', () => {
+    const notes = read('docs/release-notes/v1.4.0.md')
+    expect(notes).toContain('one affected native or Flatpak GOG/Epic title')
+    expect(notes).toContain('approved host/account')
+    expect(notes).not.toContain('one native GOG title and one Flatpak Epic title')
+  })
+
+  it('binds Web launch-mode cards to the same host capability registry as launch', () => {
+    const configHttp = read('src/confighttp.cpp')
+    const audioVideo = read('src_assets/common/assets/web/configs/tabs/AudioVideo.vue')
+
+    expect(configHttp).toContain('stream_display_policy::mode_options(vd_available)')
+    expect(configHttp).toContain('output_tree["stream_display_mode_options"]')
+    expect(audioVideo).toContain('resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)')
+  })
+
+  it('keeps the Doctor navigation name in every shipped English locale', () => {
+    for (const locale of ['en.json', 'en_US.json', 'en_GB.json']) {
+      const strings = JSON.parse(read(`src_assets/common/assets/web/public/assets/locale/${locale}`))
+      expect(strings.navbar.troubleshoot, locale).toBe('Doctor & Support')
+    }
+  })
+
   it('pins all four install commands to v1.4.0 and preserves platform safety', () => {
     const blocks = installBlocks()
     expect(blocks).toHaveLength(4)

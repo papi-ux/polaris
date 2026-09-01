@@ -35,6 +35,7 @@ export const CONFIG_RESPONSE_ONLY_KEYS = [
   'runtime_effective_headless',
   'runtime_gpu_native_override_active',
   'stream_display_mode',
+  'stream_display_mode_options',
   'stream_path_id',
   'stream_path_label',
   ...CLIENT_SETTINGS_RESPONSE_ONLY_KEYS,
@@ -63,9 +64,35 @@ export function resolveStreamDisplayMode(config = {}) {
 }
 
 export function streamDisplayModeAvailable(mode) {
-  // Family/EVDI software paths still reserved; gamescope is selectable (attach or own).
-  if (mode === 'family_isolated' || mode === 'headless_evdi') return false
-  return true
+  // A missing capability catalog is not authority to start a private runtime or
+  // create/swap a display. Mirror Desktop is the sole no-probe recovery choice.
+  return mode === 'desktop_display'
+}
+
+export function resolveStreamDisplayModeAvailability(mode, options) {
+  if (!Array.isArray(options)) {
+    const available = streamDisplayModeAvailable(mode)
+    return {
+      available,
+      unavailableReason: available ? '' : 'This host did not report availability for this mode.',
+    }
+  }
+
+  const option = options.find((candidate) => candidate?.value === mode)
+  if (!option) {
+    return {
+      available: false,
+      unavailableReason: 'This mode was not advertised by this host.',
+    }
+  }
+
+  const available = option.available === true
+  return {
+    available,
+    unavailableReason: available
+      ? ''
+      : String(option.unavailable_reason || 'This mode is not available on this host right now.'),
+  }
 }
 
 export function applyStreamDisplayModeToConfig(config = {}, mode) {

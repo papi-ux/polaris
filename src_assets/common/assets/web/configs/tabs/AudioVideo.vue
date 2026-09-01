@@ -11,8 +11,8 @@ import {
   applyStreamDisplayModeToConfig,
   resolveClientSettingsSync,
   resolveStreamDisplayMode,
+  resolveStreamDisplayModeAvailability,
   resolveStreamDisplayRuntimeNotice,
-  streamDisplayModeAvailable,
 } from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
 
@@ -59,12 +59,11 @@ watch(() => config.value.fallback_mode, (mode) => {
 // Primary copy answers the player's question first. Backend vocabulary stays in the
 // technical disclosure, where it remains available for diagnosis without making
 // labwc/wlroots/portal knowledge a prerequisite for choosing a mode.
-const streamDisplayModes = [
+const streamDisplayModeDefinitions = [
   {
     id: 'headless_stream',
     title: 'Private Stream',
     badge: 'Recommended',
-    available: true,
     group: 'private',
     copy: 'Recommended. Runs the game on a private display without touching the host monitors.',
     impact: 'Best for handheld play and most gaming PCs.',
@@ -74,7 +73,6 @@ const streamDisplayModes = [
     id: 'windowed_stream',
     title: 'Private Stream (GPU-native)',
     badge: 'GPU-native',
-    available: true,
     group: 'private',
     copy: 'The same private session, keeping frames on the GPU when the host supports it.',
     impact: 'Best for supported NVIDIA hosts; it may appear as a window on the host.',
@@ -84,7 +82,6 @@ const streamDisplayModes = [
     id: 'gamescope_stream',
     title: 'Gamescope Stream',
     badge: 'Deck-style',
-    available: true,
     group: 'private',
     copy: 'Runs one game in a Steam Deck-style session that Polaris owns.',
     impact: 'Best for Steam-first hosts. Gamescope must be installed.',
@@ -94,7 +91,6 @@ const streamDisplayModes = [
     id: 'host_virtual_display',
     title: 'Host Virtual Display',
     badge: 'Adds a display',
-    available: true,
     group: 'host',
     copy: 'Adds a display to the host desktop and sizes it for the streaming client.',
     impact: 'The physical desktop stays usable, but windows and icons may rearrange.',
@@ -104,23 +100,26 @@ const streamDisplayModes = [
     id: 'headless_dongle',
     title: 'Headless Dongle',
     badge: 'Host default',
-    available: true,
     group: 'host',
-    copy: 'Moves the desktop to a physical dummy plug and blanks the real panel for privacy.',
-    impact: 'Configure it once as the host default; clients cannot enable it for one game.',
+    copy: 'Moves the desktop onto a physical dummy plug. Privacy mode also blanks the real panel.',
+    impact: 'Configure it once as the host default; Off mode keeps the real panel active, and clients cannot enable it for one game.',
     technical: 'Runtime: host desktop · Capture: portal by default, optional KMS · Requires streaming and primary outputs plus automatic display management',
   },
   {
     id: 'desktop_display',
     title: 'Mirror Desktop',
     badge: 'Visible on host',
-    available: true,
     group: 'host',
     copy: 'Streams everything visible on the host desktop, including notifications.',
     impact: 'Best for remote-desktop use and quick checks; it provides no privacy isolation.',
     technical: 'Runtime: host desktop · Capture: portal/PipeWire · Uses the existing physical display',
   },
 ]
+
+const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => ({
+  ...mode,
+  ...resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options),
+})))
 
 const plannedStreamDisplayModes = [
   {
@@ -136,7 +135,7 @@ const plannedStreamDisplayModes = [
 const streamDisplayMode = computed(() => resolveStreamDisplayMode(config.value))
 
 const selectedStreamDisplayMode = computed(() => (
-  streamDisplayModes.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes[0]
+  streamDisplayModes.value.find((mode) => mode.id === streamDisplayMode.value) || streamDisplayModes.value[0]
 ))
 
 const clientSettingsSync = computed(() => resolveClientSettingsSync(config.value))
@@ -343,7 +342,7 @@ async function refreshDongleOutputs() {
 }
 
 function setStreamDisplayMode(mode) {
-  if (!streamDisplayModeAvailable(mode)) {
+  if (streamDisplayModes.value.find((candidate) => candidate.id === mode)?.available !== true) {
     return
   }
   if (mode !== 'headless_dongle') {
@@ -454,6 +453,12 @@ function updateDisplayPlannerSource(event) {
                 </span>
                 <span class="mt-3 block text-sm leading-relaxed text-silver">{{ mode.copy }}</span>
                 <span class="mt-2 block text-xs leading-relaxed text-storm">{{ mode.impact }}</span>
+                <span
+                  v-if="mode.available === false"
+                  class="mt-2 block text-xs font-medium leading-relaxed text-warning-bright"
+                >
+                  Unavailable: {{ mode.unavailableReason }}
+                </span>
               </button>
               <details class="border-t border-storm/20 bg-void/20 px-4 py-2.5 text-xs text-storm">
                 <summary class="focus-ring cursor-pointer select-none font-medium text-silver">Technical details</summary>
