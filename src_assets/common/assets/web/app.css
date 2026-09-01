@@ -883,10 +883,12 @@ textarea {
   display: inline-flex;
   min-height: 1.75rem;
   align-items: center;
+  gap: 0.375rem;
   padding: 0.25rem 0.125rem;
   color: var(--color-silver);
   font-size: 0.75rem;
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .system-footer-link:hover {
@@ -2004,7 +2006,78 @@ textarea {
 }
 
 .troubleshooting-action-button {
-  @apply inline-flex h-9 items-center gap-2 rounded-lg px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.pairing-flow-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--edge-raised);
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface-raised);
+}
+
+.pairing-flow-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.pairing-flow-copy .meta-pill {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.pairing-flow-text {
+  min-width: 0;
+  color: var(--color-storm);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.pairing-inline-note {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.375rem;
+  border-left: 1px solid var(--edge-raised);
+  padding-left: 1rem;
+  color: var(--color-storm);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.pairing-inline-note-label {
+  color: var(--color-warning-bright);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+}
+
+@media (max-width: 47.99rem) {
+  .pairing-flow-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pairing-flow-copy {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .pairing-inline-note {
+    width: 100%;
+    border-top: 1px solid var(--edge-raised);
+    border-left: 0;
+    padding-top: 0.75rem;
+    padding-left: 0;
+  }
 }
 
 .troubleshooting-action-button-primary {

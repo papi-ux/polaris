@@ -412,7 +412,7 @@ function updateDisplayPlannerSource(event) {
                 <a href="https://papi-ux.com/docs/launch-modes/" target="_blank" class="focus-ring text-ice hover:underline">Launch mode guide</a>
               </div>
             </div>
-            <span class="rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-ice">
+            <span class="shrink-0 whitespace-nowrap rounded-full border border-ice/20 bg-ice/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-ice">
               {{ selectedStreamDisplayMode.title }}
             </span>
           </div>
