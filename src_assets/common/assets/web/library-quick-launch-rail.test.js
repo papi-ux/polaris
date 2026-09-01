@@ -65,7 +65,7 @@ describe('AppsView Library Quick Launch rail', () => {
     document.body.innerHTML = ''
   })
 
-  it('renders a Moonlight-style quick launch rail before the published app list', async () => {
+  it('renders a compact quick launch rail before the published app list', async () => {
     const wrapper = mountAppsView({
       apps: [
         { uuid: 'broken-favorite', name: 'Broken Favorite', favorite: true },
@@ -79,7 +79,7 @@ describe('AppsView Library Quick Launch rail', () => {
     const source = wrapper.html()
     expect(source.indexOf('library-quick-launch-rail')).toBeLessThan(source.indexOf('Library Surface'))
     expect(wrapper.find('.library-quick-launch-rail').text()).toContain('3 ready / 4 shown')
-    expect(wrapper.find('.library-quick-launch-rail').text()).toContain('Moonlight-style shortcuts')
+    expect(wrapper.find('.library-quick-launch-rail').text()).toContain('Favorites and recently played games, ready to launch.')
 
     expect(wrapper.findAll('[data-quick-launch-app]').map((node) => node.attributes('data-quick-launch-app'))).toEqual([
       'favorite-recent',
@@ -87,6 +87,11 @@ describe('AppsView Library Quick Launch rail', () => {
       'ready-basic',
       'broken-favorite',
     ])
+
+    const recentCard = wrapper.find('[data-quick-launch-app="recent-ready"]')
+    expect(recentCard.find('.control-chip').text()).toBe('Ready')
+    expect(recentCard.findAll('.meta-pill').filter((pill) => pill.text() === 'Recent')).toHaveLength(1)
+    expect(recentCard.find('.library-quick-launch-action').classes()).not.toContain('w-full')
   })
 
   it('pins the running app and routes broken entries to repair copy instead of launch', async () => {

@@ -75,7 +75,7 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Safe default')
   })
 
-  it('puts player impact first and keeps backend vocabulary in optional technical details', () => {
+  it('puts player impact first and keeps backend vocabulary in one selected-path summary', () => {
     const wrapper = mountAudioVideo()
     const picker = wrapper.find('[data-stream-display-mode-picker]')
     const privateMode = picker.findAll('article').find((card) => card.text().includes('Private Stream'))
@@ -86,8 +86,10 @@ describe('Linux Streaming Setup checklist', () => {
     expect(privateMode).toBeDefined()
     expect(privateMode.find('button').text()).toContain('without touching the host monitors')
     expect(privateMode.find('button').text()).not.toContain('labwc')
-    expect(privateMode.find('details').text()).toContain('Technical details')
-    expect(privateMode.find('details').text()).toContain('Runtime: labwc')
+    expect(privateMode.find('details').exists()).toBe(false)
+    expect(wrapper.find('[data-selected-stream-path]').text()).toContain('Current path')
+    expect(wrapper.find('[data-selected-stream-path]').text()).toContain('Runtime: labwc')
+    expect(wrapper.findAll('[data-selected-stream-path]')).toHaveLength(1)
     expect(dongleMode.find('button').text()).toContain('Privacy mode blanks the real panel after the one-time portal approval is saved')
     expect(dongleMode.find('button').text()).toContain('the panel stays on during that approval')
     expect(dongleMode.find('button').text()).toContain('Off mode keeps the real panel active')
@@ -144,7 +146,7 @@ describe('Linux Streaming Setup checklist', () => {
 
     expect(text).toContain('Private Stream (GPU-native)')
     expect(text).toContain('GPU-native requested')
-    expect(text).toContain('Enabled')
+    expect(text).toContain('Auto Quality: On')
     expect(text).toContain('DMA-BUF capture GPU-resident')
     expect(text).not.toContain('CUDA')
     expect(text).not.toContain('NVIDIA')
