@@ -36,6 +36,15 @@ namespace ai_optimizer {
     int cache_ttl_hours = 168;       ///< Cache TTL (default 1 week)
   };
 
+  struct provider_test_result_t {
+    std::optional<std::string> explanation_json;
+    std::string code;
+    std::string error;
+    std::string detail;
+    std::string action;
+    bool retryable = true;
+  };
+
   /**
    * @brief Resolve the CODEX_HOME value Polaris should use for Codex subscription mode.
    */
@@ -219,6 +228,21 @@ namespace ai_optimizer {
     const std::string &mode = "");
 
   /**
+   * @brief Test draft provider settings and preserve an actionable failure reason.
+   *
+   * Unlike the runtime optimization API, this endpoint distinguishes transport,
+   * timeout, authentication, endpoint, and response-contract failures for the UI.
+   */
+  provider_test_result_t test_provider_with_config(
+    const config_t &config,
+    const std::string &device_name,
+    const std::string &app_name,
+    const std::string &gpu_info,
+    const std::string &game_category = "",
+    const std::optional<session_history_t> &history = std::nullopt,
+    const std::string &mode = "");
+
+  /**
    * @brief Get a provider-aware model catalog as JSON using ad-hoc config.
    * Uses the draft provider settings without mutating live runtime state.
    */
@@ -271,8 +295,8 @@ namespace ai_optimizer {
     const device_db::optimization_t &optimization);
 
   /**
-   * @brief Parse and normalize a Doctor explanation JSON response.
-   * Always forces destructive_action_allowed=false.
+   * @brief Parse and validate a Doctor explanation JSON response.
+   * Rejects any response that does not match the explanation-only schema.
    */
   std::string parse_doctor_explanation_json(const std::string &text);
 
@@ -283,6 +307,15 @@ namespace ai_optimizer {
    */
   std::string explain_doctor_json_with_config(const config_t &config,
                                               const std::string &redacted_evidence_json);
+
+  /**
+   * @brief Explain redacted Doctor/support-bundle evidence with Polaris' active
+   * server-owned provider configuration.
+   *
+   * Browser callers deliberately cannot choose the provider, credentials, or
+   * endpoint for this request.
+   */
+  std::string explain_doctor_json(const std::string &redacted_evidence_json);
 
   /**
    * @brief Get AI status as JSON string.

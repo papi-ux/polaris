@@ -253,7 +253,7 @@ describe('ConfigView pending changes review', () => {
     expect(wrapper.vm.pendingChanges.map((change) => change.key)).not.toContain('clear_steamgriddb_api_key')
   })
 
-  it('posts a SteamGridDB secret clear without leaking the internal clear flag', async () => {
+  it('posts an explicit SteamGridDB secret clear flag', async () => {
     const wrapper = mountConfigView({ has_steamgriddb_api_key: true })
     await flushConfigLoad()
 
@@ -269,7 +269,7 @@ describe('ConfigView pending changes review', () => {
     const saveRequest = global.fetch.mock.calls.at(-1)
     expect(saveRequest[0]).toBe('./api/config')
     const body = JSON.parse(saveRequest[1].body)
-    expect(body).not.toHaveProperty('clear_steamgriddb_api_key')
+    expect(body).toHaveProperty('clear_steamgriddb_api_key', true)
     expect(body).toHaveProperty('steamgriddb_api_key', '')
   })
 })
