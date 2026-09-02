@@ -52,6 +52,10 @@ function mountAudioVideo(config = linuxConfig()) {
         VirtualDisplayStatus: true,
         Checkbox: true,
         PlatformLayout: { template: '<div><slot name="linux" /></div>', props: ['platform'] },
+        // Shared presentational leaves render for real: the assertions below
+        // click their buttons and read their text as an operator would.
+        SelectableCard: false,
+        StatTile: false,
       },
     },
   })

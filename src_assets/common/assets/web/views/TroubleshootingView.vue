@@ -98,11 +98,11 @@
           v-for="item in fixMyStreamChecklist"
           :key="item.key"
           class="surface-subtle border p-4"
-          :class="fixMyStreamStatusClass(item.status)"
+          :class="statusTone(item.status).card"
         >
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">{{ item.label }}</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="fixMyStreamBadgeClass(item.status)">
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(item.status).badge">
               {{ fixMyStreamStatusLabel(item.status) }}
             </span>
           </div>
@@ -125,10 +125,10 @@
       </div>
 
       <div class="grid gap-3 xl:grid-cols-3">
-        <div class="surface-subtle border p-4" :class="selfTestCardClass(networkPathReport.status)">
+        <div class="surface-subtle border p-4" :class="statusTone(networkPathReport.status).card">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">Network Path Tester</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="selfTestBadgeClass(networkPathReport.status)">{{ selfTestStatusLabel(networkPathReport.status) }}</span>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(networkPathReport.status).badge">{{ statusTone(networkPathReport.status).label }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ networkPathReport.summary }}</p>
           <p class="mt-3 text-xs leading-relaxed text-ice">Recommended ceiling: {{ networkPathReport.recommendedBitrateKbps }} kbps.</p>
@@ -136,7 +136,7 @@
             <summary class="cursor-pointer text-ice">Advanced evidence</summary>
             <div class="mt-2 space-y-2">
               <div v-for="check in networkPathReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
-                <div class="font-medium text-silver">{{ check.label }} · {{ selfTestStatusLabel(check.status) }}</div>
+                <div class="font-medium text-silver">{{ check.label }} · {{ statusTone(check.status).label }}</div>
                 <div>{{ check.detail }}</div>
                 <div class="mt-1 text-ice">{{ check.action }}</div>
               </div>
@@ -145,10 +145,10 @@
           </details>
         </div>
 
-        <div class="surface-subtle border p-4" :class="selfTestCardClass(controllerInputReport.status)">
+        <div class="surface-subtle border p-4" :class="statusTone(controllerInputReport.status).card">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">Controller/Input Tester</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="selfTestBadgeClass(controllerInputReport.status)">{{ selfTestStatusLabel(controllerInputReport.status) }}</span>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(controllerInputReport.status).badge">{{ statusTone(controllerInputReport.status).label }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ controllerInputReport.summary }}</p>
           <div class="mt-3 flex flex-wrap gap-2">
@@ -160,7 +160,7 @@
             <summary class="cursor-pointer text-ice">Advanced evidence</summary>
             <div class="mt-2 space-y-2">
               <div v-for="check in controllerInputReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
-                <div class="font-medium text-silver">{{ check.label }} · {{ selfTestStatusLabel(check.status) }}</div>
+                <div class="font-medium text-silver">{{ check.label }} · {{ statusTone(check.status).label }}</div>
                 <div>{{ check.detail }}</div>
                 <div class="mt-1 text-ice">{{ check.action }}</div>
               </div>
@@ -168,10 +168,10 @@
           </details>
         </div>
 
-        <div class="surface-subtle border p-4" :class="selfTestCardClass(postSessionReport.status)">
+        <div class="surface-subtle border p-4" :class="statusTone(postSessionReport.status).card">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">Post-session Stream Report</div>
-            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="selfTestBadgeClass(postSessionReport.status)">{{ postSessionReport.issueOwner }}</span>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(postSessionReport.status).badge">{{ postSessionReport.issueOwner }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ postSessionReport.mainIssue }}</p>
           <p class="mt-3 text-xs leading-relaxed text-ice">Next launch: {{ postSessionReport.suggestedNextLaunchProfile }}</p>
@@ -489,6 +489,7 @@ import {
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
+import { statusTone } from '../status-tones.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -781,24 +782,6 @@ const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
   postSession: postSessionReport.value,
 }))
 
-function selfTestCardClass(status) {
-  if (status === 'pass') return 'border-success/20'
-  if (status === 'fail') return 'border-danger/25'
-  return 'border-warning/25'
-}
-
-function selfTestBadgeClass(status) {
-  if (status === 'pass') return 'border border-success/30 bg-success/10 text-success'
-  if (status === 'fail') return 'border border-danger/30 bg-danger/10 text-danger-bright'
-  return 'border border-warning/30 bg-warning/10 text-warning-bright'
-}
-
-function selfTestStatusLabel(status) {
-  if (status === 'pass') return 'Looks good'
-  if (status === 'fail') return 'Fix first'
-  return 'Check'
-}
-
 function recordControllerEvent(label, pad = 1) {
   controllerEvents.value = [
     ...controllerEvents.value.slice(-15),
@@ -844,18 +827,6 @@ function fixMyStreamStatusLabel(status) {
   if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')
   if (status === 'fail') return i18n.t('troubleshooting.fix_my_stream_status_fail')
   return i18n.t('troubleshooting.fix_my_stream_status_warning')
-}
-
-function fixMyStreamStatusClass(status) {
-  if (status === 'pass') return 'border-success/20'
-  if (status === 'fail') return 'border-danger/25'
-  return 'border-warning/25'
-}
-
-function fixMyStreamBadgeClass(status) {
-  if (status === 'pass') return 'border border-success/30 bg-success/10 text-success'
-  if (status === 'fail') return 'border border-danger/30 bg-danger/10 text-danger-bright'
-  return 'border border-warning/30 bg-warning/10 text-warning-bright'
 }
 
 const sessionSnapshotItems = computed(() => {
