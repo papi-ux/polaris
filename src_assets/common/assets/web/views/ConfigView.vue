@@ -367,6 +367,7 @@ const tabs = ref([
       "adapter_name": "",
       "output_name": "",
       "fallback_mode": "",
+          "display_plan": "",
       "isolated_virtual_display_option": "disabled",
       "dd_configuration_option": "disabled",
       "dd_resolution_option": "auto",

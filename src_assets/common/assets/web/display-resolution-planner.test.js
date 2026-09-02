@@ -12,7 +12,7 @@ describe('display resolution planner', () => {
     const planner = buildResolutionPlanner({ fallbackMode: '2560x1600x90' })
 
     expect(planner.recommendedId).toBe('balanced')
-    expect(planner.recommendedTitle).toBe('Best for this device')
+    expect(planner.recommendedTitle).toBe('Balanced')
     expect(planner.recommendedMode).toBe('1920x1200x90')
     expect(planner.sourceAspectRatio).toBe('8:5')
     expect(planner.visibleChoices.map((choice) => choice.title)).toEqual([
