@@ -11102,8 +11102,84 @@ namespace proc {
     }
   }
 
+  void migration_v9(nlohmann::json &fileTree) {
+    // Polaris v1.4.0 initially hid Flatpak Heroic during protocol activation. Rewrite
+    // only one exact generated detached command whose scanner metadata or legacy URI
+    // proves its identity. Preserve UUIDs, artwork, profiles, prep commands, and every
+    // unrelated app field. Native Heroic commands remain headless and unchanged.
+    static const int this_version = 13;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    std::size_t migrated = 0;
+    if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+      for (auto &app : fileTree["apps"]) {
+        if (!app.is_object() || !boost::iequals(json_string_member_or(app, "source"), "heroic") ||
+            !json_string_member_or(app, "cmd").empty() ||
+            !app.contains("detached") || !app["detached"].is_array() || app["detached"].size() != 1 ||
+            !app["detached"][0].is_string()) {
+          continue;
+        }
+
+        const auto existing_command = app["detached"][0].get<std::string>();
+        auto heroic = game_library::heroic_game_from_metadata(
+          json_string_member_or(app, "heroic-app-name"),
+          json_string_member_or(app, "heroic-store"),
+          json_string_member_or(app, "heroic-runner"),
+          json_string_member_or(app, "heroic-install")
+        );
+        if (!heroic) {
+          heroic = game_library::parse_legacy_heroic_launch_command(existing_command);
+        }
+        if (!heroic || heroic->install != game_library::launcher_install_t::flatpak) {
+          continue;
+        }
+
+        const auto generated_forms = game_library::heroic_launch_commands_for_install(
+          heroic->store,
+          heroic->app_name,
+          heroic->install
+        );
+        if (std::find(generated_forms.begin(), generated_forms.end(), existing_command) == generated_forms.end()) {
+          continue;
+        }
+
+        bool changed = false;
+        if (existing_command != heroic->command) {
+          app["detached"][0] = heroic->command;
+          changed = true;
+        }
+
+        const std::array<std::pair<const char *, std::string>, 4> metadata {{
+          {"heroic-app-name", heroic->app_name},
+          {"heroic-store", heroic->store},
+          {"heroic-runner", heroic->runner},
+          {"heroic-install", game_library::heroic_install_name(heroic->install)},
+        }};
+        for (const auto &[key, value] : metadata) {
+          if (json_string_member_or(app, key) != value) {
+            app[key] = value;
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          ++migrated;
+        }
+      }
+    }
+
+    fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Migrated " << migrated
+                      << " Flatpak Heroic app(s) to visible cold-start activation (v13).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 12;
+    int last_version = 13;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -11118,6 +11194,7 @@ namespace proc {
       migration_v6(fileTree);
       migration_v7(fileTree);
       migration_v8(fileTree);
+      migration_v9(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }

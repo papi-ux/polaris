@@ -501,30 +501,71 @@ namespace game_library {
     // operator; the strict app-name and runner alphabets make the single quotes final.
     const auto uri = "'heroic://launch?appName=" + app_name + "&runner=" + runner + "'";
     if (install == launcher_install_t::flatpak) {
+      // Let Heroic finish its normal visible cold-start activation before it dispatches
+      // the protocol URL. Hiding the Flatpak with Electron CLI flags can leave users on
+      // the streamed desktop with no game and no launcher error to act on.
       return "setsid flatpak run " + std::string(heroic_flatpak_app_id) +
-             " --no-gui --no-sandbox " + uri;
+             " " + uri;
     }
 
     return "setsid heroic --no-gui --no-sandbox " + uri;
   }
 
+  std::vector<std::string> heroic_launch_commands_for_install(
+    const std::string &store,
+    const std::string &app_name,
+    launcher_install_t install
+  ) {
+    std::vector<std::string> commands;
+    auto command = heroic_launch_command(store, app_name, install);
+    if (command.empty()) {
+      return commands;
+    }
+    commands.push_back(std::move(command));
+
+    if (install == launcher_install_t::flatpak) {
+      const auto runner = heroic_runner_for_store(store);
+      const auto query_uri = "'heroic://launch?appName=" + app_name + "&runner=" + runner + "'";
+      // Polaris v1.4.0 initially forced a hidden Flatpak cold start. Retain that exact
+      // generated form only for deduplication and the bounded apps.json migration.
+      commands.push_back(
+        "setsid flatpak run " + std::string(heroic_flatpak_app_id) +
+        " --no-gui --no-sandbox " + query_uri
+      );
+    }
+
+    // Polaris v1.3.13 and earlier emitted Heroic's path-style URI. Keep the exact
+    // install-specific form solely for deduplication/migration.
+    const auto legacy_uri = "heroic://launch/" + store + "/" + app_name;
+    if (install == launcher_install_t::flatpak) {
+      commands.push_back("setsid flatpak run " + std::string(heroic_flatpak_app_id) + " " + legacy_uri);
+    } else {
+      commands.push_back("setsid heroic " + legacy_uri);
+    }
+
+    return commands;
+  }
+
   std::vector<std::string> heroic_launch_commands(const std::string &store, const std::string &app_name) {
     std::vector<std::string> commands;
+    std::vector<std::string> older_forms;
     for (const auto install : {launcher_install_t::native, launcher_install_t::flatpak}) {
-      auto command = heroic_launch_command(store, app_name, install);
-      if (!command.empty()) {
-        commands.push_back(std::move(command));
+      auto forms = heroic_launch_commands_for_install(store, app_name, install);
+      if (forms.empty()) {
+        continue;
       }
+      commands.push_back(std::move(forms.front()));
+      older_forms.insert(
+        older_forms.end(),
+        std::make_move_iterator(forms.begin() + 1),
+        std::make_move_iterator(forms.end())
+      );
     }
-
-    // Older Polaris releases emitted Heroic's path-style URI. Keep these exact strings
-    // solely for deduplication/migration; all new launches use the canonical query URI.
-    if (!heroic_runner_for_store(store).empty() && is_heroic_app_name_safe(app_name)) {
-      const auto legacy_uri = "heroic://launch/" + store + "/" + app_name;
-      commands.push_back("setsid heroic " + legacy_uri);
-      commands.push_back("setsid flatpak run " + std::string(heroic_flatpak_app_id) + " " + legacy_uri);
-    }
-
+    commands.insert(
+      commands.end(),
+      std::make_move_iterator(older_forms.begin()),
+      std::make_move_iterator(older_forms.end())
+    );
     return commands;
   }
 
