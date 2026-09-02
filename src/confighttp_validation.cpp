@@ -71,6 +71,53 @@ namespace confighttp::validation {
       return true;
     }
 
+    // Sorted and unique; the single source of truth for response-only keys.
+    // confighttp's saveConfig and config.cpp's apply_config both consume this
+    // through the public helpers below, and getConfig serves it to the web UI
+    // as config_response_only_keys.
+    constexpr std::array response_only_config_keys_list {
+      "ai_auto_quality_enabled"sv,
+      "client_settings_authority"sv,
+      "client_settings_available"sv,
+      "client_settings_effective_stream_display_mode"sv,
+      "client_settings_effective_stream_display_mode_label"sv,
+      "client_settings_endpoint"sv,
+      "client_settings_endpoint_base_url"sv,
+      "client_settings_endpoint_https_port"sv,
+      "client_settings_endpoint_origin"sv,
+      "client_settings_endpoint_path"sv,
+      "client_settings_endpoint_same_origin"sv,
+      "client_settings_endpoint_url"sv,
+      "client_settings_live_fields"sv,
+      "client_settings_relaunch_required"sv,
+      "client_settings_restart_fields"sv,
+      "client_settings_stream_display_mode"sv,
+      "client_settings_stream_display_mode_label"sv,
+      "client_settings_sync_mode"sv,
+      "client_settings_v1"sv,
+      "config_response_only_keys"sv,
+      "has_ai_api_key"sv,
+      "has_api_key"sv,
+      "has_steamgriddb_api_key"sv,
+      "platform"sv,
+      "runtime_backend"sv,
+      "runtime_effective_headless"sv,
+      "runtime_gpu_native_override_active"sv,
+      "runtime_requested_headless"sv,
+      "status"sv,
+      "stream_display_mode"sv,
+      "stream_display_mode_options"sv,
+      "stream_path_id"sv,
+      "stream_path_label"sv,
+      "vdisplayAvailable"sv,
+      "vdisplayBackend"sv,
+      "vdisplayStatus"sv,
+      "version"sv,
+    };
+
+    static_assert(std::ranges::is_sorted(response_only_config_keys_list), "response-only key list must stay sorted");
+    static_assert(std::ranges::adjacent_find(response_only_config_keys_list) == response_only_config_keys_list.end(), "response-only key list must stay unique");
+
     constexpr std::array allowed_config_keys {
       "adapter_name"sv,
       "adaptive_bitrate_enabled"sv,
@@ -570,5 +617,13 @@ namespace confighttp::validation {
     }
 
     return true;
+  }
+
+  std::span<const std::string_view> response_only_config_keys() {
+    return response_only_config_keys_list;
+  }
+
+  bool is_response_only_config_key(const std::string_view key) {
+    return std::ranges::binary_search(response_only_config_keys_list, key);
   }
 }  // namespace confighttp::validation
