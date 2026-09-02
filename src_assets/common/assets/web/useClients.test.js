@@ -9,7 +9,7 @@ import {
 } from './composables/useClients'
 
 describe('client permission presets', () => {
-  it('maps Standard Access to the existing default permission mask', () => {
+  it('maps Browse & Watch to the compatibility permission mask', () => {
     expect(permissionPresetMask('standard')).toBe(permissionMapping._default)
     expect(permissionPresetKey(permissionMapping._default)).toBe('standard')
   })

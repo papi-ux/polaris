@@ -281,8 +281,20 @@ async function save() {
       body: JSON.stringify(passwordData),
     })
 
-    if (response.status !== 200) {
-      error.value = "Internal Server Error"
+    if (response.status === 401) {
+      window.location.hash = '#/login'
+      return
+    }
+
+    if (!response.ok) {
+      try {
+        const payload = await response.json()
+        error.value = typeof payload?.error === 'string' && payload.error.trim()
+          ? payload.error.trim()
+          : `Credential setup failed (HTTP ${response.status})`
+      } catch {
+        error.value = `Credential setup failed (HTTP ${response.status})`
+      }
       return
     }
 
@@ -293,7 +305,7 @@ async function save() {
       error.value = payload.error
     }
   } catch (e) {
-    error.value = "Internal Server Error"
+    error.value = "Could not reach Polaris. Check that the service is running, then try again."
   } finally {
     loading.value = false
   }

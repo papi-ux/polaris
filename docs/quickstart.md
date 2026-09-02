@@ -40,10 +40,16 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 | openSUSE Tumbleweed | [openSUSE guide](openSUSE.md) — source build |
 | Anything else | [Building Polaris](building.md) |
 
-## 2. Create your web console account
+## 2. Open the right web console path
 
-Open **https://localhost:47990/#/welcome**, create your web UI account, and pair a client. After
-credentials exist, **https://localhost:47990** opens the normal console.
+**Fresh install:** if this host has never had a Polaris web account, open
+**https://localhost:47990/#/welcome**, create the account, and pair a client.
+
+**Upgrade or reinstall:** open **https://localhost:47990/#/login** and sign in with the existing
+account. Package upgrades and removals intentionally preserve credentials, pairing keys, settings,
+and the library under `~/.config/polaris`; reinstalling the package does not make the host a new
+first-run installation. If the credentials are no longer known, use the bounded reset in
+[Troubleshooting](troubleshooting.md#web-ui-credentials).
 
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at
@@ -86,6 +92,16 @@ Pick whichever fits your network:
   configured trusted subnet.
 - **QR pairing** for Nova.
 - **Manual PIN** for standard Moonlight clients.
+
+New devices use **Game Control** by default, which is the least-privilege preset that can browse,
+launch, and control a game. **Browse & Watch** is intentionally read-only: it can list the library
+and join an existing stream, but it cannot start Desktop or a game and cannot send input. Existing
+paired devices keep their saved access until you change it under **Devices → Edit Access**.
+
+For Moonlight on Linux, Android, or another non-Nova client: add the Polaris host in Moonlight and
+leave its displayed four-digit PIN open. In the Polaris web UI, open **Devices → Manual PIN**, enter
+that PIN, keep **Game Control** selected, and choose **Send**. Return to Moonlight and refresh the
+host if its library does not appear immediately. Steam is not required on the client.
 
 ## 5. Start a game and verify the path
 

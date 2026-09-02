@@ -27,7 +27,7 @@ test.describe('pairing', () => {
     await expect(loggedInPage.getByText(/qr|passphrase/i).first()).toBeVisible()
   })
 
-  test('paired client editor closes with escape', async ({ loggedInPage }) => {
+  test('labels browse-and-watch clients clearly and closes their editor with escape', async ({ loggedInPage }) => {
     await loggedInPage.route('**/api/clients/list', async (route) => {
       await route.fulfill({
         json: {
@@ -59,6 +59,8 @@ test.describe('pairing', () => {
 
     await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
 
+    await expect(loggedInPage.getByText('Browse & Watch').first()).toBeVisible()
+
     const editButtons = loggedInPage.getByRole('button', { name: /edit access/i })
     await editButtons.first().click()
     const dialog = loggedInPage.getByRole('dialog')
@@ -68,30 +70,7 @@ test.describe('pairing', () => {
     await expect(dialog).toBeHidden()
   })
 
-  test('QR pairing requests Standard Access by default', async ({ loggedInPage }) => {
-    let payload = null
-    await loggedInPage.route('**/api/otp', async (route) => {
-      payload = route.request().postDataJSON()
-      await route.fulfill({
-        json: {
-          status: true,
-          otp: '1234',
-          ip: '10.0.0.2',
-          name: 'Polaris',
-          access_preset: 'standard',
-          message: 'OTP created',
-        },
-      })
-    })
-
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
-    await loggedInPage.locator('#otp-passphrase').fill('abcd')
-    await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
-
-    await expect.poll(() => payload?.access_preset).toBe('standard')
-  })
-
-  test('QR pairing sends Game Control when selected', async ({ loggedInPage }) => {
+  test('QR pairing requests Game Control by default', async ({ loggedInPage }) => {
     let payload = null
     await loggedInPage.route('**/api/otp', async (route) => {
       payload = route.request().postDataJSON()
@@ -108,14 +87,38 @@ test.describe('pairing', () => {
     })
 
     await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
-    await loggedInPage.getByRole('radio', { name: /game control/i }).click()
     await loggedInPage.locator('#otp-passphrase').fill('abcd')
     await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
 
+    await expect(loggedInPage.getByRole('radio', { name: /game control/i })).toHaveAttribute('aria-checked', 'true')
     await expect.poll(() => payload?.access_preset).toBe('game_control')
   })
 
-  test('manual PIN approval sends the selected access preset', async ({ loggedInPage }) => {
+  test('QR pairing sends Browse & Watch when selected', async ({ loggedInPage }) => {
+    let payload = null
+    await loggedInPage.route('**/api/otp', async (route) => {
+      payload = route.request().postDataJSON()
+      await route.fulfill({
+        json: {
+          status: true,
+          otp: '1234',
+          ip: '10.0.0.2',
+          name: 'Polaris',
+          access_preset: 'standard',
+          message: 'OTP created',
+        },
+      })
+    })
+
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('radio', { name: /browse & watch/i }).click()
+    await loggedInPage.locator('#otp-passphrase').fill('abcd')
+    await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
+
+    await expect.poll(() => payload?.access_preset).toBe('standard')
+  })
+
+  test('manual PIN approval defaults to Game Control', async ({ loggedInPage }) => {
     let payload = null
     await loggedInPage.route('**/api/pin', async (route) => {
       payload = route.request().postDataJSON()
@@ -124,7 +127,6 @@ test.describe('pairing', () => {
 
     await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
     await loggedInPage.getByRole('button', { name: /manual pin/i }).click()
-    await loggedInPage.getByRole('radio', { name: /game control/i }).click()
     await loggedInPage.locator('#pin-input').fill('1234')
     await loggedInPage.getByRole('button', { name: /^send$/i }).click()
 

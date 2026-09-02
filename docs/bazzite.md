@@ -65,9 +65,15 @@ systemctl --user daemon-reload
 systemctl --user enable --now polaris
 ```
 
-Open `https://127.0.0.1:47990/#/welcome`, create the web UI account, and pair
-Moonlight, Nova, or another GameStream-compatible client. After credentials are
-created, `https://127.0.0.1:47990` opens the normal console.
+**Fresh install:** open `https://127.0.0.1:47990/#/welcome`, create the web UI
+account, and pair Moonlight, Nova, or another GameStream-compatible client.
+
+**Upgrade or reinstall:** open `https://127.0.0.1:47990/#/login` and use the
+existing account. The rpm-ostree transaction intentionally leaves credentials,
+pairing keys, settings, and the library under `~/.config/polaris`, even if an old
+Polaris layer had to be removed before the new RPM could be installed. If needed,
+follow the [credential reset](troubleshooting.md#web-ui-credentials) instead of
+returning to Welcome.
 
 This Bazzite-specific copy is intentional. Bazzite's `/usr` deployment is backed
 by composefs, so `setcap` can fail on the layered `/usr/bin/polaris-*` binary
@@ -314,6 +320,11 @@ wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/relea
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
 
+After the reboot, refresh `/usr/local/bin/polaris-kms` and its capability using
+the copy and `setcap` steps from [Install](#install), restart the service, and
+return to `https://127.0.0.1:47990/#/login` with the existing credentials. Do not
+use the first-run Welcome page merely because the package layer was replaced.
+
 ## Roll Back
 
 Bazzite keeps previous deployments. If the new deployment does not work, choose
@@ -430,4 +441,3 @@ Please include these details when reporting Bazzite issues:
 - active capture path shown in the Polaris dashboard
 - requested client resolution, FPS, codec, and whether the web UI preview was open
 - whether headless mode and virtual display behavior worked after a reboot
-

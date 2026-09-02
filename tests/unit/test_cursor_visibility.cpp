@@ -4,6 +4,7 @@
  */
 #include "../tests_common.h"
 
+#include <src/config.h>
 #include <src/globals.h>
 
 namespace {
@@ -21,6 +22,10 @@ namespace {
     bool original_visibility = false;
   };
 }  // namespace
+
+TEST(CursorVisibilityConfigTests, HostCursorIsShownByDefault) {
+  EXPECT_TRUE(config::default_mouse_cursor_visible);
+}
 
 TEST_F(CursorVisibilityTest, SetVisibleUpdatesState) {
   EXPECT_FALSE(cursor::visible());

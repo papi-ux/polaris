@@ -271,6 +271,39 @@ TEST(StreamDisplayPolicyTests, HostVirtualCaptureFollowsTheVirtualDisplayBackend
   EXPECT_EQ(capture_for_host_virtual_display_backend(backend_e::NONE, "portal"), "portal");
 }
 
+TEST(StreamDisplayPolicyTests, SessionTransitionUsesACaptureBackendThatCanAddressTheRuntime) {
+  using stream_display_policy::capture_for_session_transition;
+
+  EXPECT_EQ(
+    capture_for_session_transition("headless_stream", "desktop_display", "wlr"),
+    ""
+  ) << "host desktop discovery must not remain pinned to private wlroots capture";
+  EXPECT_EQ(
+    capture_for_session_transition("windowed_stream", "desktop_display", "wlroots"),
+    ""
+  );
+  EXPECT_EQ(
+    capture_for_session_transition("headless_stream", "desktop_display", "kms"),
+    "kms"
+  ) << "an explicit Desktop-compatible KMS choice remains authoritative";
+  EXPECT_EQ(
+    capture_for_session_transition("headless_stream", "desktop_display", "portal"),
+    "portal"
+  );
+  EXPECT_EQ(
+    capture_for_session_transition("desktop_display", "headless_stream", "portal"),
+    "wlr"
+  ) << "private labwc outputs require the wlroots capture path";
+  EXPECT_EQ(
+    capture_for_session_transition("headless_stream", "gamescope_stream", "wlr"),
+    "portal"
+  );
+  EXPECT_EQ(
+    capture_for_session_transition("headless_stream", "headless_stream", "wlr"),
+    "wlr"
+  ) << "no session transition means no capture override";
+}
+
 TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
   ScopedPrivateRuntimePath runtime_path;
   LinuxDisplayPolicyGuard guard;

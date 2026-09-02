@@ -66,10 +66,11 @@ Default conf seed: `linux_stream_mode = gamescope_stream`, `capture = portal`.
 
 ## After install
 
-1. Open **https://127.0.0.1:47990** and create the web UI account.  
-2. Pair Moonlight / Nova.  
-3. Logs: `journalctl --user -u polaris -f`  
-4. Stop/start: `systemctl --user restart polaris polaris-gamescope-idle`
+1. **Fresh install:** open **https://127.0.0.1:47990/#/welcome** and create the web UI account.
+2. **Upgrade or reinstall:** open **https://127.0.0.1:47990/#/login** with the existing account; the source/package install intentionally preserves `~/.config/polaris`.
+3. Pair Moonlight / Nova.
+4. Logs: `journalctl --user -u polaris -f`
+5. Stop/start: `systemctl --user restart polaris polaris-gamescope-idle`
 
 ### Optional environment
 

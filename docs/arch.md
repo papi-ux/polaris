@@ -20,7 +20,13 @@ polaris
 The package installs the host binary, the web console assets, desktop metadata, and the user service
 file. Host integration stays explicit: `--setup-host` is a separate step you run yourself.
 
-Open **https://localhost:47990/#/welcome**, create your web UI account, and pair a client.
+**Fresh install:** open **https://localhost:47990/#/welcome**, create your web UI account, and pair
+a client.
+
+**Upgrade or reinstall:** open **https://localhost:47990/#/login** and use the existing account.
+Arch and CachyOS package operations preserve credentials, pairing keys, settings, and the library
+under `~/.config/polaris`; removing the package does not reset the web account. If needed, follow
+the [credential reset](troubleshooting.md#web-ui-credentials) instead of returning to Welcome.
 
 ## What `--setup-host` does
 
@@ -87,6 +93,7 @@ systemctl --user restart polaris
 ```
 
 Your configuration, pairing keys, and library stay in `~/.config/polaris` across upgrades.
+Sign back in at **https://localhost:47990/#/login** with the existing web credentials.
 
 ## Uninstall
 

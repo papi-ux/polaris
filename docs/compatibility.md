@@ -45,7 +45,7 @@ Polaris is Linux-only by design. Windows and macOS host ports are not planned.
 | Headless Stream runtime | Recommended path | Launches games into a stream-only compositor instead of rearranging your physical desktop. |
 | Nova-aware launch contract | Supported | Lets Nova show Private Stream, Host Virtual Display, Mirror Desktop, watch and resume, and safety state before launch. |
 | Mission Control | Supported | Shows runtime, capture path, encoder, clients, stream health, and host actions in one cockpit. |
-| Game Control pairing preset | Supported | Trusted clients can browse, launch, and send input without broad server-admin permissions. |
+| Game Control pairing preset | Supported / default for new devices | Trusted clients can browse, launch, and send input without clipboard, file-transfer, or server-command permissions. Existing devices keep their saved access until edited. |
 | Doctor and optional AI explanation | Supported / optional | Deterministic telemetry drives diagnosis and safe actions. AI may explain that evidence, but cannot define launch settings or Doctor actions. |
 
 ## Best-tested first setup

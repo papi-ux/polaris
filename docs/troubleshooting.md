@@ -9,6 +9,20 @@ network, host, and client evidence before you change anything.
 
 ## Web UI credentials
 
+### Welcome page after an upgrade or reinstall
+
+The Welcome wizard is only for a host that has never had a Polaris web account.
+Package upgrades, package removal, and reinstall intentionally leave credentials,
+pairing keys, settings, and the library in `~/.config/polaris`.
+
+If Welcome reports an error after an upgrade, open
+`https://localhost:47990/#/login` and use the previous credentials. On hosts
+whose guide uses the IPv4 loopback explicitly, use
+`https://127.0.0.1:47990/#/login`. Do not delete the configuration directory just
+to recover web access.
+
+If the old credentials are no longer known, reset them as described below.
+
 Reset the web UI username and password:
 
 ```bash
@@ -51,6 +65,33 @@ systemctl --user enable --now polaris
 
 If Sunshine runs as a system service on your distro, use the matching system-service command instead.
 To switch back, stop Polaris and start Sunshine again.
+
+## Paired client gets Permission denied (403) when starting a stream
+
+Pairing proves the device's identity, but its saved access preset still controls whether it can
+start or control a stream. A device set to **Browse & Watch** can list apps and watch an existing
+session, but Desktop and game launch requests correctly return 403.
+
+Open **Devices** in the Polaris web UI, find the paired device, choose **Edit Access**, select
+**Game Control**, and save. Retry the launch without pairing again. Game Control includes library,
+launch, keyboard, mouse, touch, pen, and controller input, but does not grant clipboard, file-transfer,
+or server-command access. Choose **Full Control** only when the device needs those broader operations.
+
+Polaris now uses Game Control for newly paired Nova and Moonlight-compatible devices. Existing paired
+devices are never silently upgraded, so a device saved by an older release may still need the one-time
+access change above.
+
+## Cursor is missing with DRM/KMS capture
+
+DRM/KMS exposes the desktop framebuffer and the hardware cursor as separate planes. Polaris must
+composite that cursor plane into the video stream; otherwise the pointer can remain visible on the
+host display while disappearing in Moonlight.
+
+Open **Settings > Input > Pointer and touch** and enable **Show host cursor**. New or unset
+configurations enable it by default, while an explicit `mouse_cursor_visible = disabled` remains
+unchanged. You can toggle Polaris-controlled cursors for the current runtime with
+`Ctrl+Alt+Shift+N`. If a client draws its own local cursor and you see two pointers, disable the host
+cursor. Portal capture may embed the compositor cursor independently of this runtime toggle.
 
 ## Headless session does not start cleanly
 

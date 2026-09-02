@@ -136,6 +136,28 @@ for expected_link in "${expected_nova_links[@]}"; do
   grep -Fq "$expected_link" README.md
 done
 
+onboarding_guides=(
+  "README.md"
+  "docs/quickstart.md"
+  "docs/fedora.md"
+  "docs/arch.md"
+  "docs/ubuntu.md"
+  "docs/bazzite.md"
+  "docs/steamos.md"
+  "docs/openSUSE.md"
+  "docs/building.md"
+  "docs/repositories.md"
+  "scripts/install/README.md"
+)
+for guide in "${onboarding_guides[@]}"; do
+  for fact in "Fresh install" "Upgrade or reinstall" "#/welcome" "#/login"; do
+    if ! grep -Fq "$fact" "$guide"; then
+      echo "$guide must distinguish fresh-install Welcome from upgrade sign-in: missing $fact" >&2
+      exit 1
+    fi
+  done
+done
+
 test -f docs/steamos.md
 steamos_guide_facts=(
   "SteamOS 3.8"

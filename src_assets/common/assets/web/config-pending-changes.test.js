@@ -119,6 +119,20 @@ describe('ConfigView pending changes review', () => {
     expect(wrapper.find('.settings-pending-review').exists()).toBe(true)
   })
 
+  it('shows the host cursor when the setting is absent', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    expect(wrapper.vm.config.mouse_cursor_visible).toBe('enabled')
+  })
+
+  it('preserves an explicitly disabled host cursor', async () => {
+    const wrapper = mountConfigView({ mouse_cursor_visible: 'disabled' })
+    await flushConfigLoad()
+
+    expect(wrapper.vm.config.mouse_cursor_visible).toBe('disabled')
+  })
+
   it('summarizes dirty settings with before/after values and impact', async () => {
     const wrapper = mountConfigView()
     await flushConfigLoad()
