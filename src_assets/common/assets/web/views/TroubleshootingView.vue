@@ -1210,8 +1210,8 @@ async function collectSupportContext() {
   }
 }
 
-async function createSupportBundle() {
-  const context = await collectSupportContext()
+async function createSupportBundle(providedContext = null) {
+  const context = providedContext || await collectSupportContext()
   return buildAnonymizedDiagnosticsBundle({
     ...context,
     issue_draft: buildGithubIssueDraft(context),
@@ -1250,8 +1250,12 @@ async function downloadIssueDraft() {
 async function requestAiDoctorExplanation() {
   requestingAiDoctorExplanation.value = true
   try {
-    const supportBundle = await createSupportBundle()
-    const config = supportBundle.config || {}
+    // Provider controls stay local to Polaris. The exported support bundle is
+    // intentionally anonymized, so fields such as ai_auth_mode are redacted
+    // and must never be recycled as live provider configuration.
+    const context = await collectSupportContext()
+    const supportBundle = await createSupportBundle(context)
+    const config = context.config || {}
     const result = await explainDoctorWithAi({
       aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
       config,

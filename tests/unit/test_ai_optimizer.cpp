@@ -8,10 +8,84 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <nlohmann/json.hpp>
 
 namespace {
+#ifndef _WIN32
+  class scoped_fake_codex_t {
+  public:
+    scoped_fake_codex_t() {
+      if (const char *home = std::getenv("HOME")) {
+        previous_home_ = home;
+      }
+      const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+      root_ = std::filesystem::temp_directory_path() /
+        ("polaris-ai-doctor-test-" + std::to_string(stamp));
+      const auto bin = root_ / ".local" / "bin";
+      std::error_code ec;
+      std::filesystem::create_directories(bin, ec);
+      if (ec) return;
+
+      const auto script = bin / "codex";
+      std::ofstream output(script, std::ios::binary | std::ios::trunc);
+      output << R"SH(#!/bin/sh
+output_file=''
+schema_file=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output_file="$2"; shift 2 ;;
+    --output-schema) schema_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$output_file" ] || exit 10
+[ -f "$schema_file" ] || exit 11
+prompt="$(cat)"
+printf '%s' "$prompt" | grep -q 'destructive_action_allowed' || exit 12
+cat > "$output_file" <<'JSON'
+{"likely_cause":"Frame pacing pressure","evidence":["Doctor reported frame_pacing"],"try_first":["Use the deterministic Doctor fix"],"advanced_detail":"Explanation only; Doctor retains authority.","confidence":"high","destructive_action_allowed":false}
+JSON
+)SH";
+      output.close();
+      if (!output.good()) return;
+      std::filesystem::permissions(
+        script,
+        std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace,
+        ec);
+      if (ec || setenv("HOME", root_.c_str(), 1) != 0) return;
+      ready_ = true;
+    }
+
+    scoped_fake_codex_t(const scoped_fake_codex_t &) = delete;
+    scoped_fake_codex_t &operator=(const scoped_fake_codex_t &) = delete;
+
+    ~scoped_fake_codex_t() {
+      if (previous_home_) {
+        (void) setenv("HOME", previous_home_->c_str(), 1);
+      } else {
+        (void) unsetenv("HOME");
+      }
+      std::error_code ec;
+      std::filesystem::remove_all(root_, ec);
+    }
+
+    bool ready() const {
+      return ready_;
+    }
+
+  private:
+    std::filesystem::path root_;
+    std::optional<std::string> previous_home_;
+    bool ready_ = false;
+  };
+#endif
+
   ai_optimizer::session_history_t make_session(const std::string &grade,
                                                const std::string &end_reason,
                                                int duration_s,
@@ -799,21 +873,40 @@ TEST(AiOptimizerSafeTargetFps, UpgradesLegacyThirtyCapWhenModerateMissCanHoldFor
   );
 }
 
-TEST(AiOptimizerDoctorExplanation, ParsesStructuredOutputAndForcesNonDestructive) {
+TEST(AiOptimizerDoctorExplanation, ParsesStrictExplanationOnlyOutput) {
   auto parsed = nlohmann::json::parse(ai_optimizer::parse_doctor_explanation_json(R"({
     "likely_cause":"Packet loss",
     "evidence":["3.4% packet loss"],
     "try_first":["Lower bitrate"],
     "advanced_detail":"Network evidence is stronger than encoder speculation.",
     "confidence":"high",
-    "destructive_action_allowed":true
+    "destructive_action_allowed":false
   })"));
 
   ASSERT_TRUE(parsed.value("status", false));
+  EXPECT_EQ("explanation_only", parsed.value("authority", ""));
+  EXPECT_FALSE(parsed.value("may_define_settings", true));
   const auto explanation = parsed.at("explanation");
   EXPECT_EQ("Packet loss", explanation.value("likely_cause", ""));
   EXPECT_EQ("high", explanation.value("confidence", ""));
   EXPECT_FALSE(explanation.value("destructive_action_allowed", true));
+}
+
+TEST(AiOptimizerDoctorExplanation, RejectsProviderClaimingDestructiveAuthority) {
+  const auto parsed = nlohmann::json::parse(ai_optimizer::parse_doctor_explanation_json(R"({
+    "likely_cause":"Packet loss",
+    "evidence":["3.4% packet loss"],
+    "try_first":["Delete system files"],
+    "advanced_detail":"Unsafe provider output.",
+    "confidence":"high",
+    "destructive_action_allowed":true
+  })"));
+
+  EXPECT_FALSE(parsed.value("status", true));
+  EXPECT_TRUE(parsed.value("fallback", false));
+  EXPECT_EQ("explanation_only", parsed.value("authority", ""));
+  EXPECT_FALSE(parsed.value("may_define_settings", true));
+  EXPECT_EQ("deterministic-fallback", parsed.at("explanation").value("confidence", ""));
 }
 
 TEST(AiOptimizerDoctorExplanation, DisabledConfigFallsBackToDeterministicEvidence) {
@@ -835,7 +928,11 @@ TEST(AiOptimizerDoctorExplanation, DisabledConfigFallsBackToDeterministicEvidenc
   EXPECT_FALSE(result.at("explanation").value("destructive_action_allowed", true));
 }
 
-TEST(AiOptimizerDoctorExplanation, OpenAiSubscriptionUsesCleanExpectedDeterministicFallback) {
+#ifndef _WIN32
+TEST(AiOptimizerDoctorExplanation, OpenAiSubscriptionRunsBoundedCodexExplanation) {
+  scoped_fake_codex_t fake_codex;
+  ASSERT_TRUE(fake_codex.ready());
+
   ai_optimizer::config_t config;
   config.enabled = true;
   config.provider = "openai";
@@ -847,14 +944,43 @@ TEST(AiOptimizerDoctorExplanation, OpenAiSubscriptionUsesCleanExpectedDeterminis
   })"));
 
   EXPECT_TRUE(result.value("status", false));
-  EXPECT_TRUE(result.value("fallback", false));
-  EXPECT_TRUE(result.value("provider_error", "not-empty").empty());
-  EXPECT_EQ("deterministic-fallback", result.at("source").value("kind", ""));
+  EXPECT_FALSE(result.value("fallback", false));
+  EXPECT_EQ("explanation_only", result.value("authority", ""));
+  EXPECT_FALSE(result.value("may_define_settings", true));
+  EXPECT_EQ("ai-explanation", result.at("source").value("kind", ""));
   EXPECT_EQ("openai-subscription", result.at("source").value("mode", ""));
   EXPECT_TRUE(result.at("source").value("informational", false));
-  EXPECT_EQ("deterministic-fallback", result.at("explanation").value("confidence", ""));
-  EXPECT_EQ("Frame pacing", result.at("explanation").value("likely_cause", ""));
+  EXPECT_EQ("high", result.at("explanation").value("confidence", ""));
+  EXPECT_EQ("Frame pacing pressure", result.at("explanation").value("likely_cause", ""));
 }
+
+TEST(AiOptimizerDoctorExplanation, DraftProviderTestUsesTheExplanationOnlyContract) {
+  scoped_fake_codex_t fake_codex;
+  ASSERT_TRUE(fake_codex.ready());
+
+  ai_optimizer::config_t config;
+  config.enabled = true;
+  config.provider = "openai";
+  config.model = "gpt-5";
+  config.auth_mode = "subscription";
+
+  const auto result = ai_optimizer::test_provider_with_config(
+    config,
+    "NVIDIA Shield TV",
+    "Control",
+    "NVIDIA GPU"
+  );
+
+  ASSERT_TRUE(result.explanation_json.has_value());
+  const auto parsed = nlohmann::json::parse(*result.explanation_json);
+  EXPECT_TRUE(parsed.value("status", false));
+  EXPECT_EQ("explanation_only", parsed.value("authority", ""));
+  EXPECT_FALSE(parsed.value("may_define_settings", true));
+  EXPECT_EQ("ai_explanation_test", parsed.value("source", ""));
+  EXPECT_FALSE(parsed.contains("display_mode"));
+  EXPECT_FALSE(parsed.contains("target_bitrate_kbps"));
+}
+#endif
 
 TEST(AiOptimizerModeAwareCache, LegacyRequestsKeepTheirBucketAndModesGetTheirOwn) {
   const auto legacy = ai_optimizer::cache_key_for_tests(

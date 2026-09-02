@@ -365,6 +365,8 @@ const selectedHistoryEntry = computed(() => {
 
 function optimizationSourceLabel(source) {
   switch (source) {
+    case 'ai_explanation_test':
+      return 'Live explanation'
     case 'ai_live':
       return 'Live AI'
     case 'ai_cached':
@@ -476,6 +478,7 @@ function applyProviderProfile(profile) {
   config.value.ai_model = profile.model || currentProvider.value.defaultModel
   config.value.ai_base_url = profile.baseUrl || currentProvider.value.defaultBaseUrl
   config.value.ai_auth_mode = profile.authMode || currentProvider.value.defaultAuth
+  config.value.ai_timeout_ms = profile.timeoutMs || (currentProvider.value.id === 'local' ? 60000 : 5000)
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
   if (config.value.ai_auth_mode === 'none') {
@@ -521,6 +524,13 @@ function syncProviderDefaults(previousProviderId) {
     } else {
       config.value.ai_auth_mode = provider.defaultAuth
     }
+  }
+
+  const previousDefaultTimeout = previousProvider?.id === 'local' ? 60000 : 5000
+  const configuredTimeout = Number(config.value.ai_timeout_ms)
+  const legacyLocalDefault = provider.id === 'local' && configuredTimeout === 5000
+  if (!configuredTimeout || legacyLocalDefault || (previousProvider && configuredTimeout === previousDefaultTimeout)) {
+    config.value.ai_timeout_ms = provider.id === 'local' ? 60000 : 5000
   }
 
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
@@ -613,13 +623,14 @@ async function testProviderConfig() {
     }
     toast(`${provider.name} explanation provider verified`, 'success')
   } else {
+    const authFailure = result.code === 'authentication_failed' || /auth|authorized|login/i.test(result.error || '')
     testResult.value = {
       success: false,
       label: 'Action needed',
       message: result.error || 'Connection test failed',
       detail: result.detail || '',
       action: result.action || authHelpText.value,
-      retryLabel: result.retryable === false ? 'Review settings' : 'Retry after fixing auth',
+      retryLabel: result.retryable === false ? 'Review settings' : (authFailure ? 'Retry after fixing auth' : 'Retry test'),
       payload: null
     }
     toast(`${provider.name} test failed: ${result.error || 'Unknown error'}`, 'error')
@@ -963,7 +974,7 @@ onBeforeUnmount(() => {
                   v-model="config.ai_timeout_ms"
                   type="number"
                   min="1000"
-                  max="30000"
+                  max="120000"
                   step="500"
                   class="w-32 bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
                   placeholder="5000" />
@@ -1019,11 +1030,8 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">Freshness</div>
-                <div class="text-sm text-silver mt-1">
-                  {{ formatRelativeTime(testResult.payload.generated_at) }}
-                  <span class="text-storm"> · expires {{ formatRelativeTime(testResult.payload.expires_at) }}</span>
-                </div>
+                <div class="text-[10px] uppercase tracking-wider text-storm">Authority</div>
+                <div class="text-sm text-silver mt-1">Explanation only · cannot change settings or actions</div>
               </div>
             </div>
             <div v-if="testResult.success && testResult.payload?.signals_used?.length" class="mt-3 rounded-lg border border-storm/20 bg-void/40 px-3 py-2">

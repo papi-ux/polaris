@@ -130,6 +130,27 @@ describe('AI optimizer guided setup', () => {
     expect(wrapper.text()).toContain('Guided step: choose the OpenAI setup that matches your auth')
   })
 
+  it('uses a realistic bounded timeout when selecting a local provider profile', async () => {
+    const config = defaultConfig()
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+
+    const localCard = wrapper.findAll('button').find(button => button.text().includes('Local'))
+    expect(localCard).toBeTruthy()
+    await localCard.trigger('click')
+    await nextTick()
+
+    const ollamaProfile = wrapper.findAll('button').find(button => button.text().includes('Ollama'))
+    expect(ollamaProfile).toBeTruthy()
+    await ollamaProfile.trigger('click')
+    await nextTick()
+
+    expect(config.ai_provider).toBe('local')
+    expect(config.ai_auth_mode).toBe('none')
+    expect(config.ai_timeout_ms).toBe(60000)
+    expect(wrapper.find('input[type="number"][max="120000"]').exists()).toBe(true)
+  })
+
   it('renders failed draft tests as structured actionable feedback', async () => {
     const config = defaultConfig({
       ai_provider: 'openai',
@@ -159,5 +180,40 @@ describe('AI optimizer guided setup', () => {
     expect(text).toContain('codex CLI is not authorized for this runtime HOME')
     expect(text).toContain('Run codex login or set CODEX_HOME to the signed-in account home.')
     expect(text).toContain('Retry after fixing auth')
+  })
+
+  it('explains a local inference timeout without blaming authentication', async () => {
+    const config = defaultConfig({
+      ai_provider: 'local',
+      ai_model: 'qwen3.8:27b',
+      ai_base_url: 'http://127.0.0.1:11434/v1',
+      ai_auth_mode: 'none',
+      ai_use_subscription: 'disabled',
+      ai_timeout_ms: 5000,
+    })
+    mockAiOptimizer.testConnection.mockResolvedValue({
+      status: false,
+      code: 'inference_timeout',
+      error: 'Model inference timed out after 60 seconds',
+      detail: 'Large local models may still be loading.',
+      action: 'Warm the model once, or raise Provider timeout to 60000 ms, then retry.',
+      retryable: true,
+    })
+
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+
+    const testButton = wrapper.findAll('button').find(button => button.text().includes('Test explanation'))
+    expect(testButton).toBeTruthy()
+    await testButton.trigger('click')
+    await flushMounted()
+
+    const text = wrapper.text()
+    expect(config.ai_timeout_ms).toBe(60000)
+    expect(text).toContain('Model inference timed out after 60 seconds')
+    expect(text).toContain('Large local models may still be loading.')
+    expect(text).toContain('raise Provider timeout to 60000 ms')
+    expect(text).toContain('Retry test')
+    expect(text).not.toContain('Retry after fixing auth')
   })
 })
