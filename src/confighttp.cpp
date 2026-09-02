@@ -3715,17 +3715,24 @@ namespace confighttp {
       auto ai_cfg = parseAiDraftConfig(body);
       ai_cfg.enabled = true;
 
-      auto result = ai_optimizer::request_sync_with_config(ai_cfg, device, app, gpu);
-      if (result) {
-        output["status"] = true;
+      auto test_result = ai_optimizer::test_provider_with_config(ai_cfg, device, app, gpu);
+      if (test_result.explanation_json) {
+        output = nlohmann::json::parse(*test_result.explanation_json);
         output["provider"] = ai_cfg.provider;
         output["model"] = ai_cfg.model;
         output["auth_mode"] = ai_cfg.auth_mode;
         output["base_url"] = ai_cfg.base_url;
-        appendAiExplanationJson(output, *result);
+        const auto explanation = output.value("explanation", nlohmann::json::object());
+        output["reasoning"] = explanation.value("advanced_detail", explanation.value("likely_cause", std::string {}));
+        output["confidence"] = explanation.value("confidence", std::string {"low"});
+        output["signals_used"] = explanation.value("evidence", nlohmann::json::array());
       } else {
         output["status"] = false;
-        output["error"] = "Connection test failed — check provider settings and logs";
+        output["code"] = test_result.code;
+        output["error"] = test_result.error;
+        output["detail"] = test_result.detail;
+        output["action"] = test_result.action;
+        output["retryable"] = test_result.retryable;
       }
     } catch (const std::exception &e) {
       output["status"] = false;
@@ -3756,21 +3763,16 @@ namespace confighttp {
       std::stringstream ss;
       ss << request->content.rdbuf();
       auto body = nlohmann::json::parse(ss.str());
-      ai_optimizer::config_t ai_cfg;
-      const auto provider = body.value("provider", nlohmann::json::object());
-      ai_cfg.enabled = true;
-      ai_cfg.provider = provider.value("provider", std::string {});
-      ai_cfg.model = provider.value("model", std::string {});
-      ai_cfg.auth_mode = provider.value("auth_mode", std::string {});
-      ai_cfg.base_url = provider.value("base_url", std::string {});
-      ai_cfg.timeout_ms = config::video.ai_optimizer.timeout_ms;
-      ai_cfg.cache_ttl_hours = config::video.ai_optimizer.cache_ttl_hours;
-      ai_cfg.api_key = config::video.ai_optimizer.api_key;
-
-      const auto evidence = body.value("evidence", nlohmann::json::object());
+      auto evidence = body.value("evidence", nlohmann::json::object());
+      if (!evidence.is_object()) evidence = nlohmann::json::object();
+      if (body.contains("deterministic_source_of_truth")) {
+        evidence["deterministic_source_of_truth"] = body["deterministic_source_of_truth"];
+      }
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
-      response->write(ai_optimizer::explain_doctor_json_with_config(ai_cfg, evidence.dump()), headers);
+      // Provider selection, credentials, and endpoint authority remain on the
+      // host. The browser supplies only anonymized evidence to explain.
+      response->write(ai_optimizer::explain_doctor_json(evidence.dump()), headers);
     } catch (const std::exception &e) {
       nlohmann::json output;
       output["status"] = false;
