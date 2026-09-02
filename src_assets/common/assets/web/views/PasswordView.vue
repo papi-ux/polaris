@@ -52,7 +52,7 @@
                 v-model="passwordData.currentUsername"
                 required
                 type="text"
-                class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                class="settings-input"
               />
             </div>
 
@@ -108,7 +108,7 @@
                 id="newUsername"
                 v-model="passwordData.newUsername"
                 type="text"
-                class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                class="settings-input"
               />
             </div>
 

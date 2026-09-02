@@ -50,7 +50,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="address_family" class="block text-sm font-medium text-storm mb-1">{{ $t('config.address_family') }}</label>
-        <select id="address_family" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.address_family">
+        <select id="address_family" class="settings-input" v-model="config.address_family">
           <option value="ipv4">{{ $t('config.address_family_ipv4') }}</option>
           <option value="both">{{ $t('config.address_family_both') }}</option>
         </select>
@@ -59,7 +59,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="port" class="block text-sm font-medium text-storm mb-1">{{ $t('config.port') }}</label>
-        <input type="number" min="1029" max="65514" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="port" :placeholder="defaultMoonlightPort"
+        <input type="number" min="1029" max="65514" class="settings-input" id="port" :placeholder="defaultMoonlightPort"
                v-model="config.port" />
         <div class="text-sm text-storm mt-1">{{ $t('config.port_desc') }}</div>
 
@@ -122,7 +122,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="origin_web_ui_allowed" class="block text-sm font-medium text-storm mb-1">{{ $t('config.origin_web_ui_allowed') }}</label>
-        <select id="origin_web_ui_allowed" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.origin_web_ui_allowed">
+        <select id="origin_web_ui_allowed" class="settings-input" v-model="config.origin_web_ui_allowed">
           <option value="pc">{{ $t('config.origin_web_ui_allowed_pc') }}</option>
           <option value="lan">{{ $t('config.origin_web_ui_allowed_lan') }}</option>
           <option value="wan">{{ $t('config.origin_web_ui_allowed_wan') }}</option>
@@ -132,7 +132,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="external_ip" class="block text-sm font-medium text-storm mb-1">{{ $t('config.external_ip') }}</label>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="external_ip" placeholder="123.456.789.12" v-model="config.external_ip" />
+        <input type="text" class="settings-input" id="external_ip" placeholder="123.456.789.12" v-model="config.external_ip" />
         <div class="text-sm text-storm mt-1">{{ $t('config.external_ip_desc') }}</div>
       </div>
     </section>
@@ -150,7 +150,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="lan_encryption_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.lan_encryption_mode') }}</label>
-        <select id="lan_encryption_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.lan_encryption_mode">
+        <select id="lan_encryption_mode" class="settings-input" v-model="config.lan_encryption_mode">
           <option value="0">{{ $t('_common.disabled_def') }}</option>
           <option value="1">{{ $t('config.lan_encryption_mode_1') }}</option>
           <option value="2">{{ $t('config.lan_encryption_mode_2') }}</option>
@@ -160,7 +160,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="wan_encryption_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.wan_encryption_mode') }}</label>
-        <select id="wan_encryption_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.wan_encryption_mode">
+        <select id="wan_encryption_mode" class="settings-input" v-model="config.wan_encryption_mode">
           <option value="0">{{ $t('_common.disabled') }}</option>
           <option value="1">{{ $t('config.wan_encryption_mode_1') }}</option>
           <option value="2">{{ $t('config.wan_encryption_mode_2') }}</option>
@@ -170,7 +170,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
       <div class="mb-3">
         <label for="ping_timeout" class="block text-sm font-medium text-storm mb-1">{{ $t('config.ping_timeout') }}</label>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="ping_timeout" placeholder="10000" v-model="config.ping_timeout" />
+        <input type="text" class="settings-input" id="ping_timeout" placeholder="10000" v-model="config.ping_timeout" />
         <div class="text-sm text-storm mt-1">{{ $t('config.ping_timeout_desc') }}</div>
       </div>
 
@@ -197,7 +197,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
           <div v-for="(subnet, index) in config.trusted_subnets" :key="index" class="flex items-center gap-2">
             <input
               type="text"
-              class="flex-1 bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+              class="settings-input flex-1 font-mono text-sm"
               :placeholder="'10.0.0.0/24'"
               v-model="config.trusted_subnets[index]"
             />

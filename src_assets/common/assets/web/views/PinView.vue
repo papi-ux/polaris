@@ -144,7 +144,7 @@
                   maxlength="4"
                   required
                   title="Enter the 4-digit pairing PIN"
-                  class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input"
                   :placeholder="$t('pin.pin_code_placeholder')"
                 />
               </div>
@@ -156,7 +156,7 @@
                   v-model="pinDeviceName"
                   name="pairing_device_name"
                   autocomplete="off"
-                  class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input"
                   :placeholder="$t('pin.device_name_placeholder')"
                 />
               </div>
@@ -203,7 +203,7 @@
                       name="otp_host"
                       autocomplete="off"
                       spellcheck="false"
-                      class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                      class="settings-input"
                       :placeholder="$t('pin.host_address_placeholder')"
                     />
                   </div>
@@ -216,7 +216,7 @@
                       autocomplete="off"
                       inputmode="numeric"
                       spellcheck="false"
-                      class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                      class="settings-input"
                       :placeholder="$t('pin.host_port_placeholder')"
                     />
                   </div>
@@ -250,7 +250,7 @@
                       pattern="[0-9a-zA-Z]{4,}"
                       required
                       spellcheck="false"
-                      class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                      class="settings-input"
                       :placeholder="$t('pin.otp_passphrase_placeholder')"
                     />
                   </div>
@@ -262,7 +262,7 @@
                       v-model="deviceName"
                       name="otp_device_name"
                       autocomplete="off"
-                      class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                      class="settings-input"
                       :placeholder="$t('pin.device_name_placeholder')"
                     />
                   </div>
@@ -464,7 +464,7 @@
                       :id="`client-name-${client.uuid}`"
                       v-model="client.editName"
                       autocomplete="off"
-                      class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                      class="settings-input"
                       :placeholder="$t('pin.device_name_placeholder')"
                       @keyup.enter="saveClient(client)"
                     />
@@ -607,7 +607,7 @@
                         :id="`display-mode-${client.uuid}`"
                         v-model="client.editDisplayMode"
                         autocomplete="off"
-                        class="w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                        class="settings-input"
                         placeholder="1920x1080x59.94"
                         @input="validateModeOverride"
                       />
@@ -691,7 +691,7 @@
                               v-model="c.cmd"
                               type="text"
                               autocomplete="off"
-                              class="w-full rounded-lg border border-storm bg-deep px-3 py-2 font-mono text-sm text-silver focus:border-ice focus:outline-none"
+                              class="settings-input font-mono text-sm"
                             />
                           </td>
                           <td v-if="platform === 'windows'" class="py-2 pr-2">

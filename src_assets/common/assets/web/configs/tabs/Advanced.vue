@@ -21,19 +21,19 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="fec_percentage" class="block text-sm font-medium text-storm mb-1">{{ $t('config.fec_percentage') }}</label>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="fec_percentage" placeholder="20" v-model="config.fec_percentage" />
+        <input type="text" class="settings-input" id="fec_percentage" placeholder="20" v-model="config.fec_percentage" />
         <div class="text-sm text-storm mt-1">{{ $t('config.fec_percentage_desc') }}</div>
       </div>
 
       <div class="mb-3">
         <label for="qp" class="block text-sm font-medium text-storm mb-1">{{ $t('config.qp') }}</label>
-        <input type="number" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="qp" placeholder="28" v-model="config.qp" />
+        <input type="number" class="settings-input" id="qp" placeholder="28" v-model="config.qp" />
         <div class="text-sm text-storm mt-1">{{ $t('config.qp_desc') }}</div>
       </div>
 
       <div class="mb-3">
         <label for="min_threads" class="block text-sm font-medium text-storm mb-1">{{ $t('config.min_threads') }}</label>
-        <input type="number" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="min_threads" placeholder="2" min="1" v-model="config.min_threads" />
+        <input type="number" class="settings-input" id="min_threads" placeholder="2" min="1" v-model="config.min_threads" />
         <div class="text-sm text-storm mt-1">{{ $t('config.min_threads_desc') }}</div>
       </div>
 
@@ -87,7 +87,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="hevc_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.hevc_mode') }}</label>
-        <select id="hevc_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.hevc_mode">
+        <select id="hevc_mode" class="settings-input" v-model="config.hevc_mode">
           <option value="0">{{ $t('config.hevc_mode_0') }}</option>
           <option value="1">{{ $t('config.hevc_mode_1') }}</option>
           <option value="2">{{ $t('config.hevc_mode_2') }}</option>
@@ -98,7 +98,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="av1_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.av1_mode') }}</label>
-        <select id="av1_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.av1_mode">
+        <select id="av1_mode" class="settings-input" v-model="config.av1_mode">
           <option value="0">{{ $t('config.av1_mode_0') }}</option>
           <option value="1">{{ $t('config.av1_mode_1') }}</option>
           <option value="2">{{ $t('config.av1_mode_2') }}</option>
@@ -123,7 +123,7 @@ const config = ref(props.config)
 
       <div class="mb-3" v-if="platform !== 'macos'">
         <label for="capture" class="block text-sm font-medium text-storm mb-1">{{ $t('config.capture') }}</label>
-        <select id="capture" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.capture">
+        <select id="capture" class="settings-input" v-model="config.capture">
           <option value="">{{ $t('_common.autodetect') }}</option>
           <PlatformLayout :platform="platform">
             <template #linux>
@@ -143,7 +143,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="encoder" class="block text-sm font-medium text-storm mb-1">{{ $t('config.encoder') }}</label>
-        <select id="encoder" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.encoder">
+        <select id="encoder" class="settings-input" v-model="config.encoder">
           <option value="">{{ $t('_common.autodetect') }}</option>
           <PlatformLayout :platform="platform">
             <template #windows>
