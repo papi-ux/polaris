@@ -33,6 +33,27 @@ and runtime path in one web console.
 
 ![Polaris Aurora Mission Control ready for a client, with host vitals, launch checks, and quick controls](docs/screenshots/polaris-mission-control-ready-v1.3.8.webp)
 
+## Built for the whole player loop
+
+Polaris is the matched host for Nova. Together they make the whole player loop
+explicit:
+
+- **Where games run is a real choice.** Private Stream, Gamescope Stream, Host
+  Virtual Display, Headless Dongle, and Mirror Desktop are described by their
+  display and privacy impact, and unavailable modes fail closed.
+- **Doctor acts only when it can prove the step is safe.** It can make one
+  reversible same-stream bitrate change, verify the encoder and fresh evidence,
+  and restore the previous target when verification fails. Other findings stay
+  read-only guidance.
+- **Launches are deterministic.** Auto, Quality, High FPS, and Stability resolve
+  into one app- and topology-bound envelope that Nova sends back unchanged.
+- **The Library keeps identity intact.** Native and Flatpak Heroic GOG/Epic
+  imports retain their runner and installation identity, while built-in utility
+  entries keep their shipped artwork unless the player chooses a manual match.
+
+Read the [changelog](docs/changelog.md) for the release-by-release change and
+validation record.
+
 ## Why Polaris
 
 <table>
@@ -54,8 +75,10 @@ and runtime path in one web console.
 
 1. **Choose a game.** Launch from Polaris, Nova, or a compatible Moonlight
    client.
-2. **Create a stream-only runtime.** Polaris starts an isolated compositor and
-   resolves the requested display, capture, and encoder path for that session.
+2. **Resolve where this session runs.** Private and Gamescope modes get a
+   session-owned compositor; Host Virtual Display gets an extra output; Mirror
+   Desktop deliberately uses the physical desktop. Polaris validates the
+   matching capture and encoder path before admitting the stream.
 3. **Observe and recover.** Mission Control reports what actually happened;
    Doctor suggests bounded corrections when live evidence needs attention.
 
@@ -119,7 +142,7 @@ capture path, HDR mode, or experimental Browser Stream setup.
 
 ## Documentation and project links
 
-- [Documentation](https://papi-ux.com/docs/) · [FAQ](https://papi-ux.com/docs/faq/) · [Runtime](https://papi-ux.com/docs/runtime/)
+- [Documentation](https://papi-ux.com/docs/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Doctor](https://papi-ux.com/docs/doctor/) · [FAQ](https://papi-ux.com/docs/faq/)
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [GitHub changelog](docs/changelog.md)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 - [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md) · [Source](https://github.com/papi-ux/polaris)
