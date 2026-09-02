@@ -89,6 +89,7 @@
 #include "client_profiles.h"
 #include "client_support_report.h"
 #include "confighttp.h"
+#include "settings_metadata.h"
 #include "stream_stats.h"
 #include "video.h"
 #ifdef __linux__
@@ -732,135 +733,6 @@ namespace nvhttp {
       };
     }
 
-    bool ai_auto_quality_enabled() {
-      // Legacy compatibility field. Launch policy no longer has an AI-owned
-      // mode; adaptive bitrate remains a separate same-stream control.
-      return false;
-    }
-
-    std::string auto_quality_blocked_reason(const std::string &limiting_factor) {
-      const auto normalized = lower_copy(limiting_factor);
-      if (normalized == "host_render") {
-        return "host_render_limited";
-      }
-      if (normalized == "network" ||
-          normalized == "encoder" ||
-          normalized == "decoder") {
-        return normalized;
-      }
-      if (normalized == "pacing" ||
-          normalized == "capture" ||
-          normalized == "hdr") {
-        return "insufficient_signal";
-      }
-      return "none";
-    }
-
-    nlohmann::json build_auto_quality_policy_json(const nlohmann::json &health,
-                                                  const adaptive_bitrate::state_t &adaptive_state,
-                                                  int encoder_bitrate_kbps) {
-      const bool auto_quality_enabled = ai_auto_quality_enabled();
-      const std::string limiting_factor = health.value("limiting_factor", std::string {"none"});
-      const std::string adaptive_state_name = lower_copy(adaptive_state.state);
-      const bool host_render_limited =
-        health.value("host_render_limited", false) ||
-        limiting_factor == "host_render" ||
-        lower_copy(health.value("primary_issue", std::string {})) == "host_render_limited";
-      const bool host_render_recovery =
-        host_render_limited &&
-        health.value("relaunch_recommended", false) &&
-        health.contains("safe_target_fps");
-      const bool blocked =
-        (!host_render_recovery && host_render_limited) ||
-        limiting_factor == "network" ||
-        limiting_factor == "encoder" ||
-        limiting_factor == "decoder";
-      const int live_bitrate_kbps =
-        adaptive_state.target_bitrate_kbps > 0 ? adaptive_state.target_bitrate_kbps : encoder_bitrate_kbps;
-      const int quality_cap_kbps =
-        adaptive_state.base_bitrate_kbps > 0 ? adaptive_state.base_bitrate_kbps : encoder_bitrate_kbps;
-      const bool bitrate_recovering =
-        !blocked &&
-        adaptive_state.enabled &&
-        adaptive_state_name == "recovering" &&
-        live_bitrate_kbps > 0 &&
-        quality_cap_kbps > 0 &&
-        live_bitrate_kbps < quality_cap_kbps;
-
-      std::string state = "holding";
-      std::string blocked_reason = "none";
-      std::string summary = "Auto Quality is holding the current profile.";
-      if (!auto_quality_enabled) {
-        state = "off";
-        summary = "Manual stream tuning is active.";
-      } else if (blocked) {
-        state = "blocked";
-        blocked_reason = auto_quality_blocked_reason(limiting_factor);
-        summary =
-          blocked_reason == "host_render_limited" ?
-            "Holding quality until the host render path reaches the stream FPS target." :
-          blocked_reason == "network" ?
-            "Holding quality while network pressure clears." :
-          blocked_reason == "encoder" ?
-            "Holding quality while encoder pressure clears." :
-          blocked_reason == "decoder" ?
-            "Holding quality while decoder pressure clears." :
-            "Holding quality until the stream has enough clean signal.";
-      } else if (host_render_recovery) {
-        state = "recovery_queued";
-        summary = "AI Recovery Profile ready for the next launch.";
-      } else if (bitrate_recovering) {
-        state = "recovering_bitrate";
-        summary = "Recovering bitrate toward the quality cap.";
-      }
-
-      nlohmann::json policy;
-      policy["enabled"] = auto_quality_enabled;
-      policy["state"] = state;
-      policy["blocked_reason"] = blocked_reason;
-      policy["live_bitrate_kbps"] = live_bitrate_kbps;
-      policy["quality_cap_kbps"] = quality_cap_kbps;
-      policy["relaunch_required"] =
-        auto_quality_enabled && state != "blocked" && health.value("relaunch_recommended", false);
-      policy["can_recover_live"] = state == "recovering_bitrate";
-      policy["summary"] = summary;
-      policy["detail"] = health.value("summary", summary);
-      policy["components"] = {
-        {"optimizer_active", false},
-        {"adaptive_bitrate_active", adaptive_bitrate::is_active()},
-        {"adaptive_state", adaptive_state.state},
-        {"adaptive_reason", adaptive_state.reason},
-        {"target_bitrate_kbps", live_bitrate_kbps}
-      };
-      if (policy["relaunch_required"].get<bool>()) {
-        auto &suggested = policy["suggested_profile"];
-        suggested["target_bitrate_kbps"] = health.value("safe_bitrate_kbps", 0);
-        suggested["display_mode"] = health.value("safe_display_mode", std::string {});
-        if (health.contains("safe_target_fps")) {
-          suggested["target_fps"] = health["safe_target_fps"];
-        }
-        if (health.contains("safe_codec")) {
-          suggested["preferred_codec"] = health["safe_codec"];
-        }
-        if (health.contains("safe_hdr")) {
-          suggested["hdr"] = health["safe_hdr"];
-        }
-      }
-      return policy;
-    }
-
-    bool host_virtual_display_available() {
-#ifdef __linux__
-      return virtual_display::is_available();
-#elif defined(_WIN32)
-      return
-        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
-        vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::UNKNOWN;
-#else
-      return false;
-#endif
-    }
-
     bool host_prefers_headless() {
 #ifdef __linux__
       // One resolve_current snapshot for the two flags (no hand-built input_t thrash).
@@ -1352,70 +1224,6 @@ namespace nvhttp {
       return true;
     }
 
-    std::string configured_stream_display_mode_selection() {
-#ifdef __linux__
-      return stream_display_policy::resolve_current().selection;
-#else
-      return "desktop_display";
-#endif
-    }
-
-    std::string effective_stream_display_mode_selection(
-      const stream_stats::stats_t &stats,
-      bool session_uses_virtual_display
-    ) {
-#ifdef __linux__
-      return stream_display_policy::resolve_effective(
-        stream_display_policy::input_t {
-          host_virtual_display_available(),
-          false,
-          stats.runtime_gpu_native_override_active,
-        },
-        stats.streaming,
-        session_uses_virtual_display,
-        stats.runtime_effective_headless
-      ).selection;
-#else
-      (void) stats;
-      (void) session_uses_virtual_display;
-      return configured_stream_display_mode_selection();
-#endif
-    }
-
-    std::string effective_stream_display_mode_selection(const stream_stats::stats_t &stats) {
-      return effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display());
-    }
-
-    std::string stream_display_mode_label_for_selection(const std::string &selection) {
-#ifdef __linux__
-      const auto label = stream_display_policy::label_for_selection(selection);
-      return label.empty() ? "Mirror Desktop" : label;
-#else
-      if (selection == "headless_stream") {
-        return "Private Stream";
-      }
-      if (selection == "host_virtual_display") {
-        return "Host Virtual Display";
-      }
-      if (selection == "windowed_stream") {
-        return "Private Stream (GPU-native)";
-      }
-      if (selection == "gamescope_stream") {
-        return "Gamescope Stream";
-      }
-      return "Mirror Desktop";
-#endif
-    }
-
-    std::string stream_display_mode_reason_for_selection(const std::string &selection) {
-#ifdef __linux__
-      return stream_display_policy::reason_for_selection(selection, host_virtual_display_available());
-#else
-      (void) selection;
-      return "Polaris will mirror the current desktop session.";
-#endif
-    }
-
     using persist_config_values_fn_t = std::function<bool(
       const std::unordered_map<std::string, std::string> &
     )>;
@@ -1486,75 +1294,6 @@ namespace nvhttp {
       error = "stream display mode selection is only supported on Linux";
       return stream_display_mode_apply_result_e::rejected;
 #endif
-    }
-
-    nlohmann::json stream_display_mode_options_json() {
-      nlohmann::json modes = nlohmann::json::array();
-#ifdef __linux__
-      for (const auto &option : stream_display_policy::mode_options(host_virtual_display_available())) {
-        bool available = option.available;
-        if (option.value == "host_virtual_display") {
-          available = available && host_virtual_display_available();
-        }
-        std::string unavailable_reason;
-        if (!available) {
-          unavailable_reason = option.unavailable_reason;
-          if (option.value == "host_virtual_display") {
-            // The backend probe knows exactly why creation would fail; the
-            // policy layer only knows that it would.
-            const auto backend_reason = virtual_display::unavailable_reason();
-            if (!backend_reason.empty()) {
-              unavailable_reason = backend_reason;
-            }
-          }
-          if (unavailable_reason.empty()) {
-            unavailable_reason = "This mode is not available on this host right now.";
-          }
-        }
-        modes.push_back({
-          {"value", option.value},
-          {"label", option.label},
-          {"available", available},
-          {"unavailable_reason", unavailable_reason},
-          {"restart_required", true},
-          {"reason", option.reason},
-          {"group", option.group},
-          {"runtime", option.runtime},
-          {"capture", option.capture},
-          {"topology", option.topology},
-          // Available and session-overridable are different questions. A dongle
-          // swap is a perfectly valid host default while still being something a
-          // single client must not switch on for one launch, and a client that
-          // cannot see the difference offers a choice the host will silently drop.
-          {"session_overridable", stream_display_policy::selection_session_overridable(option.value)},
-        });
-      }
-#else
-      for (const auto &selection : {
-             "headless_stream"s,
-             "desktop_display"s,
-             "host_virtual_display"s,
-             "windowed_stream"s
-           }) {
-        const bool available = selection != "host_virtual_display" || host_virtual_display_available();
-        const bool private_group = selection == "headless_stream" || selection == "windowed_stream";
-        modes.push_back({
-          // Same shape as the Linux branch so clients parse one contract;
-          // the runtime/capture/topology vocabulary is Linux-only and empty here.
-          {"value", selection},
-          {"label", stream_display_mode_label_for_selection(selection)},
-          {"available", available},
-          {"unavailable_reason", available ? "" : "Host virtual display is not available on this host."},
-          {"restart_required", true},
-          {"reason", stream_display_mode_reason_for_selection(selection)},
-          {"group", private_group ? "private" : "host"},
-          {"runtime", ""},
-          {"capture", ""},
-          {"topology", ""},
-        });
-      }
-#endif
-      return modes;
     }
 
     nlohmann::json build_client_settings_sync_status(const crypto::named_cert_t &client,
@@ -1824,7 +1563,7 @@ namespace nvhttp {
       const std::string policy_state = lower_copy(auto_quality.value("state", std::string {}));
       std::string state = "stable";
       std::string label = "Quality";
-      if (!auto_quality.value("enabled", ai_auto_quality_enabled())) {
+      if (!auto_quality.value("enabled", settings_metadata::ai_auto_quality_enabled())) {
         state = "manual_override";
         label = "Manual";
       } else if (policy_state == "upgrade_available") {
@@ -1981,7 +1720,7 @@ namespace nvhttp {
       const auto capture_reason = stream_stats::capture_path_reason(stats);
       const bool capture_cpu_copy = stream_stats::capture_path_uses_cpu_copy(stats);
       const bool capture_gpu_native = stream_stats::capture_path_is_gpu_native(stats);
-      const bool auto_quality_enabled = ai_auto_quality_enabled();
+      const bool auto_quality_enabled = settings_metadata::ai_auto_quality_enabled();
       const auto hdr_effective_mode = stream_stats::hdr_effective_mode(stats);
       const auto hdr_downgrade_reason = stream_stats::hdr_downgrade_reason(stats);
       const auto hdr_downgrade_message = stream_stats::hdr_downgrade_message(stats);
@@ -2059,10 +1798,10 @@ namespace nvhttp {
 
       nlohmann::json policy;
       policy["version"] = 1;
-      const auto policy_stream_display_mode = effective_stream_display_mode_selection(stats);
+      const auto policy_stream_display_mode = settings_metadata::effective_stream_display_mode_selection(stats);
       policy["mode"] = policy_stream_display_mode;
-      policy["mode_label"] = stream_display_mode_label_for_selection(policy_stream_display_mode);
-      policy["mode_reason"] = stream_display_mode_reason_for_selection(policy_stream_display_mode);
+      policy["mode_label"] = settings_metadata::stream_display_mode_label_for_selection(policy_stream_display_mode);
+      policy["mode_reason"] = settings_metadata::stream_display_mode_reason_for_selection(policy_stream_display_mode);
       policy["source"] = source;
       policy["source_label"] = stream_policy_source_label(source);
       policy["optimization_source"] = stats.optimization_source;
@@ -2113,16 +1852,16 @@ namespace nvhttp {
                                               const stream_stats::stats_t &stats,
                                               const nlohmann::json &health) {
       const auto policy = build_stream_policy_json(client, stats, health);
-      const auto configured_mode = configured_stream_display_mode_selection();
-      const auto effective_mode = effective_stream_display_mode_selection(stats);
+      const auto configured_mode = settings_metadata::configured_stream_display_mode_selection();
+      const auto effective_mode = settings_metadata::effective_stream_display_mode_selection(stats);
       const bool relaunch_required =
         rtsp_stream::session_count() != 0 && configured_mode != effective_mode;
       const auto client_sync = client_sync_report_for(client.uuid);
 
       nlohmann::json desired;
       desired["stream_display_mode"] = configured_mode;
-      desired["stream_display_mode_label"] = stream_display_mode_label_for_selection(configured_mode);
-      desired["stream_display_mode_reason"] = stream_display_mode_reason_for_selection(configured_mode);
+      desired["stream_display_mode_label"] = settings_metadata::stream_display_mode_label_for_selection(configured_mode);
+      desired["stream_display_mode_reason"] = settings_metadata::stream_display_mode_reason_for_selection(configured_mode);
       desired["display_mode"] = client.display_mode;
       desired["target_bitrate_kbps"] = client.target_bitrate_kbps;
       desired["ai_auto_quality_enabled"] = false;
@@ -2134,8 +1873,8 @@ namespace nvhttp {
 
       nlohmann::json effective;
       effective["stream_display_mode"] = effective_mode;
-      effective["stream_display_mode_label"] = stream_display_mode_label_for_selection(effective_mode);
-      effective["stream_display_mode_reason"] = stream_display_mode_reason_for_selection(effective_mode);
+      effective["stream_display_mode_label"] = settings_metadata::stream_display_mode_label_for_selection(effective_mode);
+      effective["stream_display_mode_reason"] = settings_metadata::stream_display_mode_reason_for_selection(effective_mode);
       effective["display_mode"] = policy.value("selected_display_mode", std::string {});
       effective["target_bitrate_kbps"] = policy.value("target_bitrate_kbps", 0);
       effective["target_bitrate_source"] = policy.value("target_bitrate_source", std::string {"client_request"});
@@ -2171,7 +1910,7 @@ namespace nvhttp {
         settings["doctor"] = health["doctor"];
       }
       settings["capabilities"] = {
-        {"modes", stream_display_mode_options_json()},
+        {"modes", settings_metadata::stream_display_mode_options_json()},
         {"display_mode_override", true},
         {"target_bitrate_override", true},
         {"ai_auto_quality_control", false},
@@ -2498,7 +2237,7 @@ namespace nvhttp {
       if (safe_codec) {
         health["safe_codec"] = *safe_codec;
       }
-      health["recovery_policy"] = build_auto_quality_policy_json(
+      health["recovery_policy"] = settings_metadata::build_auto_quality_policy_json(
         health,
         adaptive_bitrate::get_state(),
         stats.bitrate_kbps
@@ -2523,7 +2262,7 @@ namespace nvhttp {
 
   std::string effective_stream_display_mode_for_action(const stream_stats::stats_t &stats,
                                                        bool current_virtual_display) {
-    return effective_stream_display_mode_selection(stats, current_virtual_display);
+    return settings_metadata::effective_stream_display_mode_selection(stats, current_virtual_display);
   }
 
 #ifdef POLARIS_TESTS
@@ -2881,7 +2620,7 @@ namespace nvhttp {
       return build_launch_mode_contract(
         app.virtual_display,
         app.name,
-        host_virtual_display_available(),
+        settings_metadata::host_virtual_display_available(),
         host_prefers_headless()
       );
     }
@@ -6832,24 +6571,14 @@ namespace nvhttp {
       controls["client_commands_enabled"] = status_snapshot.client_commands_enabled;
       controls["device_commands_enabled"] = named_cert_p->allow_client_commands;
 
-      auto &tuning = output["tuning"];
-      tuning["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
-      tuning["adaptive_bitrate_active"] = adaptive_state.active;
-      tuning["adaptive_runtime_update_supported"] = adaptive_state.runtime_update_supported;
-      tuning["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
-      tuning["adaptive_base_bitrate_kbps"] = adaptive_state.base_bitrate_kbps;
-      tuning["adaptive_min_bitrate_kbps"] = adaptive_state.min_bitrate_kbps;
-      tuning["adaptive_max_bitrate_kbps"] = adaptive_state.max_bitrate_kbps;
-      tuning["adaptive_bitrate_state"] = adaptive_state.state;
-      tuning["adaptive_bitrate_reason"] = adaptive_state.reason;
-      tuning["adaptive_packet_loss_ewma"] = adaptive_state.ewma_packet_loss;
-      tuning["adaptive_rtt_ewma_ms"] = adaptive_state.ewma_rtt_ms;
-      tuning["ai_auto_quality_enabled"] = false;
-      tuning["ai_optimizer_enabled"] = false;
-      tuning["mangohud_configured"] = status_snapshot.mangohud_configured;
+      output["tuning"] = settings_metadata::build_tuning_json(
+        adaptive_state,
+        stats,
+        status_snapshot.mangohud_configured
+      );
 
       auto &display_mode = output["display_mode"];
-      const auto stream_display_mode = effective_stream_display_mode_selection(
+      const auto stream_display_mode = settings_metadata::effective_stream_display_mode_selection(
         stats,
         status_snapshot.virtual_display
       );
@@ -6869,8 +6598,8 @@ namespace nvhttp {
         status_snapshot.display_mode_explicit ?
           (status_snapshot.virtual_display ? "virtual_display" : "headless") :
           "auto";
-      display_mode["label"] = stream_display_mode_label_for_selection(stream_display_mode);
-      display_mode["reason"] = stream_display_mode_reason_for_selection(stream_display_mode);
+      display_mode["label"] = settings_metadata::stream_display_mode_label_for_selection(stream_display_mode);
+      display_mode["reason"] = settings_metadata::stream_display_mode_reason_for_selection(stream_display_mode);
       display_mode["paired_display_mode_override"] = named_cert_p->display_mode;
       display_mode["paired_display_mode_locked"] = !named_cert_p->display_mode.empty();
       display_mode["paired_target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
@@ -8603,7 +8332,7 @@ namespace nvhttp {
         }},
         {"transport", {{"bytes_sent", stats.bytes_sent}}},
         {"effective_settings", {
-          {"topology", effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display())},
+          {"topology", settings_metadata::effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display())},
           {"width", stats.width}, {"height", stats.height},
           {"target_fps", stats.session_target_fps > 0.0 ? stats.session_target_fps : stats.fps},
           {"bitrate_kbps", stats.bitrate_kbps}, {"codec", stats.codec},
@@ -8613,7 +8342,7 @@ namespace nvhttp {
       };
       const auto evidence = doctor_v2::status(named_cert_p->uuid, app_uuid, host_evidence);
       doctor_trial::effective_settings_t settings {
-        .topology = effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display()),
+        .topology = settings_metadata::effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display()),
         .width = stats.width,
         .height = stats.height,
         .target_fps = static_cast<int>(std::round(
@@ -8961,7 +8690,7 @@ namespace nvhttp {
           .app_name = app_name,
           .launch_instance_id = proc::proc.get_session_token(),
           .session_generation = timing.session_generation,
-          .effective_stream_display_mode = effective_stream_display_mode_selection(stats, virtual_display),
+          .effective_stream_display_mode = settings_metadata::effective_stream_display_mode_selection(stats, virtual_display),
           .state_path = platf::appdata() / "recovery_profiles.json",
           .stats = stats,
           .health = health,
@@ -9788,7 +9517,7 @@ namespace nvhttp {
       bool virtual_display_supported = false;
       bool host_requires_virtual_display = false;
 #if defined(_WIN32)
-      virtual_display_supported = host_virtual_display_available();
+      virtual_display_supported = settings_metadata::host_virtual_display_available();
       host_requires_virtual_display =
         config::video.linux_display.headless_mode ||
         !video::allow_encoder_probing();
