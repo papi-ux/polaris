@@ -10,9 +10,7 @@
 #include <src/nvhttp.h>
 #include <src/stream_stats.h>
 
-#include <chrono>
 #include <gtest/gtest.h>
-#include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -246,19 +244,4 @@ TEST_F(SettingsProjectionContract, ResponseOnlyKeysMirrorTheValidationList) {
     }
   }
   EXPECT_TRUE(saw_stream_path_id);
-}
-
-// TEMPORARY-TIMING: removed before commit.
-TEST_F(SettingsProjectionContract, TempTimingAutoQualityStatusJson) {
-  using clock = std::chrono::steady_clock;
-  // Warm caches once so the measurement reflects steady-state serving.
-  (void) nvhttp::auto_quality_status_json();
-  const auto t0 = clock::now();
-  for (int i = 0; i < 1000; ++i) {
-    const auto payload = nvhttp::auto_quality_status_json();
-    (void) payload;
-  }
-  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
-  std::cout << "TEMP-TIMING auto_quality_status_json: " << us << " us / 1000 calls = "
-            << (static_cast<double>(us) / 1000.0) << " us per call" << std::endl;
 }
