@@ -266,6 +266,37 @@ namespace stream_display_policy {
     return std::string {current_capture};
   }
 
+  std::string capture_for_session_transition(
+    std::string_view configured_selection,
+    std::string_view session_selection,
+    std::string_view current_capture
+  ) {
+    const auto configured = to_lower_copy(configured_selection);
+    const auto session = to_lower_copy(session_selection);
+    if (configured == session) {
+      return std::string {current_capture};
+    }
+
+    if (session == k_headless_stream || session == k_windowed_stream) {
+      return "wlr";
+    }
+
+    if (session == k_gamescope_stream || session == k_headless_dongle) {
+      return "portal";
+    }
+
+    const auto capture = to_lower_copy(current_capture);
+    if (session == k_desktop_display &&
+        (capture == "wlr" || capture == "wlroots" || capture == "auto")) {
+      // Let desktop capture discovery prefer a working KMS path when the
+      // process retained CAP_SYS_ADMIN, then fall through to Portal on an
+      // ordinary unprivileged installation. Pinning WLR here leaves neither.
+      return {};
+    }
+
+    return std::string {current_capture};
+  }
+
   void normalize_host_virtual_display_state_for_backend(
       virtual_display::backend_e backend) {
     auto &linux_display = config::video.linux_display;

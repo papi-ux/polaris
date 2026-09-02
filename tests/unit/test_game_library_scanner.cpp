@@ -556,20 +556,37 @@ TEST(HeroicLibraryScannerTests, BuildsTheCommandForTheInstallThatHasTheTitle) {
     "setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=1207658930&runner=gog'");
   EXPECT_EQ(
     game_library::heroic_launch_command("gog", "1207658930", game_library::launcher_install_t::flatpak),
-    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "setsid flatpak run com.heroicgameslauncher.hgl "
     "'heroic://launch?appName=1207658930&runner=gog'");
 
   const auto both = game_library::heroic_launch_commands("epic", "Snow");
-  ASSERT_EQ(both.size(), 4u);
+  ASSERT_EQ(both.size(), 5u);
   EXPECT_EQ(
     both[0],
     "setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=Snow&runner=legendary'");
   EXPECT_EQ(
     both[1],
-    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "setsid flatpak run com.heroicgameslauncher.hgl "
     "'heroic://launch?appName=Snow&runner=legendary'");
   EXPECT_EQ(both[2], "setsid heroic heroic://launch/epic/Snow");
-  EXPECT_EQ(both[3], "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/epic/Snow");
+  EXPECT_EQ(
+    both[3],
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=Snow&runner=legendary'");
+  EXPECT_EQ(both[4], "setsid flatpak run com.heroicgameslauncher.hgl heroic://launch/epic/Snow");
+
+  const auto flatpak_only = game_library::heroic_launch_commands_for_install(
+    "gog",
+    "1207658930",
+    game_library::launcher_install_t::flatpak
+  );
+  ASSERT_EQ(flatpak_only.size(), 3u);
+  EXPECT_EQ(flatpak_only.front(),
+    "setsid flatpak run com.heroicgameslauncher.hgl "
+    "'heroic://launch?appName=1207658930&runner=gog'");
+  EXPECT_EQ(flatpak_only[1],
+    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "'heroic://launch?appName=1207658930&runner=gog'");
 }
 
 TEST(HeroicLibraryScannerTests, MapsOnlySupportedStoresAndInstallNames) {
@@ -596,7 +613,7 @@ TEST(HeroicLibraryScannerTests, RebuildsImportsFromExactMetadataAndRejectsTamper
   EXPECT_EQ(epic->install, game_library::launcher_install_t::flatpak);
   EXPECT_EQ(
     epic->command,
-    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "setsid flatpak run com.heroicgameslauncher.hgl "
     "'heroic://launch?appName=Snow&runner=legendary'");
 
   EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "epic", "epic", "flatpak").has_value());
@@ -619,7 +636,7 @@ TEST(HeroicLibraryScannerTests, ParsesOnlyExactLegacyPolarisCommands) {
   ASSERT_TRUE(flatpak.has_value());
   EXPECT_EQ(flatpak->install, game_library::launcher_install_t::flatpak);
   EXPECT_EQ(flatpak->command,
-    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "setsid flatpak run com.heroicgameslauncher.hgl "
     "'heroic://launch?appName=1207658930&runner=gog'");
 
   EXPECT_FALSE(game_library::parse_legacy_heroic_launch_command(

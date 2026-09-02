@@ -120,11 +120,14 @@ sudo -H polaris --setup-host
 polaris
 ```
 
-Open `https://localhost:47990`, create the web account, pair a client, and launch
-a title. The [quick-start guide](https://papi-ux.com/docs/quickstart/) contains
-the current Fedora, Arch, SteamOS, Ubuntu, Bazzite, openSUSE, and source paths.
-Only use `polaris --setup-host --enable-kms` when the guide says your DRM/KMS
-capture path needs it.
+**Fresh install:** open `https://localhost:47990/#/welcome` and create the web
+account. **Upgrade or reinstall:** open `https://localhost:47990/#/login` and
+use the existing account; package operations intentionally preserve credentials,
+pairing keys, settings, and the library under `~/.config/polaris`. The
+[quick-start guide](https://papi-ux.com/docs/quickstart/) contains the current
+Fedora, Arch, SteamOS, Ubuntu, Bazzite, openSUSE, and source paths. Only use
+`polaris --setup-host --enable-kms` when the guide says your DRM/KMS capture path
+needs it.
 
 ## Clients and compatibility
 
@@ -138,6 +141,10 @@ launching, input, and streaming. Features that depend on Polaris-specific host
 metadata are naturally limited there. Check the maintained [compatibility
 guide](https://papi-ux.com/docs/compatibility/) before choosing a distro, GPU,
 capture path, HDR mode, or experimental Browser Stream setup.
+
+Newly paired clients receive **Game Control** by default: enough access to browse,
+launch, and play, without clipboard, file-transfer, or server-command permissions.
+Existing clients keep their saved access until it is changed under **Devices**.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 

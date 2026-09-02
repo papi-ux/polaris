@@ -12,6 +12,16 @@ Adding the repository is a one-time step. Downloading a release package by hand
 still works and is still supported; the repository is an easier path to the same
 package, not a different one.
 
+## After install or upgrade
+
+**Fresh install:** open `https://localhost:47990/#/welcome` and create the web UI
+account. **Upgrade or reinstall:** open `https://localhost:47990/#/login` and use
+the existing account. Repository upgrades and package replacement intentionally
+preserve credentials, pairing keys, settings, and the library under
+`~/.config/polaris`; they do not turn the host back into a first-run installation.
+Use the [credential reset](troubleshooting.md#web-ui-credentials) if the existing
+account is no longer known.
+
 ## Fedora
 
 ```bash

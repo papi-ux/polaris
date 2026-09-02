@@ -20,8 +20,13 @@ sudo -H polaris --setup-host &&
 polaris
 ```
 
-Open `https://localhost:47990`, create the web UI password, and pair Moonlight, Nova, or another
-GameStream-compatible client.
+**Fresh install:** open `https://localhost:47990/#/welcome`, create the web UI account, and pair
+Moonlight, Nova, or another GameStream-compatible client.
+
+**Upgrade or reinstall:** open `https://localhost:47990/#/login` and use the existing account.
+APT package operations preserve credentials, pairing keys, settings, and the library under
+`~/.config/polaris`; removing the DEB does not reset the web account. If needed, follow the
+[credential reset](troubleshooting.md#web-ui-credentials) instead of returning to Welcome.
 
 ## Source Build Fallback
 
@@ -70,6 +75,8 @@ systemctl --user restart polaris
 
 `--setup-host` exits without asking for root when the package already provides the udev rules and
 modules-load configuration and the virtual input nodes are usable.
+
+After the restart, return to `https://localhost:47990/#/login` with the existing web credentials.
 
 ## Optional Setup
 
