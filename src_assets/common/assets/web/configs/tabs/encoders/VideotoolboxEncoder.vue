@@ -21,7 +21,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="vt_coder" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vt_coder') }}</label>
-        <select id="vt_coder" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.vt_coder">
+        <select id="vt_coder" class="settings-input" v-model="config.vt_coder">
           <option value="auto">{{ $t('config.ffmpeg_auto') }}</option>
           <option value="cabac">{{ $t('config.coder_cabac') }}</option>
           <option value="cavlc">{{ $t('config.coder_cavlc') }}</option>
@@ -30,7 +30,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="vt_software" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vt_software') }}</label>
-        <select id="vt_software" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.vt_software">
+        <select id="vt_software" class="settings-input" v-model="config.vt_software">
           <option value="auto">{{ $t('_common.auto') }}</option>
           <option value="disabled">{{ $t('_common.disabled') }}</option>
           <option value="allowed">{{ $t('config.vt_software_allowed') }}</option>

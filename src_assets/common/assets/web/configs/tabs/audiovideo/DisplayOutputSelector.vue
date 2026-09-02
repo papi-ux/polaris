@@ -15,7 +15,7 @@ const outputNamePlaceholder = (props.platform === 'windows') ? '{de9bb7e2-186e-5
 <template>
   <div class="mb-3">
     <label for="output_name" class="block text-sm font-medium text-storm mb-1">{{ $tp('config.output_name') }}</label>
-    <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="output_name" :placeholder="outputNamePlaceholder"
+    <input type="text" class="settings-input" id="output_name" :placeholder="outputNamePlaceholder"
            v-model="config.output_name"/>
     <div class="text-sm text-storm mt-1">
       {{ $tp('config.output_name_desc') }}
