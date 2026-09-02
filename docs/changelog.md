@@ -12,6 +12,7 @@ starts at `v1.0.0`.
 - Shows the host cursor by default for new or unset configurations so Moonlight-compatible clients retain a usable pointer, including on DRM/KMS capture where the hardware cursor uses a separate plane; preserves explicit disabled settings, Nova's per-session coordination, and the runtime toggle
 - Preserves write-only SteamGridDB, AI, and legacy API credentials when Settings or Quick Controls saves an otherwise complete redacted configuration; clearing a stored key now requires its explicit clear action
 - Keeps deterministic Doctor output as the source of truth while allowing a configured provider to explain its redacted evidence; OpenAI subscription mode now invokes the signed-in Codex CLI through a private, bounded explanation-only workspace, and provider failure remains an informational `deterministic-fallback`
+- Starts imported Flatpak Heroic titles through the launcher's normal visible cold-start protocol path instead of hiding the only actionable launcher feedback; exact older Polaris-generated commands migrate in place without changing UUIDs, artwork, profiles, prep commands, or custom fields
 
 ## v1.4.0 - 2026-09-01
 

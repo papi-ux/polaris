@@ -120,6 +120,13 @@ namespace game_library {
   /** @brief The `heroic://launch` command for one title, for the install that has it. */
   std::string heroic_launch_command(const std::string &store, const std::string &app_name, launcher_install_t install);
 
+  /** @brief Current and exact older Polaris launch forms for one Heroic installation. */
+  std::vector<std::string> heroic_launch_commands_for_install(
+    const std::string &store,
+    const std::string &app_name,
+    launcher_install_t install
+  );
+
   /** @brief Every command form that could launch one Heroic title, for import dedup. */
   std::vector<std::string> heroic_launch_commands(const std::string &store, const std::string &app_name);
 
