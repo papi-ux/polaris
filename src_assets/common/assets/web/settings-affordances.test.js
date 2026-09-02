@@ -134,3 +134,26 @@ describe('settings affordances', () => {
     expect(source).toMatch(/autoQualityPartial[\s\S]{0,200}!==/)
   })
 })
+
+// F7: the Video/Audio page binds host truth from the settings projection and
+// keeps a config-derived fallback for hosts that answer 404.
+describe('settings projection binding', () => {
+  it('reads badges, availability, provenance, and the live strip from the projection with a fallback', () => {
+    const source = webSource('configs/tabs/AudioVideo.vue')
+
+    expect(source).toContain("from '../../composables/useConfigProjection'")
+    expect(source).toContain('projection.load()')
+    expect(source).toContain('projectionModes.value?.find(')
+    expect(source).toContain('resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)')
+    expect(source).toContain('data-auto-quality-strip')
+    expect(source).toContain("data-provenance=\"max_bitrate\"")
+    expect(source).toContain("data-provenance=\"fallback_mode\"")
+    expect(source).toContain("data-provenance=\"adaptive_bitrate_enabled\"")
+    expect(source).toMatch(/autoQualityLive \? autoQualityLiveRows : autoQualityRows/)
+  })
+
+  it('lets the host name the response-only keys the save path strips', () => {
+    expect(webSource('views/ConfigView.vue')).toContain('resolveConfigResponseOnlyKeys(source)')
+    expect(webSource('client-settings-sync.js')).toContain('export function resolveConfigResponseOnlyKeys')
+  })
+})

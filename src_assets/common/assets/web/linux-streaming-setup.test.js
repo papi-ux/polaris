@@ -306,7 +306,10 @@ describe('Linux Streaming Setup checklist', () => {
     expect(dongle).toBeDefined()
     expect(desktop).toBeDefined()
     await dongle.trigger('click')
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The page also fetches the settings projection on mount; only the dongle
+    // discovery call is under test here.
+    const discoveryCalls = () => fetchMock.mock.calls.filter(([url]) => !String(url).includes('settings/metadata'))
+    expect(discoveryCalls()).toHaveLength(1)
     await desktop.trigger('click')
 
     resolveFetch({

@@ -13,3 +13,27 @@ test('apps view loads', async ({ loggedInPage }) => {
   await expect(loggedInPage).toHaveURL(/#\/apps/)
   await expect(loggedInPage.getByRole('heading', { name: /^library$/i })).toBeVisible({ timeout: 10000 })
 })
+
+test('settings metadata projection answers a session with version 1', async ({ loggedInPage }) => {
+  const response = await loggedInPage.request.get('/api/settings/metadata')
+  expect(response.status()).toBe(200)
+  const body = await response.json()
+  expect(body.status).toBe(true)
+  expect(body.version).toBe(1)
+  expect(Array.isArray(body.modes)).toBe(true)
+  expect(body.fields).toBeTypeOf('object')
+  expect(body.stream_display).toBeTypeOf('object')
+  expect(body.auto_quality).toBeTypeOf('object')
+
+  // The stats channel carries the same tuning and auto-quality blocks at 1 Hz.
+  const stats = await loggedInPage.request.get('/api/stats/stream')
+  expect(stats.status()).toBe(200)
+  const statsBody = await stats.json()
+  expect(statsBody.tuning).toBeTypeOf('object')
+  expect(statsBody.auto_quality).toBeTypeOf('object')
+})
+
+test('settings metadata projection requires a web session', async ({ request }) => {
+  const response = await request.get('/api/settings/metadata')
+  expect([401, 403]).toContain(response.status())
+})

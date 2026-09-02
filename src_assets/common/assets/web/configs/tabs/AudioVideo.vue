@@ -17,6 +17,13 @@ import {
   resolveStreamDisplayRuntimeNotice,
 } from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
+import { provenanceLabel, useConfigProjection } from '../../composables/useConfigProjection'
+import { useStreamStats } from '../../composables/useStreamStats'
+import {
+  autoQualityHostStateKey,
+  autoQualityHostTone,
+  buildLiveAutoQualityRows,
+} from '../../auto-quality-live'
 
 const $t = inject('i18n').t;
 
@@ -37,6 +44,25 @@ const sudovdaStatus = {
 
 const currentDriverStatus = computed(() => sudovdaStatus[props.vdisplay])
 const config = ref(props.config)
+
+// Host truth for this page. Mode badges and availability, stream-display
+// labels, field provenance, and the Auto Quality strip read the projection
+// when the host serves it; every consumer keeps its config-derived fallback
+// for hosts that answer 404. Live tuning rides the stats channel at 1 Hz.
+const projection = useConfigProjection()
+onMounted(() => {
+  projection.load()
+})
+const liveStreamStats = typeof window !== 'undefined' && typeof window.EventSource === 'function'
+  ? useStreamStats(2000, { pauseWhenHidden: true }).stats
+  : ref(null)
+const projectionModes = computed(() => (
+  projection.ok.value && Array.isArray(projection.modes.value) ? projection.modes.value : null
+))
+const hostStreamDisplay = computed(() => (projection.ok.value ? projection.streamDisplay.value : null))
+const liveTuning = computed(() => liveStreamStats.value?.tuning || projection.tuning.value || null)
+const liveAutoQuality = computed(() => liveStreamStats.value?.auto_quality || projection.autoQuality.value || null)
+const provenanceFor = (configKey) => provenanceLabel(projection, configKey)
 const isLinux = computed(() => props.platform === 'linux')
 const isWindows = computed(() => props.platform === 'windows')
 const showDisplayPlannerAdvanced = ref(false)
@@ -141,10 +167,24 @@ const streamDisplayModeDefinitions = [
   },
 ]
 
-const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => ({
-  ...mode,
-  ...resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options),
-})))
+const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => {
+  const hostMode = projectionModes.value?.find((candidate) => candidate?.value === mode.id)
+  const availability = hostMode
+    ? {
+        available: hostMode.available === true,
+        unavailableReason: hostMode.available === true
+          ? ''
+          : String(hostMode.unavailable_reason || $t('config.av_mode_unavailable_default')),
+      }
+    : resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)
+  const hostBadge = hostMode && typeof hostMode.badge === 'string' ? hostMode.badge.trim() : ''
+  return {
+    ...mode,
+    ...availability,
+    badge: hostBadge || mode.badge,
+    hostBadge: Boolean(hostBadge),
+  }
+}))
 
 const plannedStreamDisplayModes = [
   {
@@ -196,16 +236,21 @@ const clientSettingsSyncCopy = computed(() => {
   }
   return $t('config.av_nova_sync_copy_synced')
 })
+const streamDisplayRelaunchRequired = computed(() => (
+  hostStreamDisplay.value
+    ? hostStreamDisplay.value.relaunch_required === true
+    : clientSettingsSync.value.relaunchRequired
+))
 const clientSettingsRows = computed(() => [
   {
     label: $t('config.av_nova_sync_row_display_mode'),
-    value: clientSettingsSync.value.desiredModeLabel,
+    value: hostStreamDisplay.value?.configured_label || clientSettingsSync.value.desiredModeLabel,
     note: $t('config.av_nova_sync_note_next_stream'),
   },
   {
     label: $t('config.av_nova_sync_row_effective_mode'),
-    value: clientSettingsSync.value.effectiveModeLabel,
-    note: clientSettingsSync.value.relaunchRequired
+    value: hostStreamDisplay.value?.effective_label || clientSettingsSync.value.effectiveModeLabel,
+    note: streamDisplayRelaunchRequired.value
       ? $t('config.av_nova_sync_note_pending')
       : $t('config.av_nova_sync_note_synced'),
   },
@@ -219,12 +264,30 @@ const autoQualityEnabled = computed(() => (
 const autoQualityPartial = computed(() => (
   (config.value.ai_enabled === 'enabled') !== (config.value.adaptive_bitrate_enabled === 'enabled')
 ))
+// Live strip: present when the host serves the projection and a policy snapshot.
+const autoQualityLive = computed(() => Boolean(projection.ok.value && liveAutoQuality.value))
+const autoQualityLiveStateKey = computed(() => autoQualityHostStateKey(liveAutoQuality.value))
+const autoQualityLiveRows = computed(() => buildLiveAutoQualityRows(
+  { autoQuality: liveAutoQuality.value, tuning: liveTuning.value },
+  $t,
+))
 const autoQualityBadge = computed(() => {
+  if (autoQualityLive.value) {
+    return $t('config.av_auto_quality_badge_live', {
+      state: $t(`config.av_auto_quality_live_state_${autoQualityLiveStateKey.value}`),
+    })
+  }
   if (autoQualityEnabled.value) return $t('config.av_auto_quality_badge_on')
   if (autoQualityPartial.value) return $t('config.av_auto_quality_badge_partial')
   return $t('config.av_auto_quality_badge_manual')
 })
 const autoQualityTone = computed(() => {
+  if (autoQualityLive.value) {
+    const tone = autoQualityHostTone(autoQualityLiveStateKey.value)
+    if (tone === 'pass') return 'border-success/30 bg-success/10 text-success'
+    if (tone === 'warning') return 'border-warning/30 bg-warning/10 text-warning-bright'
+    return 'border-storm/40 bg-storm/10 text-storm'
+  }
   if (autoQualityEnabled.value) return 'border-success/30 bg-success/10 text-success'
   if (autoQualityPartial.value) return 'border-warning/30 bg-warning/10 text-warning-bright'
   return 'border-storm/40 bg-storm/10 text-storm'
@@ -875,8 +938,26 @@ function updateDisplayPlannerSource(event) {
           </button>
         </div>
 
-        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <StatTile v-for="row in autoQualityRows" :key="row.label" :label="row.label" :value="row.value" :note="row.note" />
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="section-kicker" data-auto-quality-strip-source="{{ autoQualityLive ? 'host' : 'saved' }}">
+            {{ autoQualityLive ? $t('config.av_auto_quality_live_kicker') : $t('config.av_auto_quality_saved_kicker') }}
+          </div>
+          <p
+            v-if="provenanceFor('adaptive_bitrate_enabled')"
+            class="text-[11px] text-storm"
+            data-provenance="adaptive_bitrate_enabled"
+          >
+            {{ $t('config.av_provenance_set_by', { source: provenanceFor('adaptive_bitrate_enabled') }) }}
+          </p>
+        </div>
+        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" data-auto-quality-strip>
+          <StatTile
+            v-for="row in (autoQualityLive ? autoQualityLiveRows : autoQualityRows)"
+            :key="row.label"
+            :label="row.label"
+            :value="row.value"
+            :note="row.note"
+          />
         </div>
       </div>
     </section>
@@ -1091,6 +1172,9 @@ pactl info | grep Source</pre>
             @input="updateDisplayPlannerSource"
           />
           <div class="text-sm text-storm mt-1">{{ $t('config.fallback_mode_desc') }}</div>
+          <p v-if="provenanceFor('fallback_mode')" class="mt-1 text-[11px] text-storm" data-provenance="fallback_mode">
+            {{ $t('config.av_provenance_set_by', { source: provenanceFor('fallback_mode') }) }}
+          </p>
         </div>
 
         <DisplayDeviceOptions
@@ -1134,6 +1218,9 @@ pactl info | grep Source</pre>
             <label for="max_bitrate" class="block text-sm font-medium text-storm mb-1">{{ $t("config.max_bitrate") }}</label>
             <input id="max_bitrate" v-model="config.max_bitrate" type="number" placeholder="0" class="settings-input" />
             <div class="text-sm text-storm mt-1">{{ $t("config.max_bitrate_desc") }}</div>
+            <p v-if="provenanceFor('max_bitrate')" class="mt-1 text-[11px] text-storm" data-provenance="max_bitrate">
+              {{ $t('config.av_provenance_set_by', { source: provenanceFor('max_bitrate') }) }}
+            </p>
           </div>
 
           <div>
