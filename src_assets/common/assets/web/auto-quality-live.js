@@ -45,18 +45,23 @@ const formatNumber = (value, digits) => {
 export function buildLiveAutoQualityRows({ autoQuality, tuning }, t) {
   const stateKey = autoQualityHostStateKey(autoQuality)
   const unknown = t('config.av_auto_quality_live_value_unknown')
-  const liveBitrate = formatMbps(autoQuality?.live_bitrate_kbps) || formatMbps(tuning?.adaptive_target_bitrate_kbps)
+  // The host reports EWMAs of zero while nothing streams; only a live session
+  // makes the network numbers mean anything.
+  const streaming = Number(autoQuality?.live_bitrate_kbps) > 0 || tuning?.adaptive_bitrate_active === true
+  const liveBitrate = formatMbps(autoQuality?.live_bitrate_kbps) || (streaming ? formatMbps(tuning?.adaptive_target_bitrate_kbps) : '')
   const minMbps = formatMbps(tuning?.adaptive_min_bitrate_kbps)
   const maxMbps = formatMbps(tuning?.adaptive_max_bitrate_kbps)
-  const rtt = formatNumber(tuning?.adaptive_rtt_ewma_ms, 0)
-  const loss = formatNumber(Number(tuning?.adaptive_packet_loss_ewma) * 100, 1)
+  const rtt = streaming ? formatNumber(tuning?.adaptive_rtt_ewma_ms, 0) : ''
+  const loss = streaming ? formatNumber(Number(tuning?.adaptive_packet_loss_ewma) * 100, 1) : ''
   const target = formatMbps(autoQuality?.target_bitrate_kbps)
+  const reason = String(autoQuality?.blocked_reason || '')
+  const stateNote = reason && reason !== 'none' ? reason : String(autoQuality?.summary || '')
 
   return [
     {
       label: t('config.av_auto_quality_live_row_state'),
       value: t(`config.av_auto_quality_live_state_${stateKey}`),
-      note: String(autoQuality?.blocked_reason || autoQuality?.summary || ''),
+      note: stateNote === 'none' ? '' : stateNote,
     },
     {
       label: t('config.av_auto_quality_live_row_bitrate'),
@@ -67,7 +72,7 @@ export function buildLiveAutoQualityRows({ autoQuality, tuning }, t) {
     },
     {
       label: t('config.av_auto_quality_live_row_network'),
-      value: rtt ? t('config.av_auto_quality_live_rtt_value', { rtt }) : unknown,
+      value: rtt ? t('config.av_auto_quality_live_rtt_value', { rtt }) : streaming ? unknown : t('config.av_auto_quality_live_not_streaming'),
       note: loss ? t('config.av_auto_quality_live_loss_note', { loss }) : '',
     },
     {

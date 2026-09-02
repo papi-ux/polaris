@@ -36,13 +36,14 @@ describe('live Auto Quality strip', () => {
     const rows = buildLiveAutoQualityRows({
       autoQuality: {
         state: 'recovering_bitrate',
-        blocked_reason: '',
+        blocked_reason: 'none',
         summary: 'Bitrate is recovering after packet loss.',
         live_bitrate_kbps: 18500,
         target_bitrate_kbps: 30000,
         relaunch_required: false,
       },
       tuning: {
+        adaptive_bitrate_active: true,
         adaptive_min_bitrate_kbps: 10000,
         adaptive_max_bitrate_kbps: 40000,
         adaptive_rtt_ewma_ms: 7.6,
@@ -62,15 +63,26 @@ describe('live Auto Quality strip', () => {
 
     expect(rows[0]).toMatchObject({ value: 'Off', note: '' })
     expect(rows[1]).toMatchObject({ value: 'Not reported', note: '' })
-    expect(rows[2]).toMatchObject({ value: 'Not reported', note: '' })
+    expect(rows[2]).toMatchObject({ value: 'No stream running', note: '' })
     expect(rows[3]).toMatchObject({ value: 'Not reported', note: 'Applied live' })
     expect(JSON.stringify(rows)).not.toContain('NaN')
+  })
+
+  it('does not dress an idle host in zero-valued network numbers', () => {
+    const rows = buildLiveAutoQualityRows({
+      autoQuality: { state: 'off', blocked_reason: 'none', live_bitrate_kbps: 0 },
+      tuning: { adaptive_bitrate_active: false, adaptive_target_bitrate_kbps: 20000, adaptive_rtt_ewma_ms: 0, adaptive_packet_loss_ewma: 0, adaptive_min_bitrate_kbps: 2000, adaptive_max_bitrate_kbps: 100000 },
+    }, t)
+
+    expect(rows[0]).toMatchObject({ value: 'Off', note: '' })
+    expect(rows[1]).toMatchObject({ value: 'Not reported', note: 'Adaptive range 2 Mbps to 100 Mbps' })
+    expect(rows[2]).toMatchObject({ value: 'No stream running', note: '' })
   })
 
   it('names a blocked state by its reason and a pending target by relaunch', () => {
     const rows = buildLiveAutoQualityRows({
       autoQuality: { state: 'blocked', blocked_reason: 'Mirror Desktop cannot change bitrate live.', target_bitrate_kbps: 25000, relaunch_required: true },
-      tuning: { adaptive_target_bitrate_kbps: 25000 },
+      tuning: { adaptive_target_bitrate_kbps: 25000, adaptive_bitrate_active: true },
     }, t)
 
     expect(rows[0]).toMatchObject({ value: 'Blocked', note: 'Mirror Desktop cannot change bitrate live.' })
