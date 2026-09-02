@@ -62,6 +62,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `headless_gamepad_isolation` | `enabled` | Hide host-connected gamepads from private headless streams; disable only when you intentionally want a wired host controller visible inside the stream |
 | `client_gamepad_seat_isolation` | `disabled` | Assign Polaris-created client gamepads to a dedicated Linux seat so other active-seat users do not receive automatic device ACLs |
 | `client_keyboard_mouse_seat_isolation` | `disabled` | Assign the virtual keyboard, mouse, touch and pen Polaris creates for clients to a dedicated Linux seat, so a client streaming a private session does not also type and click into the desktop session logged in at the machine |
+| `mouse_cursor_visible` | `enabled` | Composite a separately captured host cursor into the stream. Required for DRM/KMS; disable it if the client draws its own cursor and you see two pointers. Portal may embed its cursor independently |
 | `back_button_timeout` | `-1` | **Milliseconds**, not seconds, that Back/Select must be held to emulate Home/Guide. `-1` disables it. A small value such as `2` means two *milliseconds*, which turns nearly every Back/Select press into Home and makes the button look broken — use `2000` for two seconds |
 | `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |

@@ -454,7 +454,7 @@
     "mouse": "Enable Mouse Input",
     "mouse_desc": "Allows guests to control the host system with the mouse",
     "mouse_cursor_visible": "Show Host Cursor in Stream",
-    "mouse_cursor_visible_desc": "Controls whether Polaris draws the host cursor into the video stream.",
+    "mouse_cursor_visible_desc": "On by default. This is required when a capture backend such as DRM/KMS exposes the cursor as a separate plane. Disable it if your client draws its own cursor and you see two pointers. Portal capture may embed the compositor cursor independently.",
     "native_pen_touch": "Native Pen/Touch Support",
     "native_pen_touch_desc": "When enabled, Polaris will pass through native pen/touch events from Moonlight clients. This can be useful to disable for older applications without native pen/touch support.",
     "notify_pre_releases": "PreRelease Notifications",

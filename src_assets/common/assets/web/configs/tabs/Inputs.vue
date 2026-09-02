@@ -203,7 +203,7 @@ const config = ref(props.config)
           <div class="settings-field-head !mb-0">
             <div class="text-sm font-medium text-silver">Show host cursor</div>
             <InfoHint size="sm" label="Show host cursor">
-              Controls whether Polaris draws the host cursor into the video stream. You can still toggle it at runtime with Ctrl+Alt+Shift+N.
+              On by default. This is required when a capture backend such as DRM/KMS exposes the cursor as a separate plane. Turn it off if your client draws its own cursor and you see two pointers. Portal capture may embed the compositor cursor independently. You can still toggle Polaris-controlled cursors at runtime with Ctrl+Alt+Shift+N.
             </InfoHint>
           </div>
         </div>
