@@ -54,6 +54,14 @@ sudo cmake --install build
 sudo -H polaris --setup-host
 ```
 
+Start Polaris after installation. **Fresh install:** open
+`https://localhost:47990/#/welcome` and create the web UI account.
+**Upgrade or reinstall:** open `https://localhost:47990/#/login` and use the existing account;
+rebuilding or reinstalling Polaris intentionally preserves credentials, pairing
+keys, settings, and the library under `~/.config/polaris`. If needed, follow the
+[credential reset](troubleshooting.md#web-ui-credentials) instead of returning
+to Welcome.
+
 ### openSUSE-specific notes
 
 - **`-DBOOST_USE_STATIC=OFF` is required.** openSUSE ships only *shared* Boost. With the

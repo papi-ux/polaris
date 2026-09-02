@@ -9,6 +9,20 @@ network, host, and client evidence before you change anything.
 
 ## Web UI credentials
 
+### Welcome page after an upgrade or reinstall
+
+The Welcome wizard is only for a host that has never had a Polaris web account.
+Package upgrades, package removal, and reinstall intentionally leave credentials,
+pairing keys, settings, and the library in `~/.config/polaris`.
+
+If Welcome reports an error after an upgrade, open
+`https://localhost:47990/#/login` and use the previous credentials. On hosts
+whose guide uses the IPv4 loopback explicitly, use
+`https://127.0.0.1:47990/#/login`. Do not delete the configuration directory just
+to recover web access.
+
+If the old credentials are no longer known, reset them as described below.
+
 Reset the web UI username and password:
 
 ```bash

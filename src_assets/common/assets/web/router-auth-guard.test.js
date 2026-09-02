@@ -238,6 +238,31 @@ describe('router authentication guard', () => {
     await expect(guard({ path: '/apps', fullPath: '/apps' }, {})).resolves.toBe('/welcome')
   })
 
+  it('keeps a credential-free host on the first-run welcome route', async () => {
+    const guard = await loadGuard(vi.fn().mockResolvedValue(response(200, {}, {
+      headers: new Headers({ 'content-type': 'text/html' }),
+      redirected: true,
+      url: 'https://polaris.test/welcome',
+    })))
+
+    await expect(guard({ path: '/welcome', fullPath: '/welcome', query: {} }, {})).resolves.toBeUndefined()
+    expect(window.__POLARIS_AUTHENTICATED__).toBe(false)
+  })
+
+  it('sends an upgrader with preserved credentials from welcome to login', async () => {
+    const guard = await loadGuard(vi.fn().mockResolvedValue(response(401)))
+
+    await expect(guard({ path: '/welcome', fullPath: '/welcome', query: {} }, {})).resolves.toBe('/login')
+    expect(window.__POLARIS_AUTHENTICATED__).toBe(false)
+  })
+
+  it('sends an already authenticated host from welcome to the console', async () => {
+    const guard = await loadGuard(vi.fn().mockResolvedValue(response(200, { status: true, platform: 'linux' })))
+
+    await expect(guard({ path: '/welcome', fullPath: '/welcome', query: {} }, {})).resolves.toBe('/')
+    expect(window.__POLARIS_AUTHENTICATED__).toBe(true)
+  })
+
   it('treats an unexpected successful HTML response as unavailable', async () => {
     const guard = await loadGuard(vi.fn().mockResolvedValue(response(200, {}, {
       headers: new Headers({ 'content-type': 'text/html' }),
