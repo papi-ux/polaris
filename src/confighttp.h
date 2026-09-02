@@ -11,6 +11,9 @@
 #include <string>
 #include <string_view>
 
+// lib includes
+#include <nlohmann/json.hpp>
+
 // local includes
 #include "thread_safe.h"
 
@@ -62,6 +65,15 @@ namespace confighttp {
   std::string client_settings_endpoint_url(std::string_view request_host);
 
   void start();
+
+  /**
+   * @brief Assemble the GET /api/settings/metadata payload.
+   *
+   * @param client_uuid Optional paired-client uuid; empty selects the host view.
+   * @param error Set to a serve-ready message when the uuid is unknown.
+   * @return The payload, or an empty object when error is set.
+   */
+  nlohmann::json build_settings_metadata_payload(const std::string &client_uuid, std::string &error);
 
   /**
    * @brief Session lifecycle states.
