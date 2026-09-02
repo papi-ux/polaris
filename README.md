@@ -5,11 +5,12 @@
   <img src="docs/screenshots/Polaris_fulllogo_2_light.svg" width="250" alt="Polaris">
 </picture>
 
-**Linux-only, self-hosted game streaming that keeps the stream off your desktop.**
+**Stream your PC games from Linux—privately, clearly, and on your terms.**
 
-Polaris launches games in an isolated Linux compositor, streams them to Nova or
-Moonlight-compatible clients, and explains the active capture, encoder, client,
-and runtime path in one web console.
+Polaris turns a Linux gaming PC into a modern, self-hosted streaming home for
+Nova, Moonlight, and other compatible clients. Choose whether a session uses a
+private compositor, virtual display, or your desktop, then see the active
+capture, encoder, client, and runtime path in one web console.
 
 [![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
 [![Matrix](https://img.shields.io/badge/Matrix-Join_chat-0dbd8b?style=for-the-badge&logo=matrix&logoColor=white&labelColor=1f1d31)](https://matrix.to/#/#papi-ux:papi-ux.com)

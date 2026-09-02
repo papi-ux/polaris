@@ -64,4 +64,13 @@ describe('Troubleshooting self-service support flow', () => {
     expect(locale).toContain('Ollama or LM Studio')
     expect(locale).toContain('AI cannot execute recovery actions')
   })
+
+  it('keeps live provider controls separate from the anonymized support bundle', () => {
+    const source = webSource('views/TroubleshootingView.vue')
+
+    expect(source).toContain('const context = await collectSupportContext()')
+    expect(source).toContain('const supportBundle = await createSupportBundle(context)')
+    expect(source).toContain('const config = context.config || {}')
+    expect(source).not.toContain('const config = supportBundle.config || {}')
+  })
 })

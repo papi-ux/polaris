@@ -28,15 +28,6 @@ export const AI_DOCTOR_EXPLANATION_CATEGORIES = Object.freeze([
   'Recent redacted warning/error summaries',
 ])
 
-function providerConfig(config = {}) {
-  return {
-    provider: String(config.ai_provider || '').trim(),
-    model: String(config.ai_model || '').trim(),
-    base_url: String(config.ai_base_url || '').trim(),
-    auth_mode: String(config.ai_auth_mode || '').trim() || (config.ai_provider === 'local' ? 'none' : 'api_key'),
-  }
-}
-
 function hasConfiguredProvider(config = {}) {
   const provider = String(config.ai_provider || '').trim()
   const model = String(config.ai_model || '').trim()
@@ -44,7 +35,7 @@ function hasConfiguredProvider(config = {}) {
   return Boolean(provider && model && (provider !== 'local' || baseUrl))
 }
 
-export function buildAiDoctorExplanationPayload({ config = {}, supportBundle = {}, deterministicSummary = null } = {}) {
+export function buildAiDoctorExplanationPayload({ supportBundle = {}, deterministicSummary = null } = {}) {
   const rawEvidence = {
     ...buildStreamEvidence(supportBundle),
     session_snapshot: supportBundle.session_snapshot || supportBundle.stream_stats || {},
@@ -55,7 +46,6 @@ export function buildAiDoctorExplanationPayload({ config = {}, supportBundle = {
   const evidence = sanitizeDiagnosticsValue(JSON.parse(JSON.stringify(rawEvidence)))
 
   return {
-    provider: providerConfig(config),
     categories: [...AI_DOCTOR_EXPLANATION_CATEGORIES],
     schema: AI_DOCTOR_EXPLANATION_SCHEMA,
     deterministic_source_of_truth: sanitizeDiagnosticsValue(deterministicSummary || supportBundle.deterministic_summary || null),

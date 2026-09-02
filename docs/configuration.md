@@ -269,7 +269,13 @@ ai_provider = local
 ai_model = gpt-oss
 ai_auth_mode = none
 ai_base_url = http://127.0.0.1:11434/v1
+ai_timeout_ms = 60000
 ```
+
+Large local models can need substantially longer than cloud models for their first response while
+weights are loaded. The web UI's local-provider profiles start with a bounded 60-second timeout and
+report inference timeout, connection, authentication, missing-model, and response-format failures
+separately. Lower the timeout after the model is warm if you prefer faster failure.
 
 ## Credential reset
 

@@ -5,6 +5,11 @@ This file tracks the public Polaris release line.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
+## Unreleased
+
+- Preserves write-only SteamGridDB, AI, and legacy API credentials when Settings or Quick Controls saves an otherwise complete redacted configuration; clearing a stored key now requires its explicit clear action
+- Keeps deterministic Doctor output as the source of truth while allowing a configured provider to explain its redacted evidence; OpenAI subscription mode now invokes the signed-in Codex CLI through a private, bounded explanation-only workspace, and provider failure remains an informational `deterministic-fallback`
+
 ## v1.4.0 - 2026-09-01
 
 A matched feature release for Nova v1.4.0. Doctor turns measured stream evidence into a clear explanation and, only when the evidence supports it, a reversible same-stream fix. Launch fields come from deterministic presets with field-level provenance, while history and AI remain unable to silently change a launch or inject a game-process limiter.

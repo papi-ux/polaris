@@ -11,4 +11,5 @@
 namespace confighttp::validation {
   bool validate_app_payload(const nlohmann::json &payload, std::string &error);
   bool validate_config_payload(const nlohmann::json &payload, std::string &error);
+  void normalize_write_only_secret_payload(nlohmann::json &payload);
 }  // namespace confighttp::validation
