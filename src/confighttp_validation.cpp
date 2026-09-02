@@ -106,6 +106,7 @@ namespace confighttp::validation {
       "capture"sv,
       "cert"sv,
       "clear_ai_api_key"sv,
+      "clear_steamgriddb_api_key"sv,
       "color_range"sv,
       "client_gamepad_seat_isolation"sv,
       "client_keyboard_mouse_seat_isolation"sv,
@@ -363,8 +364,8 @@ namespace confighttp::validation {
         return false;
       }
 
-      if (key == "clear_ai_api_key" && !value.is_boolean()) {
-        error = "clear_ai_api_key must be a boolean";
+      if ((key == "clear_ai_api_key" || key == "clear_steamgriddb_api_key") && !value.is_boolean()) {
+        error = key + " must be a boolean";
         return false;
       }
 
@@ -374,6 +375,38 @@ namespace confighttp::validation {
     }
 
     return true;
+  }
+
+  void normalize_write_only_secret_payload(nlohmann::json &payload) {
+    if (!payload.is_object()) {
+      return;
+    }
+
+    const auto consume_clear_flag = [&](const char *flag, const char *secret) {
+      const bool clear = payload.contains(flag) && payload[flag].is_boolean() && payload[flag].get<bool>();
+      payload.erase(flag);
+
+      if (clear) {
+        payload[secret] = "";
+        return;
+      }
+
+      const auto secret_it = payload.find(secret);
+      if (secret_it != payload.end() && secret_it->is_string() && secret_it->get_ref<const std::string &>().empty()) {
+        payload.erase(secret_it);
+      }
+    };
+
+    // GET /api/config deliberately returns write-only secrets as empty strings.
+    // Treat those placeholders as "unchanged" unless the corresponding explicit
+    // clear flag is present, so full-document writers cannot erase credentials.
+    consume_clear_flag("clear_ai_api_key", "ai_api_key");
+    consume_clear_flag("clear_steamgriddb_api_key", "steamgriddb_api_key");
+
+    const auto legacy_api_key = payload.find("api_key");
+    if (legacy_api_key != payload.end() && legacy_api_key->is_string() && legacy_api_key->get_ref<const std::string &>().empty()) {
+      payload.erase(legacy_api_key);
+    }
   }
 
   bool validate_app_payload(const nlohmann::json &payload, std::string &error) {
