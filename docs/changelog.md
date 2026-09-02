@@ -8,6 +8,7 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Separates fresh-install Welcome setup from upgrade and reinstall sign-in across every supported distro guide, preserves existing host state by default, routes hosts with stored credentials away from the first-run wizard, and surfaces the real credential persistence error instead of a generic internal-server message
+- Makes `Game Control` the default for every newly paired Nova or Moonlight-compatible client, providing the browse, launch, and input permissions needed to play without granting clipboard, file-transfer, or server-command access; renames the old non-launching `Standard Access` label to `Browse & Watch`, while leaving every existing device's saved permissions unchanged
 - Preserves write-only SteamGridDB, AI, and legacy API credentials when Settings or Quick Controls saves an otherwise complete redacted configuration; clearing a stored key now requires its explicit clear action
 - Keeps deterministic Doctor output as the source of truth while allowing a configured provider to explain its redacted evidence; OpenAI subscription mode now invokes the signed-in Codex CLI through a private, bounded explanation-only workspace, and provider failure remains an informational `deterministic-fallback`
 

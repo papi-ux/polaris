@@ -538,6 +538,11 @@ struct TemporaryPairingState {
 };
 
 TEST_F(PairingAccessPresetTest, ParsesAccessPresets) {
+  EXPECT_EQ(DEFAULT_PAIRING_ACCESS_PRESET, "game_control"sv);
+  const auto default_preset = pairing_access_preset_from_view(DEFAULT_PAIRING_ACCESS_PRESET);
+  ASSERT_TRUE(default_preset);
+  EXPECT_EQ(pairing_access_preset_perm(*default_preset), crypto::PERM::_game_control);
+
   const auto standard = pairing_access_preset_from_view("standard");
   ASSERT_TRUE(standard);
   EXPECT_EQ(pairing_access_preset_perm(*standard), crypto::PERM::_default);
@@ -560,14 +565,14 @@ TEST_F(PairingAccessPresetTest, ParsesAccessPresets) {
   EXPECT_FALSE(pairing_access_preset_from_view("invalid"));
 }
 
-TEST_F(PairingAccessPresetTest, StoredAccessPresetOverridesFirstPairFullDefault) {
-  auto session = successful_pairing_session("game-control", crypto::PERM::_game_control);
+TEST_F(PairingAccessPresetTest, ExplicitBrowseWatchPresetOverridesGameControlDefault) {
+  auto session = successful_pairing_session("browse-watch", crypto::PERM::_default);
 
   complete_successful_pairing(session);
 
   auto clients = get_all_clients();
   ASSERT_EQ(clients.size(), 1);
-  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_default));
 }
 
 TEST_F(PairingAccessPresetTest, RepairingSameCertificateReplacesAuthorizationWithoutDuplicate) {
@@ -1249,7 +1254,7 @@ TEST_F(PairingAccessPresetTest, LegacyStateWithoutTimestampsLoadsAsUnknown) {
   EXPECT_EQ(clients[0]["last_seen_at"].get<std::int64_t>(), 0);
 }
 
-TEST_F(PairingAccessPresetTest, ConcurrentLegacyFirstPairGrantsFullAccessExactlyOnce) {
+TEST_F(PairingAccessPresetTest, ConcurrentLegacyPairingDefaultsEveryNewClientToGameControl) {
   auto first = std::make_shared<crypto::named_cert_t>();
   first->name = "concurrent-first";
   first->uuid = uuid_util::uuid_t::generate().string();
@@ -1280,15 +1285,12 @@ TEST_F(PairingAccessPresetTest, ConcurrentLegacyFirstPairGrantsFullAccessExactly
 
   const auto clients = get_all_clients();
   ASSERT_EQ(clients.size(), 2);
-  int full_count = 0;
-  int default_count = 0;
+  int game_control_count = 0;
   for (const auto &client : clients) {
     const auto perm = client["perm"].get<uint32_t>();
-    full_count += perm == static_cast<uint32_t>(crypto::PERM::_all);
-    default_count += perm == static_cast<uint32_t>(crypto::PERM::_default);
+    game_control_count += perm == static_cast<uint32_t>(crypto::PERM::_game_control);
   }
-  EXPECT_EQ(full_count, 1);
-  EXPECT_EQ(default_count, 1);
+  EXPECT_EQ(game_control_count, 2);
 }
 
 TEST_F(PairingAccessPresetTest, ConcurrentActivityAndMetadataWritesPersistConsistently) {
@@ -1348,7 +1350,7 @@ TEST_F(PairingAccessPresetTest, ConcurrentActivityAndMetadataWritesPersistConsis
   EXPECT_TRUE(device["name"].get<std::string>().starts_with("concurrent-client-"));
 }
 
-TEST_F(PairingAccessPresetTest, NovaTrustedPairGetsGameControlForAdditionalClient) {
+TEST_F(PairingAccessPresetTest, NovaTrustedPairKeepsGameControlForAdditionalClient) {
   auto first = std::make_shared<crypto::named_cert_t>();
   first->name = "legacy-first";
   first->uuid = uuid_util::uuid_t::generate().string();
@@ -1364,12 +1366,12 @@ TEST_F(PairingAccessPresetTest, NovaTrustedPairGetsGameControlForAdditionalClien
 
   auto clients = get_all_clients();
   ASSERT_EQ(clients.size(), 2);
-  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_all));
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
   EXPECT_EQ(clients[1]["client_family"].get<std::string>(), "nova");
   EXPECT_EQ(clients[1]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
   EXPECT_NE(static_cast<uint32_t>(crypto::PERM::_game_control & crypto::PERM::launch), 0U);
 }
-TEST_F(PairingAccessPresetTest, LegacyPairingKeepsFirstFullThenStandardBehavior) {
+TEST_F(PairingAccessPresetTest, LegacyPairingDefaultsEveryNewClientToGameControl) {
   auto first = std::make_shared<crypto::named_cert_t>();
   first->name = "legacy-first";
   first->uuid = uuid_util::uuid_t::generate().string();
@@ -1384,6 +1386,6 @@ TEST_F(PairingAccessPresetTest, LegacyPairingKeepsFirstFullThenStandardBehavior)
 
   auto clients = get_all_clients();
   ASSERT_EQ(clients.size(), 2);
-  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_all));
-  EXPECT_EQ(clients[1]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_default));
+  EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
+  EXPECT_EQ(clients[1]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
 }

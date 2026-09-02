@@ -93,6 +93,16 @@ Pick whichever fits your network:
 - **QR pairing** for Nova.
 - **Manual PIN** for standard Moonlight clients.
 
+New devices use **Game Control** by default, which is the least-privilege preset that can browse,
+launch, and control a game. **Browse & Watch** is intentionally read-only: it can list the library
+and join an existing stream, but it cannot start Desktop or a game and cannot send input. Existing
+paired devices keep their saved access until you change it under **Devices → Edit Access**.
+
+For Moonlight on Linux, Android, or another non-Nova client: add the Polaris host in Moonlight and
+leave its displayed four-digit PIN open. In the Polaris web UI, open **Devices → Manual PIN**, enter
+that PIN, keep **Game Control** selected, and choose **Send**. Return to Moonlight and refresh the
+host if its library does not appear immediately. Steam is not required on the client.
+
 ## 5. Start a game and verify the path
 
 Launch from the Polaris library, Nova, or a Moonlight client, then watch the live session dashboard

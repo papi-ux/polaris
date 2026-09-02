@@ -142,6 +142,10 @@ metadata are naturally limited there. Check the maintained [compatibility
 guide](https://papi-ux.com/docs/compatibility/) before choosing a distro, GPU,
 capture path, HDR mode, or experimental Browser Stream setup.
 
+Newly paired clients receive **Game Control** by default: enough access to browse,
+launch, and play, without clipboard, file-transfer, or server-command permissions.
+Existing clients keep their saved access until it is changed under **Devices**.
+
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
 ## Documentation and project links
