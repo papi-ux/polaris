@@ -10,7 +10,7 @@ export const DISPLAY_PLANNER_PRESETS = [
   {
     id: 'balanced',
     title: 'Balanced',
-    intent: 'Best for this device: preserve aspect ratio while easing encoder and network load.',
+    intent: 'Balanced default: preserve aspect ratio while easing encoder and network load.',
     scaleFactor: 0.75,
   },
   {
@@ -102,7 +102,7 @@ export function buildResolutionPlanner({
     sourceAspectRatio: aspectRatioLabel(base.width, base.height),
     sourceFps: base.fps,
     recommendedId: recommended.id,
-    recommendedTitle: 'Best for this device',
+    recommendedTitle: 'Balanced',
     recommendedMode: recommended.targetMode,
     choices,
     visibleChoices,
@@ -150,7 +150,7 @@ function isSafeMode(target, limits) {
 }
 
 function resolvePresetBadge(id, base, scaleFactor) {
-  if (id === 'balanced') return 'Best for this device'
+  if (id === 'balanced') return 'Recommended'
   if (id === 'native') return `${base.width}×${base.height}`
   if (id === 'sharp') return `${scaleFactor}x supersample`
   if (id === 'performance') return `${scaleFactor}x downscale`
