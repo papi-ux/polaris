@@ -4232,6 +4232,7 @@ namespace confighttp {
         bad_request(response, request, validation_error);
         return;
       }
+      validation::normalize_write_only_secret_payload(input_tree);
       const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       for (const auto &[k, v] : input_tree.items()) {
         if (v.is_null()) {

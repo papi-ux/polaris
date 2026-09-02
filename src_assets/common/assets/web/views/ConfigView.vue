@@ -911,7 +911,6 @@ function save() {
 
   let configCopy = serialize()
   const clearSteamGridDbApiKey = configCopy.clear_steamgriddb_api_key === true
-  delete configCopy.clear_steamgriddb_api_key
 
   tabs.value.forEach(tab => {
     Object.keys(tab.options).forEach(optionKey => {
