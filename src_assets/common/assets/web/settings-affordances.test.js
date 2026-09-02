@@ -31,12 +31,17 @@ describe('settings affordances', () => {
 
   it('keeps read-only tiles off the input-look recipe on the Video/Audio page', () => {
     const source = webSource('configs/tabs/AudioVideo.vue')
+    const statTile = webSource('components/StatTile.vue')
 
     // The old read-only tile literal is nearly indistinguishable from the
-    // editable input recipe; every status tile now uses the stat grammar.
+    // editable input recipe; every status tile now renders through the shared
+    // StatTile component, which is the only holder of the stat grammar here.
     expect(source).not.toContain('border-storm/20 bg-void/25')
-    expect(source).toContain('stat-tile-compact')
-    expect(source).toContain('stat-kicker')
+    expect(source).toContain('<StatTile')
+    expect(source).not.toContain('stat-tile-compact')
+    expect(statTile).toContain('stat-tile-compact')
+    expect(statTile).toContain('stat-kicker')
+    expect(statTile).toContain('data-readonly')
   })
 
   it('routes every editable field through settings-input on the Video/Audio page', () => {
@@ -49,12 +54,32 @@ describe('settings affordances', () => {
 
   it('marks every choice card on the Video/Audio page as selectable with a pressed state', () => {
     const source = webSource('configs/tabs/AudioVideo.vue')
+    const selectableCard = webSource('components/SelectableCard.vue')
 
-    const selectable = source.match(/selectable-card/g) || []
-    const pressed = source.match(/:aria-pressed=/g) || []
+    const selectable = source.match(/<SelectableCard/g) || []
+    const selected = source.match(/:selected=/g) || []
     // Mode picker, planner presets, and advanced scale factors.
     expect(selectable.length).toBeGreaterThanOrEqual(3)
-    expect(pressed.length).toBeGreaterThanOrEqual(3)
+    expect(selected.length).toBeGreaterThanOrEqual(3)
+    // The shared component owns the vocabulary and the pressed-state wiring.
+    expect(selectableCard).toContain('selectable-card focus-ring')
+    expect(selectableCard).toContain('type="button"')
+    expect(selectableCard).toContain(':aria-pressed=')
+  })
+
+  it('publishes the shared status vocabulary as importable components', () => {
+    const statusTones = webSource('status-tones.js')
+    const statusBadge = webSource('components/StatusBadge.vue')
+    const troubleshooting = webSource('views/TroubleshootingView.vue')
+
+    // One tone table serves cards, badges, and labels; views import it
+    // instead of growing private pass/fail/warning switch copies.
+    expect(statusTones).toContain('export function statusTone')
+    expect(statusBadge).toContain('meta-pill')
+    expect(statusBadge).toContain("from '../status-tones.js'")
+    expect(troubleshooting).toContain("from '../status-tones.js'")
+    expect(troubleshooting).not.toContain('selfTestCardClass')
+    expect(troubleshooting).not.toContain('fixMyStreamBadgeClass')
   })
 
   it('labels the planner mono value as a target mode instead of dressing it as an input', () => {
