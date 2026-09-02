@@ -28,7 +28,7 @@ const config = ref(props.config)
           <label for="file_apps" class="settings-field-label">{{ $t('config.file_apps') }}</label>
           <InfoHint size="sm" :label="$t('config.file_apps')">{{ $t('config.file_apps_desc') }}</InfoHint>
         </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="file_apps" placeholder="apps.json" v-model="config.file_apps" />
+        <input type="text" class="settings-input" id="file_apps" placeholder="apps.json" v-model="config.file_apps" />
       </div>
 
       <div class="mb-3">
@@ -36,7 +36,7 @@ const config = ref(props.config)
           <label for="log_path" class="settings-field-label">{{ $t('config.log_path') }}</label>
           <InfoHint size="sm" :label="$t('config.log_path')">{{ $t('config.log_path_desc') }}</InfoHint>
         </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="log_path" placeholder="polaris.log" v-model="config.log_path" />
+        <input type="text" class="settings-input" id="log_path" placeholder="polaris.log" v-model="config.log_path" />
       </div>
 
       <div class="mb-3">
@@ -44,7 +44,7 @@ const config = ref(props.config)
           <label for="file_state" class="settings-field-label">{{ $t('config.file_state') }}</label>
           <InfoHint size="sm" :label="$t('config.file_state')">{{ $t('config.file_state_desc') }}</InfoHint>
         </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="file_state" placeholder="polaris_state.json"
+        <input type="text" class="settings-input" id="file_state" placeholder="polaris_state.json"
                v-model="config.file_state" />
       </div>
     </section>
@@ -65,7 +65,7 @@ const config = ref(props.config)
           <label for="credentials_file" class="settings-field-label">{{ $t('config.credentials_file') }}</label>
           <InfoHint size="sm" :label="$t('config.credentials_file')">{{ $t('config.credentials_file_desc') }}</InfoHint>
         </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="credentials_file" placeholder="polaris_state.json" v-model="config.credentials_file" />
+        <input type="text" class="settings-input" id="credentials_file" placeholder="polaris_state.json" v-model="config.credentials_file" />
       </div>
 
       <div class="mb-3">
@@ -73,7 +73,7 @@ const config = ref(props.config)
           <label for="pkey" class="settings-field-label">{{ $t('config.pkey') }}</label>
           <InfoHint size="sm" :label="$t('config.pkey')">{{ $t('config.pkey_desc') }}</InfoHint>
         </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="pkey" placeholder="/dir/pkey.pem" v-model="config.pkey" />
+        <input type="text" class="settings-input" id="pkey" placeholder="/dir/pkey.pem" v-model="config.pkey" />
       </div>
 
       <div class="mb-3">
@@ -81,7 +81,7 @@ const config = ref(props.config)
           <label for="cert" class="settings-field-label">{{ $t('config.cert') }}</label>
           <InfoHint size="sm" :label="$t('config.cert')">{{ $t('config.cert_desc') }}</InfoHint>
         </div>
-        <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="cert" placeholder="/dir/cert.pem" v-model="config.cert" />
+        <input type="text" class="settings-input" id="cert" placeholder="/dir/cert.pem" v-model="config.cert" />
       </div>
     </section>
   </div>

@@ -72,7 +72,7 @@ function addRemappingEntry() {
             <label for="dd_configuration_option" class="block text-sm font-medium text-storm mb-1">
               {{ $t('config.dd_configuration_option') }}
             </label>
-            <select id="dd_configuration_option" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.dd_configuration_option">
+            <select id="dd_configuration_option" class="settings-input" v-model="config.dd_configuration_option">
               <option value="disabled">{{ $t('_common.disabled_def') }}</option>
               <option value="verify_only">{{ $t('config.dd_config_verify_only') }}</option>
               <option value="ensure_active">{{ $t('config.dd_config_ensure_active') }}</option>
@@ -86,7 +86,7 @@ function addRemappingEntry() {
               <label for="dd_resolution_option" class="block text-sm font-medium text-storm mb-1">
                 {{ $t('config.dd_resolution_option') }}
               </label>
-              <select id="dd_resolution_option" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.dd_resolution_option">
+              <select id="dd_resolution_option" class="settings-input" v-model="config.dd_resolution_option">
                 <option value="disabled">{{ $t('config.dd_resolution_option_disabled') }}</option>
                 <option value="auto">{{ $t('config.dd_resolution_option_auto') }}</option>
                 <option value="manual">{{ $t('config.dd_resolution_option_manual') }}</option>
@@ -97,7 +97,7 @@ function addRemappingEntry() {
 
               <div class="mt-2" v-if="config.dd_resolution_option === 'manual'">
                 <div class="text-sm text-storm mb-1">{{ $t('config.dd_manual_resolution') }}</div>
-                <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="dd_manual_resolution" placeholder="2560x1440" v-model="config.dd_manual_resolution" />
+                <input type="text" class="settings-input" id="dd_manual_resolution" placeholder="2560x1440" v-model="config.dd_manual_resolution" />
               </div>
             </div>
 
@@ -105,7 +105,7 @@ function addRemappingEntry() {
               <label for="dd_refresh_rate_option" class="block text-sm font-medium text-storm mb-1">
                 {{ $t('config.dd_refresh_rate_option') }}
               </label>
-              <select id="dd_refresh_rate_option" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.dd_refresh_rate_option">
+              <select id="dd_refresh_rate_option" class="settings-input" v-model="config.dd_refresh_rate_option">
                 <option value="disabled">{{ $t('config.dd_refresh_rate_option_disabled') }}</option>
                 <option value="auto">{{ $t('config.dd_refresh_rate_option_auto') }}</option>
                 <option value="manual">{{ $t('config.dd_refresh_rate_option_manual') }}</option>
@@ -113,7 +113,7 @@ function addRemappingEntry() {
 
               <div class="mt-2" v-if="config.dd_refresh_rate_option === 'manual'">
                 <div class="text-sm text-storm mb-1">{{ $t('config.dd_manual_refresh_rate') }}</div>
-                <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="dd_manual_refresh_rate" placeholder="59.9558" v-model="config.dd_manual_refresh_rate" />
+                <input type="text" class="settings-input" id="dd_manual_refresh_rate" placeholder="59.9558" v-model="config.dd_manual_refresh_rate" />
               </div>
             </div>
           </div>
@@ -123,7 +123,7 @@ function addRemappingEntry() {
               <label for="dd_config_revert_delay" class="block text-sm font-medium text-storm mb-1">
                 {{ $t('config.dd_config_revert_delay') }}
               </label>
-              <input type="number" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="dd_config_revert_delay" placeholder="3000" min="0" v-model="config.dd_config_revert_delay" />
+              <input type="number" class="settings-input" id="dd_config_revert_delay" placeholder="3000" min="0" v-model="config.dd_config_revert_delay" />
               <div class="text-sm text-storm mt-1">
                 {{ $t('config.dd_config_revert_delay_desc') }}
               </div>
@@ -178,16 +178,16 @@ function addRemappingEntry() {
                 <tbody>
                   <tr v-for="(value, idx) in config.dd_mode_remapping[getRemappingType()]">
                     <td v-if="getRemappingType() !== REFRESH_RATE_ONLY">
-                      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="value.requested_resolution" :placeholder="'1920x1080'" />
+                      <input type="text" class="settings-input font-mono text-sm" v-model="value.requested_resolution" :placeholder="'1920x1080'" />
                     </td>
                     <td v-if="getRemappingType() !== RESOLUTION_ONLY">
-                      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="value.requested_fps" :placeholder="'60'" />
+                      <input type="text" class="settings-input font-mono text-sm" v-model="value.requested_fps" :placeholder="'60'" />
                     </td>
                     <td v-if="getRemappingType() !== REFRESH_RATE_ONLY">
-                      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="value.final_resolution" :placeholder="'2560x1440'" />
+                      <input type="text" class="settings-input font-mono text-sm" v-model="value.final_resolution" :placeholder="'2560x1440'" />
                     </td>
                     <td v-if="getRemappingType() !== RESOLUTION_ONLY">
-                      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="value.final_refresh_rate" :placeholder="'119.95'" />
+                      <input type="text" class="settings-input font-mono text-sm" v-model="value.final_refresh_rate" :placeholder="'119.95'" />
                     </td>
                     <td>
                       <button class="focus-ring rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-danger-bright transition hover:bg-danger/20" @click="config.dd_mode_remapping[getRemappingType()].splice(idx, 1)">
@@ -209,7 +209,7 @@ function addRemappingEntry() {
         <label for="dd_hdr_option" class="block text-sm font-medium text-storm mb-1">
           {{ $t('config.dd_hdr_option') }}
         </label>
-        <select id="dd_hdr_option" class="mb-3 w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.dd_hdr_option">
+        <select id="dd_hdr_option" class="settings-input mb-3" v-model="config.dd_hdr_option">
           <option value="disabled">{{ $t('config.dd_hdr_option_disabled') }}</option>
           <option value="auto">{{ $t('config.dd_hdr_option_auto') }}</option>
         </select>

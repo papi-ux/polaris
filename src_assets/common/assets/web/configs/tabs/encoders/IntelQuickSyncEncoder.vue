@@ -21,7 +21,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="qsv_preset" class="block text-sm font-medium text-storm mb-1">{{ $t('config.qsv_preset') }}</label>
-        <select id="qsv_preset" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.qsv_preset">
+        <select id="qsv_preset" class="settings-input" v-model="config.qsv_preset">
           <option value="veryfast">{{ $t('config.qsv_preset_veryfast') }}</option>
           <option value="faster">{{ $t('config.qsv_preset_faster') }}</option>
           <option value="fast">{{ $t('config.qsv_preset_fast') }}</option>
@@ -34,7 +34,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="qsv_coder" class="block text-sm font-medium text-storm mb-1">{{ $t('config.qsv_coder') }}</label>
-        <select id="qsv_coder" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.qsv_coder">
+        <select id="qsv_coder" class="settings-input" v-model="config.qsv_coder">
           <option value="auto">{{ $t('config.ffmpeg_auto') }}</option>
           <option value="cabac">{{ $t('config.coder_cabac') }}</option>
           <option value="cavlc">{{ $t('config.coder_cavlc') }}</option>
