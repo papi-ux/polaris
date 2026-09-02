@@ -6733,6 +6733,16 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats) {
+    stats_json["tuning"] = settings_metadata::build_tuning_json(
+      adaptive_bitrate::get_state(),
+      stats,
+      proc::proc.current_app_has_mangohud()
+    );
+    stats_json["auto_quality"] = nvhttp::auto_quality_status_json();
+    return stats_json;
+  }
+
   void getStreamStats(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request))
       return;
@@ -6742,7 +6752,10 @@ namespace confighttp {
     auto stats = stream_stats::get_current();
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
-    response->write(stats.to_json(), headers);
+    response->write(
+      augment_stream_stats_json(nlohmann::json::parse(stats.to_json()), stats).dump(),
+      headers
+    );
   }
 
   /**
@@ -6788,7 +6801,9 @@ namespace confighttp {
       // Stream stats every second until shutdown or client disconnect
       while (!shutdown_event->peek()) {
         auto stats = stream_stats::get_current();
-        *response << "data: " << stats.to_json() << "\n\n";
+        *response << "data: "
+                  << augment_stream_stats_json(nlohmann::json::parse(stats.to_json()), stats).dump()
+                  << "\n\n";
 
         std::promise<bool> send_error;
         response->send([&send_error](const SimpleWeb::error_code &ec) {
