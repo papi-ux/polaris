@@ -100,6 +100,34 @@ Two practical settings:
 
 Same advice as AMD: Private Stream, Mesa VA-API, expect SHM capture. On an Arc discrete card, set `adapter_name` so Polaris picks the Arc GPU rather than the integrated one.
 
+## Linux setup checklist
+
+The **Advanced & diagnostics** disclosure on the Video/Audio settings page shows a short checklist for the selected launch mode. Each checklist step is one line in the UI; this section carries the full detail behind each step.
+
+### Private Stream checklist
+
+Private Stream (labwc) is the solid default: apps stay off the host desktop, and capture uses wlroots. Nothing extra is needed beyond `labwc` and `wlr-randr` on the host `PATH` (see [Private Stream](#private-stream)). The encoder, bitrate, and HDR settings below the checklist all apply to this path.
+
+### Gamescope Stream checklist
+
+Gamescope Stream attaches to an idle `gamescope-0` unit or spawns an owned headless Gamescope session, and the portal captures it. It needs `gamescope` on the host `PATH`, and some host setups also need private portal units; that part is host and packaging specific, see [the gamescope notes in Stream paths](stream-paths.md#relation-to-gamescope). The web UI's labwc-only flags (cage compositor, GPU-native capture preference) are ignored on this path. Encoder, bitrate, and HDR settings below the checklist still apply.
+
+### Headless Dongle checklist
+
+Set the streaming output (the dummy plug) and the primary output (the real panel), pick a swap mode, and save. Capture goes through the portal after Polaris prepares the display topology. The **Detect connectors** button fills empty output fields from host discovery; the swap behavior itself is described under [Headless Dongle](#headless-dongle), and the `headless_swap_mode` values live in [Configuration](configuration.md#common-options).
+
+### Mirror Desktop checklist
+
+Mirror Desktop captures the visible host session through the portal and needs no extra setup. Prefer Private Stream or Gamescope Stream when apps should stay isolated from the desktop.
+
+### Encoder and quality
+
+Set the encoder (`nvenc` on NVIDIA, `vaapi` on AMD and Intel Mesa hosts), the bitrate, and optionally Auto Quality; the same settings apply to the labwc and gamescope paths alike. With Auto Quality on, Polaris balances bitrate and profile recovery for the selected path instead of asking you to tune them by hand.
+
+### GPU-native capture preference
+
+Leave the GPU-native preference off unless session health shows SHM or system-memory fallback on a host that should support GPU-resident capture; the flag does not apply to Gamescope Stream. When the preference is on, Polaris may run labwc windowed instead of fully hidden so DMA-BUF capture can stay GPU-resident. NVIDIA hosts running true headless (NVENC, headless labwc) with the preference off can refuse the first launch with a cold-cache 503; switch to Private Stream (GPU-native) or enable the preference, restart Polaris, and retry, as covered in [the NVIDIA warning above](#if-you-have-an-nvidia-card).
+
 ## How capture works
 
 Polaris selects the capture path after the launch mode is chosen:
