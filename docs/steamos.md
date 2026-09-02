@@ -43,7 +43,9 @@ SteamOS ships without an initialized pacman keyring, so the first `pacman` trans
 
 Installing v1.3.9 or earlier additionally needs `--assume-installed labwc=0.9.0` on the `pacman -U` step. Those packages declared a `labwc` dependency that pulls in a library downgrade which breaks Desktop Mode. See Troubleshooting below.
 
-Open `https://localhost:47990/#/welcome`, create the web UI account, and pair Nova, Moonlight, or another GameStream-compatible client. After credentials are created, `https://localhost:47990` opens the normal console.
+**Fresh install:** open `https://localhost:47990/#/welcome`, create the web UI account, and pair Nova, Moonlight, or another GameStream-compatible client.
+
+**Upgrade or reinstall:** open `https://localhost:47990/#/login` and use the existing account. Pacman package operations preserve credentials, pairing keys, settings, and the library under `~/.config/polaris`; reinstalling after a SteamOS update does not reset the web account. If needed, follow the [credential reset](troubleshooting.md#web-ui-credentials) instead of returning to Welcome.
 
 ## Stream Paths on SteamOS
 
@@ -58,6 +60,8 @@ Polaris does not depend on labwc for this reason, and links nothing from it. Pri
 Download the new `Polaris-steamos3.8-x86_64.pkg.tar.zst` artifact and repeat the failure-safe install command. The package manager replaces the prior Polaris files, host setup refreshes required integration, and read-only mode is restored before service startup.
 
 A SteamOS operating-system update may remove packages layered into the mutable root. If Polaris disappears after an OS update, return to Desktop Mode and reinstall the current SteamOS 3.8 artifact. Do not substitute the rolling Arch package.
+
+After Polaris restarts, return to `https://localhost:47990/#/login` with the existing web credentials.
 
 ## Remove and Roll Back
 

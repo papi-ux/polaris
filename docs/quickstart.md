@@ -40,10 +40,16 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 | openSUSE Tumbleweed | [openSUSE guide](openSUSE.md) — source build |
 | Anything else | [Building Polaris](building.md) |
 
-## 2. Create your web console account
+## 2. Open the right web console path
 
-Open **https://localhost:47990/#/welcome**, create your web UI account, and pair a client. After
-credentials exist, **https://localhost:47990** opens the normal console.
+**Fresh install:** if this host has never had a Polaris web account, open
+**https://localhost:47990/#/welcome**, create the account, and pair a client.
+
+**Upgrade or reinstall:** open **https://localhost:47990/#/login** and sign in with the existing
+account. Package upgrades and removals intentionally preserve credentials, pairing keys, settings,
+and the library under `~/.config/polaris`; reinstalling the package does not make the host a new
+first-run installation. If the credentials are no longer known, use the bounded reset in
+[Troubleshooting](troubleshooting.md#web-ui-credentials).
 
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at
