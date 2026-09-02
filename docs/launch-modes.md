@@ -131,6 +131,6 @@ Headless Dongle itself cannot be requested as a per-launch override because it r
 
 ## Under the hood (optional reading)
 
-- [Runtime and Streaming Model](runtime.md): how capture paths and fallback decisions actually work.
+- [Runtime and streaming model](runtime.md): how capture paths and fallback decisions actually work.
 - [Configuration](configuration.md): every key and value, including the legacy booleans.
 - [Stream paths (plugin contract)](stream-paths.md): the developer contract behind the mode cards.
