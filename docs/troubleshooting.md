@@ -81,6 +81,18 @@ Polaris now uses Game Control for newly paired Nova and Moonlight-compatible dev
 devices are never silently upgraded, so a device saved by an older release may still need the one-time
 access change above.
 
+## Cursor is missing with DRM/KMS capture
+
+DRM/KMS exposes the desktop framebuffer and the hardware cursor as separate planes. Polaris must
+composite that cursor plane into the video stream; otherwise the pointer can remain visible on the
+host display while disappearing in Moonlight.
+
+Open **Settings > Input > Pointer and touch** and enable **Show host cursor**. New or unset
+configurations enable it by default, while an explicit `mouse_cursor_visible = disabled` remains
+unchanged. You can toggle Polaris-controlled cursors for the current runtime with
+`Ctrl+Alt+Shift+N`. If a client draws its own local cursor and you see two pointers, disable the host
+cursor. Portal capture may embed the compositor cursor independently of this runtime toggle.
+
 ## Headless session does not start cleanly
 
 Confirm these settings first:

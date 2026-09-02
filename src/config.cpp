@@ -689,7 +689,7 @@ namespace config {
 
     true,  // keyboard enabled
     true,  // mouse enabled
-    false, // mouse cursor visible in stream
+    true,  // mouse cursor visible in stream
     true,  // controller enabled
     true,  // always send scancodes
     true,  // high resolution scrolling
