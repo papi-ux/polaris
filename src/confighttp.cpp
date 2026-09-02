@@ -4216,6 +4216,7 @@ namespace confighttp {
       proc::proc.current_app_has_mangohud()
     );
     output["auto_quality"] = nvhttp::auto_quality_status_json();
+    output["provenance"] = settings_metadata::config_write_provenance_json();
     if (client_uuid.empty()) {
       auto clients = nlohmann::json::array();
       for (const auto &client : nvhttp::get_all_clients()) {
@@ -4348,6 +4349,16 @@ namespace confighttp {
         BOOST_LOG(error) << "SaveConfig: "sv << message;
         bad_request(response, request, message);
         return;
+      }
+      {
+        std::vector<std::string> written_keys;
+        for (const auto &[k, v] : input_tree.items()) {
+          if (v.is_null() || (v.is_string() && v.get<std::string>().empty() && !is_write_only_secret_config_key(k))) {
+            continue;
+          }
+          written_keys.push_back(k);
+        }
+        settings_metadata::note_config_write("web_ui", std::move(written_keys));
       }
       if (input_tree.contains("adaptive_bitrate_enabled")) {
         doctor_actions::set_adaptive_enabled(

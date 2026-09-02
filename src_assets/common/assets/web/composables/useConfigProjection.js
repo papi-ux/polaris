@@ -75,6 +75,7 @@ export function useConfigProjection({ fetchImpl } = {}) {
     responseOnlyKeys: section('response_only_keys'),
     liveFields: section('live_fields'),
     restartFields: section('restart_fields'),
+    provenance: section('provenance'),
   }
 }
 

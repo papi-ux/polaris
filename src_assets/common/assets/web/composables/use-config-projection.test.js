@@ -22,6 +22,7 @@ const payload = () => ({
   response_only_keys: ['status', 'stream_path_id'],
   live_fields: ['max_bitrate'],
   restart_fields: ['linux_stream_mode'],
+  provenance: [{ at: '2026-09-02T22:10:00Z', writer: 'web_ui', keys: ['max_bitrate'] }],
 })
 
 const respond = (status, body) => async (url, init) => ({
@@ -49,6 +50,7 @@ describe('useConfigProjection', () => {
     expect(projection.modes.value[0].badge).toBe('Recommended')
     expect(projection.autoQuality.value.state).toBe('holding')
     expect(projection.responseOnlyKeys.value).toEqual(['status', 'stream_path_id'])
+    expect(projection.provenance.value[0].writer).toBe('web_ui')
   })
 
   it('scopes to a paired client when asked', async () => {

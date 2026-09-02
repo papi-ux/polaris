@@ -241,6 +241,22 @@ const streamDisplayRelaunchRequired = computed(() => (
     ? hostStreamDisplay.value.relaunch_required === true
     : clientSettingsSync.value.relaunchRequired
 ))
+// The newest committed config write, from either writer, when the host reports it.
+const lastConfigWrite = computed(() => {
+  const notes = projection.provenance.value
+  return Array.isArray(notes) && notes.length > 0 && notes[0] && typeof notes[0] === 'object' ? notes[0] : null
+})
+const lastConfigWriteRow = computed(() => {
+  const note = lastConfigWrite.value
+  if (!note) return null
+  const writerKey = note.writer === 'gamestream' ? 'gamestream' : note.writer === 'web_ui' ? 'web_ui' : 'other'
+  const keys = Array.isArray(note.keys) ? note.keys : []
+  return {
+    label: $t('config.av_nova_sync_row_last_write'),
+    value: $t(`config.av_provenance_writer_${writerKey}`),
+    note: $t('config.av_provenance_keys_note', { count: keys.length, at: String(note.at || '') }),
+  }
+})
 const clientSettingsRows = computed(() => [
   {
     label: $t('config.av_nova_sync_row_display_mode'),
@@ -254,6 +270,7 @@ const clientSettingsRows = computed(() => [
       ? $t('config.av_nova_sync_note_pending')
       : $t('config.av_nova_sync_note_synced'),
   },
+  ...(lastConfigWriteRow.value ? [lastConfigWriteRow.value] : []),
 ])
 
 const autoQualityEnabled = computed(() => (

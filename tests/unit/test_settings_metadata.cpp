@@ -137,3 +137,38 @@ TEST(SettingsMetadataTests, StreamDisplayModeOptionsCarryBadges) {
   }
   EXPECT_TRUE(saw_headless);
 }
+
+TEST(ConfigWriteProvenance, StartsEmptyAndRecordsSortedUniqueKeysNewestFirst) {
+  settings_metadata::reset_config_write_provenance_for_tests();
+  EXPECT_TRUE(settings_metadata::config_write_provenance_json().empty());
+
+  settings_metadata::note_config_write("web_ui", {"max_bitrate", "fallback_mode", "max_bitrate"});
+  settings_metadata::note_config_write("gamestream", {"adaptive_bitrate_enabled"});
+
+  const auto notes = settings_metadata::config_write_provenance_json();
+  ASSERT_EQ(notes.size(), 2u);
+  EXPECT_EQ(notes.at(0).at("writer").get<std::string>(), "gamestream");
+  EXPECT_EQ(notes.at(0).at("keys"), nlohmann::json::array({"adaptive_bitrate_enabled"}));
+  EXPECT_EQ(notes.at(1).at("writer").get<std::string>(), "web_ui");
+  EXPECT_EQ(notes.at(1).at("keys"), nlohmann::json::array({"fallback_mode", "max_bitrate"}));
+  for (const auto &note : notes) {
+    const auto at = note.at("at").get<std::string>();
+    EXPECT_EQ(at.size(), 20u) << at;
+    EXPECT_EQ(at.back(), 'Z') << at;
+    EXPECT_EQ(at[10], 'T') << at;
+  }
+  settings_metadata::reset_config_write_provenance_for_tests();
+}
+
+TEST(ConfigWriteProvenance, KeepsOnlyTheMostRecentThirtyTwoWrites) {
+  settings_metadata::reset_config_write_provenance_for_tests();
+  for (int i = 0; i < 40; ++i) {
+    settings_metadata::note_config_write("web_ui", {"key_" + std::to_string(i)});
+  }
+  const auto notes = settings_metadata::config_write_provenance_json();
+  ASSERT_EQ(notes.size(), 32u);
+  EXPECT_EQ(notes.front().at("keys").at(0).get<std::string>(), "key_39");
+  EXPECT_EQ(notes.back().at("keys").at(0).get<std::string>(), "key_8");
+  settings_metadata::reset_config_write_provenance_for_tests();
+}
+

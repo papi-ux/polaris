@@ -1221,6 +1221,13 @@ namespace nvhttp {
                            << target;
       }
 
+      std::vector<std::string> written_keys;
+      written_keys.reserve(updates.size());
+      for (const auto &update : updates) {
+        written_keys.push_back(update.first);
+      }
+      settings_metadata::note_config_write("gamestream", std::move(written_keys));
+
       return true;
     }
 

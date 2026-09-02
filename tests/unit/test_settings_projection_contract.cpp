@@ -117,6 +117,7 @@ TEST_F(SettingsProjectionContract, HostViewWithZeroClientsServesCompleteContract
   EXPECT_EQ(payload.at("auto_quality").at("state").get<std::string>(), "off");
 
   ASSERT_TRUE(payload.at("clients").is_array());
+  ASSERT_TRUE(payload.at("provenance").is_array());
   EXPECT_TRUE(payload.at("clients").empty());
 }
 

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -73,4 +74,29 @@ namespace settings_metadata {
   nlohmann::json build_tuning_json(const adaptive_bitrate::state_t &adaptive_state,
                                    const stream_stats::stats_t &stats,
                                    bool mangohud_configured);
+
+  /**
+   * @brief Record a committed configuration write for the settings projection.
+   *
+   * Two paths write the config file without coordinating: the web console
+   * (POST /api/config, writer "web_ui") and paired clients
+   * (POST /polaris/v1/client-settings, writer "gamestream"). Each committed
+   * write is noted here so the projection can show who last changed what.
+   * @param writer The writing path.
+   * @param keys The config keys the write carried; duplicates are folded.
+   */
+  void note_config_write(const std::string &writer, std::vector<std::string> keys);
+
+  /**
+   * @brief The most recent committed configuration writes, newest first.
+   *
+   * Bounded to the last 32 writes; each entry carries an ISO 8601 UTC `at`,
+   * the `writer`, and the sorted `keys`.
+   */
+  nlohmann::json config_write_provenance_json();
+
+  /**
+   * @brief Forget recorded writes (tests only).
+   */
+  void reset_config_write_provenance_for_tests();
 }  // namespace settings_metadata

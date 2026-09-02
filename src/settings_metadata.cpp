@@ -6,7 +6,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
+#include <deque>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -318,5 +324,61 @@ namespace settings_metadata {
     tuning["ai_optimizer_enabled"] = false;
     tuning["mangohud_configured"] = mangohud_configured;
     return tuning;
+  }
+  namespace {
+    constexpr std::size_t k_config_write_notes = 32;
+
+    struct config_write_note_t {
+      std::chrono::system_clock::time_point at;
+      std::string writer;
+      std::vector<std::string> keys;
+    };
+
+    std::mutex config_write_mutex;
+    std::deque<config_write_note_t> config_write_notes;
+
+    std::string iso8601_utc(std::chrono::system_clock::time_point at) {
+      const std::time_t seconds = std::chrono::system_clock::to_time_t(at);
+      std::tm utc {};
+#ifdef _WIN32
+      gmtime_s(&utc, &seconds);
+#else
+      gmtime_r(&seconds, &utc);
+#endif
+      char buffer[32];
+      if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return {};
+      }
+      return buffer;
+    }
+  }  // namespace
+
+  void note_config_write(const std::string &writer, std::vector<std::string> keys) {
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    std::lock_guard<std::mutex> lock(config_write_mutex);
+    config_write_notes.push_front({std::chrono::system_clock::now(), writer, std::move(keys)});
+    while (config_write_notes.size() > k_config_write_notes) {
+      config_write_notes.pop_back();
+    }
+  }
+
+  nlohmann::json config_write_provenance_json() {
+    auto notes = nlohmann::json::array();
+    std::lock_guard<std::mutex> lock(config_write_mutex);
+    for (const auto &note : config_write_notes) {
+      notes.push_back({
+        {"at", iso8601_utc(note.at)},
+        {"writer", note.writer},
+        {"keys", note.keys},
+      });
+    }
+    return notes;
+  }
+
+  void reset_config_write_provenance_for_tests() {
+    std::lock_guard<std::mutex> lock(config_write_mutex);
+    config_write_notes.clear();
   }
 }  // namespace settings_metadata
