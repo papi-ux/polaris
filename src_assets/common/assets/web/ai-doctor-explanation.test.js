@@ -45,7 +45,7 @@ describe('AI Doctor explanation payload', () => {
       },
     })
 
-    expect(payload.provider).toEqual({ provider: 'local', model: 'llama3.1', base_url: 'http://127.0.0.1:11434/v1', auth_mode: 'none' })
+    expect(payload).not.toHaveProperty('provider')
     expect(payload.categories).toEqual([
       'Doctor diagnosis and evidence',
       'Fix My Stream checklist',
@@ -58,6 +58,31 @@ describe('AI Doctor explanation payload', () => {
     expect(JSON.stringify(payload)).not.toContain('tok-secret')
     expect(JSON.stringify(payload)).not.toContain('hunter2')
     expect(JSON.stringify(payload)).not.toContain('sk-live-secret')
+  })
+
+  it('keeps subscription provider controls out of the anonymized request', () => {
+    const payload = buildAiDoctorExplanationPayload({
+      config: {
+        ai_provider: 'openai',
+        ai_model: 'gpt-5.6-luna',
+        ai_base_url: 'https://api.openai.com/v1',
+        ai_auth_mode: 'subscription',
+        ai_api_key: 'must-never-cross-the-browser-wire',
+      },
+      supportBundle: {
+        config: {
+          ai_provider: 'openai',
+          ai_auth_mode: '[redacted]',
+        },
+        doctor: { primary_issue: 'frame_pacing' },
+      },
+    })
+
+    const serialized = JSON.stringify(payload)
+    expect(payload).not.toHaveProperty('provider')
+    expect(serialized).not.toContain('subscription')
+    expect(serialized).not.toContain('api.openai.com')
+    expect(serialized).not.toContain('must-never-cross-the-browser-wire')
   })
 })
 

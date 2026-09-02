@@ -31,7 +31,7 @@ A matched feature release for Nova v1.4.0. Doctor turns measured stream evidence
 - Refuses PipeWire DMA-BUF frames when the running package has no matching encoder importer; CUDA-disabled NVIDIA packages fall back to SHM/CPU capture before the first unusable GPU-only frame can reach the encoder
 - Forwards non-cage detached Steam shutdown through Steam's no-bootstrap remote client, preventing a vanished listener from starting a replacement client while preserving retry authority when generation cleanup is incomplete
 - Restores distro-package Gamescope sessions to their empty compositor baseline without requiring Nix-only services, and retains the exact recovery claim when safe cleanup cannot be proven
-- Restricts AI and Codex CLI output to typed explanatory text that cannot define settings, actions, confidence overrides, or launch policy; subscription `deterministic-fallback` remains informational and quiet
+- Restricts AI and Codex CLI output to typed explanatory text that cannot define settings, actions, confidence overrides, or launch policy; OpenAI subscription mode now invokes the signed-in Codex CLI through a private, bounded explanation-only workspace instead of reporting a configured provider as unavailable, while provider failure remains an informational `deterministic-fallback`
 - Retains the GCC 16, Ubuntu snapshot, exact release-source, sanitizer, Arch, public-hygiene, and CodeQL gates from the protected release base
 - Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
 
