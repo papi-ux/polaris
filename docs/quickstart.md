@@ -1,4 +1,4 @@
-# Quick Start
+# Quick start
 
 This page takes a Linux host from nothing to a first stream. Fedora 44 and Arch Linux are the
 recommended package paths; if you run something else, start from [Compatibility](compatibility.md)
@@ -76,7 +76,7 @@ linux_prefer_gpu_native_capture = enabled
 
 To pick a different mode later, such as Gamescope, a virtual display, or a dummy plug, see
 [Launch modes and capture paths](launch-modes.md). [Configuration](configuration.md) explains every
-setting, and [Runtime and Streaming Model](runtime.md) explains what these keys actually change.
+setting, and [Runtime and streaming model](runtime.md) explains what these keys actually change.
 
 ## 4. Pair a client
 
