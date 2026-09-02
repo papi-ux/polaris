@@ -22,6 +22,7 @@
 
 // local includes
 #include "config.h"
+#include "confighttp_validation.h"
 #include "entry_handler.h"
 #include "file_handler.h"
 #include "logging.h"
@@ -78,22 +79,6 @@ namespace config {
 
     return value.empty() ? "(empty)"s : "[redacted]"s;
   }
-
-  namespace {
-    bool is_response_only_config_key(const std::string_view key) {
-      return key == "status"sv ||
-             key == "platform"sv ||
-             key == "version"sv ||
-             key == "vdisplayStatus"sv ||
-             key == "vdisplayAvailable"sv ||
-             key == "vdisplayBackend"sv ||
-             key == "runtime_backend"sv ||
-             key == "runtime_requested_headless"sv ||
-             key == "runtime_effective_headless"sv ||
-             key == "runtime_gpu_native_override_active"sv ||
-             key == "stream_display_mode"sv;
-    }
-  }  // namespace
 
   namespace nv {
 
@@ -1273,7 +1258,7 @@ namespace config {
 #endif
 
     for (auto it = vars.begin(); it != vars.end();) {
-      if (is_response_only_config_key(it->first)) {
+      if (confighttp::validation::is_response_only_config_key(it->first)) {
         it = vars.erase(it);
       } else {
         ++it;

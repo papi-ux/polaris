@@ -4,6 +4,9 @@
  */
 #include "../tests_common.h"
 
+#include <algorithm>
+#include <array>
+
 #include <src/confighttp_validation.h>
 
 TEST(ConfigValidationTests, RejectsConfigKeysThatCanBreakSerialization) {
@@ -143,6 +146,83 @@ TEST(ConfigValidationTests, AcceptsClientGamepadSeatIsolationConfigKey) {
 
   std::string error;
   EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+}
+
+TEST(ResponseOnlyConfigKeyTests, CoversEveryKeyTheLegacyListsScrubbed) {
+  // Union of the two lists previously hardcoded in confighttp.cpp (saveConfig)
+  // and config.cpp (apply_config). Removing any of these from the canonical
+  // list would let derived state leak back into the config file.
+  constexpr std::array legacy_keys {
+    "ai_auto_quality_enabled",
+    "client_settings_authority",
+    "client_settings_available",
+    "client_settings_effective_stream_display_mode",
+    "client_settings_effective_stream_display_mode_label",
+    "client_settings_endpoint",
+    "client_settings_endpoint_base_url",
+    "client_settings_endpoint_https_port",
+    "client_settings_endpoint_origin",
+    "client_settings_endpoint_path",
+    "client_settings_endpoint_same_origin",
+    "client_settings_endpoint_url",
+    "client_settings_live_fields",
+    "client_settings_relaunch_required",
+    "client_settings_restart_fields",
+    "client_settings_stream_display_mode",
+    "client_settings_stream_display_mode_label",
+    "client_settings_sync_mode",
+    "client_settings_v1",
+    "has_ai_api_key",
+    "has_api_key",
+    "has_steamgriddb_api_key",
+    "platform",
+    "runtime_backend",
+    "runtime_effective_headless",
+    "runtime_gpu_native_override_active",
+    "runtime_requested_headless",
+    "status",
+    "stream_display_mode",
+    "stream_display_mode_options",
+    "vdisplayAvailable",
+    "vdisplayBackend",
+    "vdisplayStatus",
+    "version",
+  };
+
+  for (const auto key : legacy_keys) {
+    EXPECT_TRUE(confighttp::validation::is_response_only_config_key(key)) << key;
+  }
+}
+
+TEST(ResponseOnlyConfigKeyTests, ScrubsStreamPathIdentityAndSelfDescribingKeys) {
+  // getConfig emits these, but before the canonical list neither C++ scrub
+  // covered them, so a full-config POST persisted them into the config file.
+  EXPECT_TRUE(confighttp::validation::is_response_only_config_key("stream_path_id"));
+  EXPECT_TRUE(confighttp::validation::is_response_only_config_key("stream_path_label"));
+  EXPECT_TRUE(confighttp::validation::is_response_only_config_key("config_response_only_keys"));
+}
+
+TEST(ResponseOnlyConfigKeyTests, LeavesRealConfigKeysWritable) {
+  // The GameStream sync-field name ai_auto_quality_enabled is response-only,
+  // but the config keys behind it must stay writable.
+  constexpr std::array writable_keys {
+    "adaptive_bitrate_enabled",
+    "ai_enabled",
+    "audio_sink",
+    "fallback_mode",
+    "linux_stream_mode",
+    "max_bitrate",
+  };
+
+  for (const auto key : writable_keys) {
+    EXPECT_FALSE(confighttp::validation::is_response_only_config_key(key)) << key;
+  }
+}
+
+TEST(ResponseOnlyConfigKeyTests, ListStaysSortedAndUnique) {
+  const auto keys = confighttp::validation::response_only_config_keys();
+  EXPECT_TRUE(std::ranges::is_sorted(keys));
+  EXPECT_EQ(std::ranges::adjacent_find(keys), keys.end());
 }
 
 TEST(AppValidationTests, AcceptsAWellFormedAppPayload) {
