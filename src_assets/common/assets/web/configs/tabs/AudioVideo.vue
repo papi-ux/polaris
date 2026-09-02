@@ -7,6 +7,8 @@ import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayDeviceOptions from "./audiovideo/DisplayDeviceOptions.vue";
 import VirtualDisplayStatus from "./audiovideo/VirtualDisplayStatus.vue";
 import Checkbox from "../../Checkbox.vue";
+import SelectableCard from '../../components/SelectableCard.vue'
+import StatTile from '../../components/StatTile.vue'
 import {
   applyStreamDisplayModeToConfig,
   resolveClientSettingsSync,
@@ -453,11 +455,10 @@ function updateDisplayPlannerSource(event) {
                   : 'hover:border-storm/70',
               ]"
             >
-              <button
-                type="button"
-                class="selectable-card focus-ring min-h-[132px] w-full p-4"
+              <SelectableCard
+                card-class="min-h-[132px] w-full p-4"
                 :disabled="mode.available === false"
-                :aria-pressed="streamDisplayMode === mode.id"
+                :selected="streamDisplayMode === mode.id"
                 @click="setStreamDisplayMode(mode.id)"
               >
                 <span class="flex items-start justify-between gap-3">
@@ -492,7 +493,7 @@ function updateDisplayPlannerSource(event) {
                 >
                   Unavailable: {{ mode.unavailableReason }}
                 </span>
-              </button>
+              </SelectableCard>
             </article>
           </div>
 
@@ -506,14 +507,16 @@ function updateDisplayPlannerSource(event) {
               <span class="meta-pill shrink-0 border-ice/25 bg-ice/10 text-ice">Selected</span>
             </div>
             <div class="mt-3 grid gap-3 lg:grid-cols-2">
-              <div class="stat-tile-compact py-2.5">
-                <div class="stat-kicker">Player impact</div>
-                <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.impact }}</div>
-              </div>
-              <div class="stat-tile-compact py-2.5">
-                <div class="stat-kicker">Capture path</div>
-                <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.technical }}</div>
-              </div>
+              <StatTile tile-class="py-2.5" label="Player impact">
+                <template #value>
+                  <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.impact }}</div>
+                </template>
+              </StatTile>
+              <StatTile tile-class="py-2.5" label="Capture path">
+                <template #value>
+                  <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.technical }}</div>
+                </template>
+              </StatTile>
             </div>
           </div>
 
@@ -624,12 +627,12 @@ function updateDisplayPlannerSource(event) {
             </summary>
 
             <div class="space-y-3 border-t border-storm/20 p-4">
-              <div class="stat-tile-compact p-3" data-capture-path-explainer>
+              <StatTile tile-class="p-3" data-capture-path-explainer>
                 <div class="text-sm font-semibold text-silver">How capture works</div>
                 <p class="mt-1 text-xs leading-relaxed text-storm">
                   Polaris chooses capture after the launch mode is set. GPU-native keeps frames on the GPU; System-memory capture copies through RAM and can be the intended safe path on AMD and Intel. Mission Control reports the path actually used.
                 </p>
-              </div>
+              </StatTile>
 
               <div class="settings-subtle-surface" data-linux-streaming-setup>
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -645,13 +648,13 @@ function updateDisplayPlannerSource(event) {
                 </div>
 
                 <div class="mt-4 grid gap-3 xl:grid-cols-2">
-                  <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="stat-tile-compact py-3">
+                  <StatTile v-for="item in linuxStreamingSetupChecklist" :key="item.id" tile-class="py-3">
                     <div class="flex items-start justify-between gap-3">
                       <div class="text-sm font-semibold text-silver">{{ item.title }}</div>
                       <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ item.status }}</span>
                     </div>
                     <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
-                  </div>
+                  </StatTile>
                 </div>
               </div>
 
@@ -664,11 +667,7 @@ function updateDisplayPlannerSource(event) {
                   <span class="meta-pill shrink-0" :class="clientSettingsSyncTone">{{ clientSettingsSyncBadge }}</span>
                 </div>
                 <div class="mt-4 grid gap-2 sm:grid-cols-2">
-                  <div v-for="row in clientSettingsRows" :key="row.label" class="stat-tile-compact">
-                    <div class="stat-kicker">{{ row.label }}</div>
-                    <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
-                    <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
-                  </div>
+                  <StatTile v-for="row in clientSettingsRows" :key="row.label" :label="row.label" :value="row.value" :note="row.note" />
                 </div>
               </div>
 
@@ -849,11 +848,7 @@ function updateDisplayPlannerSource(event) {
         </div>
 
         <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <div v-for="row in autoQualityRows" :key="row.label" class="stat-tile-compact">
-            <div class="stat-kicker">{{ row.label }}</div>
-            <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
-            <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
-          </div>
+          <StatTile v-for="row in autoQualityRows" :key="row.label" :label="row.label" :value="row.value" :note="row.note" />
         </div>
       </div>
     </section>
@@ -978,15 +973,13 @@ pactl info | grep Source</pre>
           </div>
 
           <div class="grid gap-3 xl:grid-cols-3">
-            <button
+            <SelectableCard
               v-for="choice in displayPlanner.visibleChoices"
               :key="choice.id"
-              type="button"
-              class="selectable-card focus-ring min-h-[126px] rounded-lg border p-4 hover:border-storm/70"
-              :class="activeDisplayPlanId === choice.id
+              :card-class="['min-h-[126px] rounded-lg border p-4 hover:border-storm/70', activeDisplayPlanId === choice.id
                 ? 'border-ice bg-ice/12 shadow-[0_0_0_1px_rgba(224,230,237,0.18)]'
-                : 'border-storm/30 bg-deep/40'"
-              :aria-pressed="activeDisplayPlanId === choice.id"
+                : 'border-storm/30 bg-deep/40']"
+              :selected="activeDisplayPlanId === choice.id"
               @click="applyDisplayPlan(choice)"
             >
               <div class="flex items-start justify-between gap-3">
@@ -1003,7 +996,7 @@ pactl info | grep Source</pre>
                 <div class="eyebrow-label">Target mode</div>
                 <div class="mt-1 font-mono text-xs text-silver">{{ choice.targetMode }}</div>
               </div>
-            </button>
+            </SelectableCard>
           </div>
 
           <div class="flex flex-col gap-3 rounded-lg border border-ice/15 bg-ice/5 p-4 text-sm text-storm lg:flex-row lg:items-center lg:justify-between">
@@ -1024,20 +1017,18 @@ pactl info | grep Source</pre>
               </div>
             </div>
             <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
-              <button
+              <SelectableCard
                 v-for="factor in displayPlanner.advancedScaleFactors"
                 :key="factor.label"
-                type="button"
-                class="selectable-card focus-ring rounded-lg border px-3 py-3"
-                :class="factor.safe ? 'border-storm/30 bg-deep/40 hover:border-storm/70' : 'border-warning/25 bg-warning/10'"
+                :card-class="['rounded-lg border px-3 py-3', factor.safe ? 'border-storm/30 bg-deep/40 hover:border-storm/70' : 'border-warning/25 bg-warning/10']"
                 :disabled="!factor.safe"
-                :aria-pressed="factor.safe && customDisplayScale === factor.scaleFactor"
+                :selected="factor.safe && customDisplayScale === factor.scaleFactor"
                 @click="customDisplayScale = factor.scaleFactor"
               >
                 <div class="text-sm font-semibold text-silver">{{ factor.label }}</div>
                 <div class="mt-1 font-mono text-xs text-storm">{{ factor.targetMode }}</div>
                 <div class="mt-1 text-[11px]" :class="factor.safe ? 'text-storm' : 'text-warning-bright'">{{ factor.safe ? 'Available' : 'Hidden as excessive' }}</div>
-              </button>
+              </SelectableCard>
             </div>
             <label class="block text-sm font-medium text-storm">
               Custom scale factor
