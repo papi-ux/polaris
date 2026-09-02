@@ -1,6 +1,6 @@
 # Changelog
 
-This file tracks the public Polaris release line.
+Every public Polaris release, newest first, with what changed in each.
 
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.

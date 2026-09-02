@@ -1,4 +1,4 @@
-# Ubuntu Install Guide
+# Install on Ubuntu 24.04
 
 Ubuntu 24.04 is the first Debian-family target for a direct Polaris DEB package. This path is
 extremely experimental and much more prone to breaking than the Fedora and Arch package paths while

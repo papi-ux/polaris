@@ -1,4 +1,4 @@
-# Arch Linux and CachyOS Install Guide
+# Install on Arch Linux and CachyOS
 
 Arch Linux is one of the two recommended Polaris package paths, and the official
 `Polaris-arch-x86_64.pkg.tar.zst` asset ships with every release. CachyOS and most pacman-compatible
@@ -81,7 +81,7 @@ linux_prefer_gpu_native_capture = enabled
 > selects `host_virtual_display`, not a headless session.
 
 Then start a game and read the active runtime, capture path, and encoder in Mission Control. See
-[Runtime and Streaming Model](runtime.md) for what those values mean.
+[Runtime and streaming model](runtime.md) for what those values mean.
 
 ## Upgrade
 

@@ -1,4 +1,4 @@
-# Frequently Asked Questions
+# FAQ
 
 Common questions about hardware requirements, client compatibility, coexisting with other GameStream
 hosts, HDR, and the optional AI features. If your question is about a specific failure, start with
@@ -16,14 +16,14 @@ memory. [Launch modes and capture paths](launch-modes.md) has per-vendor recomme
 ### Can Polaris stream 10-bit to an SDR handheld screen?
 
 Yes, if the client explicitly requests a 10-bit path and the active encoder and runtime support
-Main10. See [Runtime and Streaming Model](runtime.md) for the difference between 10-bit SDR and true
+Main10. See [Runtime and streaming model](runtime.md) for the difference between 10-bit SDR and true
 HDR.
 
 ### Can Polaris stream true HDR on Linux?
 
 Yes, but Polaris only advertises true HDR when the active capture path reports HDR display metadata.
 Headless labwc and wlroots sessions stay honestly SDR until the runtime can provide real metadata.
-[Runtime and Streaming Model](runtime.md) has the details.
+[Runtime and streaming model](runtime.md) has the details.
 
 ## Clients
 

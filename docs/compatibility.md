@@ -1,4 +1,4 @@
-# Support and Compatibility
+# Support and compatibility
 
 What Polaris supports today, how well each path is validated, and where the honest limits are. Status
 words mean specific things here: **Recommended** paths have official package assets and the most
