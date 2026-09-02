@@ -47,6 +47,16 @@ const displayPlanner = computed(() => buildResolutionPlanner({
   customScale: customDisplayScale.value,
   showAdvanced: showDisplayPlannerAdvanced.value,
 }))
+// Interim active-plan detection until the plan id persists in config: a plan is
+// active when the saved fallback mode matches its target exactly.
+const activeDisplayPlanId = computed(() => {
+  const current = String(config.value.fallback_mode || '').trim()
+  if (!current) {
+    return ''
+  }
+  const match = displayPlanner.value.choices.find((choice) => choice.targetMode === current)
+  return match ? match.id : ''
+})
 
 watch(() => config.value.fallback_mode, (mode) => {
   if (applyingDisplayPlan) {
@@ -174,15 +184,15 @@ const clientSettingsSyncCopy = computed(() => {
 const clientSettingsRows = computed(() => [
   { label: 'Display mode', value: clientSettingsSync.value.desiredModeLabel, note: 'Next stream' },
   { label: 'Effective mode', value: clientSettingsSync.value.effectiveModeLabel, note: clientSettingsSync.value.relaunchRequired ? 'Pending' : 'Synced' },
-  { label: 'Bitrate limit', value: 'Live', note: 'Client write' },
-  { label: 'Adaptive bitrate', value: 'Live', note: 'Measured loss + RTT' },
 ])
 
 const autoQualityEnabled = computed(() => (
-  config.value.adaptive_bitrate_enabled === 'enabled'
+  config.value.ai_enabled === 'enabled' && config.value.adaptive_bitrate_enabled === 'enabled'
 ))
+// The split state is reachable when the config file was edited by hand or an
+// older host upgraded: exactly one of the pair is on.
 const autoQualityPartial = computed(() => (
-  config.value.adaptive_bitrate_enabled === 'enabled'
+  (config.value.ai_enabled === 'enabled') !== (config.value.adaptive_bitrate_enabled === 'enabled')
 ))
 const autoQualityBadge = computed(() => {
   if (autoQualityEnabled.value) return 'Auto Quality: On'
@@ -431,7 +441,7 @@ function updateDisplayPlannerSource(event) {
             >
               <button
                 type="button"
-                class="focus-ring min-h-[132px] w-full p-4 text-left"
+                class="selectable-card focus-ring min-h-[132px] w-full p-4"
                 :disabled="mode.available === false"
                 :aria-pressed="streamDisplayMode === mode.id"
                 @click="setStreamDisplayMode(mode.id)"
@@ -482,12 +492,12 @@ function updateDisplayPlannerSource(event) {
               <span class="meta-pill shrink-0 border-ice/25 bg-ice/10 text-ice">Selected</span>
             </div>
             <div class="mt-3 grid gap-3 lg:grid-cols-2">
-              <div class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2.5">
-                <div class="text-[11px] font-semibold text-silver">Player impact</div>
+              <div class="stat-tile-compact py-2.5">
+                <div class="stat-kicker">Player impact</div>
                 <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.impact }}</div>
               </div>
-              <div class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2.5">
-                <div class="text-[11px] font-semibold text-silver">Capture path</div>
+              <div class="stat-tile-compact py-2.5">
+                <div class="stat-kicker">Capture path</div>
                 <div class="mt-1 text-xs leading-relaxed text-storm">{{ selectedStreamDisplayMode.technical }}</div>
               </div>
             </div>
@@ -525,7 +535,7 @@ function updateDisplayPlannerSource(event) {
                 Streaming output (dongle)
                 <select
                   v-model="config.linux_streaming_output"
-                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input mt-1"
                 >
                   <option value="">— select —</option>
                   <option
@@ -547,7 +557,7 @@ function updateDisplayPlannerSource(event) {
                 Primary output (real panel)
                 <select
                   v-model="config.linux_primary_output"
-                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input mt-1"
                 >
                   <option value="">— select —</option>
                   <option
@@ -569,7 +579,7 @@ function updateDisplayPlannerSource(event) {
                 Swap mode
                 <select
                   v-model="config.headless_swap_mode"
-                  class="mt-1 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input mt-1"
                 >
                   <option value="privacy">privacy — blank panel after portal approval</option>
                   <option value="off">off — extended, panel stays primary</option>
@@ -600,7 +610,7 @@ function updateDisplayPlannerSource(event) {
             </summary>
 
             <div class="space-y-3 border-t border-storm/20 p-4">
-              <div class="rounded-lg border border-storm/20 bg-void/25 p-3" data-capture-path-explainer>
+              <div class="stat-tile-compact p-3" data-capture-path-explainer>
                 <div class="text-sm font-semibold text-silver">How capture works</div>
                 <p class="mt-1 text-xs leading-relaxed text-storm">
                   Polaris chooses capture after the launch mode is set. GPU-native keeps frames on the GPU; System-memory capture copies through RAM and can be the intended safe path on AMD and Intel. Mission Control reports the path actually used.
@@ -621,7 +631,7 @@ function updateDisplayPlannerSource(event) {
                 </div>
 
                 <div class="mt-4 grid gap-3 xl:grid-cols-2">
-                  <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-3">
+                  <div v-for="item in linuxStreamingSetupChecklist" :key="item.id" class="stat-tile-compact py-3">
                     <div class="flex items-start justify-between gap-3">
                       <div class="text-sm font-semibold text-silver">{{ item.title }}</div>
                       <span class="rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ item.status }}</span>
@@ -639,9 +649,9 @@ function updateDisplayPlannerSource(event) {
                   </div>
                   <span class="meta-pill shrink-0" :class="clientSettingsSyncTone">{{ clientSettingsSyncBadge }}</span>
                 </div>
-                <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-                  <div v-for="row in clientSettingsRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
-                    <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ row.label }}</div>
+                <div class="mt-4 grid gap-2 sm:grid-cols-2">
+                  <div v-for="row in clientSettingsRows" :key="row.label" class="stat-tile-compact">
+                    <div class="stat-kicker">{{ row.label }}</div>
                     <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
                     <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
                   </div>
@@ -825,8 +835,8 @@ function updateDisplayPlannerSource(event) {
         </div>
 
         <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <div v-for="row in autoQualityRows" :key="row.label" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2">
-            <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ row.label }}</div>
+          <div v-for="row in autoQualityRows" :key="row.label" class="stat-tile-compact">
+            <div class="stat-kicker">{{ row.label }}</div>
             <div class="mt-1 text-sm font-medium text-silver">{{ row.value }}</div>
             <div class="mt-1 text-[11px] text-storm">{{ row.note }}</div>
           </div>
@@ -858,7 +868,7 @@ function updateDisplayPlannerSource(event) {
             id="audio_sink"
             v-model="config.audio_sink"
             type="text"
-            class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+            class="settings-input"
             :placeholder="$tp('config.audio_sink_placeholder', 'alsa_output.pci-0000_09_00.3.analog-stereo')"
           />
           <div class="text-sm text-storm mt-1">{{ $tp('config.audio_sink_desc') }}</div>
@@ -893,7 +903,7 @@ pactl info | grep Source</pre>
                   id="virtual_sink"
                   v-model="config.virtual_sink"
                   type="text"
-                  class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input"
                   :placeholder="$t('config.virtual_sink_placeholder')"
                 />
                 <div class="text-sm text-storm mt-1 whitespace-pre-wrap">{{ $t('config.virtual_sink_desc') }}</div>
@@ -958,16 +968,27 @@ pactl info | grep Source</pre>
               v-for="choice in displayPlanner.visibleChoices"
               :key="choice.id"
               type="button"
-              class="focus-ring min-h-[126px] rounded-lg border border-storm/30 bg-deep/40 p-4 text-left transition hover:border-storm/70"
-              :class="choice.id === displayPlanner.recommendedId ? 'border-success/45 bg-success/10' : ''"
+              class="selectable-card focus-ring min-h-[126px] rounded-lg border p-4 hover:border-storm/70"
+              :class="activeDisplayPlanId === choice.id
+                ? 'border-ice bg-ice/12 shadow-[0_0_0_1px_rgba(224,230,237,0.18)]'
+                : 'border-storm/30 bg-deep/40'"
+              :aria-pressed="activeDisplayPlanId === choice.id"
               @click="applyDisplayPlan(choice)"
             >
               <div class="flex items-start justify-between gap-3">
                 <div class="text-sm font-semibold text-silver">{{ choice.title }}</div>
-                <span class="shrink-0 rounded-full border border-storm/30 bg-storm/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ choice.badge }}</span>
+                <span
+                  class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow"
+                  :class="choice.id === displayPlanner.recommendedId
+                    ? 'border-success/30 bg-success/10 text-success'
+                    : 'border-storm/30 bg-storm/10 text-storm'"
+                >{{ choice.id === displayPlanner.recommendedId ? 'Recommended' : choice.badge }}</span>
               </div>
               <div class="mt-3 text-sm leading-relaxed text-storm">{{ choice.reason }}</div>
-              <div class="mt-3 rounded-md border border-storm/20 bg-void/25 px-2.5 py-2 font-mono text-xs text-silver">{{ choice.targetMode }}</div>
+              <div class="mt-3">
+                <div class="eyebrow-label">Target mode</div>
+                <div class="mt-1 font-mono text-xs text-silver">{{ choice.targetMode }}</div>
+              </div>
             </button>
           </div>
 
@@ -993,9 +1014,10 @@ pactl info | grep Source</pre>
                 v-for="factor in displayPlanner.advancedScaleFactors"
                 :key="factor.label"
                 type="button"
-                class="focus-ring rounded-lg border px-3 py-3 text-left"
-                :class="factor.safe ? 'border-storm/30 bg-void/25 hover:border-storm/70' : 'border-warning/25 bg-warning/10 opacity-60'"
+                class="selectable-card focus-ring rounded-lg border px-3 py-3"
+                :class="factor.safe ? 'border-storm/30 bg-deep/40 hover:border-storm/70' : 'border-warning/25 bg-warning/10'"
                 :disabled="!factor.safe"
+                :aria-pressed="factor.safe && customDisplayScale === factor.scaleFactor"
                 @click="customDisplayScale = factor.scaleFactor"
               >
                 <div class="text-sm font-semibold text-silver">{{ factor.label }}</div>
@@ -1011,7 +1033,7 @@ pactl info | grep Source</pre>
                 min="0.5"
                 max="2"
                 step="0.25"
-                class="mt-2 w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                class="settings-input mt-2"
               />
             </label>
           </div>
@@ -1028,7 +1050,7 @@ pactl info | grep Source</pre>
             id="fallback_mode"
             v-model="config.fallback_mode"
             type="text"
-            class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+            class="settings-input"
             placeholder="1920x1080x60"
             @input="updateDisplayPlannerSource"
           />
@@ -1074,19 +1096,19 @@ pactl info | grep Source</pre>
         <div class="settings-form-grid">
           <div>
             <label for="max_bitrate" class="block text-sm font-medium text-storm mb-1">{{ $t("config.max_bitrate") }}</label>
-            <input id="max_bitrate" v-model="config.max_bitrate" type="number" placeholder="0" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" />
+            <input id="max_bitrate" v-model="config.max_bitrate" type="number" placeholder="0" class="settings-input" />
             <div class="text-sm text-storm mt-1">{{ $t("config.max_bitrate_desc") }}</div>
           </div>
 
           <div>
             <label for="minimum_fps_target" class="block text-sm font-medium text-storm mb-1">{{ $t("config.minimum_fps_target") }}</label>
-            <input id="minimum_fps_target" v-model="config.minimum_fps_target" type="number" min="0" max="1000" placeholder="0" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" />
+            <input id="minimum_fps_target" v-model="config.minimum_fps_target" type="number" min="0" max="1000" placeholder="0" class="settings-input" />
             <div class="text-sm text-storm mt-1">{{ $t("config.minimum_fps_target_desc") }}</div>
           </div>
 
           <div>
             <label for="disconnect_resume_timeout_seconds" class="block text-sm font-medium text-storm mb-1">{{ $t("config.disconnect_resume_timeout_seconds") }}</label>
-            <input id="disconnect_resume_timeout_seconds" v-model.number="config.disconnect_resume_timeout_seconds" type="number" min="0" max="86400" step="30" placeholder="300" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" />
+            <input id="disconnect_resume_timeout_seconds" v-model.number="config.disconnect_resume_timeout_seconds" type="number" min="0" max="86400" step="30" placeholder="300" class="settings-input" />
             <div class="text-sm text-storm mt-1">{{ $t("config.disconnect_resume_timeout_seconds_desc") }}</div>
           </div>
         </div>
@@ -1109,7 +1131,7 @@ pactl info | grep Source</pre>
                 min="500"
                 max="100000"
                 step="500"
-                class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver text-sm focus:border-ice focus:outline-none"
+                class="settings-input text-sm"
               />
             </div>
             <div>
@@ -1120,7 +1142,7 @@ pactl info | grep Source</pre>
                 min="1000"
                 max="300000"
                 step="1000"
-                class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver text-sm focus:border-ice focus:outline-none"
+                class="settings-input text-sm"
               />
             </div>
           </div>
