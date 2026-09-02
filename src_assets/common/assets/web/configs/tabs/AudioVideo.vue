@@ -271,12 +271,12 @@ const linuxStreamingSetupChecklist = computed(() => {
       title: 'Pick a stream path',
       status: selectedStreamDisplayMode.value.title,
       copy: isGamescopePath.value
-        ? 'Gamescope Stream: attach idle gamescope-0 or spawn owned headless; portal captures it. Encoder/bitrate/HDR below still apply.'
+        ? 'Attach an idle gamescope-0 or let Polaris spawn an owned session; encoder and bitrate settings below still apply.'
         : isDonglePath.value
-          ? 'Dongle: set streaming + primary outputs, privacy swap, portal capture after topology prepare.'
+          ? 'Set the streaming and primary outputs plus the privacy swap below, then save.'
           : isLabwcPath.value
-            ? 'Private Stream (labwc) is the solid default — apps stay off the desk, wlroots capture.'
-            : 'Mirror Desktop captures the host session via portal. Prefer Private Stream or Gamescope for isolated apps.',
+            ? 'Private Stream (labwc) is the solid default and keeps apps off the host desktop.'
+            : 'Mirror Desktop streams the visible host session; prefer Private Stream or Gamescope Stream for isolated apps.',
     },
     {
       id: 'encoder',
@@ -284,7 +284,7 @@ const linuxStreamingSetupChecklist = computed(() => {
       status: autoQualityBadge.value,
       copy: autoQualityEnabled.value
         ? 'Auto Quality balances bitrate and profile recovery for this path.'
-        : 'Set encoder (NVENC/VAAPI), bitrate, and optional Auto Quality — these apply to labwc and gamescope.',
+        : 'Set the encoder, bitrate, and optional Auto Quality for this path.',
     },
   ]
   if (isLabwcPath.value) {
@@ -294,7 +294,7 @@ const linuxStreamingSetupChecklist = computed(() => {
       status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
       copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
         ? 'Windowed labwc may be used to keep DMA-BUF capture GPU-resident when proven.'
-        : 'Leave GPU-native off unless session health shows SHM/system-memory fallback. This flag does not apply to Gamescope Stream.',
+        : 'Leave GPU-native off unless session health shows SHM/system-memory fallback.',
     })
   }
   if (isGamescopePath.value) {
@@ -302,7 +302,7 @@ const linuxStreamingSetupChecklist = computed(() => {
       id: 'gamescope-host',
       title: 'Host gamescope stack',
       status: 'Portal + gamescope-0',
-      copy: 'Needs gamescope on PATH and (on lea) private portal units. WebUI labwc flags (cage, GPU-native preference) are ignored for this path.',
+      copy: 'Install gamescope on the host PATH; labwc-only web UI flags are ignored for this path.',
     })
   }
   if (nvidiaTrueHeadlessGpuNativeGuard.value) {
@@ -310,7 +310,7 @@ const linuxStreamingSetupChecklist = computed(() => {
       id: 'nvidia-headless-gpu-native-guard',
       title: 'NVIDIA true-headless guard',
       status: 'Needs GPU-native preference',
-      copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 when GPU-native capture is disabled. Switch to Private Stream (GPU-native) or enable the preference, restart, retry.',
+      copy: 'Disabled GPU-native capture can hit a cold-cache 503 here; switch to Private Stream (GPU-native) or enable the preference, then restart and retry.',
     })
   }
   return items
@@ -630,7 +630,8 @@ function updateDisplayPlannerSource(event) {
               <StatTile tile-class="p-3" data-capture-path-explainer>
                 <div class="text-sm font-semibold text-silver">How capture works</div>
                 <p class="mt-1 text-xs leading-relaxed text-storm">
-                  Polaris chooses capture after the launch mode is set. GPU-native keeps frames on the GPU; System-memory capture copies through RAM and can be the intended safe path on AMD and Intel. Mission Control reports the path actually used.
+                  Polaris picks the capture path after the launch mode is set: GPU-native keeps frames on the GPU, while System-memory capture copies through RAM and can be the intended safe path on AMD and Intel.
+                  <a href="https://papi-ux.com/docs/launch-modes/#how-capture-works" target="_blank" class="focus-ring text-ice hover:underline">How capture works</a>
                 </p>
               </StatTile>
 
@@ -655,6 +656,9 @@ function updateDisplayPlannerSource(event) {
                     </div>
                     <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
                   </StatTile>
+                </div>
+                <div class="mt-3 text-xs text-storm">
+                  Full setup detail: <a href="https://papi-ux.com/docs/launch-modes/#linux-setup-checklist" target="_blank" class="focus-ring text-ice hover:underline">Linux setup checklist</a>
                 </div>
               </div>
 
@@ -1002,7 +1006,10 @@ pactl info | grep Source</pre>
           <div class="flex flex-col gap-3 rounded-lg border border-ice/15 bg-ice/5 p-4 text-sm text-storm lg:flex-row lg:items-center lg:justify-between">
             <div>
               <div class="font-medium text-silver">Moonlight compatibility stays standard</div>
-              <div class="mt-1">Planner choices only write the existing fallback display mode format. Nova/per-game overrides can layer on top where client-settings support exists.</div>
+              <div class="mt-1">
+                Planner choices only write the existing fallback display mode format.
+                <a href="https://papi-ux.com/docs/configuration/#common-options" target="_blank" class="focus-ring text-ice hover:underline">fallback_mode reference</a>
+              </div>
             </div>
             <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-secondary" @click="showDisplayPlannerAdvanced = !showDisplayPlannerAdvanced">
               {{ showDisplayPlannerAdvanced ? 'Hide Advanced' : 'Show Advanced' }}
