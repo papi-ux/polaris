@@ -34,7 +34,7 @@ TEST(DoctorResetContract, OptimizeCannotReadHistoryAiSettingsOrRecoveryOverlay) 
   const auto serializer = between(
     nvhttp,
     "void append_deterministic_optimization_json(",
-    "bool ai_auto_quality_enabled()"
+    "bool host_prefers_headless()"
   );
   for (const auto *forbidden : {
          "get_session_history", "get_cached", "request_sync",
@@ -847,7 +847,7 @@ TEST(DoctorResetContract, ClientSettingsPersistencePreservesExistingConfigAtomic
   const auto persistence = between(
     nvhttp,
     "bool persist_config_values(",
-    "std::string configured_stream_display_mode_selection()"
+    "using persist_config_values_fn_t"
   );
 
   EXPECT_EQ(persistence.find("file_handler::read_file"), std::string::npos);

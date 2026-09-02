@@ -776,6 +776,7 @@ TEST(StreamDisplayPolicyTests, ModeOptionsExposeRuntimeCaptureTopologyForPlugins
   ASSERT_NE(headless, options.end());
   EXPECT_EQ(headless->runtime, "labwc");
   EXPECT_EQ(headless->capture, "wlroots");
+  EXPECT_EQ(headless->badge, "Recommended");
   EXPECT_EQ(headless->available, stream_display_policy::selection_available("headless_stream"));
   if (!headless->available) {
     EXPECT_FALSE(headless->unavailable_reason.empty());

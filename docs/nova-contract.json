@@ -359,6 +359,7 @@
       ],
       "fields": [
         "available",
+        "badge",
         "capture",
         "group",
         "label",
@@ -376,7 +377,7 @@
         "receiver": "mode"
       },
       "polaris_emitter": {
-        "file": "src/nvhttp.cpp",
+        "file": "src/settings_metadata.cpp",
         "function": "stream_display_mode_options_json",
         "style": "initializer_list",
         "declaration": "modes.push_back({"
@@ -540,6 +541,7 @@
       "game": [],
       "session_capture": [],
       "client_settings_mode_option": [
+        "badge",
         "capture",
         "runtime",
         "topology"

@@ -618,6 +618,7 @@ namespace stream_display_policy {
       mode_option_t option;
       option.value = std::string {path.id};
       option.label = std::string {path.label};
+      option.badge = std::string {path.badge};
       option.reason = reason_for_selection(path.id, virtual_display_available);
       option.available = path.available &&
         (path.id != stream_path::k_host_virtual_display || virtual_display_available);
