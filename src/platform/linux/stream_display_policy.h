@@ -84,6 +84,21 @@ namespace stream_display_policy {
   );
 
   /**
+   * @brief Resolve a temporary capture backend when one launch changes paths.
+   *
+   * Private labwc outputs require direct wlroots capture. Conversely, wlroots
+   * cannot capture an ordinary host desktop or a Gamescope session. This
+   * helper changes only a session-scoped override; the caller remains
+   * responsible for restoring the saved host capture setting at teardown.
+   * Explicit compatible choices such as Desktop + KMS are preserved.
+   */
+  std::string capture_for_session_transition(
+    std::string_view configured_selection,
+    std::string_view session_selection,
+    std::string_view current_capture
+  );
+
+  /**
    * @brief Normalize connector and capture authority for the backend that will
    *        or did create the Host Virtual display.
    *

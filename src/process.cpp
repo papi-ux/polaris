@@ -6875,6 +6875,7 @@ namespace proc {
     const bool virtual_display_requested_before_mode =
       launch_session->virtual_display ||
       (app.virtual_display && !launch_session->user_locked_virtual_display);
+    const auto configured_session_mode = stream_display_policy::configured_selection();
     auto session_mode = stream_display_policy::effective_session_selection_for_launch(
       launch_session->stream_mode,
       launch_session->mirror_desktop || app.desktop_mirror,
@@ -6884,7 +6885,7 @@ namespace proc {
       false
     );
     if (session_mode.empty()) {
-      session_mode = stream_display_policy::configured_selection();
+      session_mode = configured_session_mode;
     }
     if (!session_mode.empty()) {
       launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
@@ -6945,6 +6946,21 @@ namespace proc {
       if (!session_mode_failed &&
           !stream_display_policy::selection_companion_state_matches(session_mode)) {
         if (stream_display_policy::apply_selection(session_mode, mode_error)) {
+          const auto session_capture =
+            stream_display_policy::capture_for_session_transition(
+              configured_session_mode,
+              session_mode,
+              config::video.capture
+            );
+          if (session_capture != config::video.capture) {
+            BOOST_LOG(info) << "process: session capture backend override ["sv
+                            << (config::video.capture.empty() ? "auto" : config::video.capture)
+                            << "] -> ["sv
+                            << (session_capture.empty() ? "auto" : session_capture)
+                            << "] for stream mode ["sv << session_mode
+                            << "]; host default restored at teardown"sv;
+            config::video.capture = session_capture;
+          }
           this->initial_linux_display_saved = true;
           session_mode_applied = true;
           BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
