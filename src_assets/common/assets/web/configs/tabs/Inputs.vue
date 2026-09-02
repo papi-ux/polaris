@@ -37,7 +37,7 @@ const config = ref(props.config)
         <label for="gamepad" class="settings-field-label">{{ $t('config.gamepad') }}</label>
         <InfoHint size="sm" :label="$t('config.gamepad')">{{ $t('config.gamepad_desc') }}</InfoHint>
       </div>
-      <select id="gamepad" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.gamepad">
+      <select id="gamepad" class="settings-input" v-model="config.gamepad">
         <option value="auto">{{ $t('_common.auto') }}</option>
 
         <PlatformLayout :platform="platform">
@@ -121,7 +121,7 @@ const config = ref(props.config)
         <label for="back_button_timeout" class="settings-field-label">{{ $t('config.back_button_timeout') }}</label>
         <InfoHint size="sm" :label="$t('config.back_button_timeout')">{{ $t('config.back_button_timeout_desc') }}</InfoHint>
       </div>
-      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="back_button_timeout" placeholder="-1"
+      <input type="text" class="settings-input" id="back_button_timeout" placeholder="-1"
              v-model="config.back_button_timeout" />
       </div>
     </section>
@@ -149,7 +149,7 @@ const config = ref(props.config)
         <label for="key_repeat_delay" class="settings-field-label">{{ $t('config.key_repeat_delay') }}</label>
         <InfoHint size="sm" :label="$t('config.key_repeat_delay')">{{ $t('config.key_repeat_delay_desc') }}</InfoHint>
       </div>
-      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="key_repeat_delay" placeholder="500"
+      <input type="text" class="settings-input" id="key_repeat_delay" placeholder="500"
              v-model="config.key_repeat_delay" />
       </div>
 
@@ -158,7 +158,7 @@ const config = ref(props.config)
         <label for="key_repeat_frequency" class="settings-field-label">{{ $t('config.key_repeat_frequency') }}</label>
         <InfoHint size="sm" :label="$t('config.key_repeat_frequency')">{{ $t('config.key_repeat_frequency_desc') }}</InfoHint>
       </div>
-      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="key_repeat_frequency" placeholder="24.9"
+      <input type="text" class="settings-input" id="key_repeat_frequency" placeholder="24.9"
              v-model="config.key_repeat_frequency" />
       </div>
 
