@@ -21,16 +21,16 @@ test('settings metadata projection answers a session with version 1', async ({ l
   expect(body.status).toBe(true)
   expect(body.version).toBe(1)
   expect(Array.isArray(body.modes)).toBe(true)
-  expect(body.fields).toBeTypeOf('object')
-  expect(body.stream_display).toBeTypeOf('object')
-  expect(body.auto_quality).toBeTypeOf('object')
+  expect(typeof body.fields).toBe('object')
+  expect(typeof body.stream_display).toBe('object')
+  expect(typeof body.auto_quality).toBe('object')
 
   // The stats channel carries the same tuning and auto-quality blocks at 1 Hz.
   const stats = await loggedInPage.request.get('/api/stats/stream')
   expect(stats.status()).toBe(200)
   const statsBody = await stats.json()
-  expect(statsBody.tuning).toBeTypeOf('object')
-  expect(statsBody.auto_quality).toBeTypeOf('object')
+  expect(typeof statsBody.tuning).toBe('object')
+  expect(typeof statsBody.auto_quality).toBe('object')
 })
 
 test('settings metadata projection requires a web session', async ({ request }) => {
