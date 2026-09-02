@@ -1,4 +1,4 @@
-# Building Polaris on openSUSE Tumbleweed
+# Build on openSUSE Tumbleweed
 
 Polaris has no prebuilt openSUSE package yet, but it builds cleanly from source on
 **openSUSE Tumbleweed** (x86_64). This guide covers the dependencies, the build, and
