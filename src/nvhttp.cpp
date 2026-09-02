@@ -5217,6 +5217,88 @@ namespace nvhttp {
     return named_cert_nodes;
   }
 
+  nlohmann::json client_settings_projection(const std::string &client_uuid) {
+    crypto::p_named_cert_t paired_client;
+    if (!client_uuid.empty()) {
+      std::lock_guard lock(client_state_mutex);
+      for (auto &named_cert : client_root.named_devices) {
+        if (named_cert->uuid == client_uuid) {
+          paired_client = named_cert;
+          break;
+        }
+      }
+      if (!paired_client) {
+        return nlohmann::json::object();
+      }
+    }
+
+    // Host view: no paired overrides and no client identity, so the
+    // client_to_host sync fields read pending instead of borrowing report
+    // state from an arbitrary paired device.
+    const crypto::named_cert_t host_view {};
+    const crypto::named_cert_t &client = paired_client ? *paired_client : host_view;
+
+    const auto stats = stream_stats::get_current();
+    const auto health = build_session_health_json(
+      stats,
+      proc::proc.session_uses_virtual_display(),
+      client.name,
+      proc::proc.get_last_run_app_name(),
+      proc::proc.get_running_app_uuid()
+    );
+    const auto policy = build_stream_policy_json(client, stats, health);
+    const auto configured_mode = settings_metadata::configured_stream_display_mode_selection();
+    const auto effective_mode = settings_metadata::effective_stream_display_mode_selection(stats);
+    const bool relaunch_required =
+      rtsp_stream::session_count() != 0 && configured_mode != effective_mode;
+    auto sync = build_client_settings_sync_status(
+      client,
+      stats,
+      policy,
+      configured_mode,
+      effective_mode,
+      relaunch_required
+    );
+
+    nlohmann::json projection;
+    projection["view"] = paired_client ? "paired_client" : "host";
+    if (paired_client) {
+      projection["client"] = {
+        {"uuid", client.uuid},
+        {"name", client.name},
+        {"display_mode", client.display_mode},
+        {"target_bitrate_kbps", client.target_bitrate_kbps}
+      };
+    }
+    projection["fields"] = sync["fields"];
+    sync.erase("fields");
+    projection["sync"] = std::move(sync);
+    projection["stream_display"] = {
+      {"configured", configured_mode},
+      {"effective", effective_mode},
+      {"configured_label", settings_metadata::stream_display_mode_label_for_selection(configured_mode)},
+      {"effective_label", settings_metadata::stream_display_mode_label_for_selection(effective_mode)},
+      {"relaunch_required", relaunch_required}
+    };
+    return projection;
+  }
+
+  nlohmann::json auto_quality_status_json() {
+    const auto stats = stream_stats::get_current();
+    const auto health = build_session_health_json(
+      stats,
+      proc::proc.session_uses_virtual_display(),
+      std::string {},
+      proc::proc.get_last_run_app_name(),
+      proc::proc.get_running_app_uuid()
+    );
+    return settings_metadata::build_auto_quality_policy_json(
+      health,
+      adaptive_bitrate::get_state(),
+      stats.bitrate_kbps
+    );
+  }
+
   void applist(resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     const auto advertised_codec_support = advertised_codec_support_for_http(true);
