@@ -24,7 +24,7 @@ namespace {
 }  // namespace
 
 TEST(CursorVisibilityConfigTests, HostCursorIsShownByDefault) {
-  EXPECT_TRUE(config::input.mouse_cursor_visible);
+  EXPECT_TRUE(config::default_mouse_cursor_visible);
 }
 
 TEST_F(CursorVisibilityTest, SetVisibleUpdatesState) {
