@@ -1,4 +1,4 @@
-# Bazzite Install Guide
+# Install on Bazzite
 
 Bazzite is Fedora-based, but it is an immutable `rpm-ostree` system rather than a
 normal DNF-managed Fedora install. The clean Polaris path for everyday Bazzite

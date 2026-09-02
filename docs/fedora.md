@@ -1,4 +1,4 @@
-# Fedora 44 Install Guide
+# Install on Fedora 44
 
 Fedora 44 is one of the two recommended Polaris package paths, and the official
 `Polaris-fedora44-x86_64.rpm` asset ships with every release. Fedora 44 is the only Fedora release
@@ -57,7 +57,7 @@ linux_prefer_gpu_native_capture = enabled
 ```
 
 Then start a game and read the active runtime, capture path, and encoder in Mission Control. See
-[Runtime and Streaming Model](runtime.md) for what each value means, and
+[Runtime and streaming model](runtime.md) for what each value means, and
 [Configuration](configuration.md) for the full setting reference.
 
 ## Upgrade

@@ -1,4 +1,4 @@
-# Runtime and Streaming Model
+# Runtime and streaming model
 
 Polaris is built around a stream runtime that is separate from your normal desktop session. The default Linux recommendation is Headless Stream: games launch inside a private `labwc` Wayland compositor, Polaris captures that compositor, and your KDE, GNOME, or wlroots desktop keeps its layout and display state.
 
