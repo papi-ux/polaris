@@ -21,7 +21,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="nvenc_preset" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_preset') }}</label>
-        <select id="nvenc_preset" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.nvenc_preset">
+        <select id="nvenc_preset" class="settings-input" v-model="config.nvenc_preset">
           <option value="1">P1 {{ $t('config.nvenc_preset_1') }}</option>
           <option value="2">P2</option>
           <option value="3">P3</option>
@@ -35,7 +35,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="nvenc_twopass" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_twopass') }}</label>
-        <select id="nvenc_twopass" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.nvenc_twopass">
+        <select id="nvenc_twopass" class="settings-input" v-model="config.nvenc_twopass">
           <option value="disabled">{{ $t('config.nvenc_twopass_disabled') }}</option>
           <option value="quarter_res">{{ $t('config.nvenc_twopass_quarter_res') }}</option>
           <option value="full_res">{{ $t('config.nvenc_twopass_full_res') }}</option>
@@ -45,7 +45,7 @@ const config = ref(props.config)
 
       <div v-if="platform === 'linux'" class="mb-3">
         <label for="nvenc_split_encode_mode" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_split_encode_mode') }}</label>
-        <select id="nvenc_split_encode_mode" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.nvenc_split_encode_mode">
+        <select id="nvenc_split_encode_mode" class="settings-input" v-model="config.nvenc_split_encode_mode">
           <option value="disabled">{{ $t('config.nvenc_split_encode_mode_disabled') }}</option>
           <option value="auto">{{ $t('config.nvenc_split_encode_mode_auto') }}</option>
           <option value="forced">{{ $t('config.nvenc_split_encode_mode_forced') }}</option>
@@ -64,7 +64,7 @@ const config = ref(props.config)
 
       <div class="mb-3">
         <label for="nvenc_vbv_increase" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_vbv_increase') }}</label>
-        <input type="number" min="0" max="400" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="nvenc_vbv_increase" placeholder="0"
+        <input type="number" min="0" max="400" class="settings-input" id="nvenc_vbv_increase" placeholder="0"
                v-model="config.nvenc_vbv_increase" />
         <div class="text-sm text-storm mt-1">
           {{ $t('config.nvenc_vbv_increase_desc') }}<br><br>
@@ -116,7 +116,7 @@ const config = ref(props.config)
 
       <div>
         <label for="nvenc_h264_cavlc" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_intra_refresh') }}</label>
-        <select id="nvenc_h264_cavlc" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.nvenc_intra_refresh">
+        <select id="nvenc_h264_cavlc" class="settings-input" v-model="config.nvenc_intra_refresh">
           <option value="disabled">{{ $t('_common.auto') }}</option>
           <option value="enabled">{{ $t('_common.enabled') }}</option>
         </select>

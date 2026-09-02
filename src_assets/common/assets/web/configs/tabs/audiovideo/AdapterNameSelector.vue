@@ -14,7 +14,7 @@ const config = ref(props.config)
 <template>
   <div class="mb-3" v-if="platform !== 'macos'">
     <label for="adapter_name" class="block text-sm font-medium text-storm mb-1">{{ $t('config.adapter_name') }}</label>
-    <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="adapter_name"
+    <input type="text" class="settings-input" id="adapter_name"
            :placeholder="$tp('config.adapter_name_placeholder', '/dev/dri/renderD128')"
            v-model="config.adapter_name" />
     <div class="text-sm text-storm mt-1">
