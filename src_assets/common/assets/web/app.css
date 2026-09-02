@@ -977,6 +977,54 @@ textarea {
   @apply rounded-lg border border-storm/20 bg-deep/30 p-3;
 }
 
+/* The one editable-field recipe. Nothing that cannot receive input may use it. */
+.settings-input {
+  @apply w-full rounded-lg border border-storm bg-deep px-3 py-2 text-silver focus:border-ice focus:outline-none;
+}
+
+.settings-disclosure > summary {
+  @apply cursor-pointer list-none;
+}
+
+.settings-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-disclosure-summary {
+  @apply flex items-center justify-between gap-3;
+}
+
+.settings-disclosure-chevron {
+  @apply transition-transform duration-150;
+}
+
+.settings-disclosure[open] > summary .settings-disclosure-chevron {
+  @apply rotate-180;
+}
+
+.settings-disclosure-body {
+  @apply mt-4;
+}
+
+.settings-summary-copy {
+  @apply mt-1 text-sm leading-relaxed text-storm;
+}
+
+/* Interactive choice cards: pointer + hover motion when enabled, inert when not.
+   Pair with :aria-pressed so pressed state is visible to assistive tech. */
+.selectable-card {
+  @apply cursor-pointer text-left transition-[background-color,border-color,color,opacity] duration-150;
+}
+
+.selectable-card:disabled {
+  @apply cursor-default opacity-60;
+}
+
+/* Compact read-only status tile: stat grammar, never the input recipe. */
+.stat-tile-compact {
+  @apply rounded-xl border border-storm/10 bg-deep/40 px-3 py-2;
+}
+
 .meta-pill {
   @apply rounded-full border px-2.5 py-1 text-xs leading-none text-storm;
   background: var(--surface-pill);
