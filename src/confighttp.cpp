@@ -4058,15 +4058,24 @@ namespace confighttp {
     output_tree["client_settings_effective_stream_display_mode"] = effective_mode;
     output_tree["client_settings_stream_display_mode_label"] = stream_display_mode_label(configured_mode);
     output_tree["client_settings_effective_stream_display_mode_label"] = stream_display_mode_label(effective_mode);
+    // Config keys, not GameStream sync-field names: the web UI checks its own
+    // pending config keys against these to render apply-live vs restart badges.
     output_tree["client_settings_live_fields"] = nlohmann::json::array({
-      "target_bitrate_kbps",
+      "max_bitrate",
       "adaptive_bitrate_enabled",
-      "ai_optimizer_enabled"
+      "ai_enabled"
     });
     output_tree["client_settings_restart_fields"] = nlohmann::json::array({
-      "stream_display_mode",
-      "display_mode"
+      "linux_stream_mode",
+      "fallback_mode"
     });
+    {
+      auto response_only_keys = nlohmann::json::array();
+      for (const auto key : validation::response_only_config_keys()) {
+        response_only_keys.emplace_back(key);
+      }
+      output_tree["config_response_only_keys"] = std::move(response_only_keys);
+    }
 #ifdef _WIN32
     output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
 #endif
@@ -4186,45 +4195,9 @@ namespace confighttp {
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
-      const auto is_response_only_config_key = [](const std::string_view key) {
-        return key == "status"sv ||
-               key == "platform"sv ||
-               key == "version"sv ||
-               key == "has_ai_api_key"sv ||
-               key == "has_steamgriddb_api_key"sv ||
-               key == "has_api_key"sv ||
-               key == "vdisplayStatus"sv ||
-               key == "vdisplayAvailable"sv ||
-               key == "vdisplayBackend"sv ||
-               key == "runtime_backend"sv ||
-               key == "runtime_requested_headless"sv ||
-               key == "runtime_effective_headless"sv ||
-               key == "runtime_gpu_native_override_active"sv ||
-               key == "stream_display_mode_options"sv ||
-               key == "client_settings_available"sv ||
-               key == "client_settings_v1"sv ||
-               key == "client_settings_endpoint"sv ||
-               key == "client_settings_endpoint_path"sv ||
-               key == "client_settings_endpoint_origin"sv ||
-               key == "client_settings_endpoint_same_origin"sv ||
-               key == "client_settings_endpoint_https_port"sv ||
-               key == "client_settings_endpoint_base_url"sv ||
-               key == "client_settings_endpoint_url"sv ||
-               key == "client_settings_sync_mode"sv ||
-               key == "client_settings_authority"sv ||
-               key == "client_settings_relaunch_required"sv ||
-               key == "client_settings_stream_display_mode"sv ||
-               key == "client_settings_effective_stream_display_mode"sv ||
-               key == "client_settings_stream_display_mode_label"sv ||
-               key == "client_settings_effective_stream_display_mode_label"sv ||
-               key == "client_settings_live_fields"sv ||
-               key == "client_settings_restart_fields"sv ||
-               key == "ai_auto_quality_enabled"sv ||
-               key == "stream_display_mode"sv;
-      };
       std::string validation_error;
       for (auto it = input_tree.begin(); it != input_tree.end();) {
-        if (is_response_only_config_key(it.key())) {
+        if (validation::is_response_only_config_key(it.key())) {
           it = input_tree.erase(it);
         } else {
           ++it;
