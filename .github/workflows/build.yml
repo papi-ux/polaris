@@ -21,7 +21,7 @@ env:
   POLARIS_CHECKOUT_REF: ${{ inputs.release_tag || github.ref }}
   POLARIS_PACKAGE_REF_NAME: ${{ inputs.release_tag || github.ref_name }}
   # Advance deliberately only after the full matrix proves a newer snapshot.
-  UBUNTU_APT_SNAPSHOT: 20260818T000000Z
+  UBUNTU_APT_SNAPSHOT: 20260901T000000Z
 
 jobs:
   resolve-source:
