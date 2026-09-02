@@ -8,8 +8,11 @@
 #include <src/confighttp_validation.h>
 #include <src/crypto.h>
 #include <src/nvhttp.h>
+#include <src/stream_stats.h>
 
+#include <chrono>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -190,6 +193,42 @@ TEST_F(SettingsProjectionContract, FieldMapCoversExactlyTheWritableConfigKeys) {
   EXPECT_EQ(actual, expected);
 }
 
+TEST_F(SettingsProjectionContract, StatsChannelAugmentationAddsTuningAndAutoQualityAdditively) {
+  nlohmann::json synthetic {
+    {"streaming", true},
+    {"fps", 60.0},
+    {"bitrate_kbps", 20000},
+    {"custom_consumer_key", "keep-me"}
+  };
+  const auto original = synthetic;
+
+  stream_stats::stats_t stats {};
+  stats.adaptive_target_bitrate_kbps = 12345;
+
+  const auto augmented = confighttp::augment_stream_stats_json(synthetic, stats);
+
+  // Every pre-existing key survives with its original value.
+  for (const auto &[key, value] : original.items()) {
+    ASSERT_TRUE(augmented.contains(key)) << key;
+    EXPECT_EQ(augmented.at(key), value) << key;
+  }
+  // Exactly the two additive keys appear, nothing else.
+  EXPECT_EQ(augmented.size(), original.size() + 2);
+  ASSERT_TRUE(augmented.contains("tuning"));
+  ASSERT_TRUE(augmented.contains("auto_quality"));
+
+  const auto &tuning = augmented.at("tuning");
+  ASSERT_TRUE(tuning.is_object());
+  EXPECT_EQ(tuning.size(), 14u);
+  EXPECT_EQ(tuning.at("adaptive_target_bitrate_kbps").get<int>(), 12345);
+  EXPECT_FALSE(tuning.at("ai_auto_quality_enabled").get<bool>());
+
+  const auto &auto_quality = augmented.at("auto_quality");
+  ASSERT_TRUE(auto_quality.is_object());
+  EXPECT_EQ(auto_quality.at("state").get<std::string>(), "off");
+  EXPECT_TRUE(auto_quality.contains("components"));
+}
+
 TEST_F(SettingsProjectionContract, ResponseOnlyKeysMirrorTheValidationList) {
   std::string error;
   const auto payload = confighttp::build_settings_metadata_payload(std::string {}, error);
@@ -207,4 +246,19 @@ TEST_F(SettingsProjectionContract, ResponseOnlyKeysMirrorTheValidationList) {
     }
   }
   EXPECT_TRUE(saw_stream_path_id);
+}
+
+// TEMPORARY-TIMING: removed before commit.
+TEST_F(SettingsProjectionContract, TempTimingAutoQualityStatusJson) {
+  using clock = std::chrono::steady_clock;
+  // Warm caches once so the measurement reflects steady-state serving.
+  (void) nvhttp::auto_quality_status_json();
+  const auto t0 = clock::now();
+  for (int i = 0; i < 1000; ++i) {
+    const auto payload = nvhttp::auto_quality_status_json();
+    (void) payload;
+  }
+  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
+  std::cout << "TEMP-TIMING auto_quality_status_json: " << us << " us / 1000 calls = "
+            << (static_cast<double>(us) / 1000.0) << " us per call" << std::endl;
 }
