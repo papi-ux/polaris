@@ -31,8 +31,14 @@ For the shared host-and-client view, see the
 
 ## Now — make Linux streaming dependable
 
+- Watch the public v1.4.0 path in the field and prioritize reproducible install,
+  launch, capture, resume, and teardown regressions over speculative features.
 - Harden start, stop, recovery, and teardown so failed sessions do not leave
   workloads, virtual displays, input devices, or stale state behind.
+- Finish affected-host validation for exact virtual-output capture, including the
+  wlroots connector-order case tracked in
+  [#556](https://github.com/papi-ux/polaris/issues/556), without falling back to a
+  physical monitor when ownership is uncertain.
 - Keep Mission Control diagnostics useful without requiring users to spelunk
   through giant logs.
 - Continue validating headless capture, compositor behavior, input isolation, and
@@ -41,6 +47,9 @@ For the shared host-and-client view, see the
   what is recommended, tested, experimental, or source-build only.
 - Make Polaris and Nova version pairing easier to understand while preserving
   standard Moonlight-client compatibility.
+- Improve Doctor's stage coverage and explanations before expanding its action
+  vocabulary. Same-stream changes must remain one-dimensional, reversible,
+  measured, and subordinate to a newer player choice.
 
 ## Next — make the current path smoother
 
