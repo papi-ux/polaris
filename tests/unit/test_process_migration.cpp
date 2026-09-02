@@ -4162,7 +4162,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 12);
+  EXPECT_EQ(migrated_tree["version"], 13);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -4227,7 +4227,7 @@ TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyFo
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 12);
+  EXPECT_EQ(migrated_tree["version"], 13);
   EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
   EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
 
@@ -4292,7 +4292,7 @@ TEST(ProcessMigrationTests, VersionTenAndElevenCatalogsRepairOnlyTheExactLegacyB
 
     const auto first_payload = file_handler::read_file(file_path.string().c_str());
     const auto migrated_tree = nlohmann::json::parse(first_payload);
-    EXPECT_EQ(migrated_tree["version"], 12);
+    EXPECT_EQ(migrated_tree["version"], 13);
     EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
     EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
     EXPECT_FALSE(migrated_tree["apps"][2].value("desktop-mirror", true));
@@ -4361,6 +4361,21 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
         {"uuid", "55555555-5555-4555-8555-555555555555"},
         {"source", "heroic"},
         {"detached", {"heroic heroic://launch/epic/Custom"}}
+      },
+      {
+        {"name", "Flatpak Query Candidate"},
+        {"uuid", "66666666-6666-4666-8666-666666666666"},
+        {"source", "heroic"},
+        {"detached", {
+          "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+          "'heroic://launch?appName=QueryCandidate&runner=legendary'"
+        }},
+        {"heroic-app-name", "QueryCandidate"},
+        {"heroic-store", "epic"},
+        {"heroic-runner", "legendary"},
+        {"heroic-install", "flatpak"},
+        {"prep-cmd", {{{"do", "notify-send preserved"}, {"undo", "notify-send restored"}}}},
+        {"custom-field", "preserved-query"}
       }
     }}
   };
@@ -4371,8 +4386,8 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 12);
-  ASSERT_EQ(migrated_tree["apps"].size(), 5u);
+  EXPECT_EQ(migrated_tree["version"], 13);
+  ASSERT_EQ(migrated_tree["apps"].size(), 6u);
 
   const auto &epic = migrated_tree["apps"][0];
   EXPECT_EQ(epic["uuid"], "11111111-1111-4111-8111-111111111111");
@@ -4389,7 +4404,7 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
   const auto &gog = migrated_tree["apps"][1];
   EXPECT_EQ(gog["custom-field"], "preserved");
   EXPECT_EQ(gog["detached"][0],
-    "setsid flatpak run com.heroicgameslauncher.hgl --no-gui --no-sandbox "
+    "setsid flatpak run com.heroicgameslauncher.hgl "
     "'heroic://launch?appName=1207658930&runner=gog'");
   EXPECT_EQ(gog["heroic-install"], "flatpak");
 
@@ -4399,6 +4414,59 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
   EXPECT_FALSE(migrated_tree["apps"][3].contains("heroic-app-name"));
   EXPECT_EQ(migrated_tree["apps"][4]["detached"], legacy_apps["apps"][4]["detached"]);
   EXPECT_FALSE(migrated_tree["apps"][4].contains("heroic-app-name"));
+
+  const auto &query = migrated_tree["apps"][5];
+  EXPECT_EQ(query["uuid"], "66666666-6666-4666-8666-666666666666");
+  EXPECT_EQ(query["custom-field"], "preserved-query");
+  EXPECT_EQ(query["detached"][0],
+    "setsid flatpak run com.heroicgameslauncher.hgl "
+    "'heroic://launch?appName=QueryCandidate&runner=legendary'");
+  ASSERT_EQ(query["prep-cmd"].size(), 1u);
+  EXPECT_EQ(query["prep-cmd"][0], legacy_apps["apps"][5]["prep-cmd"][0]);
+
+  auto parsed_again = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_again.has_value());
+  EXPECT_EQ(file_handler::read_file(file_path.string().c_str()), first_payload);
+
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, MigratesVersionTwelveFlatpakHeroicPathWithoutScannerMetadata) {
+  const auto file_path = test_paths::root() / "v12_heroic_launch_migration.json";
+  const nlohmann::json legacy_apps = {
+    {"version", 12},
+    {"apps", {
+      {
+        {"name", "Alan Wake 2"},
+        {"uuid", "77777777-7777-4777-8777-777777777777"},
+        {"source", "heroic"},
+        {"detached", {
+          "setsid flatpak run com.heroicgameslauncher.hgl "
+          "heroic://launch/epic/dc9d2e595d0e4650b35d659f90d41059"
+        }},
+        {"image-path", "/preserved/custom-art.png"}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), legacy_apps.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto first_payload = file_handler::read_file(file_path.string().c_str());
+  const auto migrated_tree = nlohmann::json::parse(first_payload);
+  EXPECT_EQ(migrated_tree["version"], 13);
+  ASSERT_EQ(migrated_tree["apps"].size(), 1u);
+  const auto &alan_wake = migrated_tree["apps"][0];
+  EXPECT_EQ(alan_wake["uuid"], "77777777-7777-4777-8777-777777777777");
+  EXPECT_EQ(alan_wake["image-path"], "/preserved/custom-art.png");
+  EXPECT_EQ(alan_wake["detached"][0],
+    "setsid flatpak run com.heroicgameslauncher.hgl "
+    "'heroic://launch?appName=dc9d2e595d0e4650b35d659f90d41059&runner=legendary'");
+  EXPECT_EQ(alan_wake["heroic-app-name"], "dc9d2e595d0e4650b35d659f90d41059");
+  EXPECT_EQ(alan_wake["heroic-store"], "epic");
+  EXPECT_EQ(alan_wake["heroic-runner"], "legendary");
+  EXPECT_EQ(alan_wake["heroic-install"], "flatpak");
 
   auto parsed_again = proc::parse(file_path.string());
   ASSERT_TRUE(parsed_again.has_value());
@@ -4584,7 +4652,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 12);
+  EXPECT_EQ(migrated_tree["version"], 13);
 
   std::filesystem::remove(file_path);
 }
@@ -4635,7 +4703,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 12);
+  EXPECT_EQ(parsed_tree["version"], 13);
 
   std::filesystem::remove(file_path);
 }
@@ -4848,7 +4916,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 12);
+  EXPECT_EQ(migrated_tree["version"], 13);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -4914,7 +4982,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 12);
+  EXPECT_EQ(migrated_tree["version"], 13);
 
   const auto &migrated_apps = migrated_tree["apps"];
   const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {

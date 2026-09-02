@@ -17,6 +17,8 @@
 #include "nvenc/nvenc_config.h"
 
 namespace config {
+  inline constexpr bool default_mouse_cursor_visible = true;
+
   // track modified config options
   inline std::unordered_map<std::string, std::string> modified_config_settings;
 

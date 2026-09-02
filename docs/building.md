@@ -57,7 +57,10 @@ sudo -H polaris --setup-host
 systemctl --user enable --now polaris
 ```
 
-The web UI will be available at `https://localhost:47990`.
+The web UI will be available at `https://localhost:47990`. **Fresh install:** use
+`https://localhost:47990/#/welcome` to create the web account.
+**Upgrade or reinstall:** use `https://localhost:47990/#/login` with the existing account;
+package replacement and source reinstall do not clear `~/.config/polaris`.
 
 See [Install on SteamOS 3.8](steamos.md), [Install on Bazzite](bazzite.md), [Install on Ubuntu 24.04](ubuntu.md), and
 [Build on openSUSE Tumbleweed](openSUSE.md) for caveats, fallback paths, and validation notes before using

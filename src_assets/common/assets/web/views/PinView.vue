@@ -70,20 +70,31 @@
             {{ selectedPairingAccessLabel }}
           </span>
         </div>
-        <div class="mt-4 flex flex-wrap gap-2" role="radiogroup" :aria-label="$t('pin.pairing_access_title')">
+        <div class="mt-4 grid gap-2 lg:grid-cols-3" role="radiogroup" :aria-label="$t('pin.pairing_access_title')">
           <button
             v-for="preset in pairingPermissionPresets"
             :key="preset.key"
             type="button"
             role="radio"
-            class="rounded-lg border px-3 py-2 text-sm font-medium transition-all duration-200"
+            class="rounded-xl border px-3 py-3 text-left transition-all duration-200"
             :class="selectedAccessPreset === preset.key
               ? preset.activeClass
               : 'border-storm/30 bg-deep/40 text-storm hover:border-storm/50 hover:text-silver'"
             :aria-checked="selectedAccessPreset === preset.key"
             @click="selectedAccessPreset = preset.key"
           >
-            {{ $t(preset.labelKey) }}
+            <span class="flex items-center justify-between gap-2">
+              <span class="text-sm font-semibold">{{ $t(preset.labelKey) }}</span>
+              <span
+                v-if="preset.recommended"
+                class="rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow text-success-bright"
+              >
+                {{ $t('pin.method_recommended') }}
+              </span>
+            </span>
+            <span class="mt-1.5 block text-xs font-normal leading-relaxed opacity-80">
+              {{ $t(preset.descriptionKey) }}
+            </span>
           </button>
         </div>
       </div>
@@ -955,21 +966,26 @@ const permissionPresets = [
   {
     key: 'viewer',
     labelKey: 'pin.viewer_access',
+    descriptionKey: 'pin.viewer_access_desc',
     activeClass: 'border-info/40 bg-info/10 text-info-bright',
-  },
-  {
-    key: 'standard',
-    labelKey: 'pin.standard_access',
-    activeClass: 'border-ice/40 bg-ice/10 text-ice',
   },
   {
     key: 'game_control',
     labelKey: 'pin.game_control_access',
+    descriptionKey: 'pin.game_control_access_desc',
     activeClass: 'border-success/40 bg-success/10 text-success-bright',
+    recommended: true,
+  },
+  {
+    key: 'standard',
+    labelKey: 'pin.standard_access',
+    descriptionKey: 'pin.browse_watch_access_desc',
+    activeClass: 'border-ice/40 bg-ice/10 text-ice',
   },
   {
     key: 'full',
     labelKey: 'pin.full_control',
+    descriptionKey: 'pin.full_control_desc',
     activeClass: 'border-danger/40 bg-danger/10 text-danger-bright',
   },
 ]
@@ -1196,7 +1212,7 @@ const pinCode = ref('')
 const pinDeviceName = ref('')
 const pinMessage = ref('')
 const pinStatus = ref('error')
-const selectedAccessPreset = ref('standard')
+const selectedAccessPreset = ref('game_control')
 
 function resetState() {
   editingHost.value = false
@@ -1245,7 +1261,7 @@ const activePairingMethod = computed(() =>
 const activePairingMethodLabel = computed(() => i18n.t(activePairingMethod.value.titleKey))
 const selectedPairingAccessLabel = computed(() => {
   const preset = permissionPresets.find((item) => item.key === selectedAccessPreset.value)
-  return i18n.t(preset?.labelKey || 'pin.standard_access')
+  return i18n.t(preset?.labelKey || 'pin.game_control_access')
 })
 const activePairingSummary = computed(() => {
   if (currentTab.value === 'TOFU') {

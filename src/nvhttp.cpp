@@ -4093,12 +4093,12 @@ namespace nvhttp {
       named_cert->perm = *pairing_perm;
     } else if (duplicate != previous_clients.end()) {
       named_cert->perm = (*duplicate)->perm;
-    } else if (boost::iequals(named_cert->client_family, "nova")) {
-      named_cert->perm = PERM::_game_control;
     } else {
-      // Permission selection and replacement are one critical section so only
-      // one concurrently paired legacy certificate can become the first full client.
-      named_cert->perm = client_root.named_devices.empty() ? PERM::_all : PERM::_default;
+      // A new streaming client must be able to browse, launch, and control a
+      // game. Broad clipboard, file, and server-command operations still
+      // require an explicit Full Control choice. Existing certificates retain
+      // their saved permissions through the duplicate branch above.
+      named_cert->perm = PERM::_game_control;
     }
 
     if (duplicate != previous_clients.end()) {

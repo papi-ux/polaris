@@ -39,22 +39,27 @@ export function createWebUiAuthGuard(probeAuth = probeWebUiAuth) {
       (signal) => probeAuth(window.fetch, window.location.href, signal)
     )
 
-    if (isPublicRoute(routePath) && routePath !== '/welcome') {
+    if (isPublicRoute(routePath)) {
       const outcome = await runCurrentProbe()
       if (!outcome.current || !isCurrentWebUiAuthProbeGeneration(generation)) return false
       const result = outcome.result
 
       if (result.state === AUTH_PROBE_STATE.welcome) {
         markWebUiUnauthenticated()
-        return '/welcome'
+        if (routePath !== '/welcome') {
+          return '/welcome'
+        }
       }
       if (result.state === AUTH_PROBE_STATE.login) {
         markWebUiUnauthenticated()
+        if (routePath === '/welcome') {
+          return '/login'
+        }
       }
       if (result.state === AUTH_PROBE_STATE.authenticated) {
         markWebUiAuthenticated(result.config)
         clearPolarisReloadParam()
-        if (routePath === '/login') {
+        if (routePath === '/login' || routePath === '/welcome') {
           return getSafeAuthReturnTarget(to.query?.redirect)
         }
       }
