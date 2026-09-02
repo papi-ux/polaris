@@ -1,7 +1,7 @@
-# Building Polaris
+# Build from source
 
-Polaris is a Linux-first host today. The most validated install paths are the Fedora RPM and Arch
-package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
+Build Polaris from source when no package fits your host. Polaris is a Linux-first host today, and
+the most validated install paths are the Fedora RPM and Arch package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
 most pacman-compatible Arch derivatives should start with the Arch package path. SteamOS 3.8 uses a
 dedicated package built against Valve's versioned repositories, not the rolling Arch asset. Bazzite can use the
 Fedora 44 RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but those package paths
