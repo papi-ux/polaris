@@ -47,12 +47,20 @@ const displayPlanner = computed(() => buildResolutionPlanner({
   customScale: customDisplayScale.value,
   showAdvanced: showDisplayPlannerAdvanced.value,
 }))
-// Interim active-plan detection until the plan id persists in config: a plan is
-// active when the saved fallback mode matches its target exactly.
+// A plan is active when its persisted id still matches the saved fallback mode;
+// a hand-edited fallback mode clears the id, so a stale pairing never lights up.
+const PERSISTABLE_PLAN_IDS = ['native', 'balanced', 'sharp', 'performance']
 const activeDisplayPlanId = computed(() => {
   const current = String(config.value.fallback_mode || '').trim()
   if (!current) {
     return ''
+  }
+  const savedPlan = String(config.value.display_plan || '').trim()
+  if (savedPlan) {
+    const saved = displayPlanner.value.choices.find((choice) => choice.id === savedPlan)
+    if (saved && saved.targetMode === current) {
+      return saved.id
+    }
   }
   const match = displayPlanner.value.choices.find((choice) => choice.targetMode === current)
   return match ? match.id : ''
@@ -64,6 +72,10 @@ watch(() => config.value.fallback_mode, (mode) => {
     return
   }
   plannerSourceMode.value = mode || ''
+  // A manual fallback-mode edit means the user left the plan.
+  if (config.value.display_plan) {
+    config.value.display_plan = ''
+  }
 }, { flush: 'sync' })
 
 // Primary copy answers the player's question first. Backend vocabulary stays in the
@@ -385,6 +397,8 @@ function applyDisplayPlan(choice) {
   if (!choice?.safe || config.value.fallback_mode === choice.targetMode) return
   applyingDisplayPlan = true
   config.value.fallback_mode = choice.targetMode
+  // Custom scales are not reconstructable after reload, so only preset ids persist.
+  config.value.display_plan = PERSISTABLE_PLAN_IDS.includes(choice.id) ? choice.id : ''
 }
 
 const validateFallbackMode = (event) => {
@@ -952,13 +966,13 @@ pactl info | grep Source</pre>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="section-kicker">Display Planner</div>
-              <h4 class="mt-2 text-sm font-semibold text-silver">{{ displayPlanner.recommendedTitle }}</h4>
+              <h4 class="mt-2 text-sm font-semibold text-silver">Preset targets</h4>
               <div class="mt-1 text-sm leading-relaxed text-storm">
-                Start from the client panel shape, keep the aspect ratio at {{ displayPlanner.sourceAspectRatio }}, and choose a plain-language target before touching raw WxHxFPS values.
+                Presets scale the saved fallback mode while keeping its {{ displayPlanner.sourceAspectRatio }} aspect ratio, so you choose a plain-language target instead of typing raw WxHxFPS values.
               </div>
             </div>
             <div class="rounded-2xl border border-success/25 bg-success/10 px-3 py-2 text-right text-sm text-success-bright">
-              <div class="text-[10px] font-semibold uppercase tracking-eyebrow">Recommended</div>
+              <div class="text-[10px] font-semibold uppercase tracking-eyebrow">Recommended · {{ displayPlanner.recommendedTitle }}</div>
               <div class="mt-1 font-medium">{{ displayPlanner.recommendedMode }}</div>
             </div>
           </div>
