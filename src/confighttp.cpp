@@ -4937,7 +4937,10 @@ namespace confighttp {
         throw std::runtime_error("Passphrase too short!");
 
       std::string deviceName = input_tree.value("deviceName", "");
-      const auto access_preset_name = input_tree.value("access_preset", std::string {"standard"});
+      const auto access_preset_name = input_tree.value(
+        "access_preset",
+        std::string {nvhttp::DEFAULT_PAIRING_ACCESS_PRESET}
+      );
       const auto access_preset = nvhttp::pairing_access_preset_from_view(access_preset_name);
       if (!access_preset) {
         bad_request(response, request, "Invalid access_preset");
@@ -4990,7 +4993,10 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
-      const auto access_preset_name = input_tree.value("access_preset", std::string {"standard"});
+      const auto access_preset_name = input_tree.value(
+        "access_preset",
+        std::string {nvhttp::DEFAULT_PAIRING_ACCESS_PRESET}
+      );
       const auto access_preset = nvhttp::pairing_access_preset_from_view(access_preset_name);
       if (!access_preset) {
         bad_request(response, request, "Invalid access_preset");

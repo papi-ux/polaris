@@ -66,6 +66,21 @@ systemctl --user enable --now polaris
 If Sunshine runs as a system service on your distro, use the matching system-service command instead.
 To switch back, stop Polaris and start Sunshine again.
 
+## Paired client gets Permission denied (403) when starting a stream
+
+Pairing proves the device's identity, but its saved access preset still controls whether it can
+start or control a stream. A device set to **Browse & Watch** can list apps and watch an existing
+session, but Desktop and game launch requests correctly return 403.
+
+Open **Devices** in the Polaris web UI, find the paired device, choose **Edit Access**, select
+**Game Control**, and save. Retry the launch without pairing again. Game Control includes library,
+launch, keyboard, mouse, touch, pen, and controller input, but does not grant clipboard, file-transfer,
+or server-command access. Choose **Full Control** only when the device needs those broader operations.
+
+Polaris now uses Game Control for newly paired Nova and Moonlight-compatible devices. Existing paired
+devices are never silently upgraded, so a device saved by an older release may still need the one-time
+access change above.
+
 ## Headless session does not start cleanly
 
 Confirm these settings first:

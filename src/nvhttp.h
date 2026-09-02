@@ -176,6 +176,8 @@ namespace nvhttp {
     full
   };
 
+  inline constexpr std::string_view DEFAULT_PAIRING_ACCESS_PRESET = "game_control";
+
   std::optional<pairing_access_preset_t> pairing_access_preset_from_view(std::string_view preset);
   crypto::PERM pairing_access_preset_perm(pairing_access_preset_t preset);
   std::string_view pairing_access_preset_name(pairing_access_preset_t preset);
