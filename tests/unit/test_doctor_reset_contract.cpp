@@ -1086,6 +1086,11 @@ TEST(DoctorResetContract, LegacyAiSurfacesAreExplanationOnly) {
     "void triggerAiOptimize(",
     "void explainDoctorWithAi("
   );
+  const auto doctor_explanation = between(
+    config_http,
+    "void explainDoctorWithAi(",
+    "namespace {"
+  );
   for (const auto *forbidden : {
          "display_mode", "target_bitrate_kbps", "preferred_codec",
          "virtual_display", "nvenc_tune"
@@ -1096,6 +1101,9 @@ TEST(DoctorResetContract, LegacyAiSurfacesAreExplanationOnly) {
   EXPECT_EQ(device_suggestion.find("ai_optimizer::get_cached"), std::string::npos);
   EXPECT_EQ(legacy_optimize.find("request_sync"), std::string::npos);
   EXPECT_NE(legacy_optimize.find("ai_launch_policy_removed"), std::string::npos);
+  EXPECT_NE(doctor_explanation.find("ai_optimizer::explain_doctor_json(evidence.dump())"), std::string::npos);
+  EXPECT_EQ(doctor_explanation.find("body.value(\"provider\""), std::string::npos);
+  EXPECT_EQ(doctor_explanation.find("ai_cfg.api_key"), std::string::npos);
 
   const auto ui = source("src_assets/common/assets/web/configs/tabs/AiOptimizer.vue");
   EXPECT_EQ(ui.find("AI Auto Quality"), std::string::npos);

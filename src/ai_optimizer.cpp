@@ -45,6 +45,7 @@ namespace ai_optimizer {
   static std::mutex inflight_mutex;
   static std::mutex model_catalog_mutex;
   static std::atomic<int> in_flight_requests {0};
+  static std::atomic<std::uint64_t> codex_temp_sequence {0};
 
   namespace {
     constexpr const char *PROVIDER_ANTHROPIC = "anthropic";
@@ -1381,6 +1382,22 @@ namespace ai_optimizer {
     }
   }
 
+  static void set_provider_test_failure(provider_test_result_t *test_result,
+                                        std::string code,
+                                        std::string error,
+                                        std::string detail,
+                                        std::string action,
+                                        bool retryable = true) {
+    if (!test_result) {
+      return;
+    }
+    test_result->code = std::move(code);
+    test_result->error = std::move(error);
+    test_result->detail = std::move(detail);
+    test_result->action = std::move(action);
+    test_result->retryable = retryable;
+  }
+
   static std::string infer_confidence(const std::string &device_name,
                                       const std::string &game_category,
                                       const std::optional<session_history_t> &history,
@@ -2215,7 +2232,8 @@ namespace ai_optimizer {
       const std::string &gpu_info,
       const std::string &game_category = "",
       const std::optional<session_history_t> &history = std::nullopt,
-      const std::string &mode = "") {
+      const std::string &mode = "",
+      provider_test_result_t *test_result = nullptr) {
 
     nlohmann::json request_body;
     request_body["model"] = active_cfg.model;
@@ -2235,11 +2253,80 @@ namespace ai_optimizer {
     auto response = post_json(join_url(active_cfg.base_url, "/chat/completions"), request_body, active_cfg.timeout_ms, headers);
     if (response.curl_code != CURLE_OK) {
       BOOST_LOG(error) << "ai_optimizer: OpenAI-compatible request failed: "sv << curl_easy_strerror(response.curl_code);
+      if (response.curl_code == CURLE_OPERATION_TIMEDOUT) {
+        const auto timeout_seconds = std::max(1, (active_cfg.timeout_ms + 999) / 1000);
+        set_provider_test_failure(
+          test_result,
+          "inference_timeout",
+          "Model inference timed out after " + std::to_string(timeout_seconds) + " seconds",
+          "The endpoint did not finish the explanation test before the configured timeout. Large local models may still be loading or may need a longer generation window.",
+          "Warm the model once, or raise Provider timeout to 60000 ms, then retry."
+        );
+      } else if (response.curl_code == CURLE_COULDNT_CONNECT) {
+        set_provider_test_failure(
+          test_result,
+          "connection_refused",
+          "Could not connect to the provider endpoint",
+          curl_easy_strerror(response.curl_code),
+          "Start the local model server and confirm the Base URL, then retry."
+        );
+      } else if (response.curl_code == CURLE_COULDNT_RESOLVE_HOST) {
+        set_provider_test_failure(
+          test_result,
+          "host_not_found",
+          "Provider host could not be resolved",
+          curl_easy_strerror(response.curl_code),
+          "Correct the provider Base URL or DNS configuration, then retry."
+        );
+      } else {
+        set_provider_test_failure(
+          test_result,
+          "transport_error",
+          "Provider request failed",
+          curl_easy_strerror(response.curl_code),
+          "Check the provider endpoint and Polaris logs, then retry."
+        );
+      }
       return std::nullopt;
     }
 
     if (response.http_code != 200) {
       BOOST_LOG(error) << "ai_optimizer: OpenAI-compatible endpoint returned HTTP "sv << response.http_code << ": "sv << response.body.substr(0, 200);
+      if (response.http_code == 401 || response.http_code == 403) {
+        set_provider_test_failure(
+          test_result,
+          "authentication_failed",
+          "Provider rejected authentication",
+          "The endpoint returned HTTP " + std::to_string(response.http_code) + ".",
+          "Check the selected authentication mode and API key, then retry.",
+          false
+        );
+      } else if (response.http_code == 404) {
+        set_provider_test_failure(
+          test_result,
+          "model_or_endpoint_not_found",
+          "Provider endpoint or model was not found",
+          "The OpenAI-compatible endpoint returned HTTP 404.",
+          "Refresh the model list, confirm the exact model id and Base URL, then retry.",
+          false
+        );
+      } else if (response.http_code == 429) {
+        set_provider_test_failure(
+          test_result,
+          "rate_limited",
+          "Provider rate limit reached",
+          "The endpoint returned HTTP 429.",
+          "Wait for provider capacity, then retry."
+        );
+      } else {
+        set_provider_test_failure(
+          test_result,
+          "provider_http_error",
+          "Provider returned HTTP " + std::to_string(response.http_code),
+          "The provider rejected the chat-completions request.",
+          "Check the endpoint logs and OpenAI-compatibility settings, then retry."
+        );
+      }
       return std::nullopt;
     }
 
@@ -2248,11 +2335,25 @@ namespace ai_optimizer {
       auto content_text = extract_openai_compatible_text(api_response);
       if (content_text.empty()) {
         BOOST_LOG(error) << "ai_optimizer: Empty response from OpenAI-compatible endpoint"sv;
+        set_provider_test_failure(
+          test_result,
+          "empty_response",
+          "Provider returned no explanation",
+          "The request completed, but the response did not contain assistant text.",
+          "Confirm that the endpoint supports OpenAI-compatible chat completions, then retry."
+        );
         return std::nullopt;
       }
       return parse_optimization_json(content_text, "OpenAI-compatible API");
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "ai_optimizer: Failed to parse OpenAI-compatible response: "sv << e.what();
+      set_provider_test_failure(
+        test_result,
+        "invalid_response",
+        "Provider returned an invalid explanation response",
+        e.what(),
+        "Use a model that follows structured JSON output, or check the provider compatibility mode."
+      );
       return std::nullopt;
     }
   }
@@ -2266,7 +2367,8 @@ namespace ai_optimizer {
       const std::string &gpu_info,
       const std::string &game_category = "",
       const std::optional<session_history_t> &history = std::nullopt,
-      const std::string &mode = "") {
+      const std::string &mode = "",
+      provider_test_result_t *test_result = nullptr) {
     if (active_cfg.provider == PROVIDER_ANTHROPIC) {
       if (active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
         return call_anthropic_cli(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
@@ -2278,7 +2380,7 @@ namespace ai_optimizer {
       return call_openai_codex_cli(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
     }
 
-    return call_openai_compatible_api(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
+    return call_openai_compatible_api(active_cfg, device_name, app_name, gpu_info, game_category, history, mode, test_result);
   }
 
   static void store_cache_entry(const config_t &active_cfg,
@@ -2366,9 +2468,9 @@ namespace ai_optimizer {
     return future;
   }
 
-  static nlohmann::json doctor_explanation_fallback(const std::string &reason,
-                                                      const nlohmann::json &evidence = nlohmann::json::object(),
-                                                      bool expected_subscription_fallback = false) {
+  static nlohmann::json doctor_explanation_fallback(
+      const std::string &reason,
+      const nlohmann::json &evidence = nlohmann::json::object()) {
     nlohmann::json explanation;
     const auto doctor = evidence.value("doctor", nlohmann::json::object());
     const auto checklist = evidence.value("fix_my_stream_checklist", nlohmann::json::array());
@@ -2415,13 +2517,15 @@ namespace ai_optimizer {
     explanation["destructive_action_allowed"] = false;
 
     return {
-      {"status", expected_subscription_fallback},
+      {"status", false},
       {"fallback", true},
-      {"provider_error", expected_subscription_fallback ? "" : reason},
+      {"authority", "explanation_only"},
+      {"may_define_settings", false},
+      {"provider_error", reason},
       {"source", {
-        {"kind", expected_subscription_fallback ? "deterministic-fallback" : "provider-failure"},
-        {"mode", expected_subscription_fallback ? "openai-subscription" : "error-fallback"},
-        {"informational", expected_subscription_fallback}
+        {"kind", "provider-failure"},
+        {"mode", "error-fallback"},
+        {"informational", false}
       }},
       {"explanation", explanation},
     };
@@ -2446,7 +2550,7 @@ namespace ai_optimizer {
       {"try_first", {{"type", "array"}, {"items", {{"type", "string"}}}}},
       {"advanced_detail", {{"type", "string"}}},
       {"confidence", {{"type", "string"}, {"enum", nlohmann::json::array({"low", "medium", "high"})}}},
-      {"destructive_action_allowed", {{"type", "boolean"}}},
+      {"destructive_action_allowed", {{"type", "boolean"}, {"const", false}}},
     };
     schema["required"] = nlohmann::json::array({"likely_cause", "evidence", "try_first", "advanced_detail", "confidence", "destructive_action_allowed"});
     return {
@@ -2459,10 +2563,195 @@ namespace ai_optimizer {
     };
   }
 
-  static std::optional<std::string> call_doctor_explanation_provider(const config_t &active_cfg,
-                                                                     const std::string &redacted_evidence_json) {
+  namespace {
+    class scoped_codex_temp_directory_t {
+    public:
+      explicit scoped_codex_temp_directory_t(std::string_view purpose) {
+        const auto base = std::filesystem::temp_directory_path();
+        for (int attempt = 0; attempt < 32; ++attempt) {
+          const auto sequence = codex_temp_sequence.fetch_add(1, std::memory_order_relaxed);
+          const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+          auto candidate = base / (
+            "polaris-codex-" + std::string {purpose} + "-" +
+            std::to_string(stamp) + "-" + std::to_string(sequence));
+          std::error_code ec;
+          if (!std::filesystem::create_directory(candidate, ec)) {
+            continue;
+          }
+          std::filesystem::permissions(
+            candidate,
+            std::filesystem::perms::owner_all,
+            std::filesystem::perm_options::replace,
+            ec);
+          if (ec) {
+            std::filesystem::remove_all(candidate, ec);
+            continue;
+          }
+          path_ = std::move(candidate);
+          return;
+        }
+      }
+
+      scoped_codex_temp_directory_t(const scoped_codex_temp_directory_t &) = delete;
+      scoped_codex_temp_directory_t &operator=(const scoped_codex_temp_directory_t &) = delete;
+
+      ~scoped_codex_temp_directory_t() {
+        if (path_.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+      }
+
+      explicit operator bool() const {
+        return !path_.empty();
+      }
+
+      const std::filesystem::path &path() const {
+        return path_;
+      }
+
+    private:
+      std::filesystem::path path_;
+    };
+
+    bool write_codex_input_file(const std::filesystem::path &path, const std::string &contents) {
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      if (!output) return false;
+      output << contents;
+      output.close();
+      return output.good();
+    }
+
+    std::optional<std::string> call_openai_codex_doctor_cli(
+      const config_t &active_cfg,
+      const std::string &redacted_evidence_json) {
+      const std::string home = getenv("HOME") ? getenv("HOME") : "/home";
+      const auto codex_bin = resolve_existing_binary(
+        {
+          home + "/.local/bin/codex",
+          "/usr/local/bin/codex",
+          "/usr/bin/codex",
+        },
+        "codex");
+
+      scoped_codex_temp_directory_t workspace {"doctor"};
+      if (!workspace) {
+        BOOST_LOG(error) << "ai_optimizer: Could not create a private Codex Doctor workspace"sv;
+        return std::nullopt;
+      }
+
+      const auto prompt_file = workspace.path() / "prompt.txt";
+      const auto schema_file = workspace.path() / "schema.json";
+      const auto output_file = workspace.path() / "output.json";
+      const auto prompt = doctor_explanation_system_prompt() +
+        "\n\nRedacted Polaris Doctor/support evidence follows. Explain it without adding unsupported facts.\n" +
+        redacted_evidence_json +
+        "\n\nReturn only the JSON object described by the supplied output schema.";
+      const auto schema = doctor_explanation_response_format().at("json_schema").at("schema").dump(2);
+      if (!write_codex_input_file(prompt_file, prompt) ||
+          !write_codex_input_file(schema_file, schema)) {
+        BOOST_LOG(error) << "ai_optimizer: Could not write the private Codex Doctor request files"sv;
+        return std::nullopt;
+      }
+
+      std::string deadline_prefix;
+#ifdef __linux__
+      const auto timeout_bin = resolve_existing_binary({"/usr/bin/timeout", "/bin/timeout"}, "");
+      if (timeout_bin.empty()) {
+        BOOST_LOG(error) << "ai_optimizer: Refusing an unbounded Codex Doctor request because timeout(1) is unavailable"sv;
+        return std::nullopt;
+      }
+      deadline_prefix = "'" + timeout_bin + "' --signal=TERM --kill-after=2s 30s ";
+#endif
+
+      const auto codex_home = active_codex_home(active_cfg);
+      const std::string cmd =
+        shell_env_assignment("CODEX_HOME", codex_home.value_or("")) +
+        deadline_prefix +
+        "'" + codex_bin + "' exec "
+        "--skip-git-repo-check "
+        "--ephemeral "
+        "--ignore-user-config "
+        "--ignore-rules "
+        "--sandbox read-only "
+        "-C '" + shell_escape_single_quotes(workspace.path().string()) + "' "
+        "-m '" + shell_escape_single_quotes(active_cfg.model) + "' "
+        "--output-schema '" + shell_escape_single_quotes(schema_file.string()) + "' "
+        "-o '" + shell_escape_single_quotes(output_file.string()) + "' "
+        "- < '" + shell_escape_single_quotes(prompt_file.string()) + "' "
+        "2>&1";
+
+      BOOST_LOG(debug) << "ai_optimizer: Running bounded Codex CLI Doctor explanation"sv;
+      const auto result = run_command_capture(cmd);
+      if (result.exit_code != 0) {
+        BOOST_LOG(error) << "ai_optimizer: Codex Doctor CLI exited with code "sv << result.exit_code;
+        // CLI diagnostics can echo portions of the supplied support evidence.
+        // Keep the exit code for operators without copying that content into
+        // the long-lived Polaris log.
+        return std::nullopt;
+      }
+
+      std::error_code size_ec;
+      const auto output_size = std::filesystem::file_size(output_file, size_ec);
+      if (size_ec || output_size == 0 || output_size > 64 * 1024) {
+        BOOST_LOG(error) << "ai_optimizer: Codex Doctor CLI returned an empty or oversized response"sv;
+        return std::nullopt;
+      }
+
+      std::ifstream output(output_file, std::ios::binary);
+      return std::string(std::istreambuf_iterator<char>(output), std::istreambuf_iterator<char>());
+    }
+
+    std::optional<std::string> doctor_explanation_contract_error(const nlohmann::json &parsed) {
+      static const std::array<std::string_view, 6> expected_keys {
+        "likely_cause", "evidence", "try_first", "advanced_detail",
+        "confidence", "destructive_action_allowed"
+      };
+      if (!parsed.is_object() || parsed.size() != expected_keys.size()) {
+        return "Doctor explanation must contain exactly the six explanation-only fields";
+      }
+      for (const auto key : expected_keys) {
+        if (!parsed.contains(std::string {key})) {
+          return "Doctor explanation is missing a required field";
+        }
+      }
+      if (!parsed["likely_cause"].is_string() || !parsed["advanced_detail"].is_string() ||
+          !parsed["confidence"].is_string() || !parsed["destructive_action_allowed"].is_boolean()) {
+        return "Doctor explanation contains a field with the wrong type";
+      }
+      for (const auto field : {"evidence", "try_first"}) {
+        if (!parsed[field].is_array() ||
+            !std::all_of(parsed[field].begin(), parsed[field].end(), [](const auto &item) { return item.is_string(); })) {
+          return "Doctor explanation evidence and try_first must be string arrays";
+        }
+      }
+      const auto confidence = parsed["confidence"].get<std::string>();
+      if (confidence != "low" && confidence != "medium" && confidence != "high") {
+        return "Doctor explanation confidence is not allowed";
+      }
+      if (parsed["destructive_action_allowed"].get<bool>()) {
+        return "Doctor explanation attempted to claim destructive-action authority";
+      }
+      return std::nullopt;
+    }
+  }  // namespace
+
+  static std::optional<std::string> call_doctor_explanation_provider(
+      const config_t &active_cfg,
+      const std::string &redacted_evidence_json,
+      provider_test_result_t *test_result = nullptr) {
+    if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      return call_openai_codex_doctor_cli(active_cfg, redacted_evidence_json);
+    }
     if (active_cfg.provider == PROVIDER_ANTHROPIC || active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       BOOST_LOG(warning) << "ai_optimizer: Doctor explanation currently uses OpenAI-compatible local/API endpoints; provider/auth mode not supported for this explanation path"sv;
+      set_provider_test_failure(
+        test_result,
+        "explanation_transport_unsupported",
+        "This provider mode cannot run Doctor explanations",
+        "The selected provider or authentication mode does not expose the supported explanation transport.",
+        "Choose an OpenAI-compatible endpoint or signed-in OpenAI subscription mode.",
+        false
+      );
       return std::nullopt;
     }
 
@@ -2478,22 +2767,114 @@ namespace ai_optimizer {
 
     std::vector<std::string> headers;
     if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
-      headers.push_back("Authorization: *** " + active_cfg.api_key);
+      headers.push_back("Authorization: Bearer " + active_cfg.api_key);
     }
 
     auto response = post_json(join_url(active_cfg.base_url, "/chat/completions"), request_body, active_cfg.timeout_ms, headers);
-    if (response.curl_code != CURLE_OK || response.http_code != 200) {
+    if (response.curl_code != CURLE_OK) {
       BOOST_LOG(error) << "ai_optimizer: Doctor explanation request failed: curl="sv
                        << curl_easy_strerror(response.curl_code) << ", HTTP "sv << response.http_code;
+      if (response.curl_code == CURLE_OPERATION_TIMEDOUT) {
+        const auto timeout_seconds = std::max(1, (active_cfg.timeout_ms + 999) / 1000);
+        set_provider_test_failure(
+          test_result,
+          "inference_timeout",
+          "Model inference timed out after " + std::to_string(timeout_seconds) + " seconds",
+          "The endpoint did not finish the explanation test before the configured timeout. Large local models may still be loading or may need a longer generation window.",
+          "Warm the model once, or raise Provider timeout to 60000 ms, then retry."
+        );
+      } else if (response.curl_code == CURLE_COULDNT_CONNECT) {
+        set_provider_test_failure(
+          test_result,
+          "connection_refused",
+          "Could not connect to the provider endpoint",
+          curl_easy_strerror(response.curl_code),
+          "Start the local model server and confirm the Base URL, then retry."
+        );
+      } else if (response.curl_code == CURLE_COULDNT_RESOLVE_HOST) {
+        set_provider_test_failure(
+          test_result,
+          "host_not_found",
+          "Provider host could not be resolved",
+          curl_easy_strerror(response.curl_code),
+          "Correct the provider Base URL or DNS configuration, then retry."
+        );
+      } else {
+        set_provider_test_failure(
+          test_result,
+          "transport_error",
+          "Provider request failed",
+          curl_easy_strerror(response.curl_code),
+          "Check the provider endpoint and Polaris logs, then retry."
+        );
+      }
       return std::nullopt;
     }
 
-    auto api_response = nlohmann::json::parse(response.body);
-    auto content_text = extract_openai_compatible_text(api_response);
-    if (content_text.empty()) {
+    if (response.http_code != 200) {
+      BOOST_LOG(error) << "ai_optimizer: Doctor explanation endpoint returned HTTP "sv << response.http_code;
+      if (response.http_code == 401 || response.http_code == 403) {
+        set_provider_test_failure(
+          test_result,
+          "authentication_failed",
+          "Provider rejected authentication",
+          "The endpoint returned HTTP " + std::to_string(response.http_code) + ".",
+          "Check the selected authentication mode and API key, then retry.",
+          false
+        );
+      } else if (response.http_code == 404) {
+        set_provider_test_failure(
+          test_result,
+          "model_or_endpoint_not_found",
+          "Provider endpoint or model was not found",
+          "The OpenAI-compatible endpoint returned HTTP 404.",
+          "Refresh the model list, confirm the exact model id and Base URL, then retry.",
+          false
+        );
+      } else if (response.http_code == 429) {
+        set_provider_test_failure(
+          test_result,
+          "rate_limited",
+          "Provider rate limit reached",
+          "The endpoint returned HTTP 429.",
+          "Wait for provider capacity, then retry."
+        );
+      } else {
+        set_provider_test_failure(
+          test_result,
+          "provider_http_error",
+          "Provider returned HTTP " + std::to_string(response.http_code),
+          "The provider rejected the explanation request.",
+          "Check the endpoint logs and OpenAI-compatibility settings, then retry."
+        );
+      }
       return std::nullopt;
     }
-    return content_text;
+
+    try {
+      auto api_response = nlohmann::json::parse(response.body);
+      auto content_text = extract_openai_compatible_text(api_response);
+      if (!content_text.empty()) {
+        return content_text;
+      }
+      set_provider_test_failure(
+        test_result,
+        "empty_response",
+        "Provider returned no explanation",
+        "The request completed, but the response did not contain assistant text.",
+        "Confirm that the endpoint supports OpenAI-compatible chat completions, then retry."
+      );
+      return std::nullopt;
+    } catch (const std::exception &e) {
+      set_provider_test_failure(
+        test_result,
+        "invalid_response",
+        "Provider returned an invalid explanation response",
+        e.what(),
+        "Use a model that follows structured JSON output, or check the provider compatibility mode."
+      );
+      return std::nullopt;
+    }
   }
 
   // ---- Public API ----
@@ -2506,15 +2887,15 @@ namespace ai_optimizer {
         return doctor_explanation_fallback("No structured JSON in AI response").dump();
       }
       auto parsed = nlohmann::json::parse(text.substr(json_start, json_end - json_start + 1));
-      nlohmann::json explanation;
-      explanation["likely_cause"] = parsed.value("likely_cause", std::string {"Polaris Doctor finding"});
-      explanation["evidence"] = parsed.contains("evidence") && parsed["evidence"].is_array() ? parsed["evidence"] : nlohmann::json::array();
-      explanation["try_first"] = parsed.contains("try_first") && parsed["try_first"].is_array() ? parsed["try_first"] : nlohmann::json::array();
-      explanation["advanced_detail"] = parsed.value("advanced_detail", std::string {});
-      const auto confidence = parsed.value("confidence", std::string {"low"});
-      explanation["confidence"] = (confidence == "medium" || confidence == "high") ? confidence : "low";
-      explanation["destructive_action_allowed"] = false;
-      return nlohmann::json {{"status", true}, {"explanation", explanation}}.dump();
+      if (const auto error = doctor_explanation_contract_error(parsed)) {
+        return doctor_explanation_fallback(*error).dump();
+      }
+      return nlohmann::json {
+        {"status", true},
+        {"authority", "explanation_only"},
+        {"may_define_settings", false},
+        {"explanation", parsed}
+      }.dump();
     } catch (const std::exception &e) {
       return doctor_explanation_fallback(e.what()).dump();
     }
@@ -2535,13 +2916,6 @@ namespace ai_optimizer {
     if (!is_config_enabled(active_cfg)) {
       return doctor_explanation_fallback("AI explanations are disabled or not fully configured.", evidence).dump();
     }
-    if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
-      // Codex CLI remains the ordinary optimizer route. Doctor explanations
-      // intentionally stay deterministic in subscription mode so an expected
-      // unsupported explanation transport is informational, not provider noise.
-      return doctor_explanation_fallback(std::string {}, evidence, true).dump();
-    }
-
     try {
       auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump());
       if (!provider_text) {
@@ -2551,10 +2925,21 @@ namespace ai_optimizer {
       if (!parsed.value("status", false)) {
         return doctor_explanation_fallback(parsed.value("provider_error", std::string {"Invalid structured output"}), evidence).dump();
       }
+      parsed["authority"] = "explanation_only";
+      parsed["may_define_settings"] = false;
+      parsed["source"] = {
+        {"kind", "ai-explanation"},
+        {"mode", active_cfg.provider + "-" + active_cfg.auth_mode},
+        {"informational", true}
+      };
       return parsed.dump();
     } catch (const std::exception &e) {
       return doctor_explanation_fallback(e.what(), evidence).dump();
     }
+  }
+
+  std::string explain_doctor_json(const std::string &redacted_evidence_json) {
+    return explain_doctor_json_with_config(cfg, redacted_evidence_json);
   }
 
   void init(const config_t &config) {
@@ -2982,12 +3367,80 @@ namespace ai_optimizer {
     const auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - started_at).count();
     if (!result) {
-      update_provider_runtime_status(false, static_cast<long>(latency_ms), "Draft test returned no optimization result");
+      update_provider_runtime_status(false, static_cast<long>(latency_ms), "Provider returned no optimization result");
       return std::nullopt;
+    }
+    update_provider_runtime_status(true, static_cast<long>(latency_ms));
+    return normalize_optimization(active_cfg, device_name, app_name, game_category, history, *result, false);
+  }
+
+  provider_test_result_t test_provider_with_config(
+      const config_t &config,
+      const std::string &device_name,
+      const std::string &app_name,
+      const std::string &gpu_info,
+      const std::string &game_category,
+      const std::optional<session_history_t> &history,
+      const std::string &mode) {
+    provider_test_result_t test_result;
+    auto active_cfg = resolved_config(config);
+    if (!is_config_enabled(active_cfg)) {
+      test_result.code = "configuration_not_ready";
+      test_result.error = "Provider settings are incomplete";
+      test_result.detail = "The selected provider, model, or authentication settings are not ready for a request.";
+      test_result.action = "Complete the provider settings, then retry.";
+      test_result.retryable = false;
+      return test_result;
+    }
+    const auto started_at = std::chrono::steady_clock::now();
+    const nlohmann::json evidence = {
+      {"deterministic_source_of_truth", {
+        {"primary_issue", "provider_test"},
+        {"summary", "This is a connectivity and explanation-contract test; no stream setting or action is being requested."}
+      }},
+      {"doctor", {
+        {"likely_cause", "Provider test evidence"},
+        {"evidence", nlohmann::json::array({"Polaris supplied a synthetic, non-actionable explanation test."})},
+        {"try_first", nlohmann::json::array({"Confirm that the provider can explain this evidence."})}
+      }},
+      {"test_context", {
+        {"device", device_name},
+        {"app", app_name},
+        {"gpu", gpu_info},
+        {"category", game_category},
+        {"mode", mode}
+      }}
+    };
+    auto result = call_doctor_explanation_provider(active_cfg, evidence.dump(), &test_result);
+    const auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started_at).count();
+    if (!result) {
+      if (test_result.error.empty()) {
+        test_result.code = "provider_rejected_response";
+        test_result.error = "Provider did not return a usable explanation";
+        test_result.detail = "The request completed without a valid structured response.";
+        test_result.action = "Check the provider settings and Polaris logs, then retry.";
+      }
+      update_provider_runtime_status(false, static_cast<long>(latency_ms), test_result.error);
+      return test_result;
+    }
+
+    auto parsed = nlohmann::json::parse(parse_doctor_explanation_json(*result));
+    if (!parsed.value("status", false)) {
+      test_result.code = "invalid_response";
+      test_result.error = "Provider returned an invalid explanation response";
+      test_result.detail = parsed.value("provider_error", std::string {"The response did not match the explanation-only schema."});
+      test_result.action = "Use a model that follows structured JSON output, or check the provider compatibility mode.";
+      update_provider_runtime_status(false, static_cast<long>(latency_ms), test_result.error);
+      return test_result;
     }
 
     update_provider_runtime_status(true, static_cast<long>(latency_ms));
-    return normalize_optimization(active_cfg, device_name, app_name, game_category, history, *result, false);
+    parsed["source"] = "ai_explanation_test";
+    parsed["authority"] = "explanation_only";
+    parsed["may_define_settings"] = false;
+    test_result.explanation_json = parsed.dump();
+    return test_result;
   }
 
   std::string get_models_json_with_config(const config_t &config) {
