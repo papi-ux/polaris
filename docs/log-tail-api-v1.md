@@ -1,6 +1,6 @@
 # Bounded log-tail API v1
 
-Polaris exposes an authenticated, cache-disabled diagnostic log tail that never reads the whole active log. It is intended for the Web UI and diagnostic tooling that needs recent log content without making host or browser memory proportional to the log file's lifetime size.
+Polaris exposes an authenticated, cache-disabled diagnostic log tail that never reads the whole active log. It is intended for the Web UI and diagnostic tooling that needs recent log content without making host or browser memory proportional to the log file's lifetime size. The endpoint is:
 
 ```text
 GET /polaris/v1/diagnostics/logs/tail

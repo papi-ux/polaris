@@ -17,6 +17,13 @@ import {
   resolveStreamDisplayRuntimeNotice,
 } from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
+import { provenanceLabel, useConfigProjection } from '../../composables/useConfigProjection'
+import { useStreamStats } from '../../composables/useStreamStats'
+import {
+  autoQualityHostStateKey,
+  autoQualityHostTone,
+  buildLiveAutoQualityRows,
+} from '../../auto-quality-live'
 
 const $t = inject('i18n').t;
 
@@ -37,6 +44,25 @@ const sudovdaStatus = {
 
 const currentDriverStatus = computed(() => sudovdaStatus[props.vdisplay])
 const config = ref(props.config)
+
+// Host truth for this page. Mode badges and availability, stream-display
+// labels, field provenance, and the Auto Quality strip read the projection
+// when the host serves it; every consumer keeps its config-derived fallback
+// for hosts that answer 404. Live tuning rides the stats channel at 1 Hz.
+const projection = useConfigProjection()
+onMounted(() => {
+  projection.load()
+})
+const liveStreamStats = typeof window !== 'undefined' && typeof window.EventSource === 'function'
+  ? useStreamStats(2000, { pauseWhenHidden: true }).stats
+  : ref(null)
+const projectionModes = computed(() => (
+  projection.ok.value && Array.isArray(projection.modes.value) ? projection.modes.value : null
+))
+const hostStreamDisplay = computed(() => (projection.ok.value ? projection.streamDisplay.value : null))
+const liveTuning = computed(() => liveStreamStats.value?.tuning || projection.tuning.value || null)
+const liveAutoQuality = computed(() => liveStreamStats.value?.auto_quality || projection.autoQuality.value || null)
+const provenanceFor = (configKey) => provenanceLabel(projection, configKey)
 const isLinux = computed(() => props.platform === 'linux')
 const isWindows = computed(() => props.platform === 'windows')
 const showDisplayPlannerAdvanced = ref(false)
@@ -83,76 +109,91 @@ watch(() => config.value.fallback_mode, (mode) => {
 // Primary copy answers the player's question first. Backend vocabulary stays in the
 // technical disclosure, where it remains available for diagnosis without making
 // labwc/wlroots/portal knowledge a prerequisite for choosing a mode.
+// The copy itself lives in the locale files under config.av_mode_*.
 const streamDisplayModeDefinitions = [
   {
     id: 'headless_stream',
-    title: 'Private Stream',
-    badge: 'Recommended',
+    title: $t('config.av_mode_headless_stream_title'),
+    badge: $t('config.av_mode_headless_stream_badge'),
     group: 'private',
-    copy: 'Recommended. Runs the game on a private display without touching the host monitors.',
-    impact: 'Best for handheld play and most gaming PCs.',
-    technical: 'Runtime: labwc · Capture: wlroots · Host display layout unchanged',
+    copy: $t('config.av_mode_headless_stream_copy'),
+    impact: $t('config.av_mode_headless_stream_impact'),
+    technical: $t('config.av_mode_headless_stream_technical'),
   },
   {
     id: 'windowed_stream',
-    title: 'Private Stream (GPU-native)',
-    badge: 'GPU-native',
+    title: $t('config.av_mode_windowed_stream_title'),
+    badge: $t('config.av_mode_windowed_stream_badge'),
     group: 'private',
-    copy: 'The same private session, keeping frames on the GPU when the host supports it.',
-    impact: 'Best for supported NVIDIA hosts; it may appear as a window on the host.',
-    technical: 'Runtime: labwc · Capture: wlroots · Prefers DMA-BUF GPU frames',
+    copy: $t('config.av_mode_windowed_stream_copy'),
+    impact: $t('config.av_mode_windowed_stream_impact'),
+    technical: $t('config.av_mode_windowed_stream_technical'),
   },
   {
     id: 'gamescope_stream',
-    title: 'Gamescope Stream',
-    badge: 'Deck-style',
+    title: $t('config.av_mode_gamescope_stream_title'),
+    badge: $t('config.av_mode_gamescope_stream_badge'),
     group: 'private',
-    copy: 'Runs one game in a Steam Deck-style session that Polaris owns.',
-    impact: 'Best for Steam-first hosts. Gamescope must be installed.',
-    technical: 'Runtime: Gamescope · Capture: portal/PipeWire · Uses an idle or Polaris-owned compositor',
+    copy: $t('config.av_mode_gamescope_stream_copy'),
+    impact: $t('config.av_mode_gamescope_stream_impact'),
+    technical: $t('config.av_mode_gamescope_stream_technical'),
   },
   {
     id: 'host_virtual_display',
-    title: 'Host Virtual Display',
-    badge: 'Adds a display',
+    title: $t('config.av_mode_host_virtual_display_title'),
+    badge: $t('config.av_mode_host_virtual_display_badge'),
     group: 'host',
-    copy: 'Adds a display to the host desktop and sizes it for the streaming client.',
-    impact: 'The physical desktop stays usable, but windows and icons may rearrange.',
-    technical: 'Runtime: host desktop · Backend: EVDI, wlroots, or KScreen · Adds and removes an output',
+    copy: $t('config.av_mode_host_virtual_display_copy'),
+    impact: $t('config.av_mode_host_virtual_display_impact'),
+    technical: $t('config.av_mode_host_virtual_display_technical'),
   },
   {
     id: 'headless_dongle',
-    title: 'Headless Dongle',
-    badge: 'Host default',
+    title: $t('config.av_mode_headless_dongle_title'),
+    badge: $t('config.av_mode_headless_dongle_badge'),
     group: 'host',
-    copy: 'Moves the desktop onto a physical dummy plug. Privacy mode blanks the real panel after the one-time portal approval is saved; the panel stays on during that approval.',
-    impact: 'Configure it once as the host default; Off mode keeps the real panel active, and clients cannot enable it for one game.',
-    technical: 'Runtime: host desktop · Capture: portal by default, optional KMS · Requires streaming and primary outputs plus automatic display management',
+    copy: $t('config.av_mode_headless_dongle_copy'),
+    impact: $t('config.av_mode_headless_dongle_impact'),
+    technical: $t('config.av_mode_headless_dongle_technical'),
   },
   {
     id: 'desktop_display',
-    title: 'Mirror Desktop',
-    badge: 'Visible on host',
+    title: $t('config.av_mode_desktop_display_title'),
+    badge: $t('config.av_mode_desktop_display_badge'),
     group: 'host',
-    copy: 'Streams everything visible on the host desktop, including notifications.',
-    impact: 'Best for remote-desktop use and quick checks; it provides no privacy isolation.',
-    technical: 'Runtime: host desktop · Capture: portal/PipeWire · Uses the existing physical display',
+    copy: $t('config.av_mode_desktop_display_copy'),
+    impact: $t('config.av_mode_desktop_display_impact'),
+    technical: $t('config.av_mode_desktop_display_technical'),
   },
 ]
 
-const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => ({
-  ...mode,
-  ...resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options),
-})))
+const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => {
+  const hostMode = projectionModes.value?.find((candidate) => candidate?.value === mode.id)
+  const availability = hostMode
+    ? {
+        available: hostMode.available === true,
+        unavailableReason: hostMode.available === true
+          ? ''
+          : String(hostMode.unavailable_reason || $t('config.av_mode_unavailable_default')),
+      }
+    : resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)
+  const hostBadge = hostMode && typeof hostMode.badge === 'string' ? hostMode.badge.trim() : ''
+  return {
+    ...mode,
+    ...availability,
+    badge: hostBadge || mode.badge,
+    hostBadge: Boolean(hostBadge),
+  }
+}))
 
 const plannedStreamDisplayModes = [
   {
-    title: 'Family Mode (isolated)',
-    copy: 'Separate per-person game sessions. Planned community work; not selectable yet.',
+    title: $t('config.av_planned_family_mode_title'),
+    copy: $t('config.av_planned_family_mode_copy'),
   },
   {
-    title: 'Headless EVDI',
-    copy: 'A dedicated headless EVDI desktop path. Planned community work; not selectable yet.',
+    title: $t('config.av_planned_headless_evdi_title'),
+    copy: $t('config.av_planned_headless_evdi_copy'),
   },
 ]
 
@@ -176,9 +217,9 @@ const streamDisplayRuntimeNoticeTone = computed(() => {
   return 'border-storm/30 bg-deep/40 text-storm'
 })
 const clientSettingsSyncBadge = computed(() => {
-  if (!clientSettingsSync.value.available) return 'Unavailable'
-  if (clientSettingsSync.value.relaunchRequired) return 'Pending relaunch'
-  return 'Bidirectional'
+  if (!clientSettingsSync.value.available) return $t('config.av_nova_sync_badge_unavailable')
+  if (clientSettingsSync.value.relaunchRequired) return $t('config.av_nova_sync_badge_pending_relaunch')
+  return $t('config.av_nova_sync_badge_bidirectional')
 })
 const clientSettingsSyncTone = computed(() => {
   if (!clientSettingsSync.value.available || clientSettingsSync.value.relaunchRequired) {
@@ -188,16 +229,48 @@ const clientSettingsSyncTone = computed(() => {
 })
 const clientSettingsSyncCopy = computed(() => {
   if (!clientSettingsSync.value.available) {
-    return 'Nova cannot see the Polaris client-settings endpoint on this host yet.'
+    return $t('config.av_nova_sync_copy_unavailable')
   }
   if (clientSettingsSync.value.relaunchRequired) {
-    return 'Nova and Polaris agree on the saved display choice, but the active stream is still using the previous runtime path.'
+    return $t('config.av_nova_sync_copy_pending_relaunch')
   }
-  return 'Nova can push desired settings and Polaris reports the effective runtime state back to the client.'
+  return $t('config.av_nova_sync_copy_synced')
+})
+const streamDisplayRelaunchRequired = computed(() => (
+  hostStreamDisplay.value
+    ? hostStreamDisplay.value.relaunch_required === true
+    : clientSettingsSync.value.relaunchRequired
+))
+// The newest committed config write, from either writer, when the host reports it.
+const lastConfigWrite = computed(() => {
+  const notes = projection.provenance.value
+  return Array.isArray(notes) && notes.length > 0 && notes[0] && typeof notes[0] === 'object' ? notes[0] : null
+})
+const lastConfigWriteRow = computed(() => {
+  const note = lastConfigWrite.value
+  if (!note) return null
+  const writerKey = note.writer === 'gamestream' ? 'gamestream' : note.writer === 'web_ui' ? 'web_ui' : 'other'
+  const keys = Array.isArray(note.keys) ? note.keys : []
+  return {
+    label: $t('config.av_nova_sync_row_last_write'),
+    value: $t(`config.av_provenance_writer_${writerKey}`),
+    note: $t('config.av_provenance_keys_note', { count: keys.length, at: String(note.at || '') }),
+  }
 })
 const clientSettingsRows = computed(() => [
-  { label: 'Display mode', value: clientSettingsSync.value.desiredModeLabel, note: 'Next stream' },
-  { label: 'Effective mode', value: clientSettingsSync.value.effectiveModeLabel, note: clientSettingsSync.value.relaunchRequired ? 'Pending' : 'Synced' },
+  {
+    label: $t('config.av_nova_sync_row_display_mode'),
+    value: hostStreamDisplay.value?.configured_label || clientSettingsSync.value.desiredModeLabel,
+    note: $t('config.av_nova_sync_note_next_stream'),
+  },
+  {
+    label: $t('config.av_nova_sync_row_effective_mode'),
+    value: hostStreamDisplay.value?.effective_label || clientSettingsSync.value.effectiveModeLabel,
+    note: streamDisplayRelaunchRequired.value
+      ? $t('config.av_nova_sync_note_pending')
+      : $t('config.av_nova_sync_note_synced'),
+  },
+  ...(lastConfigWriteRow.value ? [lastConfigWriteRow.value] : []),
 ])
 
 const autoQualityEnabled = computed(() => (
@@ -208,47 +281,76 @@ const autoQualityEnabled = computed(() => (
 const autoQualityPartial = computed(() => (
   (config.value.ai_enabled === 'enabled') !== (config.value.adaptive_bitrate_enabled === 'enabled')
 ))
+// Live strip: present when the host serves the projection and a policy snapshot.
+const autoQualityLive = computed(() => Boolean(projection.ok.value && liveAutoQuality.value))
+const autoQualityLiveStateKey = computed(() => autoQualityHostStateKey(liveAutoQuality.value))
+const autoQualityLiveRows = computed(() => buildLiveAutoQualityRows(
+  { autoQuality: liveAutoQuality.value, tuning: liveTuning.value },
+  $t,
+))
 const autoQualityBadge = computed(() => {
-  if (autoQualityEnabled.value) return 'Auto Quality: On'
-  if (autoQualityPartial.value) return 'Auto Quality: Partial'
-  return 'Auto Quality: Manual'
+  if (autoQualityLive.value) {
+    return $t('config.av_auto_quality_badge_live', {
+      state: $t(`config.av_auto_quality_live_state_${autoQualityLiveStateKey.value}`),
+    })
+  }
+  if (autoQualityEnabled.value) return $t('config.av_auto_quality_badge_on')
+  if (autoQualityPartial.value) return $t('config.av_auto_quality_badge_partial')
+  return $t('config.av_auto_quality_badge_manual')
 })
 const autoQualityTone = computed(() => {
+  if (autoQualityLive.value) {
+    const tone = autoQualityHostTone(autoQualityLiveStateKey.value)
+    if (tone === 'pass') return 'border-success/30 bg-success/10 text-success'
+    if (tone === 'warning') return 'border-warning/30 bg-warning/10 text-warning-bright'
+    return 'border-storm/40 bg-storm/10 text-storm'
+  }
   if (autoQualityEnabled.value) return 'border-success/30 bg-success/10 text-success'
   if (autoQualityPartial.value) return 'border-warning/30 bg-warning/10 text-warning-bright'
   return 'border-storm/40 bg-storm/10 text-storm'
 })
 const autoQualityCopy = computed(() => {
   if (autoQualityEnabled.value) {
-    return 'Polaris will balance bitrate, per-game profile choice, and safer recovery targets without making the user choose a tuning layer.'
+    return $t('config.av_auto_quality_copy_on')
   }
   if (autoQualityPartial.value) {
-    return 'This host has an older split Auto Quality state. Turn it on here to keep profile selection and live bitrate recovery together.'
+    return $t('config.av_auto_quality_copy_partial')
   }
-  return 'Manual tuning is active. Polaris will keep the selected bitrate and profile controls under Advanced Tuning.'
+  return $t('config.av_auto_quality_copy_manual')
 })
 const autoQualityRows = computed(() => [
   {
-    label: 'Profile',
-    value: config.value.ai_enabled === 'enabled' ? 'Auto' : 'Manual',
-    note: config.value.ai_enabled === 'enabled' ? 'Per game and device' : 'No launch tuning',
+    label: $t('config.av_auto_quality_row_profile'),
+    value: config.value.ai_enabled === 'enabled'
+      ? $t('config.av_auto_quality_profile_auto')
+      : $t('config.av_auto_quality_profile_manual'),
+    note: config.value.ai_enabled === 'enabled'
+      ? $t('config.av_auto_quality_profile_note_auto')
+      : $t('config.av_auto_quality_profile_note_manual'),
   },
   {
-    label: 'Bitrate',
-    value: config.value.adaptive_bitrate_enabled === 'enabled' ? 'Adaptive' : 'Fixed',
+    label: $t('config.av_auto_quality_row_bitrate'),
+    value: config.value.adaptive_bitrate_enabled === 'enabled'
+      ? $t('config.av_auto_quality_bitrate_adaptive')
+      : $t('config.av_auto_quality_bitrate_fixed'),
     note: config.value.adaptive_bitrate_enabled === 'enabled'
-      ? `${Number(config.value.adaptive_bitrate_min || 0) / 1000}-${Number(config.value.adaptive_bitrate_max || 0) / 1000} Mbps`
-      : `${Number(config.value.max_bitrate || 0) / 1000} Mbps cap`,
+      ? $t('config.av_auto_quality_bitrate_range_note', {
+          min: Number(config.value.adaptive_bitrate_min || 0) / 1000,
+          max: Number(config.value.adaptive_bitrate_max || 0) / 1000,
+        })
+      : $t('config.av_auto_quality_bitrate_cap_note', { cap: Number(config.value.max_bitrate || 0) / 1000 }),
   },
   {
-    label: 'Runtime',
+    label: $t('config.av_auto_quality_row_runtime'),
     value: selectedStreamDisplayMode.value.title,
     note: selectedStreamDisplayMode.value.badge,
   },
   {
-    label: 'Nova',
+    label: $t('config.av_auto_quality_row_nova'),
     value: clientSettingsSyncBadge.value,
-    note: clientSettingsSync.value.relaunchRequired ? 'Relaunch to sync' : 'Push/pull ready',
+    note: clientSettingsSync.value.relaunchRequired
+      ? $t('config.av_auto_quality_nova_note_relaunch')
+      : $t('config.av_auto_quality_nova_note_ready'),
   },
 ])
 const isLabwcPath = computed(() => (
@@ -268,49 +370,51 @@ const linuxStreamingSetupChecklist = computed(() => {
   const items = [
     {
       id: 'path',
-      title: 'Pick a stream path',
+      title: $t('config.av_checklist_path_title'),
       status: selectedStreamDisplayMode.value.title,
       copy: isGamescopePath.value
-        ? 'Gamescope Stream: attach idle gamescope-0 or spawn owned headless; portal captures it. Encoder/bitrate/HDR below still apply.'
+        ? $t('config.av_checklist_path_copy_gamescope')
         : isDonglePath.value
-          ? 'Dongle: set streaming + primary outputs, privacy swap, portal capture after topology prepare.'
+          ? $t('config.av_checklist_path_copy_dongle')
           : isLabwcPath.value
-            ? 'Private Stream (labwc) is the solid default — apps stay off the desk, wlroots capture.'
-            : 'Mirror Desktop captures the host session via portal. Prefer Private Stream or Gamescope for isolated apps.',
+            ? $t('config.av_checklist_path_copy_labwc')
+            : $t('config.av_checklist_path_copy_mirror'),
     },
     {
       id: 'encoder',
-      title: 'Encoder and quality',
+      title: $t('config.av_checklist_encoder_title'),
       status: autoQualityBadge.value,
       copy: autoQualityEnabled.value
-        ? 'Auto Quality balances bitrate and profile recovery for this path.'
-        : 'Set encoder (NVENC/VAAPI), bitrate, and optional Auto Quality — these apply to labwc and gamescope.',
+        ? $t('config.av_checklist_encoder_copy_auto')
+        : $t('config.av_checklist_encoder_copy_manual'),
     },
   ]
   if (isLabwcPath.value) {
     items.push({
       id: 'wayland-vaapi',
-      title: 'labwc GPU-native capture',
-      status: config.value.linux_prefer_gpu_native_capture === 'enabled' ? 'GPU-native requested' : 'Safe default',
+      title: $t('config.av_checklist_gpu_native_title'),
+      status: config.value.linux_prefer_gpu_native_capture === 'enabled'
+        ? $t('config.av_checklist_gpu_native_status_requested')
+        : $t('config.av_checklist_gpu_native_status_default'),
       copy: config.value.linux_prefer_gpu_native_capture === 'enabled'
-        ? 'Windowed labwc may be used to keep DMA-BUF capture GPU-resident when proven.'
-        : 'Leave GPU-native off unless session health shows SHM/system-memory fallback. This flag does not apply to Gamescope Stream.',
+        ? $t('config.av_checklist_gpu_native_copy_requested')
+        : $t('config.av_checklist_gpu_native_copy_default'),
     })
   }
   if (isGamescopePath.value) {
     items.push({
       id: 'gamescope-host',
-      title: 'Host gamescope stack',
-      status: 'Portal + gamescope-0',
-      copy: 'Needs gamescope on PATH and (on lea) private portal units. WebUI labwc flags (cage, GPU-native preference) are ignored for this path.',
+      title: $t('config.av_checklist_gamescope_title'),
+      status: $t('config.av_checklist_gamescope_status'),
+      copy: $t('config.av_checklist_gamescope_copy'),
     })
   }
   if (nvidiaTrueHeadlessGpuNativeGuard.value) {
     items.push({
       id: 'nvidia-headless-gpu-native-guard',
-      title: 'NVIDIA true-headless guard',
-      status: 'Needs GPU-native preference',
-      copy: 'NVENC true-headless labwc hosts can hit cold-cache 503 when GPU-native capture is disabled. Switch to Private Stream (GPU-native) or enable the preference, restart, retry.',
+      title: $t('config.av_checklist_nvidia_guard_title'),
+      status: $t('config.av_checklist_nvidia_guard_status'),
+      copy: $t('config.av_checklist_nvidia_guard_copy'),
     })
   }
   return items
@@ -491,7 +595,7 @@ function updateDisplayPlannerSource(event) {
                   v-if="mode.available === false"
                   class="mt-2 block text-xs font-medium leading-relaxed text-warning-bright"
                 >
-                  Unavailable: {{ mode.unavailableReason }}
+                  {{ $t('config.av_mode_unavailable', { reason: mode.unavailableReason }) }}
                 </span>
               </SelectableCard>
             </article>
@@ -630,7 +734,8 @@ function updateDisplayPlannerSource(event) {
               <StatTile tile-class="p-3" data-capture-path-explainer>
                 <div class="text-sm font-semibold text-silver">How capture works</div>
                 <p class="mt-1 text-xs leading-relaxed text-storm">
-                  Polaris chooses capture after the launch mode is set. GPU-native keeps frames on the GPU; System-memory capture copies through RAM and can be the intended safe path on AMD and Intel. Mission Control reports the path actually used.
+                  Polaris picks the capture path after the launch mode is set: GPU-native keeps frames on the GPU, while System-memory capture copies through RAM and can be the intended safe path on AMD and Intel.
+                  <a href="https://papi-ux.com/docs/launch-modes/#how-capture-works" target="_blank" class="focus-ring text-ice hover:underline">How capture works</a>
                 </p>
               </StatTile>
 
@@ -655,6 +760,9 @@ function updateDisplayPlannerSource(event) {
                     </div>
                     <div class="mt-2 text-sm leading-relaxed text-storm">{{ item.copy }}</div>
                   </StatTile>
+                </div>
+                <div class="mt-3 text-xs text-storm">
+                  Full setup detail: <a href="https://papi-ux.com/docs/launch-modes/#linux-setup-checklist" target="_blank" class="focus-ring text-ice hover:underline">Linux setup checklist</a>
                 </div>
               </div>
 
@@ -831,7 +939,7 @@ function updateDisplayPlannerSource(event) {
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
               <div class="text-base font-semibold text-silver">
-                {{ autoQualityEnabled ? 'Auto Quality is balancing this host' : autoQualityPartial ? 'Auto Quality is partially enabled' : 'Manual stream tuning' }}
+                {{ autoQualityEnabled ? $t('config.av_auto_quality_heading_on') : autoQualityPartial ? $t('config.av_auto_quality_heading_partial') : $t('config.av_auto_quality_heading_manual') }}
               </div>
               <span class="meta-pill" :class="autoQualityTone">{{ autoQualityBadge }}</span>
             </div>
@@ -843,12 +951,30 @@ function updateDisplayPlannerSource(event) {
             :class="autoQualityEnabled ? 'dashboard-action-button-secondary' : 'dashboard-action-button-primary'"
             @click="setAutoQuality(!autoQualityEnabled)"
           >
-            {{ autoQualityEnabled ? 'Use Manual Tuning' : 'Enable Auto Quality' }}
+            {{ autoQualityEnabled ? $t('config.av_auto_quality_disable_action') : $t('config.av_auto_quality_enable_action') }}
           </button>
         </div>
 
-        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <StatTile v-for="row in autoQualityRows" :key="row.label" :label="row.label" :value="row.value" :note="row.note" />
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="section-kicker" :data-auto-quality-strip-source="autoQualityLive ? 'host' : 'saved'">
+            {{ autoQualityLive ? $t('config.av_auto_quality_live_kicker') : $t('config.av_auto_quality_saved_kicker') }}
+          </div>
+          <p
+            v-if="provenanceFor('adaptive_bitrate_enabled')"
+            class="text-[11px] text-storm"
+            data-provenance="adaptive_bitrate_enabled"
+          >
+            {{ $t('config.av_provenance_set_by', { source: provenanceFor('adaptive_bitrate_enabled') }) }}
+          </p>
+        </div>
+        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" data-auto-quality-strip>
+          <StatTile
+            v-for="row in (autoQualityLive ? autoQualityLiveRows : autoQualityRows)"
+            :key="row.label"
+            :label="row.label"
+            :value="row.value"
+            :note="row.note"
+          />
         </div>
       </div>
     </section>
@@ -961,13 +1087,13 @@ pactl info | grep Source</pre>
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="section-kicker">Display Planner</div>
-              <h4 class="mt-2 text-sm font-semibold text-silver">Preset targets</h4>
+              <h4 class="mt-2 text-sm font-semibold text-silver">{{ $t('config.av_planner_title') }}</h4>
               <div class="mt-1 text-sm leading-relaxed text-storm">
-                Presets scale the saved fallback mode while keeping its {{ displayPlanner.sourceAspectRatio }} aspect ratio, so you choose a plain-language target instead of typing raw WxHxFPS values.
+                {{ $t('config.av_planner_copy', { aspect: displayPlanner.sourceAspectRatio }) }}
               </div>
             </div>
             <div class="rounded-2xl border border-success/25 bg-success/10 px-3 py-2 text-right text-sm text-success-bright">
-              <div class="text-[10px] font-semibold uppercase tracking-eyebrow">Recommended · {{ displayPlanner.recommendedTitle }}</div>
+              <div class="text-[10px] font-semibold uppercase tracking-eyebrow">{{ $t('config.av_planner_recommended_label', { title: displayPlanner.recommendedTitle }) }}</div>
               <div class="mt-1 font-medium">{{ displayPlanner.recommendedMode }}</div>
             </div>
           </div>
@@ -989,11 +1115,11 @@ pactl info | grep Source</pre>
                   :class="choice.id === displayPlanner.recommendedId
                     ? 'border-success/30 bg-success/10 text-success'
                     : 'border-storm/30 bg-storm/10 text-storm'"
-                >{{ choice.id === displayPlanner.recommendedId ? 'Recommended' : choice.badge }}</span>
+                >{{ choice.id === displayPlanner.recommendedId ? $t('config.av_planner_badge_recommended') : choice.badge }}</span>
               </div>
               <div class="mt-3 text-sm leading-relaxed text-storm">{{ choice.reason }}</div>
               <div class="mt-3">
-                <div class="eyebrow-label">Target mode</div>
+                <div class="eyebrow-label">{{ $t('config.av_planner_target_mode') }}</div>
                 <div class="mt-1 font-mono text-xs text-silver">{{ choice.targetMode }}</div>
               </div>
             </SelectableCard>
@@ -1001,11 +1127,14 @@ pactl info | grep Source</pre>
 
           <div class="flex flex-col gap-3 rounded-lg border border-ice/15 bg-ice/5 p-4 text-sm text-storm lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <div class="font-medium text-silver">Moonlight compatibility stays standard</div>
-              <div class="mt-1">Planner choices only write the existing fallback display mode format. Nova/per-game overrides can layer on top where client-settings support exists.</div>
+              <div class="font-medium text-silver">{{ $t('config.av_planner_moonlight_title') }}</div>
+              <div class="mt-1">
+                {{ $t('config.av_planner_moonlight_copy') }}
+                <a href="https://papi-ux.com/docs/configuration/#common-options" target="_blank" class="focus-ring text-ice hover:underline">{{ $t('config.av_planner_moonlight_link') }}</a>
+              </div>
             </div>
             <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-secondary" @click="showDisplayPlannerAdvanced = !showDisplayPlannerAdvanced">
-              {{ showDisplayPlannerAdvanced ? 'Hide Advanced' : 'Show Advanced' }}
+              {{ showDisplayPlannerAdvanced ? $t('config.av_planner_hide_advanced') : $t('config.av_planner_show_advanced') }}
             </button>
           </div>
 
@@ -1013,7 +1142,7 @@ pactl info | grep Source</pre>
             <div>
               <div class="section-kicker">Advanced Display Planner</div>
               <div class="mt-2 text-sm leading-relaxed text-storm">
-                Scale factors are capped to 0.5x–2x and excessive modes stay hidden. Use Custom only when a client/game needs a specific override and the normal recommendation is not right.
+                {{ $t('config.av_planner_advanced_copy') }}
               </div>
             </div>
             <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
@@ -1027,11 +1156,11 @@ pactl info | grep Source</pre>
               >
                 <div class="text-sm font-semibold text-silver">{{ factor.label }}</div>
                 <div class="mt-1 font-mono text-xs text-storm">{{ factor.targetMode }}</div>
-                <div class="mt-1 text-[11px]" :class="factor.safe ? 'text-storm' : 'text-warning-bright'">{{ factor.safe ? 'Available' : 'Hidden as excessive' }}</div>
+                <div class="mt-1 text-[11px]" :class="factor.safe ? 'text-storm' : 'text-warning-bright'">{{ factor.safe ? $t('config.av_planner_factor_available') : $t('config.av_planner_factor_hidden') }}</div>
               </SelectableCard>
             </div>
             <label class="block text-sm font-medium text-storm">
-              Custom scale factor
+              {{ $t('config.av_planner_custom_scale') }}
               <input
                 v-model.number="customDisplayScale"
                 type="number"
@@ -1060,6 +1189,9 @@ pactl info | grep Source</pre>
             @input="updateDisplayPlannerSource"
           />
           <div class="text-sm text-storm mt-1">{{ $t('config.fallback_mode_desc') }}</div>
+          <p v-if="provenanceFor('fallback_mode')" class="mt-1 text-[11px] text-storm" data-provenance="fallback_mode">
+            {{ $t('config.av_provenance_set_by', { source: provenanceFor('fallback_mode') }) }}
+          </p>
         </div>
 
         <DisplayDeviceOptions
@@ -1103,6 +1235,9 @@ pactl info | grep Source</pre>
             <label for="max_bitrate" class="block text-sm font-medium text-storm mb-1">{{ $t("config.max_bitrate") }}</label>
             <input id="max_bitrate" v-model="config.max_bitrate" type="number" placeholder="0" class="settings-input" />
             <div class="text-sm text-storm mt-1">{{ $t("config.max_bitrate_desc") }}</div>
+            <p v-if="provenanceFor('max_bitrate')" class="mt-1 text-[11px] text-storm" data-provenance="max_bitrate">
+              {{ $t('config.av_provenance_set_by', { source: provenanceFor('max_bitrate') }) }}
+            </p>
           </div>
 
           <div>
@@ -1121,15 +1256,15 @@ pactl info | grep Source</pre>
         <div class="settings-subtle-surface space-y-3">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <div class="text-sm font-medium text-silver">Adaptive bitrate range</div>
-              <div class="mt-1 text-sm text-storm">Used only for evidence-backed live bitrate changes and gradual recovery.</div>
+              <div class="text-sm font-medium text-silver">{{ $t('config.av_adaptive_range_title') }}</div>
+              <div class="mt-1 text-sm text-storm">{{ $t('config.av_adaptive_range_copy') }}</div>
             </div>
             <div class="control-chip whitespace-nowrap" :class="autoQualityTone">{{ autoQualityBadge }}</div>
           </div>
 
           <div v-if="autoQualityEnabled" class="settings-form-grid">
             <div>
-              <label class="block text-sm font-medium text-storm mb-1">Min Bitrate (kbps)</label>
+              <label class="block text-sm font-medium text-storm mb-1">{{ $t('config.av_adaptive_range_min_label') }}</label>
               <input
                 v-model.number="config.adaptive_bitrate_min"
                 type="number"
@@ -1140,7 +1275,7 @@ pactl info | grep Source</pre>
               />
             </div>
             <div>
-              <label class="block text-sm font-medium text-storm mb-1">Max Bitrate (kbps)</label>
+              <label class="block text-sm font-medium text-storm mb-1">{{ $t('config.av_adaptive_range_max_label') }}</label>
               <input
                 v-model.number="config.adaptive_bitrate_max"
                 type="number"
@@ -1153,10 +1288,10 @@ pactl info | grep Source</pre>
           </div>
 
           <div v-if="autoQualityEnabled" class="text-sm text-storm">
-            Floor: {{ config.adaptive_bitrate_min / 1000 }} Mbps. Ceiling: {{ config.adaptive_bitrate_max / 1000 }} Mbps.
+            {{ $t('config.av_adaptive_range_bounds', { floor: config.adaptive_bitrate_min / 1000, ceiling: config.adaptive_bitrate_max / 1000 }) }}
           </div>
           <div v-else class="text-sm text-storm">
-            Enable Adaptive Bitrate above to use measured live bitrate recovery.
+            {{ $t('config.av_adaptive_range_disabled_hint') }}
           </div>
         </div>
       </div>

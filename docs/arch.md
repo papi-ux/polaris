@@ -53,7 +53,7 @@ systemctl --user enable --now polaris
 CachyOS is expected to work through this package path. If a derivative renames dependencies or ships
 different runtime helpers, the package may refuse to install or Polaris may fail to find a helper at
 launch. In that case use the local package or source build in
-[Building Polaris](building.md), and please report the derivative-specific gap with your distro, GPU,
+[Build from source](building.md), and please report the derivative-specific gap with your distro, GPU,
 driver, compositor, and package details.
 
 ## Verify the stream path

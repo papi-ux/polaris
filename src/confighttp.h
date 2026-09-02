@@ -11,8 +11,15 @@
 #include <string>
 #include <string_view>
 
+// lib includes
+#include <nlohmann/json.hpp>
+
 // local includes
 #include "thread_safe.h"
+
+namespace stream_stats {
+  struct stats_t;
+}
 
 #define WEB_DIR POLARIS_ASSETS_DIR "/web/"
 
@@ -62,6 +69,23 @@ namespace confighttp {
   std::string client_settings_endpoint_url(std::string_view request_host);
 
   void start();
+
+  /**
+   * @brief Assemble the GET /api/settings/metadata payload.
+   *
+   * @param client_uuid Optional paired-client uuid; empty selects the host view.
+   * @param error Set to a serve-ready message when the uuid is unknown.
+   * @return The payload, or an empty object when error is set.
+   */
+  nlohmann::json build_settings_metadata_payload(const std::string &client_uuid, std::string &error);
+
+  /**
+   * @brief Add the live tuning and auto-quality blocks to a stream stats payload.
+   *
+   * Both GET /api/stats/stream and its SSE variant serve this augmented shape;
+   * the keys are additive so bare stats consumers keep working unchanged.
+   */
+  nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats);
 
   /**
    * @brief Session lifecycle states.

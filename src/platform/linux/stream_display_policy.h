@@ -31,6 +31,7 @@ namespace stream_display_policy {
   struct mode_option_t {
     std::string value;
     std::string label;
+    std::string badge;
     std::string reason;
     bool available = true;
     std::string unavailable_reason;

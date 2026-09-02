@@ -34,7 +34,7 @@ TEST(DoctorResetContract, OptimizeCannotReadHistoryAiSettingsOrRecoveryOverlay) 
   const auto serializer = between(
     nvhttp,
     "void append_deterministic_optimization_json(",
-    "bool ai_auto_quality_enabled()"
+    "bool host_prefers_headless()"
   );
   for (const auto *forbidden : {
          "get_session_history", "get_cached", "request_sync",
@@ -847,7 +847,7 @@ TEST(DoctorResetContract, ClientSettingsPersistencePreservesExistingConfigAtomic
   const auto persistence = between(
     nvhttp,
     "bool persist_config_values(",
-    "std::string configured_stream_display_mode_selection()"
+    "using persist_config_values_fn_t"
   );
 
   EXPECT_EQ(persistence.find("file_handler::read_file"), std::string::npos);
@@ -1111,9 +1111,15 @@ TEST(DoctorResetContract, LegacyAiSurfacesAreExplanationOnly) {
   EXPECT_EQ(ui.find("testResult.payload.target_bitrate_kbps"), std::string::npos);
   EXPECT_NE(ui.find("AI explanations"), std::string::npos);
 
+  // The Video/Audio page copy moved into the locale file, so the banned
+  // legacy phrase is checked in both places and the required adaptive
+  // explanation is pinned where it now lives, with its wiring in the source.
   const auto audio_video = source("src_assets/common/assets/web/configs/tabs/AudioVideo.vue");
+  const auto av_locale = source("src_assets/common/assets/web/public/assets/locale/en.json");
   EXPECT_EQ(audio_video.find("AI Auto Quality"), std::string::npos);
-  EXPECT_NE(audio_video.find("Adaptive bitrate"), std::string::npos);
+  EXPECT_EQ(av_locale.find("AI Auto Quality"), std::string::npos);
+  EXPECT_NE(av_locale.find("Adaptive bitrate"), std::string::npos);
+  EXPECT_NE(audio_video.find("config.av_adaptive_range_title"), std::string::npos);
   EXPECT_EQ(
     audio_video.find("config.value.adaptive_bitrate_enabled === 'enabled' &&"),
     std::string::npos

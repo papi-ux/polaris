@@ -220,6 +220,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_session_key.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_otp_claim.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_stop_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_projection_contract.cpp
 )
 
 set(TEST_NETWORK_SOURCES
@@ -233,6 +234,7 @@ set(TEST_AUDIO_SOURCES
 set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp

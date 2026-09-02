@@ -1,12 +1,29 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { shallowMount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, reactive, ref } from 'vue'
 
 import AudioVideo from './configs/tabs/AudioVideo.vue'
 
+const enMessages = JSON.parse(readFileSync(
+  join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'),
+  'utf8',
+))
+
+// en.json-backed stub: the behavioral assertions below keep reading the real
+// rendered English copy, resolved the same way vue-i18n resolves it at runtime.
+// Unknown keys fall back to the key itself, matching the old stub.
 const i18n = {
-  t(key) {
-    return key
+  t(key, params = {}) {
+    const value = key.split('.').reduce(
+      (node, part) => (node && typeof node === 'object' ? node[part] : undefined),
+      enMessages,
+    )
+    if (typeof value !== 'string') {
+      return key
+    }
+    return value.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
   },
 }
 
@@ -64,6 +81,26 @@ function mountAudioVideo(config = linuxConfig()) {
 describe('Linux Streaming Setup checklist', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('renders the en.json copy for strings routed through the locale system', () => {
+    const wrapper = mountAudioVideo()
+    const text = wrapper.text()
+
+    // Representative keys across the moved families: mode cards, checklist,
+    // Auto Quality, planned modes, and the display planner. Each value must
+    // exist in en.json and appear verbatim in the rendered page.
+    for (const key of [
+      'av_mode_headless_stream_copy',
+      'av_checklist_path_title',
+      'av_auto_quality_badge_manual',
+      'av_planned_family_mode_copy',
+      'av_planner_moonlight_title',
+    ]) {
+      const value = enMessages.config[key]
+      expect(typeof value, `config.${key} must exist in en.json`).toBe('string')
+      expect(text, `config.${key}`).toContain(value)
+    }
   })
 
   it('guides desktop Linux operators through display pairing, Auto Quality, and AMD/VAAPI capture checks', () => {
@@ -269,7 +306,10 @@ describe('Linux Streaming Setup checklist', () => {
     expect(dongle).toBeDefined()
     expect(desktop).toBeDefined()
     await dongle.trigger('click')
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The page also fetches the settings projection on mount; only the dongle
+    // discovery call is under test here.
+    const discoveryCalls = () => fetchMock.mock.calls.filter(([url]) => !String(url).includes('settings/metadata'))
+    expect(discoveryCalls()).toHaveLength(1)
     await desktop.trigger('click')
 
     resolveFetch({
