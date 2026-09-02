@@ -1,10 +1,6 @@
-# SteamOS 3.8 Install Guide
+# Install on SteamOS 3.8
 
-Polaris provides a dedicated x86_64 package for SteamOS 3.8:
-
-`Polaris-steamos3.8-x86_64.pkg.tar.zst`
-
-This package is built against Valve's versioned SteamOS 3.8 package repositories. It is not built against rolling Arch Linux, and the rolling Arch package is not a supported substitute on SteamOS.
+Polaris provides a dedicated x86_64 package for SteamOS 3.8, `Polaris-steamos3.8-x86_64.pkg.tar.zst`. It is built against Valve's versioned SteamOS 3.8 package repositories and is not built against rolling Arch Linux; the rolling Arch package is not a supported substitute on SteamOS.
 
 ## Validation Status
 
