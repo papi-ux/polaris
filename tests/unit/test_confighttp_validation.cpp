@@ -57,6 +57,66 @@ TEST(ConfigValidationTests, RejectsNonBooleanAiApiKeyClearFlag) {
   EXPECT_NE(error.find("clear_ai_api_key must be a boolean"), std::string::npos);
 }
 
+TEST(ConfigValidationTests, RejectsNonBooleanSteamGridDbApiKeyClearFlag) {
+  nlohmann::json payload = {
+    {"clear_steamgriddb_api_key", "true"}
+  };
+
+  std::string error;
+  EXPECT_FALSE(confighttp::validation::validate_config_payload(payload, error));
+  EXPECT_NE(error.find("clear_steamgriddb_api_key must be a boolean"), std::string::npos);
+}
+
+TEST(ConfigValidationTests, RedactedSecretPlaceholdersPreserveExistingSecrets) {
+  nlohmann::json payload = {
+    {"api_key", ""},
+    {"ai_api_key", ""},
+    {"steamgriddb_api_key", ""},
+    {"clear_ai_api_key", false},
+    {"clear_steamgriddb_api_key", false},
+    {"sunshine_name", "Updated host"}
+  };
+
+  confighttp::validation::normalize_write_only_secret_payload(payload);
+
+  EXPECT_FALSE(payload.contains("api_key"));
+  EXPECT_FALSE(payload.contains("ai_api_key"));
+  EXPECT_FALSE(payload.contains("steamgriddb_api_key"));
+  EXPECT_FALSE(payload.contains("clear_ai_api_key"));
+  EXPECT_FALSE(payload.contains("clear_steamgriddb_api_key"));
+  EXPECT_EQ(payload.at("sunshine_name"), "Updated host");
+}
+
+TEST(ConfigValidationTests, ExplicitSecretClearFlagsWinOverPlaceholders) {
+  nlohmann::json payload = {
+    {"ai_api_key", "replacement-that-must-not-survive"},
+    {"steamgriddb_api_key", "replacement-that-must-not-survive"},
+    {"clear_ai_api_key", true},
+    {"clear_steamgriddb_api_key", true}
+  };
+
+  confighttp::validation::normalize_write_only_secret_payload(payload);
+
+  EXPECT_EQ(payload.at("ai_api_key"), "");
+  EXPECT_EQ(payload.at("steamgriddb_api_key"), "");
+  EXPECT_FALSE(payload.contains("clear_ai_api_key"));
+  EXPECT_FALSE(payload.contains("clear_steamgriddb_api_key"));
+}
+
+TEST(ConfigValidationTests, NonEmptySecretReplacementsRemainExplicit) {
+  nlohmann::json payload = {
+    {"api_key", "legacy-new"},
+    {"ai_api_key", "ai-new"},
+    {"steamgriddb_api_key", "sgdb-new"}
+  };
+
+  confighttp::validation::normalize_write_only_secret_payload(payload);
+
+  EXPECT_EQ(payload.at("api_key"), "legacy-new");
+  EXPECT_EQ(payload.at("ai_api_key"), "ai-new");
+  EXPECT_EQ(payload.at("steamgriddb_api_key"), "sgdb-new");
+}
+
 TEST(ConfigValidationTests, AcceptsBrowserStreamPrimaryAndDeprecatedAliasKeys) {
   nlohmann::json payload = {
     {"browser_streaming", "enabled"},
