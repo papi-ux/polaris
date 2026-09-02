@@ -119,8 +119,12 @@ describe('settings affordances', () => {
 
   it('labels the planner mono value as a target mode instead of dressing it as an input', () => {
     const source = webSource('configs/tabs/AudioVideo.vue')
+    const locale = webSource('public/assets/locale/en.json')
 
-    expect(source).toContain('Target mode')
+    // The label text moved into the locale file; the source must still wire
+    // the key so the mono value keeps its plain-language caption.
+    expect(source).toContain('config.av_planner_target_mode')
+    expect(locale).toContain('"av_planner_target_mode": "Target mode"')
     expect(source).not.toMatch(/rounded-md border border-storm\/20 bg-void\/25[^"]*font-mono/)
   })
 
