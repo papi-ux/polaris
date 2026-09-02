@@ -956,7 +956,7 @@ function updateDisplayPlannerSource(event) {
         </div>
 
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <div class="section-kicker" data-auto-quality-strip-source="{{ autoQualityLive ? 'host' : 'saved' }}">
+          <div class="section-kicker" :data-auto-quality-strip-source="autoQualityLive ? 'host' : 'saved'">
             {{ autoQualityLive ? $t('config.av_auto_quality_live_kicker') : $t('config.av_auto_quality_saved_kicker') }}
           </div>
           <p

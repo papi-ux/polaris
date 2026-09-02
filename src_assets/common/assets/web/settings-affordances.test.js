@@ -157,3 +157,18 @@ describe('settings projection binding', () => {
     expect(webSource('client-settings-sync.js')).toContain('export function resolveConfigResponseOnlyKeys')
   })
 })
+
+// Vue 3 does not interpolate mustaches inside attributes: `attr="{{ expr }}"`
+// ships the literal braces to the DOM. Dynamic attributes must be bound.
+describe('attribute interpolation', () => {
+  it.each(migratedSettingsSources)('%s binds dynamic attributes instead of interpolating them', (relativePath) => {
+    const source = webSource(relativePath)
+    const offenders = source.split('\n').filter((line) => /\s[a-zA-Z-]+="[^"]*\{\{/.test(line))
+    expect(offenders, `mustache inside an attribute in ${relativePath}`).toEqual([])
+  })
+
+  it('binds the Auto Quality strip source marker', () => {
+    const source = webSource('configs/tabs/AudioVideo.vue')
+    expect(source).toContain(`:data-auto-quality-strip-source="autoQualityLive ? 'host' : 'saved'"`)
+  })
+})
