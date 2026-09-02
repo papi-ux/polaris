@@ -611,6 +611,7 @@ namespace config {
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode
+    {},  // display_plan (empty = mode set manually)
     false, // isolated Display
     false, // ignore_encoder_probe_failure
     false, // browser_streaming
@@ -1406,6 +1407,7 @@ namespace config {
     }
 
     string_f(vars, "fallback_mode", video.fallback_mode);
+    string_f(vars, "display_plan", video.display_plan);
     bool_f(vars, "isolated_virtual_display_option", video.isolated_virtual_display_option);
     bool_f(vars, "ignore_encoder_probe_failure", video.ignore_encoder_probe_failure);
     bool_f(vars, "webrtc_browser_streaming", video.browser_streaming);

@@ -397,6 +397,22 @@ namespace nvhttp {
   std::string effective_stream_display_mode_for_action(const stream_stats::stats_t &stats,
                                                        bool current_virtual_display);
 
+  /**
+   * @brief Project the client-settings state served on the GameStream surface
+   *        for read-only consumption by the Web UI config server.
+   *
+   * @param client_uuid Paired-client uuid for a per-client view; empty selects
+   *                    the host view (no paired overrides, no client identity).
+   * @return An object with view, optional client identity, fields, sync, and
+   *         stream_display; an empty object when the uuid is unknown.
+   */
+  nlohmann::json client_settings_projection(const std::string &client_uuid);
+
+  /**
+   * @brief Host-view auto-quality policy built from the live session health.
+   */
+  nlohmann::json auto_quality_status_json();
+
 #ifdef POLARIS_TESTS
   bool is_in_trusted_subnet_for_tests(const boost::asio::ip::address &addr);
   bool pairing_unique_id_valid_for_tests(std::string_view unique_id);

@@ -60,6 +60,7 @@
 #include "process.h"
 #include "rtsp.h"
 #include "session_event_queue.h"
+#include "settings_metadata.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
 #include "update_status.h"
@@ -3963,6 +3964,30 @@ namespace confighttp {
   }
 
   /**
+   * @brief Config keys the web UI may apply without a stream relaunch.
+   *
+   * One source for GET /api/config and GET /api/settings/metadata so the two
+   * surfaces can never disagree about which pending keys apply live.
+   */
+  nlohmann::json client_settings_live_config_fields_json() {
+    return nlohmann::json::array({
+      "max_bitrate",
+      "adaptive_bitrate_enabled",
+      "ai_enabled"
+    });
+  }
+
+  /**
+   * @brief Config keys that only take effect after a stream relaunch.
+   */
+  nlohmann::json client_settings_restart_config_fields_json() {
+    return nlohmann::json::array({
+      "linux_stream_mode",
+      "fallback_mode"
+    });
+  }
+
+  /**
    * @brief Get the configuration settings.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -4060,15 +4085,8 @@ namespace confighttp {
     output_tree["client_settings_effective_stream_display_mode_label"] = stream_display_mode_label(effective_mode);
     // Config keys, not GameStream sync-field names: the web UI checks its own
     // pending config keys against these to render apply-live vs restart badges.
-    output_tree["client_settings_live_fields"] = nlohmann::json::array({
-      "max_bitrate",
-      "adaptive_bitrate_enabled",
-      "ai_enabled"
-    });
-    output_tree["client_settings_restart_fields"] = nlohmann::json::array({
-      "linux_stream_mode",
-      "fallback_mode"
-    });
+    output_tree["client_settings_live_fields"] = client_settings_live_config_fields_json();
+    output_tree["client_settings_restart_fields"] = client_settings_restart_config_fields_json();
     {
       auto response_only_keys = nlohmann::json::array();
       for (const auto key : validation::response_only_config_keys()) {
@@ -4149,6 +4167,104 @@ namespace confighttp {
     output_tree["adaptive_bitrate_enabled"] = bool_config_value(adaptive_bitrate::is_enabled());
     output_tree["ai_enabled"] = bool_config_value(ai_optimizer::is_enabled());
     send_response(response, output_tree);
+  }
+
+  nlohmann::json build_settings_metadata_payload(const std::string &client_uuid, std::string &error) {
+    auto projection = nvhttp::client_settings_projection(client_uuid);
+    if (projection.empty()) {
+      error = "unknown client";
+      return nlohmann::json::object();
+    }
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["version"] = 1;
+    output["view"] = projection["view"];
+    if (projection.contains("client")) {
+      output["client"] = projection["client"];
+    }
+    output["fields"] = projection["fields"];
+    output["sync"] = projection["sync"];
+    output["stream_display"] = projection["stream_display"];
+    output["write_paths"] = {
+      {"web_ui", {{"endpoint", "/api/config"}, {"auth", "web_session"}}},
+      {"gamestream", {{"endpoint", std::string(CLIENT_SETTINGS_ENDPOINT)}, {"auth", "paired_client_cert"}}},
+      {"coordinated", false},
+      {"note", "Both paths write the same underlying settings without cross-path locking; the last writer wins."}
+    };
+    {
+      auto response_only_keys = nlohmann::json::array();
+      for (const auto key : validation::response_only_config_keys()) {
+        response_only_keys.emplace_back(key);
+      }
+      output["response_only_keys"] = std::move(response_only_keys);
+    }
+    output["live_fields"] = client_settings_live_config_fields_json();
+    output["restart_fields"] = client_settings_restart_config_fields_json();
+    output["field_map"] = {
+      {"max_bitrate", "target_bitrate_kbps"},
+      {"ai_enabled", "ai_optimizer_enabled"},
+      {"adaptive_bitrate_enabled", "adaptive_bitrate_enabled"},
+      {"linux_stream_mode", "stream_display_mode"},
+      {"fallback_mode", "display_mode"},
+      {"disconnect_resume_timeout_seconds", "disconnect_resume_timeout_seconds"}
+    };
+    output["modes"] = settings_metadata::stream_display_mode_options_json();
+    output["tuning"] = settings_metadata::build_tuning_json(
+      adaptive_bitrate::get_state(),
+      stream_stats::get_current(),
+      proc::proc.current_app_has_mangohud()
+    );
+    output["auto_quality"] = nvhttp::auto_quality_status_json();
+    output["provenance"] = settings_metadata::config_write_provenance_json();
+    if (client_uuid.empty()) {
+      auto clients = nlohmann::json::array();
+      for (const auto &client : nvhttp::get_all_clients()) {
+        clients.push_back({
+          {"uuid", client.value("uuid", std::string {})},
+          {"name", client.value("name", std::string {})},
+          {"connected", client.value("connected", false)},
+          {"display_mode", client.value("display_mode", std::string {})},
+          {"target_bitrate_kbps", client.value("target_bitrate_kbps", 0)}
+        });
+      }
+      output["clients"] = std::move(clients);
+    }
+    return output;
+  }
+
+  /**
+   * @brief Read-only projection of every settings surface for the Web UI.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/settings/metadata| GET| null}
+   */
+  void getSettingsMetadata(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::string client_uuid;
+    for (const auto &[name, value] : request->parse_query_string()) {
+      if (name == "client") {
+        client_uuid = value;
+      }
+    }
+
+    std::string error;
+    auto output = build_settings_metadata_payload(client_uuid, error);
+    if (!error.empty()) {
+      send_response(
+        response,
+        SimpleWeb::StatusCode::client_error_not_found,
+        nlohmann::json {{"status", false}, {"error", error}}
+      );
+      return;
+    }
+    send_response(response, output);
   }
 
   /**
@@ -4233,6 +4349,16 @@ namespace confighttp {
         BOOST_LOG(error) << "SaveConfig: "sv << message;
         bad_request(response, request, message);
         return;
+      }
+      {
+        std::vector<std::string> written_keys;
+        for (const auto &[k, v] : input_tree.items()) {
+          if (v.is_null() || (v.is_string() && v.get<std::string>().empty() && !is_write_only_secret_config_key(k))) {
+            continue;
+          }
+          written_keys.push_back(k);
+        }
+        settings_metadata::note_config_write("web_ui", std::move(written_keys));
       }
       if (input_tree.contains("adaptive_bitrate_enabled")) {
         doctor_actions::set_adaptive_enabled(
@@ -6624,6 +6750,16 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats) {
+    stats_json["tuning"] = settings_metadata::build_tuning_json(
+      adaptive_bitrate::get_state(),
+      stats,
+      proc::proc.current_app_has_mangohud()
+    );
+    stats_json["auto_quality"] = nvhttp::auto_quality_status_json();
+    return stats_json;
+  }
+
   void getStreamStats(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request))
       return;
@@ -6633,7 +6769,10 @@ namespace confighttp {
     auto stats = stream_stats::get_current();
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
-    response->write(stats.to_json(), headers);
+    response->write(
+      augment_stream_stats_json(nlohmann::json::parse(stats.to_json()), stats).dump(),
+      headers
+    );
   }
 
   /**
@@ -6679,7 +6818,9 @@ namespace confighttp {
       // Stream stats every second until shutdown or client disconnect
       while (!shutdown_event->peek()) {
         auto stats = stream_stats::get_current();
-        *response << "data: " << stats.to_json() << "\n\n";
+        *response << "data: "
+                  << augment_stream_stats_json(nlohmann::json::parse(stats.to_json()), stats).dump()
+                  << "\n\n";
 
         std::promise<bool> send_error;
         response->send([&send_error](const SimpleWeb::error_code &ec) {
@@ -6947,6 +7088,7 @@ namespace confighttp {
     server.resource["^/api/logs$"]["GET"] = getLogs;
     server.resource["^/api/logs/clear$"]["POST"] = withCsrf(clearLogs);
     server.resource["^/api/config$"]["GET"] = getConfig;
+    server.resource["^/api/settings/metadata$"]["GET"] = getSettingsMetadata;
     server.resource["^/api/update-status$"]["GET"] = getUpdateStatus;
     server.resource["^/api/config$"]["POST"] = withCsrf(saveConfig);
     server.resource["^/api/configLocale$"]["GET"] = getLocale;

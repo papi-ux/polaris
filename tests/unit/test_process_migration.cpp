@@ -341,16 +341,19 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
        }) {
     EXPECT_EQ(status_handler.find(loose_read), std::string::npos);
   }
-  const auto captured_display_helper_start = source.find(
-    "std::string effective_stream_display_mode_selection(\n      const stream_stats::stats_t &stats,"
+  // The captured-display helper moved to the shared settings_metadata unit;
+  // its two-argument overload must still never read live proc session state.
+  const auto metadata_source = read_source_file_for_contract("src/settings_metadata.cpp");
+  const auto captured_display_helper_start = metadata_source.find(
+    "std::string effective_stream_display_mode_selection(\n    const stream_stats::stats_t &stats,"
   );
-  const auto captured_display_helper_end = source.find(
+  const auto captured_display_helper_end = metadata_source.find(
     "std::string effective_stream_display_mode_selection(const stream_stats::stats_t &stats)",
     captured_display_helper_start
   );
   ASSERT_NE(captured_display_helper_start, std::string::npos);
   ASSERT_NE(captured_display_helper_end, std::string::npos);
-  const auto captured_display_helper = source.substr(
+  const auto captured_display_helper = metadata_source.substr(
     captured_display_helper_start,
     captured_display_helper_end - captured_display_helper_start
   );

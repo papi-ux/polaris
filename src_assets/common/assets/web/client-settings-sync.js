@@ -38,8 +38,21 @@ export const CONFIG_RESPONSE_ONLY_KEYS = [
   'stream_display_mode_options',
   'stream_path_id',
   'stream_path_label',
+  'config_response_only_keys',
   ...CLIENT_SETTINGS_RESPONSE_ONLY_KEYS,
 ]
+
+// The host is the authority on which keys are response-only: since the
+// canonical list moved into confighttp_validation, GET /api/config and the
+// settings projection both carry it as `config_response_only_keys`. The
+// hardcoded mirror above stays as the fallback for hosts that predate it.
+export function resolveConfigResponseOnlyKeys(source = {}) {
+  const served = source?.config_response_only_keys
+  if (Array.isArray(served) && served.length > 0 && served.every((key) => typeof key === 'string')) {
+    return Array.from(new Set([...served, 'config_response_only_keys']))
+  }
+  return CONFIG_RESPONSE_ONLY_KEYS
+}
 
 export function isTruthySetting(value) {
   return value === true || value === 'true' || value === 'enabled' || value === 1 || value === '1'
@@ -243,7 +256,7 @@ export function stripClientSettingsResponseOnly(config = {}) {
 }
 
 export function stripConfigResponseOnly(config = {}) {
-  for (const key of CONFIG_RESPONSE_ONLY_KEYS) {
+  for (const key of resolveConfigResponseOnlyKeys(config)) {
     delete config[key]
   }
   return config

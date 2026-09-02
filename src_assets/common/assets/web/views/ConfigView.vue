@@ -268,7 +268,7 @@ import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import {
-  CONFIG_RESPONSE_ONLY_KEYS,
+  resolveConfigResponseOnlyKeys,
   stripConfigResponseOnly,
 } from '../client-settings-sync'
 import { requestHostRestart } from '../restart-host.js'
@@ -788,7 +788,7 @@ function clearSearchHighlight() {
 
 function captureResponseOnlyConfig(source) {
   responseOnlyConfig.value = {}
-  for (const key of CONFIG_RESPONSE_ONLY_KEYS) {
+  for (const key of resolveConfigResponseOnlyKeys(source)) {
     if (source[key] !== undefined) {
       responseOnlyConfig.value[key] = source[key]
     }

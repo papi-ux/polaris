@@ -184,6 +184,7 @@ namespace config {
     } linux_display;
 
     std::string fallback_mode;
+    std::string display_plan;
     bool isolated_virtual_display_option;
     bool ignore_encoder_probe_failure;
     bool browser_streaming;

@@ -62,8 +62,8 @@ The web UI will be available at `https://localhost:47990`. **Fresh install:** us
 **Upgrade or reinstall:** use `https://localhost:47990/#/login` with the existing account;
 package replacement and source reinstall do not clear `~/.config/polaris`.
 
-See the [SteamOS 3.8 install guide](steamos.md), [Bazzite install guide](bazzite.md), [Ubuntu install guide](ubuntu.md), and
-[openSUSE build guide](openSUSE.md) for caveats, fallback paths, and validation notes before using
+See [Install on SteamOS 3.8](steamos.md), [Install on Bazzite](bazzite.md), [Install on Ubuntu 24.04](ubuntu.md), and
+[Build on openSUSE Tumbleweed](openSUSE.md) for caveats, fallback paths, and validation notes before using
 those less-turnkey paths.
 
 ### Distro compatibility buckets

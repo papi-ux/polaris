@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CONFIG_RESPONSE_ONLY_KEYS,
   applyStreamDisplayModeToConfig,
   labelForStreamDisplayMode,
   resolveClientSettingsSync,
+  resolveConfigResponseOnlyKeys,
   resolveStreamDisplayMode,
   resolveStreamDisplayModeAvailability,
   resolveStreamDisplayRuntimeNotice,
@@ -289,5 +291,27 @@ describe('client settings sync helpers', () => {
       headless_mode: 'enabled',
       linux_stream_mode: 'headless_stream',
     })
+  })
+})
+
+describe('response-only keys from the host', () => {
+  it('prefers the list the host serves and always includes the carrier key', () => {
+    const served = ['status', 'platform', 'stream_path_id', 'brand_new_key']
+    const keys = resolveConfigResponseOnlyKeys({ config_response_only_keys: served })
+
+    expect(keys).toEqual([...served, 'config_response_only_keys'])
+    const config = stripConfigResponseOnly({
+      config_response_only_keys: served,
+      brand_new_key: 'server says drop me',
+      status: true,
+      max_bitrate: 20000,
+    })
+    expect(config).toEqual({ max_bitrate: 20000 })
+  })
+
+  it('falls back to the mirror for hosts that predate the served list', () => {
+    expect(resolveConfigResponseOnlyKeys({})).toBe(CONFIG_RESPONSE_ONLY_KEYS)
+    expect(resolveConfigResponseOnlyKeys({ config_response_only_keys: 'not a list' })).toBe(CONFIG_RESPONSE_ONLY_KEYS)
+    expect(CONFIG_RESPONSE_ONLY_KEYS).toContain('config_response_only_keys')
   })
 })

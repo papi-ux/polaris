@@ -1,6 +1,6 @@
 # Linux stream paths (plugin contract)
 
-This is the developer contract. User-facing guidance on choosing a mode lives in [Launch modes and capture paths](launch-modes.md).
+The developer contract for Linux stream paths. User-facing guidance on choosing a mode lives in [Launch modes and capture paths](launch-modes.md).
 
 Polaris models each user-facing Linux streaming option as a **stream path**: a stable id plus three orthogonal concerns.
 

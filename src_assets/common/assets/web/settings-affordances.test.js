@@ -119,8 +119,12 @@ describe('settings affordances', () => {
 
   it('labels the planner mono value as a target mode instead of dressing it as an input', () => {
     const source = webSource('configs/tabs/AudioVideo.vue')
+    const locale = webSource('public/assets/locale/en.json')
 
-    expect(source).toContain('Target mode')
+    // The label text moved into the locale file; the source must still wire
+    // the key so the mono value keeps its plain-language caption.
+    expect(source).toContain('config.av_planner_target_mode')
+    expect(locale).toContain('"av_planner_target_mode": "Target mode"')
     expect(source).not.toMatch(/rounded-md border border-storm\/20 bg-void\/25[^"]*font-mono/)
   })
 
@@ -128,5 +132,43 @@ describe('settings affordances', () => {
     const source = webSource('configs/tabs/AudioVideo.vue')
 
     expect(source).toMatch(/autoQualityPartial[\s\S]{0,200}!==/)
+  })
+})
+
+// F7: the Video/Audio page binds host truth from the settings projection and
+// keeps a config-derived fallback for hosts that answer 404.
+describe('settings projection binding', () => {
+  it('reads badges, availability, provenance, and the live strip from the projection with a fallback', () => {
+    const source = webSource('configs/tabs/AudioVideo.vue')
+
+    expect(source).toContain("from '../../composables/useConfigProjection'")
+    expect(source).toContain('projection.load()')
+    expect(source).toContain('projectionModes.value?.find(')
+    expect(source).toContain('resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)')
+    expect(source).toContain('data-auto-quality-strip')
+    expect(source).toContain("data-provenance=\"max_bitrate\"")
+    expect(source).toContain("data-provenance=\"fallback_mode\"")
+    expect(source).toContain("data-provenance=\"adaptive_bitrate_enabled\"")
+    expect(source).toMatch(/autoQualityLive \? autoQualityLiveRows : autoQualityRows/)
+  })
+
+  it('lets the host name the response-only keys the save path strips', () => {
+    expect(webSource('views/ConfigView.vue')).toContain('resolveConfigResponseOnlyKeys(source)')
+    expect(webSource('client-settings-sync.js')).toContain('export function resolveConfigResponseOnlyKeys')
+  })
+})
+
+// Vue 3 does not interpolate mustaches inside attributes: `attr="{{ expr }}"`
+// ships the literal braces to the DOM. Dynamic attributes must be bound.
+describe('attribute interpolation', () => {
+  it.each(migratedSettingsSources)('%s binds dynamic attributes instead of interpolating them', (relativePath) => {
+    const source = webSource(relativePath)
+    const offenders = source.split('\n').filter((line) => /\s[a-zA-Z-]+="[^"]*\{\{/.test(line))
+    expect(offenders, `mustache inside an attribute in ${relativePath}`).toEqual([])
+  })
+
+  it('binds the Auto Quality strip source marker', () => {
+    const source = webSource('configs/tabs/AudioVideo.vue')
+    expect(source).toContain(`:data-auto-quality-strip-source="autoQualityLive ? 'host' : 'saved'"`)
   })
 })

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This page covers the fastest recovery steps for the public Polaris host flow. Use the web UI's
+The fastest recovery steps for the public Polaris host flow. Use the web UI's
 Troubleshooting screen first when it is still reachable.
 
 If the stream is running but looks slow, unstable, or blurry, start with
