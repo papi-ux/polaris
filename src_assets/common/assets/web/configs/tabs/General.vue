@@ -87,7 +87,7 @@ function handleSteamGridDbKeyInput() {
           Controls the language used by the Polaris web console.
         </InfoHint>
       </div>
-      <select id="locale" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.locale">
+      <select id="locale" class="settings-input" v-model="config.locale">
         <option value="bg">Български (Bulgarian)</option>
         <option value="cs">Čeština (Czech)</option>
         <option value="de">Deutsch (German)</option>
@@ -121,7 +121,7 @@ function handleSteamGridDbKeyInput() {
           Shown to clients and local discovery surfaces.
         </InfoHint>
       </div>
-      <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" id="sunshine_name" placeholder="Polaris"
+      <input type="text" class="settings-input" id="sunshine_name" placeholder="Polaris"
              v-model="config.sunshine_name" />
     </div>
 
@@ -133,7 +133,7 @@ function handleSteamGridDbKeyInput() {
           Use quieter levels for routine operation and raise this only while debugging.
         </InfoHint>
       </div>
-      <select id="min_log_level" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="config.min_log_level">
+      <select id="min_log_level" class="settings-input" v-model="config.min_log_level">
         <option value="0">{{ $t('config.min_log_level_0') }}</option>
         <option value="1">{{ $t('config.min_log_level_1') }}</option>
         <option value="2">{{ $t('config.min_log_level_2') }}</option>
@@ -182,10 +182,10 @@ function handleSteamGridDbKeyInput() {
         <tbody>
         <tr v-for="(c, i) in cmds[type]">
           <td>
-            <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="c.do" />
+            <input type="text" class="settings-input font-mono text-sm" v-model="c.do" />
           </td>
           <td>
-            <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="c.undo" />
+            <input type="text" class="settings-input font-mono text-sm" v-model="c.undo" />
           </td>
           <td v-if="platform === 'windows'" class="align-middle">
             <Checkbox :id="type + '-cmd-admin-' + i"
@@ -233,10 +233,10 @@ function handleSteamGridDbKeyInput() {
         <tbody>
         <tr v-for="(c, i) in serverCmd">
           <td>
-            <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none" v-model="c.name" />
+            <input type="text" class="settings-input" v-model="c.name" />
           </td>
           <td>
-            <input type="text" class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm" v-model="c.cmd" />
+            <input type="text" class="settings-input font-mono text-sm" v-model="c.cmd" />
           </td>
           <td v-if="platform === 'windows'">
             <div class="flex items-center gap-2">
@@ -333,7 +333,7 @@ function handleSteamGridDbKeyInput() {
           </button>
         </div>
         <input type="password" id="steamgriddb_api_key"
-               class="w-full bg-deep border border-storm rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+               class="settings-input font-mono text-sm"
                v-model="config.steamgriddb_api_key"
                @input="handleSteamGridDbKeyInput"
                placeholder="Enter your SteamGridDB API key" />

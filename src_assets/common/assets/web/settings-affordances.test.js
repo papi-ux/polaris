@@ -6,7 +6,28 @@ const webSource = (relativePath) => readFileSync(
   'utf8',
 )
 
-// The Video/Audio page mixes editable controls with host status. These guards
+// Settings surfaces migrated onto the shared vocabulary. Every file here must
+// route editable fields through .settings-input and stay off the raw literals.
+const migratedSettingsSources = [
+  'configs/tabs/AudioVideo.vue',
+  'configs/tabs/General.vue',
+  'configs/tabs/Network.vue',
+  'configs/tabs/Inputs.vue',
+  'configs/tabs/Files.vue',
+  'configs/tabs/Advanced.vue',
+  'configs/tabs/audiovideo/AdapterNameSelector.vue',
+  'configs/tabs/audiovideo/DisplayDeviceOptions.vue',
+  'configs/tabs/audiovideo/DisplayOutputSelector.vue',
+  'configs/tabs/encoders/AmdAmfEncoder.vue',
+  'configs/tabs/encoders/IntelQuickSyncEncoder.vue',
+  'configs/tabs/encoders/NvidiaNvencEncoder.vue',
+  'configs/tabs/encoders/SoftwareEncoder.vue',
+  'configs/tabs/encoders/VideotoolboxEncoder.vue',
+  'views/PasswordView.vue',
+  'views/PinView.vue',
+]
+
+// The settings pages mix editable controls with host status. These guards
 // keep the two visually distinct: settings look like settings, status looks
 // like status, and nothing renders as a text field unless it accepts input.
 describe('settings affordances', () => {
@@ -22,6 +43,14 @@ describe('settings affordances', () => {
     expect(css).toMatch(/\.stat-tile-compact\s*\{/)
   })
 
+  it('declares the vocabulary in the components layer so utilities can override it', () => {
+    const css = webSource('app.css')
+
+    // Unlayered author CSS beats layered utilities after the build flattens
+    // layers, which silently killed per-use padding overrides like py-2.5.
+    expect(css).toMatch(/@layer components \{[\s\S]*\.settings-input[\s\S]*\.selectable-card[\s\S]*\.stat-tile-compact[\s\S]*\n\}/)
+  })
+
   it('keeps the pointer cursor on interactive cards via selectable-card', () => {
     const css = webSource('app.css')
 
@@ -29,27 +58,33 @@ describe('settings affordances', () => {
     expect(css).toMatch(/\.selectable-card:disabled\s*\{[^}]*cursor-default/s)
   })
 
-  it('keeps read-only tiles off the input-look recipe on the Video/Audio page', () => {
+  it('keeps read-only tiles off the input-look recipe across the settings surfaces', () => {
     const source = webSource('configs/tabs/AudioVideo.vue')
     const statTile = webSource('components/StatTile.vue')
 
     // The old read-only tile literal is nearly indistinguishable from the
     // editable input recipe; every status tile now renders through the shared
     // StatTile component, which is the only holder of the stat grammar here.
-    expect(source).not.toContain('border-storm/20 bg-void/25')
     expect(source).toContain('<StatTile')
     expect(source).not.toContain('stat-tile-compact')
     expect(statTile).toContain('stat-tile-compact')
     expect(statTile).toContain('stat-kicker')
     expect(statTile).toContain('data-readonly')
+
+    for (const path of migratedSettingsSources) {
+      expect(webSource(path), path).not.toContain('border-storm/20 bg-void/25')
+    }
   })
 
-  it('routes every editable field through settings-input on the Video/Audio page', () => {
-    const source = webSource('configs/tabs/AudioVideo.vue')
+  it('routes every editable field through settings-input across the settings surfaces', () => {
+    for (const path of migratedSettingsSources) {
+      const source = webSource(path)
 
-    expect(source).not.toMatch(/border border-storm bg-deep px-3 py-2 text-silver/)
-    expect(source).not.toMatch(/bg-deep border border-storm rounded-lg px-3 py-2/)
-    expect(source).toContain('settings-input')
+      // Both historical orderings of the raw editable-input recipe.
+      expect(source, path).not.toMatch(/border border-storm bg-deep px-3 py-2 text-silver/)
+      expect(source, path).not.toMatch(/bg-deep border border-storm rounded-lg px-3 py-2/)
+      expect(source, path).toContain('settings-input')
+    }
   })
 
   it('marks every choice card on the Video/Audio page as selectable with a pressed state', () => {
