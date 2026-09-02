@@ -1,6 +1,6 @@
 # Quick start
 
-This page takes a Linux host from nothing to a first stream. Fedora 44 and Arch Linux are the
+Take a Linux host from nothing to a first stream. Fedora 44 and Arch Linux are the
 recommended package paths; if you run something else, start from [Compatibility](compatibility.md)
 to find your path before following the steps here.
 
@@ -28,7 +28,7 @@ polaris
 
 CachyOS and most pacman-compatible Arch derivatives should start with the Arch package path. See the
 [Arch guide](arch.md) for details, and fall back to the source flow in
-[Building Polaris](building.md) if a derivative has dependency naming or runtime helper differences.
+[Build from source](building.md) if a derivative has dependency naming or runtime helper differences.
 
 ### Other hosts
 
@@ -38,7 +38,7 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 | Bazzite 44 | [Bazzite guide](bazzite.md) — layer the Fedora 44 RPM with `rpm-ostree` |
 | Ubuntu 24.04 | [Ubuntu guide](ubuntu.md) — experimental tester DEB |
 | openSUSE Tumbleweed | [openSUSE guide](openSUSE.md) — source build |
-| Anything else | [Building Polaris](building.md) |
+| Anything else | [Build from source](building.md) |
 
 ## 2. Create your web console account
 

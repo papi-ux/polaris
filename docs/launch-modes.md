@@ -43,7 +43,7 @@ The same private session, tuned so frames can stay on the GPU the whole way from
 Gamescope is the small compositor Valve built for the Steam Deck's Game Mode: it runs one game at a time, fullscreen, in a session it fully owns, and handles scaling and frame pacing itself. This mode runs your games under Gamescope and streams that session, either by joining a Gamescope that is already idle on the host or by starting its own.
 
 - **Best for:** Steam-first hosts and games that behave best inside Game Mode.
-- **One caveat:** it needs `gamescope` installed on the host. The card is greyed out until it is. Some packages install a helper for this; see [Building Polaris](building.md).
+- **One caveat:** it needs `gamescope` installed on the host. The card is greyed out until it is. Some packages install a helper for this; see [Build from source](building.md).
 
 ### Family Mode (isolated)
 
