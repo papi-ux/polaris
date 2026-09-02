@@ -343,6 +343,8 @@
     "envvar_compatibility_mode_desc": "Enable compatibility mode for environment variables. This will modify the behavior of certain environment variables to be more compatible with older tools.",
     "external_ip": "External IP",
     "external_ip_desc": "If no external IP address is given, Polaris will automatically detect external IP",
+    "display_plan": "Display Plan",
+    "display_plan_desc": "Display Planner preset saved alongside the fallback mode. Empty means the mode was set manually; editing the fallback mode by hand clears it.",
     "fallback_mode": "Fallback Display Mode",
     "fallback_mode_desc": "Polaris will use this mode when the client does not provide a mode or when the app is launched through the web UI. Format: [Width]x[Height]x[FPS]",
     "fallback_mode_error": "Invalid fallback mode. Format: [Width]x[Height]x[FPS]",
