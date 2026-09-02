@@ -897,6 +897,14 @@ namespace nvhttp {
 #endif
     }
 
+    bool build_has_vulkan() {
+#ifdef POLARIS_BUILD_VULKAN
+      return true;
+#else
+      return false;
+#endif
+    }
+
     bool is_mobile_client_type(const std::optional<device_db::device_t> &device_profile);
 
     std::mutex client_presentation_mutex;
@@ -1992,6 +2000,21 @@ namespace nvhttp {
       return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
     }
 
+    nlohmann::json encoder_selection_json() {
+      const auto selection = video::active_encoder_selection_info();
+      return {
+        {"mode", selection.mode},
+        {"gpu_driver", selection.gpu_driver.empty() ? "unknown" : selection.gpu_driver},
+        {"policy", selection.policy},
+        {"preferred_encoder", selection.preferred_encoder},
+        {"fallback_encoder", selection.fallback_encoder},
+        {"selected_encoder", selection.selected_encoder.empty() ? "unknown" : selection.selected_encoder},
+        {"exact_live_probe_required", selection.exact_live_probe_required},
+        {"fallback_used", selection.fallback_used},
+        {"reason", selection.reason}
+      };
+    }
+
     nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
                                              bool current_virtual_display,
                                              const std::string &device_name,
@@ -2238,7 +2261,9 @@ namespace nvhttp {
       health["capture_cpu_copy"] = capture_fallback;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
+      health["encoder_selection"] = encoder_selection_json();
       health["cuda_build"] = build_has_cuda();
+      health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
         nvenc_cuda_disabled_path || safe_target_fps > 0.0;
       if (safe_codec) {
@@ -6444,6 +6469,7 @@ namespace nvhttp {
 
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
+      build["vulkan"] = build_has_vulkan();
 
       // Feature flags
       auto &features = output["features"];
@@ -6593,6 +6619,7 @@ namespace nvhttp {
       output["shutdown_requested"] = stop_in_progress;
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
+      build["vulkan"] = build_has_vulkan();
 #ifdef __linux__
       output["cage_pid"] = stream_runtime::labwc::pid();
       output["screen_locked"] = session_manager::is_screen_locked();
@@ -6717,6 +6744,7 @@ namespace nvhttp {
       // Encoder info
       auto &encoder = output["encoder"];
       encoder["active_backend"] = video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name();
+      encoder["selection"] = encoder_selection_json();
       encoder["codec"] = stats.codec;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;

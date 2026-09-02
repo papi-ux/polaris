@@ -249,7 +249,13 @@ int main(int argc, char *argv[]) {
   #else
   constexpr auto linux_cuda_build_feature = "disabled"sv;
   #endif
-  BOOST_LOG(info) << "Build features: cuda="sv << linux_cuda_build_feature;
+  #ifdef POLARIS_BUILD_VULKAN
+  constexpr auto linux_vulkan_build_feature = "enabled"sv;
+  #else
+  constexpr auto linux_vulkan_build_feature = "disabled"sv;
+  #endif
+  BOOST_LOG(info) << "Build features: cuda="sv << linux_cuda_build_feature
+                  << " vulkan="sv << linux_vulkan_build_feature;
 #endif
 
   // Log publisher metadata

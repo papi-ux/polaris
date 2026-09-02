@@ -7768,7 +7768,7 @@ namespace proc {
     if (!delay_encoder_probe_until_cage &&
         no_active_sessions_at_launch &&
         video::probe_encoders()) {
-      if (config::video.ignore_encoder_probe_failure) {
+      if (config::video.ignore_encoder_probe_failure && config::video.encoder != "vulkan"sv) {
         BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
       } else {
         return 503;
@@ -8110,7 +8110,7 @@ namespace proc {
       const auto cage_socket = stream_runtime::labwc::wayland_socket();
       if (cage_socket.empty()) {
         BOOST_LOG(error) << "session_manager: Cage compositor started without an active WAYLAND_DISPLAY socket for encoder reprobe"sv;
-        if (config::video.ignore_encoder_probe_failure) {
+        if (config::video.ignore_encoder_probe_failure && config::video.encoder != "vulkan"sv) {
           BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
           return true;
         }
@@ -8135,7 +8135,7 @@ namespace proc {
         return true;
       }
 
-      if (config::video.ignore_encoder_probe_failure) {
+      if (config::video.ignore_encoder_probe_failure && config::video.encoder != "vulkan"sv) {
         BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
         return true;
       }
@@ -8146,14 +8146,18 @@ namespace proc {
     const bool requested_headless = requested_headless_for_session;
     const bool prefer_gpu_native_capture = config::video.linux_display.prefer_gpu_native_capture;
     const bool encoder_requires_gpu_native_capture = video::active_encoder_requires_gpu_native_capture();
+    const bool automatic_encoder_prefers_gpu_native_capture =
+      video::automatic_encoder_prefers_gpu_native_capture();
     const bool should_try_gpu_native_cage_probe =
-      prefer_gpu_native_capture || encoder_requires_gpu_native_capture;
+      prefer_gpu_native_capture ||
+      encoder_requires_gpu_native_capture ||
+      automatic_encoder_prefers_gpu_native_capture;
     const bool should_probe_windowed_cage_for_gpu_native =
       use_cage_compositor_for_session &&
       !gamescope_stream_session &&
       stream_runtime::labwc::should_attempt_windowed_gpu_native_probe(
         requested_headless,
-        prefer_gpu_native_capture,
+        prefer_gpu_native_capture || automatic_encoder_prefers_gpu_native_capture,
         should_try_gpu_native_cage_probe
       );
     stream_stats::reset_gpu_native_probe(should_probe_windowed_cage_for_gpu_native, no_active_sessions_at_launch);

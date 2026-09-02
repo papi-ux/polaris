@@ -56,7 +56,8 @@ TEST(LinuxPlatformHardeningSource, HeadlessVaapiFailsClosedBeforeDmabufInitializ
   const auto capture = read_source("src/platform/linux/wlgrab.cpp");
   const auto process = read_source("src/process.cpp");
 
-  EXPECT_NE(policy.find("return hwdevice_type == platf::mem_type_e::cuda;"), std::string::npos);
+  EXPECT_NE(policy.find("hwdevice_type == platf::mem_type_e::cuda"), std::string::npos);
+  EXPECT_NE(policy.find("hwdevice_type == platf::mem_type_e::vulkan"), std::string::npos);
   EXPECT_EQ(policy.find("hwdevice_type == platf::mem_type_e::vaapi"), std::string::npos);
   EXPECT_NE(capture.find("vaapi_headless_dmabuf_disabled_for_stability"), std::string::npos);
   EXPECT_NE(capture.find("true-headless ext-image-copy-capture DMA-BUF is disabled for VAAPI stability"), std::string::npos);
@@ -131,6 +132,30 @@ TEST(LinuxPlatformHardeningSource, KmsCardRejectsAnUnusableRenderDescriptor) {
   const auto guard = source.find("if (render_fd.el < 0) {", dup_fallback);
   ASSERT_NE(guard, std::string::npos);
   EXPECT_NE(source.find("return -1;", guard), std::string::npos);
+}
+
+TEST(LinuxPlatformHardeningSource, VulkanVideoPreservesRadvOptionsAndInitializesProbeFrames) {
+  const auto platform = read_source("src/platform/linux/misc.cpp");
+  EXPECT_NE(platform.find("append_environment_token(\"RADV_PERFTEST\", \"video_encode\")"), std::string::npos);
+  EXPECT_NE(platform.find("append_environment_token(\"RADV_EXPERIMENTAL\", \"video_encode\")"), std::string::npos);
+  EXPECT_NE(platform.find("current + ',' + std::string {token}"), std::string::npos)
+    << "existing RADV options must be preserved";
+
+  const auto encoder = read_source("src/platform/linux/vulkan_encode.cpp");
+  const auto target_views = encoder.find("if (!target.views_created)");
+  const auto dummy_frame = encoder.find("descriptor->sequence == 0", target_views);
+  const auto blank_dispatch = encoder.find("return dispatch_compute(true);", dummy_frame);
+  ASSERT_NE(target_views, std::string::npos);
+  ASSERT_NE(dummy_frame, std::string::npos);
+  ASSERT_NE(blank_dispatch, std::string::npos);
+  EXPECT_LT(target_views, dummy_frame);
+  EXPECT_LT(dummy_frame, blank_dispatch);
+  EXPECT_NE(encoder.find("const std::array<uint8_t, 4> transparent_pixel = {}"), std::string::npos);
+  EXPECT_NE(encoder.find("if (!blank) {", encoder.find("int dispatch_compute(bool blank,")), std::string::npos);
+  EXPECT_NE(encoder.find("create_ram_upload_resources()"), std::string::npos);
+  EXPECT_NE(encoder.find("stage_ram_frame(slot, *ram_img)"), std::string::npos);
+  EXPECT_NE(encoder.find("VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT"), std::string::npos);
+  EXPECT_NE(encoder.find("vk_frame->access[i] = static_cast<VkAccessFlagBits>(0);"), std::string::npos);
 }
 
 TEST(LinuxPlatformHardeningSource, KscreenConfigurationNeverPassesThroughShell) {

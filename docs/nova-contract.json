@@ -254,13 +254,15 @@
         "pacing_policy",
         "recommendation_version",
         "requested_client_fps",
+        "selection",
         "session_target_fps",
         "target_device",
         "target_format",
         "target_residency"
       ],
       "informational_ok": [
-        "active_backend"
+        "active_backend",
+        "selection"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
@@ -271,6 +273,31 @@
         "file": "src/nvhttp.cpp",
         "variable": "encoder",
         "style": "subscript"
+      }
+    },
+    "session_encoder_selection": {
+      "$comment": [
+        "Nested under session_encoder.selection. This explains the deterministic host-side",
+        "Auto policy, its runtime-selected encoder, and whether an exact live probe used the",
+        "documented fallback. It ships ahead of a Nova consumer; Doctor and the web UI can",
+        "use the same evidence without giving either surface control over launch behavior."
+      ],
+      "fields": [
+        "exact_live_probe_required",
+        "fallback_encoder",
+        "fallback_used",
+        "gpu_driver",
+        "mode",
+        "policy",
+        "preferred_encoder",
+        "reason",
+        "selected_encoder"
+      ],
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "encoder_selection_json",
+        "declaration": "return {",
+        "style": "initializer_list"
       }
     },
     "linux_gpu_profile": {

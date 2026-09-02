@@ -26,6 +26,7 @@ sudo zypper install \
   libopus-devel libopusenc-devel \
   wayland-devel wayland-protocols-devel pipewire-devel \
   libayatana-appindicator3-devel desktop-file-utils appstream-glib \
+  shaderc vulkan-devel \
   labwc grim wlr-randr xdpyinfo xwayland
 ```
 
@@ -72,6 +73,8 @@ to Welcome.
 - **AMD / VAAPI** is the default-friendly path (`-DPOLARIS_ENABLE_CUDA=OFF`); choose the
   VAAPI encoder in the web UI. NVIDIA hosts: install the CUDA toolkit and use
   `-DPOLARIS_ENABLE_CUDA=ON`.
+- **Vulkan Video** is experimental and requires `shaderc`, `vulkan-devel`, explicit DRM/KMS
+  capture, and a driver exposing Vulkan Video encode. It does not require CUDA.
 
 ## 3. Optional: build an installable RPM
 

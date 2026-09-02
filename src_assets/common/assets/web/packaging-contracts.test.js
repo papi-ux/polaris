@@ -253,21 +253,24 @@ describe('Linux packaging contracts', () => {
     expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?cage_screencopy::capture\([\s\S]*?#endif/)
   })
 
-  it('installs Vulkan development files for every CUDA distro path', () => {
+  it('installs Vulkan headers, loader, and shader compiler independently of CUDA', () => {
     const installer = readSource('scripts/install/01-install-deps.sh')
     const distroContracts = [
-      ['  fedora)', '  arch)', 'vulkan-loader-devel'],
-      ['  arch)', '  debian)', 'vulkan-headers vulkan-icd-loader'],
-      ['  debian)', '  suse)', 'libvulkan-dev'],
-      ['  suse)', '  *)', 'vulkan-devel'],
+      ['  fedora)', '  arch)', ['glslc', 'vulkan-loader-devel']],
+      ['  arch)', '  debian)', ['shaderc', 'vulkan-headers', 'vulkan-icd-loader']],
+      ['  debian)', '  suse)', ['glslang-tools', 'libvulkan-dev']],
+      ['  suse)', '  *)', ['shaderc', 'vulkan-devel']],
     ]
 
-    for (const [start, end, vulkanPackage] of distroContracts) {
+    for (const [start, end, vulkanPackages] of distroContracts) {
       const distroBlock = section(installer, start, end)
       const cudaIndex = distroBlock.indexOf('if [ "$WITH_CUDA" = 1 ]; then')
-      const vulkanIndex = distroBlock.indexOf(vulkanPackage)
       expect(cudaIndex, `${start} must have a CUDA dependency branch`).toBeGreaterThanOrEqual(0)
-      expect(vulkanIndex, `${start} must install ${vulkanPackage}`).toBeGreaterThan(cudaIndex)
+      for (const vulkanPackage of vulkanPackages) {
+        const vulkanIndex = distroBlock.indexOf(vulkanPackage)
+        expect(vulkanIndex, `${start} must install ${vulkanPackage}`).toBeGreaterThanOrEqual(0)
+        expect(vulkanIndex, `${start} must install ${vulkanPackage} without CUDA`).toBeLessThan(cudaIndex)
+      }
     }
   })
 

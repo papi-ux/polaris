@@ -6,6 +6,7 @@
 
 // standard includes
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <vector>
 
@@ -67,6 +68,14 @@ namespace platf {
    *        the answer for the process lifetime. Empty when no render node exists.
    */
   std::string default_render_device();
+
+  /**
+   * @brief Return the kernel driver bound to an enumerated render node.
+   * @param render_device Exact /dev/dri/renderD* path, or empty to inspect the
+   *        shared default render device.
+   * @return Driver name such as amdgpu, nvidia, i915, or xe; empty if unknown.
+   */
+  std::string render_device_driver(std::string_view render_device = {});
 
   /**
    * @brief The default render node for VAAPI specifically (issue #367).

@@ -7,6 +7,9 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Adds an experimental Linux Vulkan Video encoder for H.264 and HEVC on explicit DRM/KMS capture, matching the encoder to the capture render node and refusing Portal/wlroots or system-memory fallback; AV1 remains disabled until the bundled FFmpeg path passes Vulkan validation
+- Keeps Vulkan image imports and cursor overlays safe across asynchronous submissions with per-slot fences and descriptor sets, and exposes low-latency CBR tuning plus explicit KMS setup guidance in Settings
+- Pins the prepared FFmpeg bundle carrying Vulkan queued-picture teardown and missing encode-queue error fixes, preventing capability probes and short sessions from leaking image views or opening a broken encoder
 - Separates fresh-install Welcome setup from upgrade and reinstall sign-in across every supported distro guide, preserves existing host state by default, routes hosts with stored credentials away from the first-run wizard, and surfaces the real credential persistence error instead of a generic internal-server message
 - Makes `Game Control` the default for every newly paired Nova or Moonlight-compatible client, providing the browse, launch, and input permissions needed to play without granting clipboard, file-transfer, or server-command access; renames the old non-launching `Standard Access` label to `Browse & Watch`, while leaving every existing device's saved permissions unchanged
 - Shows the host cursor by default for new or unset configurations so Moonlight-compatible clients retain a usable pointer, including on DRM/KMS capture where the hardware cursor uses a separate plane; preserves explicit disabled settings, Nova's per-session coordination, and the runtime toggle

@@ -3,6 +3,7 @@
  * @brief Definitions for wlgrab capture.
  */
 // standard includes
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,6 +17,9 @@
 #include "src/stream_stats.h"
 #include "src/video.h"
 #include "vaapi.h"
+#ifdef POLARIS_BUILD_VULKAN
+  #include "vulkan_encode.h"
+#endif
 #include "wayland.h"
 #include "wlgrab_capture_policy.h"
 #include "wlgrab_frame_source.h"
@@ -36,6 +40,10 @@ namespace wl {
 #endif
 #ifdef POLARIS_BUILD_CUDA
       case platf::mem_type_e::cuda:
+        return true;
+#endif
+#ifdef POLARIS_BUILD_VULKAN
+      case platf::mem_type_e::vulkan:
         return true;
 #endif
       default:
@@ -496,6 +504,12 @@ namespace wl {
       }
 #endif
 
+#ifdef POLARIS_BUILD_VULKAN
+      if (mem_type == platf::mem_type_e::vulkan) {
+        return vk::make_avcodec_encode_device_ram(width, height, reported_wayland_main_device);
+      }
+#endif
+
       return std::make_unique<platf::avcodec_encode_device_t>();
     }
 
@@ -508,6 +522,18 @@ namespace wl {
       img->data = new std::uint8_t[height * img->row_pitch];
 
       return img;
+    }
+
+    int dummy_img(platf::img_t *img) override {
+      if (!img || !img->data || img->height <= 0 || img->row_pitch <= 0) {
+        return -1;
+      }
+      std::memset(
+        img->data,
+        0,
+        static_cast<std::size_t>(img->height) * static_cast<std::size_t>(img->row_pitch)
+      );
+      return 0;
     }
 
     egl::display_t egl_display;
@@ -607,6 +633,18 @@ namespace wl {
 #ifdef POLARIS_BUILD_CUDA
       if (mem_type == platf::mem_type_e::cuda) {
         return cuda::make_avcodec_gl_encode_device(width, height, 0, 0);
+      }
+#endif
+
+#ifdef POLARIS_BUILD_VULKAN
+      if (mem_type == platf::mem_type_e::vulkan) {
+        return vk::make_avcodec_encode_device_vram(
+          width,
+          height,
+          0,
+          0,
+          reported_wayland_main_device
+        );
       }
 #endif
 
@@ -746,6 +784,18 @@ namespace wl {
       }
 #endif
 
+#ifdef POLARIS_BUILD_VULKAN
+      if (mem_type == platf::mem_type_e::vulkan) {
+        return vk::make_avcodec_encode_device_vram(
+          width,
+          height,
+          0,
+          0,
+          extcopy.capture_render_node()
+        );
+      }
+#endif
+
       return std::make_unique<platf::avcodec_encode_device_t>();
     }
 
@@ -777,7 +827,10 @@ namespace wl {
 
 namespace platf {
   std::shared_ptr<display_t> wl_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
-    if (hwdevice_type != platf::mem_type_e::system && hwdevice_type != platf::mem_type_e::vaapi && hwdevice_type != platf::mem_type_e::cuda) {
+    if (hwdevice_type != platf::mem_type_e::system &&
+        hwdevice_type != platf::mem_type_e::vaapi &&
+        hwdevice_type != platf::mem_type_e::cuda &&
+        hwdevice_type != platf::mem_type_e::vulkan) {
       BOOST_LOG(error) << "Could not initialize display with the given hw device type."sv;
       return nullptr;
     }

@@ -218,10 +218,11 @@ for boost_library in (
         boost_library,
         "Arch versioned Boost runtime dependencies",
     )
-require_package(shell_array(arch, "makedepends"), "vulkan-headers", "Arch build dependencies")
+for package in ("shaderc", "vulkan-headers"):
+    require_package(shell_array(arch, "makedepends"), package, "Arch build dependencies")
 
 fedora = read("packaging/linux/fedora/Polaris.spec")
-for package in ("pipewire-devel", "vulkan-loader-devel"):
+for package in ("glslc", "pipewire-devel", "vulkan-loader-devel"):
     if not re.search(rf"(?m)^BuildRequires:\s+{re.escape(package)}\s*$", fedora):
         raise AssertionError(f"Fedora build dependencies must explicitly include {package}")
 fedora_build_match = re.search(r"(?ms)^%build\n(?P<body>.*?)(?=^%check\n)", fedora)
@@ -664,7 +665,7 @@ arch_install = re.search(
 if not arch_install:
     raise AssertionError("missing Arch Install dependencies workflow step")
 arch_install_tokens = workflow_run_tokens(arch_install.group("body"))
-for package in ("vulkan-headers", "vulkan-icd-loader"):
+for package in ("shaderc", "vulkan-headers", "vulkan-icd-loader"):
     if package not in arch_install_tokens:
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
 

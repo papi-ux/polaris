@@ -39,7 +39,8 @@ jobs:
             libminiupnpc-devel nlohmann_json-devel libnuma-devel libpulse-devel \
             libopus-devel libopusenc-devel \
             wayland-devel wayland-protocols-devel pipewire-devel \
-            libayatana-appindicator3-devel desktop-file-utils appstream-glib
+            libayatana-appindicator3-devel desktop-file-utils appstream-glib \
+            shaderc vulkan-devel
 
       - name: Build
         run: |

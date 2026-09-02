@@ -6282,6 +6282,9 @@ namespace confighttp {
     switch (video::active_encoder_mem_type()) {
       case platf::mem_type_e::cuda:  return "nvidia";
       case platf::mem_type_e::vaapi: return has_amdgpu() ? "amd" : "intel";
+      case platf::mem_type_e::vulkan:
+        if (fs::exists("/proc/driver/nvidia")) return "nvidia";
+        return has_amdgpu() ? "amd" : "intel";
       default: break;
     }
 
@@ -6494,6 +6497,18 @@ namespace confighttp {
     nlohmann::json output;
     output["gpu"] = nullptr;
     output["video"]["active_encoder"] = video::active_encoder_name();
+    const auto encoder_selection = video::active_encoder_selection_info();
+    output["video"]["encoder_selection"] = {
+      {"mode", encoder_selection.mode},
+      {"gpu_driver", encoder_selection.gpu_driver.empty() ? "unknown" : encoder_selection.gpu_driver},
+      {"policy", encoder_selection.policy},
+      {"preferred_encoder", encoder_selection.preferred_encoder},
+      {"fallback_encoder", encoder_selection.fallback_encoder},
+      {"selected_encoder", encoder_selection.selected_encoder.empty() ? "unknown" : encoder_selection.selected_encoder},
+      {"exact_live_probe_required", encoder_selection.exact_live_probe_required},
+      {"fallback_used", encoder_selection.fallback_used},
+      {"reason", encoder_selection.reason}
+    };
 #ifdef __linux__
     const bool display_environment_repaired =
       session_manager::repair_desktop_session_environment() ||

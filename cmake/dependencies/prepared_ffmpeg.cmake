@@ -1,4 +1,4 @@
-set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG "v2026.516.30821" CACHE STRING
+set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG "v2026.724.203728" CACHE STRING
     "LizardByte/build-deps release tag used for prepared FFmpeg archives")
 set(POLARIS_PREPARED_FFMPEG_BASE_URL
     "https://github.com/LizardByte/build-deps/releases/download/${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}"
@@ -60,23 +60,23 @@ function(polaris_prepared_ffmpeg_asset_hash out_var asset_name)
 
   set(hash "")
   if(asset_name STREQUAL "Darwin-arm64-ffmpeg.tar.gz")
-    set(hash "707813b81590d80f0f411e05ddbac9a4e2f1c4dbc1e3f61d32d512454317bfa6")
+    set(hash "f4f72fcef4180f18329351cc1080e3fa1a5a7d084fa1c52defa93586aac88f0f")
   elseif(asset_name STREQUAL "Darwin-x86_64-ffmpeg.tar.gz")
-    set(hash "fce51e3ecb41d60c39b0378a548e786c5e11e6c5834fdb805a6cc531b4458bf0")
+    set(hash "da45523c20c0dd44ef3f54ffc41a16f363da2e2298bd0539e3b502b3e750eef7")
   elseif(asset_name STREQUAL "FreeBSD-aarch64-ffmpeg.tar.gz")
-    set(hash "7ef5687dadc700f3023b36e46503ebde28dd9d41460e57beb21befffeae423e4")
+    set(hash "3a3527675b09b8537b6997622001df21be61d8d280671dd11a388662699d7ad8")
   elseif(asset_name STREQUAL "FreeBSD-amd64-ffmpeg.tar.gz")
-    set(hash "2f1f1510ec121ac8e5aa5ee998bdefecfd09430536c1d5669e29fa2e878621a5")
+    set(hash "3ca1b26feaa0402b7e89124b0c55ba4013cee31cec8d6ec0ac5e5b846afa0cb0")
   elseif(asset_name STREQUAL "Linux-aarch64-ffmpeg.tar.gz")
-    set(hash "10b6c9440ba6178ec3b944f6c6f697253497cad5196d23a2d32d335daae0062e")
+    set(hash "fd6492f55d79ae178db97e48d6395b4cac2a2e10b2f157b0d40355cfd7c160e8")
   elseif(asset_name STREQUAL "Linux-ppc64le-ffmpeg.tar.gz")
-    set(hash "8b7b0ba5eaa12bc9bfb6e3561fb14a50453ce688f6c8cab81aa70fb85bc4e3fb")
+    set(hash "30583f89fc82816872ed4b9ac044e04c2c2f2a79aa63ca3a9facb5a20e15fcec")
   elseif(asset_name STREQUAL "Linux-x86_64-ffmpeg.tar.gz")
-    set(hash "c32319fcc2867befe8ff3ae26b4d3a58378c3a9c1bfef9029c9969321c3bc6ec")
+    set(hash "2c27d4694b4ed0e734f497d4bd62f1b3662cbbc4ded2a69f2dc4b703441eebb3")
   elseif(asset_name STREQUAL "Windows-AMD64-ffmpeg.tar.gz")
-    set(hash "2f7a2c2fc6be9b96de3c6f654389f73a5e5d369d7e802d017894fae96247661d")
+    set(hash "b293d7f6bd3f032ea01c7e4451b7db540622f2d603e8b98d336513895842c506")
   elseif(asset_name STREQUAL "Windows-ARM64-ffmpeg.tar.gz")
-    set(hash "0675898a1c7175e133b8f0e9cdb737038c53b9bd86d1a5b63fe2ea88a974d2e6")
+    set(hash "53e0dee93a2185fc619425da14cf10a7a328d016ff9cc50c2c52e051bb3895d1")
   endif()
 
   set("${out_var}" "${hash}" PARENT_SCOPE)

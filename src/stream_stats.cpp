@@ -1359,6 +1359,19 @@ namespace stream_stats {
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
     append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
+    const auto encoder_selection = health.value("encoder_selection", nlohmann::json::object());
+    append_doctor_evidence(
+      evidence,
+      "encoder_selection",
+      "Encoder selection",
+      encoder_selection.value("selected_encoder", std::string {"unknown"}),
+      "",
+      encoder_selection.value("selected_encoder", std::string {"unknown"}) == "unknown" ?
+        "unknown" :
+        encoder_selection.value("fallback_used", false) ? "watch" : "pass",
+      "deterministic_launch_policy",
+      encoder_selection.value("reason", std::string {"Encoder selection evidence is unavailable."})
+    );
     append_doctor_evidence(
       evidence,
       "packet_loss",
@@ -1474,6 +1487,7 @@ namespace stream_stats {
       {"steam_input_detail", stats.input_steam_input_detail}
     };
     advanced["health"] = health;
+    advanced["encoder_selection"] = encoder_selection;
     advanced["recent_issue_codes"] = nlohmann::json::array();
     if (steam_input_conflict) {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");

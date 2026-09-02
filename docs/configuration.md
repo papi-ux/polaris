@@ -31,7 +31,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path.
+These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is an explicit experimental DRM/KMS path, not the default for a private or portal session.
 
 ## Linux display modes
 
@@ -66,7 +66,8 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `client_keyboard_mouse_seat_isolation` | `disabled` | Assign the virtual keyboard, mouse, touch and pen Polaris creates for clients to a dedicated Linux seat, so a client streaming a private session does not also type and click into the desktop session logged in at the machine |
 | `mouse_cursor_visible` | `enabled` | Composite a separately captured host cursor into the stream. Required for DRM/KMS; disable it if the client draws its own cursor and you see two pointers. Portal may embed its cursor independently |
 | `back_button_timeout` | `-1` | **Milliseconds**, not seconds, that Back/Select must be held to emulate Home/Guide. `-1` disables it. A small value such as `2` means two *milliseconds*, which turns nearly every Back/Select press into Home and makes the button look broken — use `2000` for two seconds |
-| `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
+| `capture` | `kms` for Vulkan Video | Capture backend override; leave empty for normal automatic selection |
+| `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and requires explicit DRM/KMS capture |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
 | `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
@@ -380,6 +381,40 @@ Recommended values:
 | `2` | `2` | Useful first manual test on multi-NVENC GPUs, especially for 4K120 HEVC/AV1. |
 | `forced` | `1` | Experimental. Use only when comparing against `auto` and explicit engine counts. |
 | `3` | `3` | Experimental. Use only on GPUs known to expose three usable NVENC engines. |
+
+## Vulkan Encoder
+
+Vulkan Video is an experimental Linux hardware-encode path for drivers that expose the Vulkan Video
+encode extensions. Its first Polaris implementation is deliberately limited to direct DRM/KMS
+capture so captured DMA-BUF images stay on the same DRM render device used by the encoder. Portal and
+wlroots capture are rejected instead of silently introducing a system-memory copy or selecting a
+different GPU.
+
+Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
+
+```bash
+sudo -H polaris --setup-host --enable-kms
+```
+
+```ini
+capture = kms
+encoder = vulkan
+```
+
+If KMS cannot export the display as DMA-BUF, or the selected GPU lacks the requested H.264 or HEVC
+Vulkan Video encoder, session startup fails with an explicit diagnostic. AV1 stays disabled on this
+experimental path until the bundled FFmpeg implementation passes Vulkan validation. Switch the
+encoder back to `vaapi` or `nvenc` rather than expecting a hidden CPU-copy fallback.
+
+### vk_tune
+
+Selects FFmpeg's Vulkan Video latency/quality target. `2` (low latency) is the streaming default;
+`0` lets FFmpeg decide, `1` favors quality, and `3` requests ultra-low latency.
+
+### vk_rc_mode
+
+Selects Vulkan Video rate control. `2` (constant bitrate) is the streaming default. `0` lets FFmpeg
+and the driver decide, `1` selects constant-QP mode, and `4` selects variable bitrate.
 
 ## AI provider settings
 

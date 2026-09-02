@@ -91,6 +91,13 @@ TEST(WlgrabCapturePolicy, DirectCudaCaptureMayRemainGpuNative) {
   );
 }
 
+TEST(WlgrabCapturePolicy, DirectVulkanCaptureMayRemainGpuNative) {
+  EXPECT_EQ(
+    wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::vulkan, true),
+    wlgrab_capture_policy::direct_capture_path_e::gpu_native
+  );
+}
+
 TEST(WlgrabCapturePolicy, MissingGpuNativeBackendUsesRamFallback) {
   EXPECT_EQ(
     wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::cuda, false),
@@ -152,6 +159,24 @@ TEST(WlgrabCapturePolicy, CudaSafetyDoesNotDependOnRouteOrModifier) {
        }) {
     EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
       platf::mem_type_e::cuda,
+      route,
+      std::nullopt
+    ));
+  }
+}
+
+TEST(WlgrabCapturePolicy, VulkanSafetyDoesNotDependOnRouteOrModifier) {
+  for (const auto route : {
+         route_e::headless_extcopy,
+         route_e::windowed_nested,
+         route_e::direct_wayland,
+       }) {
+    EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
+      platf::mem_type_e::vulkan,
+      route
+    ));
+    EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
+      platf::mem_type_e::vulkan,
       route,
       std::nullopt
     ));

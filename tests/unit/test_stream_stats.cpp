@@ -840,6 +840,43 @@ TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
   EXPECT_TRUE(saw_conflict);
 }
 
+TEST(StreamStatsDoctorTests, EncoderAutoFallbackIsVisibleAsWatchEvidence) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "steady"},
+      {"grade", "good"},
+      {"encoder_selection", {
+        {"selected_encoder", "vaapi"},
+        {"fallback_used", true},
+        {"reason", "Vulkan did not satisfy the exact live route; selected VA-API instead."}
+      }}
+    }
+  );
+
+  const auto selection = std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) {
+      return item.value("id", std::string {}) == "encoder_selection";
+    }
+  );
+  ASSERT_NE(selection, doctor.at("evidence").end());
+  EXPECT_EQ(selection->at("value"), "vaapi");
+  EXPECT_EQ(selection->at("status"), "watch");
+  EXPECT_EQ(
+    doctor.at("advanced_evidence").at("encoder_selection").at("fallback_used"),
+    true
+  );
+}
+
 TEST(StreamStatsDoctorTests, IgnoresSteamInputSettingsWithoutStrictIsolation) {
   stream_stats::stats_t stats {};
   stats.streaming = true;

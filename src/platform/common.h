@@ -234,6 +234,7 @@ namespace platf {
     vaapi,  ///< VAAPI
     dxgi,  ///< DXGI
     cuda,  ///< CUDA
+    vulkan,  ///< Vulkan
     videotoolbox,  ///< VideoToolbox
     unknown  ///< Unknown
   };
@@ -558,6 +559,12 @@ namespace platf {
      * @note Implementations may set or modify codec options prior to codec initialization.
      */
     virtual void init_codec_options(AVCodecContext *ctx, AVDictionary **options) {};
+
+    /**
+     * @brief Release platform-owned resources that depend on the codec's hardware device.
+     * @note This runs before AVCodecContext teardown. Implementations must be idempotent.
+     */
+    virtual void release_encode_resources() {};
 
     /**
      * @brief Prepare to derive a context.

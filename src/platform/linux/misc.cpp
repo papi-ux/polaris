@@ -85,6 +85,34 @@ namespace {
   std::atomic_bool thread_priority_permission_denied {false};
   std::atomic_bool thread_priority_permission_warning_logged {false};
 
+#ifdef POLARIS_BUILD_VULKAN
+  void append_environment_token(const char *name, std::string_view token) {
+    const char *existing = std::getenv(name);
+    if (!existing || !*existing) {
+      setenv(name, std::string {token}.c_str(), 1);
+      return;
+    }
+
+    const std::string current {existing};
+    std::size_t start = 0;
+    while (start <= current.size()) {
+      const auto end = current.find(',', start);
+      auto value = std::string_view {current}.substr(start, end - start);
+      const auto first = value.find_first_not_of(" \t");
+      const auto last = value.find_last_not_of(" \t");
+      if (first != std::string_view::npos && value.substr(first, last - first + 1) == token) {
+        return;
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    setenv(name, (current + ',' + std::string {token}).c_str(), 1);
+  }
+#endif
+
   std::string format_rlimit_value(rlim_t value) {
     if (value == RLIM_INFINITY) {
       return "infinity";
@@ -1698,6 +1726,14 @@ std::string get_local_ip_for_gateway() {
     // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
     set_env("AMD_DEBUG", "lowlatencyenc");
 
+#ifdef POLARIS_BUILD_VULKAN
+    // Mesa exposes RADV Vulkan Video behind driver feature tokens. Preserve
+    // any user-supplied options while enabling both the legacy and current
+    // spellings before GBM or Vulkan creates a device.
+    append_environment_token("RADV_PERFTEST", "video_encode");
+    append_environment_token("RADV_EXPERIMENTAL", "video_encode");
+#endif
+
     // Seat isolation trades the logind ACL for group ownership, so an account
     // outside `input` loses access to its own virtual devices. Report it here
     // rather than leaving it to be inferred from a controller that never
@@ -1893,6 +1929,19 @@ std::string get_local_ip_for_gateway() {
       return chosen;
     }();
     return cached;
+  }
+
+  std::string render_device_driver(std::string_view render_device) {
+    const auto selected = render_device.empty() ? default_render_device() : std::string {render_device};
+    if (selected.empty()) {
+      return {};
+    }
+
+    const auto &candidates = render_device_candidates();
+    const auto candidate = std::find_if(candidates.begin(), candidates.end(), [&](const auto &entry) {
+      return entry.path == selected;
+    });
+    return candidate == candidates.end() ? std::string {} : candidate->driver;
   }
 
   std::string default_vaapi_render_device() {

@@ -3,6 +3,7 @@
  * @brief Definitions for KMS screen capture.
  */
 // standard includes
+#include <cstring>
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -27,6 +28,7 @@
 #include "src/utility.h"
 #include "src/video.h"
 #include "vaapi.h"
+#include "vulkan_encode.h"
 #include "wayland.h"
 
 using namespace std::literals;
@@ -1225,6 +1227,12 @@ namespace platf {
         }
 #endif
 
+#ifdef POLARIS_BUILD_VULKAN
+        if (mem_type == mem_type_e::vulkan) {
+          return vk::make_avcodec_encode_device_ram(width, height);
+        }
+#endif
+
 #ifdef POLARIS_BUILD_CUDA
         if (mem_type == mem_type_e::cuda) {
           if (pix_fmt == pix_fmt_e::nv12) {
@@ -1342,6 +1350,14 @@ namespace platf {
       }
 
       int dummy_img(platf::img_t *img) override {
+        if (!img || !img->data || img->height <= 0 || img->row_pitch <= 0) {
+          return -1;
+        }
+        std::memset(
+          img->data,
+          0,
+          static_cast<std::size_t>(img->height) * static_cast<std::size_t>(img->row_pitch)
+        );
         return 0;
       }
 
@@ -1360,6 +1376,20 @@ namespace platf {
 #ifdef POLARIS_BUILD_VAAPI
         if (mem_type == mem_type_e::vaapi) {
           return va::make_avcodec_encode_device(width, height, dup(card.render_fd.el), img_offset_x, img_offset_y, true);
+        }
+#endif
+
+#ifdef POLARIS_BUILD_VULKAN
+        if (mem_type == mem_type_e::vulkan) {
+          char *render_device = drmGetRenderDeviceNameFromFd(card.render_fd.el);
+          if (!render_device) {
+            BOOST_LOG(error) << "Vulkan Video could not resolve the KMS capture card's render node"sv;
+            return nullptr;
+          }
+
+          std::string render_device_path {render_device};
+          free(render_device);
+          return vk::make_avcodec_encode_device_vram(width, height, img_offset_x, img_offset_y, std::move(render_device_path));
         }
 #endif
 
@@ -1508,14 +1538,17 @@ namespace platf {
   }  // namespace kms
 
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda) {
+    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda || hwdevice_type == mem_type_e::vulkan) {
       auto disp = std::make_shared<kms::display_vram_t>(hwdevice_type);
 
       if (!disp->init(display_name, config)) {
         return disp;
       }
 
-      // In the case of failure, attempt the old method for VAAPI
+      // If direct DMA-BUF capture cannot initialize, retain the portable
+      // GPU -> RAM -> encoder-upload path. Vulkan uses its own bounded staging
+      // ring, so an explicit Vulkan request remains Vulkan instead of silently
+      // switching encoders.
     }
 
     auto disp = std::make_shared<kms::display_ram_t>(hwdevice_type);
