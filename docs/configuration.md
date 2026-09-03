@@ -177,6 +177,77 @@ account ids, installed app ids, profile filenames, or filesystem paths, and it d
 configuration. Close Steam before changing the setting through Steam or by another supported tool so
 the running client cannot overwrite the update.
 
+## Settings by tab
+
+The web UI groups the keys above by area. Each Settings tab links to its section here.
+
+### General tab
+
+Host identity (the name clients see, the web console language, the log level), automation
+(commands that run before an app launches and are undone after the session, commands that run
+when the host changes session state, and server shortcuts a paired client may trigger), desktop
+behaviour (pre-release update notifications, the tray icon, and whether the tray shows the force
+stop, restart, and quit controls), and metadata integrations (a SteamGridDB key for artwork on
+non-Steam entries, and whether Polaris may ask How Long To Beat for titles missing from its local
+completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`,
+`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`.
+
+### Input tab
+
+Gamepads (whether clients may control the host with a controller, DualShock and DualSense
+mapping, and the isolation switches that keep host-wired controllers out of private streams and
+client pads off other Linux seats), keyboard (passthrough, repeat delay and rate, scancodes for
+non-US layouts, right Alt as the Windows key), pointer and touch (mouse capture, the separately
+composited host cursor that DRM/KMS capture needs, high-resolution scrolling, native pen and touch
+events), and extras (an input-only app entry for TV workflows, rumble forwarding). Keys:
+`controller`, `headless_gamepad_isolation`, `client_gamepad_seat_isolation`, `keyboard`,
+`key_repeat_delay`, `key_repeat_frequency`, `always_send_scancodes`, `mouse`,
+`mouse_cursor_visible`, `high_resolution_scrolling`, `native_pen_touch`,
+`client_keyboard_mouse_seat_isolation`, `enable_input_only_mode`, `forward_rumble`,
+`back_button_timeout`.
+
+### Network tab
+
+Exposure (whether the host announces itself for discovery, whether pairing is enabled, UPnP port
+forwarding, the address family, the base port and the port map derived from it, which origins may
+reach the web UI, and an external IP for clients outside the network) and transport security (the
+encryption mode for LAN and WAN sessions, Trusted Subnet Auto-Pairing, and the trusted subnet
+list in CIDR form). Keys: `enable_discovery`, `enable_pairing`, `upnp`, `address_family`, `port`,
+`origin_web_ui_allowed`, `external_ip`, `lan_encryption_mode`, `wan_encryption_mode`,
+`trusted_subnets`.
+
+### Audio and video tab
+
+Everything the stream is made of: the launch mode and its runtime, host audio capture and the
+sink Polaris captures, the display outputs and fallback mode the Display Planner writes, Auto
+Quality, advanced tuning such as the maximum bitrate and the adaptive range, and how long a paused
+session waits for a client to resume. The mode cards, the live Auto Quality strip, and the planner
+are explained in [Launch modes and capture paths](launch-modes.md). Keys: `linux_stream_mode`,
+`headless_mode`, `linux_use_cage_compositor`, `linux_prefer_gpu_native_capture`, `fallback_mode`,
+`display_plan`, `adaptive_bitrate_enabled`, `disconnect_resume_timeout_seconds`.
+
+### Advanced tab
+
+Load handling (limit the capture frame rate to what the client asked for), compatibility switches
+for older tools and clients (environment variable compatibility, legacy app ordering, streaming on
+even when encoder probing fails, the experimental browser stream), and the capture and encoder
+overrides that force a specific path when automatic selection is wrong. Keys: `limit_framerate`,
+`envvar_compatibility_mode`, `legacy_ordering`, `ignore_encoder_probe_failure`,
+`browser_streaming`, `encoder`.
+
+### Files tab
+
+Where Polaris keeps its app library, its log, its runtime state, and, optionally, the web
+credentials separately from the state file. The defaults are listed under [Files](#files). Keys:
+`file_apps`, `log_path`, `file_state`, `credentials_file`.
+
+### AI and Encoder Profiles tabs
+
+The AI tab is covered under [AI provider settings](#ai-provider-settings); the encoder tabs under
+[NVIDIA NVENC Encoder](#nvidia-nvenc-encoder) and [Linux HDR and Main10](#linux-hdr-and-main10),
+with the codec switches (`hevc_mode`, `av1_mode`), the quantisation fallback (`qp`), and the
+software encoder thread floor (`min_threads`) on the encoder pages themselves.
+
 ## Linux HDR and Main10
 
 On Linux, treat sessions that log `stream_hdr_enabled=false` as SDR even if the client requests HDR.
