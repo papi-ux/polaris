@@ -36,7 +36,9 @@ describe('settings surfaces affordances', () => {
     expect(readFileSync(join(process.cwd(), 'docs/moonlight.md'), 'utf8')).toContain('# Play with Moonlight')
     expect(webSource('views/PinView.vue')).toContain('href="https://papi-ux.com/docs/troubleshooting/#paired-client-gets-permission-denied-403-when-starting-a-stream"')
     expect(webSource('views/HomeView.vue')).toContain('href="https://papi-ux.com/docs/repositories/#after-install-or-upgrade"')
-    expect(webSource('views/PasswordView.vue')).toContain('href="https://papi-ux.com/docs/configuration/#credential-reset"')
+    expect(webSource('views/PasswordView.vue')).toContain('href="https://papi-ux.com/docs/configuration/#rotate-the-web-credentials"')
+    expect(webSource('views/PasswordView.vue')).not.toContain('<InfoHint')
+    expect(webSource('views/HomeView.vue')).not.toContain('<InfoHint')
     const quickstart = readFileSync(join(process.cwd(), 'docs/quickstart.md'), 'utf8')
     const troubleshooting = readFileSync(join(process.cwd(), 'docs/troubleshooting.md'), 'utf8')
     const repositories = readFileSync(join(process.cwd(), 'docs/repositories.md'), 'utf8')
@@ -45,6 +47,7 @@ describe('settings surfaces affordances', () => {
     expect(troubleshooting).toContain('## Paired client gets Permission denied (403) when starting a stream')
     expect(repositories).toContain('## After install or upgrade')
     expect(configuration).toContain('## Credential reset')
+    expect(configuration).toContain('## Rotate the web credentials')
   })
 
   it('renders Devices status through StatTile and the pairing routes through SelectableCard', () => {

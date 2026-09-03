@@ -59,9 +59,6 @@
             <div class="section-kicker">{{ $t('index.host_now') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ $t('index.telemetry') }}</h2>
-              <InfoHint size="sm" label="System snapshot details">
-                {{ $t('index.system_snapshot_desc') }}
-              </InfoHint>
             </div>
           </div>
           <span class="system-telemetry-live meta-pill" :class="telemetryLiveClass">
@@ -309,7 +306,6 @@ import { ref, computed, inject } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState, updateStatusLightClass } from '../update-center.js'
-import InfoHint from '../components/InfoHint.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { resources, legalDocs, sponsor } from '../resource-links.js'

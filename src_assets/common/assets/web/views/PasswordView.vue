@@ -6,7 +6,7 @@
         <h1 class="page-title">{{ $t('password.page_title') }}</h1>
         <p class="page-subtitle">
           {{ $t('password.page_subtitle') }}
-          <a href="https://papi-ux.com/docs/configuration/#credential-reset" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('password.docs_link') }}</a>
+          <a href="https://papi-ux.com/docs/configuration/#rotate-the-web-credentials" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('password.docs_link') }}</a>
         </p>
         <div class="page-meta">
           <span class="meta-pill">{{ $t('password.web_ui_only') }}</span>
@@ -22,9 +22,6 @@
               {{ $t('password.sensitive_action') }}
             </span>
           </div>
-          <InfoHint size="sm" align="right" :label="$t('password.reload_guidance')">
-            {{ $t('password.action_desc') }}
-          </InfoHint>
         </div>
         <div class="header-support-copy">{{ $t('password.commit_copy') }}</div>
       </article>
@@ -37,9 +34,6 @@
             <div class="section-kicker">{{ $t('password.step_one') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ $t('password.verify_access') }}</h2>
-              <InfoHint size="sm" :label="$t('password.current_creds_guidance')">
-                {{ $t('password.current_creds_desc') }}
-              </InfoHint>
               <span class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
                 {{ $t('password.sensitive_action') }}
               </span>
@@ -62,9 +56,6 @@
             <div>
               <div class="mb-1 flex items-center gap-2">
                 <label for="currentPassword" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                <InfoHint size="sm" :label="$t('password.current_password_guidance')">
-                  {{ $t('password.current_password_desc') }}
-                </InfoHint>
               </div>
               <div class="relative">
                 <input
@@ -92,9 +83,6 @@
             <div class="section-kicker">{{ $t('password.step_two') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ $t('password.rotate_access') }}</h2>
-              <InfoHint size="sm" :label="$t('password.new_creds_guidance')">
-                {{ $t('password.new_creds_desc') }}
-              </InfoHint>
             </div>
             <p class="section-copy">{{ $t('password.rotate_access_copy') }}</p>
           </div>
@@ -103,9 +91,6 @@
             <div class="lg:col-span-2">
               <div class="mb-1 flex items-center gap-2">
                 <label for="newUsername" class="block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
-                <InfoHint size="sm" :label="$t('password.username_guidance')">
-                  {{ $t('password.new_username_desc') }}
-                </InfoHint>
               </div>
               <input
                 id="newUsername"
@@ -118,9 +103,6 @@
             <div>
               <div class="mb-1 flex items-center gap-2">
                 <label for="newPassword" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                <InfoHint size="sm" :label="$t('password.new_password_guidance')">
-                  {{ $t('password.new_password_desc') }}
-                </InfoHint>
               </div>
               <div class="relative">
                 <input
@@ -173,9 +155,6 @@
             <div class="section-kicker">{{ $t('password.commit_changes') }}</div>
             <div class="section-title-row">
               <div class="text-sm font-medium text-silver">{{ $t('password.save_and_reload') }}</div>
-              <InfoHint size="sm" :label="$t('password.commit_guidance')">
-                {{ $t('password.action_desc') }}
-              </InfoHint>
             </div>
             <div class="mt-1 text-sm text-storm">{{ $t('password.save_and_reload_copy') }}</div>
           </div>
@@ -200,7 +179,6 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import InfoHint from '../components/InfoHint.vue'
 
 const error = ref(null)
 const success = ref(false)

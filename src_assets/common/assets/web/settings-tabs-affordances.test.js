@@ -41,6 +41,19 @@ describe('settings tabs affordances', () => {
     expect(webSource(path)).toContain(`href="${url}"`)
   })
 
+  it.each(['configs/tabs/General.vue', 'configs/tabs/Inputs.vue', 'configs/tabs/Network.vue', 'configs/tabs/Files.vue'])('%s carries no (i) hints; that depth lives in the reference tables', (path) => {
+    expect(webSource(path)).not.toContain('<InfoHint')
+  })
+
+  it('backs every tab pointer with a field table in the reference', () => {
+    const configuration = readFileSync(join(process.cwd(), 'docs/configuration.md'), 'utf8')
+    for (const tab of ['General', 'Input', 'Network', 'Advanced', 'Files']) {
+      const start = configuration.indexOf(`### ${tab} tab`)
+      expect(start, tab).toBeGreaterThan(-1)
+      expect(configuration.slice(start, start + 4000)).toContain('| Field | What it does |')
+    }
+  })
+
   it('anchors every docs pointer to a real heading', () => {
     const configuration = readFileSync(join(process.cwd(), 'docs/configuration.md'), 'utf8')
     const troubleshooting = readFileSync(join(process.cwd(), 'docs/troubleshooting.md'), 'utf8')
