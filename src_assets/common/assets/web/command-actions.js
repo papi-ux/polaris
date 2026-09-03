@@ -56,7 +56,12 @@ function createSettingsActions(t, router) {
   }))
 }
 
-function createHostActions(t, fetchImpl, toast) {
+function defaultSignOutNavigate() {
+  window.location.assign(`${window.location.pathname}#/login`)
+  window.location.reload()
+}
+
+function createHostActions(t, fetchImpl, toast, signOutNavigate = defaultSignOutNavigate) {
   return [
     {
       id: 'restart',
@@ -100,14 +105,28 @@ function createHostActions(t, fetchImpl, toast) {
         toast(translate(t, 'command_palette.quit_sent', 'Quit requested'), 'info')
       },
     },
+    {
+      id: 'sign-out',
+      group: 'Host Controls',
+      icon: '🚪',
+      label: translate(t, 'command_palette.actions.sign_out', 'Sign out'),
+      description: 'End this web session and return to the login page.',
+      hint: 'POST /api/logout',
+      aliases: ['sign out', 'log out', 'logout', 'end session'],
+      action: async () => {
+        const response = await fetchImpl('./api/logout', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } })
+        if (response && response.ok === false) throw new Error(`HTTP ${response.status}`)
+        signOutNavigate()
+      },
+    },
   ]
 }
 
-export function createCommandActions({ t, router, fetchImpl = fetch, toast = () => {} }) {
+export function createCommandActions({ t, router, fetchImpl = fetch, toast = () => {}, signOutNavigate = defaultSignOutNavigate }) {
   return [
     ...createNavigationActions(t, router),
     ...createSettingsActions(t, router),
-    ...createHostActions(t, fetchImpl, toast),
+    ...createHostActions(t, fetchImpl, toast, signOutNavigate),
   ]
 }
 

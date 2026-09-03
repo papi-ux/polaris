@@ -4,7 +4,7 @@
       <div class="page-heading">
         <div class="section-kicker">{{ $t('index.host_health') }}</div>
         <h1 class="page-title">{{ systemHeaderTitle }}</h1>
-        <p class="page-subtitle">Live host state, recent issues, and the controls that matter now.</p>
+        <p class="page-subtitle">{{ $t('index.page_subtitle') }}</p>
       </div>
       <div class="system-header-actions">
         <button
@@ -13,27 +13,27 @@
           :disabled="checkingUpdates"
           @click="refreshSystemPage"
         >
-          {{ checkingUpdates ? 'Refreshing…' : 'Refresh' }}
+          {{ checkingUpdates ? $t('index.refreshing') : $t('index.refresh') }}
         </button>
         <router-link class="focus-ring system-button system-button-primary" to="/troubleshooting">
-          Troubleshoot
+          {{ $t('index.troubleshoot') }}
         </router-link>
       </div>
     </header>
 
-    <section data-system-status-strip class="system-status-strip" aria-label="Host health summary">
+    <section data-system-status-strip class="system-status-strip" :aria-label="$t('index.host_health_summary')">
       <article class="system-status-item">
         <div class="system-status-heading">
-          <span class="section-kicker">Health</span>
+          <span class="section-kicker">{{ $t('index.health') }}</span>
           <span class="system-status-dot" :class="healthBadgeClass" aria-hidden="true"></span>
         </div>
         <div class="system-status-value">{{ healthLabel }}</div>
-        <div class="system-status-copy">{{ recentIssues.length ? 'Recent host issues are ready to review.' : 'No active host issues.' }}</div>
+        <div class="system-status-copy">{{ recentIssues.length ? $t('index.health_copy_issues') : $t('index.health_copy_clear') }}</div>
       </article>
 
       <article class="system-status-item">
         <div class="system-status-heading">
-          <span class="section-kicker">Version</span>
+          <span class="section-kicker">{{ $t('index.version') }}</span>
           <button type="button" class="focus-ring system-inline-action" @click="copyVersion">
             {{ copiedVersion ? $t('index.copied') : $t('index.copy_version') }}
           </button>
@@ -44,11 +44,11 @@
 
       <article class="system-status-item">
         <div class="system-status-heading">
-          <span class="section-kicker">Issues</span>
+          <span class="section-kicker">{{ $t('index.issues') }}</span>
           <span class="system-status-count">{{ groupedIssueLogs.length }}</span>
         </div>
-        <div class="system-status-value">{{ groupedIssueLogs.length ? 'Needs review' : 'Clear' }}</div>
-        <div class="system-status-copy">{{ groupedIssueLogs.length ? `${groupedIssueLogs.length} grouped issues · ${recentIssues.length} shown` : 'Latest bounded log scan is clean.' }}</div>
+        <div class="system-status-value">{{ groupedIssueLogs.length ? $t('index.issues_needs_review') : $t('index.issues_clear') }}</div>
+        <div class="system-status-copy">{{ groupedIssueLogs.length ? $t('index.issues_copy_grouped', { grouped: groupedIssueLogs.length, shown: recentIssues.length }) : $t('index.issues_copy_clean') }}</div>
       </article>
     </section>
 
@@ -56,9 +56,9 @@
       <section data-system-telemetry class="section-card system-telemetry-panel">
         <div class="system-panel-heading">
           <div>
-            <div class="section-kicker">Host now</div>
+            <div class="section-kicker">{{ $t('index.host_now') }}</div>
             <div class="section-title-row">
-              <h2 class="section-title">Telemetry</h2>
+              <h2 class="section-title">{{ $t('index.telemetry') }}</h2>
               <InfoHint size="sm" label="System snapshot details">
                 {{ $t('index.system_snapshot_desc') }}
               </InfoHint>
@@ -73,7 +73,7 @@
           <article class="system-telemetry-item">
             <div class="system-telemetry-heading">
               <span class="system-telemetry-label">{{ $t('index.gpu_health') }}</span>
-              <span class="system-telemetry-state" :class="gpu ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ gpu ? 'Nominal' : 'Unavailable' }}</span>
+              <span class="system-telemetry-state" :class="gpu ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ gpu ? $t('index.state_nominal') : $t('index.state_unavailable') }}</span>
             </div>
             <template v-if="gpu">
               <div class="system-telemetry-value text-accent">{{ gpu.utilization_pct ?? '--' }}<span>%</span></div>
@@ -88,7 +88,7 @@
           <article class="system-telemetry-item">
             <div class="system-telemetry-heading">
               <span class="system-telemetry-label">{{ $t('index.display_state') }}</span>
-              <span class="system-telemetry-state" :class="displays.length ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ displays.length ? 'Active' : 'Idle' }}</span>
+              <span class="system-telemetry-state" :class="displays.length ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ displays.length ? $t('index.state_active') : $t('index.state_idle') }}</span>
             </div>
             <div class="system-telemetry-value">{{ displays.length }}</div>
             <div class="system-telemetry-copy">{{ $t('index.active_displays') }}</div>
@@ -103,7 +103,7 @@
           <article class="system-telemetry-item">
             <div class="system-telemetry-heading">
               <span class="system-telemetry-label">{{ $t('index.audio_state') }}</span>
-              <span class="system-telemetry-state" :class="audio?.sink ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ audio?.sink ? 'Ready' : 'Unavailable' }}</span>
+              <span class="system-telemetry-state" :class="audio?.sink ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ audio?.sink ? $t('index.state_ready') : $t('index.state_unavailable') }}</span>
             </div>
             <div class="system-telemetry-value system-telemetry-value-text">
               {{ audio?.sink ? formatAudioName(audio.sink) : $t('index.audio_unavailable') }}
@@ -116,7 +116,7 @@
           <article class="system-telemetry-item">
             <div class="system-telemetry-heading">
               <span class="system-telemetry-label">{{ $t('index.session_mode') }}</span>
-              <span class="system-telemetry-state" :class="sessionType ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ sessionType ? 'Active' : 'Idle' }}</span>
+              <span class="system-telemetry-state" :class="sessionType ? 'system-telemetry-state-success' : 'system-telemetry-state-muted'">{{ sessionType ? $t('index.state_active') : $t('index.state_idle') }}</span>
             </div>
             <div class="system-telemetry-value system-telemetry-value-text">
               {{ sessionType || $t('index.session_mode_idle') }}
@@ -129,22 +129,22 @@
               data-display-session-health
               class="system-session-health border-success/30 bg-success/10 text-success-bright"
             >
-              Desktop session environment was repaired automatically.
+              {{ $t('index.session_repaired') }}
             </div>
             <div
               v-else-if="displaySession?.status === 'missing_display_environment'"
               data-display-session-health
               class="system-session-health border-warning/30 bg-warning/10 text-warning-bright"
             >
-              Desktop preview environment is missing. Restart Polaris from the desktop session or run the user service so it inherits Wayland/X11.
+              {{ $t('index.session_missing_env') }}
             </div>
           </article>
         </div>
       </section>
 
       <aside data-system-recent-issues class="section-card system-recent-issues-panel">
-        <div class="section-kicker">Recent issues</div>
-        <h2 class="section-title">{{ recentIssues.length ? 'Host activity to review' : 'Nothing needs attention' }}</h2>
+        <div class="section-kicker">{{ $t('index.recent_issues') }}</div>
+        <h2 class="section-title">{{ recentIssues.length ? $t('index.recent_issues_review') : $t('index.recent_issues_clear') }}</h2>
 
         <div v-if="recentIssues.length" class="system-issue-list">
           <article
@@ -164,15 +164,15 @@
 
         <div v-else class="system-issues-empty">
           <div class="system-issues-check" aria-hidden="true">✓</div>
-          <div class="system-issues-empty-title">No warnings or errors</div>
-          <p>The latest bounded host log scan is clean.</p>
-          <span>Latest scan · up to 200 source lines</span>
+          <div class="system-issues-empty-title">{{ $t('index.no_warnings_title') }}</div>
+          <p>{{ $t('index.no_warnings_copy') }}</p>
+          <span>{{ $t('index.latest_scan_note') }}</span>
         </div>
 
         <div class="system-issue-actions">
-         <span v-if="groupedIssueLogs.length > recentIssues.length" class="system-issue-more">+{{ groupedIssueLogs.length - recentIssues.length }} more in logs</span>
-          <router-link class="focus-ring system-text-link" to="/troubleshooting#logs">Open logs →</router-link>
-          <router-link v-if="recentIssues.length" class="focus-ring system-text-link" to="/troubleshooting">Run guided troubleshooting →</router-link>
+         <span v-if="groupedIssueLogs.length > recentIssues.length" class="system-issue-more">{{ $t('index.more_in_logs', { count: groupedIssueLogs.length - recentIssues.length }) }}</span>
+          <router-link class="focus-ring system-text-link" to="/troubleshooting#logs">{{ $t('index.open_logs') }}</router-link>
+          <router-link v-if="recentIssues.length" class="focus-ring system-text-link" to="/troubleshooting">{{ $t('index.run_guided') }}</router-link>
         </div>
       </aside>
     </div>
@@ -187,10 +187,13 @@
           role="status"
         ></span>
         <div class="system-update-copy">
-          <div class="section-kicker">Software</div>
-          <h2 class="section-title">Update Center</h2>
+          <div class="section-kicker">{{ $t('index.software') }}</div>
+          <h2 class="section-title">{{ $t('index.update_center') }}</h2>
           <p><span class="system-update-state-summary">{{ updateCenterState.statusLabel }}</span> · {{ updateCheckError || updateCenterState.primaryActionSummary }}</p>
-          <p class="system-update-safety">Polaris never auto-installs updates from this page.</p>
+          <p class="system-update-safety">
+            {{ $t('index.never_auto_installs') }}
+            <a href="https://papi-ux.com/docs/repositories/#after-install-or-upgrade" target="_blank" rel="noopener" class="focus-ring system-text-link">{{ $t('index.updates_docs_link') }}</a>
+          </p>
         </div>
         <div class="system-update-actions">
           <button
@@ -201,7 +204,7 @@
             :disabled="updateCenterState.primaryActionKind === 'none'"
             @click="handlePrimaryUpdateAction"
           >
-            {{ copiedInstallCommand ? 'Copied' : updateCenterState.primaryActionLabel }}
+            {{ copiedInstallCommand ? $t('index.copied') : updateCenterState.primaryActionLabel }}
           </button>
           <button
             data-update-center-refresh
@@ -210,7 +213,7 @@
             :disabled="checkingUpdates"
             @click="refreshUpdateStatus"
           >
-            {{ checkingUpdates ? 'Checking…' : 'Check again' }}
+            {{ checkingUpdates ? $t('index.checking') : $t('index.check_again') }}
           </button>
           <button
             v-if="!updateDetailsForced"
@@ -220,7 +223,7 @@
             aria-controls="system-update-details"
             @click="updateDetailsOpen = !updateDetailsOpen"
           >
-            {{ showUpdateDetails ? 'Hide details' : 'Update details' }}
+            {{ showUpdateDetails ? $t('index.hide_details') : $t('index.update_details') }}
           </button>
         </div>
       </div>
@@ -228,19 +231,19 @@
       <div v-show="showUpdateDetails" id="system-update-details" data-update-center-details class="system-update-details">
         <div class="system-update-grid">
           <article class="surface-subtle p-4">
-            <div class="system-telemetry-label">Installed</div>
+            <div class="system-telemetry-label">{{ $t('index.installed') }}</div>
             <div class="system-update-value">{{ updateCenterState.currentVersion || version?.version || '—' }}</div>
-            <div class="system-update-meta">Running on this host</div>
+            <div class="system-update-meta">{{ $t('index.running_on_host') }}</div>
           </article>
           <article class="surface-subtle p-4">
-            <div class="system-telemetry-label">Latest</div>
+            <div class="system-telemetry-label">{{ $t('index.latest') }}</div>
             <div class="system-update-value text-ice">{{ updateCenterState.latestVersion || '—' }}</div>
-            <a v-if="updateCenterState.releaseUrl" class="system-text-link" :href="updateCenterState.releaseUrl" target="_blank">View release notes</a>
+            <a v-if="updateCenterState.releaseUrl" class="system-text-link" :href="updateCenterState.releaseUrl" target="_blank" rel="noopener">{{ $t('index.view_release_notes') }}</a>
           </article>
           <article class="surface-subtle p-4">
-            <div class="system-telemetry-label">Package</div>
-            <div class="system-update-package">{{ updateCenterState.packageLabel || 'Manual release page' }}</div>
-            <div class="system-update-meta break-all">{{ updateCenterState.asset?.name || 'No matching package detected for this host yet.' }}</div>
+            <div class="system-telemetry-label">{{ $t('index.package') }}</div>
+            <div class="system-update-package">{{ updateCenterState.packageLabel || $t('index.manual_release_page') }}</div>
+            <div class="system-update-meta break-all">{{ updateCenterState.asset?.name || $t('index.no_matching_package') }}</div>
             <div v-if="updateCenterState.assetDigest" class="system-update-digest">{{ updateCenterState.assetDigest }}</div>
           </article>
         </div>
@@ -249,34 +252,34 @@
           <div v-if="updateCenterState.canCopyInstallCommand" class="system-install-command">
             <div class="system-install-heading">
               <div>
-                <div class="font-medium text-silver">Manual install command</div>
-                <div class="system-update-meta">Copy, inspect, and run locally when you are ready. Polaris never auto-installs from the web UI.</div>
+                <div class="font-medium text-silver">{{ $t('index.manual_install_command') }}</div>
+                <div class="system-update-meta">{{ $t('index.manual_install_copy') }}</div>
               </div>
               <button type="button" class="focus-ring system-button system-button-secondary" @click="copyInstallCommand">
-                {{ copiedInstallCommand ? 'Copied' : 'Copy command' }}
+                {{ copiedInstallCommand ? $t('index.copied') : $t('index.copy_command') }}
               </button>
             </div>
             <pre><code>{{ updateCenterState.installCommand }}</code></pre>
           </div>
           <div class="system-install-links">
-            <a v-if="updateCenterState.asset" class="focus-ring system-button system-button-primary" :href="updateCenterState.asset.browser_download_url" target="_blank">Download package</a>
-            <a v-if="updateCenterState.releaseUrl" class="focus-ring system-button system-button-secondary" :href="updateCenterState.releaseUrl" target="_blank">Open release</a>
+            <a v-if="updateCenterState.asset" class="focus-ring system-button system-button-primary" :href="updateCenterState.asset.browser_download_url" target="_blank" rel="noopener">{{ $t('index.download_package') }}</a>
+            <a v-if="updateCenterState.releaseUrl" class="focus-ring system-button system-button-secondary" :href="updateCenterState.releaseUrl" target="_blank" rel="noopener">{{ $t('index.open_release') }}</a>
           </div>
         </div>
       </div>
     </section>
 
-    <nav class="system-quick-actions" aria-label="System shortcuts">
+    <nav class="system-quick-actions" :aria-label="$t('index.system_shortcuts')">
       <router-link v-for="action in quickActions" :key="action.to" class="focus-ring system-quick-action" :to="action.to">
-        <span>{{ action.title }}</span>
+        <span>{{ $t(action.titleKey) }}</span>
         <span aria-hidden="true">→</span>
       </router-link>
     </nav>
 
     <footer class="system-resource-footer">
       <div>
-        <div class="section-kicker">Product & resources</div>
-        <p>Nova client support, documentation, community, and project information.</p>
+        <div class="section-kicker">{{ $t('index.product_resources') }}</div>
+        <p>{{ $t('index.product_resources_copy') }}</p>
       </div>
       <div class="system-resource-links">
         <a class="focus-ring system-footer-link" href="https://github.com/papi-ux/nova" target="_blank">Nova</a>
@@ -302,7 +305,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState, updateStatusLightClass } from '../update-center.js'
@@ -310,6 +313,8 @@ import InfoHint from '../components/InfoHint.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { resources, legalDocs, sponsor } from '../resource-links.js'
+
+const i18n = inject('i18n')
 
 const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
 
@@ -327,9 +332,9 @@ const updateCenterSection = ref(null)
 const updateDetailsOpen = ref(false)
 
 const quickActions = [
-  { to: '/apps', title: 'Applications' },
-  { to: '/troubleshooting#logs', title: 'Logs' },
-  { to: '/config', title: 'Settings' }
+  { to: '/apps', titleKey: 'index.quick_applications_title' },
+  { to: '/troubleshooting#logs', titleKey: 'index.quick_logs_title' },
+  { to: '/config', titleKey: 'index.quick_settings_title' }
 ]
 
 const installedVersionNotStable = computed(() => {
@@ -351,6 +356,13 @@ const buildVersionIsDirty = computed(() => {
   return version.value?.version?.split('.').length === 5 && version.value.version.includes('dirty')
 })
 
+// A commit-suffixed version such as 1.4.0.5fd06cc2 is a local build of that
+// release, not the packaged one. It must not read as the current public release.
+const buildVersionIsLocal = computed(() => {
+  const parts = String(version.value?.version || '').split('.')
+  return parts.length >= 4 && /^[0-9a-f]{7,}$/i.test(parts[3] || '')
+})
+
 const groupedIssueLogs = computed(() => groupRecentIssueLogs(logs.value, { maxSourceLines: 200 }))
 const fatalCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Fatal').length)
 const warningCount = computed(() => groupedIssueLogs.value.filter((entry) => entry.level === 'Warning').length)
@@ -366,22 +378,22 @@ const healthState = computed(() => {
 const healthLabel = computed(() => {
   switch (healthState.value) {
     case 'critical':
-      return 'Critical'
+      return i18n.t('index.health_critical')
     case 'warning':
-      return 'Warning'
+      return i18n.t('index.health_warning')
     default:
-      return 'Healthy'
+      return i18n.t('index.health_healthy')
   }
 })
 
 const systemHeaderTitle = computed(() => {
   switch (healthState.value) {
     case 'critical':
-      return 'Host needs attention'
+      return i18n.t('index.header_attention')
     case 'warning':
-      return 'Host status is mixed'
+      return i18n.t('index.header_mixed')
     default:
-      return 'Host is healthy'
+      return i18n.t('index.header_healthy')
   }
 })
 
@@ -397,12 +409,13 @@ const healthBadgeClass = computed(() => {
 })
 
 const versionHeaderSummary = computed(() => {
-  if (!version.value) return 'Version unavailable'
-  if (buildVersionIsDirty.value) return 'Local dirty build'
-  if (installedVersionNotStable.value) return 'Running newer than the latest stable tag'
-  if (stableBuildAvailable.value) return 'New stable release available'
-  if (notifyPreReleases.value && preReleaseBuildAvailable.value) return 'New prerelease available'
-  return 'Current public release'
+  if (!version.value) return i18n.t('index.version_unavailable')
+  if (buildVersionIsDirty.value) return i18n.t('index.version_dirty_build')
+  if (installedVersionNotStable.value) return i18n.t('index.version_newer_than_stable')
+  if (stableBuildAvailable.value) return i18n.t('index.version_new_stable_available')
+  if (notifyPreReleases.value && preReleaseBuildAvailable.value) return i18n.t('index.version_new_prerelease_available')
+  if (buildVersionIsLocal.value) return i18n.t('index.version_local_build')
+  return i18n.t('index.version_current')
 })
 
 const updateCenterState = computed(() => buildUpdateCenterState({
@@ -430,8 +443,8 @@ const telemetryAvailable = computed(() => {
 })
 
 const telemetryLiveLabel = computed(() => {
-  if (systemLoading.value) return 'Refreshing…'
-  return telemetryAvailable.value ? 'Live' : 'Unavailable'
+  if (systemLoading.value) return i18n.t('index.refreshing')
+  return telemetryAvailable.value ? i18n.t('index.telemetry_live') : i18n.t('index.telemetry_unavailable')
 })
 
 const telemetryLiveClass = computed(() => {
@@ -452,10 +465,10 @@ const showUpdateDetails = computed(() => {
 const sessionModeDescription = computed(() => {
   const mode = String(sessionType.value || '').toLowerCase()
   if (!mode) return ''
-  if (mode.includes('wayland')) return 'Wayland compositor active.'
-  if (mode.includes('x11')) return 'X11 desktop session active.'
-  if (mode.includes('headless')) return 'Headless · Private Stream runtime active.'
-  return 'Live compositor mode reported by the host.'
+  if (mode.includes('wayland')) return i18n.t('index.session_wayland')
+  if (mode.includes('x11')) return i18n.t('index.session_x11')
+  if (mode.includes('headless')) return i18n.t('index.session_headless')
+  return i18n.t('index.session_live')
 })
 
 function issueSeverityClass(level) {

@@ -2167,7 +2167,9 @@ textarea {
 }
 
 .troubleshooting-action-card {
-  @apply rounded-xl border border-storm/30 bg-deep/40 p-3 text-left transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice disabled:cursor-not-allowed disabled:opacity-50;
+  /* Action cards are buttons: the ice tint, pointer, and press state separate
+     them from the read-only tiles that share their shape. */
+  @apply cursor-pointer rounded-xl border border-ice/25 bg-ice/5 p-3 text-left transition-[border-color,color,background-color,transform] duration-200 hover:border-ice hover:bg-ice/10 hover:text-ice active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
 }
 
 .troubleshooting-filter-button {

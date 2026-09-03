@@ -3,10 +3,13 @@
     <section class="page-header">
       <div class="page-heading">
         <div class="section-kicker">{{ $t('navbar.pairing') }}</div>
-        <h1 class="page-title">Pair clients</h1>
-        <p class="page-subtitle">Start with one route, then review saved devices.</p>
+        <h1 class="page-title">{{ $t('pin.page_title') }}</h1>
+        <p class="page-subtitle">
+          {{ $t('pin.page_subtitle') }}
+          <a href="https://papi-ux.com/docs/quickstart/#4-pair-a-client" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('pin.pairing_docs_link') }}</a>
+        </p>
         <div class="page-meta">
-          <span class="meta-pill">{{ pairedCount }} saved</span>
+          <span class="meta-pill">{{ $t('pin.saved_count', { count: pairedCount }) }}</span>
           <span class="meta-pill">{{ activePairingMethodLabel }}</span>
         </div>
       </div>
@@ -16,20 +19,18 @@
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div class="min-w-0">
           <div class="section-kicker">{{ $t('pin.pair_device') }}</div>
-          <h2 class="section-title">Pair a device</h2>
+          <h2 class="section-title">{{ $t('pin.pair_a_device') }}</h2>
         </div>
       </div>
 
       <div class="pairing-methods mt-5 grid gap-3 lg:grid-cols-3">
-        <button
+        <SelectableCard
           v-for="method in pairingMethods"
           :key="method.key"
-          type="button"
-          class="focus-ring pairing-method-card rounded-xl border px-4 py-3 text-left transition-[border-color,background-color,box-shadow] duration-200"
-          :class="currentTab === method.key
+          :selected="currentTab === method.key"
+          :card-class="['pairing-method-card rounded-xl border px-4 py-3 transition-[border-color,background-color,box-shadow] duration-200', currentTab === method.key
             ? 'border-ice/40 bg-twilight/70 shadow-[0_0_32px_color-mix(in_srgb,var(--color-accent)_12%,transparent)]'
-            : 'border-storm/20 bg-deep/40 hover:border-storm/40 hover:bg-twilight/30'"
-          :aria-pressed="currentTab === method.key"
+            : 'border-storm/20 bg-deep/40 hover:border-storm/40 hover:bg-twilight/30']"
           @click="switchTab(method.key)"
         >
           <div class="flex items-center justify-between gap-3">
@@ -45,7 +46,7 @@
             </span>
           </div>
           <p v-if="currentTab === method.key" class="mt-2 text-xs text-storm">{{ $t(method.descKey) }}</p>
-        </button>
+        </SelectableCard>
       </div>
 
       <div class="pairing-flow-strip mt-5">
@@ -55,7 +56,7 @@
         </div>
         <div class="pairing-inline-note">
           <span class="pairing-inline-note-label">{{ $t('_common.warning') }}</span>
-          <span>Review access before sharing the client.</span>
+          <span>{{ $t('pin.review_access_warning') }}</span>
         </div>
       </div>
 
@@ -64,7 +65,10 @@
           <div class="min-w-0">
             <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.pairing_access') }}</div>
             <h3 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.pairing_access_title') }}</h3>
-            <p class="mt-1 text-sm text-storm">{{ $t('pin.pairing_access_desc') }}</p>
+            <p class="mt-1 text-sm text-storm">
+              {{ $t('pin.pairing_access_desc') }}
+              <a href="https://papi-ux.com/docs/troubleshooting/#paired-client-gets-permission-denied-403-when-starting-a-stream" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('pin.access_docs_link') }}</a>
+            </p>
           </div>
           <span class="rounded-full border px-2.5 py-1 text-xs font-medium" :class="accessToneClass(permissionPresetMask(selectedAccessPreset) || 0)">
             {{ selectedPairingAccessLabel }}
@@ -76,7 +80,7 @@
             :key="preset.key"
             type="button"
             role="radio"
-            class="rounded-xl border px-3 py-3 text-left transition-all duration-200"
+            class="selectable-card focus-ring rounded-xl border px-3 py-3 transition-all duration-200"
             :class="selectedAccessPreset === preset.key
               ? preset.activeClass
               : 'border-storm/30 bg-deep/40 text-storm hover:border-storm/50 hover:text-silver'"
@@ -109,7 +113,7 @@
               </div>
               <a
                 href="#/config#encryption_and_trust"
-                class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
+                class="focus-ring dashboard-action-button dashboard-action-button-primary"
               >
                 {{ $t('pin.configure_network') }}
               </a>
@@ -154,7 +158,7 @@
                   pattern="[0-9]{4}"
                   maxlength="4"
                   required
-                  title="Enter the 4-digit pairing PIN"
+                  :title="$t('pin.pin_code_title')"
                   class="settings-input"
                   :placeholder="$t('pin.pin_code_placeholder')"
                 />
@@ -175,7 +179,7 @@
               <div class="flex flex-wrap items-center gap-3">
                 <button
                   type="submit"
-                  class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
+                  class="focus-ring dashboard-action-button dashboard-action-button-primary"
                 >
                   {{ $t('pin.send') }}
                 </button>
@@ -234,7 +238,7 @@
                   <div class="flex gap-3">
                     <button
                       type="button"
-                      class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:opacity-50"
+                      class="focus-ring dashboard-action-button dashboard-action-button-primary"
                       :disabled="!canSaveHost"
                       @click="saveHost"
                     >
@@ -242,7 +246,7 @@
                     </button>
                     <button
                       type="button"
-                      class="inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-all duration-200 hover:border-ice hover:text-ice"
+                      class="focus-ring dashboard-action-button dashboard-action-button-ghost"
                       @click="editHost"
                     >
                       {{ $t('_common.cancel') }}
@@ -281,7 +285,7 @@
                   <div class="flex flex-wrap items-center gap-3">
                     <button
                       type="submit"
-                      class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
+                      class="focus-ring dashboard-action-button dashboard-action-button-primary gap-2"
                     >
                       <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
@@ -349,18 +353,14 @@
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div class="min-w-0">
             <div class="section-kicker">{{ $t('pin.paired_devices') }}</div>
-            <h2 id="unpair" class="section-title">Saved devices</h2>
+            <h2 id="unpair" class="section-title">{{ $t('pin.saved_devices') }}</h2>
           </div>
           <div class="pairing-device-toolbar flex flex-wrap items-center gap-2">
-            <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-xs text-storm">
-              {{ pairedCount }} saved
-            </span>
-            <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-xs text-storm">
-              {{ connectedCount }} connected
-            </span>
+            <span class="meta-pill">{{ $t('pin.saved_count', { count: pairedCount }) }}</span>
+            <span class="meta-pill">{{ $t('pin.connected_count', { count: connectedCount }) }}</span>
             <button
               type="button"
-              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="focus-ring dashboard-action-button dashboard-action-button-danger"
               :disabled="unpairAllPressed || clients.length === 0"
               @click="unpairAll"
             >
@@ -415,9 +415,9 @@
                     {{ clientDisplayName(client) || $t('pin.unpair_single_unknown') }}
                   </h3>
                   <p v-if="clientAliasName(client)" class="mt-1 text-xs text-storm">
-                    Saved as {{ client.name }}
+                    {{ $t('pin.saved_as', { name: client.name }) }}
                   </p>
-                  <p class="mt-2 text-sm text-storm">Update access, display behavior, and client actions.</p>
+                  <p class="mt-2 text-sm text-storm">{{ $t('pin.edit_access_copy') }}</p>
                 </div>
                 <div class="pairing-client-actions flex flex-wrap items-center gap-2">
                   <span
@@ -448,14 +448,14 @@
                   </span>
                   <button
                     type="button"
-                    class="inline-flex h-9 items-center justify-center rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice"
+                    class="focus-ring dashboard-action-button dashboard-action-button-primary"
                     @click="saveClient(client)"
                   >
                     {{ $t('_common.save') }}
                   </button>
                   <button
                     type="button"
-                    class="inline-flex h-9 items-center justify-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-all duration-200 hover:border-ice hover:text-ice"
+                    class="focus-ring dashboard-action-button dashboard-action-button-ghost"
                     @click="cancelEdit(client)"
                   >
                     {{ $t('_common.cancel') }}
@@ -463,7 +463,19 @@
                 </div>
               </div>
 
-              <div class="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
+              <section class="mt-5 rounded-2xl border border-storm/20 bg-void/40 p-4" data-client-host-view :data-client-host-view-state="hostViewState">
+                <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.host_view_kicker') }}</div>
+                <h4 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.host_view_title') }}</h4>
+                <p class="mt-1 text-sm text-storm">{{ $t('pin.host_view_desc') }}</p>
+                <div v-if="hostViewState === 'loading'" class="mt-3 text-sm text-storm">{{ $t('pin.host_view_loading') }}</div>
+                <div v-else-if="hostViewState === 'unavailable'" class="mt-3 text-sm text-storm">{{ $t('pin.host_view_unavailable') }}</div>
+                <div v-else-if="hostViewRows.length === 0" class="mt-3 text-sm text-storm">{{ $t('pin.host_view_empty') }}</div>
+                <div v-else class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                  <StatTile v-for="row in hostViewRows" :key="row.key" :label="row.label" :value="row.value" :note="row.note" />
+                </div>
+              </section>
+
+              <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
                 <section class="rounded-2xl border border-storm/20 bg-void/40 p-4">
                   <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.identity_access') }}</div>
                   <h4 class="mt-2 text-base font-semibold text-silver">{{ $t('pin.access_presets') }}</h4>
@@ -599,7 +611,7 @@
                       <span v-if="aiSuggestion.display_mode" class="text-silver/60">{{ $t('pin.mode_short') }} <span class="font-medium text-silver">{{ aiSuggestion.display_mode }}</span></span>
                       <span v-if="aiSuggestion.target_bitrate_kbps" class="text-silver/60">{{ $t('pin.bitrate_short') }} <span class="font-medium text-silver">{{ (aiSuggestion.target_bitrate_kbps / 1000).toFixed(0) }} Mbps</span></span>
                       <span v-if="aiSuggestion.color_range != null" class="text-silver/60">{{ $t('pin.color_short') }} <span class="font-medium text-silver">{{ colorRangeLabel(aiSuggestion.color_range) }}</span></span>
-                      <span v-if="aiSuggestion.hdr != null" class="text-silver/60">HDR <span class="font-medium text-silver">{{ aiSuggestion.hdr ? 'On' : 'Off' }}</span></span>
+                      <span v-if="aiSuggestion.hdr != null" class="text-silver/60">HDR <span class="font-medium text-silver">{{ aiSuggestion.hdr ? $t('pin.hdr_on') : $t('pin.hdr_off') }}</span></span>
                     </div>
                     <div v-if="aiSuggestion.reasoning" class="mt-2 text-xs italic text-silver/60">{{ aiSuggestion.reasoning }}</div>
                     <button
@@ -636,7 +648,7 @@
                         v-model="client.editProfile.output_name"
                         type="text"
                         autocomplete="off"
-                        class="w-full rounded-lg border border-storm/50 bg-void/50 px-2.5 py-1.5 text-sm text-silver focus:border-ice focus:outline-none"
+                        class="settings-input text-sm"
                         placeholder="e.g. HDMI-A-1"
                       />
                     </div>
@@ -644,7 +656,7 @@
                       <label class="mb-1 block text-xs font-medium uppercase tracking-eyebrow text-storm">{{ $t('pin.color_range_label') }}</label>
                       <select
                         v-model="client.editProfile.color_range"
-                        class="w-full rounded-lg border border-storm/50 bg-void/50 px-2.5 py-1.5 text-sm text-silver focus:border-ice focus:outline-none"
+                        class="settings-input text-sm"
                       >
                         <option :value="0">{{ $t('pin.color_client_default') }}</option>
                         <option :value="1">{{ $t('pin.color_limited') }}</option>
@@ -658,7 +670,7 @@
                         type="text"
                         autocomplete="off"
                         spellcheck="false"
-                        class="w-full rounded-lg border border-storm/50 bg-void/50 px-2.5 py-1.5 text-sm text-silver focus:border-ice focus:outline-none"
+                        class="settings-input text-sm"
                         placeholder="AA:BB:CC:DD:EE:FF"
                       />
                     </div>
@@ -786,7 +798,7 @@
                     </span>
                   </div>
                   <div v-if="clientAliasName(client)" class="mt-2 text-xs text-storm">
-                    Saved as {{ client.name }}
+                    {{ $t('pin.saved_as', { name: client.name }) }}
                   </div>
                   <div class="mt-3 font-mono text-xs text-storm">[ {{ permToStr(client.perm) }} ]</div>
                 </div>
@@ -842,26 +854,11 @@
               </div>
 
               <div class="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
-                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.permissions_summary') }}</div>
-                  <div class="mt-1.5 text-sm font-medium text-silver">{{ accessPresetLabel(client.perm) }}</div>
-                </div>
-                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.display_summary') }}</div>
-                  <div class="mt-1.5 text-sm font-medium text-silver">{{ clientDisplaySummary(client) }}</div>
-                </div>
-                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.client_commands_summary') }}</div>
-                  <div class="mt-1.5 text-sm font-medium text-silver">{{ clientCommandSummary(client) }}</div>
-                </div>
-                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.date_added') }}</div>
-                  <div class="mt-1.5 text-sm font-medium text-silver">{{ formatClientTimestamp(client.paired_at, undefined, undefined, $t('pin.not_recorded')) }}</div>
-                </div>
-                <div class="rounded-lg border border-storm/15 bg-void/25 px-3 py-2.5">
-                  <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">{{ $t('pin.last_seen') }}</div>
-                  <div class="mt-1.5 text-sm font-medium text-silver">{{ formatClientTimestamp(client.last_seen_at, undefined, undefined, $t('pin.not_recorded')) }}</div>
-                </div>
+                <StatTile :label="$t('pin.permissions_summary')" :value="accessPresetLabel(client.perm)" />
+                <StatTile :label="$t('pin.display_summary')" :value="clientDisplaySummary(client)" />
+                <StatTile :label="$t('pin.client_commands_summary')" :value="clientCommandSummary(client)" />
+                <StatTile :label="$t('pin.date_added')" :value="formatClientTimestamp(client.paired_at, undefined, undefined, $t('pin.not_recorded'))" />
+                <StatTile :label="$t('pin.last_seen')" :value="formatClientTimestamp(client.last_seen_at, undefined, undefined, $t('pin.not_recorded'))" />
               </div>
             </div>
           </article>
@@ -873,24 +870,19 @@
       <div class="p-5">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div class="min-w-0">
-            <div class="section-kicker">Profile Maintenance</div>
-            <h2 class="section-title">Stale profile aliases</h2>
-            <p class="mt-2 text-sm text-storm">
-              Remove leftover display-profile aliases from renamed, duplicate, or test clients without unpairing the
-              real device.
-            </p>
+            <div class="section-kicker">{{ $t('pin.profile_maintenance') }}</div>
+            <h2 class="section-title">{{ $t('pin.stale_aliases_title') }}</h2>
+            <p class="mt-2 text-sm text-storm">{{ $t('pin.stale_aliases_copy') }}</p>
           </div>
           <div class="pairing-device-toolbar flex flex-wrap items-center gap-2">
-            <span class="rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-xs text-storm">
-              {{ staleProfileEntries.length }} stale
-            </span>
+            <span class="meta-pill">{{ $t('pin.stale_count', { count: staleProfileEntries.length }) }}</span>
             <button
               type="button"
-              class="inline-flex h-9 items-center justify-center rounded-lg bg-danger px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-danger/85 hover:shadow-[0_0_24px_color-mix(in_srgb,var(--color-danger)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+              class="focus-ring dashboard-action-button dashboard-action-button-danger"
               :disabled="removingStaleProfiles || staleProfileEntries.length === 0"
               @click="deleteStaleProfiles"
             >
-              {{ removingStaleProfiles ? 'Removing…' : 'Remove stale' }}
+              {{ removingStaleProfiles ? $t('pin.removing_stale') : $t('pin.remove_stale') }}
             </button>
           </div>
         </div>
@@ -907,19 +899,17 @@
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
                   <h3 class="text-sm font-semibold text-silver">{{ entry.name }}</h3>
-                  <span class="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-bright">
-                    Stale alias
-                  </span>
+                  <span class="meta-pill border-warning/30 bg-warning/10 text-warning-bright">{{ $t('pin.stale_alias_badge') }}</span>
                 </div>
                 <div class="mt-2 text-sm text-storm">{{ profileSummary(entry.profile) }}</div>
               </div>
 
               <button
                 type="button"
-                class="inline-flex h-9 items-center justify-center rounded-lg border border-danger/30 bg-danger/10 px-4 text-sm font-medium text-danger-bright transition-all duration-200 hover:bg-danger/20"
+                class="focus-ring dashboard-action-button dashboard-action-button-danger"
                 @click="deleteClientProfileEntry(entry.name)"
               >
-                Remove
+                {{ $t('pin.remove') }}
               </button>
             </div>
           </article>
@@ -934,6 +924,10 @@ import { computed, inject, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
 import Skeleton from '../components/Skeleton.vue'
+import SelectableCard from '../components/SelectableCard.vue'
+import StatTile from '../components/StatTile.vue'
+import { useConfigProjection } from '../composables/useConfigProjection'
+import { buildClientHostSyncRows } from '../client-host-sync.js'
 import { useToast } from '../composables/useToast'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { formatClientTimestamp } from '../client-timestamps'
@@ -998,6 +992,20 @@ let qrCodeLoader = null
 let hostInfoCache = null
 let hostManuallySet = false
 let currentEditingClient = null
+
+// Host truth for the device being edited: GET /api/settings/metadata?client=<uuid>.
+// A host without the endpoint answers 404 and the panel says so instead of guessing.
+const hostView = useConfigProjection()
+const hostViewState = computed(() => {
+  if (hostView.loading.value) return 'loading'
+  if (!hostView.ok.value) return 'unavailable'
+  return 'ready'
+})
+const hostViewRows = computed(() => (
+  hostView.ok.value
+    ? buildClientHostSyncRows(hostView.fields.value, i18n.t, { streamDisplay: hostView.streamDisplay.value })
+    : []
+))
 let lastFocusedElement = null
 
 const ensureQRCode = async () => {
@@ -1097,14 +1105,14 @@ function suggestionForClient(client) {
 function clientRecommendationState(client) {
   const suggestion = suggestionForClient(client)
   if (!suggestion || !suggestion.status) {
-    return { label: 'No recommendation', tone: 'neutral' }
+    return { label: i18n.t('pin.recommendation_none'), tone: 'neutral' }
   }
 
   const recognizedDevice = suggestion.confidence !== 'low' ||
     !String(suggestion.reasoning || '').startsWith('Unknown device')
 
   if (!recognizedDevice) {
-    return { label: 'No recommendation', tone: 'neutral' }
+    return { label: i18n.t('pin.recommendation_none'), tone: 'neutral' }
   }
 
   const profile = profiles.value[client.name] || {}
@@ -1118,10 +1126,10 @@ function clientRecommendationState(client) {
     Number(profile.color_range || 0) === expectedColorRange
   const aiSource = typeof suggestion.source === 'string' && suggestion.source.startsWith('ai')
   if (matched) {
-    return { label: aiSource ? 'AI matched' : 'Recommended', tone: 'good' }
+    return { label: aiSource ? i18n.t('pin.recommendation_ai_matched') : i18n.t('pin.recommendation_recommended'), tone: 'good' }
   }
 
-  return { label: aiSource ? 'AI available' : 'Custom profile', tone: 'warn' }
+  return { label: aiSource ? i18n.t('pin.recommendation_ai_available') : i18n.t('pin.recommendation_custom'), tone: 'warn' }
 }
 
 function recommendationToneClass(state) {
@@ -1158,7 +1166,7 @@ async function refreshRecommendationSuggestions() {
 async function fetchAiSuggestion(client) {
   const name = client.editName || client.name
   if (!name) {
-    showToast('Device needs a name for AI suggestions', 'error')
+    showToast(i18n.t('pin.ai_name_required'), 'error')
     return
   }
   aiSuggestionFor.value = name
@@ -1172,7 +1180,7 @@ async function fetchAiSuggestion(client) {
     if (result && result.status) {
       aiSuggestion.value = result
     } else {
-      showToast('No suggestion available — device not recognized', 'info')
+      showToast(i18n.t('pin.ai_no_suggestion'), 'info')
       aiSuggestionFor.value = null
     }
   }
@@ -1184,7 +1192,7 @@ function applySuggestion(client) {
   if (suggestion.display_mode) client.editDisplayMode = suggestion.display_mode
   if (suggestion.color_range != null) client.editProfile.color_range = suggestion.color_range
   if (suggestion.hdr != null) client.editProfile.hdr = suggestion.hdr
-  showToast('AI suggestion applied to profile', 'success')
+  showToast(i18n.t('pin.ai_applied'), 'success')
   aiSuggestion.value = null
   aiSuggestionFor.value = null
 }
@@ -1485,7 +1493,7 @@ function profileSummary(profile) {
   if (profile.hdr) parts.push('HDR')
   if (profile.color_range === 1 || profile.color_range === 2) parts.push(colorRangeLabel(profile.color_range))
   if (profile.mac_address) parts.push('WoL')
-  return parts.length > 0 ? parts.join(' · ') : 'Default behavior'
+  return parts.length > 0 ? parts.join(' · ') : i18n.t('pin.default_behavior')
 }
 
 function editClient(client) {
@@ -1510,6 +1518,7 @@ function editClient(client) {
     mac_address: profile.mac_address || ''
   }
   currentEditingClient = client
+  hostView.load(client.uuid)
   nextTick(() => {
     document.getElementById(`client-name-${client.uuid}`)?.focus()
   })
@@ -1616,9 +1625,9 @@ async function deleteStaleProfiles() {
     for (const entry of staleProfileEntries.value) {
       await deleteProfile(entry.name)
     }
-    showToast('Removed stale client profile aliases', 'success')
+    showToast(i18n.t('pin.stale_removed'), 'success')
   } catch {
-    showToast('Failed to remove stale client profile aliases', 'error')
+    showToast(i18n.t('pin.stale_remove_failed'), 'error')
   } finally {
     removingStaleProfiles.value = false
   }

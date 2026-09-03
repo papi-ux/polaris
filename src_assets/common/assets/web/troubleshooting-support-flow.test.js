@@ -10,9 +10,13 @@ describe('Troubleshooting self-service support flow', () => {
   it('uses Doctor & Support as the canonical page name and player-facing self-test copy', () => {
     const source = webSource('views/TroubleshootingView.vue')
 
+    const locale = webSource('public/assets/locale/en.json')
+
     expect(source).toContain("$t('navbar.troubleshoot')")
-    expect(source).toContain('Start with quick player checks')
+    expect(source).toContain("$t('troubleshooting.self_tests_desc')")
+    expect(locale).toContain('Start with quick player checks')
     expect(source).not.toContain('nerd-sniping')
+    expect(locale).not.toContain('nerd-sniping')
   })
 
   it('shows the plain Doctor diagnosis before advanced/raw evidence', () => {

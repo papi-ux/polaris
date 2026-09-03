@@ -390,6 +390,41 @@ but the active Linux display path did not provide enough metadata to advertise a
 If `usable=false`, the display path exposed an HDR metadata blob, but Polaris rejected it because core
 static metadata such as display primaries or max display luminance was missing.
 
+## Quick recovery ladder
+
+The Doctor & Support page offers three recovery actions, ordered from least to most disruptive.
+Try them in order and stop at the first one that gets the stream back.
+
+1. **Force Close** ends the running app. Use it when a client says an app is already running or a
+   game hangs on the host while Polaris itself is fine. Connected clients see the stream end or
+   return to the app list, and the app list reloads.
+2. **Restart Polaris** restarts the host service. Use it when the host stops answering, pairing
+   fails, or capture never starts. Every active stream ends and the web UI reconnects on its own
+   once the service is back.
+3. **Quit Polaris** stops the service entirely. Use it only when you can start Polaris again another
+   way, such as a terminal or the desktop launcher, because the web UI cannot bring it back once it
+   has exited.
+
+On Windows the ladder has an optional fourth step, **Reset Persistent Display Device Settings**,
+for a host stuck restoring a changed display configuration.
+
+## Built-in self tests
+
+The self tests on the Doctor & Support page answer three player questions without opening the raw
+evidence.
+
+- **Network Path Tester** reads the live round trip and packet loss for the current client, checks
+  whether the control and stream ports answer, and suggests a bitrate ceiling the measured path can
+  carry. Open **Advanced evidence** for the per-check detail and the native probe output.
+- **Controller/Input Tester** shows whether the browser or the host sees a controller. **Detect
+  controller** samples the browser gamepad API, **Log A press** records a manual button sample, and
+  **Test rumble** pulses haptics when the browser exposes them.
+- **Post-session Stream Report** summarises the last completed stream: the loudest signal, who owned
+  the issue, and the launch profile to try next.
+
+**Copy self-test summary** puts all three results on the clipboard in the same form the support
+bundle uses.
+
 ## Support bundle and logs
 
 The Troubleshooting screen in the Polaris web UI inspects **this host**. It is the place to go

@@ -7,6 +7,7 @@ test.describe('dashboard', () => {
     await expect(sidebar.getByRole('link', { name: /library/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /settings/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /devices/i })).toBeVisible()
+    await expect(loggedInPage.locator('[data-sidebar-sign-out]')).toBeVisible()
   })
 
   test('live summary strip and GPU gauges render when streaming', async ({ loggedInPage }) => {

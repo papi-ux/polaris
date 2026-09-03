@@ -79,6 +79,21 @@
       <div class="px-3">
         <ThemeToggle :collapsed="sidebarCollapsed" />
       </div>
+      <div class="px-3 pb-1">
+        <button
+          type="button"
+          data-sidebar-sign-out
+          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver disabled:cursor-not-allowed disabled:opacity-50"
+          :class="{ 'justify-center px-2': sidebarCollapsed }"
+          :disabled="signingOut"
+          :title="signOutLabel"
+          :aria-label="signOutLabel"
+          @click="signOut"
+        >
+          <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6A2.25 2.25 0 0 0 5.25 5.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9"/></svg>
+          <span v-if="!sidebarCollapsed" class="min-w-0 flex-1 truncate font-medium">{{ signingOut ? signOutPendingLabel : signOutLabel }}</span>
+        </button>
+      </div>
       <div class="px-3 pb-2">
         <button
           type="button"
@@ -157,7 +172,7 @@ import SpaceParticles from './components/SpaceParticles.vue'
 import ThemeToggle from './ThemeToggle.vue'
 import { initTheme } from './theme.js'
 import { getCachedConfig } from './config-cache.js'
-import { webUiAuthenticated } from './auth-state.js'
+import { markWebUiUnauthenticated, webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
 import { createNavSections, getNavItemByPath } from './nav-metadata.js'
 import { buildUpdateCenterState, updateStatusLightClass } from './update-center.js'
@@ -276,6 +291,31 @@ watch(showNav, (visible) => {
     void refreshSidebarUpdateStatus()
   }
 })
+
+const signingOut = ref(false)
+const signOutLabel = computed(() => (i18nReady ? t('navbar.sign_out') : 'Sign out'))
+const signOutPendingLabel = computed(() => (i18nReady ? t('navbar.sign_out_pending') : 'Signing out…'))
+
+// Ends the web session through the host. The auth guard treats the next
+// probe as a confirmed sign-out, so a reload lands on the login page.
+async function signOut() {
+  signingOut.value = true
+  try {
+    const response = await fetch('./api/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    markWebUiUnauthenticated()
+    window.location.assign(`${window.location.pathname}#/login`)
+    window.location.reload()
+  } catch (error) {
+    console.error('Sign out failed:', error)
+    signingOut.value = false
+    window.alert?.(i18nReady ? t('navbar.sign_out_error') : 'Polaris could not end the session. Reload and try again.')
+  }
+}
 
 function toggleCollapse() {
   sidebarCollapsed.value = !sidebarCollapsed.value
