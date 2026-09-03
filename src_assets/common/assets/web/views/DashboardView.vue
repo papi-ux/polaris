@@ -476,8 +476,11 @@
 
     <!-- Session History (idle): one list; this browser's rich local history,
          with the host's session log as the fallback source. -->
-    <div v-if="statsLoaded && !stats?.streaming && !sessions.length && hostHistoryRows.length" class="card p-4">
-      <div class="eyebrow-label mb-3">Session History</div>
+    <div v-if="statsLoaded && !stats?.streaming && !sessions.length && hostHistoryRows.length" class="card p-4" data-session-history-host>
+      <div class="flex items-center justify-between mb-3">
+        <div class="eyebrow-label">{{ t('dashboard.session_history') }}</div>
+        <button type="button" class="focus-ring text-[10px] text-storm hover:text-ice transition-colors" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
+      </div>
       <div class="space-y-2">
         <div v-for="(s, i) in hostHistoryRows" :key="i" class="flex items-center gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2">
           <span class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold" :class="{
@@ -490,10 +493,10 @@
         </div>
       </div>
     </div>
-    <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4">
+    <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4" data-session-history-local>
       <div class="flex items-center justify-between mb-3">
-        <div class="eyebrow-label">Session History</div>
-        <button @click="clearHistory" class="text-[10px] text-storm hover:text-ice transition-colors">Clear</button>
+        <div class="eyebrow-label">{{ t('dashboard.session_history') }}</div>
+        <button type="button" class="focus-ring text-[10px] text-storm hover:text-ice transition-colors" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
       </div>
       <div class="space-y-0">
         <div v-for="(s, i) in sessions.slice(0, 8)" :key="i"
@@ -521,6 +524,17 @@
       :pending="disconnectingClient"
       :pending-label="t('dashboard.disconnect_client_pending')"
       @confirm="disconnectClient"
+    />
+    <ConfirmActionDialog
+      v-model="clearHistoryConfirmOpen"
+      :title="t('dashboard.clear_history_confirm_title')"
+      :message="t('dashboard.clear_history_confirm_message')"
+      :impact-items="[t('dashboard.clear_history_impact_host'), t('dashboard.clear_history_impact_browser')]"
+      :confirm-label="t('dashboard.clear_history')"
+      :cancel-label="t('_common.cancel')"
+      :pending="clearingHistory"
+      :pending-label="t('dashboard.clear_history_pending')"
+      @confirm="clearAllSessionHistory"
     />
     <ConfirmActionDialog
       v-model="doctorActionConfirmOpen"
@@ -1466,6 +1480,32 @@ async function launchRecentApp(app) {
 // Connected client disconnect
 const connectedClientUuid = ref(null)
 const disconnectConfirmOpen = ref(false)
+const clearHistoryConfirmOpen = ref(false)
+const clearingHistory = ref(false)
+
+// One action for both history sources: the host's recorded outcomes through
+// POST /api/ai/history/clear and this browser's local list.
+async function clearAllSessionHistory() {
+  clearingHistory.value = true
+  try {
+    const response = await fetch('./api/ai/history/clear', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || result.status === false) throw new Error(result.error || `HTTP ${response.status}`)
+    clearHistory()
+    sessionHistory.value = []
+    clearHistoryConfirmOpen.value = false
+    showToast(t('dashboard.clear_history_success'), 'success')
+  } catch (error) {
+    console.error(error)
+    showToast(`${t('dashboard.clear_history_error')} ${error.message || ''}`.trim(), 'error')
+  } finally {
+    clearingHistory.value = false
+  }
+}
 const disconnectingClient = ref(false)
 const disconnectClientImpactItems = computed(() => [
   t('dashboard.disconnect_client_impact_stream'),

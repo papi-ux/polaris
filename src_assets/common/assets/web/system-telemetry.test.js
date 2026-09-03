@@ -12,7 +12,8 @@ describe('System telemetry display-session guidance', () => {
     expect(home).toContain('data-display-session-health')
     expect(home).toContain('environment_repaired')
     expect(home).toContain('missing_display_environment')
-    expect(home).toContain('Restart Polaris from the desktop session')
+    expect(home).toContain("$t('index.session_missing_env')")
+    expect(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8')).toContain('Restart Polaris from the desktop session')
   })
 
   it('reports boot readiness and keeps headless-boot hosts off the restart-from-desktop advice', () => {

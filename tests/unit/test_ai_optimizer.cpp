@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -101,6 +102,31 @@ JSON
     session.last_sample_count = samples;
     return session;
   }
+}
+
+// Never call ai_optimizer::clear_history() here: appdata() resolves once per
+// process, so it would remove the real history file of whoever runs the tests.
+TEST(AiOptimizerSessionHistory, ClearHistoryAtRemovesTheGivenFileAndForgetsEntries) {
+  const auto history_file = std::filesystem::temp_directory_path() /
+    ("polaris-ai-history-test-" + std::to_string(::getpid()) + ".json");
+  {
+    std::ofstream out(history_file);
+    out << "{\"device:game\":{\"avg_fps\":60}}";
+  }
+  ASSERT_TRUE(std::filesystem::exists(history_file));
+  // get_history_json() loads the persisted history once per process; trigger
+  // that load first so the clear below is what leaves the list empty.
+  (void) ai_optimizer::get_history_json();
+
+  ai_optimizer::clear_history_at(history_file);
+
+  EXPECT_FALSE(std::filesystem::exists(history_file));
+  const auto history = nlohmann::json::parse(ai_optimizer::get_history_json());
+  EXPECT_TRUE(history.is_array());
+  EXPECT_TRUE(history.empty());
+  // Idempotent: clearing an already-missing file is not an error.
+  ai_optimizer::clear_history_at(history_file);
+  EXPECT_FALSE(std::filesystem::exists(history_file));
 }
 
 TEST(AiOptimizerCodexHome, UsesExplicitCodexHomeWhenConfigured) {

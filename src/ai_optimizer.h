@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <filesystem>
 #include <string>
 
 namespace ai_optimizer {
@@ -331,6 +332,23 @@ namespace ai_optimizer {
    * @brief Get all session history as JSON string.
    */
   std::string get_history_json();
+
+  /**
+   * @brief Forget every recorded session outcome and remove the persisted history file.
+   *
+   * The web console offers this next to the Session History list. Cached
+   * recommendations are untouched; use clear_cache() for those.
+   */
+  void clear_history();
+
+  /**
+   * @brief clear_history() against an explicit history file.
+   *
+   * Tests use this with a temporary file: appdata() resolves once per process,
+   * so a unit test that calls clear_history() would remove the developer's real
+   * history file.
+   */
+  void clear_history_at(const std::filesystem::path &history_file);
 
   /**
    * @brief Get merged cached optimization + session history profiles for one

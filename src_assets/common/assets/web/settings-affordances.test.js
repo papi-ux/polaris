@@ -25,6 +25,7 @@ const migratedSettingsSources = [
   'configs/tabs/encoders/VideotoolboxEncoder.vue',
   'views/PasswordView.vue',
   'views/PinView.vue',
+  'views/TroubleshootingView.vue',
 ]
 
 // The settings pages mix editable controls with host status. These guards

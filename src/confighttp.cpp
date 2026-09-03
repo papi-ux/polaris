@@ -3674,6 +3674,19 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  /**
+   * @brief Forget the host's recorded session outcomes.
+   * @api_examples{/api/ai/history/clear| POST| null}
+   */
+  void clearAiHistory(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+    ai_optimizer::clear_history();
+    nlohmann::json output;
+    output["status"] = true;
+    send_response(response, output);
+  }
+
   void getAiModels(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -7107,6 +7120,7 @@ namespace confighttp {
     server.resource["^/api/ai/cache$"]["GET"] = getAiCache;
     server.resource["^/api/ai/history$"]["GET"] = getAiHistory;
     server.resource["^/api/ai/cache/clear$"]["POST"] = withCsrf(clearAiCache);
+    server.resource["^/api/ai/history/clear$"]["POST"] = withCsrf(clearAiHistory);
     server.resource["^/api/ai/models$"]["POST"] = withCsrf(getAiModels);
     server.resource["^/api/ai/test$"]["POST"] = withCsrf(testAiConfig);
     server.resource["^/api/ai/optimize$"]["POST"] = withCsrf(triggerAiOptimize);
