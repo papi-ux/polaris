@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <mutex>
+
 // standard includes
 #include <optional>
 
@@ -34,6 +36,31 @@ namespace platf {
     gamepad_feedback_msg_t last_rgb_led;
   };
 
+  /**
+   * @brief Log once when a seat isolation request did not reach the kernel.
+   *
+   * Creating the device is not the same as isolating it. The uinput backend can
+   * accept device_phys and never write it, which leaves the operator with a
+   * setting that saves, reads back as enabled, and does nothing.
+   */
+  template<class Device>
+  void warn_if_seat_isolation_inert(const inputtino::Result<Device> &device, std::string_view label) {
+    if (!config::input.client_keyboard_mouse_seat_isolation || !device) {
+      return;
+    }
+
+    const auto status = input_isolation::inspect_devices(true, (*device).get_nodes());
+    const auto warning_text = input_isolation::isolation_warning(status, label);
+    if (warning_text.empty()) {
+      return;
+    }
+
+    static std::once_flag reported;
+    std::call_once(reported, [&warning_text]() {
+      BOOST_LOG(warning) << warning_text;
+    });
+  }
+
   struct input_raw_t {
     input_raw_t():
         gamepads(MAX_GAMEPADS) {
@@ -56,6 +83,7 @@ namespace platf {
         if (!*mouse) {
           BOOST_LOG(warning) << "Unable to create virtual mouse: " << mouse->getErrorMessage();
         }
+        warn_if_seat_isolation_inert(*mouse, "mouse");
       }
       return &*mouse;
     }
@@ -75,6 +103,7 @@ namespace platf {
         if (!*keyboard) {
           BOOST_LOG(warning) << "Unable to create virtual keyboard: " << keyboard->getErrorMessage();
         }
+        warn_if_seat_isolation_inert(*keyboard, "keyboard");
       }
       return &*keyboard;
     }
@@ -118,9 +147,11 @@ namespace platf {
       if (!touch) {
         BOOST_LOG(warning) << "Unable to create virtual touch screen: " << touch.getErrorMessage();
       }
+      warn_if_seat_isolation_inert(touch, "touch screen");
       if (!pen) {
         BOOST_LOG(warning) << "Unable to create virtual pen tablet: " << pen.getErrorMessage();
       }
+      warn_if_seat_isolation_inert(pen, "pen tablet");
     }
 
     input_raw_t *global;

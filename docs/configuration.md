@@ -104,6 +104,14 @@ membership only applies to new sessions. On ostree hosts such as Bazzite the gro
 in `/usr/lib/group` and `usermod` cannot see it, so use `ujust add-user-to-input-group`
 instead. The startup warning prints whichever command applies.
 
+`client_keyboard_mouse_seat_isolation` marks the virtual keyboard, mouse, touch and pen the same
+way, but it has only the phys marker to work with: unlike gamepads, those devices keep their normal
+names so a compositor configured to ignore them by name keeps working. The marker has to survive
+into the kernel to matter, and a uinput backend that accepts the field without writing it leaves the
+devices on seat0 while the setting still reads back as enabled. Polaris inspects the devices it
+creates and logs a warning naming `client_keyboard_mouse_seat_isolation` when the marker never
+arrived, so check for that line, or run the command below, before relying on the boundary.
+
 #### Verifying that isolation is applied
 
 Check the device, not the seat list:
@@ -114,7 +122,7 @@ udevadm info -q property -n /dev/input/eventN | grep ID_SEAT
 
 `ID_SEAT=seat-polaris` means the rules applied and the device is isolated.
 
-`loginctl list-seats` will keep showing only `seat0`, and that is expected — it is not a sign that
+`loginctl list-seats` will keep showing only `seat0`, and that is expected. It is not a sign that
 isolation failed. logind only materializes a seat that owns a device tagged `master-of-seat`, which
 in practice means a graphics device. `seat-polaris` exists purely as a udev property that keeps
 logind from handing the device to the seat0 session, so it never becomes a seat logind lists.

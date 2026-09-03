@@ -509,7 +509,7 @@
     "headless_gamepad_isolation_desc": "Keeps controllers plugged into the host out of Private Stream sessions.",
     "client_gamepad_seat_isolation": "Isolate Client Gamepads from Other Linux Users",
     "client_keyboard_mouse_seat_isolation": "Isolate Client Keyboard and Mouse from the Host Session",
-    "client_keyboard_mouse_seat_isolation_desc": "Puts the client's virtual keyboard and mouse on their own Linux seat so they do not also drive the host desktop.",
+    "client_keyboard_mouse_seat_isolation_desc": "Puts the client's virtual keyboard and mouse on their own Linux seat so they do not also drive the host desktop, where the input backend supports it.",
     "client_gamepad_seat_isolation_desc": "Puts client gamepads on their own Linux seat so the local desktop user does not get automatic access.",
     "global_prep_cmd": "Command Preparations",
     "global_prep_cmd_desc": "Configure a list of commands to be executed before or after running any application. If any of the specified preparation commands fail, the application launch process will be aborted.",
