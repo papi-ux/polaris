@@ -12,6 +12,7 @@
 #include <cmath>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -134,6 +135,30 @@ namespace stream_stats {
            ) && source_cadence_confirms_motion)));
     }
 
+    double encoder_pressure_frame_budget_ms(double target_fps) {
+      return std::isfinite(target_fps) && target_fps > 0.0 ?
+               1000.0 / target_fps :
+               std::numeric_limits<double>::infinity();
+    }
+
+    double encoder_pressure_fail_threshold_ms(double target_fps) {
+      return std::min(12.0, encoder_pressure_frame_budget_ms(target_fps));
+    }
+
+    double encoder_pressure_watch_threshold_ms(double target_fps) {
+      return std::min(8.0, encoder_pressure_frame_budget_ms(target_fps) * 0.90);
+    }
+
+    bool encoder_time_fails_budget(double encode_time_ms, double target_fps) {
+      return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
+             encode_time_ms >= encoder_pressure_fail_threshold_ms(target_fps);
+    }
+
+    bool encoder_time_nears_budget(double encode_time_ms, double target_fps) {
+      return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
+             encode_time_ms >= encoder_pressure_watch_threshold_ms(target_fps);
+    }
+
     bool video_policy_pacing_warning_is_confirmed(
         const doctor_video_policy_state_t &sample) {
       return sample.sample_count >= DOCTOR_PACING_WARMUP_SAMPLES &&
@@ -148,7 +173,8 @@ namespace stream_stats {
         sample.capture_residency == platf::frame_residency_e::cpu ||
         sample.encode_target_residency == platf::frame_residency_e::cpu;
       const bool encoder_watch =
-        sample.encode_time_ms >= 8.0 || sample.avg_frame_age_ms >= 18.0;
+        encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps) ||
+        sample.avg_frame_age_ms >= 18.0;
       return capture_cpu_copy || encoder_watch ||
         video_policy_pacing_warning_is_confirmed(sample);
     }
@@ -686,6 +712,29 @@ namespace stream_stats {
         {"action", "Set linux_prefer_gpu_native_capture = enabled, restart Polaris, and retry Private Stream (GPU-native) before chasing CUDA/NVENC driver issues."}
       });
     }
+  #ifdef POLARIS_BUILD_VULKAN
+    auto vaapi_vendor = stats.vaapi_vendor;
+    std::transform(vaapi_vendor.begin(), vaapi_vendor.end(), vaapi_vendor.begin(), [](unsigned char byte) {
+      return static_cast<char>(std::tolower(byte));
+    });
+    const bool amd_vaapi = stats.encode_target_device == "vaapi" &&
+                           (vaapi_vendor.find("amd") != std::string::npos ||
+                            vaapi_vendor.find("radeon") != std::string::npos ||
+                            vaapi_vendor.find("radeonsi") != std::string::npos);
+    const bool private_compositor_session =
+      linux_display.use_cage_compositor &&
+      (stats.runtime_requested_headless || stats.runtime_effective_headless ||
+       stats.runtime_gpu_native_override_active);
+    if (private_compositor_session && capture_path_uses_cpu_copy(stats) &&
+        amd_vaapi && config::video.encoder == "vaapi") {
+      configuration_warnings.push_back({
+        {"id", "amd_private_explicit_vaapi_shm"},
+        {"severity", "warning"},
+        {"message", "AMD Private Stream is explicitly pinned to VA-API while capture is crossing SHM/system-memory frames; this compatibility path can be throughput-limited at high resolution or refresh rate."},
+        {"action", "Set Force a Specific Encoder to Autodetect (recommended), restart Polaris, and start a fresh Private Stream. Auto will live-probe Vulkan Video and fall back to VA-API if the exact GPU-native path is unavailable."}
+      });
+    }
+  #endif
 #endif
     if (adapter_pairing_status == "mismatched") {
       configuration_warnings.push_back({
@@ -1261,12 +1310,12 @@ namespace stream_stats {
     // capture path, not the encoder — the old verdict here sent an SHM-bound
     // user to lower bitrate, which cannot recover capture throughput (issue
     // #367: encode at 5.8 ms of budget while frames arrived 26.5 ms old).
-    const bool encoder_time_fail = stats.encode_time_ms >= 12.0;
+    const bool encoder_time_fail = encoder_time_fails_budget(stats.encode_time_ms, target_fps);
     const bool frame_age_counts_against_encoder = !capture_cpu_copy;
     const bool encoder_fail = encoder_time_fail ||
                               (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 22.0);
     const bool encoder_watch = !encoder_fail &&
-                               (stats.encode_time_ms >= 8.0 ||
+                               (encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
                                 (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
     const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
     const bool source_cadence_available = stats.capture_source_fps > 0.0 && target_fps > 0.0;

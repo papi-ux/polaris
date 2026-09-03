@@ -376,6 +376,45 @@ function linuxGpuProfile(stats = {}) {
   return stats?.linux_gpu_profile || stats?.linuxGpuProfile || {}
 }
 
+function gpuNativeCaptureState(stats = {}) {
+  const profile = linuxGpuProfile(stats)
+  const probe = stats?.gpu_native_probe || stats?.gpuNativeProbe || {}
+  return {
+    requested: Boolean(
+      profile.gpu_native_requested || profile.gpuNativeRequested ||
+      probe.requested || stats?.runtime_gpu_native_override_active
+    ),
+    succeeded: Boolean(
+      profile.gpu_native_succeeded || profile.gpuNativeSucceeded ||
+      stats?.capture_gpu_native || stats?.capture?.gpu_native
+    ),
+  }
+}
+
+function streamTargetFps(stats = {}) {
+  for (const value of [stats?.encode_target_fps, stats?.session_target_fps, stats?.requested_client_fps]) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return null
+}
+
+function encoderPressure(stats = {}, encodeTime = Number(stats?.encode_time_ms)) {
+  if (!Number.isFinite(encodeTime)) return null
+  const targetFps = streamTargetFps(stats)
+  const frameBudgetMs = targetFps ? 1000 / targetFps : null
+  const failThresholdMs = frameBudgetMs ? Math.min(12, frameBudgetMs) : 12
+  const warningThresholdMs = frameBudgetMs ? Math.min(8, frameBudgetMs * 0.9) : 8
+  const status = encodeTime >= failThresholdMs ? 'fail' : encodeTime >= warningThresholdMs ? 'warning' : 'pass'
+  return {
+    status,
+    targetFps,
+    frameBudgetMs,
+    exceedsFrameBudget: Boolean(frameBudgetMs && encodeTime >= frameBudgetMs),
+    frameBudgetUsePct: frameBudgetMs ? (encodeTime / frameBudgetMs) * 100 : null,
+  }
+}
+
 function linuxConfigurationWarnings(stats = {}) {
   const profile = linuxGpuProfile(stats)
   if (Array.isArray(profile.configuration_warnings)) return profile.configuration_warnings
@@ -404,15 +443,11 @@ function hostConfigurationWarningItem(stats = {}) {
 export function describeLinuxGpuProfile(stats = {}) {
   const profile = linuxGpuProfile(stats)
   const encoderApi = lower(profile.encoder_api || profile.encoderApi || stats?.encode_target_device)
+  const vaapiVendor = lower(profile.vaapi_vendor || profile.vaapiVendor)
+  const vaapiLabel = /amd|radeon|radeonsi/.test(vaapiVendor) ? 'AMD/VAAPI' : 'VA-API'
   const captureReason = lower(stats?.capture_path_reason || stats?.capture?.reason)
   const capturePath = lower(stats?.capture_path || stats?.capture?.path || stats?.capture_transport)
-  const gpuNativeRequested = Boolean(profile.gpu_native_requested ?? profile.gpuNativeRequested)
-  const gpuNativeSucceeded = Boolean(
-    profile.gpu_native_succeeded ??
-    profile.gpuNativeSucceeded ??
-    stats?.capture_gpu_native ??
-    stats?.capture?.gpu_native
-  )
+  const { requested: gpuNativeRequested, succeeded: gpuNativeSucceeded } = gpuNativeCaptureState(stats)
   const adapterMatchesCaptureDevice = profile.adapter_matches_capture_device ?? profile.adapterMatchesCaptureDevice
   const adapterPairingStatus = lower(profile.adapter_pairing_status || profile.adapterPairingStatus)
   const adapterPairingSource = lower(profile.adapter_pairing_device_source || profile.adapterPairingDeviceSource)
@@ -435,23 +470,23 @@ export function describeLinuxGpuProfile(stats = {}) {
 
   if (pairingMismatch) {
     if (adapterPairingSource === 'wayland_main_device') {
-      return `AMD/VAAPI is active, but encoder adapter ${encoderAdapter} does not match the Wayland compositor device ${waylandMainDevice}. Verify the /dev/dri/renderD* mapping before blaming the client.`
+      return `${vaapiLabel} is active, but encoder adapter ${encoderAdapter} does not match the Wayland compositor device ${waylandMainDevice}. Verify the /dev/dri/renderD* mapping before blaming the client.`
     }
-    return 'AMD/VAAPI is active, but the capture render node does not match the encoder adapter. Review the /dev/dri/renderD* selection before blaming the client.'
+    return `${vaapiLabel} is active, but the capture render node does not match the encoder adapter. Review the /dev/dri/renderD* selection before blaming the client.`
   }
 
   if (cpuCopy) {
     if (gpuNativeRequested && !gpuNativeSucceeded) {
-      return 'AMD/VAAPI is active, but GPU-native capture fell back to SHM/system-memory frames. This can be a safe conservative Private Stream baseline.'
+      return `${vaapiLabel} is active, but GPU-native capture fell back to SHM/system-memory frames. This compatibility fallback can be throughput-limited at high resolution or refresh rate.`
     }
-    return 'AMD/VAAPI is active with SHM/system-memory capture. This can be a safe conservative Private Stream baseline.'
+    return `${vaapiLabel} is active with SHM/system-memory capture. This compatibility path can be throughput-limited at high resolution or refresh rate.`
   }
 
   if (gpuNativeSucceeded || stats?.capture_gpu_native || stats?.capture?.gpu_native) {
-    return 'AMD/VAAPI is using GPU-native capture; capture and encode are staying on the GPU path.'
+    return `${vaapiLabel} is using GPU-native capture; capture and encode are staying on the GPU path.`
   }
 
-  return 'AMD/VAAPI is active. Compare the reported capture path, render node, and encoder adapter before changing advanced capture flags.'
+  return `${vaapiLabel} is active. Compare the reported capture path, render node, and encoder adapter before changing advanced capture flags.`
 }
 
 export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, logs = '', recentIssues = [] } = {}) {
@@ -460,6 +495,9 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   const encodeTime = Number(stats?.encode_time_ms)
   const captureKnown = Boolean(stats?.capture_path || stats?.capture_transport || stats?.capture_path_reason)
   const captureCpuCopy = Boolean(stats?.capture_cpu_copy)
+  const gpuNativeState = gpuNativeCaptureState(stats)
+  const autoVulkanWarning = linuxConfigurationWarnings(stats)
+    .find((warning) => warning?.id === 'amd_private_explicit_vaapi_shm')
   const gpuProfileDescription = describeLinuxGpuProfile(stats)
   const authPairingIssue = latestIssueMatching(logs, ['auth', 'pair', 'pin', 'credential', 'unauthorized', 'forbidden'])
   const recentIssueCount = Array.isArray(recentIssues) ? recentIssues.length : 0
@@ -485,9 +523,11 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
       'Capture path',
       'fail',
       gpuProfileDescription || 'The active capture path is crossing SHM/system-memory frames.',
-      gpuProfileDescription
-        ? 'Treat the conservative Private Stream baseline as valid, then review render-node pairing and support evidence before testing GPU-native or KMS/DRM capture.'
-        : 'On Linux, compare DMA-BUF/GPU-native capture telemetry with the selected display and encoder adapter before changing advanced capture settings.'
+      autoVulkanWarning?.action || (gpuNativeState.requested && !gpuNativeState.succeeded
+        ? 'GPU-native capture was already attempted and fell back. Do not repeat the same mode; inspect the recorded probe reason, then lower resolution/FPS for this fallback path if needed.'
+        : gpuProfileDescription
+          ? 'Keep this compatibility fallback if stability matters, or test a supported GPU-native path once before lowering resolution/FPS.'
+          : 'On Linux, compare DMA-BUF/GPU-native capture telemetry with the selected display and encoder adapter before changing advanced capture settings.')
     )
     : stats?.capture_gpu_native
       ? checklistItem('capture-path', 'Capture path', 'pass', gpuProfileDescription || 'Capture is reported as GPU-native.', 'Keep display pairing as-is unless the stream feels wrong.')
@@ -495,12 +535,27 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         ? checklistItem('capture-path', 'Capture path', 'warning', gpuProfileDescription || `Capture path is ${stats.capture_path || stats.capture_transport || 'mixed/unknown'}.`, 'Check whether the chosen display and encoder are paired to the intended GPU path.')
         : checklistItem('capture-path', 'Capture path', 'warning', 'No capture metadata has been reported yet.', 'Start a stream, then confirm capture path and display pairing.')
 
-  const encoder = Number.isFinite(encodeTime)
-    ? encodeTime > 12
-      ? checklistItem('encoder-pressure', 'Encoder pressure', 'fail', `${encodeTime.toFixed(1)} ms encode time is over the safe low-latency budget.`, 'Lower resolution/FPS, lower bitrate, or switch to the low-latency hardware preset.')
-      : encodeTime > 8
-        ? checklistItem('encoder-pressure', 'Encoder pressure', 'warning', `${encodeTime.toFixed(1)} ms encode time is close to the 120 FPS budget.`, 'Watch for frame pacing spikes before chasing network fixes.')
-        : checklistItem('encoder-pressure', 'Encoder pressure', 'pass', `${encodeTime.toFixed(1)} ms encode time leaves headroom.`, 'Encoder pressure is not the loudest signal right now.')
+  const pressure = encoderPressure(stats, encodeTime)
+  const targetBudgetDetail = pressure?.targetFps
+    ? `${pressure.frameBudgetMs.toFixed(1)} ms frame budget for ${Math.round(pressure.targetFps)} FPS`
+    : 'safe low-latency budget'
+  const targetBudgetUse = pressure?.frameBudgetUsePct !== null && pressure?.frameBudgetUsePct !== undefined
+    ? `${Math.round(pressure.frameBudgetUsePct)}% of the ${targetBudgetDetail}`
+    : ''
+  const encoder = pressure
+    ? pressure.status === 'fail'
+      ? checklistItem(
+        'encoder-pressure',
+        'Encoder pressure',
+        'fail',
+        pressure.exceedsFrameBudget
+          ? `${encodeTime.toFixed(1)} ms encode time exceeds the ${targetBudgetDetail}.`
+          : `${encodeTime.toFixed(1)} ms encode time is over the 12.0 ms low-latency ceiling and uses ${targetBudgetUse}.`,
+        'Lower resolution/FPS or switch to the low-latency hardware preset.'
+      )
+      : pressure.status === 'warning'
+        ? checklistItem('encoder-pressure', 'Encoder pressure', 'warning', pressure.targetFps ? `${encodeTime.toFixed(1)} ms encode time uses ${targetBudgetUse}.` : `${encodeTime.toFixed(1)} ms encode time is close to the ${targetBudgetDetail}.`, 'Watch for frame pacing spikes before chasing network fixes.')
+        : checklistItem('encoder-pressure', 'Encoder pressure', 'pass', pressure.targetFps ? `${encodeTime.toFixed(1)} ms encode time uses ${targetBudgetUse} and leaves headroom.` : `${encodeTime.toFixed(1)} ms encode time leaves headroom within the ${targetBudgetDetail}.`, 'Encoder pressure is not the loudest signal right now.')
     : checklistItem('encoder-pressure', 'Encoder pressure', 'warning', 'Encoder timing has not been reported yet.', 'Start a live stream and wait for encoder telemetry.')
 
   const authPairing = authPairingIssue
@@ -965,6 +1020,10 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   const encodeTime = Number(stats.encode_time_ms)
   const dropped = Number(stats.dropped_frame_ratio)
   const safeLogs = redactSensitiveText(logs)
+  const pressure = encoderPressure(stats, encodeTime)
+  const gpuNativeState = gpuNativeCaptureState(stats)
+  const autoVulkanWarning = linuxConfigurationWarnings(stats)
+    .find((warning) => warning?.id === 'amd_private_explicit_vaapi_shm')
   let issueOwner = 'client'
   let mainIssue = 'Client disconnected or ended the session before Polaris saw a louder host/network signal.'
   let suggestedNextLaunchProfile = 'Retry the same launch profile once, then collect a support bundle if it repeats.'
@@ -975,11 +1034,13 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
     suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
   }
 
-  if ((Number.isFinite(encodeTime) && encodeTime > 12) || stats.capture_cpu_copy || /encoder|capture|shm|dmabuf|vaapi|nvenc/i.test(safeLogs)) {
+  if (pressure?.status === 'fail' || stats.capture_cpu_copy || /encoder|capture|shm|dmabuf|vaapi|nvenc/i.test(safeLogs)) {
     issueOwner = 'host'
-    mainIssue = Number.isFinite(encodeTime) && encodeTime > 12 ? `Host encoder time was ${encodeTime.toFixed(1)} ms.` : 'Host capture/encoder path was the loudest signal.'
+    mainIssue = pressure?.status === 'fail' ? `Host encoder time was ${encodeTime.toFixed(1)} ms.` : 'Host capture/encoder path was the loudest signal.'
     suggestedNextLaunchProfile = stats.capture_cpu_copy
-      ? 'Try Private Stream (GPU-native) or lower resolution/FPS before changing network settings.'
+      ? autoVulkanWarning?.action || (gpuNativeState.requested && !gpuNativeState.succeeded
+        ? 'GPU-native capture was already attempted and fell back to SHM; inspect the probe reason, then lower resolution/FPS for this fallback path before changing network settings.'
+        : 'Try Private Stream (GPU-native) once, or lower resolution/FPS before changing network settings.')
       : 'Try the low-latency hardware encoder profile or lower resolution/FPS.'
   }
 

@@ -8979,14 +8979,14 @@ namespace proc {
                                  << app_name << ']';
                 return;
               }
-              BOOST_LOG(error) << "private_session: ["sv << app_name
-                               << "] never opened a window in the private session after "sv
-                               << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
-                               << "s. The stream is showing an empty compositor and the app most likely "sv
-                               << "rendered to the host desktop instead. See docs/troubleshooting.md."sv;
+              BOOST_LOG(warning) << "private_session: ["sv << app_name
+                                 << "] did not expose a managed window in the private session after "sv
+                                 << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
+                                 << "s. Polaris cannot confirm whether the app rendered on the host desktop "sv
+                                 << "or used an unenumerated fullscreen/XWayland surface; check the client image before applying the Flatpak portal workaround. See docs/troubleshooting.md."sv;
               confighttp::emit_session_event(
                 "warning",
-                app_name + " did not open a window in the private session; the stream is showing an empty compositor"
+                app_name + " did not expose a managed private-session window; verify where it rendered"
               );
               return;
             }

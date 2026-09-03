@@ -229,6 +229,34 @@ TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNati
   );
 }
 
+#if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
+TEST(StreamStatsLinuxGpuProfileTests, RecommendsAutoVulkanForExplicitAmdVaapiShmPrivateStream) {
+  LinuxDisplayConfigGuard guard;
+  config::video.encoder = "vaapi";
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.runtime_requested_headless = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.vaapi_vendor = "Mesa Gallium driver for AMD Radeon (radeonsi)";
+
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+  const auto &warnings = profile.at("configuration_warnings");
+  const auto recommendation = std::find_if(warnings.begin(), warnings.end(), [](const auto &warning) {
+    return warning.value("id", std::string {}) == "amd_private_explicit_vaapi_shm";
+  });
+
+  ASSERT_NE(recommendation, warnings.end());
+  EXPECT_NE(recommendation->at("action").get<std::string>().find("Autodetect"), std::string::npos);
+  EXPECT_NE(recommendation->at("action").get<std::string>().find("Vulkan Video"), std::string::npos);
+  EXPECT_NE(recommendation->at("action").get<std::string>().find("fall back to VA-API"), std::string::npos);
+}
+#endif
+
 TEST(StreamStatsLinuxGpuProfileTests, DoesNotCallMissingCaptureDeviceAnAdapterMatch) {
   LinuxDisplayConfigGuard guard;
   config::video.adapter_name = "/dev/dri/renderD129";
@@ -922,6 +950,29 @@ TEST(StreamStatsDoctorTests, KeepsNearTargetHighRefreshPacingGreen) {
   EXPECT_EQ(doctor.at("traffic_light"), "green");
   EXPECT_EQ(doctor.at("status"), "ok");
   EXPECT_EQ(doctor.at("primary_issue"), "none");
+}
+
+TEST(StreamStatsDoctorTests, GradesEncoderTimeAgainstTheActiveFpsBudget) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 97.0;
+  stats.encode_target_fps = 97.0;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 10.4;
+
+  const auto high_refresh = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(high_refresh.at("primary_issue"), "encoder_load");
+  EXPECT_EQ(high_refresh.at("traffic_light"), "red");
+  EXPECT_EQ(high_refresh.at("status"), "needs_action");
+
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  const auto sixty_fps = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(sixty_fps.at("primary_issue"), "encoder_load");
+  EXPECT_EQ(sixty_fps.at("traffic_light"), "amber");
 }
 
 TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkEvidence) {
