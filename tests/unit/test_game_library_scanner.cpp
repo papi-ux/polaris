@@ -790,11 +790,11 @@ TEST(HeroicRuntimeTests, ReadsTheRuntimeFromTheHeroicPerGameConfig) {
       "dc9d2e595d0e4650b35d659f90d41059": {
         "useGameMode": true,
         "wineVersion": {
-          "bin": "/home/player/.local/share/Steam/compatibilitytools.d/Proton-GE Latest/proton",
+          "bin": "/opt/compatibilitytools.d/Proton-GE Latest/proton",
           "name": "Proton-GE Latest",
           "type": "proton"
         },
-        "winePrefix": "/home/player/Games/Heroic/Prefixes/Example Game"
+        "winePrefix": "/games/Heroic/Prefixes/Example Game"
       }
     })";
   }
@@ -830,7 +830,7 @@ TEST(HeroicRuntimeTests, ParsesThePlatformOutOfTheLegendaryLibraryEntry) {
     "runner": "legendary",
     "is_installed": true,
     "is_linux_native": false,
-    "install": {"executable": "AlanWake2.exe", "install_path": "/home/player/Games/Heroic/ExampleGame", "is_dlc": false, "platform": "Windows"}
+    "install": {"executable": "AlanWake2.exe", "install_path": "/games/Heroic/ExampleGame", "is_dlc": false, "platform": "Windows"}
   }]})";
 
   const auto games = game_library::parse_heroic_cache_json(payload, "epic", game_library::launcher_install_t::flatpak);
