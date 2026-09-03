@@ -764,7 +764,7 @@ onBeforeUnmount(() => {
             <div class="settings-section-title mt-2 text-base">{{ $t('config.ai_recommended_title') }}</div>
             <p class="settings-section-copy mt-2">{{ $t('config.ai_recommended_copy') }}</p>
           </div>
-          <div class="meta-pill">
+          <div class="meta-pill shrink-0 whitespace-nowrap">
             {{ $t('config.ai_steps_done', { done: setupSteps.filter(step => step.done).length, total: setupSteps.length }) }}
           </div>
         </div>

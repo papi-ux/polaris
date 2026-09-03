@@ -16,7 +16,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
 <template>
   <div id="network" class="config-page">
-    <p class="text-xs text-storm" data-tab-docs-link>
+    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
       <a href="https://papi-ux.com/docs/configuration/#common-options" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.network_docs_link') }}</a>
     </p>
     <section class="settings-section">
