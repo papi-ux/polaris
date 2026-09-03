@@ -333,6 +333,14 @@ namespace ai_optimizer {
   std::string get_history_json();
 
   /**
+   * @brief Forget every recorded session outcome and remove the persisted history file.
+   *
+   * The web console offers this next to the Session History list. Cached
+   * recommendations are untouched; use clear_cache() for those.
+   */
+  void clear_history();
+
+  /**
    * @brief Get merged cached optimization + session history profiles for one
    * device, or all devices when device_name is empty.
    */

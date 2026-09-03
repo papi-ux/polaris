@@ -928,7 +928,10 @@
     "toggle_theme": "Theme",
     "troubleshoot": "Doctor & Support",
     "browser_stream": "Browser Stream",
-    "webrtc": "Browser Stream"
+    "webrtc": "Browser Stream",
+    "sign_out": "Sign out",
+    "sign_out_pending": "Signing out…",
+    "sign_out_error": "Polaris could not end the session. Reload and try again."
   },
   "command_palette": {
     "placeholder": "Type a command, route, or setting...",
@@ -947,7 +950,8 @@
       "network": "Open Trusted Subnets Settings",
       "launch": "Launch",
       "restart": "Restart Polaris",
-      "quit": "Quit Polaris"
+      "quit": "Quit Polaris",
+      "sign_out": "Sign out"
     }
   },
   "quick_controls": {
@@ -1109,7 +1113,16 @@
     "telemetry_title": "Live stream trends",
     "telemetry_desc": "Charts stay secondary to the display, but they should still make it obvious when pacing, bitrate, or the encoder starts to drift.",
     "unknown_client": "Unknown Client",
-    "host_context": "Host Context"
+    "host_context": "Host Context",
+    "session_history": "Session History",
+    "clear_history": "Clear history",
+    "clear_history_confirm_title": "Clear session history?",
+    "clear_history_confirm_message": "This forgets past session outcomes on this host and in this browser. Doctor keeps working from live evidence.",
+    "clear_history_impact_host": "The host's recorded session outcomes are deleted, including the quality grades Auto recovery reads.",
+    "clear_history_impact_browser": "This browser's local session list is emptied.",
+    "clear_history_pending": "Clearing…",
+    "clear_history_success": "Session history cleared.",
+    "clear_history_error": "Failed to clear the host session history."
   },
   "password": {
     "action_desc": "Polaris will reload this browser session after the change succeeds.",

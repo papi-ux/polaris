@@ -103,6 +103,16 @@ JSON
   }
 }
 
+TEST(AiOptimizerSessionHistory, ClearHistoryLeavesNothingBehind) {
+  ai_optimizer::clear_history();
+  const auto history = nlohmann::json::parse(ai_optimizer::get_history_json());
+  EXPECT_TRUE(history.is_array());
+  EXPECT_TRUE(history.empty());
+  // Idempotent: clearing an already-empty history is not an error.
+  ai_optimizer::clear_history();
+  EXPECT_TRUE(nlohmann::json::parse(ai_optimizer::get_history_json()).empty());
+}
+
 TEST(AiOptimizerCodexHome, UsesExplicitCodexHomeWhenConfigured) {
   auto resolved = ai_optimizer::resolve_codex_home_for_subscription(
     "/tmp/polaris-profile-home",
