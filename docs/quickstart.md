@@ -103,6 +103,10 @@ leave its displayed four-digit PIN open. In the Polaris web UI, open **Devices â
 that PIN, keep **Game Control** selected, and choose **Send**. Return to Moonlight and refresh the
 host if its library does not appear immediately. Steam is not required on the client.
 
+The Moonlight flow step by step, including which client settings matter, is in
+[Play with Moonlight](moonlight.md). The access presets and the device editor are in
+[Pair and manage devices](devices.md).
+
 ## 5. Start a game and verify the path
 
 Launch from the Polaris library, Nova, or a Moonlight client, then watch the live session dashboard

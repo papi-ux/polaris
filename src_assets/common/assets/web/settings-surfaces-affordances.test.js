@@ -31,7 +31,9 @@ describe('settings surfaces affordances', () => {
   })
 
   it('points each surface at its guide', () => {
-    expect(webSource('views/PinView.vue')).toContain('href="https://papi-ux.com/docs/quickstart/#4-pair-a-client"')
+    expect(webSource('views/PinView.vue')).toContain('href="https://papi-ux.com/docs/devices/"')
+    expect(readFileSync(join(process.cwd(), 'docs/devices.md'), 'utf8')).toContain('# Pair and manage devices')
+    expect(readFileSync(join(process.cwd(), 'docs/moonlight.md'), 'utf8')).toContain('# Play with Moonlight')
     expect(webSource('views/PinView.vue')).toContain('href="https://papi-ux.com/docs/troubleshooting/#paired-client-gets-permission-denied-403-when-starting-a-stream"')
     expect(webSource('views/HomeView.vue')).toContain('href="https://papi-ux.com/docs/repositories/#after-install-or-upgrade"')
     expect(webSource('views/PasswordView.vue')).toContain('href="https://papi-ux.com/docs/configuration/#credential-reset"')

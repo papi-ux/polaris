@@ -13,10 +13,10 @@ const templateOf = (source) => {
 }
 
 const tabs = {
-  'configs/tabs/General.vue': 'https://papi-ux.com/docs/configuration/#common-options',
-  'configs/tabs/Inputs.vue': 'https://papi-ux.com/docs/troubleshooting/#input-does-not-work',
-  'configs/tabs/Network.vue': 'https://papi-ux.com/docs/configuration/#common-options',
-  'configs/tabs/Advanced.vue': 'https://papi-ux.com/docs/configuration/#common-options',
+  'configs/tabs/General.vue': 'https://papi-ux.com/docs/configuration/#general-tab',
+  'configs/tabs/Inputs.vue': 'https://papi-ux.com/docs/configuration/#input-tab',
+  'configs/tabs/Network.vue': 'https://papi-ux.com/docs/configuration/#network-tab',
+  'configs/tabs/Advanced.vue': 'https://papi-ux.com/docs/configuration/#advanced-tab',
   'configs/tabs/Files.vue': 'https://papi-ux.com/docs/configuration/#files',
   'configs/tabs/AiOptimizer.vue': 'https://papi-ux.com/docs/configuration/#ai-provider-settings',
 }
@@ -45,6 +45,9 @@ describe('settings tabs affordances', () => {
     const configuration = readFileSync(join(process.cwd(), 'docs/configuration.md'), 'utf8')
     const troubleshooting = readFileSync(join(process.cwd(), 'docs/troubleshooting.md'), 'utf8')
     expect(configuration).toContain('## Common options')
+    for (const tab of ['General', 'Input', 'Network', 'Advanced']) {
+      expect(configuration).toContain(`### ${tab} tab`)
+    }
     expect(configuration).toContain('## Files')
     expect(configuration).toContain('## AI provider settings')
     expect(troubleshooting).toContain('## Input does not work')
