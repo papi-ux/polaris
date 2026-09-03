@@ -1389,7 +1389,7 @@ TEST(ProcessRuntimeConfigTests, SteamPidfdCaptureRejectsStartTimeMismatch) {
   EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, std::nullopt));
 }
 
-TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBeforePidfdSignal) {
+TEST(ProcessRuntimeConfigTests, GamescopeAttachedAuthorityFailsClosedAndRetriesTransientEmptyEnviron) {
   int ready_pipe[2] {-1, -1};
   ASSERT_EQ(pipe(ready_pipe), 0);
   const pid_t child = fork();
@@ -1426,7 +1426,8 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedClientPidReuseFailsClosedBefore
   EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242", -1, child));
   EXPECT_EQ(kill(child, 0), 0) << "unreadable live candidate allowed partial pidfd signaling";
 
-  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
+  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242", -1, -1, child))
+    << "one transient empty environ read did not recover within the bounded capture retry";
   int status = 0;
   ASSERT_EQ(child_guard.wait(&status, 0), child);
   EXPECT_TRUE(WIFSIGNALED(status));

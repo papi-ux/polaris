@@ -296,6 +296,29 @@ TEST(AdaptiveBitrateController, VideoPolicyTransitionsInvalidateOnceWithAdaptive
   );
 }
 
+TEST(AdaptiveBitrateController, ProvisionalPacingTransitionInvalidatesWithoutBlockingRestore) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::note_doctor_video_policy_evidence(false, false);
+  const auto clean_observation = adaptive_bitrate::get_doctor_state();
+
+  adaptive_bitrate::note_doctor_video_policy_evidence(false, true);
+  const auto provisional_observation = adaptive_bitrate::get_doctor_state();
+  EXPECT_GT(provisional_observation.revision, clean_observation.revision);
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::set_doctor_bitrate_if_revision(
+    clean_observation.revision,
+    25000,
+    clean_observation.max_bitrate_kbps
+  ));
+
+  adaptive_bitrate::note_doctor_video_policy_evidence(false, true);
+  EXPECT_EQ(
+    adaptive_bitrate::get_doctor_state().revision,
+    provisional_observation.revision
+  );
+}
+
 TEST(AdaptiveBitrateController, EncoderPressureAtFloorAdvancesControllerRevision) {
   enable_controller(2000);
 

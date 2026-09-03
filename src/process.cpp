@@ -1749,6 +1749,8 @@ namespace proc {
     thread_local int *exact_generation_capture_attempt_counter_for_tests = nullptr;
     thread_local pid_t forced_reused_gamescope_attached_pid = -1;
     thread_local pid_t forced_unreadable_gamescope_attached_pid = -1;
+    thread_local pid_t forced_empty_isolated_session_environ_pid = -1;
+    thread_local int forced_empty_isolated_session_environ_failures_remaining = 0;
     thread_local pid_t forced_steam_ownership_capture_failure_pid = -1;
 #endif
 
@@ -1803,6 +1805,13 @@ namespace proc {
 
         auto environ_before = read_proc_status_file_result(pid, "environ");
 #ifdef POLARIS_TESTS
+        if (pid == forced_empty_isolated_session_environ_pid &&
+            forced_empty_isolated_session_environ_failures_remaining != 0) {
+          environ_before = {{}, 0};
+          if (forced_empty_isolated_session_environ_failures_remaining > 0) {
+            --forced_empty_isolated_session_environ_failures_remaining;
+          }
+        }
         if (pid == forced_unreadable_environ_pid &&
             forced_unreadable_environ_failures_remaining != 0) {
           environ_before = {{}, EACCES};
@@ -1814,22 +1823,30 @@ namespace proc {
           }
         }
 #endif
-        if (!environ_before.ok()) {
+        // A live process can expose a successful zero-byte environ read while
+        // exec replaces its address space. Treat a known Polaris descendant as
+        // ambiguous rather than silently concluding that no exact-generation
+        // process remains.
+        const bool transiently_empty_environ =
+          environ_before.ok() && environ_before.bytes.empty();
+        if (!environ_before.ok() || transiently_empty_environ) {
+          const int environ_error = transiently_empty_environ ? EAGAIN :
+            environ_before.error;
           const auto status = read_proc_status_file(pid, "status");
-          if (process_vanished_during_proc_read(environ_before.error) ||
+          if (process_vanished_during_proc_read(environ_error) ||
               proc_status_is_zombie(status)) {
             continue;
           }
           const auto real_uid = proc_status_real_uid(status);
           const auto descends_from_polaris = proc_pid_descends_from(pid, getpid());
           if (unreadable_environ_latches_capture(
-                environ_before.error,
+                environ_error,
                 real_uid,
                 getuid(),
                 descends_from_polaris
               )) {
             if (unreadable_environ_capture_failure_may_retry(
-                  environ_before.error,
+                  environ_error,
                   real_uid,
                   getuid(),
                   descends_from_polaris
@@ -2835,7 +2852,10 @@ namespace proc {
         }
       });
       (void) steam_appid;
-      auto authority = isolated_session_process_snapshot(session_instance_id);
+      auto authority = isolated_session_process_snapshot_after_quiescence(
+        session_instance_id,
+        "before Gamescope attached session cleanup"
+      );
       if (!authority.capture_complete) {
         return false;
       }
@@ -5480,16 +5500,24 @@ namespace proc {
   bool terminate_gamescope_attached_clients_for_tests(
     const std::string &steam_appid,
     pid_t forced_reused_pid,
-    pid_t forced_unreadable_pid
+    pid_t forced_unreadable_pid,
+    pid_t forced_empty_environ_pid
   ) {
     const auto previous_reused = forced_reused_gamescope_attached_pid;
     const auto previous_unreadable = forced_unreadable_gamescope_attached_pid;
-    auto restore = util::fail_guard([previous_reused, previous_unreadable]() {
+    const auto previous_empty = forced_empty_isolated_session_environ_pid;
+    const auto previous_empty_failures = forced_empty_isolated_session_environ_failures_remaining;
+    auto restore = util::fail_guard([previous_reused, previous_unreadable, previous_empty, previous_empty_failures]() {
       forced_reused_gamescope_attached_pid = previous_reused;
       forced_unreadable_gamescope_attached_pid = previous_unreadable;
+      forced_empty_isolated_session_environ_pid = previous_empty;
+      forced_empty_isolated_session_environ_failures_remaining = previous_empty_failures;
     });
     forced_reused_gamescope_attached_pid = forced_reused_pid;
     forced_unreadable_gamescope_attached_pid = forced_unreadable_pid;
+    forced_empty_isolated_session_environ_pid = forced_empty_environ_pid;
+    forced_empty_isolated_session_environ_failures_remaining =
+      forced_empty_environ_pid > 0 ? 1 : 0;
     return terminate_gamescope_attached_session_clients(steam_appid, "gamescope-attached-test");
   }
 

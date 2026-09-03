@@ -108,9 +108,14 @@ namespace adaptive_bitrate {
    * Repeated samples in the same policy class do not rotate action authority.
    * This keeps a stable action usable between status publication and a human
    * click while still rejecting a stale restore after clean evidence becomes
-   * an encoder or pacing warning. The class is reset for every stream.
+   * an encoder or pacing warning. A provisional pacing warning rotates the
+   * evidence epoch without blocking restore until the configured warmup and
+   * confirmation window completes. The class is reset for every stream.
    */
-  void note_doctor_video_policy_evidence(bool suppresses_quality_restore);
+  void note_doctor_video_policy_evidence(
+    bool suppresses_quality_restore,
+    bool provisional_pacing_warning = false
+  );
 
   /**
    * @brief Whether current or latched post-change video evidence blocks a

@@ -155,7 +155,8 @@ namespace stream_stats {
 
     void publish_doctor_video_policy_locked() {
       adaptive_bitrate::note_doctor_video_policy_evidence(
-        video_policy_suppresses_quality_restore(doctor_video_policy_state)
+        video_policy_suppresses_quality_restore(doctor_video_policy_state),
+        video_policy_has_pacing_warning(doctor_video_policy_state)
       );
     }
 
