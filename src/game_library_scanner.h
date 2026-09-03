@@ -89,7 +89,62 @@ namespace game_library {
     std::string command;
     std::string poster_url;
     std::string hero_url;
+    /// Normalised platform the title installs as: "windows", "linux", or empty when unknown.
+    std::string platform;
+    /// How it will actually run: "proton", "wine", "native", or empty when unknown.
+    std::string runtime;
+    /// The runtime's own label, e.g. "Proton-GE Latest". Empty for native titles.
+    std::string runtime_name;
   };
+
+  /// A title's platform and the runtime that will execute it.
+  struct heroic_runtime_t {
+    std::string platform;
+    std::string runtime;
+    std::string runtime_name;
+  };
+
+  /**
+   * @brief Normalise the platform Heroic records for an installed title.
+   * @param platform Heroic's own value, e.g. "Windows", "Linux", "Mac".
+   * @param linux_native Heroic's is_linux_native flag.
+   *
+   * Heroic writes the installed platform in mixed case and only sometimes, so a
+   * title with no recorded platform falls back to the native flag rather than
+   * guessing Windows.
+   */
+  std::string normalize_heroic_platform(std::string_view platform, bool linux_native);
+
+  /**
+   * @brief Decide what a title will run under from its per-game Heroic config.
+   * @param wine_type Heroic's wineVersion.type, e.g. "proton" or "wine".
+   * @param wine_name Heroic's wineVersion.name, e.g. "Proton-GE Latest".
+   * @param platform Normalised platform from normalize_heroic_platform().
+   *
+   * A Linux-native title runs natively whatever a stale wine entry says, and a
+   * Windows title with no usable runtime reports none rather than inventing one.
+   */
+  heroic_runtime_t heroic_runtime_from_config(std::string_view wine_type, std::string_view wine_name, std::string_view platform);
+
+  /**
+   * @brief Find the Heroic config root that owns a library file.
+   * @param library_path A Heroic library file, at whatever depth it sits.
+   *
+   * Heroic's library files live at different depths under the same root:
+   * `store_cache/legendary_library.json` is one level down while
+   * `legendaryConfig/legendary/installed.json` is two. Walking up to the
+   * directory that actually holds `GamesConfig` avoids assuming either.
+   */
+  std::filesystem::path heroic_config_root_for_library(const std::filesystem::path &library_path);
+
+  /**
+   * @brief Read the runtime Heroic recorded for one title.
+   * @param config_root A Heroic config directory, e.g. ~/.config/heroic.
+   *
+   * Heroic keeps the wine or proton choice per game rather than in the library
+   * file, so the platform alone cannot say what will actually run.
+   */
+  heroic_runtime_t heroic_runtime_for_app(const std::filesystem::path &config_root, const std::string &app_name, const std::string &platform);
 
   /** @brief The stable API/storage name for a launcher installation. */
   std::string heroic_install_name(launcher_install_t install);
