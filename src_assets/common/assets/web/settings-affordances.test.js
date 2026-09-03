@@ -15,6 +15,7 @@ const migratedSettingsSources = [
   'configs/tabs/Inputs.vue',
   'configs/tabs/Files.vue',
   'configs/tabs/Advanced.vue',
+  'configs/tabs/AiOptimizer.vue',
   'configs/tabs/audiovideo/AdapterNameSelector.vue',
   'configs/tabs/audiovideo/DisplayDeviceOptions.vue',
   'configs/tabs/audiovideo/DisplayOutputSelector.vue',

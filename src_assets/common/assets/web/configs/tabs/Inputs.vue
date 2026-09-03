@@ -14,13 +14,16 @@ const config = ref(props.config)
 
 <template>
   <div id="input" class="config-page">
+    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/troubleshooting/#input-does-not-work" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.inputs_docs_link') }}</a>
+    </p>
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Controllers</div>
+        <div class="section-kicker">{{ $t('config.inputs_kicker_controllers') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Gamepads</h3>
-          <InfoHint size="sm" label="Gamepad handling guidance">
-            Choose how Polaris emulates controllers on the host and how automatic DS4 or DS5 mapping should behave.
+          <h3 class="settings-section-title">{{ $t('config.inputs_section_gamepads') }}</h3>
+          <InfoHint size="sm" :label="$t('config.inputs_hint_gamepad_handling_guidance')">
+            {{ $t('config.inputs_hint_gamepad_handling_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -128,11 +131,11 @@ const config = ref(props.config)
 
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Keyboard</div>
+        <div class="section-kicker">{{ $t('config.inputs_kicker_keyboard') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Keyboard</h3>
-          <InfoHint size="sm" label="Keyboard passthrough guidance">
-            Tune repeat behavior and compatibility so host shortcuts, desktop navigation, and keyboard-heavy titles behave correctly.
+          <h3 class="settings-section-title">{{ $t('config.inputs_section_keyboard') }}</h3>
+          <InfoHint size="sm" :label="$t('config.inputs_hint_keyboard_passthrough_guidance')">
+            {{ $t('config.inputs_hint_keyboard_passthrough_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -181,11 +184,11 @@ const config = ref(props.config)
 
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Mouse & Touch</div>
+        <div class="section-kicker">{{ $t('config.inputs_kicker_mouse_touch') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Pointer and touch</h3>
-          <InfoHint size="sm" label="Pointer and touch guidance">
-            Control mouse capture, cursor visibility, scrolling fidelity, and native pen or touch passthrough.
+          <h3 class="settings-section-title">{{ $t('config.inputs_section_pointer_and_touch') }}</h3>
+          <InfoHint size="sm" :label="$t('config.inputs_hint_pointer_and_touch_guidance')">
+            {{ $t('config.inputs_hint_pointer_and_touch_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -201,9 +204,9 @@ const config = ref(props.config)
       <div class="min-w-0">
         <div>
           <div class="settings-field-head !mb-0">
-            <div class="text-sm font-medium text-silver">Show host cursor</div>
-            <InfoHint size="sm" label="Show host cursor">
-              On by default. This is required when a capture backend such as DRM/KMS exposes the cursor as a separate plane. Turn it off if your client draws its own cursor and you see two pointers. Portal capture may embed the compositor cursor independently. You can still toggle Polaris-controlled cursors at runtime with Ctrl+Alt+Shift+N.
+            <div class="text-sm font-medium text-silver">{{ $t('config.inputs_show_host_cursor') }}</div>
+            <InfoHint size="sm" :label="$t('config.inputs_hint_show_host_cursor')">
+              {{ $t('config.inputs_hint_show_host_cursor_body') }}
             </InfoHint>
           </div>
         </div>
@@ -246,11 +249,11 @@ const config = ref(props.config)
 
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
-        <div class="section-kicker">Accessories</div>
+        <div class="section-kicker">{{ $t('config.inputs_kicker_accessories') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Extras</h3>
-          <InfoHint size="sm" label="Extended input guidance">
-            Expose input-only mode for TV workflows and forward rumble where the host platform supports it.
+          <h3 class="settings-section-title">{{ $t('config.inputs_section_extras') }}</h3>
+          <InfoHint size="sm" :label="$t('config.inputs_hint_extended_input_guidance')">
+            {{ $t('config.inputs_hint_extended_input_guidance_body') }}
           </InfoHint>
         </div>
       </div>
