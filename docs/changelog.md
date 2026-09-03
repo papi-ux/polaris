@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Fixes a Linux Vulkan Video crash at client disconnect by closing FFmpeg's codec-owned picture views before releasing Polaris's converter resources, and records bounded teardown phase markers for field verification.
+
 ## v1.4.1 - 2026-09-03
 
 A matched performance, access, and Linux workflow update for Nova v1.4.1. Polaris adds guarded experimental Vulkan Video for supported Linux DRM/KMS paths, memory-only guest pairing, Hyprland Desktop Takeover, and more precise Doctor and capture evidence. Existing configurations remain valid, and automatic encoder selection falls back when the exact Vulkan requirements are not met.
