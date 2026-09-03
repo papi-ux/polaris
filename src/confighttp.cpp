@@ -2774,6 +2774,64 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Publish a Heroic launcher entry once a Heroic game has been imported.
+   *
+   * The imported games launch straight into a title, which leaves no way to reach
+   * Heroic itself from a stream to install something or fix a login. Mirrors the
+   * Lutris entry, including matching an entry a user added by hand.
+   */
+  void ensure_heroic_library_app(nlohmann::json &file_tree, game_library::launcher_install_t install) {
+    if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+      file_tree["apps"] = nlohmann::json::array();
+    }
+
+    const auto launcher_command = game_library::heroic_launcher_command(install);
+    const auto matches_launcher = [&launcher_command](const std::string &value) {
+      const auto trimmed = boost::trim_copy(value);
+      return boost::iequals(trimmed, launcher_command) ||
+             boost::iequals(trimmed, "heroic") ||
+             boost::iequals(trimmed, "setsid heroic");
+    };
+
+    for (const auto &app : file_tree["apps"]) {
+      if (!app.is_object()) {
+        continue;
+      }
+
+      if (boost::iequals(boost::trim_copy(app.value("name", "")), "Heroic")) {
+        return;
+      }
+
+      if (matches_launcher(app.value("cmd", ""))) {
+        return;
+      }
+
+      if (!app.contains("detached") || !app["detached"].is_array()) {
+        continue;
+      }
+
+      for (const auto &detached : app["detached"]) {
+        if (detached.is_string() && matches_launcher(detached.get<std::string>())) {
+          return;
+        }
+      }
+    }
+
+    nlohmann::json app {
+      {"name", "Heroic"},
+      {"uuid", ""},
+      {"cmd", ""},
+      {"detached", nlohmann::json::array({launcher_command})},
+      {"source", "heroic"},
+      {"auto-detach", true},
+      {"wait-all", true},
+      {"exit-timeout", 5}
+    };
+    proc::migrate_apps(&file_tree, &app);
+    BOOST_LOG(info) << "Added Heroic library launcher to the app list.";
+  }
+
   void ensure_lutris_library_app(nlohmann::json &file_tree) {
     if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
       file_tree["apps"] = nlohmann::json::array();
@@ -3207,6 +3265,7 @@ namespace confighttp {
 
       int imported = 0;
       bool imported_lutris_game = false;
+      std::optional<game_library::launcher_install_t> imported_heroic_install;
       for (const auto &game : body["games"]) {
         std::string name = game.value("name", "");
         std::string source = game.value("source", "steam");
@@ -3336,6 +3395,9 @@ namespace confighttp {
           app["heroic-store"] = store;
           app["heroic-runner"] = heroic->runner;
           app["heroic-install"] = install_name;
+          // Remember which packaging produced an import so the launcher entry
+          // published below can use the command that exists on this host.
+          imported_heroic_install = heroic->install;
 
           if (const auto cached = game_library::find_heroic_cached_game(
                 game_library::library_home_roots(),
@@ -3370,6 +3432,10 @@ namespace confighttp {
 
       if (imported_lutris_game) {
         ensure_lutris_library_app(fileTree);
+      }
+
+      if (imported_heroic_install) {
+        ensure_heroic_library_app(fileTree, *imported_heroic_install);
       }
 
       // Write back
