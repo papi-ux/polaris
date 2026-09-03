@@ -3,27 +3,30 @@
     <section class="page-header security-page-header">
       <div class="page-heading">
         <div class="section-kicker">{{ $t('navbar.security') }}</div>
-        <h1 class="page-title">Rotate web access</h1>
-        <p class="page-subtitle">Update the web sign-in without leaving the host.</p>
+        <h1 class="page-title">{{ $t('password.page_title') }}</h1>
+        <p class="page-subtitle">
+          {{ $t('password.page_subtitle') }}
+          <a href="https://papi-ux.com/docs/configuration/#credential-reset" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('password.docs_link') }}</a>
+        </p>
         <div class="page-meta">
           <span class="meta-pill">{{ $t('password.web_ui_only') }}</span>
-          <span class="meta-pill border-warning/30 bg-warning/10 text-warning-bright">Reloads on save</span>
+          <span class="meta-pill border-warning/30 bg-warning/10 text-warning-bright">{{ $t('password.reloads_on_save') }}</span>
         </div>
       </div>
 
       <article class="header-support-card security-header-card">
         <div class="header-support-title-row">
           <div class="flex items-center gap-2">
-            <div class="section-kicker !mb-0">Commit</div>
+            <div class="section-kicker !mb-0">{{ $t('password.commit') }}</div>
             <span class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
               {{ $t('password.sensitive_action') }}
             </span>
           </div>
-          <InfoHint size="sm" align="right" label="Reload guidance">
+          <InfoHint size="sm" align="right" :label="$t('password.reload_guidance')">
             {{ $t('password.action_desc') }}
           </InfoHint>
         </div>
-        <div class="header-support-copy">Verify the current pair, set the replacement pair, then save once.</div>
+        <div class="header-support-copy">{{ $t('password.commit_copy') }}</div>
       </article>
     </section>
 
@@ -34,14 +37,14 @@
             <div class="section-kicker">{{ $t('password.step_one') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ $t('password.verify_access') }}</h2>
-              <InfoHint size="sm" label="Current credentials guidance">
+              <InfoHint size="sm" :label="$t('password.current_creds_guidance')">
                 {{ $t('password.current_creds_desc') }}
               </InfoHint>
               <span class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
                 {{ $t('password.sensitive_action') }}
               </span>
             </div>
-            <p class="section-copy">Use the current web credentials to authorize the rotation.</p>
+            <p class="section-copy">{{ $t('password.verify_access_copy') }}</p>
           </div>
 
           <div class="mt-5 space-y-4">
@@ -59,7 +62,7 @@
             <div>
               <div class="mb-1 flex items-center gap-2">
                 <label for="currentPassword" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                <InfoHint size="sm" label="Current password guidance">
+                <InfoHint size="sm" :label="$t('password.current_password_guidance')">
                   {{ $t('password.current_password_desc') }}
                 </InfoHint>
               </div>
@@ -70,7 +73,7 @@
                   autocomplete="current-password"
                   required
                   :type="showCurrentPassword ? 'text' : 'password'"
-                  class="w-full rounded-lg border border-storm bg-deep px-3 py-2 pr-20 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input pr-20"
                 />
                 <button
                   type="button"
@@ -89,18 +92,18 @@
             <div class="section-kicker">{{ $t('password.step_two') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ $t('password.rotate_access') }}</h2>
-              <InfoHint size="sm" label="New credentials guidance">
+              <InfoHint size="sm" :label="$t('password.new_creds_guidance')">
                 {{ $t('password.new_creds_desc') }}
               </InfoHint>
             </div>
-            <p class="section-copy">Set the replacement operator identity and confirm it before reload.</p>
+            <p class="section-copy">{{ $t('password.rotate_access_copy') }}</p>
           </div>
 
           <div class="mt-5 grid gap-4 lg:grid-cols-2">
             <div class="lg:col-span-2">
               <div class="mb-1 flex items-center gap-2">
                 <label for="newUsername" class="block text-sm font-medium text-storm">{{ $t('_common.username') }}</label>
-                <InfoHint size="sm" label="Username guidance">
+                <InfoHint size="sm" :label="$t('password.username_guidance')">
                   {{ $t('password.new_username_desc') }}
                 </InfoHint>
               </div>
@@ -115,7 +118,7 @@
             <div>
               <div class="mb-1 flex items-center gap-2">
                 <label for="newPassword" class="block text-sm font-medium text-storm">{{ $t('_common.password') }}</label>
-                <InfoHint size="sm" label="New password guidance">
+                <InfoHint size="sm" :label="$t('password.new_password_guidance')">
                   {{ $t('password.new_password_desc') }}
                 </InfoHint>
               </div>
@@ -126,7 +129,7 @@
                   autocomplete="new-password"
                   required
                   :type="showNewPassword ? 'text' : 'password'"
-                  class="w-full rounded-lg border border-storm bg-deep px-3 py-2 pr-20 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input pr-20"
                 />
                 <button
                   type="button"
@@ -147,8 +150,8 @@
                   autocomplete="new-password"
                   required
                   :type="showConfirmPassword ? 'text' : 'password'"
-                  class="w-full rounded-lg border bg-deep px-3 py-2 pr-20 text-silver focus:border-ice focus:outline-none"
-                  :class="passwordMismatch ? 'border-danger/70' : 'border-storm'"
+                  class="settings-input pr-20"
+                  :class="passwordMismatch ? '!border-danger/70' : ''"
                 />
                 <button
                   type="button"
@@ -170,14 +173,14 @@
             <div class="section-kicker">{{ $t('password.commit_changes') }}</div>
             <div class="section-title-row">
               <div class="text-sm font-medium text-silver">{{ $t('password.save_and_reload') }}</div>
-              <InfoHint size="sm" label="Commit changes guidance">
+              <InfoHint size="sm" :label="$t('password.commit_guidance')">
                 {{ $t('password.action_desc') }}
               </InfoHint>
             </div>
-            <div class="mt-1 text-sm text-storm">Apply the new credentials and let Polaris reload the web gate.</div>
+            <div class="mt-1 text-sm text-storm">{{ $t('password.save_and_reload_copy') }}</div>
           </div>
           <button
-            class="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-ice px-4 text-sm font-medium text-void transition-all duration-200 hover:bg-ice/90 hover:shadow-glow-ice disabled:cursor-not-allowed disabled:opacity-50"
+            class="focus-ring dashboard-action-button dashboard-action-button-primary"
             :disabled="!canSave"
           >
             {{ saving ? $t('password.saving') : $t('password.save_and_reload') }}
