@@ -11,7 +11,7 @@ test.describe('pairing', () => {
   })
 
   test('supports keyboard switching between pairing methods', async ({ loggedInPage }) => {
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
     await expect(loggedInPage.getByRole('heading', { name: /pair/i }).first()).toBeVisible()
 
     const manualPinButton = loggedInPage.getByRole('button', { name: /manual pin/i })
@@ -57,7 +57,7 @@ test.describe('pairing', () => {
       await route.fulfill({ json: { status: false } })
     })
 
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
 
     await expect(loggedInPage.getByText('Browse & Watch').first()).toBeVisible()
 
@@ -86,11 +86,11 @@ test.describe('pairing', () => {
       })
     })
 
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
     await loggedInPage.locator('#otp-passphrase').fill('abcd')
     await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
 
-    await expect(loggedInPage.getByRole('radio', { name: /game control/i })).toHaveAttribute('aria-checked', 'true')
+    await expect(loggedInPage.getByRole('radio', { name: /^game control/i })).toHaveAttribute('aria-checked', 'true')
     await expect.poll(() => payload?.access_preset).toBe('game_control')
   })
 
@@ -110,7 +110,7 @@ test.describe('pairing', () => {
       })
     })
 
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
     await loggedInPage.getByRole('radio', { name: /browse & watch/i }).click()
     await loggedInPage.locator('#otp-passphrase').fill('abcd')
     await loggedInPage.getByRole('button', { name: /generate qr/i }).click()
@@ -125,7 +125,7 @@ test.describe('pairing', () => {
       await route.fulfill({ json: { status: true, access_preset: 'game_control' } })
     })
 
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
     await loggedInPage.getByRole('button', { name: /manual pin/i }).click()
     await loggedInPage.locator('#pin-input').fill('1234')
     await loggedInPage.getByRole('button', { name: /^send$/i }).click()
@@ -157,7 +157,7 @@ test.describe('pairing', () => {
       })
     })
 
-    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^pairing$/i }).click()
+    await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
 
     const clientCard = loggedInPage.locator('article').filter({ hasText: 'QA Client' }).first()
     await expect(clientCard.getByText('Game Control').first()).toBeVisible()

@@ -6,10 +6,10 @@ test.describe('dashboard', () => {
     await expect(sidebar.getByRole('link', { name: /mission control/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /library/i })).toBeVisible()
     await expect(sidebar.getByRole('link', { name: /settings/i })).toBeVisible()
-    await expect(sidebar.getByRole('link', { name: /pairing/i })).toBeVisible()
+    await expect(sidebar.getByRole('link', { name: /devices/i })).toBeVisible()
   })
 
-  test('metric chart cards are present when streaming', async ({ loggedInPage }) => {
+  test('live summary strip and GPU gauges render when streaming', async ({ loggedInPage }) => {
     const streamStats = {
       streaming: true,
       client_name: 'QA Client',
@@ -74,15 +74,20 @@ test.describe('dashboard', () => {
 
     await loggedInPage.reload({ waitUntil: 'domcontentloaded' })
 
-    for (const label of ['FPS', 'Bitrate', 'Encode', 'Latency', 'GPU Load', 'Packet Loss']) {
-      await expect(loggedInPage.getByText(label, { exact: false }).first()).toBeVisible()
+    // While streaming, Mission Control renders the stream metrics as the live
+    // summary strip and names the capture path; the GPU gauges belong to the
+    // idle layout and are covered by the partial-metrics test below.
+    for (const metric of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Encode']) {
+      await expect(loggedInPage.locator(`[data-live-summary-metric="${metric}"]`)).toBeVisible()
     }
     await expect(loggedInPage.getByText(/GPU Native/i).first()).toBeVisible()
   })
 
   test('AMD GPU with partial metrics does not render undefined or NaN', async ({ loggedInPage }) => {
+    // Idle host: the GPU gauges and the readiness pill only render on the idle
+    // layout, which is where partial telemetry has to degrade cleanly.
     const streamStats = {
-      streaming: true,
+      streaming: false,
       client_name: 'QA Client',
       client_ip: '127.0.0.1',
       clients: [{ name: 'QA Client', ip: '127.0.0.1', fps: 59.8, latency_ms: 12 }],
@@ -148,20 +153,23 @@ test.describe('dashboard', () => {
 
     await loggedInPage.reload({ waitUntil: 'domcontentloaded' })
 
-    // Wait for the streaming dashboard to render with AMD GPU data.
-    await expect(loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: 'GPU Load' })).toBeVisible({ timeout: 10000 })
-    await expect(loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: 'VRAM' })).toBeVisible({ timeout: 10000 })
+    // Wait for the Host vitals card to render with AMD GPU data: the gauges
+    // that have a value show, the ones without a value are not rendered at all.
+    const vitals = loggedInPage.locator('.section-card', { hasText: 'Host vitals' })
+    await expect(vitals.getByText('GPU', { exact: true })).toBeVisible({ timeout: 10000 })
+    await expect(vitals.getByText('VRAM', { exact: true })).toBeVisible({ timeout: 10000 })
 
-    // Encoder tile must be hidden when encoder_pct is absent
-    await expect(loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: /^Encoder$/ })).not.toBeVisible()
+    // Encoder and temperature gauges must be absent when their metrics are absent
+    await expect(vitals.getByText(/^(NVENC|VCN)$/)).toHaveCount(0)
+    await expect(vitals.getByText('Temp', { exact: true })).toHaveCount(0)
+
+    // Missing temperature and power draw render as '--', not raw numbers
+    await expect(vitals.getByText(/--W/)).toBeVisible()
+    await expect(loggedInPage.locator('[data-dashboard-idle-hero]').getByText(/--°C/)).toBeVisible()
 
     // No raw undefined or NaN values anywhere on the page
     const bodyText = await loggedInPage.locator('body').innerText()
     expect(bodyText).not.toMatch(/\bundefined\b/)
     expect(bodyText).not.toMatch(/\bNaN\b/)
-
-    // Missing temperature should render as '--', not a raw number
-    const tempTile = loggedInPage.locator('.dashboard-metric-tile').filter({ hasText: 'GPU Temp' })
-    await expect(tempTile.getByText('--', { exact: true })).toBeVisible()
   })
 })
