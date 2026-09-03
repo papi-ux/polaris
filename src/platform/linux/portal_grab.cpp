@@ -31,6 +31,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/graphics.h"
+#include "src/platform/linux/misc.h"
 #include "src/video.h"
 #include "src/stream_stats.h"
 
@@ -48,6 +49,9 @@
 #endif
 #ifdef POLARIS_BUILD_VAAPI
   #include "src/platform/linux/vaapi.h"
+#endif
+#ifdef POLARIS_BUILD_VULKAN
+  #include "src/platform/linux/vulkan_encode.h"
 #endif
 
 using namespace std::literals;
@@ -569,7 +573,8 @@ namespace portal {
       }
 
 #ifndef POLARIS_BUILD_WAYLAND
-      if (generation.stream_mode == "host_virtual_display") {
+      if (generation.stream_mode == "host_virtual_display" ||
+          generation.stream_mode == "desktop_takeover") {
         BOOST_LOG(error) << "portal: host virtual capture requires KWin output pinning, but Wayland support is not built"sv;
         return nullptr;
       }
@@ -1148,6 +1153,21 @@ namespace portal {
           device->prefer_8bit_encode = true;
         }
         return device;
+      }
+#endif
+#ifdef POLARIS_BUILD_VULKAN
+      if (mem_type == platf::mem_type_e::vulkan) {
+        // Portal remains on its safe SHM/MemFd transport for Vulkan until the
+        // negotiated DMA-BUF route has the same automatic live-frame
+        // retirement contract as the private WLR paths. The upload and color
+        // conversion remain Vulkan-backed and an explicit Vulkan request can
+        // therefore work without requiring DRM/KMS permissions.
+        return vk::make_avcodec_encode_device_ram(
+          w,
+          h,
+          config::video.adapter_name.empty() ?
+            platf::default_render_device() : config::video.adapter_name
+        );
       }
 #endif
       return std::make_unique<platf::avcodec_encode_device_t>();

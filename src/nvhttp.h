@@ -86,6 +86,7 @@ namespace nvhttp {
     std::string pin;
     std::string device_name;
     std::optional<crypto::PERM> pairing_perm;
+    bool temporary_authorization = false;
   };
 
   /**
@@ -205,6 +206,7 @@ namespace nvhttp {
     } async_insert_pin;
 
     std::optional<crypto::PERM> pairing_perm = {};
+    bool temporary_authorization = false;
 
     /**
      * @brief used as a security measure to prevent out of order calls
@@ -278,13 +280,25 @@ namespace nvhttp {
    * bool pin_status = nvhttp::pin("1234", "laptop");
    * @examples_end
    */
-  bool pin(std::string pin, std::string name, std::optional<crypto::PERM> pairing_perm = std::nullopt);
+  bool pin(
+    std::string pin,
+    std::string name,
+    std::optional<crypto::PERM> pairing_perm = std::nullopt,
+    bool temporary_authorization = false
+  );
 
   std::string request_otp(
     const std::string& passphrase,
     const std::string& deviceName,
-    std::optional<crypto::PERM> pairing_perm = std::nullopt
+    std::optional<crypto::PERM> pairing_perm = std::nullopt,
+    bool temporary_authorization = false
   );
+
+  /** Revoke a memory-only authorization after its final stream disconnect. */
+  bool expire_temporary_client_authorization(std::string_view uuid);
+
+  /** Return whether the current live authorization is memory-only. */
+  bool is_temporary_client_authorization(std::string_view uuid);
 
   /**
    * @brief Remove single client.
@@ -360,6 +374,8 @@ namespace nvhttp {
    * @param[in]  enable_legacy_ordering  Enable legacy ordering
    * @param[in]  allow_client_commands  Allow client commands
    * @param[in]  always_use_virtual_display  Always use virtual display
+   * @param[in]  temporary_authorization  Explicit temporary/durable choice;
+   *                                       omitted preserves the current choice
    * 
    * @return     Whether the update is successful
    */
@@ -373,7 +389,8 @@ namespace nvhttp {
     const crypto::PERM newPerm,
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const bool always_use_virtual_display,
+    const std::optional<bool> temporary_authorization = std::nullopt
   );
 
   bool update_device_info(
@@ -386,7 +403,8 @@ namespace nvhttp {
     const crypto::PERM newPerm,
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const bool always_use_virtual_display,
+    const std::optional<bool> temporary_authorization = std::nullopt
   );
 
   /** Shared trusted evidence used by both authenticated Doctor action routes. */

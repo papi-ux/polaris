@@ -31,7 +31,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path.
+These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto promotes it only for a compatible AMD private-stream route that passes an exact live-frame safety probe.
 
 ## Linux display modes
 
@@ -42,6 +42,7 @@ AMD/NVIDIA guidance, see [Launch modes and capture paths](launch-modes.md).
 | --- | --- |
 | My real desktop, at host resolution | `desktop_display` (Mirror Desktop) |
 | An extra display, sized to the client | `host_virtual_display` |
+| My live Hyprland desktop on a private client-sized output, with host displays dark | `desktop_takeover` |
 | An isolated game-only session, desktop untouched | `headless_stream` / `windowed_stream` |
 
 Two client-facing notes: Moonlight-protocol clients can request the mirror for a single launch with
@@ -55,7 +56,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
-| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
+| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
 | `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
 | `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel after one-time portal approval is saved (the approval session keeps it on); `off` extends onto the dongle and leaves the panel primary |
 | `fallback_mode` | `1920x1080x60` | Display mode used when the client-requested mode is unsupported, as `WxHxFPS`. The web UI's Display Planner presets write this same key, so Moonlight compatibility stays standard; Nova and per-game overrides can layer on top where client-settings support exists |
@@ -66,7 +67,8 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `client_keyboard_mouse_seat_isolation` | `disabled` | Assign the virtual keyboard, mouse, touch and pen Polaris creates for clients to a dedicated Linux seat, so a client streaming a private session does not also type and click into the desktop session logged in at the machine |
 | `mouse_cursor_visible` | `enabled` | Composite a separately captured host cursor into the stream. Required for DRM/KMS; disable it if the client draws its own cursor and you see two pointers. Portal may embed its cursor independently |
 | `back_button_timeout` | `-1` | **Milliseconds**, not seconds, that Back/Select must be held to emulate Home/Guide. `-1` disables it. A small value such as `2` means two *milliseconds*, which turns nearly every Back/Select press into Home and makes the button look broken — use `2000` for two seconds |
-| `encoder` | `nvenc` / `vaapi` / `software` | Primary encoder backend |
+| `capture` | empty (automatic) | Capture backend override; explicit Vulkan supports `kms`, `wlr`, and `portal` |
+| `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and strict when selected explicitly |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
 | `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
@@ -380,6 +382,43 @@ Recommended values:
 | `2` | `2` | Useful first manual test on multi-NVENC GPUs, especially for 4K120 HEVC/AV1. |
 | `forced` | `1` | Experimental. Use only when comparing against `auto` and explicit engine counts. |
 | `3` | `3` | Experimental. Use only on GPUs known to expose three usable NVENC engines. |
+
+## Vulkan Encoder
+
+Vulkan Video is an experimental Linux hardware-encode path for drivers that expose the Vulkan Video
+encode extensions. Explicit selection supports direct DRM/KMS, wlroots, and Portal capture. GPU-native
+DRM/KMS and wlroots frames remain matched to the encoder's render node; Portal and any safely retired
+wlroots DMA-BUF route use the Vulkan RAM uploader rather than pretending a CPU copy is zero-copy.
+
+With `encoder` left on Auto, Polaris promotes Vulkan only for a compatible AMD private-compositor
+route that can validate the exact first live GPU-native frame and retire a failed route to VA-API.
+NVIDIA stays on NVENC, Intel stays on VA-API, and AMD desktop capture stays on VA-API by default.
+
+Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
+
+```bash
+sudo -H polaris --setup-host --enable-kms
+```
+
+```ini
+capture = kms
+encoder = vulkan
+```
+
+If the selected GPU lacks the requested H.264 or HEVC Vulkan Video encoder, or an explicitly selected
+capture path cannot initialize, session startup fails with an explicit diagnostic. AV1 stays disabled
+on this experimental path until the bundled FFmpeg implementation passes Vulkan validation. Switch
+the encoder back to `vaapi` or `nvenc`; Polaris does not silently replace an explicit Vulkan choice.
+
+### vk_tune
+
+Selects FFmpeg's Vulkan Video latency/quality target. `2` (low latency) is the streaming default;
+`0` lets FFmpeg decide, `1` favors quality, and `3` requests ultra-low latency.
+
+### vk_rc_mode
+
+Selects Vulkan Video rate control. `2` (constant bitrate) is the streaming default. `0` lets FFmpeg
+and the driver decide, `1` selects constant-QP mode, and `4` selects variable bitrate.
 
 ## AI provider settings
 

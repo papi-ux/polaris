@@ -94,7 +94,7 @@ let
   phase2VulkanCuda =
     if enablePortalDmabufLinear == null then enablePhase2VulkanCuda else enablePortalDmabufLinear;
 
-  buildDepsTag = "v2026.516.30821";
+  buildDepsTag = "v2026.724.203728";
   ffmpegArch =
     {
       x86_64-linux = "Linux-x86_64";
@@ -106,8 +106,8 @@ let
     url = "https://github.com/LizardByte/build-deps/releases/download/${buildDepsTag}/${ffmpegArch}-ffmpeg.tar.gz";
     hash =
       {
-        x86_64-linux = "sha256-VT+4qP2FaizCoIBBbBkzbYw4YOvGhuBUoZxWL0IYVZo=";
-        aarch64-linux = "sha256-X5v/GsJy8G3/LHW/8s0VAS0Vegr7JhZSqYotXL/s81o=";
+        x86_64-linux = "sha256-LCfUaUtO0Oc09JfUvWLxs2Ysu8Te0qafLcS3A0Qe67M=";
+        aarch64-linux = "sha256-/WSS9V15rheNuX5I1jlbTKwqLhCy8Vew1ANVz9fBYOg=";
       }
       .${stdenv.hostPlatform.system};
   };
@@ -140,7 +140,7 @@ stdenv'.mkDerivation (finalAttrs: {
   ui = buildNpmPackage {
     inherit (finalAttrs) src version;
     pname = "polaris-stream-ui";
-    npmDepsHash = "sha256-mpfQk4k40tMhB9FbXuNntgOqzWEShtXgBtmB4qUXj4o=";
+    npmDepsHash = "sha256-zgDMvRbXZ5yQXlIZneO9Xuq2J4Xs2G4EgvewiP3QYts=";
 
     installPhase = ''
       runHook preInstall

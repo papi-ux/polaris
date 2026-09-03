@@ -42,6 +42,7 @@ sudo apt-get install -y \
   libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
   libappindicator3-dev libgtk-3-dev \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+  glslang-tools libvulkan-dev \
   wayland-protocols grim labwc wlr-randr xwayland x11-utils nodejs npm
 
 git clone --recursive https://github.com/papi-ux/polaris.git
@@ -93,6 +94,7 @@ sudo -H polaris --setup-host --enable-kms
 ```
 
 The default compositor and portal paths do not require granting KMS capability.
+The experimental Vulkan Video encoder does require this KMS setup and an explicit `capture = kms` selection.
 
 ## Headless Labwc Checks
 

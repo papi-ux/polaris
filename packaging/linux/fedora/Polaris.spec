@@ -37,6 +37,7 @@ BuildRequires: libXinerama-devel
 BuildRequires: libXrandr-devel
 BuildRequires: libXtst-devel
 BuildRequires: git
+BuildRequires: glslc
 BuildRequires: golang
 BuildRequires: mesa-libGL-devel
 BuildRequires: mesa-libgbm-devel

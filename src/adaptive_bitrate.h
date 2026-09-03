@@ -105,12 +105,17 @@ namespace adaptive_bitrate {
    * @brief Linearize a transition in host video evidence that can suppress a
    *        deterministic quality restore.
    *
-   * Repeated samples in the same policy class do not rotate action authority.
+   * Repeated samples in the same policy/evidence class do not rotate action authority.
    * This keeps a stable action usable between status publication and a human
    * click while still rejecting a stale restore after clean evidence becomes
-   * an encoder or pacing warning. The class is reset for every stream.
+   * an encoder or pacing warning. A nonblocking path observation (such as a
+   * healthy SHM compatibility path) or provisional pacing warning rotates the
+   * evidence epoch without blocking restore. The class is reset for every stream.
    */
-  void note_doctor_video_policy_evidence(bool suppresses_quality_restore);
+  void note_doctor_video_policy_evidence(
+    bool suppresses_quality_restore,
+    bool nonblocking_video_observation = false
+  );
 
   /**
    * @brief Whether current or latched post-change video evidence blocks a

@@ -32,6 +32,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "nvhttp.h"
 #include "platform/common.h"
 #ifdef __linux__
   #include "platform/linux/session_media.h"
@@ -536,6 +537,7 @@ namespace stream {
     std::uint64_t session_generation = 0;
 
     bool watch_only;
+    bool temporary_authorization = false;
     int requested_fps = 0;
     int session_target_fps = 0;
     std::string pacing_policy;
@@ -2405,12 +2407,28 @@ namespace stream {
       auto remaining = --running_sessions;
       BOOST_LOG(info) << "Session ended for ["sv << session.device_name << "] [active sessions: "sv << remaining << "]"sv;
 
+      bool temporary_authorization_expired = false;
+      if (session.temporary_authorization ||
+          nvhttp::is_temporary_client_authorization(session.device_uuid)) {
+        const auto same_device = rtsp_stream::session_snapshot(session.device_uuid);
+        if (same_device.requester_role == rtsp_stream::session_role_e::none) {
+          temporary_authorization_expired =
+            nvhttp::expire_temporary_client_authorization(session.device_uuid);
+        }
+      }
+
       if (remaining == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
         bool paused_for_resume = false;
         if (proc::proc.running()) {
           if (proc::proc.session_shutdown_requested()) {
             BOOST_LOG(info) << "Skipping pause because host shutdown is already in progress"sv;
+          } else if (temporary_authorization_expired ||
+                     proc::proc.session_requires_immediate_teardown_on_disconnect()) {
+            BOOST_LOG(info) << (temporary_authorization_expired ?
+              "Temporary client disconnected; ending the app session instead of keeping it resumable"sv :
+              "Desktop Takeover client disconnected; restoring the physical desktop immediately"sv);
+            proc::proc.terminate();
           } else {
             proc::proc.pause();
             paused_for_resume = proc::proc.running() > 0;
@@ -2605,6 +2623,7 @@ namespace stream {
       session->paired_target_bitrate_kbps = launch_session.paired_target_bitrate_kbps.value_or(0);
       session->permission = launch_session.perm;
       session->watch_only = launch_session.watch_only;
+      session->temporary_authorization = launch_session.temporary_authorization;
 
       session->do_cmds = std::move(launch_session.client_do_cmds);
       session->undo_cmds = std::move(launch_session.client_undo_cmds);

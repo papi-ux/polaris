@@ -1023,6 +1023,7 @@ TEST(AiOptimizerModeAwareCache, LegacyRequestsKeepTheirBucketAndModesGetTheirOwn
 
 TEST(AiOptimizerModeAwareCache, RecommendedModeValidationKeepsRegistryIdsOnly) {
   EXPECT_EQ("gamescope_stream", ai_optimizer::normalize_stream_mode("Gamescope_Stream"));
+  EXPECT_EQ("desktop_takeover", ai_optimizer::normalize_stream_mode("Desktop_Takeover"));
   EXPECT_EQ("headless_stream", ai_optimizer::normalize_stream_mode("headless_stream"));
   EXPECT_EQ("", ai_optimizer::normalize_stream_mode("not_a_mode"));
   EXPECT_EQ("", ai_optimizer::normalize_stream_mode(""));

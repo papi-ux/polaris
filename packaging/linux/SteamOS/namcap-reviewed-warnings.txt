@@ -1,4 +1,4 @@
-polaris W: ELF file ('usr/bin/polaris-1.4.0') lacks GNU_PROPERTY_X86_FEATURE_1_SHSTK.
+polaris W: ELF file ('usr/bin/polaris-1.4.1') lacks GNU_PROPERTY_X86_FEATURE_1_SHSTK.
 polaris W: ELF file ('usr/bin/polaris-browser-stream-helper') lacks GNU_PROPERTY_X86_FEATURE_1_SHSTK.
 polaris W: Unused shared library '/usr/lib/libresolv.so.2' by file ('usr/bin/polaris-browser-stream-helper')
 polaris W: Dependency included, but may not be needed ('avahi')
@@ -11,7 +11,6 @@ polaris W: Dependency included, but may not be needed ('libxrandr')
 polaris W: Dependency included, but may not be needed ('libxtst')
 polaris W: Dependency included, but may not be needed ('pipewire')
 polaris W: Dependency included, but may not be needed ('udev')
-polaris W: Dependency included, but may not be needed ('vulkan-icd-loader')
 polaris W: Dependency included, but may not be needed ('which')
 polaris W: Dependency included, but may not be needed ('wlr-randr')
 polaris W: Dependency included, but may not be needed ('xorg-xdpyinfo')

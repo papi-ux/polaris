@@ -111,6 +111,7 @@ See [`scripts/install/README.md`](../scripts/install/README.md) for steps, PREFI
 | labwc | Isolated stream compositor |
 | wlr-randr | Configure the isolated stream output mode |
 | Xwayland and xdpyinfo | Launch and detect X11 clients inside labwc |
+| Vulkan headers/loader and GLSL compiler | Build the Linux Vulkan Video encoder and its conversion shader |
 | CUDA toolkit | Needed for NVENC builds |
 
 ### Example packages
@@ -133,16 +134,16 @@ sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
   wayland-protocols libdrm libcap libnotify libayatana-appindicator \
   libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
   miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \
-  grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo vulkan-headers vulkan-icd-loader cuda
+  grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo shaderc vulkan-headers vulkan-icd-loader cuda
 ```
 
-`vulkan-headers` supplies the compile-time API headers and `vulkan-icd-loader` supplies the runtime loader expected by the packaged binary.
+`shaderc` compiles the bundled conversion shader, `vulkan-headers` supplies the compile-time API, and `vulkan-icd-loader` supplies the runtime loader expected by the packaged binary.
 
 CachyOS should use the same package/dependency family first. If a CachyOS kernel, NVIDIA/CUDA stack, or pacman package split behaves differently, include those details when opening an issue.
 
 #### openSUSE Tumbleweed
 
-Use the dedicated [openSUSE guide](openSUSE.md). The short version is: shared Boost is required, so configure with `-DBOOST_USE_STATIC=OFF`; AMD/VAAPI can build with CUDA disabled, while NVIDIA hosts should install CUDA and enable `-DPOLARIS_ENABLE_CUDA=ON`.
+Use the dedicated [openSUSE guide](openSUSE.md). The short version is: shared Boost is required, so configure with `-DBOOST_USE_STATIC=OFF`; install `shaderc` and `vulkan-devel` for the Vulkan Video build, AMD/VAAPI can build with CUDA disabled, and NVIDIA hosts should install CUDA and enable `-DPOLARIS_ENABLE_CUDA=ON`.
 
 ### Build and install
 

@@ -279,7 +279,7 @@ describe('Fix My Stream checklist', () => {
     expect(checklist.map((item) => item.status)).toEqual([
       'pass',
       'fail',
-      'fail',
+      'pass',
       'fail',
       'fail',
       'warning',
@@ -337,6 +337,7 @@ describe('Fix My Stream checklist', () => {
       encode_time_ms: 5.2,
       linux_gpu_profile: {
         encoder_api: 'vaapi',
+        vaapi_vendor: 'Mesa Gallium driver for AMD Radeon (radeonsi)',
         encoder_adapter: '/dev/dri/renderD128',
         capture_device: '/dev/dri/renderD128',
         adapter_matches_capture_device: true,
@@ -353,9 +354,118 @@ describe('Fix My Stream checklist', () => {
 
     expect(capture.detail).toContain('AMD/VAAPI')
     expect(capture.detail).toContain('SHM/system-memory')
-    expect(capture.action).toContain('conservative Private Stream baseline')
+    expect(capture.status).toBe('pass')
+    expect(capture.detail).toContain('does not show capture pressure')
+    expect(capture.action).toContain('already attempted')
     expect(`${capture.detail} ${capture.action}`).not.toContain('CUDA')
     expect(`${capture.detail} ${capture.action}`).not.toContain('NVIDIA')
+  })
+
+  it('warns on measured SHM capture pressure instead of the transport alone', () => {
+    const base = {
+      streaming: true,
+      packet_loss: 0,
+      capture_path: 'shm_cpu_capture',
+      capture_path_reason: 'headless_shm_fallback',
+      capture_cpu_copy: true,
+      encode_time_ms: 4,
+      encode_target_fps: 120,
+      avg_frame_age_ms: 19,
+    }
+
+    const healthy = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { ...base, health: { grade: 'good', capture_pressure: false } },
+    }).find((item) => item.key === 'capture-path')
+    const pressured = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { ...base, health: { grade: 'watch', capture_pressure: true } },
+    }).find((item) => item.key === 'capture-path')
+
+    expect(healthy.status).toBe('pass')
+    expect(pressured.status).toBe('warning')
+  })
+
+  it('uses the active FPS budget for encoder pressure instead of a hard-coded 120 FPS label', () => {
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: {
+        streaming: true,
+        packet_loss: 0,
+        capture_gpu_native: true,
+        encode_target_fps: 97,
+        encode_time_ms: 10.4,
+      },
+    })
+
+    const encoder = checklist.find((item) => item.key === 'encoder-pressure')
+    expect(encoder.status).toBe('fail')
+    expect(encoder.detail).toContain('exceeds the 10.3 ms frame budget for 97 FPS')
+    expect(encoder.detail).not.toContain('120 FPS')
+  })
+
+  it('does not claim a 60 FPS frame-budget overrun when only the low-latency ceiling is crossed', () => {
+    const encoder = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: {
+        streaming: true,
+        packet_loss: 0,
+        capture_gpu_native: true,
+        encode_target_fps: 60,
+        encode_time_ms: 13,
+      },
+    }).find((item) => item.key === 'encoder-pressure')
+
+    expect(encoder.status).toBe('fail')
+    expect(encoder.detail).toContain('12.0 ms low-latency ceiling')
+    expect(encoder.detail).toContain('78% of the 16.7 ms frame budget for 60 FPS')
+    expect(encoder.detail).not.toContain('exceeds the 16.7 ms frame budget')
+  })
+
+  it('does not recommend retrying GPU-native after the live attempt fell back', () => {
+    const stats = {
+      capture_path: 'shm_cpu_capture',
+      capture_path_reason: 'gpu_native_requested_shm_fallback',
+      capture_cpu_copy: true,
+      capture_gpu_native: false,
+      encode_target_device: 'vaapi',
+      linux_gpu_profile: {
+        encoder_api: 'vaapi',
+        vaapi_vendor: 'Mesa Gallium driver for AMD Radeon (radeonsi)',
+        gpu_native_requested: true,
+        gpu_native_succeeded: false,
+      },
+    }
+
+    const capture = buildFixMyStreamChecklist({ statsConnected: true, stats })
+      .find((item) => item.key === 'capture-path')
+    const report = buildPostSessionStreamReport({ stats })
+
+    expect(capture.action).toContain('already attempted')
+    expect(capture.action).not.toContain('Try Private Stream (GPU-native)')
+    expect(report.suggestedNextLaunchProfile).toContain('already attempted')
+    expect(report.suggestedNextLaunchProfile).not.toContain('Try Private Stream (GPU-native)')
+  })
+
+  it('surfaces the deterministic Auto Vulkan recommendation for explicit AMD VAAPI SHM', () => {
+    const warning = {
+      id: 'amd_private_explicit_vaapi_shm',
+      severity: 'warning',
+      message: 'AMD Private Stream is explicitly pinned to VA-API while capture is crossing SHM/system-memory frames.',
+      action: 'Set Force a Specific Encoder to Autodetect (recommended), restart Polaris, and start a fresh Private Stream.',
+    }
+    const stats = {
+      capture_cpu_copy: true,
+      linux_gpu_profile: { configuration_warnings: [warning] },
+    }
+    const checklist = buildFixMyStreamChecklist({ statsConnected: true, stats })
+    const hostConfig = checklist.find((item) => item.key === 'host-config')
+    const capture = checklist.find((item) => item.key === 'capture-path')
+    const report = buildPostSessionStreamReport({ stats })
+
+    expect(hostConfig.detail).toContain('explicitly pinned to VA-API')
+    expect(capture.action).toContain('Autodetect (recommended)')
+    expect(report.suggestedNextLaunchProfile).toContain('Autodetect (recommended)')
   })
 
   it('reports a Wayland-to-encoder adapter mismatch before generic SHM fallback guidance', () => {
@@ -547,6 +657,44 @@ describe('support self-service reports', () => {
     expect(report.suggestedNextLaunchProfile).toContain('Private Stream')
     expect(report.copyText).toContain('Issue owner: host')
     expect(report.copyText).not.toContain('token=')
+  })
+
+  it('does not invent a host failure from healthy SHM capability logs', () => {
+    const report = buildPostSessionStreamReport({
+      stats: {
+        packet_loss: 0,
+        latency_ms: 5,
+        encode_time_ms: 4,
+        encode_target_fps: 120,
+        dropped_frame_ratio: 0,
+        capture_cpu_copy: true,
+        health: { grade: 'good', capture_pressure: false },
+      },
+      logs: [
+        'Info: // Testing for available encoders, this may generate errors. You can safely ignore those errors. //',
+        'Warning: capture_transport=shm; capture will incur an extra CPU-side copy/conversion path',
+        'Info: Paused session resume timeout expired; terminating app',
+      ].join('\n'),
+      disconnectReason: 'client disconnected',
+    })
+
+    expect(report.issueOwner).toBe('client')
+    expect(report.mainIssue).not.toContain('capture/encoder')
+    expect(report.mainIssue).not.toContain('Network')
+  })
+
+  it('still attributes explicit encoder and network failures from logs', () => {
+    const host = buildPostSessionStreamReport({
+      stats: { packet_loss: 0, latency_ms: 5, encode_time_ms: 4, encode_target_fps: 60 },
+      logs: 'Warning: encoder queue saturated after capture fell back to SHM',
+    })
+    const network = buildPostSessionStreamReport({
+      stats: { packet_loss: 0, latency_ms: 5, encode_time_ms: 4, encode_target_fps: 60 },
+      logs: 'Warning: UDP network timeout while sending video packets',
+    })
+
+    expect(host.issueOwner).toBe('host')
+    expect(network.issueOwner).toBe('network')
   })
 
   it('generates support-copy text for network, controller, and post-session reports', () => {

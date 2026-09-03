@@ -856,6 +856,7 @@ function humanizeStreamPathId(id) {
     headless_stream: 'Private Stream',
     windowed_stream: 'Private Stream (GPU-native)',
     host_virtual_display: 'Host Virtual Display',
+    desktop_takeover: 'Desktop Takeover',
     desktop_display: 'Mirror Desktop',
     gamescope_stream: 'Gamescope Stream',
     family_isolated: 'Family Mode (isolated)',

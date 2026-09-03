@@ -152,6 +152,19 @@ export function resolveAutoQualityState(stats = {}, sync = {}) {
     lower(stats?.capture_residency || capture?.residency) === 'cpu' ||
     lower(stats?.encode_target_residency || encoder?.target_residency) === 'cpu',
   )
+  const healthGrade = lower(health?.grade)
+  const explicitCapturePressure = health?.capture_pressure ?? stats?.capture_pressure ?? capture?.pressure
+  const capturePressure = explicitCapturePressure !== undefined && explicitCapturePressure !== null
+    ? enabledValue(explicitCapturePressure)
+    : captureCpuCopy && ['watch', 'degraded'].includes(healthGrade) && issueIncludes(
+      health,
+      'capture',
+      'gpu_native_requested_shm_fallback',
+      'headless_shm_fallback',
+      'headless_shm_default',
+      'shm_cpu_capture',
+      'encoder_upload_cpu',
+    )
   const manualOverride = Boolean(
     sync?.manualOverride ||
     syncState === 'manual_override' ||
@@ -164,7 +177,6 @@ export function resolveAutoQualityState(stats = {}, sync = {}) {
     health?.host_render_limited ||
     issueIncludes(health, 'host_render_limited', 'host_render'),
   )
-  const healthGrade = lower(health?.grade)
   const healthAutoAction = lower(health?.auto_action)
   const healthSuggestsRecovery = ['watch', 'degraded'].includes(healthGrade) ||
     Boolean(health?.recovery_profile || health?.relaunch_recommended) ||
@@ -218,13 +230,13 @@ export function resolveAutoQualityState(stats = {}, sync = {}) {
     })
   }
 
-  if (syncFailed || captureCpuCopy || degraded) {
-    const detail = health?.summary || sync?.message || (captureCpuCopy
-      ? 'The active capture path is crossing CPU/system memory.'
+  if (syncFailed || capturePressure || degraded) {
+    const detail = health?.summary || sync?.message || (capturePressure
+      ? 'Measured pressure is present on the CPU/system-memory capture path.'
       : 'Auto Quality needs a stream setting check.')
     return result({
       state: AUTO_QUALITY_STATES.NEEDS_ATTENTION,
-      label: captureCpuCopy ? 'Capture Attention' : 'Needs Attention',
+      label: capturePressure ? 'Capture Attention' : 'Needs Attention',
       compactLabel: 'Attention',
       detail,
       targetSummary,

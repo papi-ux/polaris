@@ -63,6 +63,12 @@ namespace adaptive_bitrate {
   // -1 is unknown for a new stream, 0 allows quality restoration, and 1 is a
   // host video warning that suppresses it. Protected by state_mutex.
   static int doctor_video_policy_class = -1;
+  // -1 is unknown, 0 is clean, 1 is a nonblocking path observation or a
+  // provisional pacing warning still inside its confirmation window, and 2
+  // is policy-blocking evidence. This keeps a stale Doctor action from crossing
+  // new capture/pacing evidence without treating one startup sample as a
+  // confirmed fault. Protected by state_mutex.
+  static int doctor_video_evidence_class = -1;
   static bool doctor_video_policy_regressed_during_override = false;
   // A post-change network regression is verification evidence, not a
   // competing controller writer. Keep it latched for the complete reversible
@@ -150,13 +156,19 @@ namespace adaptive_bitrate {
     state_changed.notify_all();
   }
 
-  void note_doctor_video_policy_evidence(bool suppresses_quality_restore) {
+  void note_doctor_video_policy_evidence(
+      bool suppresses_quality_restore,
+      bool nonblocking_video_observation) {
     std::lock_guard<std::mutex> lock(state_mutex);
     const int policy_class = suppresses_quality_restore ? 1 : 0;
-    if (doctor_video_policy_class == policy_class) {
+    const int evidence_class = suppresses_quality_restore ? 2 :
+      nonblocking_video_observation ? 1 : 0;
+    if (doctor_video_policy_class == policy_class &&
+        doctor_video_evidence_class == evidence_class) {
       return;
     }
     doctor_video_policy_class = policy_class;
+    doctor_video_evidence_class = evidence_class;
 
     // Video samples collected during a Doctor-owned change are verification
     // evidence, not a competing controller writer. Latch a regression so a
@@ -818,6 +830,7 @@ namespace adaptive_bitrate {
     encoder_applied_revision = 0;
     encoder_applied_at = {};
     doctor_video_policy_class = -1;
+    doctor_video_evidence_class = -1;
     doctor_video_policy_regressed_during_override = false;
     doctor_network_policy_regressed_during_override = false;
     ++operator_revision;

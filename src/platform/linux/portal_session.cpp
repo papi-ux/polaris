@@ -408,7 +408,7 @@ namespace portal {
     // a source type that cannot name the virtual output at all.
     const auto mode = stream_mode;
     if (mode == "headless_dongle" || mode == "desktop_display" || mode == "headless_evdi" ||
-        mode == "host_virtual_display") {
+        mode == "host_virtual_display" || mode == "desktop_takeover") {
       return portal_source_monitor;
     }
 

@@ -76,7 +76,10 @@ def reads_for_object(source: str, reader: dict) -> set[str]:
     helper = re.compile(
         rf'\bfiniteDouble\(\s*{re.escape(reader["receiver"])}\s*,\s*"([a-zA-Z_0-9]+)"'
     )
-    return set(pattern.findall(body)) | set(helper.findall(body))
+    strict_helper = re.compile(
+        rf'\bstrict(?:String|Boolean)\(\s*{re.escape(reader["receiver"])}\s*,\s*"([a-zA-Z_0-9]+)"'
+    )
+    return set(pattern.findall(body)) | set(helper.findall(body)) | set(strict_helper.findall(body))
 
 
 def polaris_manifest(repo: Path) -> dict:

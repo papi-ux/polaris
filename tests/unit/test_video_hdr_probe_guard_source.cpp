@@ -125,6 +125,23 @@ TEST(VideoCaptureGuardSource, EncoderProbeCannotMutateStateDuringCapture) {
     << "external resets must not wait indefinitely for active capture";
 }
 
+TEST(VideoCaptureGuardSource, ExplicitVulkanSelectionCannotSilentlyFallBack) {
+  const auto source = read_video_source();
+  ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
+
+  const auto strict_policy = source.find(
+    "strict_configured_encoder || config::video.encoder == \"vulkan\"sv"
+  );
+  ASSERT_NE(strict_policy, std::string::npos)
+    << "explicit Vulkan selection must always use strict encoder matching";
+  const auto strict_failure = source.find(
+    "if (require_configured_encoder && !config::video.encoder.empty() && chosen_encoder == nullptr)",
+    strict_policy
+  );
+  ASSERT_NE(strict_failure, std::string::npos);
+  EXPECT_LT(strict_policy, strict_failure);
+}
+
 TEST(VideoHdrDiagnosticsSource, WarnsWhenAClientHdrRequestBecomesAnSdrStream) {
   const auto source = read_video_source();
   ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";

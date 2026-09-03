@@ -36,6 +36,7 @@ namespace stream_path {
   enum class topology_kind_e {
     LEAVE_ALONE,  ///< Do not rearrange host outputs (private stream, mirror)
     HOST_VIRTUAL,  ///< Create/use host-visible virtual output (wlr/kscreen)
+    DESKTOP_TAKEOVER,  ///< Move Hyprland workspaces to a new virtual output and blank sources
     SWAP_PRIMARY,  ///< Move desktop onto dongle and restore on stop (#226-style)
   };
 
@@ -74,6 +75,7 @@ namespace stream_path {
     bool wlr_randr_present = false;
     bool gamescope_present = false;
     bool virtual_display_available = false;
+    bool desktop_takeover_available = false;
     /// Capture backend currently configured (e.g. "portal", "kms", "wlr").
     std::string configured_capture;
   };
@@ -107,6 +109,7 @@ namespace stream_path {
   constexpr std::string_view k_headless_stream = "headless_stream";
   constexpr std::string_view k_windowed_stream = "windowed_stream";
   constexpr std::string_view k_host_virtual_display = "host_virtual_display";
+  constexpr std::string_view k_desktop_takeover = "desktop_takeover";
   constexpr std::string_view k_desktop_display = "desktop_display";
   constexpr std::string_view k_gamescope_stream = "gamescope_stream";
   constexpr std::string_view k_headless_dongle = "headless_dongle";

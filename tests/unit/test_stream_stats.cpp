@@ -75,6 +75,11 @@ namespace {
     std::filesystem::path path;
   };
 
+  void mark_doctor_pacing_window_confirmed(stream_stats::stats_t &stats) {
+    stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES;
+    stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_CONFIRMATION_SAMPLES;
+  }
+
   nlohmann::json trusted_doctor_action_request(
       const doctor_actions::recovery_action_context_t &context) {
     const auto health = context.health.is_object() ?
@@ -223,6 +228,34 @@ TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNati
     std::string::npos
   );
 }
+
+#if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
+TEST(StreamStatsLinuxGpuProfileTests, RecommendsAutoVulkanForExplicitAmdVaapiShmPrivateStream) {
+  LinuxDisplayConfigGuard guard;
+  config::video.encoder = "vaapi";
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.runtime_requested_headless = true;
+  stats.runtime_effective_headless = true;
+  stats.capture_transport = platf::frame_transport_e::shm;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.vaapi_vendor = "Mesa Gallium driver for AMD Radeon (radeonsi)";
+
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+  const auto &warnings = profile.at("configuration_warnings");
+  const auto recommendation = std::find_if(warnings.begin(), warnings.end(), [](const auto &warning) {
+    return warning.value("id", std::string {}) == "amd_private_explicit_vaapi_shm";
+  });
+
+  ASSERT_NE(recommendation, warnings.end());
+  EXPECT_NE(recommendation->at("action").get<std::string>().find("Autodetect"), std::string::npos);
+  EXPECT_NE(recommendation->at("action").get<std::string>().find("Vulkan Video"), std::string::npos);
+  EXPECT_NE(recommendation->at("action").get<std::string>().find("fall back to VA-API"), std::string::npos);
+}
+#endif
 
 TEST(StreamStatsLinuxGpuProfileTests, DoesNotCallMissingCaptureDeviceAnAdapterMatch) {
   LinuxDisplayConfigGuard guard;
@@ -560,7 +593,7 @@ TEST(StreamStatsCapturePathTests, DetectsCpuEncodeUpload) {
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
 }
 
-TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuthorityOnce) {
+TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateAuthorityWithoutBlockingHealthyRestore) {
   stream_stats::update_stream_active(false);
   adaptive_bitrate::reset();
 
@@ -588,7 +621,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
   });
   const auto fallback_revision = adaptive_bitrate::get_doctor_state().revision;
   EXPECT_GT(fallback_revision, gpu_revision);
-  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
   const auto fallback_stats = stream_stats::get_current();
   EXPECT_EQ(fallback_stats.capture_transport, platf::frame_transport_e::shm);
   EXPECT_EQ(fallback_stats.capture_residency, platf::frame_residency_e::cpu);
@@ -607,7 +640,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
     platf::frame_format_e::nv12
   );
   EXPECT_GT(adaptive_bitrate::get_doctor_state().revision, recovered_revision);
-  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
 
   stream_stats::update_stream_active(false);
   adaptive_bitrate::reset();
@@ -840,6 +873,43 @@ TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
   EXPECT_TRUE(saw_conflict);
 }
 
+TEST(StreamStatsDoctorTests, EncoderAutoFallbackIsVisibleAsWatchEvidence) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "steady"},
+      {"grade", "good"},
+      {"encoder_selection", {
+        {"selected_encoder", "vaapi"},
+        {"fallback_used", true},
+        {"reason", "Vulkan did not satisfy the exact live route; selected VA-API instead."}
+      }}
+    }
+  );
+
+  const auto selection = std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) {
+      return item.value("id", std::string {}) == "encoder_selection";
+    }
+  );
+  ASSERT_NE(selection, doctor.at("evidence").end());
+  EXPECT_EQ(selection->at("value"), "vaapi");
+  EXPECT_EQ(selection->at("status"), "watch");
+  EXPECT_EQ(
+    doctor.at("advanced_evidence").at("encoder_selection").at("fallback_used"),
+    true
+  );
+}
+
 TEST(StreamStatsDoctorTests, IgnoresSteamInputSettingsWithoutStrictIsolation) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -882,6 +952,29 @@ TEST(StreamStatsDoctorTests, KeepsNearTargetHighRefreshPacingGreen) {
   EXPECT_EQ(doctor.at("primary_issue"), "none");
 }
 
+TEST(StreamStatsDoctorTests, GradesEncoderTimeAgainstTheActiveFpsBudget) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 97.0;
+  stats.encode_target_fps = 97.0;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_device = "vaapi";
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 10.4;
+
+  const auto high_refresh = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(high_refresh.at("primary_issue"), "encoder_load");
+  EXPECT_EQ(high_refresh.at("traffic_light"), "red");
+  EXPECT_EQ(high_refresh.at("status"), "needs_action");
+
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  const auto sixty_fps = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(sixty_fps.at("primary_issue"), "encoder_load");
+  EXPECT_EQ(sixty_fps.at("traffic_light"), "amber");
+}
+
 TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkEvidence) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -896,6 +989,7 @@ TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkE
   stats.packet_loss = 0.0;
   stats.latency_ms = 4.0;
   stats.network_risk = false;
+  mark_doctor_pacing_window_confirmed(stats);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -926,6 +1020,120 @@ TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkE
   const auto serialized = nlohmann::json::parse(stats.to_json());
   EXPECT_DOUBLE_EQ(serialized.at("frame_interval_error_ms"), 8.3333);
   EXPECT_DOUBLE_EQ(serialized.at("frame_jitter_ms"), 8.3333);
+}
+
+TEST(StreamStatsDoctorTests, KeepsStartupPacingUnknownUntilWarmupCompletes) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 120.0;
+  stats.capture_source_fps = 120.0;
+  stats.frame_jitter_ms = 8.3333;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES - 1;
+  stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES - 1;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "frame_pacing"}, {"grade", "watch"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("confidence").at("basis"), "pacing_window_collecting");
+  const auto &pacing = *std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) { return item.value("id", "") == "frame_pacing"; }
+  );
+  EXPECT_EQ(pacing.at("status"), "unknown");
+  ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+  EXPECT_EQ(doctor.at("suppressed_findings").front().at("id"), "pacing_window_collecting");
+}
+
+TEST(StreamStatsDoctorTests, RequiresTwoConsecutivePacingWarningsAfterWarmup) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 120.0;
+  stats.capture_source_fps = 120.0;
+  stats.frame_jitter_ms = 8.3333;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES;
+  stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_CONFIRMATION_SAMPLES - 1;
+
+  const auto first = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "frame_pacing"}, {"grade", "watch"}}
+  );
+  EXPECT_EQ(first.at("primary_issue"), "none");
+  EXPECT_EQ(first.at("advanced_evidence").at("pacing_coverage").at("ready"), true);
+  EXPECT_EQ(first.at("advanced_evidence").at("pacing_coverage").at("confirmed"), false);
+
+  stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_CONFIRMATION_SAMPLES;
+  const auto second = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "frame_pacing"}, {"grade", "watch"}}
+  );
+  EXPECT_EQ(second.at("primary_issue"), "frame_pacing");
+  EXPECT_EQ(second.at("traffic_light"), "amber");
+  EXPECT_EQ(second.at("advanced_evidence").at("pacing_coverage").at("confirmed"), true);
+}
+
+TEST(StreamStatsDoctorTests, TracksAndResetsPerStreamPacingCoverage) {
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true, "PacingCoverage", "203.0.113.30");
+  for (std::uint64_t i = 0; i < stream_stats::DOCTOR_PACING_WARMUP_SAMPLES; ++i) {
+    stream_stats::note_doctor_video_policy_sample(
+      120.0, 60.0, 0.0, 0.0, 2.0, 8.3333, 2.0
+    );
+  }
+
+  const auto active = stream_stats::get_current();
+  EXPECT_EQ(active.video_policy_sample_count, stream_stats::DOCTOR_PACING_WARMUP_SAMPLES);
+  EXPECT_EQ(active.pacing_warning_streak, stream_stats::DOCTOR_PACING_WARMUP_SAMPLES);
+
+  stream_stats::update_stream_active(false);
+  const auto stopped = stream_stats::get_current();
+  EXPECT_EQ(stopped.video_policy_sample_count, 0);
+  EXPECT_EQ(stopped.pacing_warning_streak, 0);
+}
+
+TEST(StreamStatsDoctorTests, SuppressesUnconfirmedPacingSummaryWhenCurrentWindowIsClean) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.capture_source_fps = 60.0;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"summary", "Old pacing warning"}
+    }
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(
+    doctor.at("confidence").at("basis"),
+    "live_evidence_overrode_unconfirmed_pacing"
+  );
+  ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+  EXPECT_EQ(
+    doctor.at("suppressed_findings").front().at("id"),
+    "unconfirmed_frame_pacing"
+  );
 }
 
 TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClean) {
@@ -1330,6 +1538,7 @@ TEST(StreamStatsDoctorTests, RelaunchFindingOffersReadOnlyPacingRecheck) {
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.encode_target_residency = platf::frame_residency_e::gpu;
+  mark_doctor_pacing_window_confirmed(stats);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -2786,6 +2995,7 @@ TEST(StreamStatsDoctorTests, StaticContentCannotHideConfirmedDroppedFrames) {
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.encode_target_residency = platf::frame_residency_e::gpu;
+  mark_doctor_pacing_window_confirmed(stats);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -2798,7 +3008,7 @@ TEST(StreamStatsDoctorTests, StaticContentCannotHideConfirmedDroppedFrames) {
   EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
 }
 
-TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
+TEST(StreamStatsDoctorTests, KeepsHealthyVaapiShmFallbackInformational) {
   LinuxDisplayConfigGuard guard;
   config::video.adapter_name = "/dev/dri/renderD128";
   config::video.linux_display.use_cage_compositor = true;
@@ -2814,18 +3024,33 @@ TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
   stats.encode_target_device = "vaapi";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.encode_target_format = platf::frame_format_e::nv12;
+  stats.fps = 120.0;
+  stats.encode_target_fps = 120.0;
+  stats.capture_source_fps = 120.0;
+  stats.encode_time_ms = 4.0;
+  stats.avg_frame_age_ms = 6.0;
 
   const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
 
-  EXPECT_EQ(doctor.at("traffic_light"), "amber");
-  EXPECT_EQ(doctor.at("simple_state"), "Advanced issue detected");
-  EXPECT_EQ(doctor.at("primary_issue"), "gpu_native_requested_shm_fallback");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("status"), "ok");
+  EXPECT_EQ(doctor.at("severity"), "info");
+  EXPECT_EQ(doctor.at("simple_state"), "Streaming ready");
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
   EXPECT_TRUE(doctor.at("advanced_evidence").at("raw_fields_redacted"));
   EXPECT_EQ(
     doctor.at("advanced_evidence").at("linux_gpu_profile").at("encoder_api"),
     "vaapi"
   );
+  const auto &capture = *std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) { return item.value("id", "") == "capture_path"; }
+  );
+  EXPECT_EQ(capture.at("status"), "watch")
+    << "the compatibility path remains visible without grading a healthy stream down";
 }
 
 TEST(StreamStatsDoctorTests, KeepsNvidiaHeadlessWarningsInAdvancedEvidence) {

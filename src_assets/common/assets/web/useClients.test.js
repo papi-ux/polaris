@@ -35,7 +35,7 @@ describe('paired client metadata', () => {
     vi.unstubAllGlobals()
   })
 
-  it('preserves added and last-seen timestamps from the clients API', async () => {
+  it('preserves lifecycle metadata from the clients API', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       json: async () => ({
         status: true,
@@ -46,6 +46,7 @@ describe('paired client metadata', () => {
           connected: false,
           paired_at: 1_720_000_000,
           last_seen_at: 1_720_003_600,
+          temporary_authorization: true,
         }],
       }),
     }))
@@ -56,6 +57,7 @@ describe('paired client metadata', () => {
     expect(clients.value[0]).toMatchObject({
       paired_at: 1_720_000_000,
       last_seen_at: 1_720_003_600,
+      temporary_authorization: true,
     })
   })
 })
@@ -103,6 +105,7 @@ describe('client update failures', () => {
       editAllowClientCommands: false,
       editEnableLegacyOrdering: false,
       editAlwaysUseVirtualDisplay: false,
+      editTemporaryAuthorization: false,
       editPerm: permissionMapping._game_control,
       edit_do: [],
       edit_undo: [],
@@ -119,5 +122,13 @@ describe('client update failures', () => {
 
     expect(handler).toMatch(/saveClientAPI\(client\)\s*\.then\(\(\) => \{\s*client\.editing = false/)
     expect(handler).toMatch(/\.catch\(err => \{\s*client\.editing = true/)
+  })
+
+  it('locks the access and guest-lifetime controls while a generated QR authorization is live', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src_assets/common/assets/web/views/PinView.vue'), 'utf8')
+
+    expect(source).toContain("const otpConfigurationLocked = computed(() => (")
+    expect(source).toContain("currentTab.value === 'OTP' && otpStatus.value === 'success' && Boolean(otp.value)")
+    expect(source.match(/:disabled="otpConfigurationLocked"/g)).toHaveLength(2)
   })
 })

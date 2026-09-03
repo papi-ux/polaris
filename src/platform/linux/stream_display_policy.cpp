@@ -6,6 +6,7 @@
 #include "stream_display_policy.h"
 
 #include "display_topology.h"
+#include "desktop_takeover.h"
 #include "stream_path.h"
 #include "src/config.h"
 #include "virtual_display.h"
@@ -57,6 +58,9 @@ namespace stream_display_policy {
         if (path->id == stream_path::k_host_virtual_display) {
           return virtual_display_available;
         }
+        if (path->id == stream_path::k_desktop_takeover) {
+          return virtual_display_available && desktop_takeover::is_available();
+        }
         return true;
       }
       return false;
@@ -80,6 +84,14 @@ namespace stream_display_policy {
         if (path->id == stream_path::k_host_virtual_display &&
             !virtual_display_available) {
           return "Host virtual display is not available on this host.";
+        }
+        if (path->id == stream_path::k_desktop_takeover &&
+            !virtual_display_available) {
+          return "Desktop Takeover requires a virtual-display backend that creates a new output.";
+        }
+        if (path->id == stream_path::k_desktop_takeover &&
+            !desktop_takeover::is_available()) {
+          return desktop_takeover::unavailable_reason();
         }
         if (!path->unavailable_reason.empty()) {
           return std::string {path->unavailable_reason};
@@ -108,6 +120,7 @@ namespace stream_display_policy {
     return key == k_headless_stream ||
            key == k_windowed_stream ||
            key == k_host_virtual_display ||
+           key == k_desktop_takeover ||
            key == k_gamescope_stream;
   }
 
@@ -120,7 +133,9 @@ namespace stream_display_policy {
 
   std::string reason_for_selection(std::string_view selection, bool virtual_display_available) {
     if (const auto *path = stream_path::find(selection)) {
-      if (path->id == stream_path::k_host_virtual_display && !virtual_display_available) {
+      if ((path->id == stream_path::k_host_virtual_display ||
+           path->id == stream_path::k_desktop_takeover) &&
+          !virtual_display_available) {
         return "Polaris requested a host virtual display, but no backend is currently available.";
       }
       return std::string {path->reason};
@@ -132,7 +147,8 @@ namespace stream_display_policy {
     const auto key = to_lower_copy(selection);
     return selection_available_for_capabilities(
       key,
-      key != k_host_virtual_display || virtual_display::is_available()
+      (key != k_host_virtual_display && key != k_desktop_takeover) ||
+        virtual_display::is_available()
     );
   }
 
@@ -148,8 +164,10 @@ namespace stream_display_policy {
   std::string selection_unavailable_reason(std::string_view selection) {
     const auto key = to_lower_copy(selection);
     const bool virtual_display_available =
-      key != k_host_virtual_display || virtual_display::is_available();
-    if (key == k_host_virtual_display && !virtual_display_available) {
+      (key != k_host_virtual_display && key != k_desktop_takeover) ||
+        virtual_display::is_available();
+    if ((key == k_host_virtual_display || key == k_desktop_takeover) &&
+        !virtual_display_available) {
       const auto backend_reason = virtual_display::unavailable_reason();
       if (!backend_reason.empty()) {
         return backend_reason;
@@ -191,6 +209,7 @@ namespace stream_display_policy {
       booleans.prefer_gpu_native_capture = true;
     }
     else if (key == k_host_virtual_display ||
+             key == k_desktop_takeover ||
              key == stream_path::k_headless_dongle) {
       // Dongle: host desktop path with topology swap — not private labwc.
       booleans.headless_mode = true;
@@ -388,7 +407,10 @@ namespace stream_display_policy {
       return configured;
     }
     if (session_uses_virtual_display) {
-      if (const auto *path = stream_path::find(stream_path::k_host_virtual_display)) {
+      const auto active_virtual_mode = configured.selection == k_desktop_takeover ?
+                                         k_desktop_takeover :
+                                         k_host_virtual_display;
+      if (const auto *path = stream_path::find(active_virtual_mode)) {
         auto caps = stream_path::probe_host_capabilities();
         caps.virtual_display_available = input.virtual_display_available;
         return stream_path::resolve_path(*path, caps);
@@ -430,16 +452,22 @@ namespace stream_display_policy {
     const auto key = to_lower_copy(selection);
     return selection_valid_for_capabilities(
       key,
-      key != k_host_virtual_display || virtual_display::is_available(),
+      (key != k_host_virtual_display && key != k_desktop_takeover) ||
+        virtual_display::is_available(),
       error
     );
   }
 
   bool selection_valid_fresh(std::string_view selection, std::string &error) {
     const auto key = to_lower_copy(selection);
+    if (key == k_desktop_takeover && !desktop_takeover::is_available_fresh()) {
+      error = desktop_takeover::unavailable_reason();
+      return false;
+    }
     return selection_valid_for_capabilities(
       key,
-      key != k_host_virtual_display || virtual_display::is_available_fresh(),
+      (key != k_host_virtual_display && key != k_desktop_takeover) ||
+        virtual_display::is_available_fresh(),
       error
     );
   }
@@ -471,7 +499,7 @@ namespace stream_display_policy {
           linux_display.auto_manage_displays) {
         return false;
       }
-      if (key == k_host_virtual_display) {
+      if (key == k_host_virtual_display || key == k_desktop_takeover) {
         const auto backend = virtual_display::detect_backend();
         if (config::video.capture != capture_for_host_virtual_display_backend(
                                        backend,
@@ -516,16 +544,18 @@ namespace stream_display_policy {
     // and the KScreen Host Virtual fallback. Clear it for Desktop, Gamescope,
     // and compositor-private modes so a prior dongle cannot pin capture or SDL
     // fullscreen hints after its topology actuator has been disabled.
-    if (key != stream_path::k_headless_dongle && key != k_host_virtual_display) {
+    if (key != stream_path::k_headless_dongle &&
+        key != k_host_virtual_display && key != k_desktop_takeover) {
       const bool retiring_connector_state =
         linux_display.stream_mode == stream_path::k_headless_dongle ||
         linux_display.stream_mode == k_host_virtual_display ||
+        linux_display.stream_mode == k_desktop_takeover ||
         linux_display.auto_manage_displays ||
         !linux_display.headless_swap_mode.empty();
       clear_connector_output_authority(retiring_connector_state);
     }
 
-    if (key == k_host_virtual_display) {
+    if (key == k_host_virtual_display || key == k_desktop_takeover) {
       normalize_host_virtual_display_state();
     }
 
@@ -600,11 +630,12 @@ namespace stream_display_policy {
         if (linux_display.private_runtime.empty() && booleans.use_cage_compositor) {
           linux_display.private_runtime = std::string {k_runtime_labwc};
         }
-        if (path->id == k_host_virtual_display) {
+        if (path->id == k_host_virtual_display || path->id == k_desktop_takeover) {
           normalize_host_virtual_display_state();
         }
         if (path->id != stream_path::k_headless_dongle &&
-            path->id != k_host_virtual_display) {
+            path->id != k_host_virtual_display &&
+            path->id != k_desktop_takeover) {
           const bool retiring_connector_state =
             linux_display.auto_manage_displays ||
             !linux_display.headless_swap_mode.empty();
@@ -627,7 +658,8 @@ namespace stream_display_policy {
       linux_display.use_cage_compositor,
       linux_display.prefer_gpu_native_capture,
     });
-    if (linux_display.stream_mode == k_host_virtual_display) {
+    if (linux_display.stream_mode == k_host_virtual_display ||
+        linux_display.stream_mode == k_desktop_takeover) {
       normalize_host_virtual_display_state();
     }
 
@@ -651,13 +683,18 @@ namespace stream_display_policy {
       option.label = std::string {path.label};
       option.badge = std::string {path.badge};
       option.reason = reason_for_selection(path.id, virtual_display_available);
+      const bool needs_virtual_display =
+        path.id == stream_path::k_host_virtual_display ||
+        path.id == stream_path::k_desktop_takeover;
       option.available = path.available &&
-        (path.id != stream_path::k_host_virtual_display || virtual_display_available);
+        (!needs_virtual_display || virtual_display_available);
       option.unavailable_reason = std::string {path.unavailable_reason};
       if (!option.available &&
-          path.id == stream_path::k_host_virtual_display &&
+          needs_virtual_display &&
           option.unavailable_reason.empty()) {
-        option.unavailable_reason = "Host virtual display is not available on this host.";
+        option.unavailable_reason = path.id == stream_path::k_desktop_takeover ?
+          "Desktop Takeover requires a virtual-display backend that creates a new output." :
+          "Host virtual display is not available on this host.";
       }
       option.group = std::string {path.group};
       option.runtime = std::string {stream_path::runtime_kind_id(path.runtime)};
@@ -683,7 +720,9 @@ namespace stream_display_policy {
       if (path.group == "experimental" && !include_unavailable) {
         continue;
       }
-      if (path.id == stream_path::k_host_virtual_display && !virtual_display_available) {
+      if ((path.id == stream_path::k_host_virtual_display ||
+           path.id == stream_path::k_desktop_takeover) &&
+          !virtual_display_available) {
         continue;
       }
       // Dongle is always listable when available; apply auto-fills outputs.

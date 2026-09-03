@@ -142,7 +142,8 @@ describe('Linux Streaming Setup checklist', () => {
     const pickerButtons = wrapper.find('[data-stream-display-mode-picker]').findAll('button')
     const planned = wrapper.find('[data-planned-stream-modes]')
 
-    expect(pickerButtons).toHaveLength(6)
+    expect(pickerButtons).toHaveLength(7)
+    expect(pickerButtons.some((button) => button.text().includes('Desktop Takeover'))).toBe(true)
     expect(planned.text()).toContain('Family Mode (isolated)')
     expect(planned.text()).toContain('Headless EVDI')
     expect(pickerButtons.some((button) => button.text().includes('Family Mode'))).toBe(false)

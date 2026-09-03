@@ -24,6 +24,7 @@ const migratedSettingsSources = [
   'configs/tabs/encoders/NvidiaNvencEncoder.vue',
   'configs/tabs/encoders/SoftwareEncoder.vue',
   'configs/tabs/encoders/VideotoolboxEncoder.vue',
+  'configs/tabs/encoders/VulkanEncoder.vue',
   'views/PasswordView.vue',
   'views/PinView.vue',
   'views/TroubleshootingView.vue',

@@ -42,7 +42,12 @@ TEST_F(OtpClaim, NoOutstandingPinMatchesNothing) {
 }
 
 TEST_F(OtpClaim, MatchingHashYieldsThePinAndWhatItAuthorizes) {
-  const auto pin = nvhttp::request_otp(passphrase, "Living Room TV", crypto::PERM::_game_control);
+  const auto pin = nvhttp::request_otp(
+    passphrase,
+    "Living Room TV",
+    crypto::PERM::_game_control,
+    true
+  );
   ASSERT_FALSE(pin.empty());
 
   const auto claim = nvhttp::claim_one_time_pin_for_tests(salt, presented_hash_for(pin));
@@ -52,6 +57,7 @@ TEST_F(OtpClaim, MatchingHashYieldsThePinAndWhatItAuthorizes) {
   EXPECT_EQ(claim.device_name, "Living Room TV");
   ASSERT_TRUE(claim.pairing_perm.has_value());
   EXPECT_EQ(*claim.pairing_perm, crypto::PERM::_game_control);
+  EXPECT_TRUE(claim.temporary_authorization);
 }
 
 TEST_F(OtpClaim, APinIsRedeemableOnlyOnce) {

@@ -24,6 +24,7 @@ linux_use_cage_compositor = enabled
 | `headless_stream` | Private Stream — private labwc compositor, prefer true headless |
 | `windowed_stream` | Private Stream (GPU-native preference) — may window labwc to keep DMA-BUF |
 | `host_virtual_display` | Host-side virtual output (EVDI / wlr / kscreen) |
+| `desktop_takeover` | Hyprland live-desktop takeover — add a client-sized virtual output, move workspaces, DPMS-off source displays, then restore exactly at teardown |
 | `desktop_display` | Mirror the current desktop session |
 | `gamescope_stream` | Gamescope Stream — attach idle `gamescope-0` or spawn owned headless; portal/PipeWire capture (available when `gamescope` is on PATH) |
 | `headless_dongle` | Swap desktop onto a dummy-plug connector for KMS capture (needs streaming + primary outputs) |

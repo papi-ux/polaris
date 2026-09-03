@@ -18,8 +18,17 @@ Doctor reports one of four plain outcomes:
 | **Client** | Received, decoded, or rendered evidence points to the playback device when those measurements are available. |
 | **No confirmed issue** | The available evidence does not support blaming one stage. Unavailable measurements stay unknown instead of becoming a guess. |
 
-Static menus and repeated frames do not by themselves prove a pacing fault. Doctor waits for useful
-coverage and keeps warning evidence visible instead of calling the stream stable beside it.
+Static menus and repeated frames do not by themselves prove a pacing fault. Doctor collects six
+complete video telemetry windows after startup and requires a warning threshold in two consecutive
+windows before grading frame pacing. While that window is still filling, pacing evidence stays
+**Unknown** instead of briefly blaming startup work. Confirmed warning evidence remains visible
+instead of appearing beside a contradictory stable verdict.
+
+SHM or system-memory capture is capability context, not a failure by itself. Doctor keeps the path
+visible in Advanced evidence, but leaves the overall verdict healthy when delivered cadence,
+capture latency, and encoder time remain inside the active stream's real FPS budget. It warns only
+when those measurements show pressure; it does not lower a healthy 120 FPS stream merely because
+its compatibility path is CPU-backed.
 
 ## Pick the offered action
 

@@ -526,6 +526,25 @@ namespace video {
   int probe_encoders(bool strict_configured_encoder = false, bool save_successful_cache = true);
 
   /**
+   * @brief Explain how the active encoder was selected.
+   * @details This is deterministic launch-policy evidence for diagnostics and
+   *          Doctor. Doctor may explain it but does not mutate the selection.
+   */
+  struct encoder_selection_info_t {
+    std::string mode;
+    std::string gpu_driver;
+    std::string policy;
+    std::string preferred_encoder;
+    std::string fallback_encoder;
+    std::string selected_encoder;
+    std::string reason;
+    bool exact_live_probe_required = false;
+    bool fallback_used = false;
+  };
+
+  encoder_selection_info_t active_encoder_selection_info();
+
+  /**
    * @brief Get the name of the currently selected encoder.
    * @return Encoder name such as "nvenc", or an empty string if none is selected.
    */
@@ -542,6 +561,14 @@ namespace video {
    * @return True for GPU-backed encoder paths such as CUDA and VAAPI.
    */
   bool active_encoder_requires_gpu_native_capture();
+
+  /**
+   * @brief Whether Linux Auto currently plans a GPU-native encoder route.
+   * @details This remains useful before deferred private-compositor probing has
+   *          selected an encoder, allowing the session manager to run the exact
+   *          first-frame probe that makes the automatic choice safe.
+   */
+  bool automatic_encoder_prefers_gpu_native_capture();
 
   /**
    * @brief Validate that the active encoder can start the requested codec/runtime path right now.

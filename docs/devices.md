@@ -13,6 +13,10 @@ what the access presets allow, and what the device editor changes.
 | **Manual PIN** | Standard Moonlight clients | The client shows a four-digit PIN; enter it here and choose **Send**. The classic Moonlight flow, described step by step in [Play with Moonlight](moonlight.md). |
 
 Every route applies the access preset selected under **Access for this device** at pairing time.
+For Nova QR and Manual PIN, **Temporary device authorization** keeps the certificate only in
+memory. Polaris revokes it after that device's final stream disconnect, and a Polaris restart also
+removes it, so the device must be paired again before it can reconnect. Temporary authorization is
+useful for a guest device; it does not weaken the selected access preset while the device is live.
 
 ## Access presets
 
@@ -56,8 +60,9 @@ window, each with its source and whether it is applied live or at the next launc
 the settings projection says so instead of guessing.
 
 **Identity & Access** holds the device name, the access preset buttons, the fine-tune permissions,
-and three switches: legacy app ordering for clients that cannot handle UTF-8, a virtual display
-on every connection (Windows hosts), and whether client commands may run for this device.
+and switches for legacy app ordering, a virtual display on every connection (Windows hosts), client
+commands, and temporary authorization. Changing a saved device to temporary removes it from the
+durable pairing store; changing it back to permanent saves it again.
 
 **Display Profile** overrides what the client asks for:
 

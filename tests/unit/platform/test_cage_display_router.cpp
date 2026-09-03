@@ -499,6 +499,20 @@ TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessCudaCanAttemptExtcopyDmabuf)
   ));
 }
 
+TEST(CageDisplayRouterPolicyTests, EffectiveHeadlessVulkanCanAttemptExtcopyDmabuf) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = true,
+    .gpu_native_override_active = false,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_headless_extcopy_dmabuf(
+    runtime_state,
+    platf::mem_type_e::vulkan
+  ));
+}
+
 TEST(CageDisplayRouterPolicyTests, WindowedOverrideDoesNotAttemptHeadlessExtcopyDmabuf) {
   const platf::runtime_state_t runtime_state {
     .requested_headless = true,
@@ -541,6 +555,20 @@ TEST(CageDisplayRouterPolicyTests, WindowedOverrideAttemptsGpuNativeCaptureForCu
   EXPECT_TRUE(cage_display_router::should_attempt_gpu_native_cage_capture(
     runtime_state,
     platf::mem_type_e::cuda
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, WindowedOverrideAttemptsGpuNativeCaptureForVulkan) {
+  const platf::runtime_state_t runtime_state {
+    .requested_headless = true,
+    .effective_headless = false,
+    .gpu_native_override_active = true,
+    .backend_name = "labwc",
+  };
+
+  EXPECT_TRUE(cage_display_router::should_attempt_gpu_native_cage_capture(
+    runtime_state,
+    platf::mem_type_e::vulkan
   ));
 }
 
@@ -604,6 +632,26 @@ TEST(CageDisplayRouterPolicyTests, CudaRemainsSafeWithoutAModifier) {
   ));
   EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
     platf::mem_type_e::cuda,
+    route_e::direct_wayland,
+    std::nullopt
+  ));
+}
+
+TEST(CageDisplayRouterPolicyTests, VulkanRemainsSafeWithoutAModifier) {
+  using route_e = wlgrab_capture_policy::gpu_native_capture_route_e;
+
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vulkan,
+    route_e::headless_extcopy,
+    std::nullopt
+  ));
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vulkan,
+    route_e::windowed_nested,
+    std::nullopt
+  ));
+  EXPECT_TRUE(cage_display_router::gpu_native_dmabuf_is_safe(
+    platf::mem_type_e::vulkan,
     route_e::direct_wayland,
     std::nullopt
   ));

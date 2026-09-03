@@ -134,6 +134,7 @@ export function applyStreamDisplayModeToConfig(config = {}, mode) {
       next.capture = 'wlr'
       break
     case 'host_virtual_display':
+    case 'desktop_takeover':
       next.headless_mode = 'enabled'
       next.linux_use_cage_compositor = 'disabled'
       next.linux_prefer_gpu_native_capture = 'disabled'
@@ -196,6 +197,7 @@ export function resolveClientSettingsSync(config = {}) {
 export function labelForStreamDisplayMode(mode) {
   if (mode === 'headless_stream') return 'Private Stream'
   if (mode === 'host_virtual_display') return 'Host Virtual Display'
+  if (mode === 'desktop_takeover') return 'Desktop Takeover'
   if (mode === 'windowed_stream') return 'Private Stream (GPU-native)'
   if (mode === 'desktop_display') return 'Mirror Desktop'
   if (mode === 'gamescope_stream') return 'Gamescope Stream'
