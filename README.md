@@ -5,7 +5,7 @@
   <img src="docs/screenshots/Polaris_fulllogo_2_light.svg" width="250" alt="Polaris">
 </picture>
 
-**Stream your PC games from Linux—privately, clearly, and on your terms.**
+**Linux game streaming that answers to you.**
 
 Polaris turns a Linux gaming PC into a modern, self-hosted streaming home for
 Nova, Moonlight, and other compatible clients. Choose whether a session uses a
