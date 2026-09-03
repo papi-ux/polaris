@@ -204,6 +204,42 @@ const shellBlockDepths = (commands) => {
   })
 }
 
+// The Heroic launcher entry is assembled in the HTTP layer, where a unit test
+// cannot reach it, so pin the shape that makes it usable: published only after a
+// real import, launched detached, and matched against an entry a user added by
+// hand so a second import does not stack duplicates.
+describe('Heroic library launcher entry', () => {
+  const confighttp = readSource('src/confighttp.cpp')
+
+  it('publishes the entry only when a Heroic import actually happened', () => {
+    expect(confighttp).toContain('std::optional<game_library::launcher_install_t> imported_heroic_install;')
+    expect(confighttp).toContain('imported_heroic_install = heroic->install;')
+    expect(confighttp).toContain('if (imported_heroic_install) {')
+    expect(confighttp).toContain('ensure_heroic_library_app(fileTree, *imported_heroic_install);')
+  })
+
+  it('uses the launcher command for the install that produced the import', () => {
+    expect(confighttp).toContain('game_library::heroic_launcher_command(install)')
+  })
+
+  it('recognises an entry the user already added', () => {
+    expect(confighttp).toContain('boost::iequals(trimmed, "heroic")')
+    expect(confighttp).toContain('boost::iequals(trimmed, "setsid heroic")')
+  })
+
+  it('runs detached with no foreground command, like the Lutris entry', () => {
+    const entry = confighttp.slice(
+      confighttp.indexOf('void ensure_heroic_library_app'),
+      confighttp.indexOf('void ensure_lutris_library_app'),
+    )
+    expect(entry).toContain('{"name", "Heroic"}')
+    expect(entry).toContain('{"source", "heroic"}')
+    expect(entry).toContain('{"cmd", ""}')
+    expect(entry).toContain('nlohmann::json::array({launcher_command})')
+    expect(entry).toContain('{"auto-detach", true}')
+  })
+})
+
 describe('Linux packaging contracts', () => {
   it('lets the user service outlive the desktop session', () => {
     // A streaming host must keep serving when the desktop session ends: a

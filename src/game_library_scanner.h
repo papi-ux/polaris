@@ -173,6 +173,15 @@ namespace game_library {
   bool is_heroic_app_name_safe(const std::string &app_name);
 
   /** @brief The `heroic://launch` command for one title, for the install that has it. */
+  /**
+   * @brief The command that opens Heroic itself, with no game attached.
+   * @param install Which packaging of Heroic the library entries came from.
+   *
+   * Unlike a game launch this keeps Heroic's window: the entry exists so a player
+   * can reach the launcher from the stream, install something, or fix a login.
+   */
+  std::string heroic_launcher_command(launcher_install_t install);
+
   std::string heroic_launch_command(const std::string &store, const std::string &app_name, launcher_install_t install);
 
   /** @brief Current and exact older Polaris launch forms for one Heroic installation. */
