@@ -2,7 +2,6 @@
 import { ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
 import Checkbox from "../../Checkbox.vue";
-import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -22,9 +21,6 @@ const config = ref(props.config)
         <div class="section-kicker">{{ $t('config.inputs_kicker_controllers') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.inputs_section_gamepads') }}</h3>
-          <InfoHint size="sm" :label="$t('config.inputs_hint_gamepad_handling_guidance')">
-            {{ $t('config.inputs_hint_gamepad_handling_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
 
@@ -38,7 +34,6 @@ const config = ref(props.config)
       <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos'">
       <div class="settings-field-head">
         <label for="gamepad" class="settings-field-label">{{ $t('config.gamepad') }}</label>
-        <InfoHint size="sm" :label="$t('config.gamepad')">{{ $t('config.gamepad_desc') }}</InfoHint>
       </div>
       <select id="gamepad" class="settings-input" v-model="config.gamepad">
         <option value="auto">{{ $t('_common.auto') }}</option>
@@ -122,10 +117,10 @@ const config = ref(props.config)
       <div class="mb-3" v-if="config.controller === 'enabled'">
       <div class="settings-field-head">
         <label for="back_button_timeout" class="settings-field-label">{{ $t('config.back_button_timeout') }}</label>
-        <InfoHint size="sm" :label="$t('config.back_button_timeout')">{{ $t('config.back_button_timeout_desc') }}</InfoHint>
       </div>
       <input type="text" class="settings-input" id="back_button_timeout" placeholder="-1"
              v-model="config.back_button_timeout" />
+        <div class="text-xs text-storm mt-1">{{ $t('config.back_button_timeout_inline') }}</div>
       </div>
     </section>
 
@@ -134,9 +129,6 @@ const config = ref(props.config)
         <div class="section-kicker">{{ $t('config.inputs_kicker_keyboard') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.inputs_section_keyboard') }}</h3>
-          <InfoHint size="sm" :label="$t('config.inputs_hint_keyboard_passthrough_guidance')">
-            {{ $t('config.inputs_hint_keyboard_passthrough_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
 
@@ -150,7 +142,6 @@ const config = ref(props.config)
       <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
       <div class="settings-field-head">
         <label for="key_repeat_delay" class="settings-field-label">{{ $t('config.key_repeat_delay') }}</label>
-        <InfoHint size="sm" :label="$t('config.key_repeat_delay')">{{ $t('config.key_repeat_delay_desc') }}</InfoHint>
       </div>
       <input type="text" class="settings-input" id="key_repeat_delay" placeholder="500"
              v-model="config.key_repeat_delay" />
@@ -159,7 +150,6 @@ const config = ref(props.config)
       <div class="mb-3" v-if="config.keyboard === 'enabled' && platform === 'windows'">
       <div class="settings-field-head">
         <label for="key_repeat_frequency" class="settings-field-label">{{ $t('config.key_repeat_frequency') }}</label>
-        <InfoHint size="sm" :label="$t('config.key_repeat_frequency')">{{ $t('config.key_repeat_frequency_desc') }}</InfoHint>
       </div>
       <input type="text" class="settings-input" id="key_repeat_frequency" placeholder="24.9"
              v-model="config.key_repeat_frequency" />
@@ -187,9 +177,6 @@ const config = ref(props.config)
         <div class="section-kicker">{{ $t('config.inputs_kicker_mouse_touch') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.inputs_section_pointer_and_touch') }}</h3>
-          <InfoHint size="sm" :label="$t('config.inputs_hint_pointer_and_touch_guidance')">
-            {{ $t('config.inputs_hint_pointer_and_touch_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
 
@@ -205,9 +192,6 @@ const config = ref(props.config)
         <div>
           <div class="settings-field-head !mb-0">
             <div class="text-sm font-medium text-silver">{{ $t('config.inputs_show_host_cursor') }}</div>
-            <InfoHint size="sm" :label="$t('config.inputs_hint_show_host_cursor')">
-              {{ $t('config.inputs_hint_show_host_cursor_body') }}
-            </InfoHint>
           </div>
         </div>
         <label class="relative inline-flex items-center cursor-pointer shrink-0">
@@ -252,9 +236,6 @@ const config = ref(props.config)
         <div class="section-kicker">{{ $t('config.inputs_kicker_accessories') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.inputs_section_extras') }}</h3>
-          <InfoHint size="sm" :label="$t('config.inputs_hint_extended_input_guidance')">
-            {{ $t('config.inputs_hint_extended_input_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
 

@@ -1,12 +1,12 @@
 <template>
   <div class="page-shell operator-console library-view">
+    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/apps/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">Library and app editor guide</a>
+    </p>
     <section v-if="!showEditForm" class="page-header">
       <div class="page-heading">
         <div class="section-title-row">
           <h1 class="page-title">{{ $t('navbar.library') }}</h1>
-          <InfoHint size="sm" label="Library overview">
-            Curate the apps Polaris can launch, keep the client-facing order clean, and pull in new titles from supported libraries without leaving the host console.
-          </InfoHint>
         </div>
         <p class="page-subtitle">Publish, order, import, and launch apps from one surface.</p>
       </div>
@@ -48,9 +48,6 @@
       <div class="page-heading">
         <div class="section-title-row">
           <h1 class="page-title">{{ editForm?.name || 'Untitled app' }}</h1>
-          <InfoHint size="sm" label="Application editor overview">
-            Tune launch commands, artwork, environment variables, and per-app behavior. Saving writes this launcher profile immediately.
-          </InfoHint>
         </div>
         <p class="page-subtitle">Edit the launcher profile that Polaris publishes to clients.</p>
       </div>
@@ -80,9 +77,6 @@
           <div class="section-kicker">Import Console</div>
           <div class="section-title-row">
             <h2 class="section-title">Import games</h2>
-            <InfoHint size="sm" label="Import console">
-              Polaris can import games from supported sources, keep track of what is already published, and stage multiple entries before one import pass.
-            </InfoHint>
           </div>
         </div>
         <div class="page-actions-secondary">
@@ -182,9 +176,6 @@
         </div>
         <div class="mt-4 flex items-center justify-center gap-2">
           <h3 class="text-lg font-semibold text-silver">Ready to scan installed libraries</h3>
-          <InfoHint size="sm" label="Game library scan">
-            Start a scan to discover install candidates from Steam, Lutris, and Heroic. Already-imported entries stay visible so you can spot what is new.
-          </InfoHint>
         </div>
         <div class="mt-5">
           <Button variant="primary" :disabled="gameScanning" @click="scanGames">
@@ -304,9 +295,6 @@
           <div class="section-kicker">Quick Launch</div>
           <div class="section-title-row">
             <h2 class="section-title">Jump back in</h2>
-            <InfoHint size="sm" label="Library Quick Launch">
-              Favorite, recent, and launch-ready apps are ranked first so the Library feels familiar from the couch while still showing broken entries that need attention.
-            </InfoHint>
           </div>
           <p class="mt-2 text-sm text-storm">Favorites and recently played games, ready to launch.</p>
         </div>
@@ -386,16 +374,10 @@
             <div class="section-kicker">Library Surface</div>
             <div class="section-title-row">
               <h2 class="section-title">Published apps</h2>
-              <InfoHint size="sm" label="Published app surface">
-                Keep this list focused. Reorder entries to shape what clients see first, and open an app to manage artwork, commands, and per-title runtime tweaks.
-              </InfoHint>
             </div>
           </div>
           <div class="console-inline-note">
             <span class="font-medium text-silver">Order rebuilds the client list</span>
-            <InfoHint size="sm" align="right" label="Ordering note">
-              Reordering can interrupt the current session because Polaris rebuilds the published app list after changes.
-            </InfoHint>
           </div>
         </div>
 
@@ -403,23 +385,18 @@
           <article class="stat-tile">
             <div class="section-title-row">
               <div class="stat-kicker">Published Apps</div>
-              <InfoHint size="sm" label="Published apps">Entries visible to paired clients and the web UI launch flow.</InfoHint>
             </div>
             <div class="stat-value">{{ appCount }}</div>
           </article>
           <article class="stat-tile">
             <div class="section-title-row">
               <div class="stat-kicker">Running Now</div>
-              <InfoHint size="sm" label="Running app">
-                {{ activeApp ? `${activeApp.name} is currently owning the session.` : 'No app is actively holding the current stream.' }}
-              </InfoHint>
             </div>
             <div class="stat-value">{{ activeApp ? 1 : 0 }}</div>
           </article>
           <article class="stat-tile">
             <div class="section-title-row">
               <div class="stat-kicker">Import Ready</div>
-              <InfoHint size="sm" label="Import candidates">Games found across Steam, Lutris, and Heroic that are not yet imported.</InfoHint>
             </div>
             <div class="stat-value">{{ availableImportCount }}</div>
           </article>
@@ -453,9 +430,6 @@
 
         <div class="console-inline-note mt-3">
           <span class="font-medium text-silver">Ordering and export</span>
-          <InfoHint size="sm" label="Ordering and export">
-            Drag rows to reorder. Open an app to export its `.art` launcher file or change per-title behavior.
-          </InfoHint>
           <span v-if="libraryViewFiltered" class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
             Reorder disabled while filtered
           </span>
@@ -561,9 +535,6 @@
           </div>
           <div class="mt-4 flex items-center justify-center gap-2">
             <h3 class="text-lg font-semibold text-silver">No apps match this view</h3>
-            <InfoHint size="sm" label="Filtered library">
-              Clear the search field or switch back to All to restore the full published list.
-            </InfoHint>
           </div>
           <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-secondary mt-5" @click="clearLibraryFilters">
             Clear filters
@@ -576,9 +547,6 @@
           </div>
           <div class="mt-4 flex items-center justify-center gap-2">
             <h3 class="text-lg font-semibold text-silver">No applications published yet</h3>
-            <InfoHint size="sm" label="Empty library">
-              Add a launcher manually or scan your existing libraries. Polaris will publish the final list to Moonlight and Nova clients once entries are saved.
-            </InfoHint>
           </div>
         </div>
       </section>
@@ -587,9 +555,6 @@
         <div class="section-kicker">Library Health</div>
         <div class="section-title-row">
           <h2 class="section-title">Coverage and host context</h2>
-          <InfoHint size="sm" align="right" label="Library hygiene">
-            Keep launcher entries short and recognizable, use per-app overrides only where needed, and export `.art` entries when you want favorite launches in frontends or automation.
-          </InfoHint>
         </div>
 
         <div class="library-health-strip mt-4">
@@ -611,7 +576,6 @@
           <article class="surface-subtle p-4">
             <div class="section-title-row">
               <div class="text-sm font-semibold text-silver">Import coverage</div>
-              <InfoHint size="sm" label="Import coverage">Games found by supported launchers that can be imported into the published list.</InfoHint>
             </div>
             <div class="mt-3 grid gap-2 sm:grid-cols-3 xl:grid-cols-1">
               <div v-for="source in importSources" :key="source.key" class="flex items-center justify-between rounded-xl border border-storm/15 bg-void/40 px-3 py-2">
@@ -627,9 +591,6 @@
           <article class="surface-subtle p-4">
             <div class="section-title-row">
               <div class="text-sm font-semibold text-silver">Library hygiene</div>
-              <InfoHint size="sm" label="Library hygiene checklist">
-                Keep launcher entries short and recognizable for clients browsing from a couch or handheld. Use per-app overrides for launchers, tools, or games that need different display or command behavior. Export `.art` entries when you want to pin favorite launches into a frontend or automation flow.
-              </InfoHint>
             </div>
             <div class="mt-3 text-sm text-storm">Keep the client-facing surface intentional.</div>
           </article>
@@ -671,7 +632,6 @@
             <div class="app-editor-field app-editor-field-wide">
               <div class="settings-field-head">
                 <label for="appName" class="settings-field-label">{{ $t('apps.app_name') }}</label>
-                <InfoHint size="sm" :label="$t('apps.app_name')">{{ $t('apps.app_name_desc') }}</InfoHint>
               </div>
               <div class="app-editor-inline-control">
                 <input type="text" class="app-editor-input" id="appName" v-model="editForm.name" />
@@ -711,7 +671,6 @@
             <div class="app-editor-field app-editor-field-wide">
               <div class="settings-field-head">
                 <label for="appImagePath" class="settings-field-label">{{ $t('apps.image') }}</label>
-                <InfoHint size="sm" :label="$t('apps.image')">{{ $t('apps.image_desc') }}</InfoHint>
               </div>
               <input type="text" class="app-editor-input app-editor-input-mono" id="appImagePath" v-model="editForm['image-path']" />
             </div>
@@ -719,7 +678,6 @@
             <div class="app-editor-field">
               <div class="settings-field-head">
                 <label for="gameCategory" class="settings-field-label">Game Category</label>
-                <InfoHint size="sm" label="Game Category">Classification hint for Auto Quality. Auto-detected from Steam genres on import.</InfoHint>
               </div>
               <select id="gameCategory" class="app-editor-input" v-model="editForm['game-category']">
                 <option value="">Not classified</option>
@@ -733,7 +691,6 @@
             <div v-if="platform !== 'macos'" class="app-editor-field">
               <div class="settings-field-head">
                 <label for="gamepad" class="settings-field-label">{{ $t('config.gamepad') }}</label>
-                <InfoHint size="sm" :label="$t('config.gamepad')">{{ $t('config.gamepad_desc') }}</InfoHint>
               </div>
               <select id="gamepad" class="app-editor-input" v-model="editForm.gamepad">
                 <option value="">{{ $t('_common.default_global') }}</option>
@@ -755,7 +712,6 @@
           <div class="app-editor-toggle-row">
             <div class="section-title-row">
               <div class="text-sm font-medium text-silver">MangoHud Overlay</div>
-              <InfoHint size="sm" label="MangoHud Overlay">Show GPU, CPU, temp, and frametime in the stream from the host side.</InfoHint>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" v-model="editMangoHud" class="sr-only peer" />
@@ -777,10 +733,6 @@
             <div class="app-editor-field app-editor-field-wide">
               <div class="settings-field-head">
                 <label for="appCmd" class="settings-field-label">{{ $t('apps.cmd') }}</label>
-                <InfoHint size="sm" :label="$t('apps.cmd')">
-                  {{ $t('apps.cmd_desc') }}
-                  {{ $t('apps.cmd_note') }}
-                </InfoHint>
               </div>
               <input type="text" class="app-editor-input app-editor-input-mono" id="appCmd" v-model="editForm.cmd" />
               <p data-command-environment-help class="mt-2 text-xs leading-5 text-storm">
@@ -801,7 +753,6 @@
                       id="appElevation"
                       label="_common.run_as"
                       desc="apps.run_as_desc"
-                      desc-as-hint
                       v-model="editForm.elevated"
                       default="false"
             ></Checkbox>
@@ -809,7 +760,6 @@
             <div class="app-editor-field">
               <div class="settings-field-head">
                 <label for="appWorkingDir" class="settings-field-label">{{ $t('apps.working_dir') }}</label>
-                <InfoHint size="sm" :label="$t('apps.working_dir')">{{ $t('apps.working_dir_desc') }}</InfoHint>
               </div>
               <input type="text" class="app-editor-input app-editor-input-mono" id="appWorkingDir" v-model="editForm['working-dir']" />
             </div>
@@ -817,7 +767,6 @@
             <div class="app-editor-field">
               <div class="settings-field-head">
                 <label for="appOutput" class="settings-field-label">{{ $t('apps.output_name') }}</label>
-                <InfoHint size="sm" :label="$t('apps.output_name')">{{ $t('apps.output_desc') }}</InfoHint>
               </div>
               <input type="text" class="app-editor-input app-editor-input-mono" id="appOutput" v-model="editForm.output" />
             </div>
@@ -831,10 +780,6 @@
             <div class="app-editor-disclosure-body">
               <div class="settings-field-head">
                 <span class="settings-field-label">{{ $t('apps.detached_cmds') }}</span>
-                <InfoHint size="sm" :label="$t('apps.detached_cmds')">
-                  {{ $t('apps.detached_cmds_desc') }}
-                  {{ $t('apps.detached_cmds_note') }}
-                </InfoHint>
               </div>
               <div v-for="(c,i) in editForm.detached" :key="i" class="app-editor-command-row">
                 <input type="text" v-model="editForm.detached[i]" class="app-editor-input app-editor-input-mono">
@@ -859,7 +804,6 @@
             <div v-if="showTweaks" class="app-editor-disclosure-body">
               <div class="settings-field-head">
                 <span class="settings-field-label">Environment variables</span>
-                <InfoHint size="sm" align="right" label="Environment and streaming tweaks">Environment variables, Proton settings, and per-game launch-time overrides.</InfoHint>
               </div>
               <div v-for="(envVar, i) in editEnvVars" :key="i" class="app-editor-env-row">
                 <input type="text" v-model="envVar.key" placeholder="KEY" class="app-editor-input app-editor-input-mono" />
@@ -889,7 +833,6 @@
                     id="clientCommands"
                     label="apps.allow_client_commands"
                     desc="apps.allow_client_commands_desc"
-                    desc-as-hint
                     v-model="editForm['allow-client-commands']"
                     default="true"
           ></Checkbox>
@@ -910,7 +853,6 @@
                           :id="'excludeGlobal_' + type"
                           :label="'apps.global_' + type + '_name'"
                           :desc="'apps.global_' + type + '_desc'"
-                          desc-as-hint
                           v-model="editForm['exclude-global-' + type + '-cmd']"
                           default="true"
                           inverse-values
@@ -918,7 +860,6 @@
                 <div>
                   <div class="settings-field-head">
                     <span class="settings-field-label">{{ $t('apps.cmd_' + type + '_name') }}</span>
-                    <InfoHint size="sm" :label="$t('apps.cmd_' + type + '_name')">{{ $t('apps.cmd_' + type + '_desc') }}</InfoHint>
                   </div>
                   <div class="app-editor-table-wrap" v-if="editForm[type + '-cmd'].length > 0">
                     <table class="app-editor-command-table">
@@ -986,24 +927,22 @@
           </summary>
           <div class="app-editor-disclosure-body">
             <div class="app-editor-grid">
-              <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" desc-as-hint v-model="editForm['auto-detach']" default="true"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" desc-as-hint v-model="editForm['wait-all']" default="true"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" desc-as-hint v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" desc-as-hint v-model="editForm['virtual-display']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" desc-as-hint v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" desc-as-hint v-model="editForm['use-app-identity']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" desc-as-hint v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" v-model="editForm['virtual-display']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
               <div class="app-editor-field">
                 <div class="settings-field-head">
                   <label for="exitTimeout" class="settings-field-label">{{ $t('apps.exit_timeout') }}</label>
-                  <InfoHint size="sm" :label="$t('apps.exit_timeout')">{{ $t('apps.exit_timeout_desc') }}</InfoHint>
                 </div>
                 <input type="number" class="app-editor-input app-editor-input-mono" id="exitTimeout" v-model="editForm['exit-timeout']" min="0" placeholder="5" />
               </div>
               <div v-if="platform === 'windows'" class="app-editor-field">
                 <div class="settings-field-head">
                   <label for="resolutionScaleFactor" class="settings-field-label">{{ $t('apps.resolution_scale_factor') }}: {{ editForm['scale-factor'] }}%</label>
-                  <InfoHint size="sm" :label="$t('apps.resolution_scale_factor')">{{ $t('apps.resolution_scale_factor_desc') }}</InfoHint>
                 </div>
                 <input type="range" step="1" min="20" max="200" class="w-full accent-ice" id="resolutionScaleFactor" v-model="editForm['scale-factor']"/>
               </div>
@@ -1023,9 +962,6 @@
             <div class="app-editor-compat-note">
               <svg class="h-5 w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <span>Environment compatibility</span>
-              <InfoHint size="sm" align="right" label="Environment compatibility">
-                {{ $t('apps.env_sunshine_compatibility') }}
-              </InfoHint>
             </div>
             <div class="app-editor-table-wrap">
               <table class="env-table text-sm">
@@ -1118,7 +1054,6 @@
 import { computed, ref, inject } from 'vue'
 import Checkbox from '../Checkbox.vue'
 import Button from '../components/Button.vue'
-import InfoHint from '../components/InfoHint.vue'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'

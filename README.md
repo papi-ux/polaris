@@ -5,7 +5,7 @@
   <img src="docs/screenshots/Polaris_fulllogo_2_light.svg" width="250" alt="Polaris">
 </picture>
 
-**Stream your PC games from Linux—privately, clearly, and on your terms.**
+**Linux game streaming that answers to you.**
 
 Polaris turns a Linux gaming PC into a modern, self-hosted streaming home for
 Nova, Moonlight, and other compatible clients. Choose whether a session uses a
@@ -150,7 +150,7 @@ Existing clients keep their saved access until it is changed under **Devices**.
 
 ## Documentation and project links
 
-- [Documentation](https://papi-ux.com/docs/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Doctor](https://papi-ux.com/docs/doctor/) · [FAQ](https://papi-ux.com/docs/faq/)
+- [Documentation](https://papi-ux.com/docs/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Doctor](https://papi-ux.com/docs/doctor/) · [FAQ](https://papi-ux.com/docs/faq/)
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [GitHub changelog](docs/changelog.md)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 - [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md) · [Source](https://github.com/papi-ux/polaris)

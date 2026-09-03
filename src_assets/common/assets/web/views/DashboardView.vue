@@ -1,5 +1,8 @@
 <template>
   <div class="page-shell operator-console mission-control-view relative">
+    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/mission-control/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ t('dashboard.docs_link') }}</a>
+    </p>
 
     <section class="page-header">
       <div class="page-heading">
@@ -30,7 +33,6 @@
             <div class="section-kicker">{{ $t('dashboard.live_session') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ liveSessionTitle }}</h2>
-              <InfoHint size="sm" :label="$t('dashboard.live_session')">{{ liveSessionSummary }}</InfoHint>
             </div>
             <div v-if="currentAppName || sessionDurationLabel" class="mt-1.5 font-mono text-[11px] text-storm">
               <template v-if="currentAppName">{{ currentAppName }}</template><template v-if="currentAppName && sessionDurationLabel"> · </template><template v-if="sessionDurationLabel">{{ sessionDurationLabel }}</template>
@@ -102,7 +104,6 @@
                 <div v-if="doctorConfidenceLabel" class="control-chip" role="listitem">{{ doctorConfidenceLabel }}</div>
                 <div class="meta-pill" :class="autoQuality.toneClass" role="listitem">{{ autoQuality.compactLabel }}</div>
                 <div class="inline-flex" role="listitem">
-                  <InfoHint size="sm" label="Auto Quality details">{{ autoQuality.detail }}</InfoHint>
                 </div>
               </div>
               <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ doctorRecommendation }}</p>
@@ -154,7 +155,6 @@
               <div class="dashboard-preview-header items-center">
                 <div class="flex min-w-0 items-center gap-2">
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
-                  <InfoHint size="sm" :label="$t('dashboard.display_preview')">{{ previewSupportCopy }}</InfoHint>
                 </div>
                 <div class="dashboard-preview-actions">
                   <button v-if="!showPreview" @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary">
@@ -559,7 +559,6 @@ import Skeleton from '../components/Skeleton.vue'
 import GaugeArc from '../components/GaugeArc.vue'
 import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
 import QuickControls from '../components/QuickControls.vue'
-import InfoHint from '../components/InfoHint.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { useToast } from '../composables/useToast'
 import { useI18n } from 'vue-i18n'
@@ -875,23 +874,7 @@ function streamDisplayModeLabel(statsPayload) {
   return modeLabelFromBool(Boolean(statsPayload?.runtime_effective_headless))
 }
 
-const runtimeBackendLabel = computed(() => {
-  const backend = String(stats.value?.runtime_backend || '').trim()
-  if (!backend || backend === 'none' || backend === 'unknown') {
-    // Last-resort while idle: derive from configured path id if present.
-    const pathId = stats.value?.stream_path_id || stats.value?.stream_display_mode_id
-    if (pathId === 'headless_stream' || pathId === 'windowed_stream' || pathId === 'family_isolated') return 'Labwc'
-    if (pathId === 'gamescope_stream') return 'Gamescope'
-    if (pathId === 'host_virtual_display' || pathId === 'headless_evdi') return 'Virtual display'
-    if (pathId === 'desktop_display') return 'Portal / host'
-    return 'Host'
-  }
-  if (backend === 'labwc') return 'Labwc'
-  if (backend === 'gamescope') return 'Gamescope'
-  if (backend === 'portal') return 'Portal'
-  if (backend === 'virtual_display') return 'Virtual display'
-  return titleizeToken(backend)
-})
+
 
 const runtimeEffectiveMode = computed(() => {
   if (!stats.value?.streaming) {
@@ -921,10 +904,7 @@ const nestedLabwcShmFallbackActive = computed(() => {
     transport === 'shm'
 })
 
-const captureTransportLabel = computed(() => {
-  if (!stats.value?.streaming) return '--'
-  return titleizeToken(stats.value?.capture_transport || 'unknown')
-})
+
 
 const capturePathLabel = computed(() => {
   if (!stats.value?.streaming) return '--'
@@ -981,14 +961,6 @@ const liveSessionTitle = computed(() => (
     : t('dashboard.live_session_single', { client: currentClientName.value })
 ))
 
-const liveSessionSummary = computed(() => {
-  if (runtimePathNote.value) return runtimePathNote.value
-  return t('dashboard.live_session_summary', {
-    backend: runtimeBackendLabel.value,
-    mode: String(runtimeEffectiveMode.value || '').toLowerCase(),
-    transport: captureTransportLabel.value,
-  })
-})
 
 const qualitySummaryLabel = computed(() => t('dashboard.quality_summary', {
   grade: qualityGrade.value,
@@ -1154,11 +1126,6 @@ const qualityScore = computed(() => buildQualityScore(stats.value || {}))
 
 const qualityGrade = computed(() => buildQualityGrade(qualityScore.value))
 
-const previewSupportCopy = computed(() => (
-  previewExpanded.value
-    ? t('dashboard.preview_support_expanded')
-    : t('dashboard.preview_support')
-))
 
 const previewStatusText = computed(() => {
   if (previewError.value) return t('dashboard.preview_unavailable_status')

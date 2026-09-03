@@ -1,7 +1,6 @@
 <script setup>
 import { ref } from 'vue'
 import Checkbox from '../../Checkbox.vue'
-import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps({
   platform: String,
@@ -75,9 +74,6 @@ function handleSteamGridDbKeyInput() {
         <div class="section-kicker">{{ $t('config.general_kicker_identity') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.general_section_host_identity') }}</h3>
-          <InfoHint size="sm" :label="$t('config.general_hint_host_basics_guidance')">
-            {{ $t('config.general_hint_host_basics_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
       <div class="settings-inline-stack">
@@ -86,9 +82,6 @@ function handleSteamGridDbKeyInput() {
     <div>
       <div class="section-title-row mb-1">
         <label for="locale" class="block text-sm font-medium text-storm">{{ $t('config.locale') }}</label>
-        <InfoHint size="sm" :label="$t('config.general_hint_locale_guidance')">
-          {{ $t('config.general_hint_locale_guidance_body') }}
-        </InfoHint>
       </div>
       <select id="locale" class="settings-input" v-model="config.locale">
         <option value="bg">Български (Bulgarian)</option>
@@ -120,9 +113,6 @@ function handleSteamGridDbKeyInput() {
     <div class="mb-3">
       <div class="section-title-row mb-1">
         <label for="sunshine_name" class="block text-sm font-medium text-storm">{{ $t('config.sunshine_name') }}</label>
-        <InfoHint size="sm" :label="$t('config.general_hint_visible_name_guidance')">
-          {{ $t('config.general_hint_visible_name_guidance_body') }}
-        </InfoHint>
       </div>
       <input type="text" class="settings-input" id="sunshine_name" placeholder="Polaris"
              v-model="config.sunshine_name" />
@@ -132,9 +122,6 @@ function handleSteamGridDbKeyInput() {
     <div class="mb-3">
       <div class="section-title-row mb-1">
         <label for="min_log_level" class="block text-sm font-medium text-storm">{{ $t('config.min_log_level') }}</label>
-        <InfoHint size="sm" :label="$t('config.general_hint_log_level_guidance')">
-          {{ $t('config.general_hint_log_level_guidance_body') }}
-        </InfoHint>
       </div>
       <select id="min_log_level" class="settings-input" v-model="config.min_log_level">
         <option value="0">{{ $t('config.min_log_level_0') }}</option>
@@ -155,9 +142,6 @@ function handleSteamGridDbKeyInput() {
         <div class="section-kicker">{{ $t('config.general_kicker_automation') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.general_section_automation') }}</h3>
-          <InfoHint size="sm" :label="$t('config.general_hint_lifecycle_commands_guidance')">
-            {{ $t('config.general_hint_lifecycle_commands_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
       <div class="settings-inline-stack">
@@ -166,10 +150,6 @@ function handleSteamGridDbKeyInput() {
     <div v-for="type in ['prep', 'state']" :id="`global_${type}_cmd`" class="d-flex flex-column">
       <div class="section-title-row mb-1">
         <label class="block text-sm font-medium text-storm">{{ $t(`config.global_${type}_cmd`) }}</label>
-        <InfoHint size="sm" :label="`${type} command guidance`">
-          <span v-if="type === 'prep'">{{ $t('config.general_prep_copy') }}</span>
-          <span v-else>{{ $t('config.general_state_copy') }}</span>
-        </InfoHint>
       </div>
       <table class="w-full text-left" v-if="cmds[type].length > 0">
         <thead>
@@ -218,9 +198,6 @@ function handleSteamGridDbKeyInput() {
     <div id="server_cmd" class="mb-3 d-flex flex-column">
       <div class="section-title-row mb-1">
         <label class="block text-sm font-medium text-storm">{{ $t('config.server_cmd') }}</label>
-        <InfoHint size="sm" :label="$t('config.general_hint_server_command_guidance')">
-          {{ $t('config.general_hint_server_command_guidance_body') }}
-        </InfoHint>
       </div>
       <table class="w-full text-left" v-if="serverCmd.length > 0">
         <thead>
@@ -271,9 +248,6 @@ function handleSteamGridDbKeyInput() {
         <div class="section-kicker">{{ $t('config.general_kicker_desktop_updates') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.general_section_desktop_behavior') }}</h3>
-          <InfoHint size="sm" :label="$t('config.general_hint_desktop_ui_behavior_guidance')">
-            {{ $t('config.general_hint_desktop_ui_behavior_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
       <div class="settings-inline-stack">
@@ -310,9 +284,6 @@ function handleSteamGridDbKeyInput() {
         <div class="section-kicker">{{ $t('config.general_kicker_metadata') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.general_section_artwork_integration') }}</h3>
-          <InfoHint size="sm" :label="$t('config.general_hint_artwork_integration_guidance')">
-            {{ $t('config.general_hint_artwork_integration_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
       <div class="mt-1">
@@ -349,9 +320,6 @@ function handleSteamGridDbKeyInput() {
         <div class="section-kicker">{{ $t('config.general_kicker_metadata') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.general_section_completion_estimates') }}</h3>
-          <InfoHint size="sm" :label="$t('config.general_hint_completion_estimate_guidance')">
-            {{ $t('config.general_hint_completion_estimate_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
       <Checkbox class="mt-1"
