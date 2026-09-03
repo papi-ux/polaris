@@ -36,6 +36,7 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 | **Application Name** | The name shown on Moonlight and Nova. |
 | **Image** | The icon, picture, or box image sent to clients. PNG only; when unset, Polaris sends its default box image. |
 | **Game Category** | A classification hint for Auto Quality, detected from Steam genres on import. |
+| **Platform and runtime** | Filled in for titles imported from Heroic. Says what the title installs as and what will execute it, such as Windows through Proton-GE. Left blank when Heroic did not record it. |
 | **Emulated Gamepad Type** | Which gamepad to emulate for this app, overriding the Input tab's default. |
 | **MangoHud Overlay** | Shows GPU, CPU, temperature, and frametime in the stream from the host side. |
 

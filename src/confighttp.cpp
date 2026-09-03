@@ -3009,6 +3009,28 @@ namespace confighttp {
       if (!entry.hero_url.empty()) {
         game["hero_url"] = entry.hero_url;
       }
+      // What the title installs as and what will execute it. Absent rather than
+      // guessed when Heroic did not record it.
+      if (!entry.platform.empty()) {
+        game["platform"] = entry.platform;
+      }
+      if (!entry.runtime.empty()) {
+        game["runtime"] = entry.runtime;
+      }
+      if (!entry.runtime_name.empty()) {
+        game["runtime_name"] = entry.runtime_name;
+      }
+    };
+    // The wine or proton choice lives per game under the Heroic config root, two
+    // levels above the library file the entries were parsed from.
+    const auto attach_heroic_runtime = [](game_library::heroic_game_t &entry, const std::filesystem::path &library_path) {
+      auto runtime = game_library::heroic_runtime_for_app(
+        library_path.parent_path().parent_path(),
+        entry.app_name,
+        entry.platform
+      );
+      entry.runtime = std::move(runtime.runtime);
+      entry.runtime_name = std::move(runtime.runtime_name);
     };
     const auto heroic_already_imported = [&existing_cmds, &existing_heroic_keys](
                                            const std::string &store,
@@ -3043,6 +3065,7 @@ namespace confighttp {
           std::stringstream cache_payload;
           cache_payload << cache_file.rdbuf();
           for (auto &entry : game_library::parse_heroic_cache_json(cache_payload.str(), store, install)) {
+            attach_heroic_runtime(entry, cache_path);
             heroic_cache_metadata.emplace(
               heroic_cache_key(entry.install, entry.store, entry.app_name),
               std::move(entry)
@@ -3077,6 +3100,9 @@ namespace confighttp {
                 ); cached != heroic_cache_metadata.end()) {
               entry.poster_url = cached->second.poster_url;
               entry.hero_url = cached->second.hero_url;
+              entry.platform = cached->second.platform;
+              entry.runtime = cached->second.runtime;
+              entry.runtime_name = cached->second.runtime_name;
             }
 
             // Both installs can hold the same title, and the launch command follows the

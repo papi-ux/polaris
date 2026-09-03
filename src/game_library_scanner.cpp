@@ -428,6 +428,99 @@ namespace game_library {
     return files;
   }
 
+  std::string normalize_heroic_platform(std::string_view platform, bool linux_native) {
+    std::string lowered;
+    lowered.reserve(platform.size());
+    for (const char c : platform) {
+      lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+
+    if (lowered == "windows" || lowered == "win32" || lowered == "win64") {
+      return "windows";
+    }
+    if (lowered == "linux") {
+      return "linux";
+    }
+    if (lowered == "mac" || lowered == "macos" || lowered == "osx") {
+      return "mac";
+    }
+
+    // Heroic does not always record a platform. The native flag is the only
+    // other thing it tells us, and silence is better than a guess.
+    return linux_native ? "linux" : std::string {};
+  }
+
+  heroic_runtime_t heroic_runtime_from_config(std::string_view wine_type, std::string_view wine_name, std::string_view platform) {
+    heroic_runtime_t runtime;
+    runtime.platform = std::string {platform};
+
+    if (platform == "linux") {
+      runtime.runtime = "native";
+      return runtime;
+    }
+
+    std::string lowered;
+    lowered.reserve(wine_type.size());
+    for (const char c : wine_type) {
+      lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+
+    if (lowered == "proton") {
+      runtime.runtime = "proton";
+    } else if (lowered == "wine" || lowered == "crossover" || lowered == "toolkit") {
+      runtime.runtime = "wine";
+    } else {
+      return runtime;
+    }
+
+    runtime.runtime_name = std::string {wine_name};
+    return runtime;
+  }
+
+  /**
+   * @brief Read the runtime Heroic recorded for one title.
+   *
+   * Heroic keeps the wine or proton choice per game in GamesConfig/<app>.json,
+   * not in the library file, so the platform alone cannot say what will run.
+   * A missing or unreadable config yields no runtime rather than a guess.
+   */
+  heroic_runtime_t heroic_runtime_for_app(
+    const std::filesystem::path &config_root,
+    const std::string &app_name,
+    const std::string &platform
+  ) {
+    if (platform == "linux") {
+      return heroic_runtime_from_config({}, {}, platform);
+    }
+
+    std::error_code ec;
+    const auto config_path = config_root / "GamesConfig" / (app_name + ".json");
+    if (!std::filesystem::is_regular_file(config_path, ec) || ec) {
+      return heroic_runtime_from_config({}, {}, platform);
+    }
+
+    std::ifstream file {config_path};
+    if (!file) {
+      return heroic_runtime_from_config({}, {}, platform);
+    }
+
+    nlohmann::json parsed = nlohmann::json::parse(file, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+      return heroic_runtime_from_config({}, {}, platform);
+    }
+
+    // The file is keyed by app name, with the settings nested underneath.
+    const auto settings = parsed.contains(app_name) && parsed[app_name].is_object() ? parsed[app_name] : parsed;
+    if (!settings.contains("wineVersion") || !settings["wineVersion"].is_object()) {
+      return heroic_runtime_from_config({}, {}, platform);
+    }
+
+    const auto &wine = settings["wineVersion"];
+    const auto type = wine.contains("type") && wine["type"].is_string() ? wine["type"].get<std::string>() : std::string {};
+    const auto name = wine.contains("name") && wine["name"].is_string() ? wine["name"].get<std::string>() : std::string {};
+    return heroic_runtime_from_config(type, name, platform);
+  }
+
   std::string heroic_install_name(launcher_install_t install) {
     return install == launcher_install_t::flatpak ? "flatpak" : "native";
   }
@@ -613,7 +706,8 @@ namespace game_library {
       const std::string &store,
       launcher_install_t install,
       std::string poster_url = {},
-      std::string hero_url = {}
+      std::string hero_url = {},
+      heroic_runtime_t runtime = {}
     ) {
       const auto runner = heroic_runner_for_store(store);
       const auto command = heroic_launch_command(store, app_name, install);
@@ -630,6 +724,9 @@ namespace game_library {
         .command = command,
         .poster_url = std::move(poster_url),
         .hero_url = std::move(hero_url),
+        .platform = std::move(runtime.platform),
+        .runtime = std::move(runtime.runtime),
+        .runtime_name = std::move(runtime.runtime_name),
       };
     }
 
@@ -671,13 +768,27 @@ namespace game_library {
         return std::nullopt;
       }
 
+      // Heroic records the installed platform under install, and flags Linux
+      // native titles separately. Neither is guaranteed to be present.
+      const auto installed_platform = entry.contains("install") && entry["install"].is_object() &&
+                                          entry["install"].contains("platform") &&
+                                          entry["install"]["platform"].is_string() ?
+                                        entry["install"]["platform"].get<std::string>() :
+                                        std::string {};
+      const auto linux_native = entry.contains("is_linux_native") && entry["is_linux_native"].is_boolean() &&
+                                entry["is_linux_native"].get<bool>();
+
+      heroic_runtime_t runtime;
+      runtime.platform = normalize_heroic_platform(installed_platform, linux_native);
+
       return make_heroic_game(
         app_name,
         entry["title"].get<std::string>(),
         "epic",
         install,
         entry.value("art_square", ""),
-        entry.value("art_cover", "")
+        entry.value("art_cover", ""),
+        std::move(runtime)
       );
     }
   }  // namespace

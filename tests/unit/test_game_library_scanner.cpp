@@ -737,3 +737,104 @@ TEST(HeroicLibraryScannerTests, RefusesAppNamesThatWouldReachTheShell) {
   EXPECT_TRUE(game_library::heroic_launch_command("legendary", "Snow", game_library::launcher_install_t::native).empty());
   EXPECT_TRUE(game_library::heroic_launch_commands("gog", "app; rm -rf ~").empty());
 }
+
+// Heroic records what a title installs as, and separately what will execute it.
+// Polaris reports both or neither, never a guess: the Library page and Nova use
+// this to say "Windows via Proton-GE" instead of leaving the operator to find out
+// at launch.
+TEST(HeroicRuntimeTests, NormalisesThePlatformHeroicRecorded) {
+  EXPECT_EQ(game_library::normalize_heroic_platform("Windows", false), "windows");
+  EXPECT_EQ(game_library::normalize_heroic_platform("windows", false), "windows");
+  EXPECT_EQ(game_library::normalize_heroic_platform("Linux", false), "linux");
+  EXPECT_EQ(game_library::normalize_heroic_platform("Mac", false), "mac");
+}
+
+TEST(HeroicRuntimeTests, FallsBackToTheNativeFlagRatherThanGuessingWindows) {
+  EXPECT_EQ(game_library::normalize_heroic_platform("", true), "linux");
+  EXPECT_TRUE(game_library::normalize_heroic_platform("", false).empty());
+  EXPECT_TRUE(game_library::normalize_heroic_platform("Nintendo", false).empty());
+}
+
+TEST(HeroicRuntimeTests, ReportsProtonAndWineWithTheirOwnLabel) {
+  const auto proton = game_library::heroic_runtime_from_config("proton", "Proton-GE Latest", "windows");
+  EXPECT_EQ(proton.runtime, "proton");
+  EXPECT_EQ(proton.runtime_name, "Proton-GE Latest");
+
+  const auto wine = game_library::heroic_runtime_from_config("wine", "Wine-GE 8", "windows");
+  EXPECT_EQ(wine.runtime, "wine");
+  EXPECT_EQ(wine.runtime_name, "Wine-GE 8");
+}
+
+TEST(HeroicRuntimeTests, CallsALinuxTitleNativeWhateverAStaleWineEntrySays) {
+  const auto native = game_library::heroic_runtime_from_config("proton", "Proton-GE Latest", "linux");
+  EXPECT_EQ(native.runtime, "native");
+  EXPECT_TRUE(native.runtime_name.empty());
+}
+
+TEST(HeroicRuntimeTests, ReportsNoRuntimeRatherThanInventingOne) {
+  const auto unknown = game_library::heroic_runtime_from_config("", "", "windows");
+  EXPECT_TRUE(unknown.runtime.empty());
+  EXPECT_TRUE(unknown.runtime_name.empty());
+  EXPECT_EQ(unknown.platform, "windows");
+}
+
+TEST(HeroicRuntimeTests, ReadsTheRuntimeFromTheHeroicPerGameConfig) {
+  // The shape here mirrors a real Heroic GamesConfig entry: settings nested
+  // under the app name, with wineVersion carrying the choice.
+  const auto config_root = std::filesystem::temp_directory_path() / "polaris-heroic-runtime-test";
+  std::filesystem::remove_all(config_root);
+  std::filesystem::create_directories(config_root / "GamesConfig");
+  {
+    std::ofstream config(config_root / "GamesConfig" / "dc9d2e595d0e4650b35d659f90d41059.json");
+    config << R"({
+      "dc9d2e595d0e4650b35d659f90d41059": {
+        "useGameMode": true,
+        "wineVersion": {
+          "bin": "/home/papi/.local/share/Steam/compatibilitytools.d/Proton-GE Latest/proton",
+          "name": "Proton-GE Latest",
+          "type": "proton"
+        },
+        "winePrefix": "/home/papi/Games/Heroic/Prefixes/Alan Wake 2"
+      }
+    })";
+  }
+
+  const auto runtime = game_library::heroic_runtime_for_app(config_root, "dc9d2e595d0e4650b35d659f90d41059", "windows");
+  EXPECT_EQ(runtime.runtime, "proton");
+  EXPECT_EQ(runtime.runtime_name, "Proton-GE Latest");
+  std::filesystem::remove_all(config_root);
+}
+
+TEST(HeroicRuntimeTests, SaysNothingWhenTheHeroicConfigIsMissingOrUnreadable) {
+  const auto config_root = std::filesystem::temp_directory_path() / "polaris-heroic-runtime-absent";
+  std::filesystem::remove_all(config_root);
+  const auto missing = game_library::heroic_runtime_for_app(config_root, "nothing-here", "windows");
+  EXPECT_TRUE(missing.runtime.empty());
+  EXPECT_EQ(missing.platform, "windows");
+
+  std::filesystem::create_directories(config_root / "GamesConfig");
+  {
+    std::ofstream broken(config_root / "GamesConfig" / "broken.json");
+    broken << "{ not json";
+  }
+  const auto unreadable = game_library::heroic_runtime_for_app(config_root, "broken", "windows");
+  EXPECT_TRUE(unreadable.runtime.empty());
+  std::filesystem::remove_all(config_root);
+}
+
+TEST(HeroicRuntimeTests, ParsesThePlatformOutOfTheLegendaryLibraryEntry) {
+  // Trimmed from the real legendary_library.json on a host with Alan Wake 2.
+  const std::string payload = R"({"library":[{
+    "app_name": "dc9d2e595d0e4650b35d659f90d41059",
+    "title": "Alan Wake 2",
+    "runner": "legendary",
+    "is_installed": true,
+    "is_linux_native": false,
+    "install": {"executable": "AlanWake2.exe", "install_path": "/home/papi/Games/Heroic/AlanWake2", "is_dlc": false, "platform": "Windows"}
+  }]})";
+
+  const auto games = game_library::parse_heroic_cache_json(payload, "epic", game_library::launcher_install_t::flatpak);
+  ASSERT_EQ(games.size(), 1u);
+  EXPECT_EQ(games[0].name, "Alan Wake 2");
+  EXPECT_EQ(games[0].platform, "windows");
+}
