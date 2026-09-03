@@ -39,6 +39,25 @@ No. Moonlight can request higher frame rates on clients that expose them, and Po
 client's requested display mode as the ceiling. If a client requests `1280x800x60`, Polaris will not
 force a 90 FPS optimization above that request even when the device profile supports it.
 
+### Which Moonlight settings matter with Polaris?
+
+Resolution and frame rate, because Polaris treats the request as a ceiling and falls back to the
+host's Display Planner mode when it cannot be met; bitrate, because Auto Quality starts from it;
+codec and HDR, because the host has to offer the matching encoder profile. The full table is in
+[Play with Moonlight](moonlight.md#5-match-the-stream-to-the-device).
+
+### Can Moonlight choose the launch mode?
+
+No. The host's saved launch mode applies to every standard Moonlight session; only Nova can pick a
+mode per launch. A protocol client can still ask for a one-off desktop mirror by adding
+`mirrorDesktop=1` to its launch request, without changing the host setting.
+
+### Moonlight shows the library but cannot start anything
+
+The device has **Browse & Watch** access, which lists the library and joins an existing stream but
+cannot launch or send input. Open **Devices**, choose **Edit Access** on that device, and pick
+**Game Control**. The presets are explained in [Pair and manage devices](devices.md#access-presets).
+
 ### Can multiple people watch the same stream?
 
 Yes. Set `max_sessions` above `1`. Polaris tracks owner and viewer roles explicitly, and passive

@@ -15,7 +15,7 @@ const config = ref(props.config)
 <template>
   <div id="input" class="config-page">
     <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
-      <a href="https://papi-ux.com/docs/troubleshooting/#input-does-not-work" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.inputs_docs_link') }}</a>
+      <a href="https://papi-ux.com/docs/configuration/#input-tab" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.inputs_docs_link') }}</a>
     </p>
     <section class="settings-section">
       <div class="settings-section-header">

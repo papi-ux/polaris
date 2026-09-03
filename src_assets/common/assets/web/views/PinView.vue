@@ -6,7 +6,7 @@
         <h1 class="page-title">{{ $t('pin.page_title') }}</h1>
         <p class="page-subtitle">
           {{ $t('pin.page_subtitle') }}
-          <a href="https://papi-ux.com/docs/quickstart/#4-pair-a-client" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('pin.pairing_docs_link') }}</a>
+          <a href="https://papi-ux.com/docs/devices/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('pin.pairing_docs_link') }}</a>
         </p>
         <div class="page-meta">
           <span class="meta-pill">{{ $t('pin.saved_count', { count: pairedCount }) }}</span>
