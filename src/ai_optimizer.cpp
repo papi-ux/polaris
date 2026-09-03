@@ -4037,14 +4037,18 @@ namespace ai_optimizer {
     return removed_history || removed_cache;
   }
 
-  void clear_history() {
+  void clear_history_at(const std::filesystem::path &history_file) {
     {
       std::lock_guard<std::mutex> lock(history_mutex);
       session_history.clear();
       std::error_code ec;
-      std::filesystem::remove(history_path(), ec);
+      std::filesystem::remove(history_file, ec);
     }
     BOOST_LOG(info) << "ai_optimizer: Session history cleared"sv;
+  }
+
+  void clear_history() {
+    clear_history_at(history_path());
   }
 
   std::string get_history_json() {
