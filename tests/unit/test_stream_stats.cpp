@@ -593,7 +593,7 @@ TEST(StreamStatsCapturePathTests, DetectsCpuEncodeUpload) {
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
 }
 
-TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuthorityOnce) {
+TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateAuthorityWithoutBlockingHealthyRestore) {
   stream_stats::update_stream_active(false);
   adaptive_bitrate::reset();
 
@@ -621,7 +621,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
   });
   const auto fallback_revision = adaptive_bitrate::get_doctor_state().revision;
   EXPECT_GT(fallback_revision, gpu_revision);
-  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
   const auto fallback_stats = stream_stats::get_current();
   EXPECT_EQ(fallback_stats.capture_transport, platf::frame_transport_e::shm);
   EXPECT_EQ(fallback_stats.capture_residency, platf::frame_residency_e::cpu);
@@ -640,7 +640,7 @@ TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateDoctorAuth
     platf::frame_format_e::nv12
   );
   EXPECT_GT(adaptive_bitrate::get_doctor_state().revision, recovered_revision);
-  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
 
   stream_stats::update_stream_active(false);
   adaptive_bitrate::reset();
@@ -3008,7 +3008,7 @@ TEST(StreamStatsDoctorTests, StaticContentCannotHideConfirmedDroppedFrames) {
   EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
 }
 
-TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
+TEST(StreamStatsDoctorTests, KeepsHealthyVaapiShmFallbackInformational) {
   LinuxDisplayConfigGuard guard;
   config::video.adapter_name = "/dev/dri/renderD128";
   config::video.linux_display.use_cage_compositor = true;
@@ -3024,18 +3024,33 @@ TEST(StreamStatsDoctorTests, ClassifiesVaapiShmFallbackAsAdvancedIssue) {
   stats.encode_target_device = "vaapi";
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.encode_target_format = platf::frame_format_e::nv12;
+  stats.fps = 120.0;
+  stats.encode_target_fps = 120.0;
+  stats.capture_source_fps = 120.0;
+  stats.encode_time_ms = 4.0;
+  stats.avg_frame_age_ms = 6.0;
 
   const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
 
-  EXPECT_EQ(doctor.at("traffic_light"), "amber");
-  EXPECT_EQ(doctor.at("simple_state"), "Advanced issue detected");
-  EXPECT_EQ(doctor.at("primary_issue"), "gpu_native_requested_shm_fallback");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("status"), "ok");
+  EXPECT_EQ(doctor.at("severity"), "info");
+  EXPECT_EQ(doctor.at("simple_state"), "Streaming ready");
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
   EXPECT_TRUE(doctor.at("advanced_evidence").at("raw_fields_redacted"));
   EXPECT_EQ(
     doctor.at("advanced_evidence").at("linux_gpu_profile").at("encoder_api"),
     "vaapi"
   );
+  const auto &capture = *std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) { return item.value("id", "") == "capture_path"; }
+  );
+  EXPECT_EQ(capture.at("status"), "watch")
+    << "the compatibility path remains visible without grading a healthy stream down";
 }
 
 TEST(StreamStatsDoctorTests, KeepsNvidiaHeadlessWarningsInAdvancedEvidence) {

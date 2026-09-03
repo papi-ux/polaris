@@ -364,6 +364,18 @@ function latestIssueMatching(logs = '', terms = []) {
     })
 }
 
+function latestHostCaptureFailure(logs = '') {
+  return String(logs || '')
+    .split('\n')
+    .reverse()
+    .find((line) => {
+      if (!/encoder|capture|shm|dmabuf|vaapi|nvenc/i.test(line)) return false
+      if (/(?:^|\]:\s*)(?:error|fatal):/i.test(line)) return true
+      return /(?:^|\]:\s*)warning:/i.test(line) &&
+        /fail(?:ed|ure)?|saturat|timeout|unable/i.test(line)
+    })
+}
+
 function checklistItem(key, label, status, detail, action) {
   return { key, label, status, detail, action }
 }
@@ -413,6 +425,32 @@ function encoderPressure(stats = {}, encodeTime = Number(stats?.encode_time_ms))
     exceedsFrameBudget: Boolean(frameBudgetMs && encodeTime >= frameBudgetMs),
     frameBudgetUsePct: frameBudgetMs ? (encodeTime / frameBudgetMs) * 100 : null,
   }
+}
+
+function capturePressureActive(stats = {}) {
+  const health = stats?.health || {}
+  const capture = stats?.capture || {}
+  const explicit = health?.capture_pressure ?? stats?.capture_pressure ?? capture?.pressure
+  if (explicit !== undefined && explicit !== null) {
+    if (typeof explicit === 'string') return ['true', 'enabled', '1'].includes(lower(explicit))
+    return Boolean(explicit)
+  }
+
+  // Backward compatibility for a host that predates capture_pressure: require
+  // both a degraded health grade and capture attribution. CPU-copy capability
+  // alone is not evidence that the live stream is under pressure.
+  const grade = lower(health?.grade)
+  const captureReason = lower(stats?.capture_path_reason || capture?.reason)
+  const attributed = [
+    health?.primary_issue,
+    health?.limiting_factor,
+    health?.recovery_profile,
+    ...(Array.isArray(health?.issues) ? health.issues : []),
+  ].map(lower).some((value) => value === 'capture' ||
+    Boolean(captureReason && value === captureReason) ||
+    /capture|shm|cpu.*upload/.test(value))
+  return Boolean(stats?.capture_cpu_copy || capture?.cpu_copy) &&
+    ['watch', 'degraded'].includes(grade) && attributed
 }
 
 function linuxConfigurationWarnings(stats = {}) {
@@ -495,6 +533,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   const encodeTime = Number(stats?.encode_time_ms)
   const captureKnown = Boolean(stats?.capture_path || stats?.capture_transport || stats?.capture_path_reason)
   const captureCpuCopy = Boolean(stats?.capture_cpu_copy)
+  const capturePressure = capturePressureActive(stats)
   const gpuNativeState = gpuNativeCaptureState(stats)
   const autoVulkanWarning = linuxConfigurationWarnings(stats)
     .find((warning) => warning?.id === 'amd_private_explicit_vaapi_shm')
@@ -517,18 +556,27 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         : checklistItem('packet-loss', 'Packet loss', 'pass', `Packet loss is ${packetLoss.toFixed(1)}%.`, 'Network is not the loudest signal right now.')
     : checklistItem('packet-loss', 'Packet loss', 'warning', 'Packet loss has not been reported yet.', 'Start a live stream and wait for session telemetry.')
 
+  const captureFrameAge = Number(stats?.avg_frame_age_ms)
   const capture = captureCpuCopy
-    ? checklistItem(
-      'capture-path',
-      'Capture path',
-      'fail',
-      gpuProfileDescription || 'The active capture path is crossing SHM/system-memory frames.',
-      autoVulkanWarning?.action || (gpuNativeState.requested && !gpuNativeState.succeeded
-        ? 'GPU-native capture was already attempted and fell back. Do not repeat the same mode; inspect the recorded probe reason, then lower resolution/FPS for this fallback path if needed.'
-        : gpuProfileDescription
-          ? 'Keep this compatibility fallback if stability matters, or test a supported GPU-native path once before lowering resolution/FPS.'
-          : 'On Linux, compare DMA-BUF/GPU-native capture telemetry with the selected display and encoder adapter before changing advanced capture settings.')
-    )
+    ? capturePressure
+      ? checklistItem(
+        'capture-path',
+        'Capture path',
+        Number.isFinite(captureFrameAge) && captureFrameAge >= 22 ? 'fail' : 'warning',
+        gpuProfileDescription || 'Measured pacing or capture latency is pressuring the SHM/system-memory path.',
+        autoVulkanWarning?.action || (gpuNativeState.requested && !gpuNativeState.succeeded
+          ? 'GPU-native capture was already attempted and fell back. Inspect the recorded probe reason, then lower resolution/FPS for this fallback path if needed.'
+          : 'Keep the compatibility path for stability, or test a supported GPU-native path before lowering resolution/FPS.')
+      )
+      : checklistItem(
+        'capture-path',
+        'Capture path',
+        'pass',
+        `${gpuProfileDescription || 'The active capture path is crossing SHM/system-memory frames.'} Current timing does not show capture pressure.`,
+        autoVulkanWarning?.action || (gpuNativeState.requested && !gpuNativeState.succeeded
+          ? 'The GPU-native path was already attempted and fell back safely. Do not repeat it unless the recorded probe condition changes.'
+          : 'No capture-path change is needed while cadence and latency remain healthy.')
+      )
     : stats?.capture_gpu_native
       ? checklistItem('capture-path', 'Capture path', 'pass', gpuProfileDescription || 'Capture is reported as GPU-native.', 'Keep display pairing as-is unless the stream feels wrong.')
       : captureKnown
@@ -1021,6 +1069,7 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   const dropped = Number(stats.dropped_frame_ratio)
   const safeLogs = redactSensitiveText(logs)
   const pressure = encoderPressure(stats, encodeTime)
+  const capturePressure = capturePressureActive(stats)
   const gpuNativeState = gpuNativeCaptureState(stats)
   const autoVulkanWarning = linuxConfigurationWarnings(stats)
     .find((warning) => warning?.id === 'amd_private_explicit_vaapi_shm')
@@ -1028,15 +1077,27 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   let mainIssue = 'Client disconnected or ended the session before Polaris saw a louder host/network signal.'
   let suggestedNextLaunchProfile = 'Retry the same launch profile once, then collect a support bundle if it repeats.'
 
-  if ((Number.isFinite(loss) && loss > 1) || (Number.isFinite(latency) && latency > 45) || /packet loss|network|udp|timeout/i.test(safeLogs)) {
+  const networkFailureLog = latestIssueMatching(safeLogs, ['packet loss', 'network', 'udp', 'socket', 'enet'])
+  if ((Number.isFinite(loss) && loss > 1) || (Number.isFinite(latency) && latency > 45) || networkFailureLog) {
     issueOwner = 'network'
     mainIssue = Number.isFinite(loss) && loss > 1 ? `Network packet loss was ${loss.toFixed(1)}%.` : 'Network latency/transport warnings stood out.'
     suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
   }
 
-  if (pressure?.status === 'fail' || stats.capture_cpu_copy || /encoder|capture|shm|dmabuf|vaapi|nvenc/i.test(safeLogs)) {
+  if (issueOwner === 'client' && autoVulkanWarning?.action) {
+    suggestedNextLaunchProfile = autoVulkanWarning.action
+  } else if (issueOwner === 'client' && stats.capture_cpu_copy && gpuNativeState.requested && !gpuNativeState.succeeded) {
+    suggestedNextLaunchProfile = 'GPU-native capture was already attempted and fell back safely; keep the compatibility path unless measured pressure appears, and collect a support bundle if symptoms repeat.'
+  }
+
+  const hostFailureFromLog = Boolean(latestHostCaptureFailure(safeLogs))
+  if (pressure?.status === 'fail' || capturePressure || hostFailureFromLog) {
     issueOwner = 'host'
-    mainIssue = pressure?.status === 'fail' ? `Host encoder time was ${encodeTime.toFixed(1)} ms.` : 'Host capture/encoder path was the loudest signal.'
+    mainIssue = pressure?.status === 'fail'
+      ? `Host encoder time was ${encodeTime.toFixed(1)} ms.`
+      : capturePressure
+        ? 'Measured capture pressure was the loudest signal.'
+        : 'A host capture/encoder failure stood out in the log.'
     suggestedNextLaunchProfile = stats.capture_cpu_copy
       ? autoVulkanWarning?.action || (gpuNativeState.requested && !gpuNativeState.succeeded
         ? 'GPU-native capture was already attempted and fell back to SHM; inspect the probe reason, then lower resolution/FPS for this fallback path before changing network settings.'

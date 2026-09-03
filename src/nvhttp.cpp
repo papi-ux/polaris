@@ -2078,7 +2078,15 @@ namespace nvhttp {
         active_encoder_name == "nvenc" &&
         !build_has_cuda() &&
         capture_fallback;
-      const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
+      const bool encoder_time_fail =
+        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+      const bool encoder_risk =
+        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+        (!capture_fallback && stats.avg_frame_age_ms >= 18.0);
+      const bool capture_latency_risk =
+        capture_fallback && !encoder_time_fail && stats.avg_frame_age_ms >= 18.0;
+      const bool capture_pressure =
+        capture_fallback && (pacing_risk || capture_latency_risk);
       const auto hdr_effective_mode = stream_stats::hdr_effective_mode(stats);
       const auto hdr_downgrade_reason = stream_stats::hdr_downgrade_reason(stats);
       const auto hdr_downgrade_message = stream_stats::hdr_downgrade_message(stats);
@@ -2090,7 +2098,7 @@ namespace nvhttp {
         !network_risk;
       const bool virtual_display_risk =
         current_virtual_display &&
-        (pacing_risk || capture_fallback || hdr_risk);
+        (pacing_risk || capture_pressure || hdr_risk);
       const bool sustained_target_miss = meaningful_fps_shortfall;
       // Reused frames can be intentional for static or menu content. Keep
       // duplicate cadence as a pacing signal, but require an actual target
@@ -2120,7 +2128,7 @@ namespace nvhttp {
         issues.push_back("frame_pacing");
         recommendations.push_back("Match the game frame cap to the stream FPS and avoid VRR-style sync on the streaming display.");
       }
-      if (capture_fallback) {
+      if (capture_pressure) {
         issues.push_back(capture_reason);
         recommendations.push_back(stream_stats::capture_path_reason_message(capture_reason));
       }
@@ -2156,7 +2164,7 @@ namespace nvhttp {
       else if (virtual_display_risk) primary_issue = "virtual_display_path";
       else if (decoder_risk) primary_issue = "decoder_path";
       else if (nvenc_cuda_disabled_path) primary_issue = "nvenc_cuda_disabled";
-      else if (capture_fallback) primary_issue = capture_reason;
+      else if (capture_pressure) primary_issue = capture_reason;
       else if (host_render_limited) primary_issue = "host_render_limited";
       else if (pacing_risk) primary_issue = "frame_pacing";
       else if (encoder_risk) primary_issue = "encoder_load";
@@ -2168,21 +2176,21 @@ namespace nvhttp {
         virtual_display_risk ? "capture" :
         decoder_risk ? "decoder" :
         nvenc_cuda_disabled_path ? "capture" :
-        capture_fallback ? "capture" :
+        capture_pressure ? "capture" :
         host_render_limited ? "host_render" :
         encoder_risk ? "encoder" :
         pacing_risk ? "pacing" :
         "none";
       const std::string auto_action =
         network_risk || encoder_risk ? "lower_bitrate" :
-        hdr_source_missing || hdr_risk || virtual_display_risk || decoder_risk || nvenc_cuda_disabled_path || capture_fallback ? "suggest_recovery" :
+        hdr_source_missing || hdr_risk || virtual_display_risk || decoder_risk || nvenc_cuda_disabled_path || capture_pressure ? "suggest_recovery" :
         host_render_limited ? "lower_render_profile" :
         "none";
 
       const int concern_count =
         static_cast<int>(network_risk) +
         static_cast<int>(pacing_risk) +
-        static_cast<int>(capture_fallback) +
+        static_cast<int>(capture_pressure) +
         static_cast<int>(nvenc_cuda_disabled_path) +
         static_cast<int>(encoder_risk) +
         static_cast<int>(hdr_source_missing) +
@@ -2250,7 +2258,7 @@ namespace nvhttp {
         virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
         decoder_risk ? "The current codec path looks harder on this client than expected." :
         nvenc_cuda_disabled_path ? "The NVIDIA path is using a CUDA-disabled CPU copy fallback." :
-        capture_fallback ? stream_stats::capture_path_reason_message(capture_reason) :
+        capture_pressure ? stream_stats::capture_path_reason_message(capture_reason) :
         host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
@@ -2282,13 +2290,14 @@ namespace nvhttp {
       health["capture_path_reason"] = capture_reason;
       health["capture_path_reason_message"] = stream_stats::capture_path_reason_message(capture_reason);
       health["capture_cpu_copy"] = capture_fallback;
+      health["capture_pressure"] = capture_pressure;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
       health["encoder_selection"] = encoder_selection_json();
       health["cuda_build"] = build_has_cuda();
       health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
-        nvenc_cuda_disabled_path || safe_target_fps > 0.0;
+        nvenc_cuda_disabled_path || capture_pressure || safe_target_fps > 0.0;
       if (safe_codec) {
         health["safe_codec"] = *safe_codec;
       }

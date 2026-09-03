@@ -279,7 +279,7 @@ describe('Fix My Stream checklist', () => {
     expect(checklist.map((item) => item.status)).toEqual([
       'pass',
       'fail',
-      'fail',
+      'pass',
       'fail',
       'fail',
       'warning',
@@ -354,9 +354,36 @@ describe('Fix My Stream checklist', () => {
 
     expect(capture.detail).toContain('AMD/VAAPI')
     expect(capture.detail).toContain('SHM/system-memory')
+    expect(capture.status).toBe('pass')
+    expect(capture.detail).toContain('does not show capture pressure')
     expect(capture.action).toContain('already attempted')
     expect(`${capture.detail} ${capture.action}`).not.toContain('CUDA')
     expect(`${capture.detail} ${capture.action}`).not.toContain('NVIDIA')
+  })
+
+  it('warns on measured SHM capture pressure instead of the transport alone', () => {
+    const base = {
+      streaming: true,
+      packet_loss: 0,
+      capture_path: 'shm_cpu_capture',
+      capture_path_reason: 'headless_shm_fallback',
+      capture_cpu_copy: true,
+      encode_time_ms: 4,
+      encode_target_fps: 120,
+      avg_frame_age_ms: 19,
+    }
+
+    const healthy = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { ...base, health: { grade: 'good', capture_pressure: false } },
+    }).find((item) => item.key === 'capture-path')
+    const pressured = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { ...base, health: { grade: 'watch', capture_pressure: true } },
+    }).find((item) => item.key === 'capture-path')
+
+    expect(healthy.status).toBe('pass')
+    expect(pressured.status).toBe('warning')
   })
 
   it('uses the active FPS budget for encoder pressure instead of a hard-coded 120 FPS label', () => {
@@ -630,6 +657,44 @@ describe('support self-service reports', () => {
     expect(report.suggestedNextLaunchProfile).toContain('Private Stream')
     expect(report.copyText).toContain('Issue owner: host')
     expect(report.copyText).not.toContain('token=')
+  })
+
+  it('does not invent a host failure from healthy SHM capability logs', () => {
+    const report = buildPostSessionStreamReport({
+      stats: {
+        packet_loss: 0,
+        latency_ms: 5,
+        encode_time_ms: 4,
+        encode_target_fps: 120,
+        dropped_frame_ratio: 0,
+        capture_cpu_copy: true,
+        health: { grade: 'good', capture_pressure: false },
+      },
+      logs: [
+        'Info: // Testing for available encoders, this may generate errors. You can safely ignore those errors. //',
+        'Warning: capture_transport=shm; capture will incur an extra CPU-side copy/conversion path',
+        'Info: Paused session resume timeout expired; terminating app',
+      ].join('\n'),
+      disconnectReason: 'client disconnected',
+    })
+
+    expect(report.issueOwner).toBe('client')
+    expect(report.mainIssue).not.toContain('capture/encoder')
+    expect(report.mainIssue).not.toContain('Network')
+  })
+
+  it('still attributes explicit encoder and network failures from logs', () => {
+    const host = buildPostSessionStreamReport({
+      stats: { packet_loss: 0, latency_ms: 5, encode_time_ms: 4, encode_target_fps: 60 },
+      logs: 'Warning: encoder queue saturated after capture fell back to SHM',
+    })
+    const network = buildPostSessionStreamReport({
+      stats: { packet_loss: 0, latency_ms: 5, encode_time_ms: 4, encode_target_fps: 60 },
+      logs: 'Warning: UDP network timeout while sending video packets',
+    })
+
+    expect(host.issueOwner).toBe('host')
+    expect(network.issueOwner).toBe('network')
   })
 
   it('generates support-copy text for network, controller, and post-session reports', () => {

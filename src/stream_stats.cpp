@@ -45,6 +45,32 @@ namespace stream_stats {
     return fps_gap >= 2.0 && fps_ratio < 0.95;
   }
 
+  double encoder_pressure_frame_budget_ms(double target_fps) {
+    return std::isfinite(target_fps) && target_fps > 0.0 ?
+             1000.0 / target_fps :
+             std::numeric_limits<double>::infinity();
+  }
+
+  namespace {
+    double encoder_pressure_fail_threshold_ms(double target_fps) {
+      return std::min(12.0, encoder_pressure_frame_budget_ms(target_fps));
+    }
+
+    double encoder_pressure_watch_threshold_ms(double target_fps) {
+      return std::min(8.0, encoder_pressure_frame_budget_ms(target_fps) * 0.90);
+    }
+  }
+
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps) {
+    return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
+           encode_time_ms >= encoder_pressure_fail_threshold_ms(target_fps);
+  }
+
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps) {
+    return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
+           encode_time_ms >= encoder_pressure_watch_threshold_ms(target_fps);
+  }
+
   static std::mutex stats_mutex;
   static stats_t current_stats;
 
@@ -135,30 +161,6 @@ namespace stream_stats {
            ) && source_cadence_confirms_motion)));
     }
 
-    double encoder_pressure_frame_budget_ms(double target_fps) {
-      return std::isfinite(target_fps) && target_fps > 0.0 ?
-               1000.0 / target_fps :
-               std::numeric_limits<double>::infinity();
-    }
-
-    double encoder_pressure_fail_threshold_ms(double target_fps) {
-      return std::min(12.0, encoder_pressure_frame_budget_ms(target_fps));
-    }
-
-    double encoder_pressure_watch_threshold_ms(double target_fps) {
-      return std::min(8.0, encoder_pressure_frame_budget_ms(target_fps) * 0.90);
-    }
-
-    bool encoder_time_fails_budget(double encode_time_ms, double target_fps) {
-      return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
-             encode_time_ms >= encoder_pressure_fail_threshold_ms(target_fps);
-    }
-
-    bool encoder_time_nears_budget(double encode_time_ms, double target_fps) {
-      return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
-             encode_time_ms >= encoder_pressure_watch_threshold_ms(target_fps);
-    }
-
     bool video_policy_pacing_warning_is_confirmed(
         const doctor_video_policy_state_t &sample) {
       return sample.sample_count >= DOCTOR_PACING_WARMUP_SAMPLES &&
@@ -168,21 +170,23 @@ namespace stream_stats {
 
     bool video_policy_suppresses_quality_restore(
         const doctor_video_policy_state_t &sample) {
-      const bool capture_cpu_copy =
-        sample.capture_transport == platf::frame_transport_e::shm ||
-        sample.capture_residency == platf::frame_residency_e::cpu ||
-        sample.encode_target_residency == platf::frame_residency_e::cpu;
       const bool encoder_watch =
         encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps) ||
         sample.avg_frame_age_ms >= 18.0;
-      return capture_cpu_copy || encoder_watch ||
-        video_policy_pacing_warning_is_confirmed(sample);
+      // SHM is a supported compatibility path. It is capability context, not
+      // pressure by itself; only measured encode/capture latency or confirmed
+      // pacing trouble should block a guarded quality restore.
+      return encoder_watch || video_policy_pacing_warning_is_confirmed(sample);
     }
 
     void publish_doctor_video_policy_locked() {
+      const bool capture_cpu_copy =
+        doctor_video_policy_state.capture_transport == platf::frame_transport_e::shm ||
+        doctor_video_policy_state.capture_residency == platf::frame_residency_e::cpu ||
+        doctor_video_policy_state.encode_target_residency == platf::frame_residency_e::cpu;
       adaptive_bitrate::note_doctor_video_policy_evidence(
         video_policy_suppresses_quality_restore(doctor_video_policy_state),
-        video_policy_has_pacing_warning(doctor_video_policy_state)
+        capture_cpu_copy || video_policy_has_pacing_warning(doctor_video_policy_state)
       );
     }
 
@@ -1318,6 +1322,8 @@ namespace stream_stats {
                                (encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
                                 (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
     const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
+    const bool capture_latency_watch = capture_cpu_copy && !encoder_time_fail &&
+                                       !capture_latency_fail && stats.avg_frame_age_ms >= 18.0;
     const bool source_cadence_available = stats.capture_source_fps > 0.0 && target_fps > 0.0;
     const bool source_cadence_confirms_motion =
       source_cadence_available && stats.capture_source_fps >= target_fps * 0.85;
@@ -1337,6 +1343,8 @@ namespace stream_stats {
     const bool pacing_watch =
       raw_pacing_watch && pacing_window_ready && pacing_streak_confirmed;
     const bool pacing_collecting = raw_pacing_watch && !pacing_watch;
+    const bool capture_pacing_watch = capture_cpu_copy && pacing_watch;
+    const bool capture_pressure = capture_latency_fail || capture_latency_watch || capture_pacing_watch;
     const bool strict_gamepad_isolation =
       stats.input_host_controller_isolation == "strict_bwrap";
     const bool steam_input_known =
@@ -1352,6 +1360,9 @@ namespace stream_stats {
     const bool health_claims_network_jitter = primary_issue == "network_jitter";
     const bool health_claims_unconfirmed_frame_pacing =
       primary_issue == "frame_pacing" && !pacing_watch;
+    const bool health_claims_unconfirmed_capture_pressure =
+      !capture_reason.empty() && primary_issue == capture_reason &&
+      capture_cpu_copy && !capture_pressure;
     const bool suppressed_stale_network_finding =
       health_claims_network_jitter && !network_fail && !network_watch;
     if (health_claims_network_jitter && !network_fail) {
@@ -1362,6 +1373,9 @@ namespace stream_stats {
       primary_issue = network_watch ? "network_observation" : std::string {};
     }
     if (health_claims_unconfirmed_frame_pacing) {
+      primary_issue.clear();
+    }
+    if (health_claims_unconfirmed_capture_pressure) {
       primary_issue.clear();
     }
     if (steam_input_conflict && !network_fail && !encoder_fail && !capture_latency_fail) {
@@ -1381,7 +1395,7 @@ namespace stream_stats {
       else if (capture_latency_fail) primary_issue = capture_reason;
       else if (network_watch) primary_issue = "network_observation";
       else if (encoder_watch) primary_issue = "encoder_load";
-      else if (capture_cpu_copy) primary_issue = capture_reason;
+      else if (capture_latency_watch || capture_pacing_watch) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
       else if (quality_reduced_live) primary_issue = "quality_reduced_live";
@@ -1395,7 +1409,9 @@ namespace stream_stats {
     std::string simple_state = "Streaming ready";
     const auto health_grade = health.value("grade", std::string {});
     const bool honor_health_grade =
-      (!health_claims_network_jitter || network_fail) && !health_claims_unconfirmed_frame_pacing;
+      (!health_claims_network_jitter || network_fail) &&
+      !health_claims_unconfirmed_frame_pacing &&
+      !health_claims_unconfirmed_capture_pressure;
     if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";
@@ -1407,11 +1423,11 @@ namespace stream_stats {
       severity = "critical";
       simple_state = "Needs attention";
     } else if ((primary_issue != "none" && primary_issue != "control_channel_observation") ||
-               (honor_health_grade && health_grade == "watch") || capture_cpu_copy || pacing_watch) {
+               (honor_health_grade && health_grade == "watch") || capture_pressure || pacing_watch) {
       traffic = "amber";
-      status = capture_cpu_copy ? "watch" : "needs_action";
+      status = "needs_action";
       severity = "warning";
-      simple_state = capture_cpu_copy ? "Advanced issue detected" : "Needs attention";
+      simple_state = "Needs attention";
     }
 
     const std::string summary =

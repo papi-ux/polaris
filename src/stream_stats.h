@@ -38,6 +38,18 @@ namespace stream_stats {
   bool is_meaningful_fps_shortfall(double target_fps, double delivered_fps);
 
   /**
+   * @brief Return the low-latency encoder budget for the requested cadence.
+   *
+   * The hard ceiling remains 12 ms for low-refresh streams, while high-refresh
+   * sessions use their actual frame interval. Keeping this contract public to
+   * the session-health builder prevents Doctor and the Nova summary from
+   * assigning different pressure grades to the same encoder timing.
+   */
+  double encoder_pressure_frame_budget_ms(double target_fps);
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps);
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps);
+
+  /**
    * @brief Per-client statistics for multi-session tracking.
    */
   struct client_stats_t {

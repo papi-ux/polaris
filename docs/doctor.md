@@ -24,6 +24,12 @@ windows before grading frame pacing. While that window is still filling, pacing 
 **Unknown** instead of briefly blaming startup work. Confirmed warning evidence remains visible
 instead of appearing beside a contradictory stable verdict.
 
+SHM or system-memory capture is capability context, not a failure by itself. Doctor keeps the path
+visible in Advanced evidence, but leaves the overall verdict healthy when delivered cadence,
+capture latency, and encoder time remain inside the active stream's real FPS budget. It warns only
+when those measurements show pressure; it does not lower a healthy 120 FPS stream merely because
+its compatibility path is CPU-backed.
+
 ## Pick the offered action
 
 Doctor uses a small action vocabulary so the button says what will happen:
