@@ -96,3 +96,21 @@ describe('settings surfaces affordances', () => {
     expect(webSource('public/assets/locale/en.json')).toContain('"version_local_build": "Local build, not the packaged release"')
   })
 })
+
+// The Library page's editor toggles describe themselves in one sentence; the
+// full explanation lives in docs/apps.md, so nothing on the page opens a hint.
+describe('library editor toggles', () => {
+  it('render their descriptions inline instead of as (i) hints', () => {
+    expect(webSource('views/AppsView.vue')).not.toContain('desc-as-hint')
+  })
+
+  it('keep every inline description to one sentence', () => {
+    const locale = JSON.parse(webSource('public/assets/locale/en.json'))
+    const keys = [...webSource('views/AppsView.vue').matchAll(/desc="apps\.([a-z_]+)"/g)].map((match) => match[1])
+    expect(keys.length).toBeGreaterThanOrEqual(8)
+    for (const key of [...keys, 'global_prep_desc', 'global_state_desc']) {
+      expect(locale.apps[key], key).toBeDefined()
+      expect(locale.apps[key].length, key).toBeLessThanOrEqual(170)
+    }
+  })
+})

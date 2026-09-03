@@ -753,7 +753,6 @@
                       id="appElevation"
                       label="_common.run_as"
                       desc="apps.run_as_desc"
-                      desc-as-hint
                       v-model="editForm.elevated"
                       default="false"
             ></Checkbox>
@@ -834,7 +833,6 @@
                     id="clientCommands"
                     label="apps.allow_client_commands"
                     desc="apps.allow_client_commands_desc"
-                    desc-as-hint
                     v-model="editForm['allow-client-commands']"
                     default="true"
           ></Checkbox>
@@ -855,7 +853,6 @@
                           :id="'excludeGlobal_' + type"
                           :label="'apps.global_' + type + '_name'"
                           :desc="'apps.global_' + type + '_desc'"
-                          desc-as-hint
                           v-model="editForm['exclude-global-' + type + '-cmd']"
                           default="true"
                           inverse-values
@@ -930,13 +927,13 @@
           </summary>
           <div class="app-editor-disclosure-body">
             <div class="app-editor-grid">
-              <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" desc-as-hint v-model="editForm['auto-detach']" default="true"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" desc-as-hint v-model="editForm['wait-all']" default="true"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" desc-as-hint v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" desc-as-hint v-model="editForm['virtual-display']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" desc-as-hint v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" desc-as-hint v-model="editForm['use-app-identity']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" desc-as-hint v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" v-model="editForm['virtual-display']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
               <div class="app-editor-field">
                 <div class="settings-field-head">
                   <label for="exitTimeout" class="settings-field-label">{{ $t('apps.exit_timeout') }}</label>
