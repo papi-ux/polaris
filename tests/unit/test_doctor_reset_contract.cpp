@@ -1105,11 +1105,17 @@ TEST(DoctorResetContract, LegacyAiSurfacesAreExplanationOnly) {
   EXPECT_EQ(doctor_explanation.find("body.value(\"provider\""), std::string::npos);
   EXPECT_EQ(doctor_explanation.find("ai_cfg.api_key"), std::string::npos);
 
+  // The AI tab copy moved into the locale file too: the banned phrase is
+  // checked in both places, and the "AI explanations" switch is pinned by its
+  // locale key in the source and its English text in the locale.
   const auto ui = source("src_assets/common/assets/web/configs/tabs/AiOptimizer.vue");
+  const auto ui_locale = source("src_assets/common/assets/web/public/assets/locale/en.json");
   EXPECT_EQ(ui.find("AI Auto Quality"), std::string::npos);
+  EXPECT_EQ(ui_locale.find("AI Auto Quality"), std::string::npos);
   EXPECT_EQ(ui.find("testResult.payload.display_mode"), std::string::npos);
   EXPECT_EQ(ui.find("testResult.payload.target_bitrate_kbps"), std::string::npos);
-  EXPECT_NE(ui.find("AI explanations"), std::string::npos);
+  EXPECT_NE(ui.find("config.ai_explanations"), std::string::npos);
+  EXPECT_NE(ui_locale.find("\"ai_explanations\": \"AI explanations\""), std::string::npos);
 
   // The Video/Audio page copy moved into the locale file, so the banned
   // legacy phrase is checked in both places and the required adaptive
