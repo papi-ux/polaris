@@ -1306,7 +1306,6 @@
     "previous_run": "Previous run",
     "previous_run_started": "That run started at",
     "previous_run_dismiss": "Dismiss",
-    "previous_run_title": "Polaris did not shut down normally",
     "report_problem": "Report a problem",
     "report_problem_desc": "Downloads the redacted support bundle and opens a prefilled issue. Nothing is sent anywhere until you attach the bundle and submit it yourself.",
     "report_problem_notes": "What went wrong",

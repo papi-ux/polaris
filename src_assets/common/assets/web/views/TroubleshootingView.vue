@@ -15,18 +15,29 @@
       </div>
     </section>
 
-    <section v-if="showCrashBanner" class="section-card space-y-3" data-previous-run-banner>
+    <section
+      v-if="previousRunBanner"
+      class="section-card space-y-3"
+      :class="previousRunBanner.crashed ? 'border-danger/30' : 'border-warning/25'"
+      data-previous-run-banner
+      :data-previous-run-outcome="previousRunBanner.crashed ? 'crashed' : 'unclean'"
+    >
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.previous_run') }}</div>
-          <h2 class="section-title">{{ $t('troubleshooting.previous_run_title') }}</h2>
-          <p class="section-copy">{{ previousRunSummary }}</p>
-          <p v-if="lastRun?.started_at" class="mt-1 text-xs text-storm">
-            {{ $t('troubleshooting.previous_run_started') }} {{ lastRun.started_at }}
+          <h2 class="section-title">{{ previousRunBanner.title }}</h2>
+          <p class="section-copy">{{ previousRunBanner.summary }}</p>
+          <p v-if="previousRunBanner.startedAt" class="mt-1 text-xs text-storm">
+            {{ $t('troubleshooting.previous_run_started') }} {{ previousRunBanner.startedAt }}
           </p>
         </div>
         <div class="flex flex-shrink-0 flex-col gap-2 sm:flex-row">
-          <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="generatingIssueDraft" @click="openPrefilledIssue">
+          <button
+            class="focus-ring troubleshooting-action-button"
+            :class="previousRunBanner.crashed ? 'troubleshooting-action-button-primary' : 'troubleshooting-action-button-secondary'"
+            :disabled="generatingIssueDraft"
+            @click="openPrefilledIssue"
+          >
             {{ $t('troubleshooting.report_problem') }}
           </button>
           <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="dismissCrashBanner">
@@ -41,7 +52,10 @@
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.fix_my_stream_mode') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.fix_my_stream') }}</h2>
-          <p class="section-copy">{{ $t('troubleshooting.fix_my_stream_desc') }}</p>
+          <p class="section-copy">
+            {{ $t('troubleshooting.fix_my_stream_desc') }}
+            <a href="https://papi-ux.com/docs/doctor/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('troubleshooting.fix_my_stream_docs_link') }}</a>
+          </p>
         </div>
         <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary" :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
           {{ $t('troubleshooting.export_anonymized_diagnostics') }}
@@ -59,17 +73,18 @@
         <details v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-storm/20 bg-deep/35 p-3">
           <summary class="cursor-pointer text-sm font-medium text-silver">{{ $t('troubleshooting.advanced_diagnostics') }}</summary>
           <div class="mt-3 grid gap-2 sm:grid-cols-2">
-            <div v-for="item in doctorAdvancedItems" :key="item.label" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
-              <div class="text-[11px] uppercase tracking-wide text-storm">{{ item.label }}</div>
-              <div class="mt-1 break-words text-sm text-silver">{{ item.value }}</div>
-            </div>
+            <StatTile v-for="item in doctorAdvancedItems" :key="item.label" :label="item.label" :value="item.value" />
           </div>
         </details>
-        <div v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation>
+        <div v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation :data-ai-readiness="aiReadiness.state">
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="text-[11px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
-              <p class="mt-1 text-xs leading-relaxed text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation_privacy') }}</p>
+              <p class="mt-1 text-xs leading-relaxed text-info-bright">{{ aiReadinessText }}</p>
+              <p class="mt-1 text-xs leading-relaxed text-storm">
+                {{ $t('troubleshooting.ai_doctor_scope') }}
+                <a href="https://papi-ux.com/docs/doctor/#optional-ai-explanation" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('troubleshooting.ai_doctor_docs_link') }}</a>
+              </p>
               <p class="mt-2 text-[11px] leading-relaxed text-storm">{{ aiDoctorCategoriesText }}</p>
             </div>
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="requestingAiDoctorExplanation" @click="requestAiDoctorExplanation">
@@ -99,6 +114,7 @@
           :key="item.key"
           class="surface-subtle border p-4"
           :class="statusTone(item.status).card"
+          data-readonly
         >
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">{{ item.label }}</div>
@@ -115,25 +131,28 @@
     <section class="section-card space-y-4" data-support-self-tests>
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <div class="section-kicker">Built-in self tests</div>
-          <h2 class="section-title">Network, controller, and post-session report</h2>
-          <p class="section-copy">Start with quick player checks. Open the supporting evidence only when you need a deeper diagnosis.</p>
+          <div class="section-kicker">{{ $t('troubleshooting.self_tests_kicker') }}</div>
+          <h2 class="section-title">{{ $t('troubleshooting.self_tests_title') }}</h2>
+          <p class="section-copy">
+            {{ $t('troubleshooting.self_tests_desc') }}
+            <a href="https://papi-ux.com/docs/troubleshooting/#built-in-self-tests" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('troubleshooting.self_tests_docs_link') }}</a>
+          </p>
         </div>
         <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="copySupportSelfTests">
-          Copy self-test summary
+          {{ $t('troubleshooting.self_tests_copy') }}
         </button>
       </div>
 
       <div class="grid gap-3 xl:grid-cols-3">
-        <div class="surface-subtle border p-4" :class="statusTone(networkPathReport.status).card">
+        <div class="surface-subtle border p-4" :class="statusTone(networkPathReport.status).card" data-readonly>
           <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-semibold text-silver">Network Path Tester</div>
+            <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.network_path_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(networkPathReport.status).badge">{{ statusTone(networkPathReport.status).label }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ networkPathReport.summary }}</p>
-          <p class="mt-3 text-xs leading-relaxed text-ice">Recommended ceiling: {{ networkPathReport.recommendedBitrateKbps }} kbps.</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">{{ $t('troubleshooting.network_path_ceiling', { kbps: networkPathReport.recommendedBitrateKbps }) }}</p>
           <details class="mt-3 text-xs text-storm">
-            <summary class="cursor-pointer text-ice">Advanced evidence</summary>
+            <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <div class="mt-2 space-y-2">
               <div v-for="check in networkPathReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
                 <div class="font-medium text-silver">{{ check.label }} · {{ statusTone(check.status).label }}</div>
@@ -147,17 +166,17 @@
 
         <div class="surface-subtle border p-4" :class="statusTone(controllerInputReport.status).card">
           <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-semibold text-silver">Controller/Input Tester</div>
+            <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.controller_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(controllerInputReport.status).badge">{{ statusTone(controllerInputReport.status).label }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ controllerInputReport.summary }}</p>
           <div class="mt-3 flex flex-wrap gap-2">
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="refreshControllerSnapshot">Detect controller</button>
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="recordControllerEvent('A / primary button', 1)">Log A press</button>
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" @click="pulseControllerHaptics">Test rumble</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="refreshControllerSnapshot">{{ $t('troubleshooting.controller_detect') }}</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="recordControllerEvent('A / primary button', 1)">{{ $t('troubleshooting.controller_log_a') }}</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" @click="pulseControllerHaptics">{{ $t('troubleshooting.controller_test_rumble') }}</button>
           </div>
           <details class="mt-3 text-xs text-storm">
-            <summary class="cursor-pointer text-ice">Advanced evidence</summary>
+            <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <div class="mt-2 space-y-2">
               <div v-for="check in controllerInputReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
                 <div class="font-medium text-silver">{{ check.label }} · {{ statusTone(check.status).label }}</div>
@@ -168,15 +187,15 @@
           </details>
         </div>
 
-        <div class="surface-subtle border p-4" :class="statusTone(postSessionReport.status).card">
+        <div class="surface-subtle border p-4" :class="statusTone(postSessionReport.status).card" data-readonly>
           <div class="flex items-center justify-between gap-3">
-            <div class="text-sm font-semibold text-silver">Post-session Stream Report</div>
+            <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.post_session_report') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(postSessionReport.status).badge">{{ postSessionReport.issueOwner }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ postSessionReport.mainIssue }}</p>
-          <p class="mt-3 text-xs leading-relaxed text-ice">Next launch: {{ postSessionReport.suggestedNextLaunchProfile }}</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">{{ $t('troubleshooting.post_session_next_launch', { profile: postSessionReport.suggestedNextLaunchProfile }) }}</p>
           <details class="mt-3 text-xs text-storm">
-            <summary class="cursor-pointer text-ice">Advanced evidence</summary>
+            <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <pre class="mt-2 whitespace-pre-wrap rounded-lg border border-storm/15 bg-void/50 p-3">{{ postSessionReport.copyText }}</pre>
           </details>
         </div>
@@ -188,7 +207,10 @@
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.recovery_ladder') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.quick_recovery') }}</h2>
-          <p class="section-copy">{{ $t('troubleshooting.quick_recovery_desc') }}</p>
+          <p class="section-copy">
+            {{ $t('troubleshooting.quick_recovery_desc') }}
+            <a href="https://papi-ux.com/docs/troubleshooting/#quick-recovery-ladder" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('troubleshooting.recovery_docs_link') }}</a>
+          </p>
         </div>
         <div class="page-meta">
           <span class="meta-pill">{{ $t('troubleshooting.recovery_guidance') }}</span>
@@ -254,8 +276,8 @@
 
         <div class="surface-subtle flex h-full flex-col border-info/15 p-4" v-if="platform === 'windows'">
           <div class="flex items-center justify-between gap-3">
-            <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-info-bright">Optional</span>
-            <span class="text-[10px] uppercase tracking-eyebrow text-storm">Display reset</span>
+            <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.recovery_optional') }}</span>
+            <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_display_reset') }}</span>
           </div>
           <h3 id="dd_reset" class="mt-3 text-lg font-semibold text-silver">{{ $t('troubleshooting.dd_reset') }}</h3>
           <p class="mt-2 flex-1 whitespace-pre-line text-sm text-storm">{{ $t('troubleshooting.dd_reset_desc') }}</p>
@@ -275,14 +297,14 @@
     </section>
 
     <section class="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.9fr)]">
-      <div class="section-card">
+      <div class="section-card" data-session-snapshot>
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 id="session_snapshot" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.session_snapshot') }}</h2>
             <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.session_snapshot_desc') }}</p>
           </div>
-          <span class="rounded-full border px-2.5 py-1 text-sm"
-                :class="streamStatsConnected ? 'border-success/40 bg-success/10 text-success' : 'border-storm/40 bg-deep/60 text-storm'">
+          <span class="meta-pill"
+                :class="streamStatsConnected ? 'border-success/40 bg-success/10 text-success' : ''">
             {{ streamStatsConnected ? $t('troubleshooting.session_snapshot_connected') : $t('troubleshooting.session_snapshot_disconnected') }}
           </span>
         </div>
@@ -294,17 +316,11 @@
           {{ $t('troubleshooting.session_snapshot_idle') }}
         </div>
         <template v-else>
-          <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div v-for="item in sessionSnapshotSummaryItems" :key="item.label" class="rounded-xl border border-storm/25 bg-deep/60 px-3 py-3">
-              <div class="text-[11px] uppercase tracking-wide text-storm">{{ item.label }}</div>
-              <div class="mt-1 text-sm font-medium text-silver break-words">{{ item.value }}</div>
-            </div>
+          <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-session-snapshot-summary>
+            <StatTile v-for="item in sessionSnapshotRows.summary" :key="item.label" :label="item.label" :value="item.value" :note="item.note || ''" />
           </div>
-          <div class="mt-4 grid gap-3 sm:grid-cols-2">
-            <div v-for="item in sessionSnapshotDetailItems" :key="item.label" class="rounded-xl border border-storm/20 bg-deep/40 px-3 py-2.5">
-              <div class="text-[11px] uppercase tracking-wide text-storm">{{ item.label }}</div>
-              <div class="mt-1 text-sm font-medium text-silver break-words">{{ item.value }}</div>
-            </div>
+          <div class="mt-4 grid gap-3 sm:grid-cols-2" data-session-snapshot-details>
+            <StatTile v-for="item in sessionSnapshotRows.details" :key="item.label" :label="item.label" :value="item.value" :note="item.note || ''" />
           </div>
         </template>
       </div>
@@ -312,7 +328,7 @@
       <div class="section-card">
         <h2 id="diagnostics" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.diagnostics') }}</h2>
         <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.diagnostics_desc') }}</p>
-        <div v-if="groupedRecentIssues.length" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4">
+        <div v-if="groupedRecentIssues.length" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-readonly>
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.recent_incidents') }}</div>
             <div class="text-xs text-storm">{{ groupedRecentIssues.length }} {{ $t('troubleshooting.visible_now') }}</div>
@@ -344,6 +360,7 @@
         </div>
         <div class="mt-4 rounded-xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
           {{ $t('troubleshooting.support_redaction_notice') }}
+          <a href="https://papi-ux.com/docs/troubleshooting/#what-is-redacted" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('troubleshooting.redaction_docs_link') }}</a>
         </div>
         <div class="mt-4 space-y-2" data-report-a-problem>
           <label class="section-kicker block" for="support-user-notes">{{ $t('troubleshooting.report_problem_notes') }}</label>
@@ -351,36 +368,39 @@
             id="support-user-notes"
             v-model="userNotes"
             rows="3"
-            class="w-full rounded-xl border border-storm/25 bg-deep/35 px-3 py-2 text-sm text-silver"
+            class="settings-input text-sm"
             :placeholder="$t('troubleshooting.report_problem_notes_placeholder')"
           ></textarea>
           <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-primary w-full sm:w-auto" :disabled="generatingIssueDraft" @click="openPrefilledIssue">
             {{ $t('troubleshooting.report_problem') }}
           </button>
-          <p class="text-xs text-storm">{{ $t('troubleshooting.report_problem_desc') }}</p>
+          <p class="text-xs text-storm">
+            {{ $t('troubleshooting.report_problem_desc') }}
+            <a href="https://papi-ux.com/docs/troubleshooting/#reporting-a-crash" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('troubleshooting.report_problem_docs_link') }}</a>
+          </p>
         </div>
-        <div class="mt-4 grid gap-2 sm:grid-cols-2">
-          <button class="focus-ring troubleshooting-action-card" @click="copyIssueDraft" :disabled="generatingIssueDraft">
+        <div class="mt-4 grid gap-2 sm:grid-cols-2" data-diagnostics-actions>
+          <button type="button" class="focus-ring troubleshooting-action-card" data-action-card @click="copyIssueDraft" :disabled="generatingIssueDraft">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_issue_draft') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.copy_issue_draft_desc') }}</div>
           </button>
-          <button class="focus-ring troubleshooting-action-card" @click="downloadIssueDraft" :disabled="generatingIssueDraft">
+          <button type="button" class="focus-ring troubleshooting-action-card" data-action-card @click="downloadIssueDraft" :disabled="generatingIssueDraft">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.download_issue_draft') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.download_issue_draft_desc') }}</div>
           </button>
-          <button class="focus-ring troubleshooting-action-card" @click="copyRecentIssues">
+          <button type="button" class="focus-ring troubleshooting-action-card" data-action-card @click="copyRecentIssues">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.copy_recent_issues') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.copy_recent_issues_desc') }}</div>
           </button>
-          <button class="focus-ring troubleshooting-action-card" :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
+          <button type="button" class="focus-ring troubleshooting-action-card" data-action-card :disabled="downloadingSupportBundle" @click="downloadSupportBundle">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.download_support_bundle') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.download_support_bundle_desc') }}</div>
           </button>
-          <button class="focus-ring troubleshooting-action-card" :disabled="clearingAiCache" @click="clearAiCache">
+          <button type="button" class="focus-ring troubleshooting-action-card" data-action-card :disabled="clearingAiCache" @click="clearAiCache">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.clear_ai_cache') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.clear_ai_cache_desc') }}</div>
           </button>
-          <button v-if="platform === 'linux'" class="focus-ring troubleshooting-action-card" :disabled="cleaningStaleVirtualDisplay" @click="requestConfirmedAction('cleanupStaleVirtualDisplay')">
+          <button v-if="platform === 'linux'" type="button" class="focus-ring troubleshooting-action-card" data-action-card :disabled="cleaningStaleVirtualDisplay" @click="requestConfirmedAction('cleanupStaleVirtualDisplay')">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.cleanup_stale_virtual_display') }}</div>
             <div class="mt-1 text-xs text-storm">{{ $t('troubleshooting.cleanup_stale_virtual_display_desc') }}</div>
           </button>
@@ -398,10 +418,10 @@
           <div class="page-meta">
             <span class="meta-pill">{{ logFilterSummary }}</span>
             <span v-if="logsTruncated" class="meta-pill" data-log-tail-truncated>
-              Bounded tail · earlier content omitted · bytes {{ logStartOffset }}–{{ logEndOffset }}
+              {{ $t('troubleshooting.logs_bounded_tail', { start: logStartOffset, end: logEndOffset }) }}
             </span>
             <span v-if="logsReset" class="meta-pill" data-log-tail-reset>
-              Log window reset after clear, rotation, or a missed range
+              {{ $t('troubleshooting.logs_window_reset') }}
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-2">
@@ -411,7 +431,7 @@
                     :class="(logLevelFilter === level || (level === 'All' && !logLevelFilter))
                       ? 'is-active'
                       : ''">
-              {{ level }}
+              {{ $t(`troubleshooting.logs_level_${level.toLowerCase()}`) }}
             </button>
           </div>
           <div class="troubleshooting-filter-panel flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
@@ -420,7 +440,7 @@
               name="logs-filter"
               autocomplete="off"
               :aria-label="$t('troubleshooting.logs_find')"
-              class="w-full rounded-lg border border-storm/50 bg-deep px-3 py-1.5 text-sm text-silver focus:border-ice focus:outline-none sm:w-72"
+              class="settings-input text-sm sm:w-72"
               v-model="logFilter"
               :placeholder="$t('troubleshooting.logs_find')"
             >
@@ -473,6 +493,8 @@ import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
+import StatTile from '../components/StatTile.vue'
+import { useConfigProjection } from '../composables/useConfigProjection'
 import { requestHostRestart } from '../restart-host.js'
 import {
   buildAnonymizedDiagnosticsBundle,
@@ -483,10 +505,12 @@ import {
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
-  describePreviousRun,
   redactSensitiveText,
 } from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
+import { aiReadinessCopy, describeAiReadiness } from '../doctor-ai-readiness.js'
+import { describePreviousRunBanner } from '../previous-run-banner.js'
+import { buildSessionSnapshotRows, summarizeStreamStats } from '../session-snapshot-rows.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
@@ -494,6 +518,11 @@ import { statusTone } from '../status-tones.js'
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
 const { stats: streamStats, connected: streamStatsConnected } = useStreamStats()
+// Host truth for this page: the settings projection feeds the stream display
+// and provenance rows, and the AI status says whether an explanation can run.
+const projection = useConfigProjection()
+const aiStatus = ref(null)
+const hostConfig = ref({})
 
 const closeAppPressed = ref(false)
 const closeAppStatus = ref(null)
@@ -598,86 +627,6 @@ async function executeConfirmedAction() {
   }
 }
 
-function yesNo(value) {
-  return value ? 'Yes' : 'No'
-}
-
-function formatNumber(value, digits = 1) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return '0'
-  }
-  return Number(value).toFixed(digits)
-}
-
-function formatFps(value) {
-  return `${formatNumber(value, 1)} FPS`
-}
-
-function formatResolution(width, height) {
-  if (!width || !height) return '(unknown)'
-  return `${width}x${height}`
-}
-
-function summarizeStreamStats(s = {}) {
-  if (!s.streaming) return 'No active stream'
-  return `${formatFps(s.fps)} / ${formatFps(s.session_target_fps || s.requested_client_fps)} target · ${s.bitrate_kbps || 0} kbps · ${formatNumber(s.packet_loss, 2)}% loss · ${formatNumber(s.encode_time_ms, 1)} ms encode`
-}
-
-function hasRuntimeOverride(s) {
-  const effectiveKnown = s.runtime_effective_headless !== undefined && s.runtime_effective_headless !== null
-  return Boolean(s.runtime_requested_headless) &&
-    effectiveKnown &&
-    !Boolean(s.runtime_effective_headless) &&
-    Boolean(s.runtime_gpu_native_override_active)
-}
-
-function runtimeModeDescription(s) {
-  if (s.stream_display_mode) return s.stream_display_mode
-  return `${yesNo(s.runtime_effective_headless)} effective / ${yesNo(s.runtime_requested_headless)} requested`
-}
-
-function runtimeOverrideDescription(s) {
-  if (hasRuntimeOverride(s)) {
-    return 'GPU-native override active: requested headless, running windowed labwc'
-  }
-  return s.runtime_gpu_native_override_active ? 'GPU-native override active' : 'None'
-}
-
-function captureReasonDescription(reason) {
-  const key = String(reason || '').toLowerCase()
-  const messages = {
-    gpu_native: 'Capture and encoder conversion are GPU-resident.',
-    headless_extcopy_dmabuf: 'True-headless DMA-BUF capture is active; frames stay GPU-resident through the encoder path.',
-    windowed_dmabuf_override: 'Windowed private compositor is preserving the GPU-native capture path.',
-    headless_shm_fallback: 'Private Stream is using SHM/system-memory capture; healthy streams can still show this, including AMD/VAAPI conservative baselines.',
-    headless_shm_default: 'Private Stream is using SHM/system-memory capture; healthy streams can still show this, including AMD/VAAPI conservative baselines.',
-    gpu_native_requested_shm_fallback: 'GPU-native capture was requested, but Wayland capture fell back to SHM/system-memory frames.',
-    gpu_native_requested_cpu_capture: 'GPU-native capture was requested, but capture frames are CPU-resident.',
-    gpu_native_requested_cpu_encode_upload: 'GPU-native capture was requested, but encoder upload/conversion is CPU-resident.',
-    encoder_upload_cpu: 'Capture is GPU-resident, but encoder upload/conversion crosses system memory.',
-    cpu_capture: 'The active capture path is CPU-resident.',
-    shm_capture: 'The active capture path is CPU-resident.',
-    dmabuf_gpu_capture: 'Capture is using DMA-BUF/GPU frames, but the encoder path is not fully GPU-native.',
-    no_capture_metadata: 'No capture metadata has been reported yet.',
-  }
-  return messages[key] || 'The active capture and encoder path is mixed or not fully classified.'
-}
-
-function fpsTargetGapDescription(s) {
-  const encoded = Number(s.fps)
-  const target = Number(s.session_target_fps || s.requested_client_fps)
-
-  if (!Number.isFinite(encoded) || !Number.isFinite(target) || target < 90 || encoded <= 0) {
-    return 'None'
-  }
-
-  if (encoded >= target * 0.85) {
-    return 'None'
-  }
-
-  return `${formatFps(encoded)} encoded against ${formatFps(target)} target`
-}
-
 const groupedRecentIssues = computed(() => groupRecentIssueLogs(logs.value, {
   maxSourceLines: 300,
   maxGroups: 8,
@@ -726,15 +675,17 @@ const doctorPlainDiagnosis = computed(() => {
 const doctorAdvancedItems = computed(() => {
   const s = streamStats.value || {}
   const doctor = doctorPayload.value || {}
+  const none = i18n.t('troubleshooting.doctor_none')
+  const unknown = i18n.t('troubleshooting.snapshot_unknown')
   return [
-    { label: 'Doctor issue', value: doctor.primary_issue || 'none' },
-    { label: 'Doctor action', value: doctor.safe_recovery_action?.id || 'none' },
-    { label: 'Client', value: s.client_name || s.client_type || '(unknown)' },
-    { label: 'Runtime', value: s.launch_mode || s.stream_display_mode || s.runtime_backend || '(unknown)' },
-    { label: 'Capture path', value: s.capture_path || s.capture_transport || '(unknown)' },
-    { label: 'Capture reason', value: s.capture_path_reason || '(unknown)' },
-    { label: 'Encoder', value: s.encoder || s.encode_target_device || '(unknown)' },
-    { label: 'Active stream stats', value: summarizeStreamStats(s) },
+    { label: i18n.t('troubleshooting.doctor_issue'), value: doctor.primary_issue || none },
+    { label: i18n.t('troubleshooting.doctor_action'), value: doctor.safe_recovery_action?.id || none },
+    { label: i18n.t('troubleshooting.doctor_client'), value: s.client_name || s.client_type || unknown },
+    { label: i18n.t('troubleshooting.doctor_runtime'), value: s.launch_mode || s.stream_display_mode || s.runtime_backend || unknown },
+    { label: i18n.t('troubleshooting.doctor_capture_path'), value: s.capture_path || s.capture_transport || unknown },
+    { label: i18n.t('troubleshooting.doctor_capture_reason'), value: s.capture_path_reason || unknown },
+    { label: i18n.t('troubleshooting.doctor_encoder'), value: s.encoder || s.encode_target_device || unknown },
+    { label: i18n.t('troubleshooting.doctor_stream_stats'), value: summarizeStreamStats(s, i18n.t) },
   ]
 })
 
@@ -813,7 +764,7 @@ async function pulseControllerHaptics() {
 
 function copySupportSelfTests() {
   navigator.clipboard.writeText(supportSelfTestCopy.value)
-  showToast('Support self-test summary copied.', 'success')
+  showToast(i18n.t('troubleshooting.self_tests_copied'), 'success')
 }
 
 watch(streamStats, (next, previous) => {
@@ -829,48 +780,19 @@ function fixMyStreamStatusLabel(status) {
   return i18n.t('troubleshooting.fix_my_stream_status_warning')
 }
 
-const sessionSnapshotItems = computed(() => {
-  if (!streamStats.value || !streamStats.value.streaming) return []
+const sessionSnapshotRows = computed(() => buildSessionSnapshotRows(streamStats.value, i18n.t, {
+  streamDisplay: projection.ok.value ? projection.streamDisplay.value : null,
+  provenance: projection.ok.value ? projection.provenance.value : null,
+}))
 
-  const s = streamStats.value
-  return [
-    { label: 'Resolution', value: formatResolution(s.width, s.height) },
-    { label: 'Codec', value: s.codec || '(unknown)' },
-    { label: 'FPS', value: `${formatFps(s.fps)} encoded / ${formatFps(s.session_target_fps)} target` },
-    { label: 'Bitrate', value: `${s.bitrate_kbps || 0} kbps` },
-    { label: 'Client IP', value: s.client_ip || '(unknown)' },
-    { label: 'Active Sessions', value: `${s.active_sessions ?? 0}` },
-    { label: 'Requested FPS', value: formatFps(s.requested_client_fps) },
-    { label: 'Runtime Backend', value: s.runtime_backend || '(unknown)' },
-    { label: 'Stream Display Mode', value: runtimeModeDescription(s) },
-    { label: 'Runtime Override', value: runtimeOverrideDescription(s) },
-    { label: 'FPS Target Gap', value: fpsTargetGapDescription(s) },
-    { label: 'Capture Path', value: s.capture_path || 'unknown' },
-    { label: 'Capture Reason', value: captureReasonDescription(s.capture_path_reason) },
-    { label: 'Capture Transport', value: `${s.capture_transport || 'unknown'} / ${s.capture_residency || 'unknown'} / ${s.capture_format || 'unknown'}` },
-    { label: 'Encode Target', value: `${s.encode_target_device || 'unknown'} / ${s.encode_target_residency || 'unknown'} / ${s.encode_target_format || 'unknown'}` },
-    { label: 'GPU Native', value: yesNo(s.capture_gpu_native) },
-    { label: 'CPU Copy', value: yesNo(s.capture_cpu_copy) },
-    { label: 'Pacing Policy', value: s.pacing_policy || 'none' },
-    { label: 'Optimization Source', value: s.optimization_source || 'default' },
-    { label: 'Network', value: `${formatNumber(s.latency_ms, 1)} ms latency / ${formatNumber(s.packet_loss, 2)}% loss` },
-    { label: 'Frame Delivery', value: `${formatNumber((s.duplicate_frame_ratio || 0) * 100, 2)}% duplicate / ${formatNumber((s.dropped_frame_ratio || 0) * 100, 2)}% dropped` },
-    { label: 'Frame Timing', value: `${formatNumber(s.avg_frame_age_ms, 2)} ms age / ${formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2)} ms target interval error` }
-  ]
-})
+// The panel copy names the real state of the optional explanation: signed in,
+// key saved, login missing, or off. It stops calling a working setup disabled.
+const aiReadiness = computed(() => describeAiReadiness(aiStatus.value, hostConfig.value || {}))
+const aiReadinessText = computed(() => aiReadinessCopy(aiReadiness.value, i18n.t))
 
-const sessionSnapshotSummaryItems = computed(() => {
-  if (!streamStats.value || !streamStats.value.streaming) return []
-  return [
-    { label: 'Client', value: streamStats.value.client_name || '(unknown)' },
-    ...sessionSnapshotItems.value.slice(0, 3)
-  ]
-})
-
-const sessionSnapshotDetailItems = computed(() => {
-  if (!streamStats.value || !streamStats.value.streaming) return []
-  return sessionSnapshotItems.value.slice(3)
-})
+async function refreshAiStatus() {
+  aiStatus.value = await safeFetchJson('./api/ai/status')
+}
 
 const actualLogs = computed(() => {
   if (!logFilter.value && !logLevelFilter.value) return logs.value
@@ -1053,8 +975,9 @@ async function refreshLastRun() {
   lastRun.value = result && !result._error ? result : null
 }
 
-const previousRunSummary = computed(() => describePreviousRun(lastRun.value || {}))
-const showCrashBanner = computed(() => Boolean(previousRunSummary.value) && !crashBannerDismissed.value)
+const previousRunBanner = computed(() => (
+  crashBannerDismissed.value ? null : describePreviousRunBanner(lastRun.value, i18n.t)
+))
 
 function dismissCrashBanner() {
   crashBannerDismissed.value = true
@@ -1327,12 +1250,15 @@ fetch("/api/config")
   .then((r) => {
     platform.value = r.platform
     version.value = r.version || ''
+    hostConfig.value = r || {}
   })
 
 logInterval = setInterval(() => { refreshLogs() }, 5000)
 refreshLogs()
 refreshNetworkPathProbe()
 refreshLastRun()
+refreshAiStatus()
+projection.load()
 
 onBeforeUnmount(() => {
   clearInterval(logInterval)
