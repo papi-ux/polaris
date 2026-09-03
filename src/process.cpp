@@ -72,6 +72,7 @@
   // _SH constants for _wfsopen()
   #include <share.h>
 #elif __linux__
+  #include "platform/linux/desktop_takeover.h"
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
@@ -4920,11 +4921,29 @@ namespace proc {
 #endif
 
 #if defined(__linux__)
+  bool launch_requests_desktop_takeover(
+      const rtsp_stream::launch_session_t &launch_session) {
+    if (launch_session.mirror_desktop) {
+      return false;
+    }
+    if (!launch_session.stream_mode.empty()) {
+      return launch_session.stream_mode == stream_display_policy::k_desktop_takeover;
+    }
+    return stream_display_policy::configured_selection() ==
+           stream_display_policy::k_desktop_takeover;
+  }
+
+  bool app_desktop_mirror_applies(
+      const proc::ctx_t &app,
+      const rtsp_stream::launch_session_t &launch_session) {
+    return app.desktop_mirror && !launch_requests_desktop_takeover(launch_session);
+  }
+
   void apply_app_display_semantics(
     const proc::ctx_t &app,
     rtsp_stream::launch_session_t &launch_session
   ) {
-    if (!app.desktop_mirror) {
+    if (!app_desktop_mirror_applies(app, launch_session)) {
       return;
     }
     launch_session.mirror_desktop = true;
@@ -6306,6 +6325,9 @@ namespace proc {
 #ifdef __linux__
   // Linux virtual display state — holds the active virtual display instance, if any
   static std::optional<virtual_display::vdisplay_t> linux_vdisplay;
+  // Exact Hyprland layout authority for Desktop Takeover. It must be restored
+  // before the virtual output may be destroyed.
+  static std::optional<desktop_takeover::state_t> linux_desktop_takeover;
 
   /**
    * @brief Check whether Linux virtual display support is currently available.
@@ -6339,7 +6361,11 @@ namespace proc {
 
   std::unique_ptr<platf::deinit_t> init() {
 #ifdef __linux__
-    virtual_display::cleanup_stale();
+    if (desktop_takeover::cleanup_stale()) {
+      virtual_display::cleanup_stale();
+    } else {
+      BOOST_LOG(error) << "Skipping stale virtual-display cleanup because Desktop Takeover restoration is still pending"sv;
+    }
 #endif
     return std::make_unique<deinit_t>();
   }
@@ -6530,7 +6556,7 @@ namespace proc {
 #ifdef __linux__
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         launch_session->stream_mode,
-        launch_session->mirror_desktop || app.desktop_mirror,
+        launch_session->mirror_desktop || app_desktop_mirror_applies(app, *launch_session),
         launch_session->virtual_display,
         app.virtual_display,
         launch_session->user_locked_virtual_display,
@@ -6650,7 +6676,7 @@ namespace proc {
           const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
         auto selection = stream_display_policy::effective_session_selection_for_launch(
           session->stream_mode,
-          session->mirror_desktop || _app.desktop_mirror,
+          session->mirror_desktop || app_desktop_mirror_applies(_app, *session),
           session->virtual_display,
           _app.virtual_display,
           session->user_locked_virtual_display,
@@ -6836,6 +6862,14 @@ namespace proc {
     }
 
 #ifdef __linux__
+    if (linux_desktop_takeover && linux_desktop_takeover->active) {
+      BOOST_LOG(error) << "process: refusing launch while Desktop Takeover recovery remains incomplete"sv;
+      return 503;
+    }
+    if (linux_vdisplay) {
+      BOOST_LOG(error) << "process: refusing launch while a prior Linux virtual display still has recovery authority"sv;
+      return 503;
+    }
     if (_retained_steam_shutdown) {
       BOOST_LOG(error) << "process: refusing launch while a retained Steam singleton shutdown remains incomplete"sv;
       return 503;
@@ -6889,7 +6923,7 @@ namespace proc {
     }
 
 #ifdef __linux__
-    if (app.desktop_mirror) {
+    if (app_desktop_mirror_applies(app, *launch_session)) {
       if (!launch_session->mirror_desktop || launch_session->virtual_display) {
         BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
                         << app.name << "]; ignoring virtual-display preference for this session"sv;
@@ -6906,7 +6940,7 @@ namespace proc {
     const auto configured_session_mode = stream_display_policy::configured_selection();
     auto session_mode = stream_display_policy::effective_session_selection_for_launch(
       launch_session->stream_mode,
-      launch_session->mirror_desktop || app.desktop_mirror,
+      launch_session->mirror_desktop || app_desktop_mirror_applies(app, *launch_session),
       launch_session->virtual_display,
       app.virtual_display,
       launch_session->user_locked_virtual_display,
@@ -6916,7 +6950,9 @@ namespace proc {
       session_mode = configured_session_mode;
     }
     if (!session_mode.empty()) {
-      launch_session->virtual_display = session_mode == stream_display_policy::k_host_virtual_display;
+      launch_session->virtual_display =
+        session_mode == stream_display_policy::k_host_virtual_display ||
+        session_mode == stream_display_policy::k_desktop_takeover;
     }
     if (launch_session->resolved_profile_from_client &&
         (launch_session->expected_stream_mode.empty() ||
@@ -7011,7 +7047,8 @@ namespace proc {
         const auto fallback_mode = stream_display_policy::configured_selection();
         session_mode = fallback_mode;
         launch_session->virtual_display =
-          fallback_mode == stream_display_policy::k_host_virtual_display;
+          fallback_mode == stream_display_policy::k_host_virtual_display ||
+          fallback_mode == stream_display_policy::k_desktop_takeover;
         BOOST_LOG(warning) << "process: session stream mode override ["sv << rejected_session_mode
                            << "] rejected: "sv << mode_error << "; using the host default"sv;
       }
@@ -7694,6 +7731,22 @@ namespace proc {
             mapped_output_name
           );
           platf::reevaluate_capture_sources();
+
+          if (launch_session->expected_stream_mode ==
+              stream_display_policy::k_desktop_takeover) {
+            auto takeover = desktop_takeover::begin(this->display_name);
+            if (takeover.recovery_state && takeover.recovery_state->active) {
+              linux_desktop_takeover = std::move(takeover.recovery_state);
+            }
+            if (!takeover) {
+              const auto warning = takeover.error.empty() ?
+                std::string {"Desktop Takeover could not be started safely."} :
+                takeover.error;
+              BOOST_LOG(error) << warning;
+              stream_stats::update_runtime_display_warning(warning);
+              return 503;
+            }
+          }
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed on Linux"sv;
           launch_session->virtual_display = false;
@@ -9303,6 +9356,46 @@ namespace proc {
     return true;
   }
 
+  bool proc_t::terminate_abandoned_desktop_takeover(
+      std::string_view session_token) {
+#ifdef __linux__
+    if (session_token.empty()) {
+      return false;
+    }
+    const auto expected_token = std::string {session_token};
+    const auto abandoned_generation_is_current = [this, expected_token]() {
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      const auto rtsp_snapshot = rtsp_stream::session_snapshot({});
+      return rtsp_snapshot.active_sessions == 0 &&
+             rtsp_snapshot.pending_sessions == 0 &&
+             _launch_session &&
+             crypto::constant_time_equals(
+               _launch_session->session_token,
+               expected_token
+             ) &&
+             _launch_session->expected_stream_mode ==
+               stream_display_policy::k_desktop_takeover;
+    };
+    const bool terminated = terminate_if(
+      abandoned_generation_is_current,
+      []() {
+        BOOST_LOG(warning) << "Desktop Takeover launch was abandoned before streaming; restoring the physical desktop"sv;
+        confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+        confighttp::emit_session_event("stream_start_abandoned", "Desktop Takeover launch was abandoned");
+      }
+    );
+    if (terminated) {
+      confighttp::set_session_state(confighttp::session_state_e::idle);
+      confighttp::emit_session_event("stream_ended", "Desktop Takeover launch was abandoned");
+    }
+    return terminated;
+#else
+    (void) session_token;
+    return false;
+#endif
+  }
+
   void proc_t::terminate_from_admitted_launch() {
     if (!_session_lifecycle_gate->transition_launch_to_stop()) {
       return;
@@ -9876,15 +9969,31 @@ namespace proc {
         display_device::revert_configuration();
       }
 #elif __linux__
+    bool desktop_takeover_restored = true;
+    if (linux_desktop_takeover && linux_desktop_takeover->active) {
+      std::string takeover_error;
+      desktop_takeover_restored = desktop_takeover::restore(
+        *linux_desktop_takeover,
+        &takeover_error
+      );
+      if (desktop_takeover_restored) {
+        linux_desktop_takeover.reset();
+      } else {
+        BOOST_LOG(error) << takeover_error;
+      }
+    }
+
     // Destroy Linux virtual display if one was created
     const bool had_linux_vdisplay = linux_vdisplay.has_value();
-    if (had_linux_vdisplay) {
+    if (had_linux_vdisplay && desktop_takeover_restored) {
       if (virtual_display::destroy(*linux_vdisplay)) {
         linux_vdisplay.reset();
         BOOST_LOG(info) << "Linux Virtual Display teardown verified"sv;
       } else {
         BOOST_LOG(error) << "Linux Virtual Display teardown not verified; retaining handle for retry"sv;
       }
+    } else if (had_linux_vdisplay) {
+      BOOST_LOG(error) << "Linux Virtual Display retained because Desktop Takeover restoration is still pending"sv;
     }
 
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
@@ -10079,6 +10188,18 @@ namespace proc {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return virtual_display;
+  }
+
+  bool proc_t::session_requires_immediate_teardown_on_disconnect() const {
+#ifdef __linux__
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    return _launch_session &&
+           _launch_session->expected_stream_mode ==
+             stream_display_policy::k_desktop_takeover;
+#else
+    return false;
+#endif
   }
 
   bool proc_t::session_allows_client_commands() {

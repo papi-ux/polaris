@@ -140,6 +140,7 @@ namespace stream_display_policy {
   constexpr std::string_view k_headless_stream = stream_path::k_headless_stream;
   constexpr std::string_view k_windowed_stream = stream_path::k_windowed_stream;
   constexpr std::string_view k_host_virtual_display = stream_path::k_host_virtual_display;
+  constexpr std::string_view k_desktop_takeover = stream_path::k_desktop_takeover;
   constexpr std::string_view k_desktop_display = stream_path::k_desktop_display;
   constexpr std::string_view k_gamescope_stream = stream_path::k_gamescope_stream;
   constexpr std::string_view k_headless_dongle = stream_path::k_headless_dongle;

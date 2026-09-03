@@ -38,14 +38,20 @@ describe('Vulkan Video settings contract', () => {
 
   it('shows automatic encoder selection evidence in Doctor', () => {
     const troubleshooting = webSource('views/TroubleshootingView.vue')
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).troubleshooting
 
     expect(troubleshooting).toContain('doctor.advanced_evidence?.encoder_selection')
-    expect(troubleshooting).toContain("label: 'Detected GPU driver'")
-    expect(troubleshooting).toContain("label: 'Encoder policy'")
-    expect(troubleshooting).toContain("label: 'Preferred encoder'")
-    expect(troubleshooting).toContain("label: 'Fallback encoder'")
-    expect(troubleshooting).toContain("label: 'Fallback used'")
-    expect(troubleshooting).toContain("label: 'Selection reason'")
+    for (const [key, label] of Object.entries({
+      doctor_detected_gpu_driver: 'Detected GPU driver',
+      doctor_encoder_policy: 'Encoder policy',
+      doctor_preferred_encoder: 'Preferred encoder',
+      doctor_fallback_encoder: 'Fallback encoder',
+      doctor_fallback_used: 'Fallback used',
+      doctor_selection_reason: 'Selection reason',
+    })) {
+      expect(troubleshooting).toContain(`i18n.t('troubleshooting.${key}')`)
+      expect(locale[key]).toBe(label)
+    }
   })
 
   it('promotes Vulkan only for AMD private Auto and preserves strict fallback behavior', () => {

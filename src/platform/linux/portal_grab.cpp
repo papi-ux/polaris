@@ -573,7 +573,8 @@ namespace portal {
       }
 
 #ifndef POLARIS_BUILD_WAYLAND
-      if (generation.stream_mode == "host_virtual_display") {
+      if (generation.stream_mode == "host_virtual_display" ||
+          generation.stream_mode == "desktop_takeover") {
         BOOST_LOG(error) << "portal: host virtual capture requires KWin output pinning, but Wayland support is not built"sv;
         return nullptr;
       }

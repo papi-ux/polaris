@@ -474,6 +474,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/desktop_takeover.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/desktop_takeover.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.h"

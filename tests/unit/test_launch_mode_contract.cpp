@@ -266,6 +266,7 @@ TEST(SessionStreamMode, DerivesSessionOverridabilityFromTopologyNotAnIdList) {
   EXPECT_TRUE(stream_display_policy::selection_session_overridable("headless_stream"));
   EXPECT_TRUE(stream_display_policy::selection_session_overridable("windowed_stream"));
   EXPECT_TRUE(stream_display_policy::selection_session_overridable("desktop_display"));
+  EXPECT_TRUE(stream_display_policy::selection_session_overridable("desktop_takeover"));
 
   // Unknown ids are not "restricted", they are simply not paths. The gate
   // checks validity first so they report as unknown rather than as reserved.

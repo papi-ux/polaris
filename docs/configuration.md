@@ -42,6 +42,7 @@ AMD/NVIDIA guidance, see [Launch modes and capture paths](launch-modes.md).
 | --- | --- |
 | My real desktop, at host resolution | `desktop_display` (Mirror Desktop) |
 | An extra display, sized to the client | `host_virtual_display` |
+| My live Hyprland desktop on a private client-sized output, with host displays dark | `desktop_takeover` |
 | An isolated game-only session, desktop untouched | `headless_stream` / `windowed_stream` |
 
 Two client-facing notes: Moonlight-protocol clients can request the mirror for a single launch with
@@ -55,7 +56,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
-| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
+| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
 | `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
 | `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel after one-time portal approval is saved (the approval session keeps it on); `off` extends onto the dongle and leaves the panel primary |
 | `fallback_mode` | `1920x1080x60` | Display mode used when the client-requested mode is unsupported, as `WxHxFPS`. The web UI's Display Planner presets write this same key, so Moonlight compatibility stays standard; Nova and per-game overrides can layer on top where client-settings support exists |

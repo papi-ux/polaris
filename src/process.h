@@ -803,6 +803,7 @@ namespace proc {
     std::string get_session_owner_device_name();
     bool is_session_owner(const std::string &unique_id);
     bool session_uses_virtual_display();
+    bool session_requires_immediate_teardown_on_disconnect() const;
     bool session_allows_client_commands();
     void mark_client_session_report_recorded(const std::string &unique_id);
     bool client_session_report_recorded() const;
@@ -825,6 +826,7 @@ namespace proc {
     void terminate(bool immediate = false, bool needs_refresh = true);
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
+    bool terminate_abandoned_desktop_takeover(std::string_view session_token);
     void terminate_from_admitted_launch();
     bool reload_configuration_from_file(const std::string &file_name);
     void reload_configuration(proc_t &&parsed);

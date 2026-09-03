@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Adds memory-only guest pairing for Nova QR and Manual PIN clients, with explicit access controls and automatic revocation after the device's final stream disconnect or a Polaris restart
+- Adds an explicit Hyprland Desktop Takeover mode that creates a client-sized virtual output, moves the live workspaces onto it, blanks the original displays with DPMS, and restores the exact workspace layout before removing the virtual output on final disconnect
 - Adds an experimental Linux Vulkan Video encoder for H.264 and HEVC on explicit DRM/KMS capture, matching the encoder to the capture render node and refusing Portal/wlroots or system-memory fallback; AV1 remains disabled until the bundled FFmpeg path passes Vulkan validation
 - Keeps Vulkan image imports and cursor overlays safe across asynchronous submissions with per-slot fences and descriptor sets, and exposes low-latency CBR tuning plus explicit KMS setup guidance in Settings
 - Pins the prepared FFmpeg bundle carrying Vulkan queued-picture teardown and missing encode-queue error fixes, preventing capability probes and short sessions from leaking image views or opening a broken encoder

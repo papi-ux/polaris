@@ -466,7 +466,8 @@ struct PairingAccessPresetTest: testing::Test {
 
 pair_session_t successful_pairing_session(
   const std::string &unique_id,
-  std::optional<crypto::PERM> pairing_perm = std::nullopt
+  std::optional<crypto::PERM> pairing_perm = std::nullopt,
+  bool temporary_authorization = false
 ) {
   pair_session_t session {
     .client = {
@@ -475,7 +476,8 @@ pair_session_t successful_pairing_session(
       .name = "test-" + unique_id
     },
     .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"},
-    .pairing_perm = pairing_perm
+    .pairing_perm = pairing_perm,
+    .temporary_authorization = temporary_authorization
   };
   return session;
 }
@@ -760,6 +762,81 @@ TEST_F(PairingAccessPresetTest, NewlyPairedClientIncludesAddedAndLastSeenTimesta
   const auto last_seen_at = clients[0].value("last_seen_at", std::int64_t {0});
   EXPECT_GT(paired_at, 0);
   EXPECT_EQ(last_seen_at, paired_at);
+}
+
+TEST_F(PairingAccessPresetTest, TemporaryAuthorizationNeverEntersDurablePairingState) {
+  TemporaryPairingState state {"temporary-authorization"};
+  auto session = successful_pairing_session(
+    "temporary-client",
+    crypto::PERM::_game_control,
+    true
+  );
+  complete_successful_pairing(session);
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_TRUE(clients[0]["temporary_authorization"].get<bool>());
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  EXPECT_TRUE(state.read()["root"]["named_devices"].empty());
+
+  reset_pairing_state_for_tests();
+  load_pairing_state_for_tests();
+  EXPECT_TRUE(get_all_clients().empty());
+}
+
+TEST_F(PairingAccessPresetTest, DeviceUpdatePreservesTemporaryAuthorizationWhenFieldIsOmitted) {
+  TemporaryPairingState state {"temporary-update-preserve"};
+  auto session = successful_pairing_session(
+    "temporary-update-client",
+    crypto::PERM::_game_control,
+    true
+  );
+  complete_successful_pairing(session);
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+
+  EXPECT_EQ(
+    update_device_info_result(
+      uuid, "renamed", "", 0, {}, {}, crypto::PERM::_game_control, true, true, false
+    ),
+    client_mutation_result_t::success
+  );
+  auto updated = get_all_clients();
+  ASSERT_EQ(updated.size(), 1);
+  EXPECT_TRUE(updated[0]["temporary_authorization"].get<bool>());
+  EXPECT_TRUE(state.read()["root"]["named_devices"].empty());
+
+  EXPECT_EQ(
+    update_device_info_result(
+      uuid, "durable", "", 0, {}, {}, crypto::PERM::_game_control, true, true, false, false
+    ),
+    client_mutation_result_t::success
+  );
+  updated = get_all_clients();
+  ASSERT_EQ(updated.size(), 1);
+  EXPECT_FALSE(updated[0]["temporary_authorization"].get<bool>());
+  EXPECT_EQ(state.read()["root"]["named_devices"].size(), 1);
+}
+
+TEST_F(PairingAccessPresetTest, TemporaryAuthorizationRevocationInvalidatesTheCertificate) {
+  auto session = successful_pairing_session(
+    "expiring-client",
+    crypto::PERM::_game_control,
+    true
+  );
+  complete_successful_pairing(session);
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+
+  auto cert = crypto::x509(PUBLIC_CERT);
+  ASSERT_TRUE(verify_client_cert_for_tests(cert.get(), 1234));
+  EXPECT_TRUE(is_temporary_client_authorization(uuid));
+  EXPECT_TRUE(expire_temporary_client_authorization(uuid));
+  EXPECT_FALSE(is_temporary_client_authorization(uuid));
+  EXPECT_FALSE(expire_temporary_client_authorization(uuid));
+  EXPECT_FALSE(verify_client_cert_for_tests(cert.get(), 1235));
 }
 
 TEST_F(PairingAccessPresetTest, RecordingClientActivityAdvancesLastSeenWithoutChangingAddedDate) {

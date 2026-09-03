@@ -467,7 +467,10 @@ TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinu
   const auto final_capability_validation = body.find(
     "validate_resolved_launch_profile_for_app(app, launch_session, client_profile)"
   );
-  const auto desktop_mirror_semantic = body.find("if (app.desktop_mirror)", final_capability_validation);
+  const auto desktop_mirror_semantic = body.find(
+    "if (app_desktop_mirror_applies(app, *launch_session))",
+    final_capability_validation
+  );
   const auto mode_derivation = body.find(
     "stream_display_policy::effective_session_selection_for_launch(",
     desktop_mirror_semantic
@@ -861,6 +864,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   ASSERT_NE(timer_callback_end, std::string::npos);
   const auto timer_callback = rtsp.substr(timer_callback_start, timer_callback_end - timer_callback_start);
   EXPECT_NE(timer_callback.find("expire_pending_launch(launch_session_id, timer_generation)"), std::string::npos);
+  EXPECT_NE(timer_callback.find("request_abandoned_desktop_takeover_teardown"), std::string::npos);
+  EXPECT_NE(timer_callback.find("launch_session_token"), std::string::npos);
   const auto timer_expiry_start = rtsp.find("bool expire_pending_launch(");
   const auto timer_expiry_end = rtsp.find("std::uint64_t launch_timer_generation()", timer_expiry_start);
   ASSERT_NE(timer_expiry_start, std::string::npos);
@@ -870,6 +875,29 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(timer_expiry.find("_raised_timer_generation.load() != timer_generation"), std::string::npos);
   EXPECT_NE(timer_expiry.find("launch_event.pop_if("), std::string::npos);
   EXPECT_NE(source.find("rtsp_snapshot.active_sessions + rtsp_snapshot.pending_sessions"), std::string::npos);
+
+  const auto takeover_cleanup_start = source.find("bool proc_t::terminate_abandoned_desktop_takeover(");
+  const auto takeover_cleanup_end = source.find("void proc_t::terminate_from_admitted_launch()", takeover_cleanup_start);
+  ASSERT_NE(takeover_cleanup_start, std::string::npos);
+  ASSERT_NE(takeover_cleanup_end, std::string::npos);
+  const auto takeover_cleanup = source.substr(
+    takeover_cleanup_start,
+    takeover_cleanup_end - takeover_cleanup_start
+  );
+  EXPECT_NE(takeover_cleanup.find("terminate_if("), std::string::npos);
+  EXPECT_NE(takeover_cleanup.find("rtsp_stream::session_snapshot({})"), std::string::npos);
+  EXPECT_NE(takeover_cleanup.find("rtsp_snapshot.active_sessions == 0"), std::string::npos);
+  EXPECT_NE(takeover_cleanup.find("rtsp_snapshot.pending_sessions == 0"), std::string::npos);
+  EXPECT_NE(takeover_cleanup.find("crypto::constant_time_equals("), std::string::npos);
+  EXPECT_NE(takeover_cleanup.find("stream_display_policy::k_desktop_takeover"), std::string::npos);
+
+  const auto setup_failure_start = rtsp.find("if (start_result == rtsp_server_t::insert_start_result_e::failed)");
+  const auto setup_failure_end = rtsp.find("respond(sock, session, &option, 500", setup_failure_start);
+  ASSERT_NE(setup_failure_start, std::string::npos);
+  ASSERT_NE(setup_failure_end, std::string::npos);
+  const auto setup_failure = rtsp.substr(setup_failure_start, setup_failure_end - setup_failure_start);
+  EXPECT_NE(setup_failure.find("server->session_clear(session.id)"), std::string::npos);
+  EXPECT_NE(setup_failure.find("request_abandoned_desktop_takeover_teardown"), std::string::npos);
 }
 
 #ifdef __linux__

@@ -164,6 +164,12 @@ namespace rtsp_stream {
                          session.device_name,
                          format_watch_profile(session));
     }
+
+    void request_abandoned_desktop_takeover_teardown(std::string session_token) {
+      std::thread([session_token = std::move(session_token)]() {
+        proc::proc.terminate_abandoned_desktop_takeover(session_token);
+      }).detach();
+    }
   }  // namespace
 
 #pragma pack(push, 1)
@@ -707,6 +713,7 @@ namespace rtsp_stream {
     bool session_raise(std::shared_ptr<launch_session_t> launch_session) {
       std::lock_guard timer_lock(_launch_timer_mutex);
       const auto launch_session_id = launch_session->id;
+      const auto launch_session_token = launch_session->session_token;
       if (!launch_event.raise_if_empty(std::move(launch_session))) {
         return false;
       }
@@ -714,9 +721,12 @@ namespace rtsp_stream {
       const auto timer_generation = ++_raised_timer_generation;
       raised_timer.cancel();
       raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this, launch_session_id, timer_generation](const boost::system::error_code &ec) {
-        if (!ec) {
-          expire_pending_launch(launch_session_id, timer_generation);
+      raised_timer.async_wait([this, launch_session_id, launch_session_token, timer_generation](const boost::system::error_code &ec) {
+        if (!ec && expire_pending_launch(launch_session_id, timer_generation)) {
+          // expire_pending_launch() has released the RTSP timer lock before
+          // process teardown begins. The process-side token and RTSP snapshot
+          // checks prevent this stale timer from touching a replacement launch.
+          request_abandoned_desktop_takeover_teardown(launch_session_token);
         }
       });
       return true;
@@ -1683,6 +1693,9 @@ namespace rtsp_stream {
     }
     if (start_result == rtsp_server_t::insert_start_result_e::failed) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
+      const auto failed_session_token = session.session_token;
+      server->session_clear(session.id);
+      request_abandoned_desktop_takeover_teardown(failed_session_token);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }

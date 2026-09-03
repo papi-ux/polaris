@@ -85,6 +85,7 @@
               ? preset.activeClass
               : 'border-storm/30 bg-deep/40 text-storm hover:border-storm/50 hover:text-silver'"
             :aria-checked="selectedAccessPreset === preset.key"
+            :disabled="otpConfigurationLocked"
             @click="selectedAccessPreset = preset.key"
           >
             <span class="flex items-center justify-between gap-2">
@@ -100,6 +101,16 @@
               {{ $t(preset.descriptionKey) }}
             </span>
           </button>
+        </div>
+        <div class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-3">
+          <Checkbox
+            id="temporary-pairing-authorization"
+            label="pin.temporary_authorization"
+            desc="pin.temporary_authorization_desc"
+            v-model="temporaryAuthorization"
+            default="false"
+            :disabled="otpConfigurationLocked"
+          />
         </div>
       </div>
 
@@ -560,6 +571,14 @@
                       v-model="client.editAllowClientCommands"
                       default="true"
                     />
+
+                    <Checkbox
+                      :id="`temporary-authorization-${client.uuid}`"
+                      label="pin.temporary_authorization"
+                      desc="pin.temporary_authorization_desc"
+                      v-model="client.editTemporaryAuthorization"
+                      default="false"
+                    />
                   </div>
                 </section>
 
@@ -783,6 +802,12 @@
                       :class="accessToneClass(client.perm)"
                     >
                       {{ accessPresetLabel(client.perm) }}
+                    </span>
+                    <span
+                      v-if="client.temporary_authorization"
+                      class="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-bright"
+                    >
+                      {{ $t('pin.temporary_badge') }}
                     </span>
                     <span
                       class="rounded-full border px-2.5 py-1 text-xs font-medium"
@@ -1221,6 +1246,10 @@ const pinDeviceName = ref('')
 const pinMessage = ref('')
 const pinStatus = ref('error')
 const selectedAccessPreset = ref('game_control')
+const temporaryAuthorization = ref(false)
+const otpConfigurationLocked = computed(() => (
+  currentTab.value === 'OTP' && otpStatus.value === 'success' && Boolean(otp.value)
+))
 
 function resetState() {
   editingHost.value = false
@@ -1236,6 +1265,7 @@ function resetState() {
   pinDeviceName.value = ''
   pinMessage.value = ''
   pinStatus.value = 'error'
+  temporaryAuthorization.value = false
   showApplyMessage.value = false
   unpairAllPressed.value = false
   unpairAllStatus.value = null
@@ -1330,6 +1360,7 @@ function registerDevice() {
       pin: pinCode.value,
       name: pinDeviceName.value,
       access_preset: selectedAccessPreset.value,
+      temporary_authorization: temporaryAuthorization.value,
     })
   })
     .then((response) => response.json())
@@ -1362,6 +1393,7 @@ async function requestOTP() {
       passphrase: passphrase.value,
       deviceName: deviceName.value,
       access_preset: selectedAccessPreset.value,
+      temporary_authorization: temporaryAuthorization.value,
     })
   })
     .then(resp => resp.json())
@@ -1507,6 +1539,7 @@ function editClient(client) {
   client.editAllowClientCommands = client.allow_client_commands
   client.editEnableLegacyOrdering = client.enable_legacy_ordering
   client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display
+  client.editTemporaryAuthorization = client.temporary_authorization
   client.editDisplayMode = client.display_mode
   client.edit_do = JSON.parse(JSON.stringify(client.do || []))
   client.edit_undo = JSON.parse(JSON.stringify(client.undo || []))
@@ -1533,6 +1566,7 @@ function cancelEdit(client) {
   client.editAllowClientCommands = client.allow_client_commands
   client.editEnableLegacyOrdering = client.enable_legacy_ordering
   client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display
+  client.editTemporaryAuthorization = client.temporary_authorization
   dismissSuggestion()
   nextTick(() => {
     lastFocusedElement?.focus?.()

@@ -175,6 +175,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_common.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cage_display_router.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_default_render_device.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_desktop_takeover.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_display_topology.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp

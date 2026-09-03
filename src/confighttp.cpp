@@ -3445,6 +3445,10 @@ namespace confighttp {
       bool enable_legacy_ordering = input_tree.value("enable_legacy_ordering", true);
       bool allow_client_commands = input_tree.value("allow_client_commands", true);
       bool always_use_virtual_display = input_tree.value("always_use_virtual_display", false);
+      std::optional<bool> temporary_authorization;
+      if (input_tree.contains("temporary_authorization")) {
+        temporary_authorization = input_tree.at("temporary_authorization").get<bool>();
+      }
       auto do_cmds = nvhttp::extract_command_entries(input_tree, "do");
       auto undo_cmds = nvhttp::extract_command_entries(input_tree, "undo");
       auto perm = static_cast<crypto::PERM>(input_tree.value("perm", static_cast<uint32_t>(crypto::PERM::_no)) & static_cast<uint32_t>(crypto::PERM::_all));
@@ -3458,7 +3462,8 @@ namespace confighttp {
         perm,
         enable_legacy_ordering,
         allow_client_commands,
-        always_use_virtual_display
+        always_use_virtual_display,
+        temporary_authorization
       );
       output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
       if (result == nvhttp::client_mutation_result_t::not_found) {
@@ -5106,6 +5111,7 @@ namespace confighttp {
         throw std::runtime_error("Passphrase too short!");
 
       std::string deviceName = input_tree.value("deviceName", "");
+      const bool temporary_authorization = input_tree.value("temporary_authorization", false);
       const auto access_preset_name = input_tree.value(
         "access_preset",
         std::string {nvhttp::DEFAULT_PAIRING_ACCESS_PRESET}
@@ -5119,11 +5125,13 @@ namespace confighttp {
       output_tree["otp"] = nvhttp::request_otp(
         passphrase,
         deviceName,
-        nvhttp::pairing_access_preset_perm(*access_preset)
+        nvhttp::pairing_access_preset_perm(*access_preset),
+        temporary_authorization
       );
       output_tree["ip"] = platf::get_local_ip_for_gateway();
       output_tree["name"] = config::nvhttp.sunshine_name;
       output_tree["access_preset"] = std::string {nvhttp::pairing_access_preset_name(*access_preset)};
+      output_tree["temporary_authorization"] = temporary_authorization;
       output_tree["status"] = true;
       output_tree["message"] = "OTP created, effective within 3 minutes.";
       send_response(response, output_tree);
@@ -5162,6 +5170,7 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
+      const bool temporary_authorization = input_tree.value("temporary_authorization", false);
       const auto access_preset_name = input_tree.value(
         "access_preset",
         std::string {nvhttp::DEFAULT_PAIRING_ACCESS_PRESET}
@@ -5175,9 +5184,11 @@ namespace confighttp {
       output_tree["status"] = nvhttp::pin(
         pin,
         name,
-        nvhttp::pairing_access_preset_perm(*access_preset)
+        nvhttp::pairing_access_preset_perm(*access_preset),
+        temporary_authorization
       );
       output_tree["access_preset"] = std::string {nvhttp::pairing_access_preset_name(*access_preset)};
+      output_tree["temporary_authorization"] = temporary_authorization;
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePin: "sv << e.what();

@@ -471,6 +471,19 @@ namespace nvhttp {
       return lower_copy(body.value("streamMode", std::string {}));
     }
 
+    bool app_desktop_mirror_applies_for_mode(
+        const proc::ctx_t &app,
+        bool explicit_mirror,
+        std::string_view requested_mode) {
+      if (!app.desktop_mirror || explicit_mirror) {
+        return app.desktop_mirror;
+      }
+      const auto effective_mode = requested_mode.empty() ?
+        stream_display_policy::configured_selection() :
+        lower_copy(std::string {requested_mode});
+      return effective_mode != stream_display_policy::k_desktop_takeover;
+    }
+
   #if defined(__linux__)
     // Session-scoped stream-mode override gate: returns the requested mode when
     // it may drive this session, empty otherwise (the host default applies).
@@ -521,8 +534,13 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
-      const bool mirror_desktop_requested =
-        explicit_mirror_desktop_requested(args) || app.desktop_mirror;
+      const bool explicit_mirror = explicit_mirror_desktop_requested(args);
+      const bool mirror_desktop_requested = explicit_mirror ||
+        app_desktop_mirror_applies_for_mode(
+          app,
+          explicit_mirror,
+          session_stream_mode_requested(args)
+        );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
@@ -559,8 +577,13 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
-      const bool mirror_desktop_requested =
-        explicit_mirror_desktop_requested(body) || app.desktop_mirror;
+      const bool explicit_mirror = explicit_mirror_desktop_requested(body);
+      const bool mirror_desktop_requested = explicit_mirror ||
+        app_desktop_mirror_applies_for_mode(
+          app,
+          explicit_mirror,
+          session_stream_mode_requested(body)
+        );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
@@ -2957,6 +2980,7 @@ namespace nvhttp {
   static std::string otp_passphrase;
   static std::string otp_device_name;
   static std::optional<PERM> otp_pairing_perm;
+  static bool otp_temporary_authorization = false;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
 
   /**
@@ -2977,6 +3001,7 @@ namespace nvhttp {
       otp_passphrase.clear();
       otp_device_name.clear();
       otp_pairing_perm.reset();
+      otp_temporary_authorization = false;
       return {};
     }
 
@@ -2990,11 +3015,13 @@ namespace nvhttp {
     claim.pin = one_time_pin;
     claim.device_name = std::move(otp_device_name);
     claim.pairing_perm = otp_pairing_perm;
+    claim.temporary_authorization = otp_temporary_authorization;
 
     one_time_pin.clear();
     otp_passphrase.clear();
     otp_device_name.clear();
     otp_pairing_perm.reset();
+    otp_temporary_authorization = false;
     return claim;
   }
 
@@ -3854,6 +3881,11 @@ namespace nvhttp {
     std::unordered_map<std::string, int> name_counts;
 
     for (auto &named_cert_p : client.named_devices) {
+      // A guest authorization must never survive a host restart or be exposed
+      // through a backup of the durable pairing-state file.
+      if (named_cert_p->temporary_authorization) {
+        continue;
+      }
       const auto fingerprint = crypto::x509_fingerprint(named_cert_p->cert);
       if (!fingerprint) {
         throw std::runtime_error("paired client contains an invalid certificate");
@@ -4094,6 +4126,7 @@ namespace nvhttp {
     clone->enable_legacy_ordering = source->enable_legacy_ordering;
     clone->allow_client_commands = source->allow_client_commands;
     clone->always_use_virtual_display = source->always_use_virtual_display;
+    clone->temporary_authorization = source->temporary_authorization;
     return clone;
   }
 
@@ -4151,7 +4184,12 @@ namespace nvhttp {
     }
     client_root.named_devices.push_back(named_cert);
 
-    if (!config::sunshine.flags[config::flag::FRESH_STATE] && !save_state()) {
+    const bool durable_state_changed =
+      !named_cert->temporary_authorization ||
+      (duplicate != previous_clients.end() && !(*duplicate)->temporary_authorization);
+    if (!config::sunshine.flags[config::flag::FRESH_STATE] &&
+        durable_state_changed &&
+        !save_state()) {
       client_root.named_devices = previous_clients;
       BOOST_LOG(error) << "Pairing authorization was not persisted; rejecting client "sv << named_cert->name;
       return false;
@@ -4256,6 +4294,7 @@ namespace nvhttp {
 
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
+    launch_session->temporary_authorization = named_cert_p->temporary_authorization;
     launch_session->profile_preference = launch_profile::normalize_preset(
       get_arg(args, "profilePreference", "auto")
     );
@@ -4566,6 +4605,7 @@ namespace nvhttp {
       named_cert_p->enable_legacy_ordering = true;
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
+      named_cert_p->temporary_authorization = sess.temporary_authorization;
 
       if (add_authorized_client(named_cert_p, sess.pairing_perm)) {
         tree.put("root.paired", 1);
@@ -4630,7 +4670,7 @@ namespace nvhttp {
     auto replacement = clone_named_cert(live_client);
     replacement->client_family = "nova";
     *live_it = replacement;
-    if (!save_state()) {
+    if (!replacement->temporary_authorization && !save_state()) {
       *live_it = live_client;
       BOOST_LOG(error) << "Couldn't persist client-family update for "sv << live_client->name;
       return live_client;
@@ -4695,7 +4735,7 @@ namespace nvhttp {
     }
 
     constexpr std::int64_t persist_interval_seconds = 60;
-    if (persist) {
+    if (persist && !live_client->temporary_authorization) {
       const auto current_seen_at = live_client->last_seen_at.load(std::memory_order_relaxed);
       const auto persisted_at = live_client->last_seen_persisted_at.load(std::memory_order_relaxed);
       const bool persistence_due = current_seen_at > 0 &&
@@ -4918,6 +4958,7 @@ namespace nvhttp {
               ptr->second.client.name = claim.device_name;
             }
             ptr->second.pairing_perm = claim.pairing_perm;
+            ptr->second.temporary_authorization = claim.temporary_authorization;
 
             getservercert(ptr->second, tree, claim.pin);
             return;
@@ -4997,7 +5038,12 @@ namespace nvhttp {
     }
   }
 
-  bool pin(std::string pin, std::string name, std::optional<PERM> pairing_perm) {
+  bool pin(
+    std::string pin,
+    std::string name,
+    std::optional<PERM> pairing_perm,
+    bool temporary_authorization
+  ) {
     pt::ptree tree;
     if (map_id_sess.empty()) {
       return false;
@@ -5026,6 +5072,7 @@ namespace nvhttp {
     if (pairing_perm) {
       sess.pairing_perm = *pairing_perm;
     }
+    sess.temporary_authorization = temporary_authorization;
     getservercert(sess, tree, pin);
 
     if (!name.empty()) {
@@ -5209,6 +5256,7 @@ namespace nvhttp {
       named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
       named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
       named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
+      named_cert_node["temporary_authorization"] = named_cert->temporary_authorization;
 
       // Add "do" commands if available
       if (!named_cert->do_cmds.empty()) {
@@ -6992,7 +7040,8 @@ namespace nvhttp {
             named_cert_p->perm,
             named_cert_p->enable_legacy_ordering,
             named_cert_p->allow_client_commands,
-            named_cert_p->always_use_virtual_display
+            named_cert_p->always_use_virtual_display,
+            named_cert_p->temporary_authorization
           );
 
           if (update_result != client_mutation_result_t::success) {
@@ -7322,7 +7371,8 @@ namespace nvhttp {
               named_cert_p->perm,
               named_cert_p->enable_legacy_ordering,
               named_cert_p->allow_client_commands,
-              named_cert_p->always_use_virtual_display
+              named_cert_p->always_use_virtual_display,
+              named_cert_p->temporary_authorization
             );
             if (update_result != client_mutation_result_t::success) {
               write_json(
@@ -9549,13 +9599,17 @@ namespace nvhttp {
 #if defined(__linux__)
       mirror_desktop_requested = explicit_mirror_desktop_requested(args);
       force_private_requested = force_private_after_desktop_steam_shutdown_requested(args);
-      const bool mirror_desktop = mirror_desktop_requested ||
-        (optimization_app && optimization_app->desktop_mirror);
       const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
       const bool paired_virtual_lock =
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
         std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
+      const bool mirror_desktop = mirror_desktop_requested ||
+        (optimization_app && app_desktop_mirror_applies_for_mode(
+          *optimization_app,
+          mirror_desktop_requested,
+          requested_selection
+        ));
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         requested_selection,
         mirror_desktop,
@@ -9875,7 +9929,8 @@ namespace nvhttp {
   std::string request_otp(
     const std::string& passphrase,
     const std::string& deviceName,
-    std::optional<PERM> pairing_perm
+    std::optional<PERM> pairing_perm,
+    bool temporary_authorization
   ) {
     if (passphrase.size() < 4) {
       return "";
@@ -9887,6 +9942,7 @@ namespace nvhttp {
     otp_passphrase = passphrase;
     otp_device_name = deviceName;
     otp_pairing_perm = pairing_perm;
+    otp_temporary_authorization = temporary_authorization;
     otp_creation_time = std::chrono::steady_clock::now();
 
     // Copied while the lock is held: the return object is initialized before
@@ -9914,6 +9970,7 @@ namespace nvhttp {
     otp_passphrase.clear();
     otp_device_name.clear();
     otp_pairing_perm.reset();
+    otp_temporary_authorization = false;
     otp_creation_time = {};
   }
 
@@ -10036,7 +10093,8 @@ namespace nvhttp {
     const crypto::PERM newPerm,
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const bool always_use_virtual_display,
+    const std::optional<bool> temporary_authorization
   ) {
     {
       std::lock_guard lock(client_state_mutex);
@@ -10060,6 +10118,7 @@ namespace nvhttp {
       replacement->enable_legacy_ordering = enable_legacy_ordering;
       replacement->allow_client_commands = allow_client_commands;
       replacement->always_use_virtual_display = always_use_virtual_display;
+      replacement->temporary_authorization = temporary_authorization.value_or(previous->temporary_authorization);
       *it = replacement;
       if (!save_state()) {
         *it = previous;
@@ -10082,7 +10141,8 @@ namespace nvhttp {
     const crypto::PERM newPerm,
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const bool always_use_virtual_display,
+    const std::optional<bool> temporary_authorization
   ) {
     return update_device_info_result(
       uuid,
@@ -10094,22 +10154,56 @@ namespace nvhttp {
       newPerm,
       enable_legacy_ordering,
       allow_client_commands,
-      always_use_virtual_display
+      always_use_virtual_display,
+      temporary_authorization
     ) == client_mutation_result_t::success;
+  }
+
+  bool expire_temporary_client_authorization(const std::string_view uuid) {
+    std::lock_guard lock(client_state_mutex);
+    const auto before = client_root.named_devices.size();
+    std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
+      return client->uuid == uuid && client->temporary_authorization;
+    });
+    if (client_root.named_devices.size() == before) {
+      return false;
+    }
+
+    rebuild_cert_chain_locked();
+    BOOST_LOG(info) << "Expired temporary authorization for client ["sv << uuid << ']';
+    return true;
+  }
+
+  bool is_temporary_client_authorization(const std::string_view uuid) {
+    std::lock_guard lock(client_state_mutex);
+    const auto client = std::find_if(
+      client_root.named_devices.begin(),
+      client_root.named_devices.end(),
+      [&](const crypto::p_named_cert_t &candidate) {
+        return candidate->uuid == uuid;
+      }
+    );
+    return client != client_root.named_devices.end() &&
+           (*client)->temporary_authorization;
   }
 
   client_mutation_result_t unpair_client_result(const std::string_view uuid) {
     bool no_clients_remain = false;
+    bool removed_temporary_authorization = false;
     {
       std::lock_guard lock(client_state_mutex);
       auto previous_clients = client_root.named_devices;
       std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
-        return client->uuid == uuid;
+        if (client->uuid != uuid) {
+          return false;
+        }
+        removed_temporary_authorization = client->temporary_authorization;
+        return true;
       });
       if (client_root.named_devices.size() == previous_clients.size()) {
         return client_mutation_result_t::not_found;
       }
-      if (!save_state()) {
+      if (!removed_temporary_authorization && !save_state()) {
         client_root.named_devices = std::move(previous_clients);
         return client_mutation_result_t::persistence_failed;
       }

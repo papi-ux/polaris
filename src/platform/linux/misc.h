@@ -5,6 +5,8 @@
 #pragma once
 
 // standard includes
+#include <chrono>
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -93,5 +95,28 @@ namespace platf {
    * @return The exit status, or 128 + signal for a signaled child.
    */
   int run_process_argv(const std::vector<std::string> &argv);
+
+  /**
+   * @brief Result from a bounded, shell-free child process invocation.
+   */
+  struct process_output_t {
+    int exit_status = 127;
+    bool timed_out = false;
+    bool truncated = false;
+    std::string output;
+  };
+
+  /**
+   * @brief Run a program without a shell and capture its standard output.
+   *
+   * The child is killed when @p timeout expires. Output beyond @p max_output_bytes
+   * is drained but not retained, so an unexpected helper response cannot grow
+   * Polaris without bound.
+   */
+  process_output_t run_process_argv_capture(
+    const std::vector<std::string> &argv,
+    std::chrono::milliseconds timeout = std::chrono::seconds {2},
+    std::size_t max_output_bytes = 1024 * 1024
+  );
 
 }  // namespace platf
