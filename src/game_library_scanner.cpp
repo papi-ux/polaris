@@ -477,13 +477,7 @@ namespace game_library {
     return runtime;
   }
 
-  /**
-   * @brief Read the runtime Heroic recorded for one title.
-   *
-   * Heroic keeps the wine or proton choice per game in GamesConfig/<app>.json,
-   * not in the library file, so the platform alone cannot say what will run.
-   * A missing or unreadable config yields no runtime rather than a guess.
-   */
+  /// Walks up to the directory that holds GamesConfig; see the header for why.
   std::filesystem::path heroic_config_root_for_library(const std::filesystem::path &library_path) {
     std::error_code ec;
     auto directory = library_path.parent_path();
@@ -497,6 +491,13 @@ namespace game_library {
     return {};
   }
 
+  /**
+   * @brief Read the runtime Heroic recorded for one title.
+   *
+   * Heroic keeps the wine or proton choice per game in GamesConfig/<app>.json,
+   * not in the library file, so the platform alone cannot say what will run.
+   * A missing or unreadable config yields no runtime rather than a guess.
+   */
   heroic_runtime_t heroic_runtime_for_app(
     const std::filesystem::path &config_root,
     const std::string &app_name,
