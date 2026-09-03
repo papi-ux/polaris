@@ -20,6 +20,8 @@ already published visible so you can spot what is new, and lets you stage severa
 before one import pass. Imported Steam titles keep their app id and take the Linux launch mode
 you have selected when they start.
 
+Importing a Lutris or Heroic title also publishes an entry for the launcher itself, once, using the command that exists on this host. Those imports launch straight into a game, so without it there is no way to reach the launcher from a stream to install something or fix a login. An entry you added by hand is recognised and not duplicated.
+
 **Library health** shows import coverage and the host context the library depends on. Keep
 entries short and recognisable on a handheld screen, use per-app overrides only where a launcher,
 tool, or game needs them, and export `.art` entries when you want favourite launches in another

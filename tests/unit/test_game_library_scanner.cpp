@@ -867,3 +867,36 @@ TEST(HeroicRuntimeTests, ReportsNoConfigRootWhenHeroicIsNotThere) {
   EXPECT_TRUE(game_library::heroic_config_root_for_library(stray).empty());
   std::filesystem::remove_all(stray.parent_path().parent_path());
 }
+
+// An imported Heroic title launches straight into the game, which leaves no way to
+// reach Heroic itself from a stream to install something or fix a login. The
+// launcher entry exists for that, so unlike a game launch it must keep the window.
+TEST(HeroicLauncherCommandTests, OpensTheLauncherItselfForEachInstall) {
+  EXPECT_EQ(game_library::heroic_launcher_command(game_library::launcher_install_t::native), "setsid heroic");
+  EXPECT_EQ(
+    game_library::heroic_launcher_command(game_library::launcher_install_t::flatpak),
+    "setsid flatpak run com.heroicgameslauncher.hgl"
+  );
+}
+
+TEST(HeroicLauncherCommandTests, KeepsTheWindowThatAGameLaunchSuppresses) {
+  // A game launch passes --no-gui because it dispatches a protocol URL. Carrying
+  // that flag here would open nothing at all.
+  const auto launcher = game_library::heroic_launcher_command(game_library::launcher_install_t::native);
+  EXPECT_EQ(launcher.find("--no-gui"), std::string::npos);
+  EXPECT_EQ(launcher.find("heroic://"), std::string::npos);
+
+  const auto game = game_library::heroic_launch_command("epic", "abc123", game_library::launcher_install_t::native);
+  EXPECT_NE(game.find("--no-gui"), std::string::npos);
+}
+
+TEST(HeroicLauncherCommandTests, MatchesTheInstallTheLibraryEntriesCameFrom) {
+  // A Flatpak-only host has no heroic on PATH, so the launcher entry has to follow
+  // the packaging that produced the import.
+  const auto flatpak = game_library::heroic_launcher_command(game_library::launcher_install_t::flatpak);
+  EXPECT_NE(flatpak.find("flatpak run"), std::string::npos);
+  EXPECT_NE(
+    game_library::heroic_launch_command("epic", "abc123", game_library::launcher_install_t::flatpak).find("flatpak run"),
+    std::string::npos
+  );
+}

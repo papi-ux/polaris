@@ -618,6 +618,15 @@ namespace game_library {
     return "setsid heroic --no-gui --no-sandbox " + uri;
   }
 
+  std::string heroic_launcher_command(launcher_install_t install) {
+    if (install == launcher_install_t::flatpak) {
+      return "setsid flatpak run " + std::string(heroic_flatpak_app_id);
+    }
+
+    // No --no-gui here, unlike a game launch: opening the launcher is the point.
+    return "setsid heroic";
+  }
+
   std::vector<std::string> heroic_launch_commands_for_install(
     const std::string &store,
     const std::string &app_name,
