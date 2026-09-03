@@ -1,6 +1,17 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
+
+// The tab renders through the injected translator; resolve the real English
+// locale here so the assertions below keep reading the shipped copy.
+const locale = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
+function translate(key, params = {}) {
+  const value = key.split('.').reduce((node, part) => (node && typeof node === 'object' ? node[part] : undefined), locale)
+  if (typeof value !== 'string') return key
+  return value.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
+}
 
 import AiOptimizer from './configs/tabs/AiOptimizer.vue'
 
@@ -66,6 +77,7 @@ function mountOptimizer(config = defaultConfig()) {
   return mount(AiOptimizer, {
     props: { config },
     attachTo: document.body,
+    global: { provide: { i18n: { t: translate } } },
   })
 }
 
