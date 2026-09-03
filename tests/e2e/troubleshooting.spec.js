@@ -2,7 +2,7 @@ import { test, expect } from './fixtures/auth.js'
 
 test.describe('troubleshooting', () => {
   test('renders self-service Doctor support actions without auto-submitting issues', async ({ loggedInPage }) => {
-    await loggedInPage.getByRole('link', { name: /troubleshooting/i }).click()
+    await loggedInPage.getByRole('link', { name: /doctor & support/i }).click()
     await expect(loggedInPage).toHaveURL(/#\/troubleshooting/)
 
     await expect(loggedInPage.getByRole('heading', { name: /^fix my stream$/i })).toBeVisible({ timeout: 15000 })
@@ -16,9 +16,9 @@ test.describe('troubleshooting', () => {
   })
 
   test('log filters remain keyboard reachable', async ({ loggedInPage }) => {
-    await loggedInPage.getByRole('link', { name: /troubleshooting/i }).click()
+    await loggedInPage.getByRole('link', { name: /doctor & support/i }).click()
     await expect(loggedInPage).toHaveURL(/#\/troubleshooting/)
-    await expect(loggedInPage.getByRole('heading', { name: /^troubleshooting$/i })).toBeVisible({ timeout: 15000 })
+    await expect(loggedInPage.getByRole('heading', { name: /^doctor & support$/i })).toBeVisible({ timeout: 15000 })
     await expect(loggedInPage.getByRole('heading', { name: /^quick recovery$/i })).toBeVisible({ timeout: 15000 })
 
     const fatalFilter = loggedInPage.getByRole('button', { name: /^fatal$/i })

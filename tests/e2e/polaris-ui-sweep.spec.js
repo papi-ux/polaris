@@ -26,7 +26,7 @@ const routes = [
   { name: 'settings', path: '/#/config', heading: /Settings/i },
   { name: 'pairing', path: '/#/pin', heading: /Pair/i },
   { name: 'browser-stream', path: '/#/browser-stream', heading: /Browser Stream/i },
-  { name: 'troubleshooting', path: '/#/troubleshooting', heading: /Troubleshooting/i },
+  { name: 'troubleshooting', path: '/#/troubleshooting', heading: /Doctor & Support/i },
 ]
 
 async function gotoRoute(page, route) {
