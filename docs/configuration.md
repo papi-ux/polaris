@@ -31,7 +31,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is an explicit experimental DRM/KMS path, not the default for a private or portal session.
+These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto promotes it only for a compatible AMD private-stream route that passes an exact live-frame safety probe.
 
 ## Linux display modes
 
@@ -67,8 +67,8 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `client_keyboard_mouse_seat_isolation` | `disabled` | Assign the virtual keyboard, mouse, touch and pen Polaris creates for clients to a dedicated Linux seat, so a client streaming a private session does not also type and click into the desktop session logged in at the machine |
 | `mouse_cursor_visible` | `enabled` | Composite a separately captured host cursor into the stream. Required for DRM/KMS; disable it if the client draws its own cursor and you see two pointers. Portal may embed its cursor independently |
 | `back_button_timeout` | `-1` | **Milliseconds**, not seconds, that Back/Select must be held to emulate Home/Guide. `-1` disables it. A small value such as `2` means two *milliseconds*, which turns nearly every Back/Select press into Home and makes the button look broken — use `2000` for two seconds |
-| `capture` | `kms` for Vulkan Video | Capture backend override; leave empty for normal automatic selection |
-| `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and requires explicit DRM/KMS capture |
+| `capture` | empty (automatic) | Capture backend override; explicit Vulkan supports `kms`, `wlr`, and `portal` |
+| `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and strict when selected explicitly |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
 | `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
@@ -386,10 +386,13 @@ Recommended values:
 ## Vulkan Encoder
 
 Vulkan Video is an experimental Linux hardware-encode path for drivers that expose the Vulkan Video
-encode extensions. Its first Polaris implementation is deliberately limited to direct DRM/KMS
-capture so captured DMA-BUF images stay on the same DRM render device used by the encoder. Portal and
-wlroots capture are rejected instead of silently introducing a system-memory copy or selecting a
-different GPU.
+encode extensions. Explicit selection supports direct DRM/KMS, wlroots, and Portal capture. GPU-native
+DRM/KMS and wlroots frames remain matched to the encoder's render node; Portal and any safely retired
+wlroots DMA-BUF route use the Vulkan RAM uploader rather than pretending a CPU copy is zero-copy.
+
+With `encoder` left on Auto, Polaris promotes Vulkan only for a compatible AMD private-compositor
+route that can validate the exact first live GPU-native frame and retire a failed route to VA-API.
+NVIDIA stays on NVENC, Intel stays on VA-API, and AMD desktop capture stays on VA-API by default.
 
 Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
 
@@ -402,10 +405,10 @@ capture = kms
 encoder = vulkan
 ```
 
-If KMS cannot export the display as DMA-BUF, or the selected GPU lacks the requested H.264 or HEVC
-Vulkan Video encoder, session startup fails with an explicit diagnostic. AV1 stays disabled on this
-experimental path until the bundled FFmpeg implementation passes Vulkan validation. Switch the
-encoder back to `vaapi` or `nvenc` rather than expecting a hidden CPU-copy fallback.
+If the selected GPU lacks the requested H.264 or HEVC Vulkan Video encoder, or an explicitly selected
+capture path cannot initialize, session startup fails with an explicit diagnostic. AV1 stays disabled
+on this experimental path until the bundled FFmpeg implementation passes Vulkan validation. Switch
+the encoder back to `vaapi` or `nvenc`; Polaris does not silently replace an explicit Vulkan choice.
 
 ### vk_tune
 

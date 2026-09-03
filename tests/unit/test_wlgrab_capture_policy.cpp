@@ -77,6 +77,28 @@ TEST(WlgrabCapturePolicy, RequestedMonitorSelectionIsExactAndFailClosed) {
   EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index("", {}).has_value());
 }
 
+TEST(WlgrabCapturePolicy, HostVirtualOutputDoesNotFallBackToPhysicalMonitorZero) {
+  // Issue #556: Hyprland advertises the physical monitor first and the newly
+  // created headless connector second. A connector name must never be parsed
+  // as index zero or silently fall back to it.
+  const std::vector<std::string> monitors {
+    "DP-2",
+    "POLARIS-HEADLESS-1627120-0",
+  };
+
+  const auto selected = wlgrab_capture_policy::select_monitor_index(
+    "POLARIS-HEADLESS-1627120-0",
+    monitors
+  );
+
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(*selected, 1u);
+  EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index(
+    "POLARIS-HEADLESS-unknown",
+    monitors
+  ).has_value());
+}
+
 TEST(WlgrabCapturePolicy, DirectVaapiCaptureUsesRamFallback) {
   EXPECT_EQ(
     wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::vaapi, true),

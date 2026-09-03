@@ -193,7 +193,12 @@ namespace wl {
       this->env_width = ::wl::env_width;
       this->env_height = ::wl::env_height;
 
-      BOOST_LOG(info) << "Selected monitor ["sv << monitor->description << "] for streaming"sv;
+      const auto selected_monitor_identity = wlgrab_capture_policy::enumerated_monitor_identity(
+        *monitor_index,
+        monitor->name
+      );
+      BOOST_LOG(info) << "Selected monitor ["sv << selected_monitor_identity
+                      << "] for streaming; description=["sv << monitor->description << ']';
       BOOST_LOG(debug) << "Offset: "sv << offset_x << 'x' << offset_y;
       BOOST_LOG(debug) << "Resolution: "sv << width << 'x' << height;
       BOOST_LOG(debug) << "Desktop Resolution: "sv << env_width << 'x' << env_height;

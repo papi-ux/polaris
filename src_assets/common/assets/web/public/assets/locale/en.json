@@ -269,7 +269,7 @@
     "av_auto_quality_row_runtime": "Runtime",
     "av_auto_quality_saved_kicker": "Saved settings",
     "av_checklist_encoder_copy_auto": "Auto Quality balances bitrate and profile recovery for this path.",
-    "av_checklist_encoder_copy_manual": "Set the encoder (NVENC/VAAPI, or Vulkan with DRM/KMS), bitrate, and optional Auto Quality for this path. Vulkan is unavailable for labwc or Portal capture.",
+    "av_checklist_encoder_copy_manual": "Set the encoder (NVENC/VAAPI, or experimental Vulkan), bitrate, and optional Auto Quality for this path. Explicit Vulkan supports DRM/KMS, wlroots, and Portal; Auto prefers it only on a live-validated AMD private stream.",
     "av_checklist_encoder_title": "Encoder and quality",
     "av_checklist_gamescope_copy": "Install gamescope on the host PATH; labwc-only web UI flags are ignored for this path.",
     "av_checklist_gamescope_status": "Portal + gamescope-0",
