@@ -134,6 +134,16 @@ TEST(LinuxPlatformHardeningSource, KmsCardRejectsAnUnusableRenderDescriptor) {
   EXPECT_NE(source.find("return -1;", guard), std::string::npos);
 }
 
+TEST(LinuxPlatformHardeningSource, KmsCapturePublishesDirectAndReadbackMetadata) {
+  const auto source = read_source("src/platform/linux/kmsgrab.cpp");
+  const auto publisher = source.find("void publish_capture_metadata(platf::img_t &img, bool gpu_resident)");
+  ASSERT_NE(publisher, std::string::npos);
+  EXPECT_NE(source.find("stream_stats::update_capture_metadata(img.frame_metadata);", publisher), std::string::npos);
+  EXPECT_NE(source.find("publish_capture_metadata(*img_out, false);", publisher), std::string::npos);
+  EXPECT_NE(source.find("publish_capture_metadata(*img, true);", publisher), std::string::npos);
+  EXPECT_NE(source.find("render_node = rendernode_path;"), std::string::npos);
+}
+
 TEST(LinuxPlatformHardeningSource, VulkanVideoPreservesRadvOptionsAndInitializesProbeFrames) {
   const auto platform = read_source("src/platform/linux/misc.cpp");
   EXPECT_NE(platform.find("append_environment_token(\"RADV_PERFTEST\", \"video_encode\")"), std::string::npos);
