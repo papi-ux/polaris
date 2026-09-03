@@ -303,7 +303,7 @@
             <h2 id="session_snapshot" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.session_snapshot') }}</h2>
             <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.session_snapshot_desc') }}</p>
           </div>
-          <span class="meta-pill"
+          <span class="meta-pill shrink-0 whitespace-nowrap"
                 :class="streamStatsConnected ? 'border-success/40 bg-success/10 text-success' : ''">
             {{ streamStatsConnected ? $t('troubleshooting.session_snapshot_connected') : $t('troubleshooting.session_snapshot_disconnected') }}
           </span>
