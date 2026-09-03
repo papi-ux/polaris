@@ -484,6 +484,19 @@ namespace game_library {
    * not in the library file, so the platform alone cannot say what will run.
    * A missing or unreadable config yields no runtime rather than a guess.
    */
+  std::filesystem::path heroic_config_root_for_library(const std::filesystem::path &library_path) {
+    std::error_code ec;
+    auto directory = library_path.parent_path();
+    for (int depth = 0; depth < 4 && !directory.empty(); ++depth) {
+      if (std::filesystem::is_directory(directory / "GamesConfig", ec) && !ec) {
+        return directory;
+      }
+      directory = directory.parent_path();
+    }
+
+    return {};
+  }
+
   heroic_runtime_t heroic_runtime_for_app(
     const std::filesystem::path &config_root,
     const std::string &app_name,
@@ -770,11 +783,16 @@ namespace game_library {
 
       // Heroic records the installed platform under install, and flags Linux
       // native titles separately. Neither is guaranteed to be present.
-      const auto installed_platform = entry.contains("install") && entry["install"].is_object() &&
-                                          entry["install"].contains("platform") &&
-                                          entry["install"]["platform"].is_string() ?
-                                        entry["install"]["platform"].get<std::string>() :
-                                        std::string {};
+      // The store cache nests the platform under install; legendary's own
+      // installed.json puts it at the top level. Accept either.
+      auto installed_platform = entry.contains("install") && entry["install"].is_object() &&
+                                    entry["install"].contains("platform") &&
+                                    entry["install"]["platform"].is_string() ?
+                                  entry["install"]["platform"].get<std::string>() :
+                                  std::string {};
+      if (installed_platform.empty() && entry.contains("platform") && entry["platform"].is_string()) {
+        installed_platform = entry["platform"].get<std::string>();
+      }
       const auto linux_native = entry.contains("is_linux_native") && entry["is_linux_native"].is_boolean() &&
                                 entry["is_linux_native"].get<bool>();
 

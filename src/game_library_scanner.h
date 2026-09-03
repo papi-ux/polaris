@@ -127,6 +127,17 @@ namespace game_library {
   heroic_runtime_t heroic_runtime_from_config(std::string_view wine_type, std::string_view wine_name, std::string_view platform);
 
   /**
+   * @brief Find the Heroic config root that owns a library file.
+   * @param library_path A Heroic library file, at whatever depth it sits.
+   *
+   * Heroic's library files live at different depths under the same root:
+   * `store_cache/legendary_library.json` is one level down while
+   * `legendaryConfig/legendary/installed.json` is two. Walking up to the
+   * directory that actually holds `GamesConfig` avoids assuming either.
+   */
+  std::filesystem::path heroic_config_root_for_library(const std::filesystem::path &library_path);
+
+  /**
    * @brief Read the runtime Heroic recorded for one title.
    * @param config_root A Heroic config directory, e.g. ~/.config/heroic.
    *

@@ -3021,14 +3021,17 @@ namespace confighttp {
         game["runtime_name"] = entry.runtime_name;
       }
     };
-    // The wine or proton choice lives per game under the Heroic config root, two
-    // levels above the library file the entries were parsed from.
+    // The wine or proton choice lives per game under the Heroic config root, and
+    // the library files sit at different depths beneath it: store_cache is one
+    // level down, legendaryConfig/legendary is two. Walk up to the directory that
+    // actually holds GamesConfig rather than assuming a fixed depth.
     const auto attach_heroic_runtime = [](game_library::heroic_game_t &entry, const std::filesystem::path &library_path) {
-      auto runtime = game_library::heroic_runtime_for_app(
-        library_path.parent_path().parent_path(),
-        entry.app_name,
-        entry.platform
-      );
+      const auto config_root = game_library::heroic_config_root_for_library(library_path);
+      if (config_root.empty()) {
+        return;
+      }
+
+      auto runtime = game_library::heroic_runtime_for_app(config_root, entry.app_name, entry.platform);
       entry.runtime = std::move(runtime.runtime);
       entry.runtime_name = std::move(runtime.runtime_name);
     };
@@ -3136,10 +3139,11 @@ namespace confighttp {
           std::ifstream file(library_path);
           std::stringstream payload;
           payload << file.rdbuf();
-          for (const auto &entry : game_library::parse_heroic_cache_json(payload.str(), store, install)) {
+          for (auto &entry : game_library::parse_heroic_cache_json(payload.str(), store, install)) {
             // Skip what installed.json or the other install already provided
             if (!seen_heroic_keys.insert(entry.store + "/" + entry.app_name).second) continue;
 
+            attach_heroic_runtime(entry, library_path);
             nlohmann::json game;
             game["name"] = entry.name;
             game["app_name"] = entry.app_name;

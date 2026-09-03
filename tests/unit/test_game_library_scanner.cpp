@@ -838,3 +838,32 @@ TEST(HeroicRuntimeTests, ParsesThePlatformOutOfTheLegendaryLibraryEntry) {
   EXPECT_EQ(games[0].name, "Alan Wake 2");
   EXPECT_EQ(games[0].platform, "windows");
 }
+
+TEST(HeroicRuntimeTests, FindsTheConfigRootWhateverDepthTheLibraryFileSitsAt) {
+  // Heroic's own layout: store_cache is one level under the root, while
+  // legendaryConfig/legendary is two. Assuming a fixed depth silently picked the
+  // wrong root for Epic's installed manifest.
+  const auto config_root = std::filesystem::temp_directory_path() / "polaris-heroic-root-test";
+  std::filesystem::remove_all(config_root);
+  std::filesystem::create_directories(config_root / "GamesConfig");
+  std::filesystem::create_directories(config_root / "store_cache");
+  std::filesystem::create_directories(config_root / "legendaryConfig" / "legendary");
+
+  EXPECT_EQ(
+    game_library::heroic_config_root_for_library(config_root / "store_cache" / "legendary_library.json"),
+    config_root
+  );
+  EXPECT_EQ(
+    game_library::heroic_config_root_for_library(config_root / "legendaryConfig" / "legendary" / "installed.json"),
+    config_root
+  );
+  std::filesystem::remove_all(config_root);
+}
+
+TEST(HeroicRuntimeTests, ReportsNoConfigRootWhenHeroicIsNotThere) {
+  const auto stray = std::filesystem::temp_directory_path() / "polaris-heroic-no-root" / "store_cache" / "library.json";
+  std::filesystem::remove_all(stray.parent_path().parent_path());
+  std::filesystem::create_directories(stray.parent_path());
+  EXPECT_TRUE(game_library::heroic_config_root_for_library(stray).empty());
+  std::filesystem::remove_all(stray.parent_path().parent_path());
+}
