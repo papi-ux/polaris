@@ -18,7 +18,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  POLARIS_CHECKOUT_REF: ${{ inputs.release_tag || github.ref }}
+  # On a pull request github.ref is refs/pull/<n>/merge, and that merge commit
+  # is published nowhere: it is advertised only in GitHub's pull request refs,
+  # so a clone of this repository cannot resolve it and the SteamOS package
+  # build, which sources from such a clone, dies reading its tree. Resolve the
+  # head branch instead, which is a published commit. Master requires branches
+  # to be up to date before merging, so the head already carries master.
+  POLARIS_CHECKOUT_REF: ${{ inputs.release_tag
+    || (github.event.pull_request.head.repo.full_name == github.repository
+    && format('refs/heads/{0}', github.head_ref))
+    || github.ref }}
   POLARIS_PACKAGE_REF_NAME: ${{ inputs.release_tag || github.ref_name }}
   # Advance deliberately only after the full matrix proves a newer snapshot.
   UBUNTU_APT_SNAPSHOT: 20260901T000000Z
@@ -785,7 +794,14 @@ jobs:
   steamos-build:
     name: SteamOS 3.8 build
     needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
-    if: needs.resolve-source.outputs.native_required == 'true'
+    # The package is built from a clone of the published repository, so the
+    # commit under test has to be published here. A pull request opened from a
+    # fork has no commit on a branch of this repository, and CI never packages
+    # an unpublished tree, so the job cannot speak for a fork.
+    if: >-
+      needs.resolve-source.outputs.native_required == 'true'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
 
     steps:

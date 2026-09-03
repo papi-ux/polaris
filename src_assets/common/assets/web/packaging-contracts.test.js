@@ -726,6 +726,17 @@ describe('Linux packaging contracts', () => {
 
     expect(steamOs).toContain('git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"')
     expect(steamOs).toContain("git rev-parse 'FETCH_HEAD^{commit}'")
+    expect(steamOs).toContain('test "$(git rev-parse HEAD)" = "$POLARIS_BUILD_COMMIT"')
+    // A fork's head commit is published nowhere in this repository, and CI never
+    // packages an unpublished tree, so the job must not claim to speak for one.
+    expect(steamOs).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    )
+    // Every package must come from a published commit. On a pull request that is
+    // the head branch, never GitHub's merge commit, which no clone can resolve.
+    expect(workflow).toContain(
+      "format('refs/heads/{0}', github.head_ref)",
+    )
     expect(steamOs).toContain('--env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT"')
     expect(bootstrap).toContain('${POLARIS_BUILD_COMMIT:?POLARIS_BUILD_COMMIT is required}')
     expect(bootstrap).not.toMatch(/(?:^|\n)POLARIS_BUILD_COMMIT=/)
