@@ -192,6 +192,18 @@ non-Steam entries, and whether Polaris may ask How Long To Beat for titles missi
 completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`,
 `hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`.
 
+| Field | What it does |
+| --- | --- |
+| **Locale** (`locale`) | The locale used for Polaris's user interface. |
+| **Server Name** (`sunshine_name`) | The name displayed by Moonlight. If not specified, the PC's hostname is used |
+| **Log Level** (`min_log_level`) | The minimum log level printed to standard out |
+| **Server Commands** (`server_cmd`) | Configure a list of commands to be executed when called from client during streaming. |
+| **PreRelease Notifications** (`notify_pre_releases`) | Whether to be notified of new pre-release versions of Polaris |
+| **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray |
+| **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
+| **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. |
+| **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
+
 ### Input tab
 
 Gamepads (whether clients may control the host with a controller, DualShock and DualSense
@@ -206,6 +218,29 @@ events), and extras (an input-only app entry for TV workflows, rumble forwarding
 `client_keyboard_mouse_seat_isolation`, `enable_input_only_mode`, `forward_rumble`,
 `back_button_timeout`.
 
+| Field | What it does |
+| --- | --- |
+| **Enable Gamepad Input** (`controller`) | Allows guests to control the host system with a gamepad / controller |
+| **Emulated Gamepad Type** (`gamepad`) | Choose which type of gamepad to emulate on the host |
+| **Emulate a DS4 gamepad if the client gamepad reports motion sensors are present** (`motion_as_ds4`) | If disabled, motion sensors will not be taken into account during gamepad type selection. |
+| **Emulate a DS4 gamepad if the client gamepad reports a touchpad is present** (`touchpad_as_ds4`) | If disabled, touchpad presence will not be taken into account during gamepad type selection. |
+| **Map Back/Select to Touchpad Click** (`ds4_back_as_touchpad_click`) | When forcing DS4 emulation, map Back/Select to Touchpad Click |
+| **Randomize DualSense MAC Address** (`ds5_inputtino_randomize_mac`) | Randomize the emulated DualSense MAC address to improve compatibility with some games and clients. |
+| **Isolate Host Gamepads in Private Stream** (`headless_gamepad_isolation`) | Prevents controllers physically connected to the host from appearing inside Private Stream sessions. Disable only when you intentionally use a host-wired controller, such as a DualSense for haptics or adaptive triggers. |
+| **Isolate Client Gamepads from Other Linux Users** (`client_gamepad_seat_isolation`) | Disabled by default to preserve controller identity and local access. When enabled, uses Polaris-specific device names and a dedicated Linux seat so logind does not grant the active local desktop user automatic access. This does not isolate applications running under the same Unix account or users in the input group. Re-run Polaris host setup after upgrading, then stop active streams and restart Polaris so existing controller nodes are recreated. |
+| **Home/Guide Button Emulation Timeout** (`back_button_timeout`) | If the Back/Select button is held down for the specified number of milliseconds, a Home/Guide button press is emulated. If set to a value < 0 (default), holding the Back/Select button will not emulate the Home/Guide button. |
+| **Enable Keyboard Input** (`keyboard`) | Allows guests to control the host system with the keyboard |
+| **Key Repeat Delay** (`key_repeat_delay`) | Control how fast keys will repeat themselves. The initial delay in milliseconds before repeating keys. |
+| **Key Repeat Frequency** (`key_repeat_frequency`) | How often keys repeat every second. This configurable option supports decimals. |
+| **Always Send Scancodes** (`always_send_scancodes`) | Sending scancodes enhances compatibility with games and apps but may result in incorrect keyboard input from certain clients that aren't using a US English keyboard layout. Enable if keyboard input is not working at all in certain applications. Disable if keys on the client are generating the wrong input on the host. |
+| **Map Right Alt key to Windows key** (`key_rightalt_to_key_win`) | It may be possible that you cannot send the Windows Key from Moonlight directly. In those cases it may be useful to make Polaris think the Right Alt key is the Windows key |
+| **Enable Mouse Input** (`mouse`) | Allows guests to control the host system with the mouse |
+| **High Resolution Scrolling Support** (`high_resolution_scrolling`) | When enabled, Polaris will pass through high resolution scroll events from Moonlight clients. This can be useful to disable for older applications that scroll too fast with high resolution scroll events. |
+| **Native Pen/Touch Support** (`native_pen_touch`) | When enabled, Polaris will pass through native pen/touch events from Moonlight clients. This can be useful to disable for older applications without native pen/touch support. |
+| **Isolate Client Keyboard and Mouse from the Host Session** (`client_keyboard_mouse_seat_isolation`) | Disabled by default. When enabled, Polaris assigns the virtual keyboard and mouse it creates for clients to a dedicated Linux seat, so logind does not hand them to the desktop session logged in at the machine. Use it when you stream a private session while someone is working at the host: without it, a client's typing and pointer movement also drive the host desktop. Applications running under the same Unix account and members of the input group are not isolated. Stop active streams and restart Polaris so the devices are recreated. |
+| **Enable Input Only Mode** (`enable_input_only_mode`) | Add an Input Only app entry. When enabled, the app list will only show the current running app and the Input Only entry when streaming. The Input Only entry will not receive any image or audio. Useful for operating the desktop on TV or connecting peripherals which the TV doesn't support with a phone. |
+| **Forward Rumble Messages** (`forward_rumble`) | Forward Rumble Messages to clients |
+
 ### Network tab
 
 Exposure (whether the host announces itself for discovery, whether pairing is enabled, UPnP port
@@ -215,6 +250,19 @@ encryption mode for LAN and WAN sessions, Trusted Subnet Auto-Pairing, and the t
 list in CIDR form). Keys: `enable_discovery`, `enable_pairing`, `upnp`, `address_family`, `port`,
 `origin_web_ui_allowed`, `external_ip`, `lan_encryption_mode`, `wan_encryption_mode`,
 `trusted_subnets`.
+
+| Field | What it does |
+| --- | --- |
+| **Enable Auto Discovery** (`enable_discovery`) | When disabled, you'll need to manually enter host IP on the client to pair. |
+| **Enable Pairing** (`enable_pairing`) | Enable pairing for the Moonlight client. This allows the client to authenticate with the host and establish a secure connection. |
+| **UPnP** (`upnp`) | Automatically configure port forwarding for streaming over the Internet |
+| **Address Family** (`address_family`) | Set the address family used by Polaris |
+| **Port** (`port`) | Set the family of ports used by Polaris |
+| **Origin Web UI Allowed** (`origin_web_ui_allowed`) | The origin of the remote endpoint address that is not denied access to Web UI |
+| **External IP** (`external_ip`) | If no external IP address is given, Polaris will automatically detect external IP |
+| **LAN Encryption Mode** (`lan_encryption_mode`) | This determines when encryption will be used when streaming over your local network. Encryption can reduce streaming performance, particularly on less powerful hosts and clients. |
+| **WAN Encryption Mode** (`wan_encryption_mode`) | This determines when encryption will be used when streaming over the Internet. Encryption can reduce streaming performance, particularly on less powerful hosts and clients. |
+| **Ping Timeout** (`ping_timeout`) | How long to wait in milliseconds for data from moonlight before shutting down the stream |
 
 ### Audio and video tab
 
@@ -235,11 +283,35 @@ overrides that force a specific path when automatic selection is wrong. Keys: `l
 `envvar_compatibility_mode`, `legacy_ordering`, `ignore_encoder_probe_failure`,
 `browser_streaming`, `encoder`.
 
+| Field | What it does |
+| --- | --- |
+| **FEC Percentage** (`fec_percentage`) | Percentage of error correcting packets per data packet in each video frame. Higher values can correct for more network packet loss, but at the cost of increasing bandwidth usage. |
+| **Quantization Parameter** (`qp`) | Some devices may not support Constant Bit Rate. For those devices, QP is used instead. Higher value means more compression, but less quality. |
+| **Minimum CPU Thread Count** (`min_threads`) | Increasing the value slightly reduces encoding efficiency, but the tradeoff is usually worth it to gain the use of more CPU cores for encoding. The ideal value is the lowest value that can reliably encode at your desired streaming settings on your hardware. |
+| **Limit capture framerate** (`limit_framerate`) | Limit the framerate being captured to client requested framerate. May not run at full framerate if vsync is enabled and display refreshrate does not match requested framerate. Could cause lag on some clients if disabled. |
+| **ENVVAR compatibility mode** (`envvar_compatibility_mode`) | Enable compatibility mode for environment variables. This will modify the behavior of certain environment variables to be more compatible with older tools. |
+| **App ordering for legacy clients** (`legacy_ordering`) | Enable ordering support workaround for legacy clients. Can cause issues with clients or scripts that can't handle UTF8 correctly. Nova clients support this by default. |
+| **Ignore Encoder Probe Failure** (`ignore_encoder_probe_failure`) | Allow streaming to continue even if probing for encoders fails. This may result in streaming failure if no encoder is available. |
+| **Browser Stream** (`browser_streaming`) | Experimental zero-install LAN browser access over WebTransport and WebCodecs. Best for touch, mouse, keyboard, launchers, desktop, and slower games; use Nova or Moonlight for controller-first play. |
+| **HEVC Support** (`hevc_mode`) | Allows the client to request HEVC Main or HEVC Main10 video streams. HEVC is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding. |
+| **AV1 Support** (`av1_mode`) | Allows the client to request AV1 Main 8-bit or 10-bit video streams. AV1 is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding. |
+| **Force a Specific Capture Method** (`capture`) | On automatic mode Polaris will use the first one that works. NvFBC requires patched nvidia drivers. |
+| **Force a Specific Encoder** (`encoder`) | Force a specific encoder, otherwise Polaris will select the best available option. Note: If you specify a hardware encoder on Windows, it must match the GPU where the display is connected. |
+
 ### Files tab
 
 Where Polaris keeps its app library, its log, its runtime state, and, optionally, the web
 credentials separately from the state file. The defaults are listed under [Files](#files). Keys:
 `file_apps`, `log_path`, `file_state`, `credentials_file`.
+
+| Field | What it does |
+| --- | --- |
+| **Apps File** (`file_apps`) | The file where current apps of Polaris are stored. |
+| **Logfile Path** (`log_path`) | The file where the current logs of Polaris are stored. |
+| **State File** (`file_state`) | The file where current state of Polaris is stored |
+| **Credentials File** (`credentials_file`) | Store Username/Password separately from Polaris's state file. |
+| **Private Key** (`pkey`) | The private key used for the web UI and Moonlight client pairing. For best compatibility, this should be an RSA-2048 private key. |
+| **Certificate** (`cert`) | The certificate used for the web UI and Moonlight client pairing. For best compatibility, this should have an RSA-2048 public key. |
 
 ### AI and Encoder Profiles tabs
 
@@ -350,6 +422,21 @@ Large local models can need substantially longer than cloud models for their fir
 weights are loaded. The web UI's local-provider profiles start with a bounded 60-second timeout and
 report inference timeout, connection, authentication, missing-model, and response-format failures
 separately. Lower the timeout after the model is warm if you prefer faster failure.
+
+## Rotate the web credentials
+
+**Security** in the web UI changes the sign-in for the web console only; paired clients are not
+affected. The page has two steps and one commit:
+
+1. **Verify current access**: type the current username and password. Polaris confirms the account
+   before it changes anything.
+2. **Choose new credentials**: type the replacement password twice. Leave the username blank to
+   keep the current one.
+3. **Save and Reload**: Polaris applies the new pair and reloads this browser session, so you sign
+   in again immediately with what you just set.
+
+The password fields have a **Show** control for checking what you typed. If you lose the
+credentials instead of rotating them, use the reset below.
 
 ## Credential reset
 

@@ -36,7 +36,15 @@ describe('settings surfaces affordances', () => {
     expect(readFileSync(join(process.cwd(), 'docs/moonlight.md'), 'utf8')).toContain('# Play with Moonlight')
     expect(webSource('views/PinView.vue')).toContain('href="https://papi-ux.com/docs/troubleshooting/#paired-client-gets-permission-denied-403-when-starting-a-stream"')
     expect(webSource('views/HomeView.vue')).toContain('href="https://papi-ux.com/docs/repositories/#after-install-or-upgrade"')
-    expect(webSource('views/PasswordView.vue')).toContain('href="https://papi-ux.com/docs/configuration/#credential-reset"')
+    expect(webSource('views/PasswordView.vue')).toContain('href="https://papi-ux.com/docs/configuration/#rotate-the-web-credentials"')
+    expect(webSource('views/PasswordView.vue')).not.toContain('<InfoHint')
+    expect(webSource('views/HomeView.vue')).not.toContain('<InfoHint')
+    expect(webSource('views/AppsView.vue')).not.toContain('<InfoHint')
+    expect(webSource('views/DashboardView.vue')).not.toContain('<InfoHint')
+    expect(webSource('views/DashboardView.vue')).toContain('href="https://papi-ux.com/docs/mission-control/"')
+    expect(readFileSync(join(process.cwd(), 'docs/mission-control.md'), 'utf8')).toContain('# Mission Control')
+    expect(webSource('views/AppsView.vue')).toContain('href="https://papi-ux.com/docs/apps/"')
+    expect(readFileSync(join(process.cwd(), 'docs/apps.md'), 'utf8')).toContain('# Add and edit apps')
     const quickstart = readFileSync(join(process.cwd(), 'docs/quickstart.md'), 'utf8')
     const troubleshooting = readFileSync(join(process.cwd(), 'docs/troubleshooting.md'), 'utf8')
     const repositories = readFileSync(join(process.cwd(), 'docs/repositories.md'), 'utf8')
@@ -45,6 +53,7 @@ describe('settings surfaces affordances', () => {
     expect(troubleshooting).toContain('## Paired client gets Permission denied (403) when starting a stream')
     expect(repositories).toContain('## After install or upgrade')
     expect(configuration).toContain('## Credential reset')
+    expect(configuration).toContain('## Rotate the web credentials')
   })
 
   it('renders Devices status through StatTile and the pairing routes through SelectableCard', () => {
@@ -85,5 +94,23 @@ describe('settings surfaces affordances', () => {
     expect(source).toContain('const buildVersionIsLocal = computed')
     expect(source).toContain("if (buildVersionIsLocal.value) return i18n.t('index.version_local_build')")
     expect(webSource('public/assets/locale/en.json')).toContain('"version_local_build": "Local build, not the packaged release"')
+  })
+})
+
+// The Library page's editor toggles describe themselves in one sentence; the
+// full explanation lives in docs/apps.md, so nothing on the page opens a hint.
+describe('library editor toggles', () => {
+  it('render their descriptions inline instead of as (i) hints', () => {
+    expect(webSource('views/AppsView.vue')).not.toContain('desc-as-hint')
+  })
+
+  it('keep every inline description to one sentence', () => {
+    const locale = JSON.parse(webSource('public/assets/locale/en.json'))
+    const keys = [...webSource('views/AppsView.vue').matchAll(/desc="apps\.([a-z_]+)"/g)].map((match) => match[1])
+    expect(keys.length).toBeGreaterThanOrEqual(8)
+    for (const key of [...keys, 'global_prep_desc', 'global_state_desc']) {
+      expect(locale.apps[key], key).toBeDefined()
+      expect(locale.apps[key].length, key).toBeLessThanOrEqual(170)
+    }
   })
 })

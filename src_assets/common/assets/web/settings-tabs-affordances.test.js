@@ -41,6 +41,32 @@ describe('settings tabs affordances', () => {
     expect(webSource(path)).toContain(`href="${url}"`)
   })
 
+  it.each(['configs/tabs/General.vue', 'configs/tabs/Inputs.vue', 'configs/tabs/Network.vue', 'configs/tabs/Files.vue'])('%s carries no (i) hints; that depth lives in the reference tables', (path) => {
+    expect(webSource(path)).not.toContain('<InfoHint')
+  })
+
+  it('backs every tab pointer with a field table in the reference', () => {
+    const configuration = readFileSync(join(process.cwd(), 'docs/configuration.md'), 'utf8')
+    for (const tab of ['General', 'Input', 'Network', 'Advanced', 'Files']) {
+      const start = configuration.indexOf(`### ${tab} tab`)
+      expect(start, tab).toBeGreaterThan(-1)
+      expect(configuration.slice(start, start + 4000)).toContain('| Field | What it does |')
+    }
+  })
+
+  it('keeps every inline field description on the five tabs to one sentence; the reference carries the depth', () => {
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
+    const offenders = []
+    for (const path of ['configs/tabs/General.vue', 'configs/tabs/Inputs.vue', 'configs/tabs/Network.vue', 'configs/tabs/Advanced.vue', 'configs/tabs/Files.vue']) {
+      const template = templateOf(webSource(path))
+      for (const match of template.matchAll(/\b(?:id|for)="([a-z][a-z0-9_]+)"/g)) {
+        const description = locale[`${match[1]}_desc`]
+        if (typeof description === 'string' && description.length > 170) offenders.push(`${path}: ${match[1]} (${description.length})`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
   it('anchors every docs pointer to a real heading', () => {
     const configuration = readFileSync(join(process.cwd(), 'docs/configuration.md'), 'utf8')
     const troubleshooting = readFileSync(join(process.cwd(), 'docs/troubleshooting.md'), 'utf8')

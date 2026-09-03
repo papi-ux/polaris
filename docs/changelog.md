@@ -14,6 +14,12 @@ starts at `v1.0.0`.
 - Keeps deterministic Doctor output as the source of truth while allowing a configured provider to explain its redacted evidence; OpenAI subscription mode now invokes the signed-in Codex CLI through a private, bounded explanation-only workspace, and provider failure remains an informational `deterministic-fallback`
 - Starts imported Flatpak Heroic titles through the launcher's normal visible cold-start protocol path instead of hiding the only actionable launcher feedback; exact older Polaris-generated commands migrate in place without changing UUIDs, artwork, profiles, prep commands, or custom fields
 
+- Reworks the Video/Audio settings tab into mode, quality, and display cards that show live host state, adds `GET /api/settings/metadata` so the console knows each field's source, sync state, and last writer, and tells host defaults apart from the values a paired device overrides
+- Gives Doctor & Support, Devices, System & Updates, and Security the shared console grammar: read-only status tiles, one button vocabulary, an AI panel that reports its real readiness, a previous-run banner that separates a crash from a deliberate stop, Session Snapshot rows that name the capture path and the last writer, and a per-device view of the host settings a client overrides
+- Adds Sign out to the sidebar and the command palette, and a Clear history action on both Mission Control session lists backed by `POST /api/ai/history/clear`, which also empties the AI optimizer's stored session outcomes
+- Moves the AI settings tab onto the same grammar with a guided provider setup and a readiness sentence, and gives the General, Input, Network, Advanced, and Files tabs localized headings with a pointer into the per-tab reference
+- Moves the console's inline explanations into the documentation: new Play with Moonlight, Pair and manage devices, Add and edit apps, and Mission Control guides, a field reference for every settings tab in the configuration guide, and every (i) hint removed from the console in favour of one docs link per page and one-sentence inline descriptions
+
 ## v1.4.0 - 2026-09-01
 
 A matched feature release for Nova v1.4.0. Doctor turns measured stream evidence into a clear explanation and, only when the evidence supports it, a reversible same-stream fix. Launch fields come from deterministic presets with field-level provenance, while history and AI remain unable to silently change a launch or inject a game-process limiter.

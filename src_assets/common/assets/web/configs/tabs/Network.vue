@@ -1,7 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
 import Checkbox from "../../Checkbox.vue";
-import InfoHint from '../../components/InfoHint.vue'
 
 const props = defineProps([
   'platform',
@@ -24,9 +23,6 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
         <div class="section-kicker">{{ $t('config.network_kicker_exposure') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.network_section_addressing_and_access') }}</h3>
-          <InfoHint size="sm" :label="$t('config.network_hint_exposure_guidance')">
-            {{ $t('config.network_hint_exposure_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
 
@@ -145,9 +141,6 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
         <div class="section-kicker">{{ $t('config.network_kicker_transport_security') }}</div>
         <div class="section-title-row">
           <h3 class="settings-section-title">{{ $t('config.network_section_encryption_and_trust') }}</h3>
-          <InfoHint size="sm" :label="$t('config.network_hint_encryption_and_trust_guidance')">
-            {{ $t('config.network_hint_encryption_and_trust_guidance_body') }}
-          </InfoHint>
         </div>
       </div>
 
