@@ -75,6 +75,11 @@ namespace {
     std::filesystem::path path;
   };
 
+  void mark_doctor_pacing_window_confirmed(stream_stats::stats_t &stats) {
+    stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES;
+    stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_CONFIRMATION_SAMPLES;
+  }
+
   nlohmann::json trusted_doctor_action_request(
       const doctor_actions::recovery_action_context_t &context) {
     const auto health = context.health.is_object() ?
@@ -933,6 +938,7 @@ TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkE
   stats.packet_loss = 0.0;
   stats.latency_ms = 4.0;
   stats.network_risk = false;
+  mark_doctor_pacing_window_confirmed(stats);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -963,6 +969,120 @@ TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkE
   const auto serialized = nlohmann::json::parse(stats.to_json());
   EXPECT_DOUBLE_EQ(serialized.at("frame_interval_error_ms"), 8.3333);
   EXPECT_DOUBLE_EQ(serialized.at("frame_jitter_ms"), 8.3333);
+}
+
+TEST(StreamStatsDoctorTests, KeepsStartupPacingUnknownUntilWarmupCompletes) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 120.0;
+  stats.capture_source_fps = 120.0;
+  stats.frame_jitter_ms = 8.3333;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES - 1;
+  stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES - 1;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "frame_pacing"}, {"grade", "watch"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("confidence").at("basis"), "pacing_window_collecting");
+  const auto &pacing = *std::find_if(
+    doctor.at("evidence").begin(),
+    doctor.at("evidence").end(),
+    [](const auto &item) { return item.value("id", "") == "frame_pacing"; }
+  );
+  EXPECT_EQ(pacing.at("status"), "unknown");
+  ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+  EXPECT_EQ(doctor.at("suppressed_findings").front().at("id"), "pacing_window_collecting");
+}
+
+TEST(StreamStatsDoctorTests, RequiresTwoConsecutivePacingWarningsAfterWarmup) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 120.0;
+  stats.capture_source_fps = 120.0;
+  stats.frame_jitter_ms = 8.3333;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES;
+  stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_CONFIRMATION_SAMPLES - 1;
+
+  const auto first = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "frame_pacing"}, {"grade", "watch"}}
+  );
+  EXPECT_EQ(first.at("primary_issue"), "none");
+  EXPECT_EQ(first.at("advanced_evidence").at("pacing_coverage").at("ready"), true);
+  EXPECT_EQ(first.at("advanced_evidence").at("pacing_coverage").at("confirmed"), false);
+
+  stats.pacing_warning_streak = stream_stats::DOCTOR_PACING_CONFIRMATION_SAMPLES;
+  const auto second = stream_stats::build_doctor_json(
+    stats,
+    {{"primary_issue", "frame_pacing"}, {"grade", "watch"}}
+  );
+  EXPECT_EQ(second.at("primary_issue"), "frame_pacing");
+  EXPECT_EQ(second.at("traffic_light"), "amber");
+  EXPECT_EQ(second.at("advanced_evidence").at("pacing_coverage").at("confirmed"), true);
+}
+
+TEST(StreamStatsDoctorTests, TracksAndResetsPerStreamPacingCoverage) {
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true, "PacingCoverage", "203.0.113.30");
+  for (std::uint64_t i = 0; i < stream_stats::DOCTOR_PACING_WARMUP_SAMPLES; ++i) {
+    stream_stats::note_doctor_video_policy_sample(
+      120.0, 60.0, 0.0, 0.0, 2.0, 8.3333, 2.0
+    );
+  }
+
+  const auto active = stream_stats::get_current();
+  EXPECT_EQ(active.video_policy_sample_count, stream_stats::DOCTOR_PACING_WARMUP_SAMPLES);
+  EXPECT_EQ(active.pacing_warning_streak, stream_stats::DOCTOR_PACING_WARMUP_SAMPLES);
+
+  stream_stats::update_stream_active(false);
+  const auto stopped = stream_stats::get_current();
+  EXPECT_EQ(stopped.video_policy_sample_count, 0);
+  EXPECT_EQ(stopped.pacing_warning_streak, 0);
+}
+
+TEST(StreamStatsDoctorTests, SuppressesUnconfirmedPacingSummaryWhenCurrentWindowIsClean) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.capture_source_fps = 60.0;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.video_policy_sample_count = stream_stats::DOCTOR_PACING_WARMUP_SAMPLES;
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats,
+    {
+      {"primary_issue", "frame_pacing"},
+      {"grade", "watch"},
+      {"summary", "Old pacing warning"}
+    }
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(
+    doctor.at("confidence").at("basis"),
+    "live_evidence_overrode_unconfirmed_pacing"
+  );
+  ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
+  EXPECT_EQ(
+    doctor.at("suppressed_findings").front().at("id"),
+    "unconfirmed_frame_pacing"
+  );
 }
 
 TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClean) {
@@ -1367,6 +1487,7 @@ TEST(StreamStatsDoctorTests, RelaunchFindingOffersReadOnlyPacingRecheck) {
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.encode_target_residency = platf::frame_residency_e::gpu;
+  mark_doctor_pacing_window_confirmed(stats);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -2823,6 +2944,7 @@ TEST(StreamStatsDoctorTests, StaticContentCannotHideConfirmedDroppedFrames) {
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.encode_target_residency = platf::frame_residency_e::gpu;
+  mark_doctor_pacing_window_confirmed(stats);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,

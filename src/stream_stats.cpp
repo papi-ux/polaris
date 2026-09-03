@@ -106,11 +106,13 @@ namespace stream_stats {
         platf::frame_residency_e::unknown;
       platf::frame_residency_e encode_target_residency =
         platf::frame_residency_e::unknown;
+      std::uint64_t sample_count = 0;
+      std::uint64_t pacing_warning_streak = 0;
     };
     doctor_video_policy_state_t doctor_video_policy_state;
     std::mutex doctor_video_policy_mutex;
 
-    bool video_policy_suppresses_quality_restore(
+    bool video_policy_has_pacing_warning(
         const doctor_video_policy_state_t &sample) {
       const bool source_cadence_available =
         sample.capture_source_fps > 0.0 && sample.target_fps > 0.0;
@@ -122,7 +124,7 @@ namespace stream_stats {
         (source_cadence_available &&
          sample.capture_source_fps < sample.target_fps * 0.50 &&
          sample.duplicate_frame_ratio >= 0.10);
-      const bool pacing_watch =
+      return
         sample.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&
          (sample.frame_jitter_ms >= 2.2 ||
@@ -130,13 +132,25 @@ namespace stream_stats {
              sample.target_fps,
              sample.delivered_fps
            ) && source_cadence_confirms_motion)));
+    }
+
+    bool video_policy_pacing_warning_is_confirmed(
+        const doctor_video_policy_state_t &sample) {
+      return sample.sample_count >= DOCTOR_PACING_WARMUP_SAMPLES &&
+        sample.pacing_warning_streak >= DOCTOR_PACING_CONFIRMATION_SAMPLES &&
+        video_policy_has_pacing_warning(sample);
+    }
+
+    bool video_policy_suppresses_quality_restore(
+        const doctor_video_policy_state_t &sample) {
       const bool capture_cpu_copy =
         sample.capture_transport == platf::frame_transport_e::shm ||
         sample.capture_residency == platf::frame_residency_e::cpu ||
         sample.encode_target_residency == platf::frame_residency_e::cpu;
       const bool encoder_watch =
         sample.encode_time_ms >= 8.0 || sample.avg_frame_age_ms >= 18.0;
-      return capture_cpu_copy || encoder_watch || pacing_watch;
+      return capture_cpu_copy || encoder_watch ||
+        video_policy_pacing_warning_is_confirmed(sample);
     }
 
     void publish_doctor_video_policy_locked() {
@@ -517,6 +531,8 @@ namespace stream_stats {
     j["control_channel_packet_loss"] = control_channel_packet_loss;
     j["control_channel_samples"] = control_channel_samples;
     j["video_sample_revision"] = video_sample_revision;
+    j["video_policy_sample_count"] = video_policy_sample_count;
+    j["pacing_warning_streak"] = pacing_warning_streak;
     j["network_sample_revision"] = network_sample_revision;
     j["network_last_received_age_ms"] = network_last_received_age_ms;
     j["media_loss_sample_revision"] = media_loss_sample_revision;
@@ -1260,10 +1276,17 @@ namespace stream_stats {
       stats.duplicate_frame_ratio >= 0.50 ||
       (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
        stats.duplicate_frame_ratio >= 0.10);
-    const bool pacing_watch =
+    const bool raw_pacing_watch =
       stats.dropped_frame_ratio >= 0.04 ||
       (!static_or_duplicate_content &&
        (stats.frame_jitter_ms >= 2.2 || observed_target_shortfall));
+    const bool pacing_window_ready =
+      stats.video_policy_sample_count >= DOCTOR_PACING_WARMUP_SAMPLES;
+    const bool pacing_streak_confirmed =
+      stats.pacing_warning_streak >= DOCTOR_PACING_CONFIRMATION_SAMPLES;
+    const bool pacing_watch =
+      raw_pacing_watch && pacing_window_ready && pacing_streak_confirmed;
+    const bool pacing_collecting = raw_pacing_watch && !pacing_watch;
     const bool strict_gamepad_isolation =
       stats.input_host_controller_isolation == "strict_bwrap";
     const bool steam_input_known =
@@ -1352,7 +1375,8 @@ namespace stream_stats {
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
-      health.contains("summary") && !suppressed_stale_network_finding ? health.value("summary", std::string {}) :
+      health.contains("summary") && !suppressed_stale_network_finding &&
+        !health_claims_unconfirmed_frame_pacing ? health.value("summary", std::string {}) :
       capture_path_reason_message(capture_reason);
 
     nlohmann::json evidence = nlohmann::json::array();
@@ -1452,15 +1476,37 @@ namespace stream_stats {
       "Target FPS gap",
       target_fps_gap,
       "FPS",
-      observed_target_shortfall ? "watch" : meaningful_fps_shortfall && !source_cadence_available ? "unknown" : "pass",
+      observed_target_shortfall && pacing_watch ? "watch" :
+        meaningful_fps_shortfall && (!source_cadence_available || !pacing_window_ready || !pacing_streak_confirmed) ? "unknown" :
+        "pass",
       "stream_stats",
-      observed_target_shortfall ?
+      observed_target_shortfall && pacing_watch ?
         "Encoded FPS is below the requested cadence while measured source cadence confirms moving content." :
+      observed_target_shortfall && !pacing_window_ready ?
+        "Encoded FPS is below the requested cadence, but Doctor is still collecting its startup pacing window." :
+      observed_target_shortfall && !pacing_streak_confirmed ?
+        "Encoded FPS is below the requested cadence, but the shortfall has not persisted for two consecutive complete windows." :
       meaningful_fps_shortfall && !source_cadence_available ?
         "Encoded FPS is below the requested cadence, but source cadence is unavailable; static content is not a pacing fault." :
         "No source-confirmed target cadence shortfall is present."
     );
-    append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
+    append_doctor_evidence(
+      evidence,
+      "frame_pacing",
+      "Mean target interval error",
+      stats.frame_jitter_ms,
+      "ms",
+      pacing_watch ? "watch" :
+        (!pacing_window_ready || pacing_collecting) ? "unknown" : "pass",
+      "stream_stats",
+      pacing_watch ?
+        "The pacing threshold remained exceeded across a complete startup window and consecutive observations." :
+      !pacing_window_ready ?
+        "Doctor is collecting six complete video telemetry windows before grading startup pacing." :
+      pacing_collecting ?
+        "The threshold was crossed once; Doctor requires a second consecutive complete window before warning." :
+        "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter."
+    );
     append_doctor_evidence(
       evidence,
       "steam_input_compatibility",
@@ -1475,7 +1521,7 @@ namespace stream_stats {
     );
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["controller_input"] = {
@@ -1492,6 +1538,14 @@ namespace stream_stats {
     if (steam_input_conflict) {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
+    advanced["pacing_coverage"] = {
+      {"sample_count", stats.video_policy_sample_count},
+      {"required_sample_count", DOCTOR_PACING_WARMUP_SAMPLES},
+      {"warning_streak", stats.pacing_warning_streak},
+      {"required_warning_streak", DOCTOR_PACING_CONFIRMATION_SAMPLES},
+      {"ready", pacing_window_ready},
+      {"confirmed", pacing_watch}
+    };
     advanced["raw_fields_redacted"] = true;
 
     double confidence_score = 0.35;
@@ -1517,6 +1571,14 @@ namespace stream_stats {
       confidence_score = 0.72;
       confidence_level = "medium";
       basis = "control_channel_only";
+    } else if (pacing_collecting && primary_issue == "none") {
+      confidence_score = 0.45;
+      confidence_level = "low";
+      basis = "pacing_window_collecting";
+    } else if (health_claims_unconfirmed_frame_pacing && primary_issue == "none") {
+      confidence_score = 0.84;
+      confidence_level = "medium";
+      basis = "live_evidence_overrode_unconfirmed_pacing";
     } else if (health.contains("primary_issue")) {
       confidence_score = 0.92;
       confidence_level = "high";
@@ -1548,7 +1610,17 @@ namespace stream_stats {
     doctor["severity"] = severity;
     doctor["simple_state"] = simple_state;
     doctor["primary_issue"] = primary_issue;
-    doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.control_channel_samples}, {"seconds", 0}}}};
+    doctor["confidence"] = {
+      {"level", confidence_level},
+      {"score", confidence_score},
+      {"basis", basis},
+      {"sample_window", {
+        {"samples", stats.control_channel_samples},
+        {"seconds", 0},
+        {"video_samples", stats.video_policy_sample_count},
+        {"pacing_warning_streak", stats.pacing_warning_streak}
+      }}
+    };
     doctor["summary"] = summary;
     doctor["recommendation"] = doctor_recommendation(
       primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
@@ -1572,6 +1644,19 @@ namespace stream_stats {
       doctor["suppressed_findings"].push_back({
         {"id", "stale_network_jitter"},
         {"reason", "Confirmed media loss is unavailable and current RTT evidence is below the action threshold; the older health label cannot trigger a bitrate change."}
+      });
+    }
+    if (pacing_collecting) {
+      doctor["suppressed_findings"].push_back({
+        {"id", "pacing_window_collecting"},
+        {"reason", !pacing_window_ready ?
+          "Doctor is collecting six complete video telemetry windows before grading startup pacing." :
+          "Pacing evidence has not crossed the warning threshold for two consecutive complete windows."}
+      });
+    } else if (health_claims_unconfirmed_frame_pacing) {
+      doctor["suppressed_findings"].push_back({
+        {"id", "unconfirmed_frame_pacing"},
+        {"reason", "The older health label is not supported by a current, fully confirmed pacing window."}
       });
     }
     // Actions that reported success and did not land. These are not stream
@@ -2195,6 +2280,12 @@ namespace stream_stats {
     doctor_video_policy_state.avg_frame_age_ms = avg_frame_age_ms;
     doctor_video_policy_state.frame_jitter_ms = frame_jitter_ms;
     doctor_video_policy_state.encode_time_ms = encode_time_ms;
+    ++doctor_video_policy_state.sample_count;
+    if (video_policy_has_pacing_warning(doctor_video_policy_state)) {
+      ++doctor_video_policy_state.pacing_warning_streak;
+    } else {
+      doctor_video_policy_state.pacing_warning_streak = 0;
+    }
     publish_doctor_video_policy_locked();
     // Publish every Doctor-policy field under the same lock as its class
     // transition. get_current() cannot observe the new authority with the old
@@ -3082,6 +3173,8 @@ namespace stream_stats {
       result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
       result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
       result.video_sample_revision = hot_video_sample_revision.load(std::memory_order_acquire);
+      result.video_policy_sample_count = doctor_video_policy_state.sample_count;
+      result.pacing_warning_streak = doctor_video_policy_state.pacing_warning_streak;
     }
     {
       // Keep the complete network group on one host-received observation.

@@ -279,8 +279,8 @@
       "$comment": [
         "Nested under session_encoder.selection. This explains the deterministic host-side",
         "Auto policy, its runtime-selected encoder, and whether an exact live probe used the",
-        "documented fallback. It ships ahead of a Nova consumer; Doctor and the web UI can",
-        "use the same evidence without giving either surface control over launch behavior."
+        "documented fallback. Nova, Doctor, and the web UI consume the same informational",
+        "evidence without giving any surface control over launch behavior."
       ],
       "fields": [
         "exact_live_probe_required",
@@ -293,6 +293,11 @@
         "reason",
         "selected_encoder"
       ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseSessionStatusResponse",
+        "receiver": "encoderSelection"
+      },
       "polaris_emitter": {
         "file": "src/nvhttp.cpp",
         "function": "encoder_selection_json",
