@@ -118,6 +118,9 @@ namespace crypto {
     bool enable_legacy_ordering;
     bool allow_client_commands;
     bool always_use_virtual_display;
+    // Temporary authorizations are intentionally memory-only. They expire
+    // after the device's final stream disconnect or when Polaris restarts.
+    bool temporary_authorization = false;
   };
 
   using p_named_cert_t = std::shared_ptr<named_cert_t>;

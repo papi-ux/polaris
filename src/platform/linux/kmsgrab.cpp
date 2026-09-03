@@ -3,6 +3,7 @@
  * @brief Definitions for KMS screen capture.
  */
 // standard includes
+#include <cstring>
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -24,9 +25,12 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/round_robin.h"
+#include "src/stream_stats.h"
 #include "src/utility.h"
 #include "src/video.h"
+#include "kms_capture_metadata.h"
 #include "vaapi.h"
+#include "vulkan_encode.h"
 #include "wayland.h"
 
 using namespace std::literals;
@@ -313,6 +317,7 @@ namespace platf {
         char *rendernode_path = drmGetRenderDeviceNameFromFd(fd.el);
         if (rendernode_path) {
           BOOST_LOG(debug) << "Opening render node: "sv << rendernode_path;
+          render_node = rendernode_path;
           render_fd.el = open(rendernode_path, O_RDWR);
           if (render_fd.el < 0) {
             BOOST_LOG(warning) << "Couldn't open render node: "sv << rendernode_path << ": "sv << strerror(errno);
@@ -540,6 +545,7 @@ namespace platf {
 
       file_t fd;
       file_t render_fd;
+      std::string render_node;
       plane_res_t plane_res;
     };
 
@@ -1116,6 +1122,22 @@ namespace platf {
         return capture_e::ok;
       }
 
+      void publish_capture_metadata(platf::img_t &img, bool gpu_resident) {
+        img.frame_metadata = kms_capture::frame_metadata(gpu_resident, card.render_node);
+        stream_stats::update_capture_metadata(img.frame_metadata);
+
+        if (capture_metadata_logged) {
+          return;
+        }
+
+        capture_metadata_logged = true;
+        auto &severity = gpu_resident ? info : warning;
+        BOOST_LOG(severity) << "kms: capture_transport="sv << platf::from_frame_transport(img.frame_metadata.transport)
+                            << " frame_residency="sv << platf::from_frame_residency(img.frame_metadata.residency)
+                            << " frame_format="sv << platf::from_frame_format(img.frame_metadata.format)
+                            << " capture_device="sv << (img.frame_metadata.device.empty() ? "unknown" : img.frame_metadata.device);
+      }
+
       mem_type_e mem_type;
 
       std::chrono::nanoseconds delay;
@@ -1132,6 +1154,8 @@ namespace platf {
 
       int cursor_plane_id;
       cursor_t captured_cursor {};
+
+      bool capture_metadata_logged {};
 
       card_t card;
     };
@@ -1222,6 +1246,12 @@ namespace platf {
 #ifdef POLARIS_BUILD_VAAPI
         if (mem_type == mem_type_e::vaapi) {
           return va::make_avcodec_encode_device(width, height, false);
+        }
+#endif
+
+#ifdef POLARIS_BUILD_VULKAN
+        if (mem_type == mem_type_e::vulkan) {
+          return vk::make_avcodec_encode_device_ram(width, height);
         }
 #endif
 
@@ -1322,6 +1352,7 @@ namespace platf {
         gl::ctx.GetTextureSubImage(rgb->tex[0], 0, img_offset_x, img_offset_y, 0, width, height, 1, GL_BGRA, GL_UNSIGNED_BYTE, img_out->height * img_out->row_pitch, img_out->data);
 
         img_out->frame_timestamp = frame_timestamp;
+        publish_capture_metadata(*img_out, false);
 
         if (cursor && captured_cursor.visible) {
           blend_cursor(*img_out);
@@ -1342,6 +1373,14 @@ namespace platf {
       }
 
       int dummy_img(platf::img_t *img) override {
+        if (!img || !img->data || img->height <= 0 || img->row_pitch <= 0) {
+          return -1;
+        }
+        std::memset(
+          img->data,
+          0,
+          static_cast<std::size_t>(img->height) * static_cast<std::size_t>(img->row_pitch)
+        );
         return 0;
       }
 
@@ -1360,6 +1399,17 @@ namespace platf {
 #ifdef POLARIS_BUILD_VAAPI
         if (mem_type == mem_type_e::vaapi) {
           return va::make_avcodec_encode_device(width, height, dup(card.render_fd.el), img_offset_x, img_offset_y, true);
+        }
+#endif
+
+#ifdef POLARIS_BUILD_VULKAN
+        if (mem_type == mem_type_e::vulkan) {
+          if (card.render_node.empty()) {
+            BOOST_LOG(error) << "Vulkan Video could not resolve the KMS capture card's render node"sv;
+            return nullptr;
+          }
+
+          return vk::make_avcodec_encode_device_vram(width, height, img_offset_x, img_offset_y, card.render_node);
         }
 #endif
 
@@ -1453,6 +1503,7 @@ namespace platf {
         }
 
         img->sequence = ++sequence;
+        publish_capture_metadata(*img, true);
 
         if (cursor && captured_cursor.visible) {
           // Copy new cursor pixel data if it's been updated
@@ -1508,14 +1559,17 @@ namespace platf {
   }  // namespace kms
 
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda) {
+    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda || hwdevice_type == mem_type_e::vulkan) {
       auto disp = std::make_shared<kms::display_vram_t>(hwdevice_type);
 
       if (!disp->init(display_name, config)) {
         return disp;
       }
 
-      // In the case of failure, attempt the old method for VAAPI
+      // If direct DMA-BUF capture cannot initialize, retain the portable
+      // GPU -> RAM -> encoder-upload path. Vulkan uses its own bounded staging
+      // ring, so an explicit Vulkan request remains Vulkan instead of silently
+      // switching encoders.
     }
 
     auto disp = std::make_shared<kms::display_ram_t>(hwdevice_type);

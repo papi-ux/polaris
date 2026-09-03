@@ -11,6 +11,7 @@
 // standard includes
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -26,6 +27,8 @@
 #include <pwd.h>
 #include <sched.h>
 #include <spawn.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -84,6 +87,34 @@ namespace portal {
 namespace {
   std::atomic_bool thread_priority_permission_denied {false};
   std::atomic_bool thread_priority_permission_warning_logged {false};
+
+#ifdef POLARIS_BUILD_VULKAN
+  void append_environment_token(const char *name, std::string_view token) {
+    const char *existing = std::getenv(name);
+    if (!existing || !*existing) {
+      setenv(name, std::string {token}.c_str(), 1);
+      return;
+    }
+
+    const std::string current {existing};
+    std::size_t start = 0;
+    while (start <= current.size()) {
+      const auto end = current.find(',', start);
+      auto value = std::string_view {current}.substr(start, end - start);
+      const auto first = value.find_first_not_of(" \t");
+      const auto last = value.find_last_not_of(" \t");
+      if (first != std::string_view::npos && value.substr(first, last - first + 1) == token) {
+        return;
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+
+    setenv(name, (current + ',' + std::string {token}).c_str(), 1);
+  }
+#endif
 
   std::string format_rlimit_value(rlim_t value) {
     if (value == RLIM_INFINITY) {
@@ -281,6 +312,148 @@ namespace platf {
       return 128 + WTERMSIG(status);
     }
     return 127;
+  }
+
+  process_output_t run_process_argv_capture(
+      const std::vector<std::string> &argv,
+      std::chrono::milliseconds timeout,
+      std::size_t max_output_bytes) {
+    process_output_t result;
+    if (argv.empty() || argv.front().empty()) {
+      return result;
+    }
+
+    int output_pipe[2] {-1, -1};
+    if (pipe2(output_pipe, O_CLOEXEC) != 0) {
+      BOOST_LOG(warning) << "Failed to create output pipe for ["sv << argv.front()
+                         << "]: "sv << strerror(errno);
+      return result;
+    }
+    file_t read_end {output_pipe[0]};
+    file_t write_end {output_pipe[1]};
+
+    std::vector<char *> native_argv;
+    native_argv.reserve(argv.size() + 1);
+    for (const auto &argument : argv) {
+      native_argv.push_back(const_cast<char *>(argument.c_str()));
+    }
+    native_argv.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+      return result;
+    }
+    const auto actions_guard = util::fail_guard([&actions]() {
+      posix_spawn_file_actions_destroy(&actions);
+    });
+    if (posix_spawn_file_actions_adddup2(&actions, write_end.el, STDOUT_FILENO) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, read_end.el) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, write_end.el) != 0 ||
+        posix_spawn_file_actions_addopen(
+          &actions,
+          STDERR_FILENO,
+          "/dev/null",
+          O_WRONLY,
+          0
+        ) != 0) {
+      return result;
+    }
+
+    pid_t child = -1;
+    const int spawn_result = posix_spawnp(
+      &child,
+      native_argv.front(),
+      &actions,
+      nullptr,
+      native_argv.data(),
+      environ
+    );
+    if (spawn_result != 0) {
+      BOOST_LOG(warning) << "Failed to launch ["sv << argv.front() << "]: "sv
+                         << strerror(spawn_result);
+      return result;
+    }
+    close(write_end.release());
+
+    const int current_flags = fcntl(read_end.el, F_GETFL, 0);
+    if (current_flags >= 0) {
+      fcntl(read_end.el, F_SETFL, current_flags | O_NONBLOCK);
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::max(timeout, std::chrono::milliseconds {0});
+    bool child_reaped = false;
+    bool output_closed = false;
+    int wait_status = 0;
+    std::array<char, 4096> buffer {};
+
+    while (!child_reaped || !output_closed) {
+      while (!output_closed) {
+        const auto bytes = read(read_end.el, buffer.data(), buffer.size());
+        if (bytes > 0) {
+          const auto available = max_output_bytes > result.output.size() ?
+                                   max_output_bytes - result.output.size() :
+                                   0;
+          const auto retained = std::min<std::size_t>(available, static_cast<std::size_t>(bytes));
+          result.output.append(buffer.data(), retained);
+          if (retained != static_cast<std::size_t>(bytes)) {
+            result.truncated = true;
+          }
+          continue;
+        }
+        if (bytes == 0) {
+          output_closed = true;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+          output_closed = true;
+        }
+        break;
+      }
+
+      if (!child_reaped) {
+        const auto waited = waitpid(child, &wait_status, WNOHANG);
+        if (waited == child) {
+          child_reaped = true;
+        } else if (waited < 0 && errno != EINTR) {
+          child_reaped = true;
+        }
+      }
+
+      if (child_reaped && output_closed) {
+        break;
+      }
+
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline && (!child_reaped || !output_closed)) {
+        result.timed_out = true;
+        if (!child_reaped) {
+          kill(child, SIGKILL);
+          while (waitpid(child, &wait_status, 0) < 0 && errno == EINTR) {
+          }
+          child_reaped = true;
+        }
+        break;
+      }
+
+      pollfd descriptor {
+        .fd = read_end.el,
+        .events = POLLIN | POLLHUP,
+        .revents = 0,
+      };
+      const auto remaining = deadline > now ?
+                               std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now) :
+                               std::chrono::milliseconds {0};
+      const int wait_ms = child_reaped ? 10 : std::clamp<int>(remaining.count(), 1, 25);
+      poll(&descriptor, 1, wait_ms);
+    }
+
+    if (result.timed_out) {
+      result.exit_status = 124;
+    } else if (WIFEXITED(wait_status)) {
+      result.exit_status = WEXITSTATUS(wait_status);
+    } else if (WIFSIGNALED(wait_status)) {
+      result.exit_status = 128 + WTERMSIG(wait_status);
+    }
+    return result;
   }
 
   ifaddr_t get_ifaddrs() {
@@ -1607,7 +1780,8 @@ std::string get_local_ip_for_gateway() {
     bool use_cage_compositor,
     virtual_display::backend_e backend
   ) {
-    return stream_mode == "host_virtual_display" &&
+    return (stream_mode == "host_virtual_display" ||
+            stream_mode == "desktop_takeover") &&
            !use_cage_compositor &&
            backend != virtual_display::backend_e::WAYLAND_WLR;
   }
@@ -1634,8 +1808,8 @@ std::string get_local_ip_for_gateway() {
     }
 #endif
 #ifdef POLARIS_BUILD_WAYLAND
-    const bool hvd_needs_portal = host_virtual_display_needs_portal();
-    if (((config::video.capture.empty() && sources.none() && !hvd_needs_portal)
+    const bool virtual_output_needs_portal = host_virtual_display_needs_portal();
+    if (((config::video.capture.empty() && sources.none() && !virtual_output_needs_portal)
          || config::video.capture == "wlr"
          || config::video.linux_display.use_cage_compositor)) {
       // When cage/labwc is configured, prefer direct wlr capture over portal
@@ -1697,6 +1871,14 @@ std::string get_local_ip_for_gateway() {
     // enable low latency mode for AMD
     // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
     set_env("AMD_DEBUG", "lowlatencyenc");
+
+#ifdef POLARIS_BUILD_VULKAN
+    // Mesa exposes RADV Vulkan Video behind driver feature tokens. Preserve
+    // any user-supplied options while enabling both the legacy and current
+    // spellings before GBM or Vulkan creates a device.
+    append_environment_token("RADV_PERFTEST", "video_encode");
+    append_environment_token("RADV_EXPERIMENTAL", "video_encode");
+#endif
 
     // Seat isolation trades the logind ACL for group ownership, so an account
     // outside `input` loses access to its own virtual devices. Report it here
@@ -1893,6 +2075,19 @@ std::string get_local_ip_for_gateway() {
       return chosen;
     }();
     return cached;
+  }
+
+  std::string render_device_driver(std::string_view render_device) {
+    const auto selected = render_device.empty() ? default_render_device() : std::string {render_device};
+    if (selected.empty()) {
+      return {};
+    }
+
+    const auto &candidates = render_device_candidates();
+    const auto candidate = std::find_if(candidates.begin(), candidates.end(), [&](const auto &entry) {
+      return entry.path == selected;
+    });
+    return candidate == candidates.end() ? std::string {} : candidate->driver;
   }
 
   std::string default_vaapi_render_device() {

@@ -72,6 +72,7 @@ namespace rtsp_stream {
     std::optional<std::uint64_t> lifecycle_generation;
     crypto::PERM perm;
     bool watch_only;
+    bool temporary_authorization = false;
 
     enum class setup_state_e : std::uint8_t {
       pending,

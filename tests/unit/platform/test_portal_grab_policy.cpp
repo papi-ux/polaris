@@ -80,7 +80,7 @@ TEST(PortalCapabilityPolicyTests, ExplicitCaptureSelectionWinsOverStreamModeDefa
 }
 
 TEST(PortalCapabilityPolicyTests, PortalOrientedModesDropCapabilitiesForImplicitCapture) {
-  for (const char *mode : {"desktop_display", "gamescope_stream", "headless_dongle"}) {
+  for (const char *mode : {"desktop_display", "desktop_takeover", "gamescope_stream", "headless_dongle"}) {
     EXPECT_TRUE(portal_capability::requires_unprivileged_process("", mode)) << mode;
     EXPECT_TRUE(portal_capability::requires_unprivileged_process("auto", mode)) << mode;
   }
@@ -130,6 +130,7 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayRequestsMonitorSourceDespiteHeadle
   // exact window+restore_token combination the dongle comment above warns
   // hangs KDE ScreenCast.
   EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "host_virtual_display"), 1u);
+  EXPECT_EQ(portal::capture_type_for_stream_display(true, false, "desktop_takeover"), 1u);
 }
 
 TEST(PortalGrabPolicyTests, EmptyModeSourcePolicyDoesNotReadMutableGlobalMode) {
@@ -251,6 +252,13 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayCaptureRoutingDependsOnBackend) {
   EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(
     "host_virtual_display", false, backend_e::WAYLAND_WLR
   )) << "a native wlroots headless output must be captured directly by name";
+
+  EXPECT_TRUE(platf::host_virtual_display_needs_portal_for_backend(
+    "desktop_takeover", false, backend_e::EVDI
+  ));
+  EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(
+    "desktop_takeover", false, backend_e::WAYLAND_WLR
+  ));
 
   for (const auto backend : {backend_e::EVDI, backend_e::WAYLAND_WLR, backend_e::KSCREEN_DOCTOR, backend_e::NONE}) {
     EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(

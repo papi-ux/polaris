@@ -73,6 +73,7 @@ makedepends=(
   'nlohmann-json'
   'nodejs'
   'npm'
+  'shaderc'
   'vulkan-headers'
 )
 

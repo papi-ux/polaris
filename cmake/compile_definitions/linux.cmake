@@ -142,9 +142,7 @@ if(${POLARIS_ENABLE_CUDA})
     endif()
 endif()
 if(CUDA_FOUND)
-    find_package(Vulkan REQUIRED)
     include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvfbc")
-    list(APPEND PLATFORM_LIBRARIES Vulkan::Vulkan)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.cu"
@@ -154,8 +152,14 @@ if(CUDA_FOUND)
     add_compile_definitions(POLARIS_BUILD_CUDA)
 endif()
 
-# libdrm is required for DRM (KMS), Wayland, and Portal capture
-if(${POLARIS_ENABLE_DRM} OR ${POLARIS_ENABLE_WAYLAND} OR ${POLARIS_ENABLE_PORTAL})
+# CUDA interop and FFmpeg's Vulkan Video encoder both use the Vulkan loader.
+if(CUDA_FOUND OR POLARIS_ENABLE_VULKAN)
+    find_package(Vulkan REQUIRED)
+    list(APPEND PLATFORM_LIBRARIES Vulkan::Vulkan)
+endif()
+
+# libdrm is required for DRM (KMS), Wayland, Vulkan, and Portal capture
+if(${POLARIS_ENABLE_DRM} OR ${POLARIS_ENABLE_WAYLAND} OR ${POLARIS_ENABLE_VULKAN} OR ${POLARIS_ENABLE_PORTAL})
     find_package(LIBDRM REQUIRED)
 else()
     set(LIBDRM_FOUND OFF)
@@ -251,6 +255,61 @@ if(LIBVA_FOUND)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vaapi.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vaapi.cpp")
+endif()
+
+# Vulkan Video encoding through FFmpeg. Capture backends may provide either a
+# GPU-resident DMA-BUF frame or a bounded RAM-upload path; runtime policy keeps
+# automatic selection behind the route-specific live-frame safety gate.
+if(${POLARIS_ENABLE_VULKAN})
+    find_program(GLSLC_EXECUTABLE glslc)
+    if(NOT GLSLC_EXECUTABLE)
+        find_program(GLSLANG_EXECUTABLE glslangValidator)
+    endif()
+    if(NOT GLSLC_EXECUTABLE AND NOT GLSLANG_EXECUTABLE)
+        message(FATAL_ERROR "Vulkan shader compiler not found (need glslc or glslangValidator)")
+    endif()
+
+    list(APPEND POLARIS_DEFINITIONS POLARIS_BUILD_VULKAN=1)
+    include_directories(SYSTEM ${CMAKE_BINARY_DIR}/generated-src)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp")
+
+    set(VULKAN_SHADER_DIR "${CMAKE_BINARY_DIR}/generated-src/shaders")
+    set(VULKAN_SHADER_SOURCE "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/shaders/vulkan/rgb2yuv.comp")
+    set(VULKAN_SHADER_SPV "${VULKAN_SHADER_DIR}/rgb2yuv.spv")
+    set(VULKAN_SHADER_DATA "${VULKAN_SHADER_DIR}/rgb2yuv.spv.inc")
+
+    file(MAKE_DIRECTORY "${VULKAN_SHADER_DIR}")
+
+    if(GLSLC_EXECUTABLE)
+        add_custom_command(
+                OUTPUT "${VULKAN_SHADER_SPV}"
+                COMMAND ${GLSLC_EXECUTABLE} -O "${VULKAN_SHADER_SOURCE}" -o "${VULKAN_SHADER_SPV}"
+                DEPENDS "${VULKAN_SHADER_SOURCE}"
+                COMMENT "Compiling Vulkan shader rgb2yuv.comp (glslc)"
+                VERBATIM)
+    else()
+        add_custom_command(
+                OUTPUT "${VULKAN_SHADER_SPV}"
+                COMMAND ${GLSLANG_EXECUTABLE} -V -o "${VULKAN_SHADER_SPV}" "${VULKAN_SHADER_SOURCE}"
+                DEPENDS "${VULKAN_SHADER_SOURCE}"
+                COMMENT "Compiling Vulkan shader rgb2yuv.comp (glslangValidator)"
+                VERBATIM)
+    endif()
+
+    add_custom_command(
+            OUTPUT "${VULKAN_SHADER_DATA}"
+            COMMAND ${CMAKE_COMMAND} -DSPV_FILE=${VULKAN_SHADER_SPV} -DOUT_FILE=${VULKAN_SHADER_DATA}
+                -P "${CMAKE_SOURCE_DIR}/cmake/scripts/binary_to_c.cmake"
+            DEPENDS "${VULKAN_SHADER_SPV}"
+            COMMENT "Generating C include from rgb2yuv.spv"
+            VERBATIM)
+
+    add_custom_target(vulkan_shaders
+            DEPENDS "${VULKAN_SHADER_DATA}"
+            COMMENT "Vulkan shader compilation")
+    list(APPEND POLARIS_TARGET_DEPENDENCIES vulkan_shaders)
 endif()
 
 # wayland
@@ -415,6 +474,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/virtual_display.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/desktop_takeover.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/desktop_takeover.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_manager.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.h"

@@ -182,9 +182,11 @@ WAYLAND_DISPLAY=wayland-1 DISPLAY=:2 heroic --no-gui "heroic://launch?appName=<i
 Polaris exports both of those variables into the private session already, so setting them by hand
 is redundant rather than required. They are shown here because that is the entry that was verified.
 
-Polaris logs a warning at launch when an app command can reach the portal, and reports
-`never opened a window in the private session` when a launch produces no window at all, rather than
-streaming an empty compositor silently.
+Polaris logs a warning at launch when an app command can reach the portal. If the private compositor
+does not expose a managed window within the observation period, Polaris reports that it could not
+confirm attachment. Check the client image before applying the portal workaround: some fullscreen or
+XWayland surfaces can be visible even when the compositor's managed-window detector cannot enumerate
+them, while a genuinely empty client image still points to the host-desktop escape described above.
 
 ## Steam Big Picture black screen or tiny window
 

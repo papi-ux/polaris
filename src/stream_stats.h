@@ -25,6 +25,9 @@
 
 namespace stream_stats {
 
+  inline constexpr std::uint64_t DOCTOR_PACING_WARMUP_SAMPLES = 6;
+  inline constexpr std::uint64_t DOCTOR_PACING_CONFIRMATION_SAMPLES = 2;
+
   /**
    * @brief Return true when delivered FPS is materially below target.
    *
@@ -33,6 +36,18 @@ namespace stream_stats {
    * recovery.
    */
   bool is_meaningful_fps_shortfall(double target_fps, double delivered_fps);
+
+  /**
+   * @brief Return the low-latency encoder budget for the requested cadence.
+   *
+   * The hard ceiling remains 12 ms for low-refresh streams, while high-refresh
+   * sessions use their actual frame interval. Keeping this contract public to
+   * the session-health builder prevents Doctor and the Nova summary from
+   * assigning different pressure grades to the same encoder timing.
+   */
+  double encoder_pressure_frame_budget_ms(double target_fps);
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps);
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps);
 
   /**
    * @brief Per-client statistics for multi-session tracking.
@@ -157,6 +172,10 @@ namespace stream_stats {
     uint64_t control_channel_samples = 0;
     /// Process-lifetime monotonic count of primary video/pacing observations.
     uint64_t video_sample_revision = 0;
+    /// Complete per-stream telemetry windows seen by Doctor; reset at stream teardown.
+    uint64_t video_policy_sample_count = 0;
+    /// Consecutive complete windows whose pacing evidence crosses a warning threshold.
+    uint64_t pacing_warning_streak = 0;
     /// Monotonic count of primary media/control network observations.
     uint64_t network_sample_revision = 0;
     /// Host monotonic age of the newest complete network observation, or -1

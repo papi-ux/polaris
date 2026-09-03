@@ -78,7 +78,9 @@ linux_prefer_gpu_native_capture = enabled
 > intentionally empty screen (right-click opens the session menu) until you launch a game from your
 > client. Wanting your actual desktop on the stream is a different mode: `desktop_display` mirrors
 > the host desktop at host resolution, and `host_virtual_display` adds an extra display sized to the
-> client. Both are one click in the web UI under Settings → Audio/Video.
+> client. On Hyprland, `desktop_takeover` moves the live desktop onto that temporary client-sized
+> output and blanks the original displays until the stream ends. All three are one click in the web
+> UI under Settings → Audio/Video.
 
 To pick a different mode later, such as Gamescope, a virtual display, or a dummy plug, see
 [Launch modes and capture paths](launch-modes.md). [Configuration](configuration.md) explains every

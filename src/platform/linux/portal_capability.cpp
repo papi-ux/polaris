@@ -46,6 +46,7 @@ namespace portal_capability {
 
     const auto mode = lower_copy(stream_mode);
     return mode == "desktop_display" ||
+           mode == "desktop_takeover" ||
            mode == "gamescope_stream" ||
            mode == "headless_dongle";
   }

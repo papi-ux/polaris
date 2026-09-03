@@ -250,9 +250,9 @@ namespace ai_optimizer {
     auto key = mode;
     std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch) { return std::tolower(ch); });
     // Mirrors stream_path's registry ids; local so this file stays platform-neutral.
-    static const std::array<std::string_view, 6> known {
+    static const std::array<std::string_view, 7> known {
       "headless_stream", "windowed_stream", "host_virtual_display",
-      "desktop_display", "gamescope_stream", "headless_dongle"
+      "desktop_takeover", "desktop_display", "gamescope_stream", "headless_dongle"
     };
     for (const auto &id : known) {
       if (key == id) {
@@ -1696,7 +1696,7 @@ namespace ai_optimizer {
       "color_range: 0=client decides, 1=limited/MPEG, 2=full/JPEG. "
       "preferred_codec: 'hevc' for most devices (better quality/bitrate), 'h264' for legacy/low-power devices, 'av1' for newest devices with AV1 decode. "
       "recommended_mode: optional advisory. ONLY when the user prompt names the session's streaming display mode and a different one of "
-      "headless_stream, windowed_stream, host_virtual_display, desktop_display, gamescope_stream, headless_dongle "
+      "headless_stream, windowed_stream, host_virtual_display, desktop_takeover, desktop_display, gamescope_stream, headless_dongle "
       "would clearly improve this game's session, name it here; otherwise omit it or return null. The host treats it as a suggestion only. "
       "If previous session data shows packet loss >2% or latency >30ms, reduce bitrate. "
       "If previous session scored A, keep current settings. If B/C, adjust. "

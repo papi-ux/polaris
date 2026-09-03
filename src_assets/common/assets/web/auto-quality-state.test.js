@@ -76,11 +76,32 @@ describe('Auto Quality UI state', () => {
     expect(state.detail).toContain('Retroid')
   })
 
-  it('treats CPU capture as attention', () => {
+  it('keeps a measured-healthy CPU capture path stable', () => {
     const state = resolveAutoQualityState(streamingStats({
       capture_gpu_native: false,
       capture_transport: 'shm',
       capture_residency: 'cpu',
+      health: {
+        grade: 'good',
+        summary: 'Session looks steady.',
+        capture_pressure: false,
+      },
+    }))
+
+    expect(state.state).toBe(AUTO_QUALITY_STATES.STABLE)
+    expect(state.label).toBe('Auto Quality Stable')
+  })
+
+  it('treats measured CPU capture pressure as attention', () => {
+    const state = resolveAutoQualityState(streamingStats({
+      capture_gpu_native: false,
+      capture_transport: 'shm',
+      capture_residency: 'cpu',
+      health: {
+        grade: 'watch',
+        summary: 'The compatibility path is missing its latency budget.',
+        capture_pressure: true,
+      },
     }))
 
     expect(state.state).toBe(AUTO_QUALITY_STATES.NEEDS_ATTENTION)

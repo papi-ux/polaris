@@ -38,6 +38,7 @@ protected:
       {"AMD AMF Encoder", "amd"},
       {"VideoToolbox Encoder", "vt"},
       {"VA-API Encoder", "vaapi"},
+      {"Vulkan Encoder", "vulkan"},
       {"Software Encoder", "sw"}
     };
   }

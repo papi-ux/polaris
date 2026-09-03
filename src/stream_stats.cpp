@@ -12,6 +12,7 @@
 #include <cmath>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -42,6 +43,32 @@ namespace stream_stats {
     const double fps_gap = target_fps - delivered_fps;
     const double fps_ratio = delivered_fps / target_fps;
     return fps_gap >= 2.0 && fps_ratio < 0.95;
+  }
+
+  double encoder_pressure_frame_budget_ms(double target_fps) {
+    return std::isfinite(target_fps) && target_fps > 0.0 ?
+             1000.0 / target_fps :
+             std::numeric_limits<double>::infinity();
+  }
+
+  namespace {
+    double encoder_pressure_fail_threshold_ms(double target_fps) {
+      return std::min(12.0, encoder_pressure_frame_budget_ms(target_fps));
+    }
+
+    double encoder_pressure_watch_threshold_ms(double target_fps) {
+      return std::min(8.0, encoder_pressure_frame_budget_ms(target_fps) * 0.90);
+    }
+  }
+
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps) {
+    return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
+           encode_time_ms >= encoder_pressure_fail_threshold_ms(target_fps);
+  }
+
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps) {
+    return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
+           encode_time_ms >= encoder_pressure_watch_threshold_ms(target_fps);
   }
 
   static std::mutex stats_mutex;
@@ -106,11 +133,13 @@ namespace stream_stats {
         platf::frame_residency_e::unknown;
       platf::frame_residency_e encode_target_residency =
         platf::frame_residency_e::unknown;
+      std::uint64_t sample_count = 0;
+      std::uint64_t pacing_warning_streak = 0;
     };
     doctor_video_policy_state_t doctor_video_policy_state;
     std::mutex doctor_video_policy_mutex;
 
-    bool video_policy_suppresses_quality_restore(
+    bool video_policy_has_pacing_warning(
         const doctor_video_policy_state_t &sample) {
       const bool source_cadence_available =
         sample.capture_source_fps > 0.0 && sample.target_fps > 0.0;
@@ -122,7 +151,7 @@ namespace stream_stats {
         (source_cadence_available &&
          sample.capture_source_fps < sample.target_fps * 0.50 &&
          sample.duplicate_frame_ratio >= 0.10);
-      const bool pacing_watch =
+      return
         sample.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&
          (sample.frame_jitter_ms >= 2.2 ||
@@ -130,18 +159,34 @@ namespace stream_stats {
              sample.target_fps,
              sample.delivered_fps
            ) && source_cadence_confirms_motion)));
-      const bool capture_cpu_copy =
-        sample.capture_transport == platf::frame_transport_e::shm ||
-        sample.capture_residency == platf::frame_residency_e::cpu ||
-        sample.encode_target_residency == platf::frame_residency_e::cpu;
+    }
+
+    bool video_policy_pacing_warning_is_confirmed(
+        const doctor_video_policy_state_t &sample) {
+      return sample.sample_count >= DOCTOR_PACING_WARMUP_SAMPLES &&
+        sample.pacing_warning_streak >= DOCTOR_PACING_CONFIRMATION_SAMPLES &&
+        video_policy_has_pacing_warning(sample);
+    }
+
+    bool video_policy_suppresses_quality_restore(
+        const doctor_video_policy_state_t &sample) {
       const bool encoder_watch =
-        sample.encode_time_ms >= 8.0 || sample.avg_frame_age_ms >= 18.0;
-      return capture_cpu_copy || encoder_watch || pacing_watch;
+        encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps) ||
+        sample.avg_frame_age_ms >= 18.0;
+      // SHM is a supported compatibility path. It is capability context, not
+      // pressure by itself; only measured encode/capture latency or confirmed
+      // pacing trouble should block a guarded quality restore.
+      return encoder_watch || video_policy_pacing_warning_is_confirmed(sample);
     }
 
     void publish_doctor_video_policy_locked() {
+      const bool capture_cpu_copy =
+        doctor_video_policy_state.capture_transport == platf::frame_transport_e::shm ||
+        doctor_video_policy_state.capture_residency == platf::frame_residency_e::cpu ||
+        doctor_video_policy_state.encode_target_residency == platf::frame_residency_e::cpu;
       adaptive_bitrate::note_doctor_video_policy_evidence(
-        video_policy_suppresses_quality_restore(doctor_video_policy_state)
+        video_policy_suppresses_quality_restore(doctor_video_policy_state),
+        capture_cpu_copy || video_policy_has_pacing_warning(doctor_video_policy_state)
       );
     }
 
@@ -517,6 +562,8 @@ namespace stream_stats {
     j["control_channel_packet_loss"] = control_channel_packet_loss;
     j["control_channel_samples"] = control_channel_samples;
     j["video_sample_revision"] = video_sample_revision;
+    j["video_policy_sample_count"] = video_policy_sample_count;
+    j["pacing_warning_streak"] = pacing_warning_streak;
     j["network_sample_revision"] = network_sample_revision;
     j["network_last_received_age_ms"] = network_last_received_age_ms;
     j["media_loss_sample_revision"] = media_loss_sample_revision;
@@ -669,6 +716,29 @@ namespace stream_stats {
         {"action", "Set linux_prefer_gpu_native_capture = enabled, restart Polaris, and retry Private Stream (GPU-native) before chasing CUDA/NVENC driver issues."}
       });
     }
+  #ifdef POLARIS_BUILD_VULKAN
+    auto vaapi_vendor = stats.vaapi_vendor;
+    std::transform(vaapi_vendor.begin(), vaapi_vendor.end(), vaapi_vendor.begin(), [](unsigned char byte) {
+      return static_cast<char>(std::tolower(byte));
+    });
+    const bool amd_vaapi = stats.encode_target_device == "vaapi" &&
+                           (vaapi_vendor.find("amd") != std::string::npos ||
+                            vaapi_vendor.find("radeon") != std::string::npos ||
+                            vaapi_vendor.find("radeonsi") != std::string::npos);
+    const bool private_compositor_session =
+      linux_display.use_cage_compositor &&
+      (stats.runtime_requested_headless || stats.runtime_effective_headless ||
+       stats.runtime_gpu_native_override_active);
+    if (private_compositor_session && capture_path_uses_cpu_copy(stats) &&
+        amd_vaapi && config::video.encoder == "vaapi") {
+      configuration_warnings.push_back({
+        {"id", "amd_private_explicit_vaapi_shm"},
+        {"severity", "warning"},
+        {"message", "AMD Private Stream is explicitly pinned to VA-API while capture is crossing SHM/system-memory frames; this compatibility path can be throughput-limited at high resolution or refresh rate."},
+        {"action", "Set Force a Specific Encoder to Autodetect (recommended), restart Polaris, and start a fresh Private Stream. Auto will live-probe Vulkan Video and fall back to VA-API if the exact GPU-native path is unavailable."}
+      });
+    }
+  #endif
 #endif
     if (adapter_pairing_status == "mismatched") {
       configuration_warnings.push_back({
@@ -1244,14 +1314,16 @@ namespace stream_stats {
     // capture path, not the encoder — the old verdict here sent an SHM-bound
     // user to lower bitrate, which cannot recover capture throughput (issue
     // #367: encode at 5.8 ms of budget while frames arrived 26.5 ms old).
-    const bool encoder_time_fail = stats.encode_time_ms >= 12.0;
+    const bool encoder_time_fail = encoder_time_fails_budget(stats.encode_time_ms, target_fps);
     const bool frame_age_counts_against_encoder = !capture_cpu_copy;
     const bool encoder_fail = encoder_time_fail ||
                               (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 22.0);
     const bool encoder_watch = !encoder_fail &&
-                               (stats.encode_time_ms >= 8.0 ||
+                               (encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
                                 (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
     const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
+    const bool capture_latency_watch = capture_cpu_copy && !encoder_time_fail &&
+                                       !capture_latency_fail && stats.avg_frame_age_ms >= 18.0;
     const bool source_cadence_available = stats.capture_source_fps > 0.0 && target_fps > 0.0;
     const bool source_cadence_confirms_motion =
       source_cadence_available && stats.capture_source_fps >= target_fps * 0.85;
@@ -1260,10 +1332,19 @@ namespace stream_stats {
       stats.duplicate_frame_ratio >= 0.50 ||
       (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
        stats.duplicate_frame_ratio >= 0.10);
-    const bool pacing_watch =
+    const bool raw_pacing_watch =
       stats.dropped_frame_ratio >= 0.04 ||
       (!static_or_duplicate_content &&
        (stats.frame_jitter_ms >= 2.2 || observed_target_shortfall));
+    const bool pacing_window_ready =
+      stats.video_policy_sample_count >= DOCTOR_PACING_WARMUP_SAMPLES;
+    const bool pacing_streak_confirmed =
+      stats.pacing_warning_streak >= DOCTOR_PACING_CONFIRMATION_SAMPLES;
+    const bool pacing_watch =
+      raw_pacing_watch && pacing_window_ready && pacing_streak_confirmed;
+    const bool pacing_collecting = raw_pacing_watch && !pacing_watch;
+    const bool capture_pacing_watch = capture_cpu_copy && pacing_watch;
+    const bool capture_pressure = capture_latency_fail || capture_latency_watch || capture_pacing_watch;
     const bool strict_gamepad_isolation =
       stats.input_host_controller_isolation == "strict_bwrap";
     const bool steam_input_known =
@@ -1279,6 +1360,9 @@ namespace stream_stats {
     const bool health_claims_network_jitter = primary_issue == "network_jitter";
     const bool health_claims_unconfirmed_frame_pacing =
       primary_issue == "frame_pacing" && !pacing_watch;
+    const bool health_claims_unconfirmed_capture_pressure =
+      !capture_reason.empty() && primary_issue == capture_reason &&
+      capture_cpu_copy && !capture_pressure;
     const bool suppressed_stale_network_finding =
       health_claims_network_jitter && !network_fail && !network_watch;
     if (health_claims_network_jitter && !network_fail) {
@@ -1289,6 +1373,9 @@ namespace stream_stats {
       primary_issue = network_watch ? "network_observation" : std::string {};
     }
     if (health_claims_unconfirmed_frame_pacing) {
+      primary_issue.clear();
+    }
+    if (health_claims_unconfirmed_capture_pressure) {
       primary_issue.clear();
     }
     if (steam_input_conflict && !network_fail && !encoder_fail && !capture_latency_fail) {
@@ -1308,7 +1395,7 @@ namespace stream_stats {
       else if (capture_latency_fail) primary_issue = capture_reason;
       else if (network_watch) primary_issue = "network_observation";
       else if (encoder_watch) primary_issue = "encoder_load";
-      else if (capture_cpu_copy) primary_issue = capture_reason;
+      else if (capture_latency_watch || capture_pacing_watch) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
       else if (quality_reduced_live) primary_issue = "quality_reduced_live";
@@ -1322,7 +1409,9 @@ namespace stream_stats {
     std::string simple_state = "Streaming ready";
     const auto health_grade = health.value("grade", std::string {});
     const bool honor_health_grade =
-      (!health_claims_network_jitter || network_fail) && !health_claims_unconfirmed_frame_pacing;
+      (!health_claims_network_jitter || network_fail) &&
+      !health_claims_unconfirmed_frame_pacing &&
+      !health_claims_unconfirmed_capture_pressure;
     if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";
@@ -1334,11 +1423,11 @@ namespace stream_stats {
       severity = "critical";
       simple_state = "Needs attention";
     } else if ((primary_issue != "none" && primary_issue != "control_channel_observation") ||
-               (honor_health_grade && health_grade == "watch") || capture_cpu_copy || pacing_watch) {
+               (honor_health_grade && health_grade == "watch") || capture_pressure || pacing_watch) {
       traffic = "amber";
-      status = capture_cpu_copy ? "watch" : "needs_action";
+      status = "needs_action";
       severity = "warning";
-      simple_state = capture_cpu_copy ? "Advanced issue detected" : "Needs attention";
+      simple_state = "Needs attention";
     }
 
     const std::string summary =
@@ -1352,13 +1441,27 @@ namespace stream_stats {
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
-      health.contains("summary") && !suppressed_stale_network_finding ? health.value("summary", std::string {}) :
+      health.contains("summary") && !suppressed_stale_network_finding &&
+        !health_claims_unconfirmed_frame_pacing ? health.value("summary", std::string {}) :
       capture_path_reason_message(capture_reason);
 
     nlohmann::json evidence = nlohmann::json::array();
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
     append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
+    const auto encoder_selection = health.value("encoder_selection", nlohmann::json::object());
+    append_doctor_evidence(
+      evidence,
+      "encoder_selection",
+      "Encoder selection",
+      encoder_selection.value("selected_encoder", std::string {"unknown"}),
+      "",
+      encoder_selection.value("selected_encoder", std::string {"unknown"}) == "unknown" ?
+        "unknown" :
+        encoder_selection.value("fallback_used", false) ? "watch" : "pass",
+      "deterministic_launch_policy",
+      encoder_selection.value("reason", std::string {"Encoder selection evidence is unavailable."})
+    );
     append_doctor_evidence(
       evidence,
       "packet_loss",
@@ -1439,15 +1542,37 @@ namespace stream_stats {
       "Target FPS gap",
       target_fps_gap,
       "FPS",
-      observed_target_shortfall ? "watch" : meaningful_fps_shortfall && !source_cadence_available ? "unknown" : "pass",
+      observed_target_shortfall && pacing_watch ? "watch" :
+        meaningful_fps_shortfall && (!source_cadence_available || !pacing_window_ready || !pacing_streak_confirmed) ? "unknown" :
+        "pass",
       "stream_stats",
-      observed_target_shortfall ?
+      observed_target_shortfall && pacing_watch ?
         "Encoded FPS is below the requested cadence while measured source cadence confirms moving content." :
+      observed_target_shortfall && !pacing_window_ready ?
+        "Encoded FPS is below the requested cadence, but Doctor is still collecting its startup pacing window." :
+      observed_target_shortfall && !pacing_streak_confirmed ?
+        "Encoded FPS is below the requested cadence, but the shortfall has not persisted for two consecutive complete windows." :
       meaningful_fps_shortfall && !source_cadence_available ?
         "Encoded FPS is below the requested cadence, but source cadence is unavailable; static content is not a pacing fault." :
         "No source-confirmed target cadence shortfall is present."
     );
-    append_doctor_evidence(evidence, "frame_pacing", "Mean target interval error", stats.frame_jitter_ms, "ms", pacing_watch ? "watch" : "pass", "stream_stats", "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter.");
+    append_doctor_evidence(
+      evidence,
+      "frame_pacing",
+      "Mean target interval error",
+      stats.frame_jitter_ms,
+      "ms",
+      pacing_watch ? "watch" :
+        (!pacing_window_ready || pacing_collecting) ? "unknown" : "pass",
+      "stream_stats",
+      pacing_watch ?
+        "The pacing threshold remained exceeded across a complete startup window and consecutive observations." :
+      !pacing_window_ready ?
+        "Doctor is collecting six complete video telemetry windows before grading startup pacing." :
+      pacing_collecting ?
+        "The threshold was crossed once; Doctor requires a second consecutive complete window before warning." :
+        "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter."
+    );
     append_doctor_evidence(
       evidence,
       "steam_input_compatibility",
@@ -1462,7 +1587,7 @@ namespace stream_stats {
     );
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["controller_input"] = {
@@ -1474,10 +1599,19 @@ namespace stream_stats {
       {"steam_input_detail", stats.input_steam_input_detail}
     };
     advanced["health"] = health;
+    advanced["encoder_selection"] = encoder_selection;
     advanced["recent_issue_codes"] = nlohmann::json::array();
     if (steam_input_conflict) {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
+    advanced["pacing_coverage"] = {
+      {"sample_count", stats.video_policy_sample_count},
+      {"required_sample_count", DOCTOR_PACING_WARMUP_SAMPLES},
+      {"warning_streak", stats.pacing_warning_streak},
+      {"required_warning_streak", DOCTOR_PACING_CONFIRMATION_SAMPLES},
+      {"ready", pacing_window_ready},
+      {"confirmed", pacing_watch}
+    };
     advanced["raw_fields_redacted"] = true;
 
     double confidence_score = 0.35;
@@ -1503,6 +1637,14 @@ namespace stream_stats {
       confidence_score = 0.72;
       confidence_level = "medium";
       basis = "control_channel_only";
+    } else if (pacing_collecting && primary_issue == "none") {
+      confidence_score = 0.45;
+      confidence_level = "low";
+      basis = "pacing_window_collecting";
+    } else if (health_claims_unconfirmed_frame_pacing && primary_issue == "none") {
+      confidence_score = 0.84;
+      confidence_level = "medium";
+      basis = "live_evidence_overrode_unconfirmed_pacing";
     } else if (health.contains("primary_issue")) {
       confidence_score = 0.92;
       confidence_level = "high";
@@ -1534,7 +1676,17 @@ namespace stream_stats {
     doctor["severity"] = severity;
     doctor["simple_state"] = simple_state;
     doctor["primary_issue"] = primary_issue;
-    doctor["confidence"] = {{"level", confidence_level}, {"score", confidence_score}, {"basis", basis}, {"sample_window", {{"samples", stats.control_channel_samples}, {"seconds", 0}}}};
+    doctor["confidence"] = {
+      {"level", confidence_level},
+      {"score", confidence_score},
+      {"basis", basis},
+      {"sample_window", {
+        {"samples", stats.control_channel_samples},
+        {"seconds", 0},
+        {"video_samples", stats.video_policy_sample_count},
+        {"pacing_warning_streak", stats.pacing_warning_streak}
+      }}
+    };
     doctor["summary"] = summary;
     doctor["recommendation"] = doctor_recommendation(
       primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
@@ -1558,6 +1710,19 @@ namespace stream_stats {
       doctor["suppressed_findings"].push_back({
         {"id", "stale_network_jitter"},
         {"reason", "Confirmed media loss is unavailable and current RTT evidence is below the action threshold; the older health label cannot trigger a bitrate change."}
+      });
+    }
+    if (pacing_collecting) {
+      doctor["suppressed_findings"].push_back({
+        {"id", "pacing_window_collecting"},
+        {"reason", !pacing_window_ready ?
+          "Doctor is collecting six complete video telemetry windows before grading startup pacing." :
+          "Pacing evidence has not crossed the warning threshold for two consecutive complete windows."}
+      });
+    } else if (health_claims_unconfirmed_frame_pacing) {
+      doctor["suppressed_findings"].push_back({
+        {"id", "unconfirmed_frame_pacing"},
+        {"reason", "The older health label is not supported by a current, fully confirmed pacing window."}
       });
     }
     // Actions that reported success and did not land. These are not stream
@@ -2181,6 +2346,12 @@ namespace stream_stats {
     doctor_video_policy_state.avg_frame_age_ms = avg_frame_age_ms;
     doctor_video_policy_state.frame_jitter_ms = frame_jitter_ms;
     doctor_video_policy_state.encode_time_ms = encode_time_ms;
+    ++doctor_video_policy_state.sample_count;
+    if (video_policy_has_pacing_warning(doctor_video_policy_state)) {
+      ++doctor_video_policy_state.pacing_warning_streak;
+    } else {
+      doctor_video_policy_state.pacing_warning_streak = 0;
+    }
     publish_doctor_video_policy_locked();
     // Publish every Doctor-policy field under the same lock as its class
     // transition. get_current() cannot observe the new authority with the old
@@ -3068,6 +3239,8 @@ namespace stream_stats {
       result.frame_jitter_ms = hot_frame_jitter_ms.load(std::memory_order_relaxed);
       result.capture_source_fps = hot_capture_source_fps.load(std::memory_order_relaxed);
       result.video_sample_revision = hot_video_sample_revision.load(std::memory_order_acquire);
+      result.video_policy_sample_count = doctor_video_policy_state.sample_count;
+      result.pacing_warning_streak = doctor_video_policy_state.pacing_warning_streak;
     }
     {
       // Keep the complete network group on one host-received observation.

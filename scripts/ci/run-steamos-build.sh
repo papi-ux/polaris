@@ -91,7 +91,7 @@ pacstrap -G -M -C /tmp/steamos-3.8.1x.conf "$STEAMOS_ROOT" \
   desktop-file-utils gcc git go grim labwc libayatana-appindicator libcap libdrm libevdev \
   libmfx libnotify libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst make mesa \
   miniupnpc namcap ninja nlohmann-json nodejs npm numactl openssl opus pipewire shellcheck \
-  sudo systemd vulkan-headers vulkan-icd-loader wayland which wlr-randr xorg-xdpyinfo xorg-xwayland
+  shaderc sudo systemd vulkan-headers vulkan-icd-loader wayland which wlr-randr xorg-xdpyinfo xorg-xwayland
 
 mount --bind /workspace "$STEAMOS_ROOT/mnt"
 mount --bind /output "$STEAMOS_ROOT/opt"

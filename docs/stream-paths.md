@@ -8,7 +8,7 @@ Polaris models each user-facing Linux streaming option as a **stream path**: a s
 |---------|---------|----------|
 | **Runtime** | Who owns app paint | `labwc`, `gamescope`, none (host) |
 | **Capture** | How frames are taken | `wlroots`, `portal`, `kms`, `evdi`, `auto` |
-| **Topology** | Host display layout policy | `leave_alone`, `host_virtual`, `swap_primary` |
+| **Topology** | Host display layout policy | `leave_alone`, `host_virtual`, `desktop_takeover`, `swap_primary` |
 
 Config key: `linux_stream_mode = <path id>`. Legacy booleans (`headless_mode`, `linux_use_cage_compositor`, `linux_prefer_gpu_native_capture`) still map to/from primary paths.
 
@@ -20,6 +20,7 @@ Config key: `linux_stream_mode = <path id>`. Legacy booleans (`headless_mode`, `
 | `windowed_stream` | labwc | wlroots | leave_alone | Available (GPU-native preference) |
 | `desktop_display` | none | portal | leave_alone | Available (Mirror Desktop / external gamescope) |
 | `host_virtual_display` | none | auto | host_virtual | Available |
+| `desktop_takeover` | none | auto | desktop_takeover | Available on a live Hyprland session with `hyprctl` and an EVDI or native wlroots virtual-output backend |
 | `gamescope_stream` | gamescope | portal | leave_alone | **Available** when `gamescope` is on PATH (attach idle or spawn owned) |
 | `family_isolated` | — | — | — | **Not registered** until PR #226 wires it (id constant kept for conf parse) |
 | `headless_evdi` | — | — | — | **Not registered** until EVDI path wires it (id constant kept for conf parse) |
@@ -64,7 +65,7 @@ Source of truth: `labwc_process_environment_value` in
 3. **Capture** (if not covered by existing portal/kms/wlroots paths):
    - Add grab backend + wire via `capture_kind_e` negotiation in platform init — do not hard-code capture inside the path id switch in `process.cpp`.
 4. **Topology** (if rearranging host outputs):
-   - Implement prepare/restore hooks keyed by `topology_kind_e` (swap primary / host virtual), callable from session prep — not as ad-hoc booleans.
+   - Implement prepare/restore hooks keyed by `topology_kind_e` (swap primary / host virtual / desktop takeover), callable from session prep — not as ad-hoc booleans.
 5. **Policy facade**: `stream_display_policy` maps path → legacy booleans for one release cycle.
 6. **UI**: Audio/Video path cards read the same ids; mark `available: false` until the runtime works.
 7. **Stats**: set `runtime_backend` + `stream_path_id` via `stream_stats::update_runtime_state` (or rely on policy `backend_name` when idle).
@@ -81,6 +82,7 @@ Source of truth: `labwc_process_environment_value` in
 | `portal_session` / `portal_grab` | ScreenCast session + process-wide media cache (`release_global_capture`) |
 | `pipewire_capture` | PW stream format/copy/dtor |
 | `display_topology` | Dongle prepare/restore (kscreen) |
+| `desktop_takeover` | Durable Hyprland workspace-move and DPMS recovery, including stale-session restoration |
 | `process` | App launch + nested kill **after** `session_media` |
 
 Stop callers must not invent a parallel order: confighttp / terminate_impl → `session_media::prepare_for_stop()` → optional `proc::terminate`.

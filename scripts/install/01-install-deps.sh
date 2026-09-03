@@ -50,10 +50,9 @@ case "$DISTRO" in
       grim labwc wlr-randr xorg-x11-server-Xwayland xdpyinfo \
       bubblewrap util-linux wireplumber \
       avahi-devel numactl-devel \
-      systemd-devel pkgconf-pkg-config
+      systemd-devel pkgconf-pkg-config \
+      glslc vulkan-loader-devel
     if [ "$WITH_CUDA" = 1 ]; then
-      # CUDA capture uses find_package(Vulkan REQUIRED) for external-memory import.
-      maybe_sudo dnf install -y vulkan-loader-devel
       maybe_sudo dnf install -y cuda-nvcc cuda-cudart-devel 2>/dev/null \
         || warn "CUDA packages not found via dnf; install NVIDIA CUDA toolkit manually"
     fi
@@ -74,9 +73,9 @@ case "$DISTRO" in
       libappindicator-gtk3 gtk3 \
       grim labwc wlr-randr xorg-xwayland xorg-xdpyinfo \
       bubblewrap util-linux wireplumber \
-      avahi numactl systemd pkgconf
+      avahi numactl systemd pkgconf \
+      shaderc vulkan-headers vulkan-icd-loader
     if [ "$WITH_CUDA" = 1 ]; then
-      maybe_sudo pacman -S --needed --noconfirm vulkan-headers vulkan-icd-loader
       maybe_sudo pacman -S --needed --noconfirm cuda 2>/dev/null \
         || warn "install 'cuda' from official/extra or use the NVIDIA runfile"
     fi
@@ -103,9 +102,9 @@ case "$DISTRO" in
       grim labwc wlr-randr xwayland x11-utils \
       bubblewrap util-linux wireplumber \
       libavahi-client-dev libnuma-dev \
-      pkg-config
+      pkg-config \
+      glslang-tools libvulkan-dev
     if [ "$WITH_CUDA" = 1 ]; then
-      maybe_sudo apt-get install -y libvulkan-dev
       warn "On Ubuntu/Debian install CUDA from NVIDIA; apt package names vary by release"
     fi
     if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then
@@ -128,9 +127,9 @@ case "$DISTRO" in
       libappindicator3-devel gtk3-devel \
       grim labwc wlr-randr xwayland xdpyinfo \
       bubblewrap util-linux wireplumber \
-      pkgconf-pkg-config
+      pkgconf-pkg-config \
+      shaderc vulkan-devel
     if [ "$WITH_CUDA" = 1 ]; then
-      maybe_sudo zypper install -y vulkan-devel
       warn "Install CUDA toolkit from NVIDIA for openSUSE"
     fi
     if [ "$WITH_GAMESCOPE_STACK" = 1 ]; then

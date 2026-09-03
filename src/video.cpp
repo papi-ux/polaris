@@ -47,11 +47,16 @@ extern "C" {
 #include "video_frame_pacing.h"
 
 #ifdef __linux__
+  #include "platform/linux/encoder_auto_policy.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/session_media.h"
   #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
+  #include "platform/linux/misc.h"
   #include "platform/linux/vaapi.h"
+  #ifdef POLARIS_BUILD_VULKAN
+    #include "platform/linux/vulkan_encode.h"
+  #endif
 #endif
 
 #ifdef _WIN32
@@ -93,6 +98,92 @@ namespace video {
       return labwc.running && labwc.state.gpu_native_override_active;
     }
 #endif
+
+    encoder_selection_info_t planned_encoder_selection_info() {
+      encoder_selection_info_t info;
+      info.mode = ::config::video.encoder.empty() ? "auto" : "explicit";
+
+#ifdef __linux__
+      const auto render_device = ::config::video.adapter_name.empty() ?
+                                   platf::default_render_device() :
+                                   ::config::video.adapter_name;
+      info.gpu_driver = platf::render_device_driver(render_device);
+
+      if (!::config::video.encoder.empty()) {
+        info.policy = "explicit";
+        info.preferred_encoder = ::config::video.encoder;
+        info.reason = "The encoder is explicitly configured and must pass exact runtime validation.";
+        return info;
+      }
+
+      const auto decision = linux_encoder_auto_policy::decide(
+        info.gpu_driver,
+        ::config::video.linux_display.use_cage_compositor
+      );
+      info.policy = std::string {decision.policy};
+      info.preferred_encoder = std::string {decision.preferred_encoder};
+      info.fallback_encoder = std::string {decision.fallback_encoder};
+      info.exact_live_probe_required = decision.exact_live_probe_required;
+
+#ifndef POLARIS_BUILD_VULKAN
+      if (decision.prefer_vulkan) {
+        info.policy = "amd_private_vulkan_not_built";
+        info.preferred_encoder = "vaapi";
+        info.fallback_encoder = "next_available";
+        info.exact_live_probe_required = false;
+      }
+#endif
+
+      if (info.gpu_driver.empty()) {
+        info.reason = "Auto could not identify the selected render-node driver; probing available encoders in the established order.";
+      } else if (info.policy == "amd_private_vulkan_live_probe") {
+        info.reason = "Auto detected AMD on a private-compositor route; prefer Vulkan Video and verify the exact live GPU-native frame path, with VA-API fallback.";
+      } else if (info.policy == "amd_private_vulkan_not_built") {
+        info.reason = "Auto detected AMD, but this build has no Vulkan Video support; prefer VA-API.";
+      } else if (info.policy == "amd_established_desktop") {
+        info.reason = "Auto detected AMD on a desktop capture route; use the established VA-API path until desktop Vulkan has the same live-frame safety gate.";
+      } else if (info.policy == "nvidia_nvenc") {
+        info.reason = "Auto detected NVIDIA; prefer NVENC.";
+      } else if (info.policy == "nouveau_availability_probe") {
+        info.reason = "Auto detected Nouveau; probe available encoders because the proprietary NVENC stack is unavailable.";
+      } else if (info.policy == "intel_vaapi") {
+        info.reason = "Auto detected Intel; prefer VA-API.";
+      } else {
+        info.reason = "Auto is probing the encoders available for the selected GPU.";
+      }
+#else
+      info.policy = ::config::video.encoder.empty() ? "availability_probe" : "explicit";
+      info.preferred_encoder = ::config::video.encoder.empty() ? "automatic" : ::config::video.encoder;
+      info.fallback_encoder = ::config::video.encoder.empty() ? "next_available" : "";
+      info.reason = ::config::video.encoder.empty() ?
+                      "Auto is probing the encoders available on this host." :
+                      "The encoder is explicitly configured and must pass runtime validation.";
+#endif
+      return info;
+    }
+
+    void finalize_encoder_selection_info(
+      encoder_selection_info_t &info,
+      std::string_view selected_encoder
+    ) {
+      info.selected_encoder = std::string {selected_encoder};
+      info.fallback_used = !info.preferred_encoder.empty() &&
+                           info.preferred_encoder != "automatic" &&
+                           info.preferred_encoder != selected_encoder;
+
+      if (info.mode == "explicit" && !info.fallback_used) {
+        info.reason = "The explicitly configured encoder passed runtime validation.";
+      } else if (info.mode == "explicit") {
+        info.reason = "The explicitly configured encoder did not pass this legacy non-strict probe; selected [" +
+                      info.selected_encoder + "] instead.";
+      } else if (info.fallback_used) {
+        info.reason += " Preferred encoder [" + info.preferred_encoder +
+                       "] did not satisfy this runtime; selected [" +
+                       info.selected_encoder + "] instead.";
+      } else if (!info.selected_encoder.empty()) {
+        info.reason += " Selected [" + info.selected_encoder + "].";
+      }
+    }
 
     frame_t make_frame(std::shared_ptr<platf::img_t> image) {
       return frame_t {std::move(image)};
@@ -385,6 +476,7 @@ namespace video {
         case platf::mem_type_e::vaapi:
         case platf::mem_type_e::dxgi:
         case platf::mem_type_e::cuda:
+        case platf::mem_type_e::vulkan:
         case platf::mem_type_e::videotoolbox:
           return platf::frame_residency_e::gpu;
         default:
@@ -402,6 +494,8 @@ namespace video {
           return "dxgi"sv;
         case platf::mem_type_e::cuda:
           return "cuda"sv;
+        case platf::mem_type_e::vulkan:
+          return "vulkan"sv;
         case platf::mem_type_e::videotoolbox:
           return "videotoolbox"sv;
         default:
@@ -471,6 +565,15 @@ namespace video {
 #ifdef POLARIS_BUILD_VAAPI
         case platf::mem_type_e::vaapi:
           return va::make_avcodec_encode_device(config.width, config.height, 0, 0, true);
+#endif
+#ifdef POLARIS_BUILD_VULKAN
+        case platf::mem_type_e::vulkan:
+          return vk::make_avcodec_encode_device_ram(
+            config.width,
+            config.height,
+            ::config::video.adapter_name.empty() ?
+              platf::default_render_device() : ::config::video.adapter_name
+          );
 #endif
         default:
           return {};
@@ -957,6 +1060,7 @@ namespace video {
   util::Either<avcodec_buffer_t, int> vaapi_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
   util::Either<avcodec_buffer_t, int> cuda_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
   util::Either<avcodec_buffer_t, int> vt_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
+  util::Either<avcodec_buffer_t, int> vulkan_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
 
   class avcodec_software_encode_device_t: public platf::avcodec_encode_device_t {
   public:
@@ -1284,6 +1388,7 @@ namespace video {
     ALWAYS_REPROBE = 1 << 9,  ///< This is an encoder of last resort and we want to aggressively probe for a better one
     YUV444_SUPPORT = 1 << 10,  ///< Encoder may support 4:4:4 chroma sampling depending on hardware
     ASYNC_TEARDOWN = 1 << 11,  ///< Encoder supports async teardown on a different thread
+    NO_AV1 = 1 << 12,  ///< Do not probe AV1 even if the platform exposes an AV1 codec.
   };
 
   bool ffmpeg_nvenc_runtime_bitrate_supported(
@@ -1323,6 +1428,9 @@ namespace video {
       }
 
       // Order matters here because the context relies on the hwdevice still being valid
+      if (auto *encode_device = device()) {
+        encode_device->release_encode_resources();
+      }
       avcodec_ctx.reset();
       converter.reset();
     }
@@ -1663,7 +1771,78 @@ namespace video {
     },
     PARALLEL_ENCODING
   };
+
+#ifdef POLARIS_BUILD_VULKAN
+  encoder_t vulkan {
+    "vulkan"sv,
+    std::make_unique<encoder_platform_formats_avcodec>(
+      AV_HWDEVICE_TYPE_VULKAN,
+      AV_HWDEVICE_TYPE_NONE,
+      AV_PIX_FMT_VULKAN,
+      AV_PIX_FMT_NV12,
+      AV_PIX_FMT_P010,
+      AV_PIX_FMT_NONE,
+      AV_PIX_FMT_NONE,
+      vulkan_init_avcodec_hardware_input_buffer
+    ),
+    {
+      {
+        {"idr_interval"s, std::numeric_limits<int>::max()},
+        {"tune"s, &config::video.vk.tune},
+        {"rc_mode"s, &config::video.vk.rc_mode},
+        {"units"s, 0},
+        {"usage"s, "stream"s},
+        {"content"s, "rendered"s},
+        {"async_depth"s, 1},
+      },
+      {},  // SDR-specific options
+      {},  // HDR-specific options
+      {},  // YUV444 SDR-specific options
+      {},  // YUV444 HDR-specific options
+      {},  // Fallback options
+      "av1_vulkan"s,
+    },
+    {
+      {
+        {"idr_interval"s, std::numeric_limits<int>::max()},
+        {"tune"s, &config::video.vk.tune},
+        {"rc_mode"s, &config::video.vk.rc_mode},
+        {"units"s, 0},
+        {"usage"s, "stream"s},
+        {"content"s, "rendered"s},
+        {"async_depth"s, 1},
+      },
+      {},  // SDR-specific options
+      {},  // HDR-specific options
+      {},  // YUV444 SDR-specific options
+      {},  // YUV444 HDR-specific options
+      {},  // Fallback options
+      "hevc_vulkan"s,
+    },
+    {
+      {
+        {"idr_interval"s, std::numeric_limits<int>::max()},
+        {"tune"s, &config::video.vk.tune},
+        {"rc_mode"s, &config::video.vk.rc_mode},
+        {"units"s, 0},
+        {"usage"s, "stream"s},
+        {"content"s, "rendered"s},
+        {"async_depth"s, 1},
+      },
+      {},  // SDR-specific options
+      {},  // HDR-specific options
+      {},  // YUV444 SDR-specific options
+      {},  // YUV444 HDR-specific options
+      {},  // Fallback options
+      "h264_vulkan"s,
+    },
+    // The bundled FFmpeg AV1 Vulkan path currently violates Vulkan AV1 encode
+    // valid-usage requirements under CBR. Keep H.264/HEVC available while AV1
+    // remains fail-closed until the dependency is fixed and revalidated.
+    LIMITED_GOP_SIZE | PARALLEL_ENCODING | NO_AV1
+  };
 #endif
+  #endif
 
 #ifdef _WIN32
   encoder_t quicksync {
@@ -2094,6 +2273,9 @@ namespace video {
     &amdvce,
 #endif
 #ifdef __linux__
+#ifdef POLARIS_BUILD_VULKAN
+    &vulkan,
+#endif
     &vaapi,
 #endif
 #ifdef __APPLE__
@@ -2103,6 +2285,7 @@ namespace video {
   };
 
   static encoder_t *chosen_encoder;
+  static encoder_selection_info_t encoder_selection_info;
   static std::shared_timed_mutex encoder_state_mutex;
   static thread_local bool encoder_probe_in_progress = false;
 
@@ -4349,7 +4532,8 @@ namespace video {
     });
 
     auto test_hevc = active_hevc_mode >= 2 || (active_hevc_mode == 0 && !(encoder.flags & H264_ONLY));
-    auto test_av1 = active_av1_mode >= 2 || (active_av1_mode == 0 && !(encoder.flags & H264_ONLY));
+    auto test_av1 = !(encoder.flags & NO_AV1) &&
+                    (active_av1_mode >= 2 || (active_av1_mode == 0 && !(encoder.flags & H264_ONLY)));
 
     encoder.h264.capabilities.set();
     encoder.hevc.capabilities.set();
@@ -4758,10 +4942,38 @@ namespace video {
     }
 
     auto encoder_list = encoders;
+    auto selection_plan = planned_encoder_selection_info();
+
+    // Vulkan Video is an explicit experimental choice. Falling back after its
+    // runtime-specific capture probe fails makes the UI claim Vulkan while the
+    // session silently runs another encoder, so Vulkan always uses strict
+    // configured-encoder semantics even at legacy non-strict call sites.
+    const bool require_configured_encoder =
+      strict_configured_encoder || config::video.encoder == "vulkan"sv;
+
+#ifdef POLARIS_BUILD_VULKAN
+    // Auto promotes Vulkan only for an AMD private-compositor route. That path
+    // has a live first-frame validation and can retire a failed DMA-BUF route
+    // to the RAM uploader. Other routes remain explicit until they carry the
+    // same contract; a stale cache entry cannot opt them in.
+    const bool automatic_vulkan_candidate =
+      config::video.encoder.empty() &&
+      selection_plan.policy == "amd_private_vulkan_live_probe";
+    if (config::video.encoder != "vulkan"sv && !automatic_vulkan_candidate) {
+      std::erase(encoder_list, &vulkan);
+    }
+#endif
 
     // If we already have a good encoder, check to see if another probe is required
     if (chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
-      return 0;
+      if (!require_configured_encoder ||
+          config::video.encoder.empty() ||
+          chosen_encoder->name == config::video.encoder) {
+        return 0;
+      }
+      BOOST_LOG(info) << "Configured encoder ["sv << config::video.encoder
+                      << "] does not match the active encoder ["sv << chosen_encoder->name
+                      << "]; forcing an exact runtime probe"sv;
     }
 
     // Try to use cached encoder from previous successful probe (skip straight to it)
@@ -4779,8 +4991,32 @@ namespace video {
       }
     }
 
+    // Hardware policy wins over cache order. The cache proves that an encoder
+    // worked for this topology; it does not override a newer vendor/route
+    // preference. Explicit encoder selection is handled separately below.
+    if (config::video.encoder.empty()) {
+      auto prioritize_encoder = [&](std::string_view name, std::size_t target_index) {
+        const auto found = std::find_if(encoder_list.begin(), encoder_list.end(), [&](const auto *encoder) {
+          return encoder->name == name;
+        });
+        if (found == encoder_list.end()) {
+          return;
+        }
+        auto *encoder = *found;
+        encoder_list.erase(found);
+        const auto insertion_index = std::min(target_index, encoder_list.size());
+        encoder_list.insert(encoder_list.begin() + static_cast<std::ptrdiff_t>(insertion_index), encoder);
+      };
+
+      prioritize_encoder(selection_plan.preferred_encoder, 0);
+      if (selection_plan.policy == "amd_private_vulkan_live_probe") {
+        prioritize_encoder("vaapi", 1);
+      }
+    }
+
     // Restart encoder selection
     auto previous_encoder = chosen_encoder;
+    const auto previous_encoder_selection_info = encoder_selection_info;
     const auto previous_hevc_mode = active_hevc_mode;
     const auto previous_av1_mode = active_av1_mode;
     const auto previous_ref_frames_invalidation = last_encoder_probe_supported_ref_frames_invalidation;
@@ -4791,8 +5027,10 @@ namespace video {
       active_av1_mode = previous_av1_mode;
       last_encoder_probe_supported_ref_frames_invalidation = previous_ref_frames_invalidation;
       last_encoder_probe_supported_yuv444_for_codec = previous_yuv444_for_codec;
+      encoder_selection_info = previous_encoder_selection_info;
     };
     reset_encoder_probe_state_unlocked();
+    encoder_selection_info = selection_plan;
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
@@ -4840,7 +5078,7 @@ namespace video {
       }
     }
 
-    if (strict_configured_encoder && !config::video.encoder.empty() && chosen_encoder == nullptr) {
+    if (require_configured_encoder && !config::video.encoder.empty() && chosen_encoder == nullptr) {
       BOOST_LOG(info) << "Configured encoder ["sv << config::video.encoder
                       << "] failed strict runtime probe; not trying fallback encoders"sv;
       restore_previous_probe_state();
@@ -4906,6 +5144,7 @@ namespace video {
     }
 
     if (chosen_encoder == nullptr) {
+      encoder_selection_info.reason += " No compatible encoder passed runtime validation.";
       const auto output_name {display_device::map_output_name(config::video.output_name)};
       BOOST_LOG(fatal) << "Unable to find display or encoder during startup."sv;
       if (!config::video.adapter_name.empty() || !output_name.empty()) {
@@ -4921,6 +5160,14 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+    finalize_encoder_selection_info(encoder_selection_info, encoder.name);
+    BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
+                    << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
+                    << " policy="sv << encoder_selection_info.policy
+                    << " preferred="sv << encoder_selection_info.preferred_encoder
+                    << " selected="sv << encoder_selection_info.selected_encoder
+                    << " fallback_used="sv << encoder_selection_info.fallback_used
+                    << " exact_live_probe_required="sv << encoder_selection_info.exact_live_probe_required;
 
     // A configured encoder that fails validation is quietly replaced by the
     // fallback search above, and the stream still comes up. The user set an
@@ -5023,6 +5270,38 @@ namespace video {
 
     return hw_device_buf;
   }
+
+#ifdef POLARIS_BUILD_VULKAN
+  using vulkan_init_avcodec_hardware_input_buffer_fn = int (*)(platf::avcodec_encode_device_t *encode_device, AVBufferRef **hw_device_buf);
+
+  util::Either<avcodec_buffer_t, int> vulkan_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *encode_device) {
+    avcodec_buffer_t hw_device_buf;
+
+    if (encode_device && encode_device->data) {
+      if (((vulkan_init_avcodec_hardware_input_buffer_fn) encode_device->data)(encode_device, &hw_device_buf)) {
+        return -1;
+      }
+      return hw_device_buf;
+    }
+
+    const auto render_device = config::video.adapter_name.empty() ? platf::default_render_device() : config::video.adapter_name;
+    auto status = av_hwdevice_ctx_create(
+      &hw_device_buf,
+      AV_HWDEVICE_TYPE_VULKAN,
+      render_device.empty() ? nullptr : render_device.c_str(),
+      nullptr,
+      0
+    );
+    if (status < 0) {
+      char string[AV_ERROR_MAX_STRING_SIZE];
+      BOOST_LOG(error) << "Failed to create a Vulkan device: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status);
+      return -1;
+    }
+
+    BOOST_LOG(info) << "Using Vulkan Video device "sv << (render_device.empty() ? "(auto)" : render_device);
+    return hw_device_buf;
+  }
+#endif
 
   util::Either<avcodec_buffer_t, int> cuda_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *encode_device) {
     avcodec_buffer_t hw_device_buf;
@@ -5134,6 +5413,10 @@ namespace video {
         return platf::mem_type_e::dxgi;
       case AV_HWDEVICE_TYPE_VAAPI:
         return platf::mem_type_e::vaapi;
+#ifdef POLARIS_BUILD_VULKAN
+      case AV_HWDEVICE_TYPE_VULKAN:
+        return platf::mem_type_e::vulkan;
+#endif
       case AV_HWDEVICE_TYPE_CUDA:
         return platf::mem_type_e::cuda;
       case AV_HWDEVICE_TYPE_NONE:
@@ -5186,6 +5469,7 @@ namespace video {
 
   static void reset_encoder_probe_state_unlocked() {
     chosen_encoder = nullptr;
+    encoder_selection_info = {};
     active_hevc_mode = config::video.hevc_mode;
     active_av1_mode = config::video.av1_mode;
     last_encoder_probe_supported_ref_frames_invalidation = false;
@@ -5211,6 +5495,20 @@ namespace video {
     return std::string(chosen_encoder->name);
   }
 
+  encoder_selection_info_t active_encoder_selection_info() {
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+
+    if (!encoder_selection_info.mode.empty()) {
+      return encoder_selection_info;
+    }
+
+    auto info = planned_encoder_selection_info();
+    if (chosen_encoder) {
+      finalize_encoder_selection_info(info, chosen_encoder->name);
+    }
+    return info;
+  }
+
   platf::mem_type_e active_encoder_mem_type() {
     std::shared_lock encoder_state_lock {encoder_state_mutex};
 
@@ -5225,10 +5523,29 @@ namespace video {
     switch (active_encoder_mem_type()) {
       case platf::mem_type_e::cuda:
       case platf::mem_type_e::vaapi:
+      case platf::mem_type_e::vulkan:
         return true;
       default:
         return false;
     }
+  }
+
+  bool automatic_encoder_prefers_gpu_native_capture() {
+#ifdef __linux__
+    if (!config::video.encoder.empty()) {
+      return false;
+    }
+
+    const auto plan = planned_encoder_selection_info();
+    if (plan.policy != "amd_private_vulkan_live_probe") {
+      return false;
+    }
+
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    return !chosen_encoder || chosen_encoder->name == "vulkan"sv;
+#else
+    return false;
+#endif
   }
 
   bool active_encoder_runtime_supports_config(const config_t &config) {

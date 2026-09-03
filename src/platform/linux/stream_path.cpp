@@ -5,6 +5,7 @@
 
 #include "stream_path.h"
 
+#include "desktop_takeover.h"
 #include "src/config.h"
 #include "virtual_display.h"
 
@@ -90,6 +91,20 @@ namespace stream_path {
         runtime_kind_e::NONE,
         capture_kind_e::AUTO,
         topology_kind_e::HOST_VIRTUAL,
+        false,
+        true,
+        true,
+        {},
+        "host",
+      },
+      {
+        k_desktop_takeover,
+        "Desktop Takeover",
+        "Hyprland",
+        "Move the live Hyprland session to a temporary virtual output and power off the physical monitors until disconnect.",
+        runtime_kind_e::NONE,
+        capture_kind_e::AUTO,
+        topology_kind_e::DESKTOP_TAKEOVER,
         false,
         true,
         true,
@@ -184,6 +199,8 @@ namespace stream_path {
     switch (kind) {
       case topology_kind_e::HOST_VIRTUAL:
         return "host_virtual";
+      case topology_kind_e::DESKTOP_TAKEOVER:
+        return "desktop_takeover";
       case topology_kind_e::SWAP_PRIMARY:
         return "swap_primary";
       case topology_kind_e::LEAVE_ALONE:
@@ -198,6 +215,7 @@ namespace stream_path {
     caps.wlr_randr_present = binary_on_path("wlr-randr");
     caps.gamescope_present = binary_on_path("gamescope");
     caps.virtual_display_available = virtual_display::is_available();
+    caps.desktop_takeover_available = desktop_takeover::is_available();
     // Portal availability is environment-dependent; configured capture is the honest hint.
     caps.configured_capture = config::video.capture;
     return caps;
@@ -230,7 +248,8 @@ namespace stream_path {
         break;
     }
 
-    if (path.topology == topology_kind_e::HOST_VIRTUAL || path.id == k_host_virtual_display) {
+    if (path.topology == topology_kind_e::HOST_VIRTUAL ||
+        path.topology == topology_kind_e::DESKTOP_TAKEOVER) {
       return std::string {k_backend_virtual_display};
     }
 
@@ -295,6 +314,12 @@ namespace stream_path {
     if (path.topology == topology_kind_e::HOST_VIRTUAL && !caps.virtual_display_available) {
       out.reason = "Host virtual display was requested, but no backend is currently available.";
     }
+    if (path.topology == topology_kind_e::DESKTOP_TAKEOVER &&
+        !caps.desktop_takeover_available) {
+      out.available = false;
+      out.unavailable_reason = desktop_takeover::unavailable_reason();
+      out.reason = "Desktop Takeover is unavailable: " + out.unavailable_reason;
+    }
 
     switch (path.runtime) {
       case runtime_kind_e::LABWC:
@@ -328,9 +353,12 @@ namespace stream_path {
         break;
       case runtime_kind_e::NONE:
         out.use_private_runtime = false;
-        out.use_host_virtual_display = path.topology == topology_kind_e::HOST_VIRTUAL;
+        out.use_host_virtual_display =
+          path.topology == topology_kind_e::HOST_VIRTUAL ||
+          path.topology == topology_kind_e::DESKTOP_TAKEOVER;
         out.effective_headless = false;
         out.requested_headless = path.topology == topology_kind_e::HOST_VIRTUAL ||
+                                 path.topology == topology_kind_e::DESKTOP_TAKEOVER ||
                                  path.topology == topology_kind_e::SWAP_PRIMARY;
         break;
     }
@@ -353,6 +381,11 @@ namespace stream_path {
       if (opt.runtime == runtime_kind_e::GAMESCOPE && !caps.gamescope_present) {
         opt.available = false;
         opt.unavailable_reason = "gamescope binary not found on PATH";
+      }
+      if (opt.topology == topology_kind_e::DESKTOP_TAKEOVER &&
+          !caps.desktop_takeover_available) {
+        opt.available = false;
+        opt.unavailable_reason = desktop_takeover::unavailable_reason();
       }
     }
     return options;

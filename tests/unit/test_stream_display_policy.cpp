@@ -220,6 +220,7 @@ TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) 
   EXPECT_TRUE(selection_owns_launch_refresh_rate("headless_stream"));
   EXPECT_TRUE(selection_owns_launch_refresh_rate("windowed_stream"));
   EXPECT_TRUE(selection_owns_launch_refresh_rate("host_virtual_display"));
+  EXPECT_TRUE(selection_owns_launch_refresh_rate("desktop_takeover"));
   EXPECT_TRUE(selection_owns_launch_refresh_rate("gamescope_stream"));
   EXPECT_FALSE(selection_owns_launch_refresh_rate("desktop_display"));
   EXPECT_FALSE(selection_owns_launch_refresh_rate("headless_dongle"));
@@ -362,6 +363,7 @@ TEST(StreamDisplayPolicyTests, CommonModeCompanionStateMatchesAllRegisteredSelec
     {"windowed_stream", "labwc"},
     {"desktop_display", ""},
     {"host_virtual_display", ""},
+    {"desktop_takeover", ""},
   };
 
   for (const auto &test_case : cases) {
@@ -372,7 +374,10 @@ TEST(StreamDisplayPolicyTests, CommonModeCompanionStateMatchesAllRegisteredSelec
     linux_display.use_cage_compositor = expected.use_cage_compositor;
     linux_display.prefer_gpu_native_capture = expected.prefer_gpu_native_capture;
     linux_display.private_runtime = test_case.runtime;
-    config::video.capture = test_case.selection == std::string_view {"host_virtual_display"} ?
+    const bool virtual_mode =
+      test_case.selection == std::string_view {"host_virtual_display"} ||
+      test_case.selection == std::string_view {"desktop_takeover"};
+    config::video.capture = virtual_mode ?
                               stream_display_policy::capture_for_host_virtual_display_backend(
                                 virtual_display::detect_backend(),
                                 ""

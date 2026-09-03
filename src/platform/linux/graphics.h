@@ -309,6 +309,7 @@ namespace egl {
     // Increment sequence when new rgb_t needs to be created
     std::uint64_t sequence;
     std::uint64_t dmabuf_buffer_key {0};
+    bool y_invert {false};
   };
 
   class sws_t {

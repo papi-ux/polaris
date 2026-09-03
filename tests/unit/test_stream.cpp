@@ -61,6 +61,17 @@ namespace {
     stats.codec = "hevc";
     return stats;
   }
+
+  stream_stats::stats_t stable_cpu_copy_stats(double delivered_fps, double target_fps) {
+    auto stats = stable_gpu_native_stats(delivered_fps, target_fps);
+    stats.capture_transport = platf::frame_transport_e::shm;
+    stats.capture_residency = platf::frame_residency_e::cpu;
+    stats.capture_format = platf::frame_format_e::bgra8;
+    stats.encode_target_device = "vaapi";
+    stats.encode_target_residency = platf::frame_residency_e::gpu;
+    stats.encode_target_format = platf::frame_format_e::nv12;
+    return stats;
+  }
 }
 
 #include "../tests_common.h"
@@ -101,6 +112,55 @@ TEST(NvhttpSessionHealthTests, HighRefreshNearTargetDeliveryRemainsSteady) {
   EXPECT_EQ(health.at("primary_issue"), "steady");
   EXPECT_EQ(health.at("limiting_factor"), "none");
   EXPECT_FALSE(health.at("host_render_limited").get<bool>());
+}
+
+TEST(NvhttpSessionHealthTests, HealthyShmFallbackRemainsInformational) {
+  auto stats = stable_cpu_copy_stats(120.0, 120.0);
+  stats.encode_time_ms = 4.0;
+  stats.avg_frame_age_ms = 6.0;
+
+  const auto health = nvhttp::build_session_health_json_for_tests(
+    stats,
+    false,
+    "RetroidPocket6",
+    "Control"
+  );
+
+  EXPECT_EQ(health.at("grade"), "good");
+  EXPECT_EQ(health.at("primary_issue"), "steady");
+  EXPECT_EQ(health.at("limiting_factor"), "none");
+  EXPECT_EQ(health.at("auto_action"), "none");
+  EXPECT_TRUE(health.at("capture_cpu_copy").get<bool>());
+  EXPECT_FALSE(health.at("capture_pressure").get<bool>());
+  EXPECT_FALSE(health.contains("safe_target_fps"));
+  EXPECT_FALSE(health.contains("recovery_profile"));
+  EXPECT_FALSE(health.at("relaunch_recommended").get<bool>());
+  EXPECT_EQ(health.at("doctor").at("status"), "ok");
+  EXPECT_EQ(health.at("doctor").at("severity"), "info");
+  EXPECT_EQ(health.at("doctor").at("traffic_light"), "green");
+  EXPECT_EQ(health.at("doctor").at("primary_issue"), "none");
+}
+
+TEST(NvhttpSessionHealthTests, OverBudgetShmEncoderUsesActualNinetySevenFpsBudget) {
+  auto stats = stable_cpu_copy_stats(97.0, 97.0);
+  stats.encode_time_ms = 10.4;
+  stats.avg_frame_age_ms = 8.0;
+
+  const auto health = nvhttp::build_session_health_json_for_tests(
+    stats,
+    false,
+    "Linux notebook",
+    "Grim Dawn"
+  );
+
+  EXPECT_EQ(health.at("grade"), "watch");
+  EXPECT_EQ(health.at("primary_issue"), "encoder_load");
+  EXPECT_EQ(health.at("limiting_factor"), "encoder");
+  EXPECT_FALSE(health.at("capture_pressure").get<bool>());
+  EXPECT_EQ(health.at("doctor").at("status"), "needs_action");
+  EXPECT_EQ(health.at("doctor").at("severity"), "critical");
+  EXPECT_EQ(health.at("doctor").at("traffic_light"), "red");
+  EXPECT_EQ(health.at("doctor").at("primary_issue"), "encoder_load");
 }
 
 TEST(NvhttpSessionHealthTests, MeaningfulTargetMissRemainsHostRenderLimited) {

@@ -148,6 +148,15 @@ const streamDisplayModeDefinitions = [
     technical: $t('config.av_mode_host_virtual_display_technical'),
   },
   {
+    id: 'desktop_takeover',
+    title: $t('config.av_mode_desktop_takeover_title'),
+    badge: $t('config.av_mode_desktop_takeover_badge'),
+    group: 'host',
+    copy: $t('config.av_mode_desktop_takeover_copy'),
+    impact: $t('config.av_mode_desktop_takeover_impact'),
+    technical: $t('config.av_mode_desktop_takeover_technical'),
+  },
+  {
     id: 'headless_dongle',
     title: $t('config.av_mode_headless_dongle_title'),
     badge: $t('config.av_mode_headless_dongle_badge'),

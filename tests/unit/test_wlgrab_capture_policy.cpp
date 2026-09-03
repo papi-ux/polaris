@@ -77,6 +77,28 @@ TEST(WlgrabCapturePolicy, RequestedMonitorSelectionIsExactAndFailClosed) {
   EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index("", {}).has_value());
 }
 
+TEST(WlgrabCapturePolicy, HostVirtualOutputDoesNotFallBackToPhysicalMonitorZero) {
+  // Issue #556: Hyprland advertises the physical monitor first and the newly
+  // created headless connector second. A connector name must never be parsed
+  // as index zero or silently fall back to it.
+  const std::vector<std::string> monitors {
+    "DP-2",
+    "POLARIS-HEADLESS-1627120-0",
+  };
+
+  const auto selected = wlgrab_capture_policy::select_monitor_index(
+    "POLARIS-HEADLESS-1627120-0",
+    monitors
+  );
+
+  ASSERT_TRUE(selected.has_value());
+  EXPECT_EQ(*selected, 1u);
+  EXPECT_FALSE(wlgrab_capture_policy::select_monitor_index(
+    "POLARIS-HEADLESS-unknown",
+    monitors
+  ).has_value());
+}
+
 TEST(WlgrabCapturePolicy, DirectVaapiCaptureUsesRamFallback) {
   EXPECT_EQ(
     wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::vaapi, true),
@@ -87,6 +109,13 @@ TEST(WlgrabCapturePolicy, DirectVaapiCaptureUsesRamFallback) {
 TEST(WlgrabCapturePolicy, DirectCudaCaptureMayRemainGpuNative) {
   EXPECT_EQ(
     wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::cuda, true),
+    wlgrab_capture_policy::direct_capture_path_e::gpu_native
+  );
+}
+
+TEST(WlgrabCapturePolicy, DirectVulkanCaptureMayRemainGpuNative) {
+  EXPECT_EQ(
+    wlgrab_capture_policy::select_direct_capture_path(platf::mem_type_e::vulkan, true),
     wlgrab_capture_policy::direct_capture_path_e::gpu_native
   );
 }
@@ -152,6 +181,24 @@ TEST(WlgrabCapturePolicy, CudaSafetyDoesNotDependOnRouteOrModifier) {
        }) {
     EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
       platf::mem_type_e::cuda,
+      route,
+      std::nullopt
+    ));
+  }
+}
+
+TEST(WlgrabCapturePolicy, VulkanSafetyDoesNotDependOnRouteOrModifier) {
+  for (const auto route : {
+         route_e::headless_extcopy,
+         route_e::windowed_nested,
+         route_e::direct_wayland,
+       }) {
+    EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_probe_is_allowed(
+      platf::mem_type_e::vulkan,
+      route
+    ));
+    EXPECT_TRUE(wlgrab_capture_policy::gpu_native_dmabuf_is_safe(
+      platf::mem_type_e::vulkan,
       route,
       std::nullopt
     ));

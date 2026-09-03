@@ -471,6 +471,19 @@ namespace nvhttp {
       return lower_copy(body.value("streamMode", std::string {}));
     }
 
+    bool app_desktop_mirror_applies_for_mode(
+        const proc::ctx_t &app,
+        bool explicit_mirror,
+        std::string_view requested_mode) {
+      if (!app.desktop_mirror || explicit_mirror) {
+        return app.desktop_mirror;
+      }
+      const auto effective_mode = requested_mode.empty() ?
+        stream_display_policy::configured_selection() :
+        lower_copy(std::string {requested_mode});
+      return effective_mode != stream_display_policy::k_desktop_takeover;
+    }
+
   #if defined(__linux__)
     // Session-scoped stream-mode override gate: returns the requested mode when
     // it may drive this session, empty otherwise (the host default applies).
@@ -521,8 +534,13 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
-      const bool mirror_desktop_requested =
-        explicit_mirror_desktop_requested(args) || app.desktop_mirror;
+      const bool explicit_mirror = explicit_mirror_desktop_requested(args);
+      const bool mirror_desktop_requested = explicit_mirror ||
+        app_desktop_mirror_applies_for_mode(
+          app,
+          explicit_mirror,
+          session_stream_mode_requested(args)
+        );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
@@ -559,8 +577,13 @@ namespace nvhttp {
       const proc::ctx_t &app,
       bool active_desktop_game
     ) {
-      const bool mirror_desktop_requested =
-        explicit_mirror_desktop_requested(body) || app.desktop_mirror;
+      const bool explicit_mirror = explicit_mirror_desktop_requested(body);
+      const bool mirror_desktop_requested = explicit_mirror ||
+        app_desktop_mirror_applies_for_mode(
+          app,
+          explicit_mirror,
+          session_stream_mode_requested(body)
+        );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
           config::video.linux_display.headless_mode,
@@ -891,6 +914,14 @@ namespace nvhttp {
 
     bool build_has_cuda() {
 #ifdef POLARIS_BUILD_CUDA
+      return true;
+#else
+      return false;
+#endif
+    }
+
+    bool build_has_vulkan() {
+#ifdef POLARIS_BUILD_VULKAN
       return true;
 #else
       return false;
@@ -1992,6 +2023,21 @@ namespace nvhttp {
       return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
     }
 
+    nlohmann::json encoder_selection_json() {
+      const auto selection = video::active_encoder_selection_info();
+      return {
+        {"mode", selection.mode},
+        {"gpu_driver", selection.gpu_driver.empty() ? "unknown" : selection.gpu_driver},
+        {"policy", selection.policy},
+        {"preferred_encoder", selection.preferred_encoder},
+        {"fallback_encoder", selection.fallback_encoder},
+        {"selected_encoder", selection.selected_encoder.empty() ? "unknown" : selection.selected_encoder},
+        {"exact_live_probe_required", selection.exact_live_probe_required},
+        {"fallback_used", selection.fallback_used},
+        {"reason", selection.reason}
+      };
+    }
+
     nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
                                              bool current_virtual_display,
                                              const std::string &device_name,
@@ -2032,7 +2078,15 @@ namespace nvhttp {
         active_encoder_name == "nvenc" &&
         !build_has_cuda() &&
         capture_fallback;
-      const bool encoder_risk = stats.encode_time_ms >= 11.0 || stats.avg_frame_age_ms >= 18.0;
+      const bool encoder_time_fail =
+        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+      const bool encoder_risk =
+        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+        (!capture_fallback && stats.avg_frame_age_ms >= 18.0);
+      const bool capture_latency_risk =
+        capture_fallback && !encoder_time_fail && stats.avg_frame_age_ms >= 18.0;
+      const bool capture_pressure =
+        capture_fallback && (pacing_risk || capture_latency_risk);
       const auto hdr_effective_mode = stream_stats::hdr_effective_mode(stats);
       const auto hdr_downgrade_reason = stream_stats::hdr_downgrade_reason(stats);
       const auto hdr_downgrade_message = stream_stats::hdr_downgrade_message(stats);
@@ -2044,7 +2098,7 @@ namespace nvhttp {
         !network_risk;
       const bool virtual_display_risk =
         current_virtual_display &&
-        (pacing_risk || capture_fallback || hdr_risk);
+        (pacing_risk || capture_pressure || hdr_risk);
       const bool sustained_target_miss = meaningful_fps_shortfall;
       // Reused frames can be intentional for static or menu content. Keep
       // duplicate cadence as a pacing signal, but require an actual target
@@ -2074,7 +2128,7 @@ namespace nvhttp {
         issues.push_back("frame_pacing");
         recommendations.push_back("Match the game frame cap to the stream FPS and avoid VRR-style sync on the streaming display.");
       }
-      if (capture_fallback) {
+      if (capture_pressure) {
         issues.push_back(capture_reason);
         recommendations.push_back(stream_stats::capture_path_reason_message(capture_reason));
       }
@@ -2110,7 +2164,7 @@ namespace nvhttp {
       else if (virtual_display_risk) primary_issue = "virtual_display_path";
       else if (decoder_risk) primary_issue = "decoder_path";
       else if (nvenc_cuda_disabled_path) primary_issue = "nvenc_cuda_disabled";
-      else if (capture_fallback) primary_issue = capture_reason;
+      else if (capture_pressure) primary_issue = capture_reason;
       else if (host_render_limited) primary_issue = "host_render_limited";
       else if (pacing_risk) primary_issue = "frame_pacing";
       else if (encoder_risk) primary_issue = "encoder_load";
@@ -2122,21 +2176,21 @@ namespace nvhttp {
         virtual_display_risk ? "capture" :
         decoder_risk ? "decoder" :
         nvenc_cuda_disabled_path ? "capture" :
-        capture_fallback ? "capture" :
+        capture_pressure ? "capture" :
         host_render_limited ? "host_render" :
         encoder_risk ? "encoder" :
         pacing_risk ? "pacing" :
         "none";
       const std::string auto_action =
         network_risk || encoder_risk ? "lower_bitrate" :
-        hdr_source_missing || hdr_risk || virtual_display_risk || decoder_risk || nvenc_cuda_disabled_path || capture_fallback ? "suggest_recovery" :
+        hdr_source_missing || hdr_risk || virtual_display_risk || decoder_risk || nvenc_cuda_disabled_path || capture_pressure ? "suggest_recovery" :
         host_render_limited ? "lower_render_profile" :
         "none";
 
       const int concern_count =
         static_cast<int>(network_risk) +
         static_cast<int>(pacing_risk) +
-        static_cast<int>(capture_fallback) +
+        static_cast<int>(capture_pressure) +
         static_cast<int>(nvenc_cuda_disabled_path) +
         static_cast<int>(encoder_risk) +
         static_cast<int>(hdr_source_missing) +
@@ -2204,7 +2258,7 @@ namespace nvhttp {
         virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
         decoder_risk ? "The current codec path looks harder on this client than expected." :
         nvenc_cuda_disabled_path ? "The NVIDIA path is using a CUDA-disabled CPU copy fallback." :
-        capture_fallback ? stream_stats::capture_path_reason_message(capture_reason) :
+        capture_pressure ? stream_stats::capture_path_reason_message(capture_reason) :
         host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
@@ -2236,11 +2290,14 @@ namespace nvhttp {
       health["capture_path_reason"] = capture_reason;
       health["capture_path_reason_message"] = stream_stats::capture_path_reason_message(capture_reason);
       health["capture_cpu_copy"] = capture_fallback;
+      health["capture_pressure"] = capture_pressure;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
+      health["encoder_selection"] = encoder_selection_json();
       health["cuda_build"] = build_has_cuda();
+      health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
-        nvenc_cuda_disabled_path || safe_target_fps > 0.0;
+        nvenc_cuda_disabled_path || capture_pressure || safe_target_fps > 0.0;
       if (safe_codec) {
         health["safe_codec"] = *safe_codec;
       }
@@ -2932,6 +2989,7 @@ namespace nvhttp {
   static std::string otp_passphrase;
   static std::string otp_device_name;
   static std::optional<PERM> otp_pairing_perm;
+  static bool otp_temporary_authorization = false;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
 
   /**
@@ -2952,6 +3010,7 @@ namespace nvhttp {
       otp_passphrase.clear();
       otp_device_name.clear();
       otp_pairing_perm.reset();
+      otp_temporary_authorization = false;
       return {};
     }
 
@@ -2965,11 +3024,13 @@ namespace nvhttp {
     claim.pin = one_time_pin;
     claim.device_name = std::move(otp_device_name);
     claim.pairing_perm = otp_pairing_perm;
+    claim.temporary_authorization = otp_temporary_authorization;
 
     one_time_pin.clear();
     otp_passphrase.clear();
     otp_device_name.clear();
     otp_pairing_perm.reset();
+    otp_temporary_authorization = false;
     return claim;
   }
 
@@ -3829,6 +3890,11 @@ namespace nvhttp {
     std::unordered_map<std::string, int> name_counts;
 
     for (auto &named_cert_p : client.named_devices) {
+      // A guest authorization must never survive a host restart or be exposed
+      // through a backup of the durable pairing-state file.
+      if (named_cert_p->temporary_authorization) {
+        continue;
+      }
       const auto fingerprint = crypto::x509_fingerprint(named_cert_p->cert);
       if (!fingerprint) {
         throw std::runtime_error("paired client contains an invalid certificate");
@@ -4069,6 +4135,7 @@ namespace nvhttp {
     clone->enable_legacy_ordering = source->enable_legacy_ordering;
     clone->allow_client_commands = source->allow_client_commands;
     clone->always_use_virtual_display = source->always_use_virtual_display;
+    clone->temporary_authorization = source->temporary_authorization;
     return clone;
   }
 
@@ -4126,7 +4193,12 @@ namespace nvhttp {
     }
     client_root.named_devices.push_back(named_cert);
 
-    if (!config::sunshine.flags[config::flag::FRESH_STATE] && !save_state()) {
+    const bool durable_state_changed =
+      !named_cert->temporary_authorization ||
+      (duplicate != previous_clients.end() && !(*duplicate)->temporary_authorization);
+    if (!config::sunshine.flags[config::flag::FRESH_STATE] &&
+        durable_state_changed &&
+        !save_state()) {
       client_root.named_devices = previous_clients;
       BOOST_LOG(error) << "Pairing authorization was not persisted; rejecting client "sv << named_cert->name;
       return false;
@@ -4231,6 +4303,7 @@ namespace nvhttp {
 
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
     launch_session->unique_id = named_cert_p->uuid;
+    launch_session->temporary_authorization = named_cert_p->temporary_authorization;
     launch_session->profile_preference = launch_profile::normalize_preset(
       get_arg(args, "profilePreference", "auto")
     );
@@ -4541,6 +4614,7 @@ namespace nvhttp {
       named_cert_p->enable_legacy_ordering = true;
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
+      named_cert_p->temporary_authorization = sess.temporary_authorization;
 
       if (add_authorized_client(named_cert_p, sess.pairing_perm)) {
         tree.put("root.paired", 1);
@@ -4605,7 +4679,7 @@ namespace nvhttp {
     auto replacement = clone_named_cert(live_client);
     replacement->client_family = "nova";
     *live_it = replacement;
-    if (!save_state()) {
+    if (!replacement->temporary_authorization && !save_state()) {
       *live_it = live_client;
       BOOST_LOG(error) << "Couldn't persist client-family update for "sv << live_client->name;
       return live_client;
@@ -4670,7 +4744,7 @@ namespace nvhttp {
     }
 
     constexpr std::int64_t persist_interval_seconds = 60;
-    if (persist) {
+    if (persist && !live_client->temporary_authorization) {
       const auto current_seen_at = live_client->last_seen_at.load(std::memory_order_relaxed);
       const auto persisted_at = live_client->last_seen_persisted_at.load(std::memory_order_relaxed);
       const bool persistence_due = current_seen_at > 0 &&
@@ -4893,6 +4967,7 @@ namespace nvhttp {
               ptr->second.client.name = claim.device_name;
             }
             ptr->second.pairing_perm = claim.pairing_perm;
+            ptr->second.temporary_authorization = claim.temporary_authorization;
 
             getservercert(ptr->second, tree, claim.pin);
             return;
@@ -4972,7 +5047,12 @@ namespace nvhttp {
     }
   }
 
-  bool pin(std::string pin, std::string name, std::optional<PERM> pairing_perm) {
+  bool pin(
+    std::string pin,
+    std::string name,
+    std::optional<PERM> pairing_perm,
+    bool temporary_authorization
+  ) {
     pt::ptree tree;
     if (map_id_sess.empty()) {
       return false;
@@ -5001,6 +5081,7 @@ namespace nvhttp {
     if (pairing_perm) {
       sess.pairing_perm = *pairing_perm;
     }
+    sess.temporary_authorization = temporary_authorization;
     getservercert(sess, tree, pin);
 
     if (!name.empty()) {
@@ -5184,6 +5265,7 @@ namespace nvhttp {
       named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
       named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
       named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
+      named_cert_node["temporary_authorization"] = named_cert->temporary_authorization;
 
       // Add "do" commands if available
       if (!named_cert->do_cmds.empty()) {
@@ -6444,6 +6526,7 @@ namespace nvhttp {
 
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
+      build["vulkan"] = build_has_vulkan();
 
       // Feature flags
       auto &features = output["features"];
@@ -6593,6 +6676,7 @@ namespace nvhttp {
       output["shutdown_requested"] = stop_in_progress;
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
+      build["vulkan"] = build_has_vulkan();
 #ifdef __linux__
       output["cage_pid"] = stream_runtime::labwc::pid();
       output["screen_locked"] = session_manager::is_screen_locked();
@@ -6717,6 +6801,7 @@ namespace nvhttp {
       // Encoder info
       auto &encoder = output["encoder"];
       encoder["active_backend"] = video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name();
+      encoder["selection"] = encoder_selection_json();
       encoder["codec"] = stats.codec;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;
@@ -6964,7 +7049,8 @@ namespace nvhttp {
             named_cert_p->perm,
             named_cert_p->enable_legacy_ordering,
             named_cert_p->allow_client_commands,
-            named_cert_p->always_use_virtual_display
+            named_cert_p->always_use_virtual_display,
+            named_cert_p->temporary_authorization
           );
 
           if (update_result != client_mutation_result_t::success) {
@@ -7294,7 +7380,8 @@ namespace nvhttp {
               named_cert_p->perm,
               named_cert_p->enable_legacy_ordering,
               named_cert_p->allow_client_commands,
-              named_cert_p->always_use_virtual_display
+              named_cert_p->always_use_virtual_display,
+              named_cert_p->temporary_authorization
             );
             if (update_result != client_mutation_result_t::success) {
               write_json(
@@ -9521,13 +9608,17 @@ namespace nvhttp {
 #if defined(__linux__)
       mirror_desktop_requested = explicit_mirror_desktop_requested(args);
       force_private_requested = force_private_after_desktop_steam_shutdown_requested(args);
-      const bool mirror_desktop = mirror_desktop_requested ||
-        (optimization_app && optimization_app->desktop_mirror);
       const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
       const bool paired_virtual_lock =
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
         std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
+      const bool mirror_desktop = mirror_desktop_requested ||
+        (optimization_app && app_desktop_mirror_applies_for_mode(
+          *optimization_app,
+          mirror_desktop_requested,
+          requested_selection
+        ));
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         requested_selection,
         mirror_desktop,
@@ -9847,7 +9938,8 @@ namespace nvhttp {
   std::string request_otp(
     const std::string& passphrase,
     const std::string& deviceName,
-    std::optional<PERM> pairing_perm
+    std::optional<PERM> pairing_perm,
+    bool temporary_authorization
   ) {
     if (passphrase.size() < 4) {
       return "";
@@ -9859,6 +9951,7 @@ namespace nvhttp {
     otp_passphrase = passphrase;
     otp_device_name = deviceName;
     otp_pairing_perm = pairing_perm;
+    otp_temporary_authorization = temporary_authorization;
     otp_creation_time = std::chrono::steady_clock::now();
 
     // Copied while the lock is held: the return object is initialized before
@@ -9886,6 +9979,7 @@ namespace nvhttp {
     otp_passphrase.clear();
     otp_device_name.clear();
     otp_pairing_perm.reset();
+    otp_temporary_authorization = false;
     otp_creation_time = {};
   }
 
@@ -10008,7 +10102,8 @@ namespace nvhttp {
     const crypto::PERM newPerm,
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const bool always_use_virtual_display,
+    const std::optional<bool> temporary_authorization
   ) {
     {
       std::lock_guard lock(client_state_mutex);
@@ -10032,6 +10127,7 @@ namespace nvhttp {
       replacement->enable_legacy_ordering = enable_legacy_ordering;
       replacement->allow_client_commands = allow_client_commands;
       replacement->always_use_virtual_display = always_use_virtual_display;
+      replacement->temporary_authorization = temporary_authorization.value_or(previous->temporary_authorization);
       *it = replacement;
       if (!save_state()) {
         *it = previous;
@@ -10054,7 +10150,8 @@ namespace nvhttp {
     const crypto::PERM newPerm,
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
-    const bool always_use_virtual_display
+    const bool always_use_virtual_display,
+    const std::optional<bool> temporary_authorization
   ) {
     return update_device_info_result(
       uuid,
@@ -10066,22 +10163,56 @@ namespace nvhttp {
       newPerm,
       enable_legacy_ordering,
       allow_client_commands,
-      always_use_virtual_display
+      always_use_virtual_display,
+      temporary_authorization
     ) == client_mutation_result_t::success;
+  }
+
+  bool expire_temporary_client_authorization(const std::string_view uuid) {
+    std::lock_guard lock(client_state_mutex);
+    const auto before = client_root.named_devices.size();
+    std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
+      return client->uuid == uuid && client->temporary_authorization;
+    });
+    if (client_root.named_devices.size() == before) {
+      return false;
+    }
+
+    rebuild_cert_chain_locked();
+    BOOST_LOG(info) << "Expired temporary authorization for client ["sv << uuid << ']';
+    return true;
+  }
+
+  bool is_temporary_client_authorization(const std::string_view uuid) {
+    std::lock_guard lock(client_state_mutex);
+    const auto client = std::find_if(
+      client_root.named_devices.begin(),
+      client_root.named_devices.end(),
+      [&](const crypto::p_named_cert_t &candidate) {
+        return candidate->uuid == uuid;
+      }
+    );
+    return client != client_root.named_devices.end() &&
+           (*client)->temporary_authorization;
   }
 
   client_mutation_result_t unpair_client_result(const std::string_view uuid) {
     bool no_clients_remain = false;
+    bool removed_temporary_authorization = false;
     {
       std::lock_guard lock(client_state_mutex);
       auto previous_clients = client_root.named_devices;
       std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
-        return client->uuid == uuid;
+        if (client->uuid != uuid) {
+          return false;
+        }
+        removed_temporary_authorization = client->temporary_authorization;
+        return true;
       });
       if (client_root.named_devices.size() == previous_clients.size()) {
         return client_mutation_result_t::not_found;
       }
-      if (!save_state()) {
+      if (!removed_temporary_authorization && !save_state()) {
         client_root.named_devices = std::move(previous_clients);
         return client_mutation_result_t::persistence_failed;
       }

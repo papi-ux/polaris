@@ -87,6 +87,11 @@ namespace config {
       bool strict_rc_buffer;
     } vaapi;
 
+    struct {
+      int tune;
+      int rc_mode;
+    } vk;
+
     std::string capture;
     std::string encoder;
     std::string adapter_name;

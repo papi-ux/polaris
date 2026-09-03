@@ -13,6 +13,7 @@
 #ifdef __linux__
 
 #include "src/platform/linux/misc.h"
+#include "src/platform/linux/encoder_auto_policy.h"
 
 namespace {
 
@@ -137,6 +138,47 @@ TEST(DefaultRenderDevice, LowestPathIsTheFinalTiebreakForStability) {
     }),
     "/dev/dri/renderD128"
   );
+}
+
+TEST(LinuxEncoderAutoPolicy, NvidiaKeepsNvencWithoutVulkanCandidate) {
+  const auto decision = linux_encoder_auto_policy::decide("nvidia", true);
+  EXPECT_FALSE(decision.include_vulkan);
+  EXPECT_FALSE(decision.prefer_vulkan);
+  EXPECT_EQ(decision.preferred_encoder, "nvenc");
+  EXPECT_FALSE(decision.exact_live_probe_required);
+}
+
+TEST(LinuxEncoderAutoPolicy, NouveauUsesCapabilityProbeWithoutNvencPreference) {
+  const auto decision = linux_encoder_auto_policy::decide("nouveau", true);
+  EXPECT_FALSE(decision.include_vulkan);
+  EXPECT_FALSE(decision.prefer_vulkan);
+  EXPECT_EQ(decision.policy, "nouveau_availability_probe");
+  EXPECT_EQ(decision.preferred_encoder, "automatic");
+  EXPECT_FALSE(decision.exact_live_probe_required);
+}
+
+TEST(LinuxEncoderAutoPolicy, IntelKeepsVaapiWithoutVulkanCandidate) {
+  const auto decision = linux_encoder_auto_policy::decide("xe", true);
+  EXPECT_FALSE(decision.include_vulkan);
+  EXPECT_EQ(decision.preferred_encoder, "vaapi");
+}
+
+TEST(LinuxEncoderAutoPolicy, AmdPrivateRoutePrefersVulkanWithExactLiveProbe) {
+  const auto decision = linux_encoder_auto_policy::decide("amdgpu", true);
+  EXPECT_TRUE(decision.include_vulkan);
+  EXPECT_TRUE(decision.prefer_vulkan);
+  EXPECT_TRUE(decision.exact_live_probe_required);
+  EXPECT_EQ(decision.preferred_encoder, "vulkan");
+  EXPECT_EQ(decision.fallback_encoder, "vaapi");
+}
+
+TEST(LinuxEncoderAutoPolicy, AmdDesktopStaysOnEstablishedBackend) {
+  const auto decision = linux_encoder_auto_policy::decide("amdgpu", false);
+  EXPECT_FALSE(decision.include_vulkan);
+  EXPECT_FALSE(decision.prefer_vulkan);
+  EXPECT_EQ(decision.preferred_encoder, "vaapi");
+  EXPECT_EQ(decision.policy, "amd_established_desktop");
+  EXPECT_EQ(decision.fallback_encoder, "next_available");
 }
 
 #else

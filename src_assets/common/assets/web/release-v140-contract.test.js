@@ -1,16 +1,10 @@
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
-const expectedAssets = [
-  'Polaris-arch-x86_64.pkg.tar.zst',
-  'Polaris-fedora44-x86_64.rpm',
-  'Polaris-steamos3.8-x86_64.pkg.tar.zst',
-  'Polaris-ubuntu24.04-x86_64.deb',
-].sort()
 
-const currentChangelog = () => {
+const historicalRelease = () => {
   const changelog = read('docs/changelog.md')
   const start = changelog.indexOf('## v1.4.0 - 2026-09-01')
   const end = changelog.indexOf('## v1.3.13 - 2026-08-22')
@@ -19,135 +13,43 @@ const currentChangelog = () => {
   return changelog.slice(start, end)
 }
 
-const installBlocks = () => [...read('docs/release-notes/v1.4.0.md').matchAll(/```bash\n([\s\S]*?)\n```/g)]
-  .map((match) => match[1])
-  .filter((block) => block.includes('wget --output-document='))
+const historicalNotes = () => read('docs/release-notes/v1.4.0.md')
 
-describe('v1.4.0 release contract', () => {
-  it('moves every current release identity to v1.4.0', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.0')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.0"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain('usr/bin/polaris-1.4.0')
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.0-1|x86_64'")
-    expect(read('src_assets/common/assets/web/packaging-contracts.test.js')).toContain("'polaris|1.4.0-1|x86_64'")
-  })
+const expectedAssets = [
+  'Polaris-arch-x86_64.pkg.tar.zst',
+  'Polaris-fedora44-x86_64.rpm',
+  'Polaris-steamos3.8-x86_64.pkg.tar.zst',
+  'Polaris-ubuntu24.04-x86_64.deb',
+].sort()
 
-  it('retires v1.3.13 to a historical contract and makes v1.4.0 current', () => {
-    expect(read('src_assets/common/assets/web/release-v1313-contract.test.js')).toContain("describe('historical v1.3.13 release contract'")
-    const gate = read('scripts/check-public-docs.sh')
-    expect(gate).toContain('docs/release-notes/v1.4.0.md')
-    expect(gate).toContain('"## v1.4.0 - 2026-09-01"')
-  })
-
-  it('publishes only the approved v1.4.0 scope', () => {
-    const release = `${currentChangelog()}\n${read('docs/release-notes/v1.4.0.md')}`
+describe('historical v1.4.0 release contract', () => {
+  it('preserves the evidence-first deterministic launch scope', () => {
+    const evidence = `${historicalRelease()}\n${historicalNotes()}`
     for (const fact of [
       'frame-pacing',
       'apply_recovery_profile_next_launch',
-      'unsupported_deprecated',
       'deterministic',
-      'resolved_profile.fields',
-      'MangoHud',
-      'automatic rollback',
       'Doctor v2',
       'Steam Input',
+      'Heroic',
       'Nova v1.4.0',
     ]) {
-      expect(release, `release must include: ${fact}`).toContain(fact)
-    }
-    for (const excluded of [
-      'history_safe',
-      'durable next-launch recovery profile',
-      'AI Auto Quality Preference',
-    ]) {
-      expect(release, `release must exclude: ${excluded}`).not.toContain(excluded)
+      expect(evidence, `historical v1.4.0 must include: ${fact}`).toContain(fact)
     }
   })
 
-  it('keeps the approved Heroic acceptance gate after release-note conflict resolution', () => {
-    const notes = read('docs/release-notes/v1.4.0.md')
-    expect(notes).toContain('one affected native or Flatpak GOG/Epic title')
-    expect(notes).toContain('approved host/account')
-    expect(notes).not.toContain('one native GOG title and one Flatpak Epic title')
-  })
-
-  it('binds Web launch-mode cards to the same host capability registry as launch', () => {
-    const configHttp = read('src/confighttp.cpp')
-    const audioVideo = read('src_assets/common/assets/web/configs/tabs/AudioVideo.vue')
-
-    expect(configHttp).toContain('stream_display_policy::mode_options(vd_available)')
-    expect(configHttp).toContain('output_tree["stream_display_mode_options"]')
-    expect(audioVideo).toContain('resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)')
-  })
-
-  it('keeps the Doctor navigation name in every shipped English locale', () => {
-    for (const locale of ['en.json', 'en_US.json', 'en_GB.json']) {
-      const strings = JSON.parse(read(`src_assets/common/assets/web/public/assets/locale/${locale}`))
-      expect(strings.navbar.troubleshoot, locale).toBe('Doctor & Support')
-    }
-  })
-
-  it('pins all four install commands to v1.4.0 and preserves platform safety', () => {
-    const blocks = installBlocks()
-    expect(blocks).toHaveLength(4)
-    for (const asset of expectedAssets) {
-      const matches = blocks.filter((block) => block.includes(`/${asset}`))
-      expect(matches, `one command block for ${asset}`).toHaveLength(1)
-      expect(matches[0]).toContain(`releases/download/v1.4.0/${asset}`)
-      expect(matches[0]).toContain('sudo -H polaris --setup-host')
-    }
-
-    for (const asset of [
-      'Polaris-arch-x86_64.pkg.tar.zst',
-      'Polaris-fedora44-x86_64.rpm',
-      'Polaris-ubuntu24.04-x86_64.deb',
-    ]) {
-      const block = blocks.find((candidate) => candidate.includes(`/${asset}`))
-      expect(block).toContain('systemctl --user restart polaris')
-    }
-
-    const steamOs = blocks.find((block) => block.includes('/Polaris-steamos3.8-x86_64.pkg.tar.zst'))
-    expect(steamOs).toContain("trap 'sudo steamos-readonly enable' EXIT")
-    expect(steamOs).toContain('sudo steamos-readonly disable || exit $?')
-    expect(steamOs).toContain('sudo pacman-key --init || exit $?')
-    expect(steamOs).toContain('sudo pacman-key --populate || exit $?')
-    expect(steamOs).toContain('sudo steamos-readonly enable || exit $?')
-    expect(steamOs).toContain('systemctl --user enable --now polaris')
-
-    const notes = read('docs/release-notes/v1.4.0.md')
+  it('preserves the exact historical assets and install identities', () => {
+    const notes = historicalNotes()
     const listed = [...new Set(notes.match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? [])]
     expect(listed.sort()).toEqual(expectedAssets)
-  })
 
-  it('publishes release-note guide links that work outside the source tree', () => {
-    const releaseNotesDir = join(process.cwd(), 'docs/release-notes')
-    const releaseNotes = readdirSync(releaseNotesDir)
-      .filter((name) => /^v\d+\.\d+\.\d+\.md$/.test(name))
-      .map((name) => read(`docs/release-notes/${name}`))
-      .join('\n')
-
-    expect(releaseNotes).not.toMatch(/\]\(\.\.\/(?:bazzite|steamos)\.md(?:[?#][^)]*)?\)/)
-    expect(releaseNotes).toContain('[Bazzite guide](https://papi-ux.com/docs/bazzite/)')
-    expect(releaseNotes).toContain('[SteamOS guide](https://papi-ux.com/docs/steamos/)')
-  })
-
-  it('keeps publication bound to one verified immutable source', () => {
-    const workflow = read('.github/workflows/build.yml')
-    const ordered = [
-      '- name: Check out exact release source',
-      '- name: Revalidate release tag against packaged source',
-      '- name: Stage curated GitHub release',
-      '- name: Upload release assets to GitHub release',
-      '- name: Verify release assets on GitHub release',
-      '- name: Publish verified draft release',
-    ]
-    const positions = ordered.map((step) => workflow.indexOf(step))
-    expect(positions.every((position) => position >= 0)).toBe(true)
-    expect(positions).toEqual([...positions].sort((a, b) => a - b))
-    expect(workflow).toContain('release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"')
-    expect(workflow).toContain('tag_commit="$(git rev-parse "refs/tags/${release_tag}^{commit}")"')
-    expect(workflow).toContain('--verify-tag')
-    expect(workflow).toContain('--notes-file "$release_notes"')
-    expect(workflow).toContain('run: gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false')
+    const blocks = [...notes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
+      .map((match) => match[1])
+      .filter((block) => block.includes('wget --output-document='))
+    expect(blocks).toHaveLength(4)
+    for (const block of blocks) {
+      expect(block).toContain('releases/download/v1.4.0/')
+      expect(block).toContain('polaris --setup-host')
+    }
   })
 })

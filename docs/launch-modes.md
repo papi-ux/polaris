@@ -17,6 +17,7 @@ Every card under **Settings → Audio/Video → Where games run** starts with wh
 | Dedicated streaming PC with a dummy plug | Headless Dongle |
 | "I want my actual desktop on the stream" | Mirror Desktop |
 | An extra screen sized to the client | Host Virtual Display |
+| My live Hyprland desktop, with the host monitors dark | Desktop Takeover |
 | Several family members at once | Not available yet, see [Family Mode](#family-mode-isolated) |
 
 > [!TIP]
@@ -55,6 +56,13 @@ Adds an extra screen to your real desktop, sized to match the client, and stream
 
 - **Best for:** using the stream like a second monitor for your normal desktop session.
 - **One caveat:** adding and removing a display can make your desktop icons and windows rearrange, exactly as plugging in a real monitor can.
+
+### Desktop Takeover
+
+Creates a client-sized virtual output in the current Hyprland session, moves the live workspaces and windows onto it, and turns the original active displays off with DPMS. On the final disconnect, Polaris immediately turns those displays back on, returns every recorded workspace to its original output, verifies the restoration, and only then removes the virtual output.
+
+- **Best for:** playing from the same Hyprland desktop while keeping the host monitors dark and matching the client's display size.
+- **One caveat:** this is an explicitly disruptive mode and is only selectable when a live Hyprland session, `hyprctl`, and an EVDI or native wlroots virtual-output backend are available. Polaris fails closed if it cannot prove or later recover the layout; it does not hold this mode open for resumable disconnects.
 
 ### Headless EVDI
 
@@ -120,6 +128,10 @@ Set the streaming output (the dummy plug) and the primary output (the real panel
 
 Mirror Desktop captures the visible host session through the portal and needs no extra setup. Prefer Private Stream or Gamescope Stream when apps should stay isolated from the desktop.
 
+### Desktop Takeover checklist
+
+Desktop Takeover requires an active Hyprland session and `hyprctl`, plus a backend that can create a new output. Polaris records the exact source monitor and workspace layout before moving anything, uses DPMS rather than disabling connectors, restores that layout before destroying the temporary output, and retains its recovery record if restoration cannot be proven.
+
 ### Encoder and quality
 
 Set the encoder (`nvenc` on NVIDIA, `vaapi` on AMD and Intel Mesa hosts), the bitrate, and optionally Auto Quality; the same settings apply to the labwc and gamescope paths alike. With Auto Quality on, Polaris balances bitrate and profile recovery for the selected path instead of asking you to tune them by hand.
@@ -152,7 +164,7 @@ If a stream misbehaves, the exact reason codes and what to do about them are in 
 
 You do not need to change the host mode to briefly share your desktop. Any Moonlight-protocol client can add `mirrorDesktop=1` to a launch request to mirror the desktop for that single session, and Nova exposes this as a launch option. The host configuration is untouched.
 
-Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session; the saved host setting returns on the next normal launch.
+Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. Desktop Takeover can be selected for one launch because its recovery record and virtual output are session-owned; an explicit Mirror Desktop request still takes precedence. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session; the saved host setting returns on the next normal launch.
 
 > [!TIP]
 > The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.
