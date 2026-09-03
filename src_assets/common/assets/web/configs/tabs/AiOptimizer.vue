@@ -1,10 +1,14 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAiOptimizer } from '../../composables/useAiOptimizer'
 import { useToast } from '../../composables/useToast'
+import SelectableCard from '../../components/SelectableCard.vue'
+import StatTile from '../../components/StatTile.vue'
+import { aiReadinessCopy, describeAiReadiness } from '../../doctor-ai-readiness.js'
 
 const props = defineProps(['config'])
 const config = ref(props.config)
+const $t = inject('i18n').t
 
 const { toast } = useToast()
 const {
@@ -28,8 +32,8 @@ const providerOptions = [
   {
     id: 'anthropic',
     name: 'Claude',
-    eyebrow: 'Anthropic',
-    summary: 'Claude via CLI subscription or direct API access.',
+    eyebrowKey: 'config.ai_provider_anthropic_eyebrow',
+    summaryKey: 'config.ai_provider_anthropic_summary',
     defaultModel: 'claude-haiku-4-5-20251001',
     defaultBaseUrl: 'https://api.anthropic.com',
     defaultAuth: 'subscription',
@@ -39,12 +43,12 @@ const providerOptions = [
     subscriptionLabel: 'Claude CLI',
     subscriptionBinary: 'claude',
     keyPlaceholder: 'sk-ant-api03-...',
-    keyHint: 'Anthropic API key from console.anthropic.com.',
+    keyHintKey: 'config.ai_provider_anthropic_key_hint',
     profiles: [
       {
         id: 'claude-cli',
         name: 'Claude CLI',
-        description: 'Use the local Claude subscription session.',
+        descriptionKey: 'config.ai_profile_claude_cli_desc',
         model: 'claude-haiku-4-5-20251001',
         baseUrl: 'https://api.anthropic.com',
         authMode: 'subscription'
@@ -52,7 +56,7 @@ const providerOptions = [
       {
         id: 'anthropic-api',
         name: 'Anthropic API',
-        description: 'Use the hosted Anthropic API.',
+        descriptionKey: 'config.ai_profile_anthropic_api_desc',
         model: 'claude-haiku-4-5-20251001',
         baseUrl: 'https://api.anthropic.com',
         authMode: 'api_key'
@@ -62,8 +66,8 @@ const providerOptions = [
   {
     id: 'openai',
     name: 'OpenAI',
-    eyebrow: 'Responses via compatibility',
-    summary: 'OpenAI via Codex CLI subscription or direct API access.',
+    eyebrowKey: 'config.ai_provider_openai_eyebrow',
+    summaryKey: 'config.ai_provider_openai_summary',
     defaultModel: 'gpt-5.4-mini',
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultAuth: 'subscription',
@@ -74,12 +78,12 @@ const providerOptions = [
     subscriptionBinary: 'codex',
     subscriptionLoginCommand: 'codex login',
     keyPlaceholder: 'sk-proj-...',
-    keyHint: 'OpenAI API key from platform.openai.com.',
+    keyHintKey: 'config.ai_provider_openai_key_hint',
     profiles: [
       {
         id: 'codex-cli',
         name: 'Codex CLI',
-        description: 'Use the local Codex subscription session.',
+        descriptionKey: 'config.ai_profile_codex_cli_desc',
         model: 'gpt-5.4-mini',
         baseUrl: 'https://api.openai.com/v1',
         authMode: 'subscription'
@@ -87,7 +91,7 @@ const providerOptions = [
       {
         id: 'openai-default',
         name: 'Hosted API',
-        description: 'Use the standard OpenAI endpoint.',
+        descriptionKey: 'config.ai_profile_openai_default_desc',
         model: 'gpt-5.4-mini',
         baseUrl: 'https://api.openai.com/v1',
         authMode: 'api_key'
@@ -97,8 +101,8 @@ const providerOptions = [
   {
     id: 'gemini',
     name: 'Gemini',
-    eyebrow: 'Google AI',
-    summary: 'Gemini through the OpenAI-compatible endpoint.',
+    eyebrowKey: 'config.ai_provider_gemini_eyebrow',
+    summaryKey: 'config.ai_provider_gemini_summary',
     defaultModel: 'gemini-2.5-flash',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultAuth: 'api_key',
@@ -106,12 +110,12 @@ const providerOptions = [
     accent: 'border-info/30 bg-info/8 text-info-bright',
     pill: 'text-info-bright border-info/30',
     keyPlaceholder: 'AIza...',
-    keyHint: 'Gemini API key from Google AI Studio.',
+    keyHintKey: 'config.ai_provider_gemini_key_hint',
     profiles: [
       {
         id: 'gemini-default',
         name: 'Gemini API',
-        description: 'Use Google AI Studio.',
+        descriptionKey: 'config.ai_profile_gemini_default_desc',
         model: 'gemini-2.5-flash',
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         authMode: 'api_key'
@@ -121,8 +125,8 @@ const providerOptions = [
   {
     id: 'local',
     name: 'Local',
-    eyebrow: 'Ollama / LM Studio',
-    summary: 'Local OpenAI-compatible inference on the host.',
+    eyebrowKey: 'config.ai_provider_local_eyebrow',
+    summaryKey: 'config.ai_provider_local_summary',
     defaultModel: 'gpt-oss',
     defaultBaseUrl: 'http://127.0.0.1:11434/v1',
     defaultAuth: 'none',
@@ -130,12 +134,12 @@ const providerOptions = [
     accent: 'border-storm/25 bg-storm/8 text-silver',
     pill: 'text-silver border-storm/25',
     keyPlaceholder: 'optional',
-    keyHint: 'Usually not required for local endpoints. LM Studio or reverse proxies may add one.',
+    keyHintKey: 'config.ai_provider_local_key_hint',
     profiles: [
       {
         id: 'ollama',
         name: 'Ollama',
-        description: 'Target Ollama on localhost.',
+        descriptionKey: 'config.ai_profile_ollama_desc',
         model: 'gpt-oss',
         baseUrl: 'http://127.0.0.1:11434/v1',
         authMode: 'none'
@@ -143,7 +147,7 @@ const providerOptions = [
       {
         id: 'lm-studio',
         name: 'LM Studio',
-        description: 'Use LM Studio\'s local server endpoint.',
+        descriptionKey: 'config.ai_profile_lm_studio_desc',
         model: 'qwen3-8b',
         baseUrl: 'http://127.0.0.1:1234/v1',
         authMode: 'none'
@@ -153,14 +157,18 @@ const providerOptions = [
 ]
 
 const authModeLabels = {
-  subscription: { name: 'Subscription', description: 'Use the local provider CLI session' },
-  api_key: { name: 'API Key', description: 'Send a bearer key to the provider' },
-  none: { name: 'No Auth', description: 'Call the endpoint without auth' }
+  subscription: { nameKey: 'config.ai_auth_subscription', descriptionKey: 'config.ai_auth_subscription_desc' },
+  api_key: { nameKey: 'config.ai_auth_api_key', descriptionKey: 'config.ai_auth_api_key_desc' },
+  none: { nameKey: 'config.ai_auth_none', descriptionKey: 'config.ai_auth_none_desc' }
 }
 
 function authModeName(mode) {
-  return authModeLabels[mode]?.name || mode
+  return authModeLabels[mode] ? $t(authModeLabels[mode].nameKey) : mode
 }
+
+// The saved runtime's readiness, read the same way Doctor & Support reads it.
+const aiReadiness = computed(() => describeAiReadiness(aiStatus.value, config.value))
+const aiReadinessText = computed(() => aiReadinessCopy(aiReadiness.value, $t))
 
 const currentProvider = computed(() =>
   providerOptions.find(provider => provider.id === config.value.ai_provider) || providerOptions[0]
@@ -170,10 +178,10 @@ const liveProvider = computed(() =>
   providerOptions.find(provider => provider.id === aiStatus.value?.provider) || null
 )
 
-const currentSubscriptionLabel = computed(() => currentProvider.value.subscriptionLabel || 'Provider CLI')
+const currentSubscriptionLabel = computed(() => currentProvider.value.subscriptionLabel || $t('config.ai_provider_cli_label'))
 const currentSubscriptionBinary = computed(() => currentProvider.value.subscriptionBinary || 'cli')
 const currentSubscriptionLoginCommand = computed(() => currentProvider.value.subscriptionLoginCommand || '')
-const liveSubscriptionLabel = computed(() => aiStatus.value?.subscription_cli || liveProvider.value?.subscriptionLabel || 'Provider CLI')
+const liveSubscriptionLabel = computed(() => aiStatus.value?.subscription_cli || liveProvider.value?.subscriptionLabel || $t('config.ai_provider_cli_label'))
 
 const availableAuthModes = computed(() => currentProvider.value.authModes)
 const currentProfiles = computed(() => currentProvider.value.profiles || [])
@@ -213,34 +221,34 @@ const authReady = computed(() => {
 })
 
 const authHelpText = computed(() => {
-  if (config.value.ai_auth_mode === 'api_key') return hasStoredApiKey.value ? 'Stored key ready' : 'Add an API key'
-  if (config.value.ai_auth_mode === 'none') return 'No auth needed'
+  if (config.value.ai_auth_mode === 'api_key') return hasStoredApiKey.value ? $t('config.ai_auth_stored_key_ready') : $t('config.ai_auth_add_key')
+  if (config.value.ai_auth_mode === 'none') return $t('config.ai_auth_none_needed')
   if (aiStatus.value?.provider === config.value.ai_provider && aiStatus.value?.cli_login_command) {
-    return `Run ${aiStatus.value.cli_login_command}`
+    return $t('config.ai_auth_run_command', { command: aiStatus.value.cli_login_command })
   }
-  if (currentSubscriptionLoginCommand.value) return `Run ${currentSubscriptionLoginCommand.value}`
-  return `Sign in with ${currentSubscriptionLabel.value}`
+  if (currentSubscriptionLoginCommand.value) return $t('config.ai_auth_run_command', { command: currentSubscriptionLoginCommand.value })
+  return $t('config.ai_auth_sign_in_with', { label: currentSubscriptionLabel.value })
 })
 
 const setupSteps = computed(() => [
   {
-    label: '1. Choose provider',
-    status: config.value.ai_provider ? currentProvider.value.name : 'Needed',
+    label: $t('config.ai_step_provider'),
+    status: config.value.ai_provider ? currentProvider.value.name : $t('config.ai_step_needed'),
     done: !!config.value.ai_provider
   },
   {
-    label: '2. Verify auth',
-    status: authReady.value ? 'Ready' : authHelpText.value,
+    label: $t('config.ai_step_auth'),
+    status: authReady.value ? $t('config.ai_step_ready') : authHelpText.value,
     done: authReady.value
   },
   {
-    label: '3. Test draft',
-    status: testResult.value?.success ? 'Passed' : 'Run before saving',
+    label: $t('config.ai_step_test'),
+    status: testResult.value?.success ? $t('config.ai_step_passed') : $t('config.ai_step_run_before_saving'),
     done: testResult.value?.success === true
   },
   {
-    label: '4. Enable explanations',
-    status: aiExplanationsEnabled.value ? 'Enabled' : 'Turn on when the draft passes',
+    label: $t('config.ai_step_enable'),
+    status: aiExplanationsEnabled.value ? $t('config.ai_state_enabled') : $t('config.ai_step_turn_on'),
     done: aiExplanationsEnabled.value
   }
 ])
@@ -289,7 +297,7 @@ const discoveredModelSuggestions = computed(() =>
 
 const fallbackModelSuggestions = computed(() => {
   const runtimeSuggestions = aiStatus.value?.provider === config.value.ai_provider && aiStatus.value?.model
-    ? [{ id: aiStatus.value.model, label: 'Live runtime', origin: 'runtime' }]
+    ? [{ id: aiStatus.value.model, label: $t('config.ai_model_origin_runtime'), origin: 'runtime' }]
     : []
 
   const profileSuggestions = currentProfiles.value
@@ -307,7 +315,7 @@ const fallbackModelSuggestions = computed(() => {
   }))
 
   const currentSelection = config.value.ai_model
-    ? [{ id: config.value.ai_model, label: 'Current selection', origin: 'current' }]
+    ? [{ id: config.value.ai_model, label: $t('config.ai_model_origin_current'), origin: 'current' }]
     : []
 
   return uniqueModelSuggestions([
@@ -315,7 +323,7 @@ const fallbackModelSuggestions = computed(() => {
     runtimeSuggestions,
     backendFallback,
     profileSuggestions,
-    [{ id: currentProvider.value.defaultModel, label: 'Provider default', origin: 'default' }]
+    [{ id: currentProvider.value.defaultModel, label: $t('config.ai_model_origin_default'), origin: 'default' }]
   ])
 })
 
@@ -327,30 +335,30 @@ const featuredModelSuggestions = computed(() => modelSuggestions.value.slice(0, 
 
 const modelDiscoverySummary = computed(() => {
   if (modelsLoading.value) {
-    return { tone: 'text-ice', badge: 'Refreshing', text: 'Checking the provider for a live model catalog.' }
+    return { tone: 'text-ice', badge: $t('config.ai_discovery_refreshing_badge'), text: $t('config.ai_discovery_refreshing_text') }
   }
 
   if (providerModelCatalog.value?.discovered) {
     const count = providerModelCatalog.value.model_count || providerModelCatalog.value.models?.length || 0
     return {
       tone: 'text-success',
-      badge: 'Live list',
-      text: `Discovered ${count} model${count === 1 ? '' : 's'} from ${currentProvider.value.name}.`
+      badge: $t('config.ai_discovery_live_badge'),
+      text: $t('config.ai_discovery_live_text', { count, provider: currentProvider.value.name })
     }
   }
 
   if (providerModelCatalog.value?.error) {
     return {
       tone: config.value.ai_auth_mode === 'subscription' ? 'text-warning-bright' : 'text-storm',
-      badge: 'Preset hints',
+      badge: $t('config.ai_discovery_preset_badge'),
       text: providerModelCatalog.value.error
     }
   }
 
   return {
     tone: 'text-storm',
-    badge: 'Preset hints',
-    text: 'Using provider defaults, profiles, and runtime hints for autocomplete suggestions.'
+    badge: $t('config.ai_discovery_preset_badge'),
+    text: $t('config.ai_discovery_preset_text')
   }
 })
 
@@ -366,15 +374,15 @@ const selectedHistoryEntry = computed(() => {
 function optimizationSourceLabel(source) {
   switch (source) {
     case 'ai_explanation_test':
-      return 'Live explanation'
+      return $t('config.ai_source_explanation_test')
     case 'ai_live':
-      return 'Live AI'
+      return $t('config.ai_source_live')
     case 'ai_cached':
-      return 'Cached AI'
+      return $t('config.ai_source_cached')
     case 'device_db':
-      return 'Device tune'
+      return $t('config.ai_source_device_db')
     default:
-      return source || 'Fallback'
+      return source || $t('config.ai_source_fallback')
   }
 }
 
@@ -407,36 +415,36 @@ function cacheStatusTone(status) {
 }
 
 function formatRelativeTime(timestamp) {
-  if (!timestamp) return '—'
+  if (!timestamp) return $t('config.ai_time_never')
   const deltaSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(timestamp))
-  if (deltaSeconds < 60) return 'just now'
-  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`
-  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`
-  return `${Math.floor(deltaSeconds / 86400)}d ago`
+  if (deltaSeconds < 60) return $t('config.ai_time_just_now')
+  if (deltaSeconds < 3600) return $t('config.ai_time_minutes_ago', { count: Math.floor(deltaSeconds / 60) })
+  if (deltaSeconds < 86400) return $t('config.ai_time_hours_ago', { count: Math.floor(deltaSeconds / 3600) })
+  return $t('config.ai_time_days_ago', { count: Math.floor(deltaSeconds / 86400) })
 }
 
 const providerHealthSummary = computed(() => {
   if (!aiStatus.value) {
-    return { tone: 'text-storm', label: 'Unknown', detail: 'Runtime state not loaded yet.' }
+    return { tone: 'text-storm', label: $t('config.ai_unknown'), detail: $t('config.ai_health_unknown_detail') }
   }
   if (aiStatus.value.last_failure_at && (!aiStatus.value.last_success_at || aiStatus.value.last_failure_at >= aiStatus.value.last_success_at)) {
     return {
       tone: 'text-danger',
-      label: 'Attention',
-      detail: aiStatus.value.last_error || 'The most recent provider request failed.'
+      label: $t('config.ai_health_attention'),
+      detail: aiStatus.value.last_error || $t('config.ai_health_attention_detail')
     }
   }
   if (Number(aiStatus.value.in_flight_requests || 0) > 0) {
     return {
       tone: 'text-info-bright',
-      label: 'Busy',
-      detail: `${aiStatus.value.in_flight_requests} request${aiStatus.value.in_flight_requests === 1 ? '' : 's'} in flight.`
+      label: $t('config.ai_health_busy'),
+      detail: $t('config.ai_health_busy_detail', { count: aiStatus.value.in_flight_requests })
     }
   }
   return {
     tone: 'text-success-bright',
-    label: 'Healthy',
-    detail: aiStatus.value.last_success_at ? `Last success ${formatRelativeTime(aiStatus.value.last_success_at)}.` : 'No provider calls have completed yet.'
+    label: $t('config.ai_health_healthy'),
+    detail: aiStatus.value.last_success_at ? $t('config.ai_health_last_success', { when: formatRelativeTime(aiStatus.value.last_success_at) }) : $t('config.ai_health_no_calls')
   }
 })
 
@@ -450,9 +458,9 @@ function providerAuthSummary(provider) {
 }
 
 function providerRuntimeSummary(provider) {
-  if (!aiStatus.value || aiStatus.value.provider !== provider.id) return 'Not saved'
-  if (aiStatus.value.enabled) return 'Saved runtime · explanations on'
-  return 'Saved runtime · explanations off'
+  if (!aiStatus.value || aiStatus.value.provider !== provider.id) return $t('config.ai_runtime_not_saved')
+  if (aiStatus.value.enabled) return $t('config.ai_runtime_saved_on')
+  return $t('config.ai_runtime_saved_off')
 }
 
 function providerRuntimeTone(provider) {
@@ -468,10 +476,10 @@ function subscriptionRuntimeTone(status) {
 }
 
 function subscriptionRuntimeSummary(status) {
-  if (!status) return 'Not loaded'
-  if (status.cli_authenticated === true) return 'Signed in and ready'
-  if (status.cli_authenticated === false && status.cli_login_command) return `Run ${status.cli_login_command}`
-  return status.cli_available ? 'Detected in PATH' : 'Not found in PATH'
+  if (!status) return $t('config.ai_not_loaded')
+  if (status.cli_authenticated === true) return $t('config.ai_cli_signed_in')
+  if (status.cli_authenticated === false && status.cli_login_command) return $t('config.ai_auth_run_command', { command: status.cli_login_command })
+  return status.cli_available ? $t('config.ai_cli_detected') : $t('config.ai_cli_missing')
 }
 
 function applyProviderProfile(profile) {
@@ -543,7 +551,7 @@ function syncProviderDefaults(previousProviderId) {
 async function refreshModelCatalog({ silent = false } = {}) {
   const result = await fetchModels(buildDraftPayload())
   if (!silent && result?.discovered) {
-    toast(`${currentProvider.value.name} model list refreshed`, 'success')
+    toast($t('config.ai_models_refreshed', { provider: currentProvider.value.name }), 'success')
   }
 }
 
@@ -610,40 +618,41 @@ async function testProviderConfig() {
 
   testLoading.value = false
   if (result.status) {
+    const device = testDeviceName.value || $t('config.ai_test_selected_device')
     const message = provider.id === 'local'
-      ? `Local endpoint returned an explanation for ${testDeviceName.value || 'the selected device'}.`
-      : `${provider.name} returned an explanation for ${testDeviceName.value || 'the selected device'}.`
+      ? $t('config.ai_test_local_returned', { device })
+      : $t('config.ai_test_provider_returned', { provider: provider.name, device })
     testResult.value = {
       success: true,
-      label: 'Draft verified',
+      label: $t('config.ai_test_verified'),
       message,
       detail: result.reasoning || '',
-      action: 'Next step: save the provider settings. AI can explain Doctor evidence, but it cannot define launch settings or actions.',
+      action: $t('config.ai_test_next_step'),
       payload: result
     }
-    toast(`${provider.name} explanation provider verified`, 'success')
+    toast($t('config.ai_test_verified_toast', { provider: provider.name }), 'success')
   } else {
     const authFailure = result.code === 'authentication_failed' || /auth|authorized|login/i.test(result.error || '')
     testResult.value = {
       success: false,
-      label: 'Action needed',
-      message: result.error || 'Connection test failed',
+      label: $t('config.ai_test_action_needed'),
+      message: result.error || $t('config.ai_test_failed'),
       detail: result.detail || '',
       action: result.action || authHelpText.value,
-      retryLabel: result.retryable === false ? 'Review settings' : (authFailure ? 'Retry after fixing auth' : 'Retry test'),
+      retryLabel: result.retryable === false ? $t('config.ai_test_review_settings') : (authFailure ? $t('config.ai_test_retry_auth') : $t('config.ai_test_retry')),
       payload: null
     }
-    toast(`${provider.name} test failed: ${result.error || 'Unknown error'}`, 'error')
+    toast($t('config.ai_test_failed_toast', { provider: provider.name, error: result.error || $t('config.ai_unknown_error') }), 'error')
   }
 }
 
 async function handleClearCache() {
   const ok = await clearCache()
   if (ok) {
-    toast('AI explanation cache cleared', 'success')
+    toast($t('config.ai_cache_cleared'), 'success')
     fetchCache()
   } else {
-    toast('Failed to clear cache', 'error')
+    toast($t('config.ai_cache_clear_failed'), 'error')
   }
 }
 
@@ -689,39 +698,49 @@ onBeforeUnmount(() => {
     <section class="settings-section space-y-4">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div class="max-w-3xl">
-          <div class="section-kicker">Provider</div>
-          <h2 class="settings-section-title mt-2">Choose an explanation provider.</h2>
-          <p class="settings-section-copy">AI can summarize structured Doctor evidence. Deterministic Launch presets remain the only source of launch settings.</p>
+          <div class="section-kicker">{{ $t('config.ai_tab_kicker') }}</div>
+          <h2 class="settings-section-title mt-2">{{ $t('config.ai_tab_title') }}</h2>
+          <p class="settings-section-copy">
+            {{ $t('config.ai_tab_copy') }}
+            <a href="https://papi-ux.com/docs/configuration/#ai-provider-settings" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.ai_tab_docs_link') }}</a>
+          </p>
         </div>
 
-        <div class="flex items-center gap-3 rounded-2xl border border-storm/40 bg-void/30 px-4 py-3">
-          <div>
-            <div class="text-xs uppercase tracking-wider text-storm">AI explanations</div>
-            <div class="text-sm font-medium text-silver mt-1">
-              {{ aiExplanationsEnabled ? 'Enabled' : 'Disabled' }}
+        <div class="flex flex-col gap-3 rounded-2xl border border-storm/40 bg-void/30 px-4 py-3" data-ai-readiness-panel :data-ai-readiness="aiReadiness.state">
+          <div class="flex items-center gap-3">
+            <div>
+              <div class="text-xs uppercase tracking-wider text-storm">{{ $t('config.ai_explanations') }}</div>
+              <div class="text-sm font-medium text-silver mt-1">
+                {{ aiExplanationsEnabled ? $t('config.ai_state_enabled') : $t('config.ai_state_disabled') }}
+              </div>
             </div>
-          </div>
-          <button
-            @click="setAiExplanationsEnabled(!aiExplanationsEnabled)"
-            class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors duration-200"
-            :class="aiExplanationsEnabled ? 'bg-ice' : 'bg-storm/50'">
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="aiExplanationsEnabled"
+              :aria-label="$t('config.ai_toggle_aria')"
+              @click="setAiExplanationsEnabled(!aiExplanationsEnabled)"
+              class="focus-ring relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors duration-200"
+              :class="aiExplanationsEnabled ? 'bg-ice' : 'bg-storm/50'">
             <span
               class="inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-200 mt-0.5"
               :class="aiExplanationsEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'"></span>
-          </button>
+            </button>
+          </div>
+          <p class="max-w-xs text-xs leading-relaxed text-storm"><span class="text-silver/80">{{ $t('config.ai_saved_runtime_prefix') }}</span> {{ aiReadinessText }}</p>
         </div>
       </div>
 
       <div class="grid gap-3 lg:grid-cols-4">
-        <button
+        <SelectableCard
           v-for="provider in providerOptions"
           :key="provider.id"
-          @click="config.ai_provider = provider.id"
-          class="rounded-2xl border p-4 text-left transition-all duration-200"
-          :class="config.ai_provider === provider.id ? provider.accent : 'border-storm/40 bg-deep hover:border-ice/40 hover:bg-twilight/30'">
+          :selected="config.ai_provider === provider.id"
+          :card-class="['rounded-2xl border p-4', config.ai_provider === provider.id ? provider.accent : 'border-storm/40 bg-deep hover:border-ice/40 hover:bg-twilight/30']"
+          @click="config.ai_provider = provider.id">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="text-[10px] uppercase tracking-eyebrow" :class="config.ai_provider === provider.id ? 'text-current/80' : 'text-storm'">{{ provider.eyebrow }}</div>
+              <div class="text-[10px] uppercase tracking-eyebrow" :class="config.ai_provider === provider.id ? 'text-current/80' : 'text-storm'">{{ $t(provider.eyebrowKey) }}</div>
               <div class="text-base font-semibold mt-1" :class="config.ai_provider === provider.id ? 'text-current' : 'text-silver'">{{ provider.name }}</div>
             </div>
             <span
@@ -729,35 +748,34 @@ onBeforeUnmount(() => {
               :class="config.ai_provider === provider.id ? 'bg-current' : 'bg-storm/50'"></span>
           </div>
           <p class="text-sm mt-3 leading-6" :class="config.ai_provider === provider.id ? 'text-current/90' : 'text-storm'">
-            {{ provider.summary }}
+            {{ $t(provider.summaryKey) }}
           </p>
           <div class="mt-3 space-y-1 text-[11px] leading-5" :class="config.ai_provider === provider.id ? 'text-current/85' : 'text-storm'">
-            <div>Auth: {{ providerAuthSummary(provider) }}</div>
+            <div>{{ $t('config.ai_auth_summary', { modes: providerAuthSummary(provider) }) }}</div>
             <div :class="providerRuntimeTone(provider)">{{ providerRuntimeSummary(provider) }}</div>
           </div>
-        </button>
+        </SelectableCard>
       </div>
 
       <div class="rounded-2xl border border-ice/15 bg-ice/5 p-4">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <div class="section-kicker">Recommended setup</div>
-            <div class="settings-section-title mt-2 text-base">Guided path to optional AI explanations</div>
-            <p class="settings-section-copy mt-2">Provider output is informational and cannot change bitrate, display, codec, HDR, topology, or Doctor actions.</p>
+            <div class="section-kicker">{{ $t('config.ai_recommended_kicker') }}</div>
+            <div class="settings-section-title mt-2 text-base">{{ $t('config.ai_recommended_title') }}</div>
+            <p class="settings-section-copy mt-2">{{ $t('config.ai_recommended_copy') }}</p>
           </div>
-          <div class="rounded-full border border-storm/40 bg-void/30 px-3 py-1 text-xs text-storm">
-            {{ setupSteps.filter(step => step.done).length }}/{{ setupSteps.length }} done
+          <div class="meta-pill">
+            {{ $t('config.ai_steps_done', { done: setupSteps.filter(step => step.done).length, total: setupSteps.length }) }}
           </div>
         </div>
         <div class="mt-4 grid gap-2 lg:grid-cols-4">
-          <div
+          <StatTile
             v-for="step in setupSteps"
             :key="step.label"
-            class="rounded-xl border px-3 py-2"
-            :class="step.done ? 'border-success/20 bg-success/8' : 'border-storm/30 bg-void/30'">
+            :tile-class="step.done ? 'border-success/20 bg-success/8' : ''">
             <div class="text-xs font-semibold" :class="step.done ? 'text-success-bright' : 'text-silver'">{{ step.label }}</div>
             <div class="mt-1 text-[11px] leading-5" :class="step.done ? 'text-success-bright/80' : 'text-storm'">{{ step.status }}</div>
-          </div>
+          </StatTile>
         </div>
       </div>
     </section>
@@ -767,15 +785,16 @@ onBeforeUnmount(() => {
         <section class="settings-section space-y-5">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <div class="section-kicker">Setup</div>
-              <h3 class="settings-section-title mt-2">{{ currentProvider.name }} setup</h3>
-              <p class="settings-section-copy mt-2">Guided step: choose the {{ currentProvider.name }} setup that matches your auth, then test this draft before saving.</p>
+              <div class="section-kicker">{{ $t('config.ai_setup_kicker') }}</div>
+              <h3 class="settings-section-title mt-2">{{ $t('config.ai_setup_title', { provider: currentProvider.name }) }}</h3>
+              <p class="settings-section-copy mt-2">{{ $t('config.ai_setup_copy', { provider: currentProvider.name }) }}</p>
             </div>
             <div class="flex items-center gap-2">
               <button
+                type="button"
                 @click="resetProviderDefaults"
-                class="inline-flex items-center rounded-full border border-storm/40 px-2.5 py-1 text-[11px] font-medium text-storm transition-colors hover:border-ice/30 hover:text-silver">
-                Reset defaults
+                class="focus-ring inline-flex items-center rounded-full border border-storm/40 px-2.5 py-1 text-[11px] font-medium text-storm transition-colors hover:border-ice/30 hover:text-silver">
+                {{ $t('config.ai_reset_defaults') }}
               </button>
               <span class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium" :class="providerPill(currentProvider.id)">
                 {{ currentProvider.name }}
@@ -785,57 +804,58 @@ onBeforeUnmount(() => {
 
           <div class="space-y-3">
             <div class="flex items-center justify-between gap-4">
-              <div class="text-xs font-semibold uppercase tracking-eyebrow text-storm">Profiles</div>
-              <div class="text-[11px] text-storm">Model + endpoint + auth</div>
+              <div class="text-xs font-semibold uppercase tracking-eyebrow text-storm">{{ $t('config.ai_profiles') }}</div>
+              <div class="text-[11px] text-storm">{{ $t('config.ai_profiles_hint') }}</div>
             </div>
             <div class="grid gap-2 sm:grid-cols-2">
-              <button
+              <SelectableCard
                 v-for="profile in currentProfiles"
                 :key="profile.id"
-                @click="applyProviderProfile(profile)"
-                class="rounded-xl border px-4 py-3 text-left transition-all duration-200"
-                :class="isProfileActive(profile) ? 'border-ice/40 bg-ice/10 text-ice' : 'border-storm/40 bg-void/30 text-silver hover:border-ice/30'">
+                :selected="isProfileActive(profile)"
+                :card-class="['rounded-xl border px-4 py-3', isProfileActive(profile) ? 'border-ice/40 bg-ice/10 text-ice' : 'border-storm/40 bg-void/30 text-silver hover:border-ice/30']"
+                @click="applyProviderProfile(profile)">
                 <div class="text-sm font-medium">{{ profile.name }}</div>
-                <div class="text-xs text-storm mt-1">{{ profile.description }}</div>
+                <div class="text-xs text-storm mt-1">{{ $t(profile.descriptionKey) }}</div>
                 <div class="text-[11px] font-mono mt-2" :class="isProfileActive(profile) ? 'text-ice/90' : 'text-silver/70'">
                   {{ profile.model }}
                 </div>
-              </button>
+              </SelectableCard>
             </div>
           </div>
 
           <div class="space-y-3">
-            <div class="text-xs font-semibold uppercase tracking-eyebrow text-storm">Authentication</div>
+            <div class="text-xs font-semibold uppercase tracking-eyebrow text-storm">{{ $t('config.ai_authentication') }}</div>
             <div class="grid gap-2 sm:grid-cols-2">
-              <button
+              <SelectableCard
                 v-for="mode in availableAuthModes"
                 :key="mode"
-                @click="config.ai_auth_mode = mode"
-                class="rounded-xl border px-4 py-3 text-left transition-all duration-200"
-                :class="config.ai_auth_mode === mode ? 'border-ice/40 bg-ice/10 text-ice' : 'border-storm/40 bg-void/30 text-silver hover:border-ice/30'">
-                <div class="text-sm font-medium">{{ authModeLabels[mode].name }}</div>
-                <div class="text-xs text-storm mt-1">{{ authModeLabels[mode].description }}</div>
-              </button>
+                :selected="config.ai_auth_mode === mode"
+                :card-class="['rounded-xl border px-4 py-3', config.ai_auth_mode === mode ? 'border-ice/40 bg-ice/10 text-ice' : 'border-storm/40 bg-void/30 text-silver hover:border-ice/30']"
+                @click="config.ai_auth_mode = mode">
+                <div class="text-sm font-medium">{{ $t(authModeLabels[mode].nameKey) }}</div>
+                <div class="text-xs text-storm mt-1">{{ $t(authModeLabels[mode].descriptionKey) }}</div>
+              </SelectableCard>
             </div>
           </div>
 
           <div class="grid gap-4 lg:grid-cols-2">
             <div>
               <div class="flex items-center justify-between gap-3 mb-1">
-                <label class="block text-sm font-medium text-silver">Model</label>
+                <label class="block text-sm font-medium text-silver">{{ $t('config.ai_model_label') }}</label>
                 <button
+                  type="button"
                   @click="refreshModelCatalog()"
                   :disabled="modelsLoading || !canRefreshModels"
                   class="inline-flex items-center gap-2 rounded-full border border-storm/40 px-2.5 py-1 text-[11px] font-medium text-storm transition-colors hover:border-ice/30 hover:text-silver disabled:cursor-not-allowed disabled:opacity-50">
                   <svg v-if="modelsLoading" class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  <span>{{ modelsLoading ? 'Refreshing…' : 'Refresh list' }}</span>
+                  <span>{{ modelsLoading ? $t('config.ai_refreshing') : $t('config.ai_refresh_list') }}</span>
                 </button>
               </div>
               <input
                 v-model="config.ai_model"
                 :list="modelOptionsId"
                 type="text"
-                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+                class="settings-input font-mono text-sm"
                 :placeholder="currentProvider.defaultModel" />
               <datalist :id="modelOptionsId">
                 <option
@@ -848,6 +868,7 @@ onBeforeUnmount(() => {
                 <button
                   v-for="model in featuredModelSuggestions"
                   :key="model.id"
+                  type="button"
                   @click="config.ai_model = model.id"
                   class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors"
                   :class="config.ai_model === model.id ? 'border-ice/40 bg-ice/10 text-ice' : model.origin === 'live' ? 'border-success/20 bg-success/8 text-success-bright hover:border-success/35' : 'border-storm/40 bg-void/30 text-storm hover:border-ice/30 hover:text-silver'">
@@ -863,60 +884,60 @@ onBeforeUnmount(() => {
             </div>
 
             <div>
-              <label class="block text-sm font-medium text-silver mb-1">Base URL</label>
+              <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_base_url_label') }}</label>
               <input
                 v-model="config.ai_base_url"
                 type="text"
-                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+                class="settings-input font-mono text-sm"
                 :placeholder="currentProvider.defaultBaseUrl" />
-              <div class="text-xs text-storm mt-1">Default endpoint: <span class="font-mono text-silver/80">{{ currentProvider.defaultBaseUrl }}</span></div>
+              <div class="text-xs text-storm mt-1">{{ $t('config.ai_default_endpoint') }} <span class="font-mono text-silver/80">{{ currentProvider.defaultBaseUrl }}</span></div>
             </div>
           </div>
 
           <div v-if="config.ai_auth_mode === 'subscription'" class="rounded-xl border border-warning/20 bg-warning/6 p-4 space-y-3">
             <div>
               <div class="text-xs uppercase tracking-eyebrow text-storm">{{ currentSubscriptionLabel }}</div>
-              <div class="text-sm text-silver">Polaris will call the local <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionBinary }}</code> CLI instead of a remote API key flow.</div>
-              <div class="text-xs text-storm mt-2">The Web UI can test this explanation provider. Saving it never changes the deterministic launch resolver.</div>
+              <div class="text-sm text-silver">{{ $t('config.ai_subscription_cli_copy', { binary: currentSubscriptionBinary }) }}</div>
+              <div class="text-xs text-storm mt-2">{{ $t('config.ai_subscription_test_copy') }}</div>
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
-                If this host is not authorized yet, run <code class="bg-void/40 px-1 rounded text-warning-bright">{{ currentSubscriptionLoginCommand }}</code> in a terminal first.
+                {{ $t('config.ai_subscription_login_copy', { command: currentSubscriptionLoginCommand }) }}
               </div>
             </div>
             <div v-if="config.ai_provider === 'openai'">
-              <label class="block text-sm font-medium text-silver mb-1">Codex home</label>
+              <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_codex_home_label') }}</label>
               <input
                 v-model="config.ai_codex_home"
                 type="text"
-                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+                class="settings-input font-mono text-sm"
                 placeholder="~/.codex" />
-              <div class="text-xs text-storm mt-1">Optional CODEX_HOME override. Use this when Polaris runs as a service or profile with a different HOME than your logged-in Codex CLI.</div>
-              <div v-if="aiStatus?.codex_home_effective" class="text-xs text-storm mt-1">Live effective CODEX_HOME: <span class="font-mono text-silver/80">{{ aiStatus.codex_home_effective }}</span></div>
+              <div class="text-xs text-storm mt-1">{{ $t('config.ai_codex_home_copy') }}</div>
+              <div v-if="aiStatus?.codex_home_effective" class="text-xs text-storm mt-1">{{ $t('config.ai_codex_home_effective') }} <span class="font-mono text-silver/80">{{ aiStatus.codex_home_effective }}</span></div>
             </div>
           </div>
 
           <div v-else-if="config.ai_auth_mode === 'none'" class="rounded-xl border border-storm/20 bg-storm/6 p-4">
-            <div class="text-sm text-silver">Polaris will call the configured endpoint without an Authorization header.</div>
-            <div class="text-xs text-storm mt-2">This is the usual setup for Ollama on <code class="bg-void/40 px-1 rounded">http://127.0.0.1:11434/v1</code>.</div>
+            <div class="text-sm text-silver">{{ $t('config.ai_no_auth_copy') }}</div>
+            <div class="text-xs text-storm mt-2">{{ $t('config.ai_no_auth_hint', { url: 'http://127.0.0.1:11434/v1' }) }}</div>
           </div>
 
           <div v-else>
-            <label class="block text-sm font-medium text-silver mb-1">API Key</label>
+            <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_api_key_label') }}</label>
             <div v-if="hasStoredApiKey" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-success/20 bg-success/8 px-3 py-2 text-xs text-success-bright">
-              <span>An API key is already stored on the host. Leave this blank to keep it, or type a new key to replace it.</span>
+              <span>{{ $t('config.ai_key_stored_copy') }}</span>
               <button
                 type="button"
                 class="rounded-full border border-success/25 px-2.5 py-1 text-[11px] font-medium text-success-bright transition-colors hover:border-danger/40 hover:text-danger-bright"
                 @click="config.clear_ai_api_key = true; config.ai_api_key = ''">
-                Clear Stored Key
+                {{ $t('config.ai_key_clear') }}
               </button>
             </div>
             <div v-else-if="config.clear_ai_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-danger/20 bg-danger/8 px-3 py-2 text-xs text-danger-bright">
-              <span>The stored API key will be removed when you save.</span>
+              <span>{{ $t('config.ai_key_will_remove') }}</span>
               <button
                 type="button"
                 class="rounded-full border border-danger/30 px-2.5 py-1 text-[11px] font-medium text-danger-bright transition-colors hover:border-ice/40 hover:text-ice"
                 @click="config.clear_ai_api_key = false">
-                Keep Existing Key
+                {{ $t('config.ai_key_keep') }}
               </button>
             </div>
             <div class="flex gap-2">
@@ -925,36 +946,37 @@ onBeforeUnmount(() => {
                   :type="showApiKey ? 'text' : 'password'"
                   v-model="config.ai_api_key"
                   @input="config.ai_api_key && (config.clear_ai_api_key = false)"
-                  class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 pr-10 text-silver focus:border-ice focus:outline-none font-mono text-sm"
+                  class="settings-input pr-10 font-mono text-sm"
                   :placeholder="currentProvider.keyPlaceholder" />
-                <button @click="showApiKey = !showApiKey" class="absolute right-2 top-1/2 -translate-y-1/2 text-storm hover:text-silver transition-colors">
+                <button type="button" :aria-label="$t('config.ai_key_toggle_aria')" @click="showApiKey = !showApiKey" class="focus-ring absolute right-2 top-1/2 -translate-y-1/2 text-storm hover:text-silver transition-colors">
                   <svg v-if="!showApiKey" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
                   <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/></svg>
                 </button>
               </div>
             </div>
-              <div class="text-xs text-storm mt-1">{{ currentProvider.keyHint }}</div>
+              <div class="text-xs text-storm mt-1">{{ $t(currentProvider.keyHintKey) }}</div>
             </div>
         </section>
 
         <section class="settings-section settings-section-compact space-y-4">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="section-kicker">Testing</div>
-              <div class="settings-section-title mt-2 text-base">Explanation cache, timeout, and provider check</div>
+              <div class="section-kicker">{{ $t('config.ai_testing_kicker') }}</div>
+              <div class="settings-section-title mt-2 text-base">{{ $t('config.ai_testing_title') }}</div>
             </div>
             <button
+              type="button"
               @click="testProviderConfig"
               :disabled="testLoading || aiLoading || !canTestDraft"
-              class="inline-flex items-center gap-2 h-10 px-4 text-sm font-medium rounded-lg bg-ice text-void hover:bg-ice/90 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
+              class="focus-ring dashboard-action-button dashboard-action-button-primary gap-2">
               <svg v-if="testLoading || aiLoading" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span>{{ testLoading || aiLoading ? 'Testing…' : 'Test explanation' }}</span>
+              <span>{{ testLoading || aiLoading ? $t('config.ai_testing') : $t('config.ai_test_explanation') }}</span>
             </button>
           </div>
 
           <div class="grid gap-4 lg:grid-cols-2">
             <div>
-              <label class="block text-sm font-medium text-silver mb-1">Cache Duration</label>
+              <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_cache_duration') }}</label>
               <div class="flex items-center gap-3">
                 <input
                   v-model="config.ai_cache_ttl_hours"
@@ -968,7 +990,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div>
-              <label class="block text-sm font-medium text-silver mb-1">Timeout</label>
+              <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_timeout_label') }}</label>
               <div class="flex items-center gap-2">
                 <input
                   v-model="config.ai_timeout_ms"
@@ -976,36 +998,36 @@ onBeforeUnmount(() => {
                   min="1000"
                   max="120000"
                   step="500"
-                  class="w-32 bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                  class="settings-input w-32"
                   placeholder="5000" />
-                <span class="text-sm text-storm">ms</span>
+                <span class="text-sm text-storm">{{ $t('config.ai_timeout_unit') }}</span>
               </div>
             </div>
           </div>
 
           <div class="grid gap-4 lg:grid-cols-2">
             <div>
-              <label class="block text-sm font-medium text-silver mb-1">Test Device</label>
+              <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_test_device') }}</label>
               <input
                 v-model="testDeviceName"
                 list="ai-device-options"
                 type="text"
-                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                class="settings-input"
                 placeholder="Steam Deck OLED" />
-              <div class="text-xs text-storm mt-1">Context for the explanation only; this cannot select device settings.</div>
+              <div class="text-xs text-storm mt-1">{{ $t('config.ai_test_device_hint') }}</div>
               <datalist id="ai-device-options">
                 <option v-for="device in aiDevices" :key="device.name" :value="device.name" />
               </datalist>
             </div>
 
             <div>
-              <label class="block text-sm font-medium text-silver mb-1">Test App</label>
+              <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_test_app') }}</label>
               <input
                 v-model="testAppName"
                 type="text"
-                class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-silver focus:border-ice focus:outline-none"
+                class="settings-input"
                 placeholder="Rocket League" />
-              <div class="text-xs text-storm mt-1">Optional explanatory context; this cannot select app settings.</div>
+              <div class="text-xs text-storm mt-1">{{ $t('config.ai_test_app_hint') }}</div>
             </div>
           </div>
 
@@ -1018,57 +1040,59 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="testResult.retryLabel" class="mt-2 text-xs font-medium text-silver/80">{{ testResult.retryLabel }}</div>
             <div v-if="testResult.success && testResult.payload" class="grid gap-2 mt-3 sm:grid-cols-2">
-              <div class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">Source</div>
+              <StatTile>
+                <div class="stat-kicker">{{ $t('config.ai_result_source') }}</div>
                 <div class="mt-2 flex flex-wrap items-center gap-2">
                   <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="cacheStatusTone(testResult.payload.cache_status)">
                     {{ optimizationSourceLabel(testResult.payload.source) }}
                   </span>
                   <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(testResult.payload.confidence)">
-                    {{ (testResult.payload.confidence || 'unknown').toUpperCase() }}
+                    {{ (testResult.payload.confidence || $t('config.ai_confidence_unknown')).toUpperCase() }}
                   </span>
                 </div>
-              </div>
-              <div class="rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-                <div class="text-[10px] uppercase tracking-wider text-storm">Authority</div>
-                <div class="text-sm text-silver mt-1">Explanation only · cannot change settings or actions</div>
-              </div>
+              </StatTile>
+              <StatTile :label="$t('config.ai_result_authority')" :value="$t('config.ai_result_authority_copy')" />
             </div>
-            <div v-if="testResult.success && testResult.payload?.signals_used?.length" class="mt-3 rounded-lg border border-storm/20 bg-void/40 px-3 py-2">
-              <div class="text-[10px] uppercase tracking-wider text-storm">Signals used</div>
+            <StatTile v-if="testResult.success && testResult.payload?.signals_used?.length" tile-class="mt-3">
+              <div class="stat-kicker">{{ $t('config.ai_result_signals') }}</div>
               <div class="mt-2 flex flex-wrap gap-2">
                 <span v-for="signal in testResult.payload.signals_used" :key="signal" class="inline-flex items-center rounded-full border border-storm/40 bg-void/30 px-2 py-0.5 text-[11px] font-medium text-silver">
                   {{ signal }}
                 </span>
               </div>
-            </div>
-            <div v-if="selectedHistoryEntry" class="mt-3 rounded-lg border px-3 py-2" :class="selectedHistoryEntry.consecutive_poor_outcomes > 0 ? 'border-danger/20 bg-danger/8' : 'border-storm/20 bg-void/40'">
-              <div class="text-[10px] uppercase tracking-wider text-storm">Recent outcome for this device + app</div>
+            </StatTile>
+            <StatTile v-if="selectedHistoryEntry" :tile-class="['mt-3', selectedHistoryEntry.consecutive_poor_outcomes > 0 ? 'border-danger/20 bg-danger/8' : '']">
+              <div class="stat-kicker">{{ $t('config.ai_result_recent_outcome') }}</div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(selectedHistoryEntry.last_optimization_confidence)">
                   {{ optimizationSourceLabel(selectedHistoryEntry.last_optimization_source) }}
                 </span>
                 <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="(selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'A' || (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'B' ? 'border-success/20 bg-success/8 text-success-bright' : (selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade) === 'C' ? 'border-warning/20 bg-warning/8 text-warning-bright' : 'border-danger/20 bg-danger/8 text-danger'">
-                  Grade {{ selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade || '—' }}
+                  {{ $t('config.ai_result_grade', { grade: selectedHistoryEntry.last_quality_grade || selectedHistoryEntry.quality_grade || '?' }) }}
                 </span>
-                <span class="text-xs text-storm">Updated {{ formatRelativeTime(selectedHistoryEntry.last_updated_at) }}</span>
+                <span class="text-xs text-storm">{{ $t('config.ai_result_updated', { when: formatRelativeTime(selectedHistoryEntry.last_updated_at) }) }}</span>
               </div>
               <div class="text-xs text-silver mt-2">
-                Latest session: {{ Math.round(selectedHistoryEntry.last_fps || selectedHistoryEntry.avg_fps || 0) }}/{{ Math.round(selectedHistoryEntry.last_target_fps || selectedHistoryEntry.last_fps || selectedHistoryEntry.avg_fps || 0) }} FPS,
-                {{ Math.round(selectedHistoryEntry.last_latency_ms || selectedHistoryEntry.avg_latency_ms || 0) }}ms,
-                {{ selectedHistoryEntry.last_bitrate_kbps || selectedHistoryEntry.avg_bitrate_kbps || 0 }}kbps,
-                {{ Number(selectedHistoryEntry.last_packet_loss_pct ?? selectedHistoryEntry.packet_loss_pct ?? 0).toFixed(1) }}% loss.
+                {{ $t('config.ai_result_latest_session', {
+                  fps: Math.round(selectedHistoryEntry.last_fps || selectedHistoryEntry.avg_fps || 0),
+                  target: Math.round(selectedHistoryEntry.last_target_fps || selectedHistoryEntry.last_fps || selectedHistoryEntry.avg_fps || 0),
+                  latency: Math.round(selectedHistoryEntry.last_latency_ms || selectedHistoryEntry.avg_latency_ms || 0),
+                  kbps: selectedHistoryEntry.last_bitrate_kbps || selectedHistoryEntry.avg_bitrate_kbps || 0,
+                  loss: Number(selectedHistoryEntry.last_packet_loss_pct ?? selectedHistoryEntry.packet_loss_pct ?? 0).toFixed(1),
+                }) }}
               </div>
               <div class="text-xs text-silver mt-2">
-                {{ selectedHistoryEntry.session_count }} session{{ selectedHistoryEntry.session_count === 1 ? '' : 's' }} tracked,
-                avg {{ Math.round(selectedHistoryEntry.avg_fps || 0) }} FPS,
-                {{ selectedHistoryEntry.poor_outcome_count }} poor outcome{{ selectedHistoryEntry.poor_outcome_count === 1 ? '' : 's' }} total,
-                {{ selectedHistoryEntry.consecutive_poor_outcomes }} consecutive poor sessions.
+                {{ $t('config.ai_result_session_totals', {
+                  sessions: selectedHistoryEntry.session_count,
+                  fps: Math.round(selectedHistoryEntry.avg_fps || 0),
+                  poor: selectedHistoryEntry.poor_outcome_count,
+                  consecutive: selectedHistoryEntry.consecutive_poor_outcomes,
+                }) }}
               </div>
               <div v-if="selectedHistoryEntry.last_invalidated_at" class="text-xs text-warning-bright mt-2">
-                  Historical explanation archived {{ formatRelativeTime(selectedHistoryEntry.last_invalidated_at) }} after the last poor run.
+                {{ $t('config.ai_result_archived', { when: formatRelativeTime(selectedHistoryEntry.last_invalidated_at) }) }}
               </div>
-            </div>
+            </StatTile>
           </div>
         </section>
       </div>
@@ -1077,81 +1101,74 @@ onBeforeUnmount(() => {
         <details class="settings-section settings-section-compact settings-disclosure" :open="false">
           <summary class="settings-disclosure-summary">
             <div>
-              <div class="section-kicker">Runtime</div>
-              <div class="settings-section-title mt-2 text-base">Saved explanation status</div>
-              <div class="settings-summary-copy">The loaded runtime can differ from the unsaved draft on the left.</div>
+              <div class="section-kicker">{{ $t('config.ai_runtime_kicker') }}</div>
+              <div class="settings-section-title mt-2 text-base">{{ $t('config.ai_runtime_title') }}</div>
+              <div class="settings-summary-copy">{{ $t('config.ai_runtime_copy') }}</div>
             </div>
             <div class="flex items-center gap-2">
               <span
                 class="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium"
                 :class="draftMatchesRuntime ? 'border-success/20 bg-success/8 text-success' : 'border-warning/20 bg-warning/8 text-warning-bright'">
-                {{ draftMatchesRuntime ? 'In sync' : 'Unsaved draft' }}
+                {{ draftMatchesRuntime ? $t('config.ai_in_sync') : $t('config.ai_unsaved_draft') }}
               </span>
               <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
             </div>
           </summary>
 
           <div class="settings-disclosure-body grid gap-3">
-            <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-              <div class="text-xs uppercase tracking-wider text-storm">Provider</div>
+            <StatTile>
+              <div class="stat-kicker">{{ $t('config.ai_runtime_provider') }}</div>
               <div class="flex items-center gap-2 mt-2">
                 <span v-if="liveProvider" class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="providerPill(liveProvider.id)">
                   {{ liveProvider.name }}
                 </span>
-                <span class="text-sm text-silver">{{ aiStatus?.provider || 'Not loaded' }}</span>
+                <span class="text-sm text-silver">{{ aiStatus?.provider || $t('config.ai_not_loaded') }}</span>
               </div>
-            </div>
+            </StatTile>
 
-            <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-              <div class="text-xs uppercase tracking-wider text-storm">Model</div>
-              <div class="text-sm text-silver font-mono mt-2 break-all">{{ aiStatus?.model || 'Not loaded' }}</div>
-            </div>
+            <StatTile :label="$t('config.ai_runtime_model')">
+              <div class="stat-kicker">{{ $t('config.ai_runtime_model') }}</div>
+              <div class="text-sm text-silver font-mono mt-2 break-all">{{ aiStatus?.model || $t('config.ai_not_loaded') }}</div>
+            </StatTile>
 
-            <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-              <div class="text-xs uppercase tracking-wider text-storm">Endpoint</div>
-              <div class="text-sm text-silver font-mono mt-2 break-all">{{ aiStatus?.base_url || 'Not loaded' }}</div>
+            <StatTile>
+              <div class="stat-kicker">{{ $t('config.ai_runtime_endpoint') }}</div>
+              <div class="text-sm text-silver font-mono mt-2 break-all">{{ aiStatus?.base_url || $t('config.ai_not_loaded') }}</div>
+            </StatTile>
+
+            <div class="grid gap-3 sm:grid-cols-2">
+              <StatTile :label="$t('config.ai_runtime_auth')" :value="aiStatus?.auth_mode || $t('config.ai_unknown')" />
+              <StatTile :label="$t('config.ai_runtime_cache_entries')" :value="String(aiStatus?.cache_count ?? 0)" />
             </div>
 
             <div class="grid gap-3 sm:grid-cols-2">
-              <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-                <div class="text-xs uppercase tracking-wider text-storm">Auth</div>
-                <div class="text-sm text-silver mt-2">{{ aiStatus?.auth_mode || 'Unknown' }}</div>
-              </div>
-
-              <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-                <div class="text-xs uppercase tracking-wider text-storm">Cache Entries</div>
-                <div class="text-sm text-silver mt-2">{{ aiStatus?.cache_count ?? 0 }}</div>
-              </div>
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-                <div class="text-xs uppercase tracking-wider text-storm">Provider Health</div>
+              <StatTile>
+                <div class="stat-kicker">{{ $t('config.ai_runtime_health') }}</div>
                 <div class="text-sm font-medium mt-2" :class="providerHealthSummary.tone">{{ providerHealthSummary.label }}</div>
                 <div class="text-xs text-storm mt-2">{{ providerHealthSummary.detail }}</div>
-              </div>
+              </StatTile>
 
-              <div class="rounded-xl border border-storm/30 bg-void/30 p-3">
-                <div class="text-xs uppercase tracking-wider text-storm">Runtime Telemetry</div>
+              <StatTile>
+                <div class="stat-kicker">{{ $t('config.ai_runtime_telemetry') }}</div>
                 <div class="mt-2 grid gap-2 text-xs text-silver">
                   <div class="flex items-center justify-between gap-3">
-                    <span class="text-storm">Last latency</span>
-                    <span class="font-mono">{{ aiStatus?.last_latency_ms ?? '—' }}<span v-if="aiStatus?.last_latency_ms != null"> ms</span></span>
+                    <span class="text-storm">{{ $t('config.ai_runtime_last_latency') }}</span>
+                    <span class="font-mono">{{ aiStatus?.last_latency_ms ?? $t('config.ai_time_never') }}<span v-if="aiStatus?.last_latency_ms != null"> ms</span></span>
                   </div>
                   <div class="flex items-center justify-between gap-3">
-                    <span class="text-storm">Last success</span>
+                    <span class="text-storm">{{ $t('config.ai_runtime_last_success') }}</span>
                     <span>{{ formatRelativeTime(aiStatus?.last_success_at) }}</span>
                   </div>
                   <div class="flex items-center justify-between gap-3">
-                    <span class="text-storm">Last failure</span>
+                    <span class="text-storm">{{ $t('config.ai_runtime_last_failure') }}</span>
                     <span>{{ formatRelativeTime(aiStatus?.last_failure_at) }}</span>
                   </div>
                   <div class="flex items-center justify-between gap-3">
-                    <span class="text-storm">In flight</span>
+                    <span class="text-storm">{{ $t('config.ai_runtime_in_flight') }}</span>
                     <span class="font-mono">{{ aiStatus?.in_flight_requests ?? 0 }}</span>
                   </div>
                 </div>
-              </div>
+              </StatTile>
             </div>
 
             <div v-if="aiStatus?.auth_mode === 'subscription'" class="rounded-xl border border-warning/20 bg-warning/6 p-3">
@@ -1160,17 +1177,17 @@ onBeforeUnmount(() => {
                 {{ subscriptionRuntimeSummary(aiStatus) }}
               </div>
               <div v-if="aiStatus?.cli_authenticated === false && aiStatus?.cli_login_command" class="text-xs text-storm mt-2">
-                Authorize this host by running <code class="bg-void/40 px-1 rounded text-warning-bright">{{ aiStatus.cli_login_command }}</code> in a terminal.
+                {{ $t('config.ai_cli_authorize', { command: aiStatus.cli_login_command }) }}
               </div>
             </div>
 
             <div v-if="aiStatus && !draftMatchesRuntime" class="rounded-xl border border-warning/20 bg-warning/6 p-3">
-              <div class="text-xs uppercase tracking-wider text-storm">Pending Change</div>
-              <div class="text-sm text-silver mt-2">The draft on the left differs from the loaded explanation runtime. Save before expecting Doctor explanations to switch providers or models.</div>
+              <div class="text-xs uppercase tracking-wider text-storm">{{ $t('config.ai_pending_change') }}</div>
+              <div class="text-sm text-silver mt-2">{{ $t('config.ai_pending_change_copy') }}</div>
             </div>
 
             <div v-if="aiStatus?.last_error" class="rounded-xl border border-danger/20 bg-danger/8 p-3">
-              <div class="text-xs uppercase tracking-wider text-storm">Recent Error</div>
+              <div class="text-xs uppercase tracking-wider text-storm">{{ $t('config.ai_recent_error') }}</div>
               <div class="text-sm text-danger mt-2">{{ aiStatus.last_error }}</div>
             </div>
           </div>
@@ -1179,20 +1196,21 @@ onBeforeUnmount(() => {
         <details class="settings-section settings-section-compact settings-disclosure" :open="cacheExpanded" @toggle="cacheExpanded = $event.target.open">
           <summary class="settings-disclosure-summary">
             <div class="flex items-center gap-2">
-              <div class="section-kicker">Cache</div>
+              <div class="section-kicker">{{ $t('config.ai_cache_kicker') }}</div>
               <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ Array.isArray(aiCache) ? aiCache.length : 0 }}</span>
             </div>
             <div class="flex items-center gap-2">
               <button
+                type="button"
                 @click.stop="handleClearCache"
-                class="text-xs text-storm hover:text-danger transition-colors"
+                class="focus-ring text-xs text-storm hover:text-danger transition-colors"
                 :class="{ 'opacity-50 pointer-events-none': !Array.isArray(aiCache) || aiCache.length === 0 }">
-                Clear All
+                {{ $t('config.ai_cache_clear_all') }}
               </button>
               <svg class="settings-disclosure-chevron h-4 w-4 text-storm" :class="{ 'rotate-180': cacheExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
             </div>
           </summary>
-          <div class="settings-disclosure-body text-sm text-storm">Legacy explanation records are informational and never feed launch policy.</div>
+          <div class="settings-disclosure-body text-sm text-storm">{{ $t('config.ai_cache_copy') }}</div>
 
           <div v-if="cacheExpanded && Array.isArray(aiCache) && aiCache.length > 0" class="space-y-2 max-h-96 overflow-y-auto scrollbar-hidden">
             <div v-for="(entry, i) in aiCache" :key="i" class="py-2" :class="i > 0 ? 'border-t border-storm/20' : ''">
@@ -1200,7 +1218,7 @@ onBeforeUnmount(() => {
                 <div class="min-w-0 flex-1">
                   <div class="text-silver font-medium truncate">{{ entry.device_name }}{{ entry.app_name ? ' + ' + entry.app_name : '' }}</div>
                   <div class="text-xs text-silver/60">
-                    Explanation only<span v-if="entry.model"> · {{ entry.model }}</span>
+                    {{ $t('config.ai_cache_explanation_only') }}<span v-if="entry.model"> · {{ entry.model }}</span>
                   </div>
                 </div>
                 <div class="flex items-center gap-2 shrink-0 ml-3">
@@ -1213,19 +1231,19 @@ onBeforeUnmount(() => {
               <div v-if="entry._expanded" class="mt-2 p-3 bg-void/50 rounded-lg text-xs space-y-1.5">
                 <div class="flex flex-wrap items-center gap-2 pb-1.5 border-b border-storm/20">
                   <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="cacheStatusTone(entry.cache_status)">
-                    {{ entry.cache_status || 'stored' }}
+                    {{ entry.cache_status || $t('config.ai_cache_stored') }}
                   </span>
                   <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="confidenceTone(entry.confidence)">
-                    {{ (entry.confidence || 'unknown').toUpperCase() }}
+                    {{ (entry.confidence || $t('config.ai_confidence_unknown')).toUpperCase() }}
                   </span>
-                  <span class="text-storm">updated {{ formatRelativeTime(entry.generated_at || entry.cached_at) }}</span>
+                  <span class="text-storm">{{ $t('config.ai_cache_updated', { when: formatRelativeTime(entry.generated_at || entry.cached_at) }) }}</span>
                 </div>
                 <div class="flex justify-between" v-if="entry.expires_at">
-                  <span class="text-storm">Expires</span>
+                  <span class="text-storm">{{ $t('config.ai_cache_expires') }}</span>
                   <span class="text-silver">{{ formatRelativeTime(entry.expires_at) }}</span>
                 </div>
                 <div v-if="entry.signals_used?.length" class="pt-1.5 border-t border-storm/20">
-                  <div class="text-storm mb-2">Signals used</div>
+                  <div class="text-storm mb-2">{{ $t('config.ai_result_signals') }}</div>
                   <div class="flex flex-wrap gap-1.5">
                     <span v-for="signal in entry.signals_used" :key="signal" class="inline-flex items-center rounded-full border border-storm/40 bg-void/30 px-2 py-0.5 text-[11px] font-medium text-silver">
                       {{ signal }}
@@ -1233,17 +1251,17 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div v-if="entry.reasoning || entry.reasoning_summary" class="pt-1.5 border-t border-storm/20">
-                  <span class="text-storm">Explanation: </span>
+                  <span class="text-storm">{{ $t('config.ai_cache_explanation') }} </span>
                   <span class="text-silver/80">{{ entry.reasoning_summary || entry.reasoning }}</span>
                 </div>
                 <div v-if="entry.reasoning" class="pt-1.5 border-t border-storm/20">
-                  <span class="text-storm">AI Reasoning: </span>
+                  <span class="text-storm">{{ $t('config.ai_cache_reasoning') }} </span>
                   <span class="text-silver/80 italic">{{ entry.reasoning }}</span>
                 </div>
               </div>
             </div>
           </div>
-          <div v-else-if="cacheExpanded" class="text-sm text-storm text-center py-3">No cached explanations yet</div>
+          <div v-else-if="cacheExpanded" class="text-sm text-storm text-center py-3">{{ $t('config.ai_cache_empty') }}</div>
         </details>
       </div>
     </div>
@@ -1251,19 +1269,19 @@ onBeforeUnmount(() => {
     <details class="settings-section settings-section-compact settings-disclosure" :open="knowledgeExpanded" @toggle="knowledgeExpanded = $event.target.open">
       <summary class="settings-disclosure-summary">
         <div class="flex items-center gap-2">
-          <div class="section-kicker">Devices</div>
-          <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ filteredDevices.length }} devices</span>
+          <div class="section-kicker">{{ $t('config.ai_devices_kicker') }}</div>
+          <span class="px-1.5 py-0.5 rounded text-xs font-mono bg-twilight text-silver">{{ $t('config.ai_devices_count', { count: filteredDevices.length }) }}</span>
         </div>
         <svg class="settings-disclosure-chevron h-4 w-4 text-storm" :class="{ 'rotate-180': knowledgeExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </summary>
-      <div class="settings-disclosure-body text-sm text-storm">Versioned device facts used only by deterministic Launch presets.</div>
+      <div class="settings-disclosure-body text-sm text-storm">{{ $t('config.ai_devices_copy') }}</div>
       <div v-if="knowledgeExpanded" class="mt-4">
         <input
           v-model="deviceSearch"
           @input="filterDevices"
           type="text"
-          placeholder="Search devices..."
-          class="w-full bg-void/50 border border-storm/50 rounded-lg px-3 py-2 text-sm text-silver focus:border-ice focus:outline-none mb-3" />
+          :placeholder="$t('config.ai_devices_search')"
+          class="settings-input text-sm mb-3" />
         <div class="space-y-1 max-h-72 overflow-y-auto scrollbar-hidden">
           <div v-for="device in filteredDevices" :key="device.name" class="flex items-center justify-between py-2 px-2 rounded-lg hover:bg-twilight/30 transition-colors">
             <div class="min-w-0 flex-1">
@@ -1285,7 +1303,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="filteredDevices.length === 0" class="text-sm text-storm text-center py-3">
-            {{ deviceSearch ? 'No matching devices' : 'Loading devices...' }}
+            {{ deviceSearch ? $t('config.ai_devices_no_match') : $t('config.ai_devices_loading') }}
           </div>
         </div>
       </div>

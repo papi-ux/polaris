@@ -12,13 +12,16 @@ const config = ref(props.config)
 
 <template>
   <div id="files" class="config-page">
+    <p class="text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/configuration/#files" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.files_docs_link') }}</a>
+    </p>
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Catalog & state</div>
+        <div class="section-kicker">{{ $t('config.files_kicker_catalog_state') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Runtime paths</h3>
-          <InfoHint size="sm" label="Catalog and state guidance">
-            Point Polaris at the files it uses for app discovery, log capture, and saved runtime state.
+          <h3 class="settings-section-title">{{ $t('config.files_section_runtime_paths') }}</h3>
+          <InfoHint size="sm" :label="$t('config.files_hint_catalog_and_state_guidance')">
+            {{ $t('config.files_hint_catalog_and_state_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -51,11 +54,11 @@ const config = ref(props.config)
 
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
-        <div class="section-kicker">Credentials</div>
+        <div class="section-kicker">{{ $t('config.files_kicker_credentials') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Credentials and TLS</h3>
-          <InfoHint size="sm" label="Security material guidance">
-            Keep login credentials and TLS material on known paths so pairing and the web UI remain stable across restarts.
+          <h3 class="settings-section-title">{{ $t('config.files_section_credentials_and_tls') }}</h3>
+          <InfoHint size="sm" :label="$t('config.files_hint_security_material_guidance')">
+            {{ $t('config.files_hint_security_material_guidance_body') }}
           </InfoHint>
         </div>
       </div>

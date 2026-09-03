@@ -16,13 +16,16 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
 <template>
   <div id="network" class="config-page">
+    <p class="text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/configuration/#common-options" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.network_docs_link') }}</a>
+    </p>
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Exposure</div>
+        <div class="section-kicker">{{ $t('config.network_kicker_exposure') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Addressing and access</h3>
-          <InfoHint size="sm" label="Exposure guidance">
-            Define how Polaris announces itself, which ports it serves, and whether the web UI stays local-only or can be reached remotely.
+          <h3 class="settings-section-title">{{ $t('config.network_section_addressing_and_access') }}</h3>
+          <InfoHint size="sm" :label="$t('config.network_hint_exposure_guidance')">
+            {{ $t('config.network_hint_exposure_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -72,7 +75,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
         </div>
 
         <div class="settings-subtle-surface mt-3">
-          <div class="mb-2 text-[11px] font-medium uppercase tracking-eyebrow text-storm">Port map</div>
+          <div class="mb-2 text-[11px] font-medium uppercase tracking-eyebrow text-storm">{{ $t('config.network_port_map') }}</div>
           <table class="w-full text-left">
             <thead>
             <tr>
@@ -139,11 +142,11 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
 
     <section id="encryption_and_trust" class="settings-section scroll-mt-28">
       <div class="settings-section-header">
-        <div class="section-kicker">Transport security</div>
+        <div class="section-kicker">{{ $t('config.network_kicker_transport_security') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Encryption and trust</h3>
-          <InfoHint size="sm" label="Encryption and trust guidance">
-            Choose how aggressively Polaris encrypts LAN and WAN sessions, then define which subnets can use the trusted TOFU pairing path.
+          <h3 class="settings-section-title">{{ $t('config.network_section_encryption_and_trust') }}</h3>
+          <InfoHint size="sm" :label="$t('config.network_hint_encryption_and_trust_guidance')">
+            {{ $t('config.network_hint_encryption_and_trust_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -175,7 +178,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
       </div>
 
       <div class="mb-3">
-        <label class="block text-sm font-medium text-storm mb-1">Trusted Subnet Auto-Pairing</label>
+        <label class="block text-sm font-medium text-storm mb-1">{{ $t('config.network_tofu_label') }}</label>
         <label class="flex items-center gap-3 rounded-xl border border-storm/40 bg-deep/60 px-3 py-3 text-sm text-silver">
           <input
             type="checkbox"
@@ -183,13 +186,13 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
             :checked="config.trusted_subnet_auto_pairing === 'enabled'"
             @change="config.trusted_subnet_auto_pairing = $event.target.checked ? 'enabled' : 'disabled'"
           />
-          <span>Allow trusted subnets to pair without a PIN.</span>
+          <span>{{ $t('config.network_tofu_copy') }}</span>
         </label>
-        <div class="text-sm text-storm mt-2">Disabled by default. Use only on networks you fully control.</div>
+        <div class="text-sm text-storm mt-2">{{ $t('config.network_tofu_hint') }}</div>
       </div>
 
       <div class="mb-3">
-        <label class="block text-sm font-medium text-storm mb-1">Trusted Subnets (TOFU)</label>
+        <label class="block text-sm font-medium text-storm mb-1">{{ $t('config.network_trusted_subnets_label') }}</label>
         <div class="text-sm text-storm mb-2">
           Use IPv4 or IPv6 CIDR notation, for example <code class="bg-deep px-1 rounded">10.0.0.0/24</code> or <code class="bg-deep px-1 rounded">fd00:1234:5678::/64</code>.
         </div>
@@ -216,7 +219,7 @@ const effectivePort = computed(() => Number(config.value?.port) || defaultMoonli
           + Add Subnet
         </button>
         <div class="settings-warning-surface mt-3" v-if="config.trusted_subnets && config.trusted_subnets.length > 0 && config.trusted_subnet_auto_pairing === 'enabled'">
-          Any device on these networks can pair without approval. Only trust networks you control.
+          {{ $t('config.network_trusted_subnets_warning') }}
         </div>
       </div>
     </section>

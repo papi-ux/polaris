@@ -13,10 +13,13 @@ const config = ref(props.config)
 
 <template>
   <div class="config-page">
+    <p class="text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/configuration/#common-options" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.advanced_docs_link') }}</a>
+    </p>
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Load handling</div>
-        <h3 class="settings-section-title">Stream behavior under load</h3>
+        <div class="section-kicker">{{ $t('config.advanced_kicker_load_handling') }}</div>
+        <h3 class="settings-section-title">{{ $t('config.advanced_section_stream_behavior_under_load') }}</h3>
       </div>
 
       <div class="mb-3">
@@ -48,9 +51,9 @@ const config = ref(props.config)
     <details class="settings-section settings-section-compact settings-disclosure">
       <summary class="settings-disclosure-summary">
         <div>
-          <div class="section-kicker">Compatibility</div>
-          <h3 class="settings-section-title mt-2">Client and environment behavior</h3>
-          <div class="settings-summary-copy">Use these flags only when you need legacy behavior or broader codec advertising.</div>
+          <div class="section-kicker">{{ $t('config.advanced_kicker_compatibility') }}</div>
+          <h3 class="settings-section-title mt-2">{{ $t('config.advanced_section_client_and_environment_behavior') }}</h3>
+          <div class="settings-summary-copy">{{ $t('config.advanced_summary_use_these_flags_only_when_you_need_legacy_behavi') }}</div>
         </div>
         <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
       </summary>
@@ -112,9 +115,9 @@ const config = ref(props.config)
     <details class="settings-section settings-section-compact settings-disclosure">
       <summary class="settings-disclosure-summary">
         <div>
-          <div class="section-kicker">Override</div>
-          <h3 class="settings-section-title mt-2">Capture and encoder preference</h3>
-          <div class="settings-summary-copy">Force a specific capture or encoder path only when automatic selection is not working.</div>
+          <div class="section-kicker">{{ $t('config.advanced_kicker_override') }}</div>
+          <h3 class="settings-section-title mt-2">{{ $t('config.advanced_section_capture_and_encoder_preference') }}</h3>
+          <div class="settings-summary-copy">{{ $t('config.advanced_summary_force_a_specific_capture_or_encoder_path_only_wh') }}</div>
         </div>
         <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7" /></svg>
       </summary>

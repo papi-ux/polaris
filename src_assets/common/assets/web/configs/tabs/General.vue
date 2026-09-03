@@ -67,13 +67,16 @@ function handleSteamGridDbKeyInput() {
 
 <template>
   <div id="general" class="config-page space-y-4">
+    <p class="text-xs text-storm" data-tab-docs-link>
+      <a href="https://papi-ux.com/docs/configuration/#common-options" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.general_docs_link') }}</a>
+    </p>
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Identity</div>
+        <div class="section-kicker">{{ $t('config.general_kicker_identity') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Host identity</h3>
-          <InfoHint size="sm" label="Host basics guidance">
-            Set the visible Polaris identity, UI language, and log verbosity that shape day-to-day host administration.
+          <h3 class="settings-section-title">{{ $t('config.general_section_host_identity') }}</h3>
+          <InfoHint size="sm" :label="$t('config.general_hint_host_basics_guidance')">
+            {{ $t('config.general_hint_host_basics_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -83,8 +86,8 @@ function handleSteamGridDbKeyInput() {
     <div>
       <div class="section-title-row mb-1">
         <label for="locale" class="block text-sm font-medium text-storm">{{ $t('config.locale') }}</label>
-        <InfoHint size="sm" label="Locale guidance">
-          Controls the language used by the Polaris web console.
+        <InfoHint size="sm" :label="$t('config.general_hint_locale_guidance')">
+          {{ $t('config.general_hint_locale_guidance_body') }}
         </InfoHint>
       </div>
       <select id="locale" class="settings-input" v-model="config.locale">
@@ -117,8 +120,8 @@ function handleSteamGridDbKeyInput() {
     <div class="mb-3">
       <div class="section-title-row mb-1">
         <label for="sunshine_name" class="block text-sm font-medium text-storm">{{ $t('config.sunshine_name') }}</label>
-        <InfoHint size="sm" label="Visible name guidance">
-          Shown to clients and local discovery surfaces.
+        <InfoHint size="sm" :label="$t('config.general_hint_visible_name_guidance')">
+          {{ $t('config.general_hint_visible_name_guidance_body') }}
         </InfoHint>
       </div>
       <input type="text" class="settings-input" id="sunshine_name" placeholder="Polaris"
@@ -129,8 +132,8 @@ function handleSteamGridDbKeyInput() {
     <div class="mb-3">
       <div class="section-title-row mb-1">
         <label for="min_log_level" class="block text-sm font-medium text-storm">{{ $t('config.min_log_level') }}</label>
-        <InfoHint size="sm" label="Log level guidance">
-          Use quieter levels for routine operation and raise this only while debugging.
+        <InfoHint size="sm" :label="$t('config.general_hint_log_level_guidance')">
+          {{ $t('config.general_hint_log_level_guidance_body') }}
         </InfoHint>
       </div>
       <select id="min_log_level" class="settings-input" v-model="config.min_log_level">
@@ -149,11 +152,11 @@ function handleSteamGridDbKeyInput() {
 
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Automation</div>
+        <div class="section-kicker">{{ $t('config.general_kicker_automation') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Automation</h3>
-          <InfoHint size="sm" label="Lifecycle commands guidance">
-            Run host-side commands before apps launch, when sessions resume, and when server shortcuts are triggered from clients.
+          <h3 class="settings-section-title">{{ $t('config.general_section_automation') }}</h3>
+          <InfoHint size="sm" :label="$t('config.general_hint_lifecycle_commands_guidance')">
+            {{ $t('config.general_hint_lifecycle_commands_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -164,8 +167,8 @@ function handleSteamGridDbKeyInput() {
       <div class="section-title-row mb-1">
         <label class="block text-sm font-medium text-storm">{{ $t(`config.global_${type}_cmd`) }}</label>
         <InfoHint size="sm" :label="`${type} command guidance`">
-          <span v-if="type === 'prep'">Run commands before launch, then undo them after the session ends.</span>
-          <span v-else>Run commands when Polaris changes session state on the host.</span>
+          <span v-if="type === 'prep'">{{ $t('config.general_prep_copy') }}</span>
+          <span v-else>{{ $t('config.general_state_copy') }}</span>
         </InfoHint>
       </div>
       <table class="w-full text-left" v-if="cmds[type].length > 0">
@@ -215,8 +218,8 @@ function handleSteamGridDbKeyInput() {
     <div id="server_cmd" class="mb-3 d-flex flex-column">
       <div class="section-title-row mb-1">
         <label class="block text-sm font-medium text-storm">{{ $t('config.server_cmd') }}</label>
-        <InfoHint size="sm" label="Server command guidance">
-          Expose trusted host-side shortcuts that clients can trigger when paired access allows it.
+        <InfoHint size="sm" :label="$t('config.general_hint_server_command_guidance')">
+          {{ $t('config.general_hint_server_command_guidance_body') }}
         </InfoHint>
       </div>
       <table class="w-full text-left" v-if="serverCmd.length > 0">
@@ -265,11 +268,11 @@ function handleSteamGridDbKeyInput() {
 
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Desktop & updates</div>
+        <div class="section-kicker">{{ $t('config.general_kicker_desktop_updates') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Desktop behavior</h3>
-          <InfoHint size="sm" label="Desktop UI behavior guidance">
-            Keep the desktop-side Polaris experience predictable, from update notifications to tray visibility and admin controls.
+          <h3 class="settings-section-title">{{ $t('config.general_section_desktop_behavior') }}</h3>
+          <InfoHint size="sm" :label="$t('config.general_hint_desktop_ui_behavior_guidance')">
+            {{ $t('config.general_hint_desktop_ui_behavior_guidance_body') }}
           </InfoHint>
         </div>
       </div>
@@ -304,50 +307,50 @@ function handleSteamGridDbKeyInput() {
 
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
-        <div class="section-kicker">Metadata</div>
+        <div class="section-kicker">{{ $t('config.general_kicker_metadata') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Artwork integration</h3>
-          <InfoHint size="sm" label="Artwork integration guidance">
-            Connect SteamGridDB so Polaris can fetch artwork for non-Steam entries in your library.
+          <h3 class="settings-section-title">{{ $t('config.general_section_artwork_integration') }}</h3>
+          <InfoHint size="sm" :label="$t('config.general_hint_artwork_integration_guidance')">
+            {{ $t('config.general_hint_artwork_integration_guidance_body') }}
           </InfoHint>
         </div>
       </div>
       <div class="mt-1">
-        <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">SteamGridDB API Key</label>
+        <label for="steamgriddb_api_key" class="block text-sm font-medium text-storm mb-1">{{ $t('config.general_steamgriddb_key') }}</label>
         <div v-if="config.has_steamgriddb_api_key && !config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-success/20 bg-success/8 px-3 py-2 text-xs text-success-bright">
-          <span>A SteamGridDB key is already stored on the host. Leave this blank to keep it, or type a new key to replace it.</span>
+          <span>{{ $t('config.general_steamgriddb_stored') }}</span>
           <button
             type="button"
             class="rounded-full border border-success/25 px-2.5 py-1 text-[11px] font-medium text-success-bright transition-colors hover:border-danger/40 hover:text-danger-bright"
             @click="clearStoredSteamGridDbKey">
-            Clear Stored Key
+            {{ $t('config.general_steamgriddb_clear') }}
           </button>
         </div>
         <div v-else-if="config.clear_steamgriddb_api_key" class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-danger/20 bg-danger/8 px-3 py-2 text-xs text-danger-bright">
-          <span>The stored SteamGridDB key will be removed when you save.</span>
+          <span>{{ $t('config.general_steamgriddb_will_remove') }}</span>
           <button
             type="button"
             class="rounded-full border border-danger/30 px-2.5 py-1 text-[11px] font-medium text-danger-bright transition-colors hover:border-ice/40 hover:text-ice"
             @click="keepStoredSteamGridDbKey">
-            Keep Existing Key
+            {{ $t('config.general_steamgriddb_keep') }}
           </button>
         </div>
         <input type="password" id="steamgriddb_api_key"
                class="settings-input font-mono text-sm"
                v-model="config.steamgriddb_api_key"
                @input="handleSteamGridDbKeyInput"
-               placeholder="Enter your SteamGridDB API key" />
-        <div class="text-xs text-storm mt-1">Enables cover art search for non-Steam games. Get a free key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" class="text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
+               :placeholder="$t('config.general_steamgriddb_placeholder')" />
+        <div class="text-xs text-storm mt-1">{{ $t('config.general_steamgriddb_desc') }} <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" rel="noopener" class="focus-ring text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
       </div>
     </section>
 
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
-        <div class="section-kicker">Metadata</div>
+        <div class="section-kicker">{{ $t('config.general_kicker_metadata') }}</div>
         <div class="section-title-row">
-          <h3 class="settings-section-title">Completion estimates</h3>
-          <InfoHint size="sm" label="Completion estimate guidance">
-            Polaris reads completion times from a local dataset. When a title is missing from it, it can ask How Long To Beat once per title, or leave the estimate blank.
+          <h3 class="settings-section-title">{{ $t('config.general_section_completion_estimates') }}</h3>
+          <InfoHint size="sm" :label="$t('config.general_hint_completion_estimate_guidance')">
+            {{ $t('config.general_hint_completion_estimate_guidance_body') }}
           </InfoHint>
         </div>
       </div>
