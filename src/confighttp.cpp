@@ -3009,6 +3009,31 @@ namespace confighttp {
       if (!entry.hero_url.empty()) {
         game["hero_url"] = entry.hero_url;
       }
+      // What the title installs as and what will execute it. Absent rather than
+      // guessed when Heroic did not record it.
+      if (!entry.platform.empty()) {
+        game["platform"] = entry.platform;
+      }
+      if (!entry.runtime.empty()) {
+        game["runtime"] = entry.runtime;
+      }
+      if (!entry.runtime_name.empty()) {
+        game["runtime_name"] = entry.runtime_name;
+      }
+    };
+    // The wine or proton choice lives per game under the Heroic config root, and
+    // the library files sit at different depths beneath it: store_cache is one
+    // level down, legendaryConfig/legendary is two. Walk up to the directory that
+    // actually holds GamesConfig rather than assuming a fixed depth.
+    const auto attach_heroic_runtime = [](game_library::heroic_game_t &entry, const std::filesystem::path &library_path) {
+      const auto config_root = game_library::heroic_config_root_for_library(library_path);
+      if (config_root.empty()) {
+        return;
+      }
+
+      auto runtime = game_library::heroic_runtime_for_app(config_root, entry.app_name, entry.platform);
+      entry.runtime = std::move(runtime.runtime);
+      entry.runtime_name = std::move(runtime.runtime_name);
     };
     const auto heroic_already_imported = [&existing_cmds, &existing_heroic_keys](
                                            const std::string &store,
@@ -3043,6 +3068,7 @@ namespace confighttp {
           std::stringstream cache_payload;
           cache_payload << cache_file.rdbuf();
           for (auto &entry : game_library::parse_heroic_cache_json(cache_payload.str(), store, install)) {
+            attach_heroic_runtime(entry, cache_path);
             heroic_cache_metadata.emplace(
               heroic_cache_key(entry.install, entry.store, entry.app_name),
               std::move(entry)
@@ -3077,6 +3103,9 @@ namespace confighttp {
                 ); cached != heroic_cache_metadata.end()) {
               entry.poster_url = cached->second.poster_url;
               entry.hero_url = cached->second.hero_url;
+              entry.platform = cached->second.platform;
+              entry.runtime = cached->second.runtime;
+              entry.runtime_name = cached->second.runtime_name;
             }
 
             // Both installs can hold the same title, and the launch command follows the
@@ -3110,10 +3139,11 @@ namespace confighttp {
           std::ifstream file(library_path);
           std::stringstream payload;
           payload << file.rdbuf();
-          for (const auto &entry : game_library::parse_heroic_cache_json(payload.str(), store, install)) {
+          for (auto &entry : game_library::parse_heroic_cache_json(payload.str(), store, install)) {
             // Skip what installed.json or the other install already provided
             if (!seen_heroic_keys.insert(entry.store + "/" + entry.app_name).second) continue;
 
+            attach_heroic_runtime(entry, library_path);
             nlohmann::json game;
             game["name"] = entry.name;
             game["app_name"] = entry.app_name;
