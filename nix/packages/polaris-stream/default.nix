@@ -140,7 +140,7 @@ stdenv'.mkDerivation (finalAttrs: {
   ui = buildNpmPackage {
     inherit (finalAttrs) src version;
     pname = "polaris-stream-ui";
-    npmDepsHash = "sha256-mpfQk4k40tMhB9FbXuNntgOqzWEShtXgBtmB4qUXj4o=";
+    npmDepsHash = "sha256-zgDMvRbXZ5yQXlIZneO9Xuq2J4Xs2G4EgvewiP3QYts=";
 
     installPhase = ''
       runHook preInstall
