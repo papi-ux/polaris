@@ -54,6 +54,19 @@ describe('settings tabs affordances', () => {
     }
   })
 
+  it('keeps every inline field description on the five tabs to one sentence; the reference carries the depth', () => {
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
+    const offenders = []
+    for (const path of ['configs/tabs/General.vue', 'configs/tabs/Inputs.vue', 'configs/tabs/Network.vue', 'configs/tabs/Advanced.vue', 'configs/tabs/Files.vue']) {
+      const template = templateOf(webSource(path))
+      for (const match of template.matchAll(/\b(?:id|for)="([a-z][a-z0-9_]+)"/g)) {
+        const description = locale[`${match[1]}_desc`]
+        if (typeof description === 'string' && description.length > 170) offenders.push(`${path}: ${match[1]} (${description.length})`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
   it('anchors every docs pointer to a real heading', () => {
     const configuration = readFileSync(join(process.cwd(), 'docs/configuration.md'), 'utf8')
     const troubleshooting = readFileSync(join(process.cwd(), 'docs/troubleshooting.md'), 'utf8')
