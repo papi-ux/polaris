@@ -203,6 +203,36 @@ NESTED_VALID=0 STOP_OK=0 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
 grep -qx 'write-idle-env' "$actions" || fail "idle runtime environment was not committed"
 grep -q 'restart polaris-portal-gamescope.service' "$actions" || fail "portal was not rebound"
 
+# The scripts/install stack has the idle unit but no private portal unit.
+# Stop must restore the idle compositor exactly like a managed host and
+# commit without touching the absent portal backend.
+reset_state
+printf 'session-A nested host-portal\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+: >"$actions"
+IDLE_LOAD_STATE=loaded PORTAL_LOAD_STATE=not-found \
+  POLARIS_SESSION_INSTANCE_ID= NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
+  run_stop >/dev/null 2>&1 || fail "host-portal restore failed"
+[ ! -e "$work/run/polaris-gamescope-wsi-nested" ] || fail "host-portal handoff retained nested claim"
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-force")" = 0 ] || fail "host-portal handoff did not reset force"
+grep -qx 'unmask-idle' "$actions" || fail "host-portal handoff did not unmask idle"
+grep -q 'start polaris-gamescope-idle.service' "$actions" || fail "host-portal handoff did not restart idle gamescope"
+grep -qx 'write-idle-env' "$actions" || fail "host-portal handoff did not commit idle runtime environment"
+! grep -Eq 'restart polaris-portal|busctl' "$actions" || fail "host-portal handoff touched the absent private portal"
+
+# A persisted host-portal session is not restored against a host whose units
+# now classify as something else.
+reset_state
+printf 'session-A nested host-portal\n' >"$work/run/polaris-gamescope-session-state"
+rm -f "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode"
+if IDLE_LOAD_STATE=loaded PORTAL_LOAD_STATE=loaded \
+    POLARIS_SESSION_INSTANCE_ID= NESTED_VALID=1 STOP_OK=1 IDLE_VALID=1 IDLE_OWNS_SOCKET=1 WRITE_ENV_OK=1 \
+    run_stop >/dev/null 2>&1; then
+  fail "host-portal session restored against a managed host"
+fi
+[ "$(tr -d '[:space:]' <"$work/run/polaris-gamescope-wsi-nested")" = restore-idle ] ||
+  fail "service model change did not retain restore-idle claim"
+
 # Distro packages intentionally lack the Nix-only idle and private-portal
 # units. Once the exact nested owner is gone and sockets are reclaimable, stop
 # must remove only its durable state and return to an empty compositor baseline.

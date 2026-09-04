@@ -134,7 +134,7 @@ namespace stream_runtime {
           return false;
         }
         if (state >> service_mode) {
-          if (service_mode != "managed" && service_mode != "standalone") {
+          if (service_mode != "managed" && service_mode != "host-portal" && service_mode != "standalone") {
             return false;
           }
           if (state >> extra) {
