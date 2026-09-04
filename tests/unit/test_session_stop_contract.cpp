@@ -338,6 +338,39 @@ TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFall
   ASSERT_NE(recover, std::string::npos);
 }
 
+TEST(SessionStopContractTests, StandalonePackagesSkipPrivatePortalRebind) {
+  // Distro packages ship no polaris-portal-gamescope.service. Restarting the
+  // absent unit and polling its bus cost every nested launch eight seconds
+  // and a warning that read like a failure (#599).
+  const auto source = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
+  ASSERT_FALSE(source.empty());
+  const auto fn = source.find("rebind_private_portal_after_nested_start() {");
+  ASSERT_NE(fn, std::string::npos);
+  const auto fn_end = source.find("\n}\n", fn);
+  ASSERT_NE(fn_end, std::string::npos);
+  const auto body = source.substr(fn, fn_end - fn);
+  const auto managed = body.find("managed)");
+  const auto restart = body.find("systemctl --user restart polaris-portal-gamescope.service");
+  const auto standalone = body.find("standalone)");
+  ASSERT_NE(managed, std::string::npos);
+  ASSERT_NE(restart, std::string::npos);
+  ASSERT_NE(standalone, std::string::npos);
+  EXPECT_LT(managed, restart);
+  EXPECT_LT(restart, standalone);
+  // The standalone arm neither restarts the unit nor waits for its bus.
+  EXPECT_EQ(body.find("polaris-portal-gamescope.service", standalone), std::string::npos);
+  EXPECT_EQ(body.find("busctl", standalone), std::string::npos);
+
+  // Between the nested launch and readiness the start path only goes through the gate.
+  const auto launch = source.find("setsid env -u WAYLAND_DISPLAY");
+  ASSERT_NE(launch, std::string::npos);
+  const auto ready = source.find("ready; WSI logs", launch);
+  ASSERT_NE(ready, std::string::npos);
+  const auto after_launch = source.substr(launch, ready - launch);
+  EXPECT_EQ(after_launch.find("systemctl --user restart polaris-portal-gamescope.service"), std::string::npos);
+  EXPECT_NE(after_launch.find("rebind_private_portal_after_nested_start"), std::string::npos);
+}
+
 TEST(SessionStopContractTests, WrappedGamescopeIsFrozenBeforeXwaylandGroupTeardown) {
   const auto source = read_source_for_contract("nix/modules/polaris-gamescope-runtime-lib.sh");
   ASSERT_FALSE(source.empty());

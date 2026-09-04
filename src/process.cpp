@@ -83,6 +83,7 @@
   #include "platform/linux/session_launch_linux.h"
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
+  #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
   #include <fcntl.h>
@@ -7401,13 +7402,15 @@ namespace proc {
       const auto target_label = nested_target.appid.empty() ?
         "Steam Big Picture"s :
         "Steam appid=" + nested_target.appid;
-      boost::filesystem::path session_bin;
-      try {
-        session_bin = boost::process::v1::search_path("polaris-gamescope-session");
+      // The launcher beside this binary wins over PATH, and whichever copy is
+      // used is checked against the module this build ships, so a helper left
+      // by an older scripts/install run is named instead of silently used.
+      const auto helper = platf::gamescope_session_helper::resolve_default();
+      BOOST_LOG(info) << platf::gamescope_session_helper::summary(helper);
+      for (const auto &advisory : platf::gamescope_session_helper::advisories(helper)) {
+        BOOST_LOG(warning) << advisory;
       }
-      catch (...) {
-        session_bin.clear();
-      }
+      const boost::filesystem::path session_bin {helper.helper.string()};
       if (!session_bin.empty()) {
         nested_wsi_session = true;
         if (!nested_target.appid.empty()) {
@@ -7444,7 +7447,7 @@ namespace proc {
       }
       else {
         BOOST_LOG(warning) << "session_manager: cannot nest " << target_label
-                           << " because polaris-gamescope-session is not on PATH; using attach"sv;
+                           << " because polaris-gamescope-session is neither beside this binary nor on PATH; using attach"sv;
       }
     }
     const auto steam_guard_snapshot = snapshot_steam_big_picture_input_guard(

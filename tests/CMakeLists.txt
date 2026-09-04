@@ -180,6 +180,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_desktop_takeover.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_display_topology.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_helper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_labwc_startup_diagnostics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp

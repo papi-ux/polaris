@@ -12,6 +12,14 @@ install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.rules"
 install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
         DESTINATION "${POLARIS_ASSETS_DIR}/modules-load.d")
 
+# Reference copies of the gamescope_stream helpers. At launch Polaris compares
+# the polaris-gamescope-session it resolved against these, so a helper left by
+# an older scripts/install run is reported as stale instead of debugged as a
+# Polaris bug. The executable copies that actually run are installed below.
+install(FILES "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"
+              "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"
+        DESTINATION "${POLARIS_ASSETS_DIR}/gamescope")
+
 # Host integration files at their live paths, for everything that is not an
 # AppImage. An AppImage cannot own paths outside its mount, so it keeps relying
 # on `polaris --setup-host` to place these under /etc.
@@ -39,6 +47,9 @@ file(COPY "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.rules"
         DESTINATION "${CMAKE_BINARY_DIR}/assets/udev/rules.d")
 file(COPY "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
         DESTINATION "${CMAKE_BINARY_DIR}/assets/modules-load.d")
+file(COPY "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"
+          "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"
+        DESTINATION "${CMAKE_BINARY_DIR}/assets/gamescope")
 # use symbolic link for shaders directory
 file(CREATE_LINK "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/shaders"
         "${CMAKE_BINARY_DIR}/assets/shaders" COPY_ON_ERROR SYMBOLIC)
