@@ -48,6 +48,7 @@ polaris_reclaim_orphan_gamescope_sockets() {
   printf 'reclaim\n' >>"$POLARIS_ACTIONS"
   [ "${RECLAIM_OK:-0}" = 1 ]
 }
+polaris_mask_idle_unit_runtime() { printf 'mask-idle\n' >>"$POLARIS_ACTIONS"; }
 polaris_unmask_idle_unit_runtime() { printf 'unmask-idle\n' >>"$POLARIS_ACTIONS"; }
 polaris_marker_owns_socket() { [ "${IDLE_OWNS_SOCKET:-0}" = 1 ]; }
 polaris_write_runtime_env() {
@@ -490,6 +491,16 @@ POLARIS_SESSION_INSTANCE_ID= POLARIS_PGREP_OUTPUT=101 run_stop >/dev/null 2>&1 |
   fail "atomic persisted attach recovery failed"
 [ ! -e "$work/run/polaris-gamescope-session-state" ] || fail "atomic credential survived complete stop"
 
+# An idempotent stop still repairs a runtime mask left before durable state was
+# published, otherwise an absent distro unit is misclassified as masked on the
+# next launch.
+rm -f "$work/run/polaris-gamescope-session-state" \
+  "$work/run/polaris-gamescope-session-id" "$work/run/polaris-gamescope-session-mode" \
+  "$work/run/polaris-gamescope-wsi-nested"
+: >"$actions"
+NESTED_VALID=0 run_stop >/dev/null 2>&1 || fail "empty stop did not remain idempotent"
+grep -qx 'unmask-idle' "$actions" || fail "empty stop retained a leaked runtime mask"
+
 # Interruption before the one rename leaves no half credential; retry commits one
 # complete ID+mode record.
 prefix="$work/session-functions.sh"
@@ -590,6 +601,36 @@ grep -Fq 'run_without_session_operation_lock setsid -f env' "$script" ||
   [ "$(<"$session_state_file")" = 'session-B nested managed' ] ||
     fail "atomic session record did not contain exact ID and mode"
 )
+
+# The durable service model controls whether nested startup masks an idle unit.
+# Standalone distro packages have no idle/private-portal services and must not
+# manufacture a masked:not-found split by masking the absent unit.
+: >"$actions"
+(
+  export PATH="$work/bin:$PATH"
+  export XDG_RUNTIME_DIR="$work/run"
+  export POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh"
+  export POLARIS_ACTIONS="$actions"
+  export POLARIS_SESSION_INSTANCE_ID=session-B
+  # shellcheck source=/dev/null
+  . "$prefix"
+  printf 'session-B nested standalone\n' >"$session_state_file"
+  prepare_nested_runtime_services || fail "standalone nested preparation failed"
+)
+! grep -qx 'mask-idle' "$actions" || fail "standalone nested preparation masked an absent idle unit"
+: >"$actions"
+(
+  export PATH="$work/bin:$PATH"
+  export XDG_RUNTIME_DIR="$work/run"
+  export POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh"
+  export POLARIS_ACTIONS="$actions"
+  export POLARIS_SESSION_INSTANCE_ID=session-B
+  # shellcheck source=/dev/null
+  . "$prefix"
+  printf 'session-B nested managed\n' >"$session_state_file"
+  prepare_nested_runtime_services || fail "managed nested preparation failed"
+)
+grep -qx 'mask-idle' "$actions" || fail "managed nested preparation did not mask idle"
 rm -f "$work/run/polaris-gamescope-session-state"
 
 # Failed startup recovery is fail-closed. It may not erase the prior claim,
@@ -640,9 +681,11 @@ grep -Fq 'prior session recovery failed; retaining its exact claim' "$script" ||
   fail "start does not fail closed when prior stop recovery fails"
 grep -Fq "POLARIS_SESSION_INSTANCE_ID='' bash \"\$0\" stop" "$script" ||
   fail "start does not route persisted attach/nested recovery through credentialed stop"
+grep -Fq '"${child_env[@]}" setpriv --no-new-privs -- \' "$script" ||
+  fail "nested Gamescope can still gain file capabilities and hide its procfs identity"
 transition_line="$(grep -nF 'publish_nested_claim transition absent' "$script" | head -n1 | cut -d: -f1)"
-mask_line="$(grep -nF 'polaris_mask_idle_unit_runtime' "$script" | tail -n1 | cut -d: -f1)"
-[ -n "$transition_line" ] && [ -n "$mask_line" ] && [ "$transition_line" -lt "$mask_line" ] ||
+prepare_line="$(grep -nF 'prepare_nested_runtime_services || {' "$script" | tail -n1 | cut -d: -f1)"
+[ -n "$transition_line" ] && [ -n "$prepare_line" ] && [ "$transition_line" -lt "$prepare_line" ] ||
   fail "nested transition claim is not published before idle destruction"
 grep -Fq 'publish_nested_claim nested transition' "$script" ||
   fail "nested launch does not CAS transition ownership before spawn"
