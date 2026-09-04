@@ -690,14 +690,18 @@ namespace nvhttp {
     nlohmann::json optimization_encoder_resolution_json(
         const optimization_encoder_resolution_t &resolution) {
       const auto active = video::active_encoder_name();
+      const bool fallback_allowed = encoder_backend_fallback_allowed(
+        resolution.resolved,
+        resolution.locked
+      );
       return {
         {"requested", resolution.requested},
         {"resolved", resolution.resolved},
         {"locked", resolution.locked},
         {"source", resolution.source},
         {"reason_code", resolution.reason_code},
-        {"strict_runtime_validation", resolution.resolved != "auto"},
-        {"fallback_allowed", resolution.resolved == "auto"},
+        {"strict_runtime_validation", !fallback_allowed},
+        {"fallback_allowed", fallback_allowed},
         {"active_backend", active.empty() ? "unknown" : active},
         {"runtime_validation", "launch"}
       };
@@ -2392,6 +2396,15 @@ namespace nvhttp {
     return value;
   }
 
+  bool encoder_backend_fallback_allowed(
+      std::string_view requested_backend,
+      bool session_override) {
+    if (session_override) {
+      return requested_backend == "auto";
+    }
+    return requested_backend != "vulkan";
+  }
+
   nlohmann::json encoder_backend_options_json() {
     nlohmann::json options = nlohmann::json::array();
     for (const auto &backend : video::selectable_encoder_backends()) {
@@ -2430,7 +2443,7 @@ namespace nvhttp {
         {"label", label},
         {"available", true},
         {"experimental", backend == "vulkan"},
-        {"fallback_allowed", backend == "auto"},
+        {"fallback_allowed", encoder_backend_fallback_allowed(backend, true)},
         {"runtime_validation", "launch"},
         {"reason", reason}
       });
@@ -6967,9 +6980,10 @@ namespace nvhttp {
         (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name()) :
         status_snapshot.effective_encoder_backend;
       encoder["session_override"] = status_snapshot.encoder_backend_explicit;
-      encoder["fallback_allowed"] =
-        !status_snapshot.encoder_backend_explicit ||
-        status_snapshot.requested_encoder_backend == "auto";
+      encoder["fallback_allowed"] = encoder_backend_fallback_allowed(
+        status_snapshot.requested_encoder_backend,
+        status_snapshot.encoder_backend_explicit
+      );
       encoder["selection"] = encoder_selection_json();
       encoder["codec"] = stats.codec;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;

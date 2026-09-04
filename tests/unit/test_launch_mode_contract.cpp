@@ -48,6 +48,17 @@ TEST(SessionEncoderContract, CapabilityRowsDescribeRuntimeValidationAndFallback)
   }
 }
 
+TEST(SessionEncoderContract, FallbackPolicyDistinguishesSessionLocksFromHostDefaults) {
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("auto", true));
+  EXPECT_FALSE(nvhttp::encoder_backend_fallback_allowed("nvenc", true));
+  EXPECT_FALSE(nvhttp::encoder_backend_fallback_allowed("vulkan", true));
+
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("auto", false));
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("nvenc", false));
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("vaapi", false));
+  EXPECT_FALSE(nvhttp::encoder_backend_fallback_allowed("vulkan", false));
+}
+
 #ifdef __linux__
   #include <filesystem>
   #include <fstream>

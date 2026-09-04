@@ -135,6 +135,16 @@ namespace nvhttp {
   std::optional<std::string> normalize_encoder_backend(std::string value);
 
   /**
+   * @brief Report whether the requested encoder policy may try another backend.
+   * @details Named per-session choices are exact. Persisted host choices retain
+   *          legacy fallback behavior, except Vulkan which is always strict.
+   */
+  bool encoder_backend_fallback_allowed(
+    std::string_view requested_backend,
+    bool session_override
+  );
+
+  /**
    * @brief Describe the encoder backend choices accepted by this host binary.
    * @details A listed backend is build-selectable; every explicit choice is
    *          still validated against the live display/GPU at launch.
