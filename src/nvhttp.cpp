@@ -644,6 +644,69 @@ namespace nvhttp {
     }
 #endif
 
+    struct optimization_encoder_resolution_t {
+      std::string requested;
+      std::string resolved;
+      std::string source;
+      std::string reason_code;
+      bool locked = false;
+    };
+
+    std::optional<optimization_encoder_resolution_t> resolve_optimization_encoder(
+        const args_t &args,
+        std::string &error) {
+      const auto request = args.find("encoder");
+      if (request != args.end()) {
+        const auto normalized = normalize_encoder_backend(request->second);
+        if (!normalized) {
+          error = "The requested encoder is not selectable by this Polaris build.";
+          return std::nullopt;
+        }
+        return optimization_encoder_resolution_t {
+          .requested = *normalized,
+          .resolved = *normalized,
+          .source = "client_launch_request",
+          .reason_code = "explicit_encoder_lock",
+          .locked = true,
+        };
+      }
+
+      const auto configured = config::video.encoder.empty() ?
+        std::optional<std::string> {"auto"} :
+        normalize_encoder_backend(config::video.encoder);
+      if (!configured) {
+        error = "The host's configured encoder is not selectable by this Polaris build.";
+        return std::nullopt;
+      }
+      return optimization_encoder_resolution_t {
+        .requested = "host_default",
+        .resolved = *configured,
+        .source = "host_configuration",
+        .reason_code = "host_default_encoder",
+        .locked = false,
+      };
+    }
+
+    nlohmann::json optimization_encoder_resolution_json(
+        const optimization_encoder_resolution_t &resolution) {
+      const auto active = video::active_encoder_name();
+      const bool fallback_allowed = encoder_backend_fallback_allowed(
+        resolution.resolved,
+        resolution.locked
+      );
+      return {
+        {"requested", resolution.requested},
+        {"resolved", resolution.resolved},
+        {"locked", resolution.locked},
+        {"source", resolution.source},
+        {"reason_code", resolution.reason_code},
+        {"strict_runtime_validation", !fallback_allowed},
+        {"fallback_allowed", fallback_allowed},
+        {"active_backend", active.empty() ? "unknown" : active},
+        {"runtime_validation", "launch"}
+      };
+    }
+
     nlohmann::json optimization_topology_resolution_json(
       const std::string &requested_topology,
       const std::string &resolved_topology,
@@ -674,7 +737,8 @@ namespace nvhttp {
       const launch_profile::resolution_t &resolved,
       const std::string &device,
       const std::string &game,
-      const nlohmann::json &topology_resolution
+      const nlohmann::json &topology_resolution,
+      const optimization_encoder_resolution_t &encoder_resolution
     ) {
       output["source"] = "deterministic_preset_v1";
       output["cache_status"] = "not_applicable";
@@ -694,6 +758,17 @@ namespace nvhttp {
         {"fields", resolved.fields}
       };
       output["topology_resolution"] = topology_resolution;
+      output["encoder_resolution"] =
+        optimization_encoder_resolution_json(encoder_resolution);
+      output["encoder_options"] = encoder_backend_options_json();
+      output["encoder_backend"] = encoder_resolution.resolved;
+      output["resolved_profile"]["fields"]["encoder_backend"] = {
+        {"value", encoder_resolution.resolved},
+        {"source", encoder_resolution.source},
+        {"reason_code", encoder_resolution.reason_code},
+        {"locked", encoder_resolution.locked},
+        {"normalized", false}
+      };
 
       // Keep the v1 flat fields for compatibility while making every emitted
       // value explicit enough for the cross-repository contract extractor to
@@ -1949,6 +2024,8 @@ namespace nvhttp {
       }
       settings["capabilities"] = {
         {"modes", settings_metadata::stream_display_mode_options_json()},
+        {"encoders", encoder_backend_options_json()},
+        {"session_encoder_override", true},
         {"display_mode_override", true},
         {"target_bitrate_override", true},
         {"ai_auto_quality_control", false},
@@ -2310,6 +2387,69 @@ namespace nvhttp {
       return health;
     }
   }  // namespace
+
+  std::optional<std::string> normalize_encoder_backend(std::string value) {
+    value = lower_copy(std::move(value));
+    if (value.empty() || !video::encoder_backend_selectable(value)) {
+      return std::nullopt;
+    }
+    return value;
+  }
+
+  bool encoder_backend_fallback_allowed(
+      std::string_view requested_backend,
+      bool session_override) {
+    if (session_override) {
+      return requested_backend == "auto";
+    }
+    return requested_backend != "vulkan";
+  }
+
+  nlohmann::json encoder_backend_options_json() {
+    nlohmann::json options = nlohmann::json::array();
+    for (const auto &backend : video::selectable_encoder_backends()) {
+      std::string label;
+      std::string reason;
+      if (backend == "auto") {
+        label = "Auto";
+        reason = "Let Polaris select and live-validate the best encoder for this launch.";
+      } else if (backend == "nvenc") {
+        label = "NVIDIA NVENC";
+        reason = "Require the NVIDIA NVENC backend for this launch.";
+      } else if (backend == "vaapi") {
+        label = "VA-API";
+        reason = "Require the Linux VA-API backend for this launch.";
+      } else if (backend == "vulkan") {
+        label = "Vulkan Video";
+        reason = "Require the experimental Vulkan Video backend for this launch.";
+      } else if (backend == "quicksync") {
+        label = "Intel Quick Sync";
+        reason = "Require the Intel Quick Sync backend for this launch.";
+      } else if (backend == "amdvce") {
+        label = "AMD AMF/VCE";
+        reason = "Require the AMD AMF/VCE backend for this launch.";
+      } else if (backend == "videotoolbox") {
+        label = "VideoToolbox";
+        reason = "Require the macOS VideoToolbox backend for this launch.";
+      } else if (backend == "software") {
+        label = "Software";
+        reason = "Require CPU software encoding for this launch.";
+      } else {
+        label = backend;
+        reason = "Require this encoder backend for this launch.";
+      }
+      options.push_back({
+        {"value", backend},
+        {"label", label},
+        {"available", true},
+        {"experimental", backend == "vulkan"},
+        {"fallback_allowed", encoder_backend_fallback_allowed(backend, true)},
+        {"runtime_validation", "launch"},
+        {"reason", reason}
+      });
+    }
+    return options;
+  }
 
   nlohmann::json build_session_health_for_action(const stream_stats::stats_t &stats,
                                                  bool current_virtual_display,
@@ -4257,6 +4397,32 @@ namespace nvhttp {
     launch_session->resolved_profile_from_client =
       util::from_view(get_arg(args, "resolvedProfile", "0"));
 
+    if (const auto encoder_it = args.find("encoderBackend"); encoder_it != args.end()) {
+      const auto normalized = normalize_encoder_backend(encoder_it->second);
+      if (!normalized) {
+        BOOST_LOG(warning) << "Rejecting launch with an encoder backend this build cannot select"sv;
+        return nullptr;
+      }
+      launch_session->encoder_backend = *normalized;
+      launch_session->encoder_backend_explicit = true;
+    }
+    const auto expected_encoder_it = args.find("expectedEncoder");
+    if (launch_session->resolved_profile_from_client && launch_session->encoder_backend_explicit) {
+      if (expected_encoder_it == args.end()) {
+        BOOST_LOG(warning) << "Rejecting exact resolved launch with no expectedEncoder assertion"sv;
+        return nullptr;
+      }
+      const auto expected = normalize_encoder_backend(expected_encoder_it->second);
+      if (!expected || *expected != launch_session->encoder_backend) {
+        BOOST_LOG(warning) << "Rejecting exact resolved launch whose expectedEncoder does not match encoderBackend"sv;
+        return nullptr;
+      }
+      launch_session->expected_encoder_backend = *expected;
+    } else if (expected_encoder_it != args.end()) {
+      BOOST_LOG(warning) << "Rejecting launch with expectedEncoder outside a resolved encoder envelope"sv;
+      return nullptr;
+    }
+
     std::stringstream mode;
     if (launch_session->resolved_profile_from_client || named_cert_p->display_mode.empty()) {
       auto mode_str = get_arg(args, "mode", config::video.fallback_mode.c_str());
@@ -4345,7 +4511,9 @@ namespace nvhttp {
                            << " > " << config::video.max_bitrate;
         return nullptr;
       }
-      if (launch_session->enable_hdr) {
+      // A per-launch encoder override has not been probed yet. Its HDR
+      // capability is checked after the exact launch-time encoder probe.
+      if (launch_session->enable_hdr && !launch_session->encoder_backend_explicit) {
         if (launch_session->host_hdr_capable && !*launch_session->host_hdr_capable) {
           BOOST_LOG(warning) << "Rejecting resolved HDR launch profile because the current encoder lacks HDR support"sv;
           return nullptr;
@@ -5759,7 +5927,9 @@ namespace nvhttp {
             BOOST_LOG(info) << "nvhttp: Deferring resume-time encoder probe until the cage runtime is available"sv;
           } else
 #endif
-          if (video::probe_encoders()) {
+          if (video::probe_encoders(
+                launch_session->encoder_backend_explicit &&
+                launch_session->encoder_backend != "auto")) {
             tree.put("root.resume", 0);
             tree.put("root.<xmlattr>.status_code", 503);
             tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
@@ -6052,7 +6222,9 @@ namespace nvhttp {
         BOOST_LOG(info) << "nvhttp: Deferring launch-time encoder probe until the cage runtime is available"sv;
       } else
 #endif
-      if (video::probe_encoders()) {
+      if (video::probe_encoders(
+            launch_session->encoder_backend_explicit &&
+            launch_session->encoder_backend != "auto")) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
@@ -6538,6 +6710,7 @@ namespace nvhttp {
       features["ai_optimizer_control"] = false;
       features["deterministic_launch_presets_v1"] = true;
       features["resolved_profile_provenance_v1"] = true;
+      features["encoder_backend_selection_v1"] = true;
 #if defined(__linux__)
       features["expected_topology_assertion_v1"] = true;
 #else
@@ -6605,6 +6778,7 @@ namespace nvhttp {
           "disconnect_resume_timeout_seconds"
         })}
       };
+      output["encoder_backends"] = encoder_backend_options_json();
 
       // Capture info
       auto &capture = output["capture"];
@@ -6801,6 +6975,15 @@ namespace nvhttp {
       // Encoder info
       auto &encoder = output["encoder"];
       encoder["active_backend"] = video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name();
+      encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
+      encoder["effective_backend"] = status_snapshot.effective_encoder_backend.empty() ?
+        (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name()) :
+        status_snapshot.effective_encoder_backend;
+      encoder["session_override"] = status_snapshot.encoder_backend_explicit;
+      encoder["fallback_allowed"] = encoder_backend_fallback_allowed(
+        status_snapshot.requested_encoder_backend,
+        status_snapshot.encoder_backend_explicit
+      );
       encoder["selection"] = encoder_selection_json();
       encoder["codec"] = stats.codec;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
@@ -9505,6 +9688,12 @@ namespace nvhttp {
         headers.emplace("Content-Type", "application/json");
         response->write(SimpleWeb::StatusCode::client_error_bad_request, output.dump(), headers);
       };
+      std::string encoder_reject_reason;
+      const auto encoder_resolution = resolve_optimization_encoder(args, encoder_reject_reason);
+      if (!encoder_resolution) {
+        reply_bad_request("invalid_or_unavailable_encoder", encoder_reject_reason);
+        return;
+      }
       bool invalid_argument = false;
       auto bounded_integer = [&](const char *name, int minimum, int maximum) -> std::optional<int> {
         const auto it = args.find(name);
@@ -9783,7 +9972,8 @@ namespace nvhttp {
           mirror_desktop_requested,
           force_private_requested,
           optimization_app
-        )
+        ),
+        *encoder_resolution
       );
 
 #ifdef __linux__

@@ -128,6 +128,29 @@ namespace nvhttp {
   std::string
   get_arg(const args_t &args, const char *name, const char *default_value = nullptr);
 
+  /**
+   * @brief Normalize and validate a client-facing encoder backend id.
+   * @return The canonical id, or nullopt when this build cannot select it.
+   */
+  std::optional<std::string> normalize_encoder_backend(std::string value);
+
+  /**
+   * @brief Report whether the requested encoder policy may try another backend.
+   * @details Named per-session choices are exact. Persisted host choices retain
+   *          legacy fallback behavior, except Vulkan which is always strict.
+   */
+  bool encoder_backend_fallback_allowed(
+    std::string_view requested_backend,
+    bool session_override
+  );
+
+  /**
+   * @brief Describe the encoder backend choices accepted by this host binary.
+   * @details A listed backend is build-selectable; every explicit choice is
+   *          still validated against the live display/GPU at launch.
+   */
+  nlohmann::json encoder_backend_options_json();
+
   // Helper function to extract command entries
   cmd_list_t
   extract_command_entries(const nlohmann::json& j, const std::string& key);

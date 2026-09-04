@@ -33,6 +33,8 @@ max_sessions = 2
 
 These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto promotes it only for a compatible AMD private-stream route that passes an exact live-frame safety probe.
 
+The `encoder` key remains the host-wide default. Clients that advertise the typed session-encoder contract can ask Polaris to keep that default, use Auto, or require one backend for a single game. Polaris accepts only a backend compiled into the running build, validates it again against the live capture route at launch, and restores the host value at teardown. Auto is the only request allowed to fall back; a named backend fails closed instead of silently selecting another encoder.
+
 ## Linux display modes
 
 This is the config-file summary. For choosing a mode, what each one feels like in practice, and

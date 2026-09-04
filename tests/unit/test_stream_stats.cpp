@@ -1489,14 +1489,17 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsCleanQualityRecoveryWithoutCompetingAut
   const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
-  EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
-  EXPECT_EQ(action.at("id"), "recheck_network");
-  EXPECT_EQ(action.at("capability"), "recheck");
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("status"), "ok");
+  EXPECT_EQ(action.at("id"), "none");
   EXPECT_FALSE(action.at("undo").at("supported"));
-  EXPECT_NE(
-    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
-    std::string::npos
-  );
+  const auto &evidence = doctor.at("evidence");
+  const auto ceiling = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+    return item.at("id") == "effective_quality_ceiling";
+  });
+  ASSERT_NE(ceiling, evidence.end());
+  EXPECT_EQ(ceiling->at("status"), "watch");
 }
 
 TEST(StreamStatsDoctorTests, QualityRestoreWaitsForMeasuredCleanNetworkEvidence) {

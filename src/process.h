@@ -658,6 +658,9 @@ namespace proc {
     bool display_mode_explicit = false;
     bool mirror_desktop = false;
     bool force_private_after_desktop_steam_shutdown = false;
+    std::string requested_encoder_backend;
+    std::string effective_encoder_backend;
+    bool encoder_backend_explicit = false;
   };
 
   session_stop_outcome_t evaluate_session_stop_request(
@@ -747,6 +750,7 @@ namespace proc {
     bool allow_client_commands = false;
     int initial_color_range = 0;
     int initial_nvenc_tune = 0;
+    std::string initial_encoder;
     bool initial_video_config_saved = false;
     // Session-scoped linux_display override bookkeeping (/launch streamMode):
     // host values saved by execute(), restored in terminate_impl after teardown.
