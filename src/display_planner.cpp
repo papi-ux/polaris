@@ -3,6 +3,7 @@
  * @brief The display resolution planner, ported from the web UI.
  */
 #include "display_planner.h"
+#include "utility.h"
 
 #include <algorithm>
 #include <cctype>
@@ -128,15 +129,13 @@ namespace display_planner {
       return std::nullopt;
     }
 
-    try {
-      return mode_t {
-        std::stod(std::string {width}),
-        std::stod(std::string {height}),
-        std::stod(std::string {fps}),
-      };
-    } catch (const std::exception &) {
+    const auto parsed_width = util::parse_decimal<double>(width);
+    const auto parsed_height = util::parse_decimal<double>(height);
+    const auto parsed_fps = util::parse_decimal<double>(fps);
+    if (!parsed_width || !parsed_height || !parsed_fps) {
       return std::nullopt;
     }
+    return mode_t {*parsed_width, *parsed_height, *parsed_fps};
   }
 
   std::string format_display_mode(const mode_t &mode) {

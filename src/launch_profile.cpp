@@ -1,6 +1,7 @@
 #include "launch_profile.h"
 
 #include "device_db.h"
+#include "utility.h"
 
 #include <algorithm>
 #include <cctype>
@@ -32,8 +33,11 @@ namespace launch_profile {
           if (index == 0) result.width = std::stoi(segment);
           else if (index == 1) result.height = std::stoi(segment);
           else if (index == 2) {
-            const auto fps = std::stod(segment);
-            result.fps = static_cast<int>(std::round(fps < 1000.0 ? fps * 1000.0 : fps));
+            const auto fps = util::parse_decimal<double>(segment);
+            if (!fps) {
+              return std::nullopt;
+            }
+            result.fps = static_cast<int>(std::round(*fps < 1000.0 ? *fps * 1000.0 : *fps));
           } else {
             return std::nullopt;
           }
@@ -51,9 +55,7 @@ namespace launch_profile {
     std::string format_fps(int fps) {
       if (fps <= 0) return "0";
       if (fps % 1000 == 0) return std::to_string(fps / 1000);
-      std::ostringstream output;
-      output << static_cast<double>(fps) / 1000.0;
-      return output.str();
+      return util::format_decimal(static_cast<double>(fps) / 1000.0);
     }
 
     std::string format_display_mode(const display_mode_t &mode) {

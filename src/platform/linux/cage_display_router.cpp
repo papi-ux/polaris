@@ -18,6 +18,7 @@
 
 #include "cage_display_router.h"
 #include "../../logging.h"
+#include "../../utility.h"
 #include "misc.h"
 #include "private_session_input.h"
 #include "wlgrab_capture_policy.h"
@@ -867,16 +868,18 @@ namespace cage_display_router {
       if (line.find(mode) != std::string::npos &&
           (line.find("current") != std::string::npos || line.find('*') != std::string::npos)) {
         const auto hz_pos = line.find(" Hz");
-        const auto comma_pos = line.rfind(',', hz_pos);
-        if (hz_pos == std::string::npos || comma_pos == std::string::npos || comma_pos >= hz_pos) {
+        const auto separator_pos = line.find(" px,");
+        if (hz_pos == std::string::npos || separator_pos == std::string::npos || separator_pos + 4 >= hz_pos) {
           continue;
         }
 
-        try {
-          return std::stod(line.substr(comma_pos + 1, hz_pos - comma_pos - 1));
-        } catch (...) {
-          return std::nullopt;
-        }
+        auto refresh = trimmed(
+          std::string_view {line}.substr(separator_pos + 4, hz_pos - separator_pos - 4)
+        );
+        // wlr-randr may honor a comma-decimal locale even though its field
+        // separator is also a comma. Normalize only the isolated Hz field.
+        std::replace(refresh.begin(), refresh.end(), ',', '.');
+        return util::parse_decimal<double>(refresh);
       }
     }
 
