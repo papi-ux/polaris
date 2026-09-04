@@ -19,6 +19,11 @@ using namespace std::literals;
 
 namespace adaptive_bitrate {
 
+  // Keep autonomous bitrate changes behind the same actionable RTT boundary
+  // Doctor uses. A relative-only spike check turns normal LAN jitter such as
+  // 1 ms -> 3 ms into "congestion" even though the path is still excellent.
+  static constexpr double ACTIONABLE_RTT_MS = 45.0;
+
   // Internal state protected by mutex for complex operations,
   // atomics for simple reads from the encoding thread.
   static std::mutex state_mutex;
@@ -250,7 +255,10 @@ namespace adaptive_bitrate {
 
     // RTT spike detection: if current RTT is more than 2x the long-term average,
     // treat it as congestion and reduce bitrate immediately
-    bool rtt_spike = (rtt_sample_count > 5) && (rtt_ms > avg_rtt * 2.0) && (avg_rtt > 0);
+    bool rtt_spike = (rtt_sample_count > 5) &&
+                     (rtt_ms >= ACTIONABLE_RTT_MS) &&
+                     (rtt_ms > avg_rtt * 2.0) &&
+                     (avg_rtt > 0);
 
     const bool network_pressure = ewma_packet_loss > 1.0 || rtt_spike;
     if (network_pressure) {
