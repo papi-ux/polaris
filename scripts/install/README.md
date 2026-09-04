@@ -89,6 +89,8 @@ NixOS/hjem can run a **private** gamescope ScreenCast bus at
 
 On typical desktops, Polaris uses the **host** XDG Desktop Portal + PipeWire, or **gamescopegrab** when the idle compositor exposes a PW node. That is enough for many non-NixOS hosts.
 
+The session helper records this layout as `host-portal` (idle unit present, no private portal unit) and logs `runtime services=host-portal` on each start. It masks and restores the idle compositor exactly as on a NixOS host and skips the private portal rebind. `managed` means both units are installed; `standalone` means neither, which is what distro packages ship.
+
 If you later deploy a private portal, set:
 
 ```ini

@@ -371,6 +371,65 @@ TEST(SessionStopContractTests, StandalonePackagesSkipPrivatePortalRebind) {
   EXPECT_NE(after_launch.find("rebind_private_portal_after_nested_start"), std::string::npos);
 }
 
+TEST(SessionStopContractTests, HostPortalStackKeepsIdleUnitAndSkipsPrivatePortal) {
+  // scripts/install ships the idle unit and no private portal unit. That is
+  // loaded:not-found, which the classifier rejected as inconsistent, so every
+  // start on that stack failed at publish_session_mode.
+  const auto source = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
+  ASSERT_FALSE(source.empty());
+  const auto npos = std::string::npos;
+
+  const auto classify = source.find("polaris_gamescope_service_mode() {");
+  ASSERT_NE(classify, npos);
+  const auto classify_end = source.find("\n}\n", classify);
+  ASSERT_NE(classify_end, npos);
+  const auto classifier = source.substr(classify, classify_end - classify);
+  const auto idle_only = classifier.find("loaded:not-found)");
+  const auto neither = classifier.find("not-found:not-found)");
+  const auto verdict = classifier.find("printf 'host-portal\\n'");
+  ASSERT_NE(idle_only, npos);
+  ASSERT_NE(neither, npos);
+  ASSERT_NE(verdict, npos);
+  EXPECT_LT(idle_only, verdict);
+  EXPECT_LT(verdict, neither);
+
+  // Both persisted-state validators accept the word.
+  std::size_t validators = 0;
+  for (auto at = source.find("''|managed|host-portal|standalone)"); at != npos; at = source.find("''|managed|host-portal|standalone)", at + 1)) {
+    ++validators;
+  }
+  EXPECT_EQ(validators, 2u);
+
+  // The idle unit is masked for nested on any host that has it.
+  const auto prepare = source.find("prepare_nested_runtime_services() {");
+  ASSERT_NE(prepare, npos);
+  const auto prepare_end = source.find("\n}\n", prepare);
+  const auto prepare_body = source.substr(prepare, prepare_end - prepare);
+  const auto mask_arm = prepare_body.find("managed|host-portal)");
+  const auto mask = prepare_body.find("polaris_mask_idle_unit_runtime");
+  ASSERT_NE(mask_arm, npos);
+  ASSERT_NE(mask, npos);
+  EXPECT_LT(mask_arm, mask);
+
+  // The private portal is neither rebound after start nor waited for on stop.
+  const auto rebind = source.find("rebind_private_portal_after_nested_start() {");
+  ASSERT_NE(rebind, npos);
+  const auto rebind_end = source.find("\n}\n", rebind);
+  const auto rebind_body = source.substr(rebind, rebind_end - rebind);
+  const auto host_arm = rebind_body.find("host-portal)");
+  ASSERT_NE(host_arm, npos);
+  EXPECT_EQ(rebind_body.find("polaris-portal-gamescope.service", host_arm), npos);
+  EXPECT_EQ(rebind_body.find("busctl", host_arm), npos);
+
+  const auto restored = source.find("idle gamescope restored after nested stop");
+  ASSERT_NE(restored, npos);
+  const auto managed_gate = source.find("if [ \"$service_mode\" = managed ]; then", restored);
+  const auto portal_restart = source.find("systemctl --user restart polaris-portal-gamescope.service", restored);
+  ASSERT_NE(managed_gate, npos);
+  ASSERT_NE(portal_restart, npos);
+  EXPECT_LT(managed_gate, portal_restart);
+}
+
 TEST(SessionStopContractTests, WrappedGamescopeIsFrozenBeforeXwaylandGroupTeardown) {
   const auto source = read_source_for_contract("nix/modules/polaris-gamescope-runtime-lib.sh");
   ASSERT_FALSE(source.empty());
@@ -653,6 +712,11 @@ TEST(SessionStopContractTests, RuntimeAcquisitionRejectsNestedOrIncompleteDurabl
   {
     std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
     state << "session-A attach managed\n";
+  }
+  EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
+  {
+    std::ofstream state(dir / "polaris-gamescope-session-state", std::ios::trunc);
+    state << "session-A attach host-portal\n";
   }
   EXPECT_TRUE(stream_runtime::gamescope_runtime_acquisition_allowed_for_tests());
   {
