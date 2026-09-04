@@ -181,6 +181,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_display_topology.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_labwc_startup_diagnostics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_attach.cpp

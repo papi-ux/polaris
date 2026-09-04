@@ -72,6 +72,14 @@ namespace stream_runtime {
       return cage_display_router::get_session_instance_id();
     }
 
+    std::optional<labwc_startup_diagnostics::snapshot_t> startup_client_diagnostics(
+      std::string_view expected_session_instance_id
+    ) {
+      return cage_display_router::get_startup_client_diagnostics(
+        expected_session_instance_id
+      );
+    }
+
     std::string x11_display() {
       return cage_display_router::get_x11_display();
     }

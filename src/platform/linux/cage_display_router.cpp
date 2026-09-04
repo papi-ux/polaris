@@ -19,11 +19,13 @@
 #include "cage_display_router.h"
 #include "../../logging.h"
 #include "../../utility.h"
+#include "labwc_startup_diagnostics.h"
 #include "misc.h"
 #include "private_session_input.h"
 #include "wlgrab_capture_policy.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cctype>
@@ -33,6 +35,8 @@
 #include <dirent.h>
 #include <functional>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -79,6 +83,8 @@ namespace cage_display_router {
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
   static std::string cage_x11_display;  // e.g., ":1"
   static std::string cage_session_instance_id;
+  static std::mutex startup_diagnostics_mutex;
+  static std::shared_ptr<labwc_startup_diagnostics::collector_t> startup_diagnostics;
 
   // The output mode most recently requested of the running compositor. A
   // resume can carry a different refresh than the launch that started the
@@ -134,6 +140,29 @@ namespace cage_display_router {
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
+
+  static void close_descriptor(int &fd) {
+    if (fd >= 0) {
+      close(fd);
+      fd = -1;
+    }
+  }
+
+  static bool make_inheritable(int fd) {
+    const auto flags = fcntl(fd, F_GETFD);
+    return flags >= 0 && fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) == 0;
+  }
+
+  static void publish_startup_diagnostics(
+    std::shared_ptr<labwc_startup_diagnostics::collector_t> collector
+  ) {
+    const std::lock_guard lock {startup_diagnostics_mutex};
+    startup_diagnostics = std::move(collector);
+  }
+
+  static void clear_startup_diagnostics() {
+    publish_startup_diagnostics(nullptr);
+  }
 
   /// Open a pidfd for the freshly spawned compositor, if the kernel allows it.
   static void open_cage_pidfd(pid_t pid) {
@@ -597,26 +626,6 @@ namespace cage_display_router {
 
   static bool executable_accessible(const std::string &path) {
     return !path.empty() && access(path.c_str(), X_OK) == 0;
-  }
-
-  static std::string shell_quote(std::string_view value) {
-    const auto quote = std::string(1, static_cast<char>(39));
-    const auto slash = std::string(1, static_cast<char>(92));
-    std::string result = quote;
-
-    for (char ch : value) {
-      if (ch == static_cast<char>(39)) {
-        result += quote;
-        result += slash;
-        result += quote;
-        result += quote;
-      } else {
-        result += ch;
-      }
-    }
-
-    result += quote;
-    return result;
   }
 
   static std::string resolve_executable(const std::string &name) {
@@ -1127,6 +1136,7 @@ namespace cage_display_router {
     cage_wayland_socket.clear();
     cage_x11_display.clear();
     cage_session_instance_id.clear();
+    clear_startup_diagnostics();
     // The mode is unrecorded until this startup settles: a resume racing the
     // launch must see "no recorded mode" and report failure, not silently
     // claim the refresh was applied.
@@ -1251,6 +1261,48 @@ namespace cage_display_router {
         "exec sleep infinity";
     }
 
+    // Capture only a real startup client's stderr and eventual shell status.
+    // The pipes are memory-only and continuously drained, so a noisy launcher
+    // cannot block on a full pipe or leave an unbounded diagnostic file behind.
+    std::array<int, 2> startup_stderr_pipe {-1, -1};
+    std::array<int, 2> startup_status_pipe {-1, -1};
+    std::shared_ptr<labwc_startup_diagnostics::collector_t> startup_collector;
+    std::thread startup_diagnostics_reader;
+    bool startup_diagnostics_enabled = false;
+    if (!game_cmd.empty() && !session_instance_id.empty()) {
+      int diagnostics_error = 0;
+      if (pipe2(startup_stderr_pipe.data(), O_CLOEXEC) != 0) {
+        diagnostics_error = errno;
+      } else if (pipe2(startup_status_pipe.data(), O_CLOEXEC) != 0) {
+        diagnostics_error = errno;
+      } else {
+        try {
+          startup_collector =
+            std::make_shared<labwc_startup_diagnostics::collector_t>(session_instance_id);
+          startup_diagnostics_reader = std::thread {
+            labwc_startup_diagnostics::drain_pipes,
+            startup_stderr_pipe[0],
+            startup_status_pipe[0],
+            startup_collector
+          };
+          startup_diagnostics_enabled = true;
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "labwc: Startup-client diagnostics unavailable: "sv << e.what();
+        }
+      }
+
+      if (!startup_diagnostics_enabled) {
+        close_descriptor(startup_stderr_pipe[0]);
+        close_descriptor(startup_stderr_pipe[1]);
+        close_descriptor(startup_status_pipe[0]);
+        close_descriptor(startup_status_pipe[1]);
+        if (diagnostics_error != 0) {
+          BOOST_LOG(warning) << "labwc: Startup-client diagnostics unavailable: "sv
+                             << strerror(diagnostics_error);
+        }
+      }
+    }
+
     // Snapshot existing sockets to detect the new one labwc creates
     auto sockets_before = snapshot_wayland_sockets();
     auto x11_displays_before = snapshot_x11_displays();
@@ -1302,6 +1354,18 @@ namespace cage_display_router {
       // not KDE's :0. labwc will set its own DISPLAY via XWayland.
       unsetenv("DISPLAY");
 
+      bool child_diagnostics_enabled = startup_diagnostics_enabled;
+      if (child_diagnostics_enabled) {
+        close_descriptor(startup_stderr_pipe[0]);
+        close_descriptor(startup_status_pipe[0]);
+        if (!make_inheritable(startup_stderr_pipe[1]) ||
+            !make_inheritable(startup_status_pipe[1])) {
+          close_descriptor(startup_stderr_pipe[1]);
+          close_descriptor(startup_status_pipe[1]);
+          child_diagnostics_enabled = false;
+        }
+      }
+
       // Redirect stdout/stderr
       int devnull = open("/dev/null", O_RDWR);
       if (devnull >= 0) {
@@ -1315,13 +1379,31 @@ namespace cage_display_router {
       int maxfd = (int)sysconf(_SC_OPEN_MAX);
       if (maxfd < 0) maxfd = 1024;
       for (int fd = 3; fd < maxfd; ++fd) {
+        if (child_diagnostics_enabled &&
+            (fd == startup_stderr_pipe[1] || fd == startup_status_pipe[1])) {
+          continue;
+        }
         close(fd);
       }
 
       // labwc -C: config dir for rc.xml, -s: startup command (game)
-      const auto startup_shell = std::string("bash -c " ) + shell_quote(startup_cmd);
+      const auto effective_startup_cmd = child_diagnostics_enabled ?
+        labwc_startup_diagnostics::instrument_shell_command(
+          startup_cmd,
+          startup_stderr_pipe[1],
+          startup_status_pipe[1]
+        ) :
+        startup_cmd;
+      const auto startup_shell =
+        labwc_startup_diagnostics::make_labwc_startup_command(effective_startup_cmd);
       supervise_labwc(labwc_path, config_dir, startup_shell);
     } else if (pid > 0) {
+      if (startup_diagnostics_enabled) {
+        close_descriptor(startup_stderr_pipe[1]);
+        close_descriptor(startup_status_pipe[1]);
+        startup_diagnostics_reader.detach();
+        publish_startup_diagnostics(std::move(startup_collector));
+      }
       cage_pid = pid;
       open_cage_pidfd(pid);
       // Restore MangoHud in parent (was cleared to prevent labwc crash)
@@ -1330,6 +1412,11 @@ namespace cage_display_router {
       if (!saved_mangohud_config.empty()) setenv("MANGOHUD_CONFIG", saved_mangohud_config.c_str(), 1);
       BOOST_LOG(info) << "labwc: Spawned (pid="sv << pid << ")"sv;
     } else {
+      if (startup_diagnostics_enabled) {
+        close_descriptor(startup_stderr_pipe[1]);
+        close_descriptor(startup_status_pipe[1]);
+        startup_diagnostics_reader.detach();
+      }
       BOOST_LOG(error) << "labwc: fork() failed"sv;
       return false;
     }
@@ -1514,6 +1601,7 @@ namespace cage_display_router {
 
   void stop() {
     if (cage_pid <= 0) {
+      clear_startup_diagnostics();
       return;
     }
 
@@ -1528,6 +1616,7 @@ namespace cage_display_router {
       cage_wayland_socket.clear();
       cage_x11_display.clear();
       cage_session_instance_id.clear();
+      clear_startup_diagnostics();
       cage_runtime_state = {
         .requested_headless = false,
         .effective_headless = false,
@@ -1575,6 +1664,7 @@ namespace cage_display_router {
     cage_wayland_socket.clear();
     cage_x11_display.clear();
     cage_session_instance_id.clear();
+    clear_startup_diagnostics();
     cage_runtime_state = {
       .requested_headless = false,
       .effective_headless = false,
@@ -1593,6 +1683,7 @@ namespace cage_display_router {
     cage_wayland_socket.clear();
     cage_x11_display.clear();
     cage_session_instance_id.clear();
+    clear_startup_diagnostics();
     cage_runtime_state = {
       .requested_headless = false,
       .effective_headless = false,
@@ -1630,6 +1721,17 @@ namespace cage_display_router {
 
   std::string get_session_instance_id() {
     return cage_session_instance_id;
+  }
+
+  std::optional<labwc_startup_diagnostics::snapshot_t> get_startup_client_diagnostics(
+    std::string_view expected_session_instance_id
+  ) {
+    std::shared_ptr<labwc_startup_diagnostics::collector_t> collector;
+    {
+      const std::lock_guard lock {startup_diagnostics_mutex};
+      collector = startup_diagnostics;
+    }
+    return collector ? collector->snapshot(expected_session_instance_id) : std::nullopt;
   }
 
   std::string get_x11_display() {

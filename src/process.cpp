@@ -9029,6 +9029,7 @@ namespace proc {
           [socket = std::move(private_socket),
            x11_display = std::move(private_x11_display),
            compositor_pid = private_compositor_pid,
+           runtime_generation = _session_instance_id,
            app_name = _app.name]() {
             const auto started = std::chrono::steady_clock::now();
             bool reported_nested_gamescope = false;
@@ -9083,14 +9084,28 @@ namespace proc {
                                  << app_name << ']';
                 return;
               }
+              const auto startup_diagnostics =
+                stream_runtime::labwc::startup_client_diagnostics(runtime_generation);
               BOOST_LOG(warning) << "private_session: ["sv << app_name
                                  << "] did not expose a managed window in the private session after "sv
                                  << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
                                  << "s. Polaris cannot confirm whether the app rendered on the host desktop "sv
-                                 << "or used an unenumerated fullscreen/XWayland surface; check the client image before applying the Flatpak portal workaround. See docs/troubleshooting.md."sv;
+                                 << "or used an unenumerated fullscreen/XWayland surface. "sv
+                                 << (startup_diagnostics ?
+                                       "Generation-scoped evidence: "s +
+                                         labwc_startup_diagnostics::describe_for_log(*startup_diagnostics) + ". " :
+                                       "No generation-scoped startup-client evidence was available. "s)
+                                 << "Check the client image before applying the Flatpak portal workaround. See docs/troubleshooting.md."sv;
+              const auto event_message =
+                startup_diagnostics && startup_diagnostics->shell_exit_status &&
+                    *startup_diagnostics->shell_exit_status != 0 ?
+                  app_name + " startup client exited with status " +
+                    std::to_string(*startup_diagnostics->shell_exit_status) +
+                    "; no private-session window appeared" :
+                  app_name + " did not expose a managed private-session window; verify where it rendered";
               confighttp::emit_session_event(
                 "warning",
-                app_name + " did not expose a managed private-session window; verify where it rendered"
+                event_message
               );
               return;
             }
