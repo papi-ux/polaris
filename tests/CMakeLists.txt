@@ -364,7 +364,9 @@ add_test(NAME test_game_artwork COMMAND test_game_artwork)
 # isolation can be exercised without linking the current singleton runtime.
 add_executable(test_multiseat_runtime
     ${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/src/multiseat_worker_broker.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_worker_broker.cpp
 )
 set_target_properties(test_multiseat_runtime PROPERTIES
     CXX_STANDARD 23

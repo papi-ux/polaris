@@ -77,8 +77,8 @@ Admission returns an opaque handle:
 
 The client, profile, and workload keys are retained as internal routing
 metadata but never appear in worker, runtime, Wayland, audio, or input names;
-those names use only the controller epoch and generation.
-That avoids leaking identity through process listings and host runtime paths.
+those names use only the controller epoch and generation. That avoids leaking
+identity through process listings and host runtime paths.
 
 The lifecycle is:
 
@@ -90,6 +90,39 @@ idempotent once stopping begins, but release is refused before stopping. A new
 control-plane process must use a new epoch, so an old callback cannot target a
 replacement registry even if its slot and generation numbers match. Startup
 reconciliation and orphan cleanup remain worker-broker responsibilities.
+
+## Worker-broker protocol
+
+The backend boundary is deliberately smaller than a container-engine API. A
+worker receives one immutable launch specification containing the exact seat
+handle, opaque worker resources, opaque profile and workload keys, chosen
+render node, concrete compositor, and encoder lease count. Client identity,
+credentials, host paths, and container-engine authority are not part of that
+payload.
+
+The backend exposes only three operations:
+
+- launch one exact worker specification;
+- stop one exact worker identity gracefully or forcibly;
+- return an authoritative, complete inventory of this deployment's workers.
+
+The control plane begins with admission closed. One successful inventory pass
+must prove that no worker from an older controller epoch remains before any new
+seat can start. Old workers are never adopted into a replacement registry.
+They receive one exact graceful stop request, then one exact forced stop after
+the configured monotonic deadline if still present. Admission opens only after
+a later clean inventory confirms their absence. The broker does not repeat a
+forced stop blindly; a worker still present after the force-confirmation
+deadline is surfaced as stuck for a higher-level recovery policy.
+
+An indeterminate launch is treated as potentially successful: its seat moves
+to stopping and remains allocated until authoritative inventory confirms that
+the exact worker is absent. Likewise, a worker that disappears from an
+authoritative inventory releases only its own exact seat. Backend observation
+failure closes admission without mutating registry state. A malformed,
+unknown-state, or duplicate observation invalidates the complete snapshot;
+the broker then issues no worker command and makes no lifecycle mutation from
+that snapshot.
 
 ## GPU admission
 
@@ -192,11 +225,21 @@ The test_multiseat_runtime target covers:
 - separate seat and encoder capacity failures;
 - one active seat per client;
 - concrete Automatic selection and fail-closed explicit Gamescope;
-- resource names that do not contain client or profile identifiers.
+- resource names that do not contain client or profile identifiers;
+- mandatory clean inventory before worker launch;
+- two independent fake workers reaching ready state and stopping separately;
+- restart reconciliation that blocks admission while an old-epoch worker exists;
+- graceful orphan cleanup followed by deadline-bounded forced cleanup;
+- fail-closed handling of rejected and indeterminate launches;
+- exact-seat release when one authoritative worker disappears;
+- observation failure that closes admission without changing a reserved seat;
+- malformed or duplicate inventory that closes admission without guessed
+  commands or lifecycle mutation.
 
-This is the control-plane proof. A later container integration test must bind
-the same handles to two real workers and demonstrate concurrent frame,
-audio, and input heartbeats before physical game testing can begin.
+This is still an in-memory control-plane proof. A later container integration
+test must bind the same protocol to two real workers and demonstrate
+concurrent frame, audio, and input heartbeats before physical game testing can
+begin.
 
 ## Upstream references
 
