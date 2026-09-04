@@ -359,6 +359,22 @@ target_link_libraries(test_game_artwork PRIVATE
 )
 add_test(NAME test_game_artwork COMMAND test_game_artwork)
 
+# The multiseat architecture contract deliberately depends only on the C++
+# standard library. Keep its executable small so admission and lifecycle
+# isolation can be exercised without linking the current singleton runtime.
+add_executable(test_multiseat_runtime
+    ${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_runtime.cpp
+)
+set_target_properties(test_multiseat_runtime PROPERTIES
+    CXX_STANDARD 23
+    INTERPROCEDURAL_OPTIMIZATION OFF
+)
+target_link_libraries(test_multiseat_runtime PRIVATE
+    gtest_main
+)
+add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
+
 configure_polaris_test_target(${PROJECT_NAME}
     $<TARGET_OBJECTS:test_polaris_main_objects>
     ${TEST_SUPPORT_SOURCES}

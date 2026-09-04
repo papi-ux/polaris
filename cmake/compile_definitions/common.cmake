@@ -108,6 +108,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/device_db.cpp"
         "${CMAKE_SOURCE_DIR}/src/launch_profile.h"
         "${CMAKE_SOURCE_DIR}/src/launch_profile.cpp"
+        "${CMAKE_SOURCE_DIR}/src/multiseat_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.h"
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_classifier.h"
