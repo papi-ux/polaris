@@ -37,6 +37,12 @@ namespace multiseat::podman {
     [[nodiscard]] virtual std::uint64_t effective_uid() const = 0;
     [[nodiscard]] virtual bool executable_file(const std::filesystem::path &path) const = 0;
     [[nodiscard]] virtual bool readable_directory(const std::filesystem::path &path) const = 0;
+    [[nodiscard]] virtual bool private_read_write_directory(
+      const std::filesystem::path &path
+    ) const = 0;
+    [[nodiscard]] virtual bool private_readable_file(
+      const std::filesystem::path &path
+    ) const = 0;
     [[nodiscard]] virtual bool read_write_character_device(
       const std::filesystem::path &path
     ) const = 0;
@@ -69,6 +75,7 @@ namespace multiseat::podman {
     std::string deployment_id;
     std::string image_reference;
     std::filesystem::path worker_entrypoint {"/usr/bin/polaris-seat-worker"};
+    std::filesystem::path ipc_root;
     std::vector<gpu_t> gpus;
     std::vector<profile_t> profiles;
     std::vector<std::string> workload_keys;
@@ -121,7 +128,10 @@ namespace multiseat::podman {
     [[nodiscard]] const profile_t *profile_for(const std::string &profile_key) const;
     [[nodiscard]] bool workload_allowed(const std::string &workload_key) const;
     [[nodiscard]] bool base_host_ready() const;
-    [[nodiscard]] bool launch_host_ready(const gpu_t &gpu) const;
+    [[nodiscard]] bool launch_host_ready(
+      const worker_launch_spec_t &spec,
+      const gpu_t &gpu
+    ) const;
     [[nodiscard]] bool valid_spec(const worker_launch_spec_t &spec) const;
     [[nodiscard]] std::vector<std::string> launch_argv(
       const worker_launch_spec_t &spec,

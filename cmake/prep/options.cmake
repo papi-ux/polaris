@@ -76,6 +76,8 @@ elseif(UNIX)  # Linux
             "Enable XDG Desktop Portal screen capture if available." ON)
     option(POLARIS_ENABLE_BROWSER_STREAM
             "Enable experimental Browser Stream WebTransport support." OFF)
+    option(POLARIS_BUILD_MULTISEAT_WORKER
+            "Build the experimental isolated multiseat worker entrypoint." OFF)
     option(POLARIS_ENABLE_WEBRTC
             "Deprecated alias for POLARIS_ENABLE_BROWSER_STREAM." OFF)
     if(POLARIS_ENABLE_WEBRTC)

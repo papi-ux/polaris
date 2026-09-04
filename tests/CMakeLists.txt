@@ -360,13 +360,15 @@ target_link_libraries(test_game_artwork PRIVATE
 add_test(NAME test_game_artwork COMMAND test_game_artwork)
 
 # Keep the multiseat test executable independent of the current singleton
-# runtime. The backend-neutral contract uses only the C++ standard library;
-# Linux adds the Podman adapter contract and its JSON inventory parser.
+# runtime. Linux adds the Podman adapter contract and its JSON inventory
+# parser; the IPC proof uses only OpenSSL's crypto primitive.
 add_executable(test_multiseat_runtime
     ${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp
     ${CMAKE_SOURCE_DIR}/src/multiseat_worker_broker.cpp
+    ${CMAKE_SOURCE_DIR}/src/multiseat_worker_protocol.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_runtime.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_worker_broker.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_worker_protocol.cpp
 )
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(test_multiseat_runtime PRIVATE
@@ -380,6 +382,7 @@ set_target_properties(test_multiseat_runtime PROPERTIES
 )
 target_link_libraries(test_multiseat_runtime PRIVATE
     gtest_main
+    OpenSSL::Crypto
 )
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(test_multiseat_runtime PRIVATE
@@ -387,6 +390,21 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(POLARIS_TEST_GO_EXECUTABLE go)
+    if(POLARIS_TEST_GO_EXECUTABLE)
+        add_test(
+            NAME polaris_multiseat_worker_go
+            COMMAND ${CMAKE_COMMAND} -E env
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    ${POLARIS_TEST_GO_EXECUTABLE} test -trimpath ./...
+        )
+        set_tests_properties(polaris_multiseat_worker_go PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
+        )
+    endif()
+endif()
 
 configure_polaris_test_target(${PROJECT_NAME}
     $<TARGET_OBJECTS:test_polaris_main_objects>

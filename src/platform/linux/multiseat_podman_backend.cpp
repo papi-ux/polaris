@@ -36,6 +36,11 @@ namespace multiseat::podman {
     constexpr auto label_render_node = "io.polaris.multiseat.render-node"sv;
     constexpr auto label_compositor = "io.polaris.multiseat.compositor"sv;
     constexpr auto label_encoders = "io.polaris.multiseat.encoders"sv;
+    constexpr auto capability_file = "auth-token"sv;
+    constexpr auto ipc_directory = "ipc"sv;
+    constexpr auto auth_directory = "auth"sv;
+    constexpr auto container_ipc_directory = "/run/polaris-ipc"sv;
+    constexpr auto container_auth_directory = "/run/polaris-auth"sv;
 
     bool ascii_alphanumeric(char value) {
       return (value >= 'a' && value <= 'z') ||
@@ -309,6 +314,7 @@ namespace multiseat::podman {
     void validate_options(const options_t &options) {
       if (!safe_path(options.executable) ||
           !safe_path(options.worker_entrypoint) ||
+          !safe_path(options.ipc_root) ||
           !opaque_name_token(options.deployment_id, 64) ||
           !pinned_image_reference(options.image_reference) ||
           options.gpus.empty() ||
@@ -433,8 +439,23 @@ namespace multiseat::podman {
     return host_.effective_uid() != 0 && host_.executable_file(options_.executable);
   }
 
-  bool backend_t::launch_host_ready(const gpu_t &gpu) const {
+  bool backend_t::launch_host_ready(
+    const worker_launch_spec_t &spec,
+    const gpu_t &gpu
+  ) const {
     if (!base_host_ready()) {
+      return false;
+    }
+    const auto worker_authority_directory =
+      options_.ipc_root / spec.resources.runtime_namespace;
+    const auto worker_ipc_directory = worker_authority_directory / ipc_directory;
+    const auto worker_auth_directory = worker_authority_directory / auth_directory;
+    if (!safe_path(worker_authority_directory) ||
+        !host_.private_read_write_directory(options_.ipc_root) ||
+        !host_.private_read_write_directory(worker_authority_directory) ||
+        !host_.private_read_write_directory(worker_ipc_directory) ||
+        !host_.private_read_write_directory(worker_auth_directory) ||
+        !host_.private_readable_file(worker_auth_directory / capability_file)) {
       return false;
     }
     const auto devices_ready = [&]() {
@@ -518,10 +539,12 @@ namespace multiseat::podman {
       "--init",
       "--pids-limit=" + std::to_string(options_.pids_limit),
       "--shm-size=" + std::to_string(options_.shared_memory_bytes) + "b",
-      "--tmpfs=/run/polaris:rw,nosuid,nodev,noexec,size=" +
-        std::to_string(options_.runtime_tmpfs_bytes) + ",mode=0700",
-      "--tmpfs=/tmp:rw,nosuid,nodev,size=" +
-        std::to_string(options_.temporary_tmpfs_bytes) + ",mode=0700",
+      "--mount=type=tmpfs,dst=/run/polaris,rw=true,tmpfs-size=" +
+        std::to_string(options_.runtime_tmpfs_bytes) +
+        ",tmpfs-mode=0700,U=true,notmpcopyup",
+      "--mount=type=tmpfs,dst=/tmp,rw=true,tmpfs-size=" +
+        std::to_string(options_.temporary_tmpfs_bytes) +
+        ",tmpfs-mode=0700,U=true,notmpcopyup",
       "--log-driver=k8s-file",
       "--log-opt=max-size=" + std::to_string(options_.log_size_bytes) + "b",
       "--health-cmd=" + json::array({options_.worker_entrypoint.native(), "health"}).dump(),
@@ -534,6 +557,14 @@ namespace multiseat::podman {
       "--health-max-log-size=" + std::to_string(options_.health_log_size),
       "--stop-signal=TERM",
       "--volume=" + profile.opaque_volume_name + ":/var/lib/polaris-seat:rw,nosuid,nodev,nocreate",
+      "--mount=type=bind,src=" +
+        (options_.ipc_root / spec.resources.runtime_namespace / ipc_directory).native() +
+        ",dst=" + std::string {container_ipc_directory} +
+        ",rw=true,relabel=private,bind-nonrecursive",
+      "--mount=type=bind,src=" +
+        (options_.ipc_root / spec.resources.runtime_namespace / auth_directory).native() +
+        ",dst=" + std::string {container_auth_directory} +
+        ",ro=true,relabel=private,bind-nonrecursive",
       "--workdir=/var/lib/polaris-seat",
     };
 
@@ -555,6 +586,7 @@ namespace multiseat::podman {
     add_environment("PULSE_SINK", spec.resources.audio_sink);
     add_environment("WAYLAND_DISPLAY", spec.resources.wayland_socket);
     add_environment("POLARIS_RUNTIME_NAMESPACE", spec.resources.runtime_namespace);
+    add_environment("POLARIS_WORKER_NAME", spec.identity.worker_name);
     add_environment("POLARIS_INPUT_SEAT", spec.resources.input_seat);
     add_environment("POLARIS_CONTROLLER_EPOCH", spec.identity.seat.controller_epoch);
     add_environment("POLARIS_LOGICAL_GPU_ID", spec.identity.seat.logical_gpu_id);
@@ -598,7 +630,7 @@ namespace multiseat::podman {
       return worker_command_result_e::rejected;
     }
     try {
-      if (!launch_host_ready(*gpu)) {
+      if (!launch_host_ready(spec, *gpu)) {
         return worker_command_result_e::rejected;
       }
     } catch (...) {

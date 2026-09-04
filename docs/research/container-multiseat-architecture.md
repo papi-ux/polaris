@@ -1,8 +1,8 @@
 # Container multiseat architecture spike
 
-Status: architecture plus an offline rootless-Podman backend contract. Nothing
-in this document enables multiseat, launches a container, or changes the
-current single-workload runtime.
+Status: architecture, an offline rootless-Podman backend, locked image inputs,
+and a supervisor/IPC proof. Nothing in this document enables multiseat,
+launches a container, or changes the current single-workload runtime.
 
 ## Outcome
 
@@ -245,6 +245,77 @@ only generated argv and synthetic Podman JSON. Podman was not installed and no
 container, volume, namespace, device, or profile was created during this
 checkpoint.
 
+## Worker image and entrypoint checkpoint
+
+The worker overlay is intentionally small and shared by four independently
+locked runtime profiles: a plain Gamescope-capable base, Steam, Heroic, and
+Lutris. `containers/multiseat/images.lock.json` records immutable OCI index
+digests for every runtime and for the Go build toolchain. Tags such as `edge`
+and `latest` are not build inputs. The Containerfile performs no package,
+module, or source download: it builds the standard-library-only worker with
+CGO disabled, copies that static binary into the chosen locked runtime, and
+overrides the image entrypoint.
+
+Separating launcher variants matters for both maintenance and isolation. It
+keeps one launcher update from silently changing every seat image and avoids
+combining multiple writable launcher homes, credential stores, and runtime
+stacks in one image. A future image workflow must build from an exact Polaris
+revision, record the resulting Polaris-owned image digest, and configure the
+Podman backend with only that final digest. Pinning the third-party base is an
+input guarantee, not a substitute for pinning the produced worker image. The
+current lock is not a publisher-trust claim: signature, attestation, SBOM,
+vulnerability-policy, license-bundle, and retained-manifest gates still belong
+in a future publication workflow.
+
+The current `polaris-seat-worker` is a supervisor proof, not a game worker. It
+validates the immutable seat allocation, securely reads its capability,
+creates private control and media sockets, publishes a process-bound health
+record, responds to authenticated heartbeats, and handles authenticated
+shutdown. Health must complete mutual authentication and a heartbeat on both
+sockets; the existence of socket nodes alone is never a ready signal. It
+deliberately has no command that starts Gamescope, a launcher,
+audio, capture, encoding, or virtual input. Podman health therefore proves only
+that this supervisor contract is alive.
+
+## Local control and media IPC checkpoint
+
+`--network=none` remains the supported boundary. One pre-created, mode-0700,
+generation-scoped host directory belongs to one exact worker. Its private
+`ipc` child is bind-mounted read-write at `/run/polaris-ipc`; its private
+`auth` child is bind-mounted read-only at `/run/polaris-auth`. The latter
+contains a mode-0600, 32-byte capability encoded as canonical lowercase hex,
+while the IPC mount contains two mode-0600 Unix sockets:
+
+- `control.sock` is reserved for lifecycle, input, feedback, status, and
+  bounded error messages;
+- `media.sock` is reserved for encoded video/audio packets and discontinuity
+  markers.
+
+The capability value never appears in argv, environment, labels, logs, or
+container inspection metadata. Each connection must have the same effective
+UID as the rootless controller and complete mutual HMAC-SHA256
+challenge/response. Proofs bind the role, channel, controller epoch, logical
+GPU, slot, generation, and worker name, so a valid control proof cannot be
+replayed on the media socket or another seat. Fresh random challenges prevent
+cross-connection proof replay, and each direction begins at sequence one and
+then advances exactly without gaps or reuse.
+
+Every frame has a fixed 32-byte big-endian header. Parsing validates the magic,
+channel, message shape, zero reserved flags, exact slot/generation, nonzero
+sequence, and advertised length before allocating a payload. Control payloads
+are capped at 64 KiB and media payloads at 16 MiB. The protocol defines future
+input, feedback, video, audio, and end-of-stream message types, but the current
+supervisor accepts only authentication, heartbeat, and control shutdown. A
+message for an unwired data path closes that connection instead of being
+silently discarded.
+
+The Podman backend does not create the shared directory or capability. A
+future privileged-enough controller helper must create them before launch,
+with private ownership and modes, and must remove them only under exact
+generation authority. The current live-host adapter merely validates that the
+root and leaf directories are private and writable and that the capability is
+a private regular file before invoking Podman.
+
 ## Launcher acceptance comes second
 
 Steam, Heroic, and Lutris are all first-class targets, but installing their
@@ -291,10 +362,19 @@ The test_multiseat_runtime target covers:
 - fail-closed root, missing-device, unknown-allocation, timeout, ambiguous
   launch output, truncation, inventory bound/cardinality/ID, and malformed
   inventory paths.
+- language-neutral IPC authentication and framing golden vectors;
+- strict capability syntax, seat/channel proof separation, payload bounds,
+  and replay/gap rejection;
+- two in-process Linux workers authenticating both channels, exchanging
+  heartbeats, and stopping independently;
+- private-file, symlink, socket-mode, health-identity, and stale-node checks;
+- digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
+  worker toolchain, plus a no-network Containerfile build contract.
 
 This remains an offline control-plane/backend proof. A later container
-integration test must supply a pinned worker image, pre-created profile
-volumes, and two real workers, then demonstrate concurrent frame, audio, and
+integration test must build and pin the final worker image, pre-create profile
+volumes and private IPC capabilities, and run two real supervisor containers.
+After that passes, the runtime adapters must add concurrent frame, audio, and
 input heartbeats before physical game testing can begin.
 
 ## Upstream references

@@ -112,6 +112,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/multiseat_worker_broker.h"
         "${CMAKE_SOURCE_DIR}/src/multiseat_worker_broker.cpp"
+        "${CMAKE_SOURCE_DIR}/src/multiseat_worker_protocol.h"
+        "${CMAKE_SOURCE_DIR}/src/multiseat_worker_protocol.cpp"
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.h"
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_classifier.h"

@@ -53,6 +53,14 @@ namespace {
       return readable_directories.contains(path.native());
     }
 
+    bool private_read_write_directory(const std::filesystem::path &path) const override {
+      return private_directories.contains(path.native());
+    }
+
+    bool private_readable_file(const std::filesystem::path &path) const override {
+      return private_files.contains(path.native());
+    }
+
     bool read_write_character_device(const std::filesystem::path &path) const override {
       return accessible_devices.contains(path.native());
     }
@@ -80,6 +88,19 @@ namespace {
     std::set<std::string> readable_directories {
       "/srv/Games Library",
     };
+    std::set<std::string> private_directories {
+      "/run/user/1000/polaris-workers",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1/ipc",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1/auth",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-2",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-2/ipc",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-2/auth",
+    };
+    std::set<std::string> private_files {
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1/auth/auth-token",
+      "/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-2/auth/auth-token",
+    };
     std::set<std::string> accessible_devices {
       "/dev/dri/renderD128",
       "/dev/dri/card0",
@@ -97,6 +118,7 @@ namespace {
       .image_reference = std::string {"ghcr.io/papi-ux/polaris-seat@sha256:"} +
                          std::string(64, 'a'),
       .worker_entrypoint = "/usr/bin/polaris-seat-worker",
+      .ipc_root = "/run/user/1000/polaris-workers",
       .gpus = {
         gpu_t {
           .logical_gpu_id = "gpu-primary",
@@ -266,6 +288,10 @@ TEST(MultiseatPodmanBackend, RejectsUnpinnedImagesAndDuplicateProfileVolumes) {
   options = options_for_tests();
   options.profiles.at(1).opaque_volume_name = options.profiles.at(0).opaque_volume_name;
   EXPECT_THROW(backend_t(host, options), std::invalid_argument);
+
+  options = options_for_tests();
+  options.ipc_root = "/run/user/1000/../polaris-workers";
+  EXPECT_THROW(backend_t(host, options), std::invalid_argument);
 }
 
 TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
@@ -299,11 +325,13 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_TRUE(has_argument(argv, "--shm-size=1073741824b"));
   EXPECT_TRUE(has_argument(
     argv,
-    "--tmpfs=/run/polaris:rw,nosuid,nodev,noexec,size=67108864,mode=0700"
+    "--mount=type=tmpfs,dst=/run/polaris,rw=true,tmpfs-size=67108864,"
+    "tmpfs-mode=0700,U=true,notmpcopyup"
   ));
   EXPECT_TRUE(has_argument(
     argv,
-    "--tmpfs=/tmp:rw,nosuid,nodev,size=1073741824,mode=0700"
+    "--mount=type=tmpfs,dst=/tmp,rw=true,tmpfs-size=1073741824,"
+    "tmpfs-mode=0700,U=true,notmpcopyup"
   ));
   EXPECT_FALSE(has_argument(argv, "--read-only-tmpfs=false"));
   EXPECT_TRUE(has_argument(argv, "--pull=never"));
@@ -326,7 +354,20 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_TRUE(has_argument(argv, "--env=WAYLAND_DISPLAY=polaris-wayland-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=PULSE_SINK=polaris-audio-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_INPUT_SEAT=polaris-input-controller-a1b2-1"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_WORKER_NAME=polaris-worker-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_COMPOSITOR=gamescope"));
+  EXPECT_TRUE(has_argument(
+    argv,
+    "--mount=type=bind,src=/run/user/1000/polaris-workers/"
+    "polaris-runtime-controller-a1b2-1/ipc,dst=/run/polaris-ipc,"
+    "rw=true,relabel=private,bind-nonrecursive"
+  ));
+  EXPECT_TRUE(has_argument(
+    argv,
+    "--mount=type=bind,src=/run/user/1000/polaris-workers/"
+    "polaris-runtime-controller-a1b2-1/auth,dst=/run/polaris-auth,"
+    "ro=true,relabel=private,bind-nonrecursive"
+  ));
   EXPECT_TRUE(has_argument(argv, "--health-on-failure=none"));
   EXPECT_TRUE(has_argument(argv, "--workload-key=steam-game;literal"));
   EXPECT_TRUE(any_argument_contains(argv, "--health-cmd=[\"/usr/bin/polaris-seat-worker\",\"health\"]"));
@@ -336,6 +377,8 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_FALSE(any_argument_contains(argv, "--pid=host"));
   EXPECT_FALSE(any_argument_contains(argv, "docker.sock"));
   EXPECT_FALSE(any_argument_contains(argv, "keep-groups"));
+  EXPECT_FALSE(any_argument_contains(argv, "POLARIS_AUTH_TOKEN"));
+  EXPECT_FALSE(any_argument_contains(argv, std::string(64, '0')));
 }
 
 TEST(MultiseatPodmanBackend, LaunchRejectsPrivilegedOrInaccessibleHostsBeforeCommand) {
@@ -347,6 +390,11 @@ TEST(MultiseatPodmanBackend, LaunchRejectsPrivilegedOrInaccessibleHostsBeforeCom
 
   host.uid = 1000;
   host.accessible_devices.erase("/dev/uhid");
+  EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
+  EXPECT_TRUE(host.calls.empty());
+
+  host.accessible_devices.insert("/dev/uhid");
+  host.private_files.clear();
   EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
   EXPECT_TRUE(host.calls.empty());
 }

@@ -1,0 +1,93 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+type lockedImage struct {
+	ID        string `json:"id"`
+	Launcher  string `json:"launcher"`
+	Reference string `json:"reference"`
+	Source    string `json:"source"`
+}
+
+type imageLock struct {
+	Schema          int           `json:"schema"`
+	Platform        string        `json:"platform"`
+	Builder         lockedImage   `json:"builder"`
+	RuntimeProfiles []lockedImage `json:"runtime_profiles"`
+}
+
+func repositoryFile(t *testing.T, elements ...string) []byte {
+	t.Helper()
+	path := filepath.Join(append([]string{".."}, elements...)...)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+func TestImageInputsAreDigestPinnedAndComplete(t *testing.T) {
+	var lock imageLock
+	if err := json.Unmarshal(
+		repositoryFile(t, "containers", "multiseat", "images.lock.json"),
+		&lock,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if lock.Schema != 1 || lock.Platform != "linux/amd64" {
+		t.Fatalf("unsupported image lock: %+v", lock)
+	}
+	digestReference := regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[a-z0-9._-]+)?@sha256:[0-9a-f]{64}$`)
+	all := append([]lockedImage{lock.Builder}, lock.RuntimeProfiles...)
+	seenReferences := map[string]bool{}
+	seenIDs := map[string]bool{}
+	for _, image := range all {
+		if image.ID == "" || seenIDs[image.ID] || image.Source == "" ||
+			!digestReference.MatchString(image.Reference) || seenReferences[image.Reference] {
+			t.Fatalf("invalid or duplicate locked image: %+v", image)
+		}
+		seenIDs[image.ID] = true
+		seenReferences[image.Reference] = true
+	}
+	for _, required := range []string{"go", "gamescope", "steam", "heroic", "lutris"} {
+		if !seenIDs[required] {
+			t.Fatalf("required image profile %q is missing", required)
+		}
+	}
+}
+
+func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
+	containerfile := string(repositoryFile(t, "containers", "multiseat", "Containerfile"))
+	lockContent := string(repositoryFile(t, "containers", "multiseat", "images.lock.json"))
+	for _, required := range []string{
+		"docker.io/library/golang@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514",
+		"ghcr.io/games-on-whales/base-app@sha256:1d7b61da242e767bc5c80c5fe897392b6a9e6854345d3dea6d2f799e7ea98a14",
+		"GOPROXY=off",
+		"CGO_ENABLED=0",
+		"go test -trimpath ./...",
+		"COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile",
+		"COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json",
+		"ENTRYPOINT [\"/usr/bin/polaris-seat-worker\"]",
+	} {
+		if !strings.Contains(containerfile, required) {
+			t.Fatalf("Containerfile is missing %q", required)
+		}
+	}
+	if strings.Contains(containerfile, ":latest") || strings.Contains(containerfile, ":edge") ||
+		strings.Contains(containerfile, "apt-get") || strings.Contains(containerfile, "curl ") ||
+		strings.Contains(containerfile, "git clone") {
+		t.Fatal("Containerfile reintroduced a moving or network-fetched build input")
+	}
+	if !strings.Contains(lockContent, "\"steam\"") ||
+		!strings.Contains(lockContent, "\"heroic\"") ||
+		!strings.Contains(lockContent, "\"lutris\"") {
+		t.Fatal("launcher image lock is incomplete")
+	}
+}

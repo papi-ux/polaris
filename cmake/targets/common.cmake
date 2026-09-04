@@ -126,6 +126,41 @@ if(POLARIS_ENABLE_BROWSER_STREAM)
     endif()
 endif()
 
+if(POLARIS_BUILD_MULTISEAT_WORKER)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+            NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR
+                "POLARIS_BUILD_MULTISEAT_WORKER currently supports only Linux/amd64 locked images")
+    endif()
+    find_program(POLARIS_GO_EXECUTABLE go REQUIRED)
+    set(MULTISEAT_WORKER_OUTPUT "${CMAKE_BINARY_DIR}/polaris-seat-worker")
+    file(GLOB MULTISEAT_WORKER_SOURCES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod")
+    list(APPEND MULTISEAT_WORKER_SOURCES
+            "${CMAKE_SOURCE_DIR}/containers/multiseat/Containerfile"
+            "${CMAKE_SOURCE_DIR}/containers/multiseat/images.lock.json")
+    add_custom_command(
+            OUTPUT "${MULTISEAT_WORKER_OUTPUT}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
+            COMMENT "Building isolated multiseat worker"
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" test -trimpath ./...
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_WORKER_OUTPUT}" .
+            DEPENDS ${MULTISEAT_WORKER_SOURCES}
+            VERBATIM)
+    add_custom_target(multiseat-worker ALL DEPENDS "${MULTISEAT_WORKER_OUTPUT}")
+    install(PROGRAMS "${MULTISEAT_WORKER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+
 # tests
 if(BUILD_TESTS)
     add_subdirectory(tests)
