@@ -1054,14 +1054,9 @@ namespace config {
       return;
     }
 
-    char *c_str_p;
-    auto val = std::strtod(tmp.c_str(), &c_str_p);
-
-    if (c_str_p == tmp.c_str()) {
-      return;
+    if (const auto value = util::parse_decimal<double>(tmp)) {
+      input = *value;
     }
-
-    input = val;
   }
 
   void double_between_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, double &input, const std::pair<double, double> &range) {

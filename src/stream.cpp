@@ -39,6 +39,7 @@ extern "C" {
 #endif
 #include "process.h"
 #include "stream.h"
+#include "stream_fec.h"
 #include "stream_recorder.h"
 #include "stream_stats.h"
 #include "sync.h"
@@ -535,6 +536,10 @@ namespace stream {
     // stream_stats uses this to reject a stale write/stop that arrives
     // after this uuid's slot has already been handed to a newer session.
     std::uint64_t session_generation = 0;
+
+    // Accessed only by videoBroadcastThread(). Keeping one tracker per
+    // session prevents multi-client summaries from being combined.
+    fec_warning_tracker_t fec_warning_tracker;
 
     bool watch_only;
     bool temporary_authorization = false;
@@ -1629,6 +1634,8 @@ namespace stream {
         }
       }
 
+      const auto encoded_frame_bytes = payload.size();
+
       video_short_frame_header_t frame_header = {};
       frame_header.headerType = 0x01;  // Short header type
       frame_header.frameType = packet->is_idr()                     ? 2 :
@@ -1675,9 +1682,6 @@ namespace stream {
 
       payload = std::string_view {(char *) concat_buf.data(), concat_buf.size()};
 
-      // There are 2 bits for FEC block count for a maximum of 4 FEC blocks
-      constexpr auto MAX_FEC_BLOCKS = 4;
-
       // The max number of data shards per block is found by solving this system of equations for D:
       // D = 255 - P
       // P = D * F
@@ -1693,13 +1697,56 @@ namespace stream {
 
       // If the number of FEC blocks needed exceeds the protocol limit, turn off FEC for this frame.
       // For normal FEC percentages, this should only happen for enormous frames (over 800 packets at 20%).
-      if (fec_blocks_needed > MAX_FEC_BLOCKS) {
-        BOOST_LOG(warning) << "Skipping FEC for abnormally large encoded frame (needed "sv << fec_blocks_needed << " FEC blocks)"sv;
+      if (fec_blocks_needed > MAX_VIDEO_FEC_BLOCKS) {
+        const auto frame_type = packet->is_idr() ? fec_frame_type_e::idr :
+                                packet->after_ref_frame_invalidation ? fec_frame_type_e::reference_invalidation :
+                                                                       fec_frame_type_e::delta;
+        const oversized_fec_frame_observation_t observation {
+          .encoded_frame_bytes = encoded_frame_bytes,
+          .packetized_frame_bytes = payload.size(),
+          .protected_payload_limit_bytes = max_data_per_fec_block * MAX_VIDEO_FEC_BLOCKS,
+          .required_blocks = fec_blocks_needed,
+          .fec_percentage = fecPercentage,
+          .packet_size = session->config.packetsize,
+          .frame_type = frame_type
+        };
+        if (fecPercentage > 0) {
+          stream_stats::record_oversized_fec_frame(
+            session->session_generation,
+            observation.encoded_frame_bytes,
+            observation.packetized_frame_bytes,
+            observation.protected_payload_limit_bytes,
+            observation.required_blocks,
+            observation.fec_percentage,
+            observation.packet_size,
+            fec_frame_type_name(observation.frame_type)
+          );
+          if (const auto summary = session->fec_warning_tracker.observe(observation)) {
+            BOOST_LOG(warning)
+              << "Skipping FEC for oversized encoded frame(s); frame data is still transmitted without parity "sv
+              << "[frames_since_last_report="sv << summary->frame_count
+              << ", encoded_bytes_max="sv << summary->largest_encoded_frame_bytes
+              << ", packetized_bytes_max="sv << summary->largest_packetized_frame_bytes
+              << ", protected_limit_bytes="sv << summary->protected_payload_limit_bytes
+              << ", required_blocks_max="sv << summary->max_required_blocks
+              << ", protocol_blocks_max="sv << MAX_VIDEO_FEC_BLOCKS
+              << ", largest_frame_type="sv << fec_frame_type_name(summary->largest_frame_type)
+              << ", idr_frames="sv << summary->idr_frame_count
+              << ", reference_invalidation_frames="sv << summary->reference_invalidation_frame_count
+              << ", fec_percentage="sv << summary->fec_percentage
+              << ", packet_size="sv << summary->packet_size
+              << ", stream="sv << session->config.monitor.width << 'x' << session->config.monitor.height
+              << '@' << session->config.monitor.framerate
+              << ", encoder_bitrate_kbps="sv << session->config.monitor.bitrate
+              << "]. This is sender-side frame-size evidence, not proof of packet loss; "sv
+              << "lower bitrate only if client media-loss or pacing telemetry also shows impact."sv;
+          }
+        }
         fecPercentage = 0;
-        fec_blocks_needed = MAX_FEC_BLOCKS;
+        fec_blocks_needed = MAX_VIDEO_FEC_BLOCKS;
       }
 
-      std::array<std::string_view, MAX_FEC_BLOCKS> fec_blocks;
+      std::array<std::string_view, MAX_VIDEO_FEC_BLOCKS> fec_blocks;
       decltype(fec_blocks)::iterator
         fec_blocks_begin = std::begin(fec_blocks),
         fec_blocks_end = std::begin(fec_blocks) + fec_blocks_needed;

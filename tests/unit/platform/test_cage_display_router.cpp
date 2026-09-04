@@ -1035,6 +1035,23 @@ TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesRequestedCurrentRef
   EXPECT_DOUBLE_EQ(*reported_refresh, 120.0);
 }
 
+TEST(CageDisplayRouterPolicyTests, OutputModeParserRecognizesLocalizedDecimalComma) {
+  constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
+  Enabled: yes
+  Modes:
+    1920x1080 px, 59,940000 Hz (current)
+)";
+
+  const auto reported_refresh = cage_display_router::output_current_refresh_hz_for_tests(
+    output,
+    "HEADLESS-1",
+    1920,
+    1080
+  );
+  ASSERT_TRUE(reported_refresh);
+  EXPECT_DOUBLE_EQ(*reported_refresh, 59.94);
+}
+
 TEST(CageDisplayRouterPolicyTests, OutputModeParserRejectsWrongCurrentRefresh) {
   constexpr std::string_view output = R"(HEADLESS-1 "Headless output 1"
   Enabled: yes

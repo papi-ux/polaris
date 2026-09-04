@@ -9,6 +9,7 @@
 // standard includes
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -22,6 +23,7 @@
 
 // local includes
 #include "platform/common.h"
+#include "stream_fec.h"
 
 namespace stream_stats {
 
@@ -48,6 +50,21 @@ namespace stream_stats {
   double encoder_pressure_frame_budget_ms(double target_fps);
   bool encoder_time_fails_budget(double encode_time_ms, double target_fps);
   bool encoder_time_nears_budget(double encode_time_ms, double target_fps);
+
+  /** Sender-side evidence for encoded frames outside the protocol FEC envelope. */
+  struct fec_protection_stats_t {
+    std::uint64_t oversized_frames_total = 0;
+    std::uint64_t oversized_idr_frames_total = 0;
+    std::uint64_t oversized_reference_invalidation_frames_total = 0;
+    std::size_t largest_encoded_frame_bytes = 0;
+    std::size_t largest_packetized_frame_bytes = 0;
+    std::size_t protected_payload_limit_bytes = 0;
+    std::size_t max_required_blocks = 0;
+    std::size_t protocol_max_blocks = stream::MAX_VIDEO_FEC_BLOCKS;
+    int fec_percentage = 0;
+    int packet_size = 0;
+    std::string largest_frame_type;
+  };
 
   /**
    * @brief Per-client statistics for multi-session tracking.
@@ -76,6 +93,9 @@ namespace stream_stats {
     std::string packet_loss_source = "unavailable";
     double control_channel_packet_loss = 0;
     uint64_t bytes_sent = 0;
+
+    // Sender packetization. This does not claim client-visible media loss.
+    fec_protection_stats_t fec_protection;
 
     // Adaptive bitrate
     int adaptive_target_bitrate_kbps = 0;
@@ -160,6 +180,10 @@ namespace stream_stats {
     int effective_launch_bitrate_kbps = 0;
     int width = 0;
     int height = 0;
+
+    // Encoded frames that were transmitted without parity because the
+    // packetized payload exceeded the four-block wire-format envelope.
+    fec_protection_stats_t fec_protection;
 
     // Network
     double latency_ms = 0;
@@ -403,6 +427,22 @@ namespace stream_stats {
                              double dropped_frame_ratio,
                              double avg_frame_age_ms,
                              double frame_jitter_ms);
+
+  /**
+   * @brief Record one frame that exceeded the video FEC protection envelope.
+   *
+   * The frame was still sent. This is sender-side size evidence only and must
+   * not be treated as measured media loss or authorize an automatic bitrate
+   * change.
+   */
+  void record_oversized_fec_frame(std::uint64_t session_generation,
+                                  std::size_t encoded_frame_bytes,
+                                  std::size_t packetized_frame_bytes,
+                                  std::size_t protected_payload_limit_bytes,
+                                  std::size_t required_blocks,
+                                  int fec_percentage,
+                                  int packet_size,
+                                  std::string_view frame_type);
 
   /**
    * @brief Update network statistics.
