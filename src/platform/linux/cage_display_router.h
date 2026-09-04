@@ -8,6 +8,7 @@
 #ifdef __linux__
 
 #include "src/platform/common.h"
+#include "labwc_startup_diagnostics.h"
 #include "wlgrab_capture_policy.h"
 
 #include <optional>
@@ -151,6 +152,13 @@ namespace cage_display_router {
    */
   std::string get_wayland_socket();
   std::string get_session_instance_id();
+
+  /**
+   * @brief Return bounded startup-client evidence only for the exact runtime generation.
+   */
+  std::optional<labwc_startup_diagnostics::snapshot_t> get_startup_client_diagnostics(
+    std::string_view expected_session_instance_id
+  );
 
   /**
    * @brief Returns the XWayland display exposed by cage (e.g., ":1").

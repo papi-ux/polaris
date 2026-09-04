@@ -470,6 +470,53 @@ namespace stream_stats {
         [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; });
       return it == session_timings.end() ? nullptr : &*it;
     }
+
+    nlohmann::json fec_protection_json(const fec_protection_stats_t &stats) {
+      return {
+        {"oversized_frames_total", stats.oversized_frames_total},
+        {"oversized_idr_frames_total", stats.oversized_idr_frames_total},
+        {"oversized_reference_invalidation_frames_total", stats.oversized_reference_invalidation_frames_total},
+        {"largest_encoded_frame_bytes", stats.largest_encoded_frame_bytes},
+        {"largest_packetized_frame_bytes", stats.largest_packetized_frame_bytes},
+        {"protected_payload_limit_bytes", stats.protected_payload_limit_bytes},
+        {"max_required_blocks", stats.max_required_blocks},
+        {"protocol_max_blocks", stats.protocol_max_blocks},
+        {"fec_percentage", stats.fec_percentage},
+        {"packet_size", stats.packet_size},
+        {"largest_frame_type", stats.largest_frame_type}
+      };
+    }
+
+    void merge_oversized_fec_frame(fec_protection_stats_t &stats,
+                                    std::size_t encoded_frame_bytes,
+                                    std::size_t packetized_frame_bytes,
+                                    std::size_t protected_payload_limit_bytes,
+                                    std::size_t required_blocks,
+                                    int fec_percentage,
+                                    int packet_size,
+                                    std::string_view frame_type) {
+      ++stats.oversized_frames_total;
+      if (frame_type == "idr") {
+        ++stats.oversized_idr_frames_total;
+      } else if (frame_type == "reference_invalidation") {
+        ++stats.oversized_reference_invalidation_frames_total;
+      }
+
+      const bool new_largest =
+        required_blocks > stats.max_required_blocks ||
+        (required_blocks == stats.max_required_blocks &&
+         packetized_frame_bytes > stats.largest_packetized_frame_bytes);
+      if (new_largest) {
+        stats.largest_encoded_frame_bytes = encoded_frame_bytes;
+        stats.largest_packetized_frame_bytes = packetized_frame_bytes;
+        stats.max_required_blocks = required_blocks;
+        stats.largest_frame_type = frame_type;
+      }
+
+      stats.protected_payload_limit_bytes = protected_payload_limit_bytes;
+      stats.fec_percentage = fec_percentage;
+      stats.packet_size = packet_size;
+    }
   }  // namespace
 
   std::string stats_t::to_json() const {
@@ -555,6 +602,7 @@ namespace stream_stats {
     j["effective_launch_bitrate_kbps"] = effective_launch_bitrate_kbps;
     j["width"] = width;
     j["height"] = height;
+    j["fec_protection"] = fec_protection_json(fec_protection);
     j["latency_ms"] = latency_ms;
     j["packet_loss"] = packet_loss;
     j["packet_loss_available"] = packet_loss_available;
@@ -614,6 +662,7 @@ namespace stream_stats {
       cj["packet_loss_source"] = c.packet_loss_source;
       cj["control_channel_packet_loss"] = c.control_channel_packet_loss;
       cj["bytes_sent"] = c.bytes_sent;
+      cj["fec_protection"] = fec_protection_json(c.fec_protection);
       cj["adaptive_target_bitrate_kbps"] = c.adaptive_target_bitrate_kbps;
       clients_json.push_back(cj);
     }
@@ -1500,6 +1549,26 @@ namespace stream_stats {
         "No current media or control-channel latency sample is available for this stream."
     );
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
+    const bool has_oversized_fec_frames =
+      stats.fec_protection.oversized_frames_total > 0;
+    const std::string fec_protection_detail = has_oversized_fec_frames ?
+      "The sender transmitted oversized encoded frames without FEC parity because their packetized payload exceeded the four-block protection envelope. The largest encoded frame was " +
+        std::to_string(stats.fec_protection.largest_encoded_frame_bytes) +
+        " bytes and required " + std::to_string(stats.fec_protection.max_required_blocks) +
+        " blocks; the protected packetized limit was " +
+        std::to_string(stats.fec_protection.protected_payload_limit_bytes) +
+        " bytes. This is frame-size evidence, not proof of media packet loss. Lower bitrate only if client media-loss or pacing telemetry also shows impact." :
+      "No encoded frame has exceeded the active video FEC protection envelope.";
+    append_doctor_evidence(
+      evidence,
+      "fec_protection",
+      "Frames outside FEC protection",
+      stats.fec_protection.oversized_frames_total,
+      "frames",
+      has_oversized_fec_frames ? "info" : "pass",
+      "sender_packetizer",
+      fec_protection_detail
+    );
     append_doctor_evidence(
       evidence,
       "live_bitrate_owner",
@@ -1590,9 +1659,10 @@ namespace stream_stats {
     );
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak", "fec_protection"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
+    advanced["fec_protection"] = fec_protection_json(stats.fec_protection);
     advanced["controller_input"] = {
       {"host_controller_isolation", stats.input_host_controller_isolation},
       {"steam_input_status", stats.input_steam_input_status},
@@ -1810,6 +1880,7 @@ namespace stream_stats {
     if (current_stats.clients.size() == 1) {
       current_stats.client_name = client_name;
       current_stats.client_ip = client_ip;
+      current_stats.fec_protection = current_stats.clients.front().fec_protection;
     }
   }
 
@@ -1832,10 +1903,12 @@ namespace stream_stats {
       current_stats.streaming = false;
       current_stats.client_name.clear();
       current_stats.client_ip.clear();
+      current_stats.fec_protection = {};
     } else {
       // Update primary client info to first remaining client
       current_stats.client_name = current_stats.clients.front().name;
       current_stats.client_ip = current_stats.clients.front().ip;
+      current_stats.fec_protection = current_stats.clients.front().fec_protection;
     }
   }
 
@@ -1944,6 +2017,40 @@ namespace stream_stats {
     hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
     hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
     hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+  }
+
+  void record_oversized_fec_frame(std::uint64_t session_generation,
+                                  std::size_t encoded_frame_bytes,
+                                  std::size_t packetized_frame_bytes,
+                                  std::size_t protected_payload_limit_bytes,
+                                  std::size_t required_blocks,
+                                  int fec_percentage,
+                                  int packet_size,
+                                  std::string_view frame_type) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    auto client = std::find_if(
+      current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      }
+    );
+    if (client == current_stats.clients.end()) {
+      return;
+    }
+
+    merge_oversized_fec_frame(
+      client->fec_protection,
+      encoded_frame_bytes,
+      packetized_frame_bytes,
+      protected_payload_limit_bytes,
+      required_blocks,
+      fec_percentage,
+      packet_size,
+      frame_type
+    );
+    if (client == current_stats.clients.begin()) {
+      current_stats.fec_protection = client->fec_protection;
+    }
   }
 
   double packet_loss_percent(uint64_t scaled_loss, uint64_t scale) {

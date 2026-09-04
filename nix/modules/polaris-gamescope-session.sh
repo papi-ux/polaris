@@ -234,6 +234,26 @@ load_session_instance_id() {
   export POLARIS_SESSION_INSTANCE_ID="$persisted"
 }
 
+prepare_nested_runtime_services() {
+  load_session_instance_id || return 1
+  [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || return 1
+  case "$POLARIS_PERSISTED_SERVICE_MODE" in
+    managed)
+      # Only Nix-managed hosts have an idle compositor that can respawn and
+      # therefore needs a runtime mask during the nested handoff.
+      polaris_mask_idle_unit_runtime
+      ;;
+    standalone)
+      # Distro packages intentionally omit the idle and private-portal units.
+      # Masking an absent unit changes LoadState from not-found to masked and
+      # makes the persisted standalone service model impossible to restore.
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 session_steam_pids() {
   local p pids rc envf env_lines session_id="${POLARIS_SESSION_INSTANCE_ID:-}" proc_root
   [ -n "$session_id" ] || return 2
@@ -909,10 +929,13 @@ case "${1:-}" in
         echo "polaris-gamescope-session: another ownership transition is already active" >&2
         exit 1
       }
-      # Runtime-mask so polaris Wants= / portal-gamescope Wants= cannot respawn
-      # idle while nested needs exclusive gamescope-0 (portal is hard-wired).
-      # Use user.control — plain mask --runtime loses to Hjem ~/.config units.
-      polaris_mask_idle_unit_runtime
+      # Runtime-mask only a managed idle unit so polaris Wants= /
+      # portal-gamescope Wants= cannot respawn it while nested needs exclusive
+      # gamescope-0. Standalone packages have no such unit to mask.
+      prepare_nested_runtime_services || {
+        echo "polaris-gamescope-session: could not prepare nested runtime services" >&2
+        exit 1
+      }
       # Stop only the exact marked owner of gamescope-0. Unknown sockets fail
       # closed instead of risking another user's compositor.
       if polaris_validate_marker "$marker"; then
@@ -997,8 +1020,13 @@ case "${1:-}" in
         exit 1
       }
       (
+        # SteamOS ships Gamescope with cap_sys_nice=eip. Prevent that file
+        # capability from changing procfs ownership/readability: exact marker
+        # publication and socket ownership checks must remain possible for the
+        # same unprivileged user that launched this private compositor.
         run_without_session_operation_lock setsid env -u WAYLAND_DISPLAY -u DISPLAY -u ENABLE_HDR_WSI \
-          "${child_env[@]}" "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
+          "${child_env[@]}" setpriv --no-new-privs -- \
+          "${POLARIS_GAMESCOPE_BIN:-gamescope}" \
           --backend headless \
           "${steam_flags[@]}" \
           --xwayland-count 2 \
@@ -1246,6 +1274,10 @@ case "${1:-}" in
         echo "polaris-gamescope-session: nested owner remains without a durable recovery claim" >&2
         exit 1
       fi
+      # A partial standalone startup may have created a user.control mask
+      # before publishing durable state. Make the idempotent stop path repair
+      # that residue so the next start still classifies absent units correctly.
+      polaris_unmask_idle_unit_runtime
       echo "polaris-gamescope-session: stop already complete" >&2
       exit 0
     fi

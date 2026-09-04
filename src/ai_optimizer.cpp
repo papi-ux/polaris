@@ -9,9 +9,11 @@
 #include "logging.h"
 #include "platform/common.h"
 #include "stream_stats.h"
+#include "utility.h"
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -1308,16 +1310,53 @@ namespace ai_optimizer {
   static bool parse_display_mode(const std::string &value, int &width, int &height, int &fps) {
     width = 0;
     height = 0;
-    float fps_value = 0.0f;
-    if (sscanf(value.c_str(), "%dx%dx%f", &width, &height, &fps_value) < 2) {
+    fps = 0;
+
+    const auto first_x = value.find('x');
+    if (first_x == std::string::npos) {
       return false;
     }
-    if (width <= 0 || height <= 0) {
+    const auto second_x = value.find('x', first_x + 1);
+    if (second_x != std::string::npos && value.find('x', second_x + 1) != std::string::npos) {
       return false;
     }
-    if (fps_value <= 0.0f) {
-      fps_value = 60.0f;
+
+    const auto parse_dimension = [](std::string_view text) -> std::optional<int> {
+      if (text.empty()) {
+        return std::nullopt;
+      }
+      int parsed {};
+      const auto *begin = text.data();
+      const auto *end = begin + text.size();
+      const auto [next, error] = std::from_chars(begin, end, parsed);
+      if (error != std::errc {} || next != end || parsed <= 0) {
+        return std::nullopt;
+      }
+      return parsed;
+    };
+
+    const auto parsed_width = parse_dimension(std::string_view {value}.substr(0, first_x));
+    const auto height_end = second_x == std::string::npos ? value.size() : second_x;
+    const auto parsed_height = parse_dimension(
+      std::string_view {value}.substr(first_x + 1, height_end - first_x - 1)
+    );
+    if (!parsed_width || !parsed_height) {
+      return false;
     }
+
+    double fps_value = 60.0;
+    if (second_x != std::string::npos) {
+      const auto parsed_fps = util::parse_decimal<double>(
+        std::string_view {value}.substr(second_x + 1)
+      );
+      if (!parsed_fps || *parsed_fps <= 0.0) {
+        return false;
+      }
+      fps_value = *parsed_fps;
+    }
+
+    width = *parsed_width;
+    height = *parsed_height;
     fps = static_cast<int>(std::round(fps_value));
     return fps > 0;
   }

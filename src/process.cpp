@@ -16,9 +16,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <fstream>
 #include <iomanip>
+#include <locale>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -3804,6 +3806,7 @@ namespace proc {
 
       const double fps_value = fps >= 1000 ? static_cast<double>(fps) / 1000.0 : static_cast<double>(fps);
       std::ostringstream stream;
+      stream.imbue(std::locale::classic());
       stream << std::fixed << std::setprecision(fps % 1000 == 0 ? 0 : 3) << fps_value;
       return stream.str();
     }
@@ -7949,10 +7952,7 @@ namespace proc {
       return 409;
     }
 
-    std::string fps_str;
-    char fps_buf[8];
-    snprintf(fps_buf, sizeof(fps_buf), "%.3f", (float)launch_session->fps / 1000.0f);
-    fps_str = fps_buf;
+    const auto fps_str = std::format("{:.3f}", static_cast<double>(launch_session->fps) / 1000.0);
 
     // Add Stream-specific environment variables
     // Polaris Compatibility (legacy Sunshine env vars)
@@ -7960,7 +7960,9 @@ namespace proc {
     _env["POLARIS_APP_NAME"] = _app.name;
     _env["POLARIS_CLIENT_WIDTH"] = std::to_string(render_width);
     _env["POLARIS_CLIENT_HEIGHT"] = std::to_string(render_height);
-    _env["POLARIS_CLIENT_FPS"] = config::sunshine.envvar_compatibility_mode ? std::to_string(std::round((float)launch_session->fps / 1000.0f)) : fps_str;
+    _env["POLARIS_CLIENT_FPS"] = config::sunshine.envvar_compatibility_mode ?
+                                   std::format("{:.6f}", std::round(static_cast<double>(launch_session->fps) / 1000.0)) :
+                                   fps_str;
     _env["POLARIS_CLIENT_HDR"] = launch_session->enable_hdr ? "true" : "false";
     _env["POLARIS_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
     _env["POLARIS_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
@@ -9027,6 +9029,7 @@ namespace proc {
           [socket = std::move(private_socket),
            x11_display = std::move(private_x11_display),
            compositor_pid = private_compositor_pid,
+           runtime_generation = _session_instance_id,
            app_name = _app.name]() {
             const auto started = std::chrono::steady_clock::now();
             bool reported_nested_gamescope = false;
@@ -9081,14 +9084,28 @@ namespace proc {
                                  << app_name << ']';
                 return;
               }
+              const auto startup_diagnostics =
+                stream_runtime::labwc::startup_client_diagnostics(runtime_generation);
               BOOST_LOG(warning) << "private_session: ["sv << app_name
                                  << "] did not expose a managed window in the private session after "sv
                                  << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
                                  << "s. Polaris cannot confirm whether the app rendered on the host desktop "sv
-                                 << "or used an unenumerated fullscreen/XWayland surface; check the client image before applying the Flatpak portal workaround. See docs/troubleshooting.md."sv;
+                                 << "or used an unenumerated fullscreen/XWayland surface. "sv
+                                 << (startup_diagnostics ?
+                                       "Generation-scoped evidence: "s +
+                                         labwc_startup_diagnostics::describe_for_log(*startup_diagnostics) + ". " :
+                                       "No generation-scoped startup-client evidence was available. "s)
+                                 << "Check the client image before applying the Flatpak portal workaround. See docs/troubleshooting.md."sv;
+              const auto event_message =
+                startup_diagnostics && startup_diagnostics->shell_exit_status &&
+                    *startup_diagnostics->shell_exit_status != 0 ?
+                  app_name + " startup client exited with status " +
+                    std::to_string(*startup_diagnostics->shell_exit_status) +
+                    "; no private-session window appeared" :
+                  app_name + " did not expose a managed private-session window; verify where it rendered";
               confighttp::emit_session_event(
                 "warning",
-                app_name + " did not expose a managed private-session window; verify where it rendered"
+                event_message
               );
               return;
             }

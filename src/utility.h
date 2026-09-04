@@ -6,6 +6,9 @@
 
 // standard includes
 #include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <concepts>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -13,6 +16,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -455,6 +459,44 @@ namespace util {
     return buf;
   }
 
+  /**
+   * Parse a protocol/config decimal without consulting the process locale.
+   *
+   * Network and persisted values use an ASCII full stop. C-library parsers
+   * follow LC_NUMERIC, which lets a desktop toolkit silently turn "60.0" into
+   * a partial parse on comma-decimal hosts.
+   */
+  template<std::floating_point T>
+  std::optional<T> parse_decimal(std::string_view text) {
+    if (text.empty()) {
+      return std::nullopt;
+    }
+
+    T value {};
+    const auto *begin = text.data();
+    const auto *end = begin + text.size();
+    const auto [next, error] = std::from_chars(begin, end, value, std::chars_format::general);
+    if (error != std::errc {} || next != end || !std::isfinite(value)) {
+      return std::nullopt;
+    }
+    return value;
+  }
+
+  template<std::floating_point T>
+  std::string format_decimal(T value) {
+    if (!std::isfinite(value)) {
+      return {};
+    }
+    char buffer[128];
+    const auto [end, error] = std::to_chars(
+      buffer, buffer + sizeof(buffer), value, std::chars_format::general
+    );
+    if (error != std::errc {}) {
+      return {};
+    }
+    return std::string {buffer, end};
+  }
+
   template<typename T>
   T get_non_string_json_value(const nlohmann::json& j, const std::string& key, const T& default_value = T{}) {
     if (!j.contains(key))
@@ -467,7 +509,8 @@ namespace util {
       if constexpr (std::is_same_v<T, int>) {
         return std::stoi(s);
       } else if constexpr (std::is_same_v<T, double>) {
-        return std::stod(s);
+        const auto parsed = parse_decimal<double>(s);
+        return parsed.value_or(default_value);
       } else if constexpr (std::is_same_v<T, bool>) {
         return s == "true";
       } else if constexpr (std::is_same_v<T, std::string>) {

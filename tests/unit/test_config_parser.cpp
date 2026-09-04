@@ -6,6 +6,28 @@
 
 #include <src/config.h>
 #include <src/nvenc/nvenc_config.h>
+#include <src/utility.h>
+
+TEST(ConfigParserTests, ProtocolDecimalsUseDotAndRequireTheWholeValue) {
+  const auto fps = util::parse_decimal<double>("60.0");
+  ASSERT_TRUE(fps.has_value());
+  EXPECT_DOUBLE_EQ(*fps, 60.0);
+
+  const auto fractional = util::parse_decimal<double>("59.94");
+  ASSERT_TRUE(fractional.has_value());
+  EXPECT_DOUBLE_EQ(*fractional, 59.94);
+
+  EXPECT_FALSE(util::parse_decimal<double>("60,0").has_value());
+  EXPECT_FALSE(util::parse_decimal<double>("60.0fps").has_value());
+  EXPECT_FALSE(util::parse_decimal<double>(" 60.0").has_value());
+  EXPECT_FALSE(util::parse_decimal<double>("nan").has_value());
+  EXPECT_FALSE(util::parse_decimal<double>("inf").has_value());
+}
+
+TEST(ConfigParserTests, ProtocolDecimalFormattingNeverUsesAComma) {
+  EXPECT_EQ(util::format_decimal(59.94), "59.94");
+  EXPECT_EQ(util::format_decimal(60.0), "60");
+}
 
 TEST(ConfigParserTests, ParsesNvencSplitEncodeModeValues) {
   EXPECT_EQ(config::nv::split_encode_mode_from_view("disabled"), nvenc::nvenc_split_encode_mode::disabled);

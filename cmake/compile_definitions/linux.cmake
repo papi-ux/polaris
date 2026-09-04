@@ -486,6 +486,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input/input_group_access.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/labwc_startup_diagnostics.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/labwc_startup_diagnostics.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.h"

@@ -15,6 +15,7 @@
     #define TRAY_ICON_PAUSING WEB_DIR "images/apollo-pausing.ico"
     #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked.ico"
   #elif defined(__linux__) || defined(linux) || defined(__linux)
+    #include <gtk/gtk.h>
     #define TRAY_ICON WEB_DIR "images/polaris-playing.svg"
     #define TRAY_ICON_PLAYING WEB_DIR "images/polaris-playing.svg"
     #define TRAY_ICON_PAUSING WEB_DIR "images/polaris-pausing.svg"
@@ -181,6 +182,12 @@ namespace system_tray {
   };
 
   int init_tray() {
+  #if defined(__linux__) || defined(linux) || defined(__linux)
+    // gtk_init_check() otherwise calls setlocale(LC_ALL, "") and can change
+    // numeric parsing for HTTP workers while Polaris is already running.
+    gtk_disable_setlocale();
+  #endif
+
   #ifdef _WIN32
     // If we're running as SYSTEM, Explorer.exe will not have permission to open our thread handle
     // to monitor for thread termination. If Explorer fails to open our thread, our tray icon

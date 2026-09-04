@@ -780,6 +780,86 @@ TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
   EXPECT_FALSE(doctor.at("safe_recovery_action").at("destructive"));
 }
 
+TEST(StreamStatsDoctorTests, KeepsOversizedFecFramesInformational) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 4.0;
+  stats.fec_protection.oversized_frames_total = 288;
+  stats.fec_protection.oversized_idr_frames_total = 4;
+  stats.fec_protection.largest_encoded_frame_bytes = 2'900'000;
+  stats.fec_protection.largest_packetized_frame_bytes = 2'940'000;
+  stats.fec_protection.protected_payload_limit_bytes = 1'006'720;
+  stats.fec_protection.max_required_blocks = 12;
+  stats.fec_protection.fec_percentage = 5;
+  stats.fec_protection.packet_size = 1024;
+  stats.fec_protection.largest_frame_type = "idr";
+
+  const auto doctor = stream_stats::build_doctor_json(
+    stats, nlohmann::json::object()
+  );
+
+  EXPECT_EQ(doctor.at("traffic_light"), "green");
+  EXPECT_EQ(doctor.at("status"), "ok");
+  EXPECT_EQ(doctor.at("severity"), "info");
+  EXPECT_EQ(doctor.at("primary_issue"), "none");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
+
+  const auto &fec = *std::find_if(
+    doctor.at("evidence").begin(), doctor.at("evidence").end(),
+    [](const auto &item) { return item.value("id", "") == "fec_protection"; }
+  );
+  EXPECT_EQ(fec.at("status"), "info");
+  EXPECT_EQ(fec.at("source"), "sender_packetizer");
+  EXPECT_EQ(fec.at("value"), 288);
+  EXPECT_NE(
+    fec.at("detail").get<std::string>().find("not proof of media packet loss"),
+    std::string::npos
+  );
+  EXPECT_EQ(
+    doctor.at("advanced_evidence").at("fec_protection").at("max_required_blocks"),
+    12
+  );
+}
+
+TEST(StreamStatsFecProtectionTests, RoutesEvidenceBySessionGeneration) {
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client("198.51.100.40", "Primary", 7401);
+  stream_stats::add_client("198.51.100.41", "Viewer", 7402);
+
+  stream_stats::record_oversized_fec_frame(
+    7402, 1'250'000, 1'280'000, 1'006'720, 6, 5, 1024, "delta"
+  );
+  auto stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 2);
+  EXPECT_EQ(stats.fec_protection.oversized_frames_total, 0);
+  EXPECT_EQ(stats.clients.at(1).fec_protection.oversized_frames_total, 1);
+
+  stream_stats::record_oversized_fec_frame(
+    7401, 2'900'000, 2'940'000, 1'006'720, 12, 5, 1024, "idr"
+  );
+  stats = stream_stats::get_current();
+  EXPECT_EQ(stats.fec_protection.oversized_frames_total, 1);
+  EXPECT_EQ(stats.fec_protection.oversized_idr_frames_total, 1);
+  EXPECT_EQ(stats.fec_protection.max_required_blocks, 12);
+
+  stream_stats::remove_client("198.51.100.40", 7401);
+  stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 1);
+  EXPECT_EQ(stats.client_name, "Viewer");
+  EXPECT_EQ(stats.fec_protection.oversized_frames_total, 1);
+  EXPECT_EQ(stats.fec_protection.max_required_blocks, 6);
+
+  stream_stats::remove_client("198.51.100.41", 7402);
+  stream_stats::update_stream_active(false);
+  EXPECT_EQ(
+    stream_stats::get_current().fec_protection.oversized_frames_total,
+    0
+  );
+}
+
 TEST(StreamStatsDoctorTests, SteamInputFindingSurvivesTheEndOfTheStream) {
   // The conflict is host state, and its one-click fix is only safe with Steam
   // closed -- which is to say, once the stream has ended. Wiping these fields

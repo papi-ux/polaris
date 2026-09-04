@@ -10,6 +10,7 @@
  * These scan the whole of src/ rather than named files on purpose. A contract
  * that lists the files it knows about only ever covers the bugs already found.
  */
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -174,6 +175,61 @@ TEST(SourceSafetyContracts, PackageFortifyFilterFollowsTheGnuCompilerIdentity) {
     EXPECT_NE(text.find("#define __clang__"), std::string::npos) << relative_path;
     EXPECT_EQ(text.find("-dumpfullversion"), std::string::npos) << relative_path;
   }
+}
+
+TEST(SourceSafetyContracts, DecimalParsingDoesNotConsultTheProcessLocale) {
+  constexpr std::array forbidden {
+    "std::stod(",
+    "std::stof(",
+    "std::stold(",
+    "std::strtod(",
+    "std::strtof(",
+    "std::strtold(",
+    "atof(",
+  };
+
+  std::vector<std::string> locale_sensitive;
+  for (const auto &source : all_sources()) {
+    for (const auto needle : forbidden) {
+      std::size_t offset = 0;
+      while ((offset = source.text.find(needle, offset)) != std::string::npos) {
+        if (!inside_string_literal(source.text, offset) && !inside_comment(source.text, offset)) {
+          locale_sensitive.push_back(
+            source.relative_path + ":" + std::to_string(line_of(source.text, offset)) + " uses " + needle
+          );
+        }
+        offset += std::string_view {needle}.size();
+      }
+    }
+  }
+
+  EXPECT_TRUE(locale_sensitive.empty()) << [&] {
+    std::ostringstream out;
+    out << "locale-sensitive decimal parser(s):";
+    for (const auto &site : locale_sensitive) {
+      out << "\n  " << site;
+    }
+    return out.str();
+  }();
+}
+
+TEST(SourceSafetyContracts, GtkCannotChangeTheProtocolNumericLocale) {
+  const auto read = [](const fs::path &path) {
+    std::ifstream input(path);
+    std::ostringstream out;
+    out << input.rdbuf();
+    return out.str();
+  };
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  const auto main = read(root / "src/main.cpp");
+  const auto tray = read(root / "src/system_tray.cpp");
+
+  EXPECT_NE(main.find("std::setlocale(LC_NUMERIC, \"C\")"), std::string::npos);
+  const auto disable = tray.find("gtk_disable_setlocale()");
+  const auto initialize = tray.find("tray_init(&tray)");
+  ASSERT_NE(disable, std::string::npos);
+  ASSERT_NE(initialize, std::string::npos);
+  EXPECT_LT(disable, initialize);
 }
 
 TEST(SourceSafetyContracts, GamescopePreviewConsumesBestEffortRepaintResult) {

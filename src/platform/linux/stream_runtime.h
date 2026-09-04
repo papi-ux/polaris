@@ -7,6 +7,7 @@
 #ifdef __linux__
 
   #include "src/platform/common.h"
+  #include "labwc_startup_diagnostics.h"
   #include "stream_display_policy.h"
   #include "wlgrab_capture_policy.h"
 
@@ -87,6 +88,9 @@ namespace stream_runtime {
     void reset_after_external_stop();
     std::string wayland_socket();
     std::string session_instance_id();
+    std::optional<labwc_startup_diagnostics::snapshot_t> startup_client_diagnostics(
+      std::string_view expected_session_instance_id
+    );
     std::string x11_display();
     platf::runtime_state_t runtime_state();
     int current_output_refresh_hz();

@@ -6413,7 +6413,9 @@ namespace confighttp {
           gpu["vram_used_mb"] = std::stoi(fields[4]);
           gpu["vram_total_mb"] = std::stoi(fields[5]);
           gpu["fan_speed_pct"] = std::stoi(fields[6]);
-          gpu["power_draw_w"] = std::stof(fields[7]);
+          if (const auto power_draw = util::parse_decimal<float>(fields[7])) {
+            gpu["power_draw_w"] = *power_draw;
+          }
           gpu["clock_gpu_mhz"] = std::stoi(fields[8]);
           gpu["clock_mem_mhz"] = std::stoi(fields[9]);
           } catch (...) {
@@ -6547,7 +6549,9 @@ namespace confighttp {
     try { gpu["vram_used_mb"] = std::stoll(read_sysfs(dev + "/mem_info_vram_used")) / (1024 * 1024); } catch (...) {}
     try { gpu["vram_total_mb"] = std::stoll(read_sysfs(dev + "/mem_info_vram_total")) / (1024 * 1024); } catch (...) {}
     try { gpu["fan_speed_pct"] = std::stoi(read_sysfs(hwmon + "/pwm1")) * 100 / 255; } catch (...) {}
-    try { gpu["power_draw_w"] = std::stof(read_sysfs(hwmon + "/power1_average")) / 1e6f; } catch (...) {}
+    if (const auto power_draw = util::parse_decimal<float>(read_sysfs(hwmon + "/power1_average"))) {
+      gpu["power_draw_w"] = *power_draw / 1e6f;
+    }
 
     int sclk = active_mhz(dev + "/pp_dpm_sclk");
     int mclk = active_mhz(dev + "/pp_dpm_mclk");

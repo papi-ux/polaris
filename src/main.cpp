@@ -3,6 +3,7 @@
  * @brief Definitions for the main entry point for Sunshine.
  */
 // standard includes
+#include <clocale>
 #include <codecvt>
 #include <csignal>
 #include <exception>
@@ -180,6 +181,10 @@ void mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) 
 }
 
 int main(int argc, char *argv[]) {
+  // Polaris protocol and config decimals always use an ASCII full stop. Keep
+  // that invariant even when a desktop toolkit initializes another locale.
+  std::setlocale(LC_NUMERIC, "C");
+
   lifetime::argv = argv;
 
   task_pool_util::TaskPool::task_id_t force_shutdown = nullptr;
@@ -189,7 +194,7 @@ int main(int argc, char *argv[]) {
   // by placing a user-writable directory in the system-wide PATH variable.
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 
-  setlocale(LC_ALL, "C");
+  std::setlocale(LC_ALL, "C");
 #endif
 
 #pragma GCC diagnostic push

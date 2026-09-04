@@ -1647,7 +1647,11 @@ namespace nvhttp {
           } else if (index == 1) {
             height = std::stoi(segment);
           } else if (index == 2) {
-            fps = std::stod(segment);
+            const auto parsed_fps = util::parse_decimal<double>(segment);
+            if (!parsed_fps) {
+              return false;
+            }
+            fps = *parsed_fps;
           } else {
             return false;
           }
@@ -4446,7 +4450,12 @@ namespace nvhttp {
         launch_session->height = atoi(segment.c_str());
       }
       if (x == 2) {
-        auto fps = atof(segment.c_str());
+        const auto parsed_fps = util::parse_decimal<double>(segment);
+        if (!parsed_fps) {
+          x = -1;
+          break;
+        }
+        auto fps = *parsed_fps;
         if (fps < 1000) {
           fps *= 1000;
         };
@@ -9716,30 +9725,20 @@ namespace nvhttp {
       const auto explicit_bitrate = bounded_integer("bitrate_kbps", 1000, 300000);
       std::optional<int> explicit_fps;
       if (const auto it = args.find("fps"); it != args.end()) {
-        try {
-          std::size_t consumed = 0;
-          const auto fps = std::stod(it->second, &consumed);
-          if (consumed != it->second.size() || !std::isfinite(fps) || fps < 15.0 || fps > 240.0) {
-            invalid_argument = true;
-          } else {
-            explicit_fps = static_cast<int>(std::round(fps * 1000.0));
-          }
-        } catch (...) {
+        const auto fps = util::parse_decimal<double>(it->second);
+        if (!fps || *fps < 15.0 || *fps > 240.0) {
           invalid_argument = true;
+        } else {
+          explicit_fps = static_cast<int>(std::round(*fps * 1000.0));
         }
       }
       std::optional<int> client_max_fps;
       if (const auto it = args.find("client_max_fps"); it != args.end()) {
-        try {
-          std::size_t consumed = 0;
-          const auto fps = std::stod(it->second, &consumed);
-          if (consumed != it->second.size() || !std::isfinite(fps) || fps < 15.0 || fps > 360.0) {
-            invalid_argument = true;
-          } else {
-            client_max_fps = static_cast<int>(std::round(fps * 1000.0));
-          }
-        } catch (...) {
+        const auto fps = util::parse_decimal<double>(it->second);
+        if (!fps || *fps < 15.0 || *fps > 360.0) {
           invalid_argument = true;
+        } else {
+          client_max_fps = static_cast<int>(std::round(*fps * 1000.0));
         }
       }
       const bool any_explicit_mode = explicit_width || explicit_height || explicit_fps;
