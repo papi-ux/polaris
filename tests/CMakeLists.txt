@@ -373,13 +373,18 @@ add_executable(test_multiseat_runtime
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(test_multiseat_runtime PRIVATE
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_authority.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_client.cpp
     )
 endif()
 set_target_properties(test_multiseat_runtime PROPERTIES
     CXX_STANDARD 23
     INTERPROCEDURAL_OPTIMIZATION OFF
 )
+target_compile_options(test_multiseat_runtime PRIVATE ${POLARIS_COMPILE_OPTIONS})
 target_link_libraries(test_multiseat_runtime PRIVATE
     gtest_main
     OpenSSL::Crypto

@@ -279,12 +279,14 @@ that this supervisor contract is alive.
 
 ## Local control and media IPC checkpoint
 
-`--network=none` remains the supported boundary. One pre-created, mode-0700,
-generation-scoped host directory belongs to one exact worker. Its private
-`ipc` child is bind-mounted read-write at `/run/polaris-ipc`; its private
-`auth` child is bind-mounted read-only at `/run/polaris-auth`. The latter
-contains a mode-0600, 32-byte capability encoded as canonical lowercase hex,
-while the IPC mount contains two mode-0600 Unix sockets:
+`--network=none` remains the supported boundary. A pre-created, mode-0700
+runtime root is the only external filesystem prerequisite. Polaris now
+exclusively creates one mode-0700, generation-scoped authority directory
+beneath that root, plus private `ipc` and `auth` children. `ipc` is
+bind-mounted read-write at `/run/polaris-ipc`; `auth` is bind-mounted
+read-only at `/run/polaris-auth`. The latter contains a controller-generated
+mode-0600, 32-byte capability encoded as canonical lowercase hex, while the
+IPC mount contains two mode-0600 Unix sockets:
 
 - `control.sock` is reserved for lifecycle, input, feedback, status, and
   bounded error messages;
@@ -309,12 +311,35 @@ supervisor accepts only authentication, heartbeat, and control shutdown. A
 message for an unwired data path closes that connection instead of being
 silently discarded.
 
-The Podman backend does not create the shared directory or capability. A
-future privileged-enough controller helper must create them before launch,
-with private ownership and modes, and must remove them only under exact
-generation authority. The current live-host adapter merely validates that the
-root and leaf directories are private and writable and that the capability is
-a private regular file before invoking Podman.
+The Linux controller authority store now implements that filesystem
+lifecycle without recursive deletion. It walks the pre-created root without
+following symlinks, rejects effective UID zero, uses exclusive creation and a
+CSPRNG-generated capability, pins directory and token inodes in a move-only
+handle, and validates the capability bytes as well as ownership, type, mode,
+size, and the complete child-name allowlist. Cleanup refuses a renamed or
+replaced generation, a mutated token, an unexpected entry, or an actively
+listening socket. It removes only inactive allowlisted socket nodes, the exact
+token, and the exact pinned directory hierarchy. Dropping a handle cleanses
+its in-memory capability but deliberately does not guess at filesystem
+cleanup.
+
+The controller-side client connects with bounded nonblocking deadlines,
+requires stable mode-0600 socket nodes and a same-effective-UID `SO_PEERCRED`
+peer, and completes mutual authentication independently on both channels.
+Connection is all-or-nothing: a missing or rejected media channel closes an
+already authenticated control channel. Heartbeat and shutdown responses are
+strictly sequence-checked, and handshake/ack phases impose their own zero- or
+32-byte payload limits before allocation rather than accepting the larger
+general channel limit.
+
+These controller components compile into Polaris but remain outside the
+singleton runtime and worker broker. The Podman backend still does not create
+authority: a future coordinator must hold the move-only handle across exact
+launch/reconciliation/stop, validate it immediately before launch, connect
+both channels only after worker readiness, and remove it only after backend
+inventory proves exact worker absence. Controller-crash orphan-directory
+recovery is also intentionally unresolved; no path may infer cleanup from a
+name alone.
 
 ## Launcher acceptance comes second
 
@@ -368,14 +393,23 @@ The test_multiseat_runtime target covers:
 - two in-process Linux workers authenticating both channels, exchanging
   heartbeats, and stopping independently;
 - private-file, symlink, socket-mode, health-identity, and stale-node checks;
+- controller-owned exclusive authority creation, CSPRNG/token validation,
+  inode-fenced allowlist-only cleanup, replacement/tamper rejection, and
+  active-socket preservation;
+- all-or-nothing controller authentication of both Unix channels, bounded
+  connect/handshake/I/O deadlines, phase-specific allocation limits, strict
+  response sequencing, and independent two-worker shutdown;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
 This remains an offline control-plane/backend proof. A later container
 integration test must build and pin the final worker image, pre-create profile
-volumes and private IPC capabilities, and run two real supervisor containers.
-After that passes, the runtime adapters must add concurrent frame, audio, and
-input heartbeats before physical game testing can begin.
+volumes and the private runtime root, let the controller create two exact
+authorities, and run two real supervisor containers. Before that live test,
+the broker still needs a coordinator that owns authority handles and client
+connections through reconciliation. After it passes, the runtime adapters
+must add concurrent frame, audio, and input heartbeats before physical game
+testing can begin.
 
 ## Upstream references
 

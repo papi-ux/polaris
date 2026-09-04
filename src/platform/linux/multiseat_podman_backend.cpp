@@ -3,6 +3,7 @@
  * @brief Rootless Podman worker backend for isolated multiseat workers.
  */
 #include "multiseat_podman_backend.h"
+#include "multiseat_worker_authority.h"
 
 #ifdef __linux__
 
@@ -36,9 +37,9 @@ namespace multiseat::podman {
     constexpr auto label_render_node = "io.polaris.multiseat.render-node"sv;
     constexpr auto label_compositor = "io.polaris.multiseat.compositor"sv;
     constexpr auto label_encoders = "io.polaris.multiseat.encoders"sv;
-    constexpr auto capability_file = "auth-token"sv;
-    constexpr auto ipc_directory = "ipc"sv;
-    constexpr auto auth_directory = "auth"sv;
+    constexpr auto capability_file = worker_ipc::authority_capability_file_name;
+    constexpr auto ipc_directory = worker_ipc::authority_ipc_directory_name;
+    constexpr auto auth_directory = worker_ipc::authority_auth_directory_name;
     constexpr auto container_ipc_directory = "/run/polaris-ipc"sv;
     constexpr auto container_auth_directory = "/run/polaris-auth"sv;
 

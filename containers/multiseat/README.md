@@ -27,9 +27,10 @@ shutdown. It does not yet start Gamescope, Steam, Heroic, Lutris, audio,
 capture, encoding, or virtual input. Treating a healthy supervisor as a
 streaming-capable worker before those adapters exist would be a false gate.
 
-The container retains `--network=none`. The controller and one exact worker
-share only a pre-created, mode-0700, generation-scoped authority directory.
-Its `ipc` child is mounted read-write for the two Unix sockets, while its
-`auth` child is mounted read-only and contains the mode-0600 capability file.
+The container retains `--network=none`. Beneath a pre-created mode-0700
+runtime root, the controller exclusively creates one inode-fenced,
+mode-0700 authority directory per exact worker generation. Its `ipc` child is
+mounted read-write for the two Unix sockets, while its `auth` child is mounted
+read-only and contains the controller-generated mode-0600 capability file.
 The capability is never placed in argv, environment, labels, or container
 inspection metadata, and the worker cannot rewrite it through either mount.
