@@ -71,6 +71,13 @@ polaris_gamescope_service_mode() {
     loaded:loaded)
       printf 'managed\n'
       ;;
+    loaded:not-found)
+      # The scripts/install stack ships the idle compositor unit and leaves the
+      # private portal optional; capture goes through the host XDG portal or
+      # gamescopegrab. The idle unit is masked and restored like a managed
+      # host, and there is no private portal backend to rebind.
+      printf 'host-portal\n'
+      ;;
     not-found:not-found)
       # Distro packages install the nested-session helper without the Nix-only
       # idle compositor/private portal units. Their safe baseline is no
@@ -174,7 +181,7 @@ recover_missing_nested_claim() (
     [ -z "${extra:-}" ] \
       && [ "$persisted" = "$POLARIS_SESSION_INSTANCE_ID" ] \
       && [ "$persisted_mode" = nested ] || return 1
-    case "${persisted_service_mode:-}" in ''|managed|standalone) ;; *) return 1 ;; esac
+    case "${persisted_service_mode:-}" in ''|managed|host-portal|standalone) ;; *) return 1 ;; esac
   else
     [ -s "$session_id_file" ] \
       && [ "$(tr -d '\r\n' <"$session_id_file")" = "$POLARIS_SESSION_INSTANCE_ID" ] \
@@ -210,7 +217,7 @@ load_session_instance_id() {
     read -r persisted persisted_mode persisted_service_mode extra <"$session_state_file" || return 1
     [ -z "${extra:-}" ] || return 1
     case "$persisted_mode" in attach|nested) ;; *) return 1 ;; esac
-    case "${persisted_service_mode:-}" in ''|managed|standalone) ;; *) return 1 ;; esac
+    case "${persisted_service_mode:-}" in ''|managed|host-portal|standalone) ;; *) return 1 ;; esac
     [ -n "$persisted" ] || return 1
     if [ -n "${POLARIS_SESSION_INSTANCE_ID:-}" ]; then
       [ "$persisted" = "$POLARIS_SESSION_INSTANCE_ID" ] || return 1
@@ -238,9 +245,10 @@ prepare_nested_runtime_services() {
   load_session_instance_id || return 1
   [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || return 1
   case "$POLARIS_PERSISTED_SERVICE_MODE" in
-    managed)
-      # Only Nix-managed hosts have an idle compositor that can respawn and
-      # therefore needs a runtime mask during the nested handoff.
+    managed|host-portal)
+      # Hosts with an idle compositor unit (Nix-managed, or the scripts/install
+      # stack) can respawn it and therefore need a runtime mask during the
+      # nested handoff.
       polaris_mask_idle_unit_runtime
       ;;
     standalone)
@@ -282,6 +290,11 @@ rebind_private_portal_after_nested_start() {
       else
         echo "polaris-gamescope-session: portal-gamescope rebound to nested gamescope-0" >&2
       fi
+      ;;
+    host-portal)
+      # The scripts/install stack captures through the host XDG portal or
+      # gamescopegrab; there is no private portal backend to rebind.
+      echo "polaris-gamescope-session: host portal in use, no private portal unit to rebind" >&2
       ;;
     standalone)
       # Distro packages ship no private portal unit. Polaris captures this
@@ -1454,23 +1467,29 @@ case "${1:-}" in
         fi
         echo "polaris-gamescope-session: idle gamescope restored after nested stop" >&2
 
-        if ! systemctl --user restart polaris-portal-gamescope.service 2>/dev/null; then
-          echo "polaris-gamescope-session: portal restart failed; retaining restore-idle claim" >&2
-          exit 1
-        fi
-        portal_bus="unix:path=$rt/polaris-portal/bus"
-        portal_ready=0
-        for _ in $(seq 1 "${POLARIS_PORTAL_WAIT_STEPS:-50}"); do
-          if busctl --address="$portal_bus" --no-pager \
-              status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
-            portal_ready=1
-            break
+        if [ "$service_mode" = managed ]; then
+          if ! systemctl --user restart polaris-portal-gamescope.service 2>/dev/null; then
+            echo "polaris-gamescope-session: portal restart failed; retaining restore-idle claim" >&2
+            exit 1
           fi
-          sleep 0.1
-        done
-        if [ "$portal_ready" != 1 ]; then
-          echo "polaris-gamescope-session: portal did not bind idle generation; retaining restore-idle claim" >&2
-          exit 1
+          portal_bus="unix:path=$rt/polaris-portal/bus"
+          portal_ready=0
+          for _ in $(seq 1 "${POLARIS_PORTAL_WAIT_STEPS:-50}"); do
+            if busctl --address="$portal_bus" --no-pager \
+                status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
+              portal_ready=1
+              break
+            fi
+            sleep 0.1
+          done
+          if [ "$portal_ready" != 1 ]; then
+            echo "polaris-gamescope-session: portal did not bind idle generation; retaining restore-idle claim" >&2
+            exit 1
+          fi
+        else
+          # host-portal: the host XDG portal owns capture, so restoring idle
+          # gamescope-0 is the whole handoff; there is no backend to rebind.
+          echo "polaris-gamescope-session: host portal in use; idle gamescope-0 restored without a private portal rebind" >&2
         fi
         if ! {
           polaris_validate_marker "$marker" idle \
