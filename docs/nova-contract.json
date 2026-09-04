@@ -244,7 +244,9 @@
         "active_backend",
         "bitrate_kbps",
         "codec",
+        "effective_backend",
         "encode_target_fps",
+        "fallback_allowed",
         "fps",
         "optimization_cache_status",
         "optimization_confidence",
@@ -253,8 +255,10 @@
         "optimization_source",
         "pacing_policy",
         "recommendation_version",
+        "requested_backend",
         "requested_client_fps",
         "selection",
+        "session_override",
         "session_target_fps",
         "target_device",
         "target_format",
@@ -262,6 +266,10 @@
       ],
       "informational_ok": [
         "active_backend",
+        "effective_backend",
+        "fallback_allowed",
+        "requested_backend",
+        "session_override",
         "selection"
       ],
       "nova_reader": {
@@ -415,6 +423,34 @@
         "declaration": "modes.push_back({"
       }
     },
+    "client_settings_encoder_option": {
+      "$comment": [
+        "One entry of capabilities.encoders in GET /polaris/v1/client-settings and",
+        "encoder_backends in GET /polaris/v1/capabilities. Availability describes",
+        "what the running build can select; every request is validated again against",
+        "the live capture route at launch. Auto alone may fall back."
+      ],
+      "fields": [
+        "available",
+        "experimental",
+        "fallback_allowed",
+        "label",
+        "reason",
+        "runtime_validation",
+        "value"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseEncoderOptions",
+        "receiver": "encoder"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "encoder_backend_options_json",
+        "style": "initializer_list",
+        "declaration": "options.push_back({"
+      }
+    },
     "optimization": {
       "$comment": [
         "Top-level GET /optimize deterministic launch resolver response.",
@@ -431,6 +467,9 @@
         "color_range",
         "confidence",
         "display_mode",
+        "encoder_backend",
+        "encoder_options",
+        "encoder_resolution",
         "hdr",
         "limiting_factor",
         "nvenc_tune",
@@ -453,6 +492,9 @@
         "auto_action",
         "auto_mode",
         "color_range",
+        "encoder_backend",
+        "encoder_options",
+        "encoder_resolution",
         "hdr",
         "limiting_factor",
         "nvenc_tune",
@@ -473,6 +515,43 @@
         "function": "append_deterministic_optimization_json",
         "style": "assignments",
         "variable": "output"
+      }
+    },
+    "optimization_encoder_resolution": {
+      "$comment": [
+        "The exact session encoder selection nested under encoder_resolution in a",
+        "deterministic /optimize response. Nova binds requested, resolved, lock, and",
+        "fallback policy to the final launch. The concrete active backend remains",
+        "informational because Auto is resolved only by the live launch probe."
+      ],
+      "fields": [
+        "active_backend",
+        "fallback_allowed",
+        "locked",
+        "reason_code",
+        "requested",
+        "resolved",
+        "runtime_validation",
+        "source",
+        "strict_runtime_validation"
+      ],
+      "informational_ok": [
+        "active_backend",
+        "reason_code",
+        "runtime_validation",
+        "source",
+        "strict_runtime_validation"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/manager/NovaEncoderLaunchContract.kt",
+        "function": "honors",
+        "receiver": "resolution"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "optimization_encoder_resolution_json",
+        "style": "initializer_list",
+        "declaration": "return {"
       }
     },
     "optimization_topology_resolution": {

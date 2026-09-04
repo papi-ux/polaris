@@ -5,13 +5,59 @@
 
 #include <src/crypto.h>
 #include <src/nvhttp.h>
+#include <src/video.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
+#include <unordered_set>
 
 #include <gtest/gtest.h>
+
+TEST(SessionEncoderContract, AdvertisesOnlyCanonicalBuildSelectableBackends) {
+  const auto backends = video::selectable_encoder_backends();
+  ASSERT_FALSE(backends.empty());
+  EXPECT_EQ(backends.front(), "auto");
+  EXPECT_NE(std::find(backends.begin(), backends.end(), "software"), backends.end());
+
+  const std::unordered_set<std::string> unique {backends.begin(), backends.end()};
+  EXPECT_EQ(unique.size(), backends.size());
+  for (const auto &backend : backends) {
+    EXPECT_TRUE(video::encoder_backend_selectable(backend)) << backend;
+    EXPECT_EQ(nvhttp::normalize_encoder_backend(backend), backend);
+  }
+  EXPECT_FALSE(video::encoder_backend_selectable("host_default"));
+  EXPECT_EQ(nvhttp::normalize_encoder_backend("not-an-encoder"), std::nullopt);
+}
+
+TEST(SessionEncoderContract, CapabilityRowsDescribeRuntimeValidationAndFallback) {
+  const auto options = nvhttp::encoder_backend_options_json();
+  ASSERT_TRUE(options.is_array());
+  ASSERT_FALSE(options.empty());
+  EXPECT_EQ(options.front().at("value"), "auto");
+  EXPECT_TRUE(options.front().at("fallback_allowed").get<bool>());
+  EXPECT_EQ(options.front().at("runtime_validation"), "launch");
+
+  for (const auto &option : options) {
+    const auto backend = option.at("value").get<std::string>();
+    EXPECT_TRUE(video::encoder_backend_selectable(backend));
+    EXPECT_EQ(option.at("available"), true);
+    EXPECT_EQ(option.at("fallback_allowed"), backend == "auto");
+  }
+}
+
+TEST(SessionEncoderContract, FallbackPolicyDistinguishesSessionLocksFromHostDefaults) {
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("auto", true));
+  EXPECT_FALSE(nvhttp::encoder_backend_fallback_allowed("nvenc", true));
+  EXPECT_FALSE(nvhttp::encoder_backend_fallback_allowed("vulkan", true));
+
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("auto", false));
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("nvenc", false));
+  EXPECT_TRUE(nvhttp::encoder_backend_fallback_allowed("vaapi", false));
+  EXPECT_FALSE(nvhttp::encoder_backend_fallback_allowed("vulkan", false));
+}
 
 #ifdef __linux__
   #include <filesystem>
@@ -173,6 +219,52 @@ namespace {
     }
     return args;
   }
+}
+
+TEST(SessionEncoderContract, ExactLaunchCarriesAutoAsAnExplicitSessionChoice) {
+  auto cert = launch_client_cert();
+  auto args = resolved_launch_args();
+  args.emplace("encoderBackend", "AUTO");
+  args.emplace("expectedEncoder", "auto");
+
+  const auto session = nvhttp::make_launch_session(true, false, args, cert.get());
+  ASSERT_NE(session, nullptr);
+  EXPECT_TRUE(session->encoder_backend_explicit);
+  EXPECT_EQ(session->encoder_backend, "auto");
+  EXPECT_EQ(session->expected_encoder_backend, "auto");
+}
+
+TEST(SessionEncoderContract, ExactLaunchRequiresMatchingEncoderAssertion) {
+  auto cert = launch_client_cert();
+
+  auto missing = resolved_launch_args();
+  missing.emplace("encoderBackend", "software");
+  EXPECT_EQ(nvhttp::make_launch_session(true, false, missing, cert.get()), nullptr);
+
+  auto mismatch = resolved_launch_args();
+  mismatch.emplace("encoderBackend", "software");
+  mismatch.emplace("expectedEncoder", "auto");
+  EXPECT_EQ(nvhttp::make_launch_session(true, false, mismatch, cert.get()), nullptr);
+
+  auto unknown = resolved_launch_args();
+  unknown.emplace("encoderBackend", "not-an-encoder");
+  unknown.emplace("expectedEncoder", "not-an-encoder");
+  EXPECT_EQ(nvhttp::make_launch_session(true, false, unknown, cert.get()), nullptr);
+}
+
+TEST(SessionEncoderContract, LegacyResolvedLaunchWithoutEncoderEnvelopeStillParses) {
+  auto cert = launch_client_cert();
+  const auto session = nvhttp::make_launch_session(
+    true,
+    false,
+    resolved_launch_args(),
+    cert.get()
+  );
+
+  ASSERT_NE(session, nullptr);
+  EXPECT_FALSE(session->encoder_backend_explicit);
+  EXPECT_TRUE(session->encoder_backend.empty());
+  EXPECT_TRUE(session->expected_encoder_backend.empty());
 }
 
 TEST(LaunchModeContractTests, RecommendationAlwaysBelongsToAllowedModesWithoutPrivateRuntime) {

@@ -14,6 +14,9 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -484,6 +487,19 @@ namespace video {
   codec_capability_state_t advertised_codec_capability_state();
   bool advertised_codec_capability_state_ready();
   void reset_encoder_probe_state();
+
+  /**
+   * @brief Encoder backends this binary can accept as an explicit selection.
+   * @details "auto" is always first. The remaining names come from the
+   *          platform/build encoder registry and still require a live probe
+   *          when a stream launches.
+   */
+  std::vector<std::string> selectable_encoder_backends();
+
+  /**
+   * @brief Whether a normalized external backend id is selectable by this build.
+   */
+  bool encoder_backend_selectable(std::string_view backend);
 
   void capture(
     safe::mail_t mail,

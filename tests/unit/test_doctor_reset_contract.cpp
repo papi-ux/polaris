@@ -842,6 +842,73 @@ TEST(DoctorResetContract, TopologySettingsShareTheFinalLaunchLifecycleLock) {
   );
 }
 
+TEST(DoctorResetContract, SessionEncoderSelectionIsExactScopedAndRestored) {
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto optimize = between(
+    nvhttp,
+    "auto polarisOptimize =",
+    "auto polarisClientSupportReport ="
+  );
+  EXPECT_NE(optimize.find("resolve_optimization_encoder("), std::string::npos);
+  EXPECT_NE(optimize.find("invalid_or_unavailable_encoder"), std::string::npos);
+  EXPECT_NE(optimize.find("*encoder_resolution"), std::string::npos);
+
+  const auto resolved_output = between(
+    nvhttp,
+    "void append_deterministic_optimization_json(",
+    "bool host_prefers_headless()"
+  );
+  EXPECT_NE(resolved_output.find("encoder_resolution"), std::string::npos);
+  EXPECT_NE(resolved_output.find("encoder_options"), std::string::npos);
+  EXPECT_NE(resolved_output.find("encoder_backend"), std::string::npos);
+
+  const auto launch_parser = between(
+    nvhttp,
+    "launch_session->resolved_profile_from_client =",
+    "std::stringstream mode;"
+  );
+  EXPECT_NE(launch_parser.find("encoderBackend"), std::string::npos);
+  EXPECT_NE(launch_parser.find("expectedEncoder"), std::string::npos);
+  EXPECT_NE(launch_parser.find("return nullptr;"), std::string::npos);
+
+  const auto process = source("src/process.cpp");
+  const auto execute = between(
+    process,
+    "int proc_t::execute_impl(",
+    "int proc_t::running()"
+  );
+  const auto snapshot = execute.find("this->initial_encoder = config::video.encoder;");
+  const auto apply = execute.find("config::video.encoder = session_encoder;");
+  const auto reset = execute.find("video::reset_encoder_probe_state();", apply);
+  const auto strict_probe = execute.find("video::probe_encoders(strict_session_encoder)");
+  ASSERT_NE(snapshot, std::string::npos);
+  ASSERT_NE(apply, std::string::npos);
+  ASSERT_NE(reset, std::string::npos);
+  ASSERT_NE(strict_probe, std::string::npos);
+  EXPECT_LT(snapshot, apply);
+  EXPECT_LT(apply, strict_probe);
+  EXPECT_NE(
+    execute.find("launch_session->enable_hdr &&\n          launch_session->host_hdr_capable == false"),
+    std::string::npos
+  ) << "an explicit encoder must be checked against HDR even for a legacy launch";
+
+  const auto resume_validation = between(
+    process,
+    "int proc_t::validate_resolved_profile_for_running_app(",
+    "int proc_t::running()"
+  );
+  EXPECT_NE(resume_validation.find("const auto live_active_encoder = video::active_encoder_name();"), std::string::npos);
+  EXPECT_NE(resume_validation.find("_launch_session->effective_encoder_backend = active_effective_encoder;"), std::string::npos);
+
+  const auto teardown = between(
+    process,
+    "void proc_t::terminate_impl(",
+    "bool proc_t::reload_configuration_from_file("
+  );
+  EXPECT_NE(teardown.find("config::video.encoder = initial_encoder;"), std::string::npos);
+  EXPECT_NE(teardown.find("video::reset_encoder_probe_state();"), std::string::npos);
+}
+
 TEST(DoctorResetContract, ClientSettingsPersistencePreservesExistingConfigAtomically) {
   const auto nvhttp = source("src/nvhttp.cpp");
   const auto persistence = between(

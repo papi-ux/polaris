@@ -189,10 +189,6 @@ namespace vk {
       cleanup_pipeline();
     }
 
-    void release_encode_resources() override {
-      cleanup_pipeline();
-    }
-
     /**
      * @brief Initialize Vulkan encode device and conversion resources.
      *
@@ -1409,7 +1405,16 @@ namespace vk {
       if (!vk_dev.dev || resources_released) {
         return;
       }
-      vkDeviceWaitIdle(vk_dev.dev);
+
+      const bool report_teardown = sequence > 0;
+      if (report_teardown) {
+        BOOST_LOG(info) << "Vulkan converter teardown: waiting for device idle"sv;
+      }
+      const auto idle_status = vkDeviceWaitIdle(vk_dev.dev);
+      if (report_teardown) {
+        BOOST_LOG(info) << "Vulkan converter teardown: device idle status="sv << idle_status;
+      }
+
       destroy_image_resource(src);
       destroy_image_resource(cursor.resource);
       for (auto &slot : cmd.slots) {
@@ -1460,14 +1465,22 @@ namespace vk {
       }
       target.views_created = false;
       target.initialized = false;
-      // Release the FFmpeg-owned frame pool reference while its Vulkan device
-      // is still alive. FFmpeg attaches codec input views to this AVFrame;
-      // keeping it until after AVCodecContext teardown leaks those views into
-      // vkDestroyDevice during short-lived capability probes.
+      if (report_teardown) {
+        BOOST_LOG(info) << "Vulkan converter teardown: conversion resources released"sv;
+      }
+
+      // This AVFrame keeps FFmpeg's Vulkan hardware device alive while the
+      // platform-owned conversion resources above are destroyed. The owning
+      // encode session closes AVCodecContext first so codec-owned picture views
+      // and synchronization objects are gone before this final reference drops.
       hwframe.reset();
       frame = nullptr;
       hw_frames_ctx = nullptr;
       resources_released = true;
+
+      if (report_teardown) {
+        BOOST_LOG(info) << "Vulkan converter teardown: complete"sv;
+      }
     }
 
     static int init_hw_device(platf::avcodec_encode_device_t *encode_device, AVBufferRef **hw_device_buf) {

@@ -6618,7 +6618,11 @@ namespace proc {
                            << " > " << config::video.max_bitrate;
         return 409;
       }
-      if (launch_session->enable_hdr && launch_session->host_hdr_capable == false) {
+      const bool encoder_capability_is_final =
+        !launch_session->encoder_backend_explicit ||
+        !launch_session->effective_encoder_backend.empty();
+      if (encoder_capability_is_final &&
+          launch_session->enable_hdr && launch_session->host_hdr_capable == false) {
         BOOST_LOG(warning) << "process: rejecting exact resolved HDR profile because the final encoder lacks HDR support"sv;
         return 409;
       }
@@ -6669,8 +6673,38 @@ namespace proc {
         _launch_session->user_locked_virtual_display;
       launch_session->force_private_after_desktop_steam_shutdown =
         _launch_session->force_private_after_desktop_steam_shutdown;
+      launch_session->encoder_backend = _launch_session->encoder_backend;
+      launch_session->encoder_backend_explicit = _launch_session->encoder_backend_explicit;
+      launch_session->effective_encoder_backend = _launch_session->effective_encoder_backend;
+    }
+    if (launch_session->encoder_backend_explicit &&
+        (!_launch_session->encoder_backend_explicit ||
+         launch_session->encoder_backend != _launch_session->encoder_backend)) {
+      BOOST_LOG(warning) << "process: rejecting reconnect encoder selection because the active app generation owns a different selection"sv;
+      return 409;
+    }
+    const auto live_active_encoder = video::active_encoder_name();
+    const auto active_effective_encoder = !live_active_encoder.empty() ?
+      live_active_encoder : _launch_session->effective_encoder_backend;
+    if (launch_session->encoder_backend_explicit &&
+        launch_session->encoder_backend != "auto" &&
+        active_effective_encoder != launch_session->encoder_backend) {
+      BOOST_LOG(warning) << "process: rejecting reconnect because the active encoder does not satisfy the exact selection"sv;
+      return 409;
+    }
+    launch_session->effective_encoder_backend = active_effective_encoder;
+    if (!active_effective_encoder.empty()) {
+      _launch_session->effective_encoder_backend = active_effective_encoder;
     }
     if (launch_session->resolved_profile_from_client) {
+      if (!launch_session->expected_encoder_backend.empty() &&
+          (!launch_session->encoder_backend_explicit ||
+           launch_session->expected_encoder_backend != launch_session->encoder_backend ||
+           !_launch_session->encoder_backend_explicit ||
+           _launch_session->encoder_backend != launch_session->expected_encoder_backend)) {
+        BOOST_LOG(warning) << "process: rejecting resolved resume profile whose expected encoder does not match the active app generation"sv;
+        return 409;
+      }
 #ifdef __linux__
       const auto effective_topology = [this](
           const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
@@ -6922,6 +6956,8 @@ namespace proc {
       return validation_error;
     }
 
+    this->initial_encoder = config::video.encoder;
+
 #ifdef __linux__
     if (app_desktop_mirror_applies(app, *launch_session)) {
       if (!launch_session->mirror_desktop || launch_session->virtual_display) {
@@ -7059,6 +7095,26 @@ namespace proc {
     this->initial_nvenc_tune = config::video.nvenc_tune;
     this->initial_video_config_saved = true;
 #endif
+
+    if (launch_session->encoder_backend_explicit) {
+      if (!launch_session->expected_encoder_backend.empty() &&
+          launch_session->expected_encoder_backend != launch_session->encoder_backend) {
+        BOOST_LOG(warning) << "process: rejecting exact resolved encoder envelope before generation install"sv;
+        return 409;
+      }
+      const auto session_encoder = launch_session->encoder_backend == "auto" ?
+        std::string {} : launch_session->encoder_backend;
+      BOOST_LOG(info) << "process: session encoder override ["sv
+                      << (initial_encoder.empty() ? "auto" : initial_encoder)
+                      << "] -> ["sv
+                      << (session_encoder.empty() ? "auto" : session_encoder)
+                      << "]; host default restored at teardown"sv;
+      config::video.encoder = session_encoder;
+      // A remembered encoder may have been selected under a different host or
+      // session policy. Clear it so this launch performs the promised live
+      // validation, including when the explicit choice is Auto.
+      video::reset_encoder_probe_state();
+    }
 
 #ifdef __linux__
     // Store the canonical generation identity even for a legacy launch so a
@@ -7467,6 +7523,34 @@ namespace proc {
     launch_session->optimization_normalization_reason = resolved_optimization.normalization_reason;
     launch_session->optimization_recommendation_version = resolved_optimization.recommendation_version;
     const auto preferred_codec = launch_session->preferred_codec.value_or("client"s);
+    const bool strict_session_encoder =
+      launch_session->encoder_backend_explicit &&
+      launch_session->encoder_backend != "auto";
+    const auto encoder_probe_matches_session = [&]() {
+      const auto active_encoder = video::active_encoder_name();
+      if (active_encoder.empty()) {
+        BOOST_LOG(error) << "process: encoder probe completed without an active encoder"sv;
+        return false;
+      }
+      if (strict_session_encoder && active_encoder != launch_session->encoder_backend) {
+        BOOST_LOG(error) << "process: exact session encoder ["sv
+                         << launch_session->encoder_backend
+                         << "] resolved to ["sv << active_encoder
+                         << "]; refusing silent fallback"sv;
+        return false;
+      }
+      launch_session->effective_encoder_backend = active_encoder;
+      const auto codec_support = video::advertised_codec_capability_state();
+      launch_session->host_hdr_capable =
+        codec_support.hevc_mode >= 3 || codec_support.av1_mode >= 3;
+      if (launch_session->enable_hdr &&
+          launch_session->host_hdr_capable == false) {
+        BOOST_LOG(error) << "process: selected session encoder ["sv << active_encoder
+                         << "] cannot satisfy the requested HDR stream"sv;
+        return false;
+      }
+      return true;
+    };
 
     BOOST_LOG(info) << "session_optimization: requested="sv
                     << launch_session->requested_width << "x"sv
@@ -7846,14 +7930,23 @@ namespace proc {
 #else
     constexpr bool delay_encoder_probe_until_cage = false;
 #endif
-    if (!delay_encoder_probe_until_cage &&
-        no_active_sessions_at_launch &&
-        video::probe_encoders()) {
-      if (config::video.ignore_encoder_probe_failure && config::video.encoder != "vulkan"sv) {
-        BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
-      } else {
-        return 503;
+    if (!delay_encoder_probe_until_cage && no_active_sessions_at_launch) {
+      const bool probe_failed = video::probe_encoders(strict_session_encoder) != 0;
+      const bool selection_failed = !probe_failed && !encoder_probe_matches_session();
+      if (probe_failed || selection_failed) {
+        if (config::video.ignore_encoder_probe_failure &&
+            !launch_session->encoder_backend_explicit &&
+            config::video.encoder != "vulkan"sv) {
+          BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
+        } else {
+          return 503;
+        }
       }
+    } else if (!delay_encoder_probe_until_cage &&
+               launch_session->encoder_backend_explicit &&
+               !encoder_probe_matches_session()) {
+      BOOST_LOG(warning) << "process: cannot change encoder selection while another stream is active"sv;
+      return 409;
     }
 
     std::string fps_str;
@@ -8191,7 +8284,9 @@ namespace proc {
       const auto cage_socket = stream_runtime::labwc::wayland_socket();
       if (cage_socket.empty()) {
         BOOST_LOG(error) << "session_manager: Cage compositor started without an active WAYLAND_DISPLAY socket for encoder reprobe"sv;
-        if (config::video.ignore_encoder_probe_failure && config::video.encoder != "vulkan"sv) {
+        if (config::video.ignore_encoder_probe_failure &&
+            !launch_session->encoder_backend_explicit &&
+            config::video.encoder != "vulkan"sv) {
           BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
           return true;
         }
@@ -8210,13 +8305,15 @@ namespace proc {
       restore_env_var("AT_SPI_BUS_ADDRESS", original_at_spi_bus_address);
       restore_env_var("WAYLAND_DISPLAY", original_wayland_display);
 
-      if (probe_status == 0) {
+      if (probe_status == 0 && encoder_probe_matches_session()) {
         BOOST_LOG(info) << "session_manager: Cage reprobe selected encoder ["
                         << video::active_encoder_name() << ']';
         return true;
       }
 
-      if (config::video.ignore_encoder_probe_failure && config::video.encoder != "vulkan"sv) {
+      if (config::video.ignore_encoder_probe_failure &&
+          !launch_session->encoder_backend_explicit &&
+          config::video.encoder != "vulkan"sv) {
         BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
         return true;
       }
@@ -8643,7 +8740,8 @@ namespace proc {
       confighttp::set_session_state(confighttp::session_state_e::cage_starting);
       confighttp::emit_session_event("cage_starting", "Starting compositor");
 
-      if (force_windowed_cage_for_gpu_native && start_cage_session(startup_cmd, true)) {
+      if (force_windowed_cage_for_gpu_native &&
+          start_cage_session(startup_cmd, true, strict_session_encoder)) {
         return true;
       }
 
@@ -8655,7 +8753,11 @@ namespace proc {
         force_windowed_cage_for_gpu_native = false;
       }
 
-      return start_cage_session(command_with_gamepad_isolation(startup_cmd), false);
+      return start_cage_session(
+        command_with_gamepad_isolation(startup_cmd),
+        false,
+        strict_session_encoder
+      );
     };
 
     auto stop_guard_on_failed_launch = util::fail_guard([this]() {
@@ -10027,6 +10129,14 @@ namespace proc {
     if (initial_video_config_saved) {
       config::video.color_range = initial_color_range;
       config::video.nvenc_tune = initial_nvenc_tune;
+      const bool encoder_policy_changed = config::video.encoder != initial_encoder;
+      config::video.encoder = initial_encoder;
+      if (encoder_policy_changed) {
+        // The concrete selection belongs to the ended generation. Force the
+        // next stream to validate the restored host policy instead of reusing
+        // the session encoder as hidden process-wide state.
+        video::reset_encoder_probe_state();
+      }
     }
 
     if (initial_linux_display_saved) {
@@ -10059,6 +10169,7 @@ namespace proc {
     initial_display.clear();
     initial_color_range = 0;
     initial_nvenc_tune = 0;
+    initial_encoder.clear();
     initial_video_config_saved = false;
     initial_stream_mode.clear();
     initial_private_runtime.clear();
@@ -10370,6 +10481,15 @@ namespace proc {
     snapshot.mirror_desktop = _launch_session && _launch_session->mirror_desktop;
     snapshot.force_private_after_desktop_steam_shutdown =
       _launch_session && _launch_session->force_private_after_desktop_steam_shutdown;
+    snapshot.requested_encoder_backend = _launch_session ?
+      (_launch_session->encoder_backend_explicit ?
+        _launch_session->encoder_backend :
+        (initial_encoder.empty() ? "auto" : initial_encoder)) :
+      std::string {};
+    snapshot.effective_encoder_backend = _launch_session ?
+      _launch_session->effective_encoder_backend : std::string {};
+    snapshot.encoder_backend_explicit =
+      _launch_session && _launch_session->encoder_backend_explicit;
     return {std::move(guard), std::move(snapshot)};
   }
 

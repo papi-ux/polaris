@@ -1421,18 +1421,48 @@ namespace video {
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
 
     ~avcodec_encode_session_t() {
-      // Flush any remaining frames in the encoder
-      if (avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
-        packet_raw_avcodec pkt;
-        while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);
+      if (!avcodec_ctx) {
+        converter.reset();
+        return;
       }
 
-      // Order matters here because the context relies on the hwdevice still being valid
-      if (auto *encode_device = device()) {
-        encode_device->release_encode_resources();
+      const bool vulkan_codec = avcodec_ctx->codec && avcodec_ctx->codec->name &&
+                                std::string_view {avcodec_ctx->codec->name}.ends_with("_vulkan"sv);
+      if (vulkan_codec) {
+        BOOST_LOG(info) << "Vulkan encoder teardown: draining codec"sv;
       }
+
+      // Flush any remaining frames in the encoder
+      const auto flush_status = avcodec_send_frame(avcodec_ctx.get(), nullptr);
+      int drain_status = flush_status;
+      std::size_t drained_packets = 0;
+      if (flush_status == 0) {
+        packet_raw_avcodec pkt;
+        while ((drain_status = avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet)) == 0) {
+          drained_packets++;
+        }
+      }
+
+      if (vulkan_codec) {
+        BOOST_LOG(info) << "Vulkan encoder teardown: codec drain complete packets="sv
+                        << drained_packets << " status="sv << drain_status;
+        BOOST_LOG(info) << "Vulkan encoder teardown: closing codec context"sv;
+      }
+
+      // Close the codec before its converter. Hardware codecs can retain
+      // picture views and synchronization objects until avcodec_free_context().
+      // The converter's AVFrame reference keeps the hardware device alive so
+      // platform-owned conversion resources remain safe to release afterward.
       avcodec_ctx.reset();
+
+      if (vulkan_codec) {
+        BOOST_LOG(info) << "Vulkan encoder teardown: codec context closed; releasing converter"sv;
+      }
       converter.reset();
+
+      if (vulkan_codec) {
+        BOOST_LOG(info) << "Vulkan encoder teardown: complete"sv;
+      }
     }
 
     // Ensure objects are destroyed in the correct order
@@ -5483,6 +5513,25 @@ namespace video {
       return;
     }
     reset_encoder_probe_state_unlocked();
+  }
+
+  std::vector<std::string> selectable_encoder_backends() {
+    std::vector<std::string> backends;
+    backends.reserve(encoders.size() + 1);
+    backends.emplace_back("auto");
+    for (const auto *encoder : encoders) {
+      backends.emplace_back(encoder->name);
+    }
+    return backends;
+  }
+
+  bool encoder_backend_selectable(std::string_view backend) {
+    if (backend == "auto"sv) {
+      return true;
+    }
+    return std::any_of(encoders.begin(), encoders.end(), [&](const auto *encoder) {
+      return encoder->name == backend;
+    });
   }
 
   std::string active_encoder_name() {

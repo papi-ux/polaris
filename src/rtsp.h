@@ -147,6 +147,16 @@ namespace rtsp_stream {
     // It never selects topology; final process resolution must equal it or the
     // exact launch/resume fails closed.
     std::string expected_stream_mode;
+    // Session-scoped encoder selection from /launch. "auto" explicitly asks
+    // Polaris to apply its automatic policy for this launch; empty preserves
+    // the host default for legacy clients.
+    std::string encoder_backend;
+    bool encoder_backend_explicit = false;
+    // Assertion copied from /optimize. It describes the requested selection
+    // mode (including "auto"), while effective_encoder_backend records the
+    // concrete backend that passed the launch-time probe.
+    std::string expected_encoder_backend;
+    std::string effective_encoder_backend;
     bool user_locked_display_mode = false;
     bool user_locked_virtual_display = false;
     uint32_t scale_factor;

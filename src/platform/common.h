@@ -561,12 +561,6 @@ namespace platf {
     virtual void init_codec_options(AVCodecContext *ctx, AVDictionary **options) {};
 
     /**
-     * @brief Release platform-owned resources that depend on the codec's hardware device.
-     * @note This runs before AVCodecContext teardown. Implementations must be idempotent.
-     */
-    virtual void release_encode_resources() {};
-
-    /**
      * @brief Prepare to derive a context.
      * @note Implementations may make modifications required before context derivation
      */

@@ -168,6 +168,30 @@ TEST(LinuxPlatformHardeningSource, VulkanVideoPreservesRadvOptionsAndInitializes
   EXPECT_NE(encoder.find("vk_frame->access[i] = static_cast<VkAccessFlagBits>(0);"), std::string::npos);
 }
 
+TEST(LinuxPlatformHardeningSource, VulkanTeardownClosesCodecBeforeConverterResources) {
+  const auto video = read_source("src/video.cpp");
+  const auto destructor = video.find("~avcodec_encode_session_t()");
+  const auto codec_close = video.find("avcodec_ctx.reset();", destructor);
+  const auto converter_close = video.find("converter.reset();", codec_close);
+  ASSERT_NE(destructor, std::string::npos);
+  ASSERT_NE(codec_close, std::string::npos);
+  ASSERT_NE(converter_close, std::string::npos);
+  EXPECT_LT(codec_close, converter_close)
+    << "FFmpeg must release codec-owned Vulkan picture views before converter resources";
+  EXPECT_EQ(video.find("release_encode_resources", destructor), std::string::npos);
+
+  const auto platform = read_source("src/platform/common.h");
+  EXPECT_EQ(platform.find("release_encode_resources"), std::string::npos);
+
+  const auto encoder = read_source("src/platform/linux/vulkan_encode.cpp");
+  const auto vulkan_destructor = encoder.find("~vk_vram_t() override");
+  const auto cleanup = encoder.find("cleanup_pipeline();", vulkan_destructor);
+  ASSERT_NE(vulkan_destructor, std::string::npos);
+  ASSERT_NE(cleanup, std::string::npos);
+  EXPECT_NE(encoder.find("Vulkan converter teardown: device idle status=", cleanup), std::string::npos);
+  EXPECT_NE(encoder.find("Vulkan converter teardown: complete", cleanup), std::string::npos);
+}
+
 TEST(LinuxPlatformHardeningSource, KscreenConfigurationNeverPassesThroughShell) {
   const auto topology = read_source("src/platform/linux/display_topology.cpp");
   EXPECT_EQ(topology.find("std::system"), std::string::npos);

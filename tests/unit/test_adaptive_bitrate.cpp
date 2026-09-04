@@ -38,6 +38,37 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   EXPECT_EQ("network_pressure", state.state);
 }
 
+TEST(AdaptiveBitrateController, IgnoresSubthresholdRelativeRttSpikeOnFastLan) {
+  enable_controller();
+
+  // Build enough history to arm relative spike detection. The final sample is
+  // three times the baseline, but 3 ms is not actionable network pressure.
+  for (int i = 0; i < 6; ++i) {
+    adaptive_bitrate::update_network_stats(0.0, 1.0);
+  }
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(0.0, 3.0);
+
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.target_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_NE(state.state, "network_pressure");
+}
+
+TEST(AdaptiveBitrateController, ReducesTargetOnActionableRelativeRttSpike) {
+  enable_controller();
+
+  for (int i = 0; i < 6; ++i) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(0.0, 55.0);
+
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "rtt_spike");
+}
+
 TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot) {
   enable_controller();
 
