@@ -75,6 +75,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/src/recovery_profile.cpp
+    ${CMAKE_SOURCE_DIR}/src/stream_fec.cpp
     ${CMAKE_SOURCE_DIR}/src/web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/display_planner.cpp
@@ -140,6 +141,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_source_safety_contracts.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_fec.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_reset_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_v2.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_trial.cpp
