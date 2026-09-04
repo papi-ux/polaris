@@ -254,6 +254,47 @@ prepare_nested_runtime_services() {
   esac
 }
 
+rebind_private_portal_after_nested_start() {
+  local portal_bus portal_ready
+  case "$POLARIS_PERSISTED_SERVICE_MODE" in
+    managed)
+      # Rebind the private portal backend to this gamescope generation. Without
+      # this, xdg-desktop-portal-gamescope keeps the prior (idle) wayland
+      # connection and Start fails with "gamescope stream not available: failed
+      # to connect to wayland socket" when the compositor was replaced under it.
+      # Restart only the gamescope impl, not the full portal frontend, so we
+      # avoid the udev/controller race that killing xdg-desktop-portal caused.
+      # polaris must Wants= (not Requires=) this unit so rebind never cascade-stops it.
+      systemctl --user restart polaris-portal-gamescope.service 2>/dev/null || true
+      portal_bus="unix:path=$rt/polaris-portal/bus"
+      portal_ready=0
+      for _ in $(seq 1 80); do
+        if busctl --address="$portal_bus" --no-pager \
+            status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
+          portal_ready=1
+          break
+        fi
+        sleep 0.1
+      done
+      if [ "$portal_ready" != 1 ]; then
+        echo "polaris-gamescope-session: portal-gamescope did not rebind after nested start" >&2
+        # Non-fatal: stream may still gamescopegrab the PW node.
+      else
+        echo "polaris-gamescope-session: portal-gamescope rebound to nested gamescope-0" >&2
+      fi
+      ;;
+    standalone)
+      # Distro packages ship no private portal unit. Polaris captures this
+      # generation through the host portal or gamescopegrab, so there is no
+      # backend to rebind and no private bus worth eight seconds of polling.
+      echo "polaris-gamescope-session: standalone package, no private portal unit to rebind" >&2
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 session_steam_pids() {
   local p pids rc envf env_lines session_id="${POLARIS_SESSION_INSTANCE_ID:-}" proc_root
   [ -n "$session_id" ] || return 2
@@ -1108,30 +1149,12 @@ case "${1:-}" in
         echo "polaris-gamescope-session: nested bound gamescope-1 (portal captures gamescope-0) — see $steam_log" >&2
         exit 1
       fi
-      # Rebind private portal backend to this gamescope generation. Without this,
-      # xdg-desktop-portal-gamescope keeps the prior (idle) wayland connection and
-      # Start fails with "gamescope stream not available: failed to connect to
-      # wayland socket" when the compositor was replaced under it.
-      # Restart only the gamescope impl — not the full portal frontend — so we
-      # avoid the udev/controller race that killing xdg-desktop-portal caused.
-      # polaris must Wants= (not Requires=) this unit so rebind never cascade-stops it.
-      systemctl --user restart polaris-portal-gamescope.service 2>/dev/null || true
-      portal_bus="unix:path=$rt/polaris-portal/bus"
-      portal_ready=0
-      for _ in $(seq 1 80); do
-        if busctl --address="$portal_bus" --no-pager \
-            status org.freedesktop.impl.portal.desktop.gamescope >/dev/null 2>&1; then
-          portal_ready=1
-          break
-        fi
-        sleep 0.1
-      done
-      if [ "$portal_ready" != 1 ]; then
-        echo "polaris-gamescope-session: portal-gamescope did not rebind after nested start" >&2
-        # Non-fatal: stream may still gamescopegrab the PW node.
-      else
-        echo "polaris-gamescope-session: portal-gamescope rebound to nested gamescope-0" >&2
-      fi
+      # Only a managed (Nix) host has a private portal backend to rebind; a
+      # standalone package has neither the unit nor the bus.
+      rebind_private_portal_after_nested_start || {
+        echo "polaris-gamescope-session: nested runtime services lost their classification before portal rebind" >&2
+        exit 1
+      }
       # Brief settle so Steam's first controller udev events land after portal is up.
       sleep 1
       echo "polaris-gamescope-session: nested ${POLARIS_GAMESCOPE_BIN:-gamescope} ready; WSI logs → $steam_log and ~/.local/share/Steam/logs/console-linux.txt" >&2
