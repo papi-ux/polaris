@@ -1291,6 +1291,10 @@ namespace stream_stats {
       stats.paired_target_bitrate_kbps > 0 && stats.effective_launch_bitrate_kbps > 0 ?
         std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps) :
         0;
+    // Enabled Auto Safe remains the sole continuous bitrate owner even while
+    // its actuator is momentarily holding or recovering. A clean, reduced
+    // target is therefore an informational observation, not a user action.
+    const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
     const bool network_evidence_available = current_network_observation &&
       (current_media_loss_observation || stats.control_channel_samples > 0);
     const bool quality_reduced_live =
@@ -1306,9 +1310,8 @@ namespace stream_stats {
     // FFmpeg bitrate changes can briefly recreate the encoder, and explicit or
     // rollback hand-offs can temporarily change the controller-state label.
     // None of those transitions authorizes Doctor to become a second writer.
-    // While Auto Safe is enabled, Doctor may observe/recheck the live result;
-    // only disabling Auto Safe can make a guarded Doctor mutation available.
-    const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
+    // While Auto Safe is enabled, Doctor may observe the live result; only
+    // disabling Auto Safe can make a guarded Doctor mutation available.
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -1398,7 +1401,7 @@ namespace stream_stats {
       else if (capture_latency_watch || capture_pacing_watch) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
-      else if (quality_reduced_live) primary_issue = "quality_reduced_live";
+      else if (quality_reduced_live && !auto_safe_managing) primary_issue = "quality_reduced_live";
       else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
     }
