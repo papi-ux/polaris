@@ -134,7 +134,7 @@ Desktop Takeover requires an active Hyprland session and `hyprctl`, plus a backe
 
 ### Encoder and quality
 
-Set the encoder (`nvenc` on NVIDIA, `vaapi` on AMD and Intel Mesa hosts), the bitrate, and optionally Auto Quality; the same settings apply to the labwc and gamescope paths alike. With Auto Quality on, Polaris balances bitrate and profile recovery for the selected path instead of asking you to tune them by hand.
+Set the host encoder (`nvenc` on NVIDIA, `vaapi` on AMD and Intel Mesa hosts), the bitrate, and optionally Auto Quality; the same settings apply to the labwc and gamescope paths alike. A capable Nova client can also keep that host policy or request an advertised encoder for one game. Auto may live-probe and fall back; a named backend is strict and fails the launch if it cannot initialize. The session choice is restored when the session ends and never rewrites the host configuration. With Auto Quality on, Polaris balances bitrate and profile recovery for the selected path instead of asking you to tune them by hand.
 
 ### GPU-native capture preference
 

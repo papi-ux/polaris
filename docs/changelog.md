@@ -8,6 +8,7 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Fixes a Linux Vulkan Video crash at client disconnect by closing FFmpeg's codec-owned picture views before releasing Polaris's converter resources, and records bounded teardown phase markers for field verification.
+- Advertises the encoder backends compiled into the host and lets a capable Nova client choose one for a single game without rewriting `polaris.conf`. Auto remains the only fallback policy; an explicit backend is live-probed strictly, bound to the deterministic launch envelope, reported in session status, and restored to the host default at teardown.
 
 ## v1.4.1 - 2026-09-03
 

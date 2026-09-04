@@ -5515,6 +5515,25 @@ namespace video {
     reset_encoder_probe_state_unlocked();
   }
 
+  std::vector<std::string> selectable_encoder_backends() {
+    std::vector<std::string> backends;
+    backends.reserve(encoders.size() + 1);
+    backends.emplace_back("auto");
+    for (const auto *encoder : encoders) {
+      backends.emplace_back(encoder->name);
+    }
+    return backends;
+  }
+
+  bool encoder_backend_selectable(std::string_view backend) {
+    if (backend == "auto"sv) {
+      return true;
+    }
+    return std::any_of(encoders.begin(), encoders.end(), [&](const auto *encoder) {
+      return encoder->name == backend;
+    });
+  }
+
   std::string active_encoder_name() {
     std::shared_lock encoder_state_lock {encoder_state_mutex};
 
