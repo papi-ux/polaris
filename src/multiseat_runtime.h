@@ -33,6 +33,7 @@ namespace multiseat {
     invalid_request,
     unknown_gpu,
     client_already_active,
+    profile_already_active,
     seat_capacity_reached,
     encoder_capacity_reached,
   };

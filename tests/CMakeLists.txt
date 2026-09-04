@@ -359,15 +359,21 @@ target_link_libraries(test_game_artwork PRIVATE
 )
 add_test(NAME test_game_artwork COMMAND test_game_artwork)
 
-# The multiseat architecture contract deliberately depends only on the C++
-# standard library. Keep its executable small so admission and lifecycle
-# isolation can be exercised without linking the current singleton runtime.
+# Keep the multiseat test executable independent of the current singleton
+# runtime. The backend-neutral contract uses only the C++ standard library;
+# Linux adds the Podman adapter contract and its JSON inventory parser.
 add_executable(test_multiseat_runtime
     ${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp
     ${CMAKE_SOURCE_DIR}/src/multiseat_worker_broker.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_runtime.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_worker_broker.cpp
 )
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(test_multiseat_runtime PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
+    )
+endif()
 set_target_properties(test_multiseat_runtime PROPERTIES
     CXX_STANDARD 23
     INTERPROCEDURAL_OPTIMIZATION OFF
@@ -375,6 +381,11 @@ set_target_properties(test_multiseat_runtime PROPERTIES
 target_link_libraries(test_multiseat_runtime PRIVATE
     gtest_main
 )
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_multiseat_runtime PRIVATE
+        nlohmann_json::nlohmann_json
+    )
+endif()
 add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
 
 configure_polaris_test_target(${PROJECT_NAME}

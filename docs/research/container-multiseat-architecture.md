@@ -1,8 +1,8 @@
 # Container multiseat architecture spike
 
-Status: architecture contract only. Nothing in this document enables
-multiseat, launches a container, or changes the current single-workload
-runtime.
+Status: architecture plus an offline rootless-Podman backend contract. Nothing
+in this document enables multiseat, launches a container, or changes the
+current single-workload runtime.
 
 ## Outcome
 
@@ -11,12 +11,12 @@ two clients to run different workloads on one host without either seat owning
 the other seat's compositor, capture, encoder, audio, input, process tree, or
 persistent launcher state.
 
-The first implementation slice therefore introduces an executable admission
-and lifecycle contract. It proves that two seats can share one logical GPU
-while retaining different exact-generation authority and different worker
-resource names. It also proves that stopping one seat cannot stop the other,
-that a stale teardown cannot target a reused slot, and that seat and encoder
-budgets fail closed.
+The implementation slices introduce executable admission, lifecycle,
+reconciliation, and rootless-container contracts. They prove that two seats
+can share one logical GPU while retaining different exact-generation
+authority and different worker resource names. They also prove that stopping
+one seat cannot stop the other, that a stale teardown cannot target a reused
+slot, and that seat, profile, and encoder budgets fail closed.
 
 It does not claim that two real games have been streamed yet.
 
@@ -177,7 +177,9 @@ Must remain per profile:
 - save data unless a separate synchronization contract owns it;
 - runtime directories, D-Bus, Wayland, audio, and input endpoints.
 
-Two active workers must never mount one mutable launcher home read-write.
+Two active workers must never mount one mutable launcher home read-write. The
+registry therefore rejects a second active seat for the same profile even
+when it comes from a different client.
 
 ## Container boundary
 
@@ -197,6 +199,51 @@ A raw Docker socket and broad privileged mode are acceptable only for a
 throwaway laboratory control. A supported deployment should use an allowlisted
 broker and the smallest device and capability set that passes the acceptance
 matrix.
+
+## Rootless Podman backend checkpoint
+
+The first Linux backend targets local rootless Podman through an explicit argv
+runner. It forces remote mode off so inherited `CONTAINER_HOST` or connection
+configuration cannot redirect authority to a Podman service. It does not use a
+shell, a Docker-compatible socket, host networking, host PID/IPC/UTS
+namespaces, wildcard devices, or privileged mode. It refuses to operate with
+effective UID zero and fails launch before invoking Podman if the executable,
+exact GPU/input character devices, or read-only game roots are not accessible
+to the current user.
+
+Each launch is immutable and includes:
+
+- a digest-pinned image with pulling disabled;
+- a pre-created opaque profile volume mounted as the only persistent writable
+  home, with implicit volume creation disabled;
+- explicit allowlisted GPU and virtual-input devices;
+- read-only shared game roots at derived `/mnt/games/<opaque-name>` paths;
+- private network, PID, IPC, UTS, cgroup, runtime, D-Bus, PipeWire/Pulse, and
+  Wayland boundaries;
+- a read-only root filesystem with Podman's writable compatibility tmpfs for
+  `/dev`, `/dev/shm`, `/run`, `/tmp`, and `/var/tmp`, plus explicit size bounds
+  for shared memory, the worker runtime directory, and `/tmp`;
+- bounded process count, container log, and health-check log settings;
+- no inherited proxy environment or host-derived `/etc/hosts` entries;
+- no capabilities, `no-new-privileges`, a tiny init, and a worker-owned
+  health command;
+- exact seat, resource, compositor, render-node, and encoder labels, but no
+  client identity or profile key.
+
+Inventory is two phase and bounded: an exact deployment-label listing returns
+full immutable container IDs, then one JSON inspection validates every ID,
+label, state, and cardinality. A running container remains `starting` until
+its health check is explicitly healthy. Invalid, truncated, contradictory, or
+oversized output fails the complete inventory rather than returning a partial
+view. Graceful teardown signals `TERM` to the inspected immutable container ID;
+forced teardown removes that exact ID with force. It never targets a name,
+latest container, wildcard, or all containers.
+
+The backend and live-host adapter compile into Polaris, but are not wired into
+the current singleton runtime. Tests use an injected fake host, so they inspect
+only generated argv and synthetic Podman JSON. Podman was not installed and no
+container, volume, namespace, device, or profile was created during this
+checkpoint.
 
 ## Launcher acceptance comes second
 
@@ -224,6 +271,7 @@ The test_multiseat_runtime target covers:
 - stale-controller rejection across a control-plane restart;
 - separate seat and encoder capacity failures;
 - one active seat per client;
+- one active seat per persistent profile;
 - concrete Automatic selection and fail-closed explicit Gamescope;
 - resource names that do not contain client or profile identifiers;
 - mandatory clean inventory before worker launch;
@@ -234,12 +282,20 @@ The test_multiseat_runtime target covers:
 - exact-seat release when one authoritative worker disappears;
 - observation failure that closes admission without changing a reserved seat;
 - malformed or duplicate inventory that closes admission without guessed
-  commands or lifecycle mutation.
+  commands or lifecycle mutation;
+- rootless Podman launch arguments with pinned images, explicit devices,
+  private namespaces, writable compatibility surfaces, explicit worker
+  runtime/temp/shared-memory bounds, and no broad authority;
+- health-gated two-worker inventory with exact ID/label validation;
+- exact-ID graceful and forced teardown plus created-worker cleanup;
+- fail-closed root, missing-device, unknown-allocation, timeout, ambiguous
+  launch output, truncation, inventory bound/cardinality/ID, and malformed
+  inventory paths.
 
-This is still an in-memory control-plane proof. A later container integration
-test must bind the same protocol to two real workers and demonstrate
-concurrent frame, audio, and input heartbeats before physical game testing can
-begin.
+This remains an offline control-plane/backend proof. A later container
+integration test must supply a pinned worker image, pre-created profile
+volumes, and two real workers, then demonstrate concurrent frame, audio, and
+input heartbeats before physical game testing can begin.
 
 ## Upstream references
 
@@ -251,3 +307,7 @@ begin.
   https://github.com/games-on-whales/gow
 - Headless Sunshine/Steam Docker proof of host plumbing:
   https://github.com/numsu/headless-sunshine-steam-docker
+- Podman rootless container and device model:
+  https://docs.podman.io/en/stable/markdown/podman-run.1.html
+- Podman JSON container inspection:
+  https://docs.podman.io/en/stable/markdown/podman-container-inspect.1.html

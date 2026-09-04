@@ -106,9 +106,18 @@ namespace multiseat {
     for (const auto &gpu_entry : gpus_) {
       const auto &gpu = gpu_entry.second;
       for (const auto &slot : gpu.slots) {
-        if (slot && slot->snapshot.client_key == request.client_key) {
+        if (!slot) {
+          continue;
+        }
+        if (slot->snapshot.client_key == request.client_key) {
           return {
             .rejection = admission_rejection_e::client_already_active,
+            .seat = std::nullopt,
+          };
+        }
+        if (slot->snapshot.profile_key == request.profile_key) {
+          return {
+            .rejection = admission_rejection_e::profile_already_active,
             .seat = std::nullopt,
           };
         }

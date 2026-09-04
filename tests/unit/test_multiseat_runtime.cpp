@@ -258,6 +258,25 @@ TEST(MultiseatRuntime, OneClientCannotOccupyTwoSeats) {
   );
 }
 
+TEST(MultiseatRuntime, OneProfileCannotOccupyTwoSeats) {
+  registry_t registry {controller_epoch, {shared_gpu()}};
+  const auto first = registry.admit(
+    request_for("client-a", "same-profile", "game-a")
+  );
+  ASSERT_TRUE(first.accepted());
+  EXPECT_EQ(
+    registry.admit(
+      request_for("client-b", "same-profile", "game-b")
+    ).rejection,
+    admission_rejection_e::profile_already_active
+  );
+  ASSERT_EQ(registry.begin_stop(first.seat->handle), mutation_result_e::applied);
+  ASSERT_EQ(registry.release(first.seat->handle), mutation_result_e::applied);
+  EXPECT_TRUE(registry.admit(
+    request_for("client-b", "same-profile", "game-b")
+  ).accepted());
+}
+
 TEST(MultiseatRuntime, RuntimeSelectionIsConcreteAndExplicitChoicesDoNotFallback) {
   registry_t registry {controller_epoch, {shared_gpu()}};
   const auto explicit_gamescope = admit_or_fail(
