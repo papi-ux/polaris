@@ -91,3 +91,18 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 		t.Fatal("launcher image lock is incomplete")
 	}
 }
+
+func TestProcessRuntimeAdaptersRemainUnwiredAndHelperAbsent(t *testing.T) {
+	server := string(repositoryFile(t, "multiseat_worker", "server.go"))
+	main := string(repositoryFile(t, "multiseat_worker", "main.go"))
+	containerfile := string(repositoryFile(t, "containers", "multiseat", "Containerfile"))
+	if !strings.Contains(server, "expectedUID,\n\t\tnil,\n\t\truntimeOptions{}") {
+		t.Fatal("production worker no longer injects an explicit nil runtime adapter set")
+	}
+	for _, productionSource := range []string{main, server, containerfile} {
+		if strings.Contains(productionSource, "newProcessRuntimeAdapters") ||
+			strings.Contains(productionSource, "polaris-seat-runtime") {
+			t.Fatal("process-backed runtime helper was wired into the production image")
+		}
+	}
+}

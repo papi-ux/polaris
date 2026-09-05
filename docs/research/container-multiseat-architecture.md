@@ -274,7 +274,7 @@ record, responds to authenticated heartbeats, and handles authenticated
 shutdown. Health must complete mutual authentication and a heartbeat on both
 sockets; the existence of socket nodes alone is never a ready signal.
 
-An injectable worker-runtime layer now models session bus, audio, compositor,
+An injectable worker-runtime layer models session bus, audio, compositor,
 virtual input, capture, encoder lease, and launcher-process-tree readiness. It
 starts them in that dependency order, admits IPC only after all seven are
 ready, propagates an unexpected terminal signal as worker failure, and tears
@@ -285,13 +285,47 @@ so a blocked, failed, or panicking adapter cannot starve later cleanup.
 Returned errors identify only the stage and operation, not adapter-provided
 paths or diagnostics.
 
-This layer is exercised by offline fakes and by the process-level C++
-controller-to-Go worker fixture. There are no concrete host-resource adapters,
-and the production command injects none, so it still has no command that
-starts Gamescope, a launcher, audio, capture, encoding, or virtual input.
-Podman health therefore proves only that the supervisor contract is alive.
-Before opt-in wiring, the controller's graceful-stop timeout must be aligned
-with the worker's bounded worst-case reverse teardown.
+A process-backed adapter layer now supplies a concrete Linux supervision
+boundary. Each stage becomes a literal, shell-free `polaris-seat-runtime
+serve` argv, receives a fixed allowlisted environment, owns a new process
+group, and cannot report ready until it writes the exact versioned record on an
+inherited descriptor. TERM is directed to that group and escalates to KILL at
+the component deadline. Tests execute this path with a synthetic subprocess,
+including hostile literal argv, environment non-inheritance, bad or missing
+readiness, early exit, descendant cleanup, and forced stop.
+
+The helper protocol is intentionally stage-specific. Every invocation also
+receives `--runtime-namespace`; no invocation receives the controller
+capability, client key, profile key, worker name, or controller epoch.
+
+| Stage | Additional literal arguments |
+| --- | --- |
+| session bus | none |
+| audio | audio sink |
+| compositor | Wayland socket, render node, concrete compositor |
+| virtual input | input seat |
+| capture | Wayland socket, render node |
+| encoder lease | logical GPU, render node, session count |
+| launcher process tree | runtime profile, opaque workload key, Wayland socket, audio sink, input seat |
+
+Environment is independently allowlisted per stage. Only the launcher receives
+the persistent-home XDG paths and runtime-profile setting; for example, the
+encoder receives only its render-node setting. The child does not inherit the
+worker's ambient environment, standard input, output, or error streams.
+
+The resource helper itself does not exist yet. It is deliberately not faked by
+calling a GoW launcher entrypoint: the referenced GoW launch scripts couple
+compositor and application startup, while the locked application roots do not
+expose one uniform private D-Bus, PipeWire, virtual-input, capture, and encoder
+contract. A real Polaris helper must implement those stage semantics and the
+controller must bind an exact runtime profile, display geometry, and trusted
+workload plan before activation. The production command still injects no
+adapters, so Podman health proves only that the supervisor contract is alive.
+
+The broker's default graceful-stop deadline is now 45 seconds. It covers the
+worker's 35-second worst-case serial reverse teardown plus the controller's
+default five-second authenticated-shutdown I/O budget and five-second backend
+command budget before an exact-generation forced removal is allowed.
 
 ## Local control and media IPC checkpoint
 
@@ -447,6 +481,9 @@ The test_multiseat_runtime target covers:
 - a real process-level C++ controller to Go worker fixture that authenticates
   and heartbeats both Unix channels before graceful shutdown drives exact
   reverse-order cleanup of the injected offline runtime;
+- a real Linux process-supervision fixture proving exact readiness framing,
+  literal shell-free argv, scrubbed environments, descendant group teardown,
+  partial-start ownership, and bounded TERM-to-KILL escalation;
 - adversarial offline runtime coverage for complete and partial startup,
   malformed leases, early exits, panics, errors, bounded timeouts, exact
   reverse teardown, redacted failures, and two-seat independence;
@@ -457,11 +494,13 @@ This remains an offline control-plane/backend proof. A later container
 integration test must build and pin the final worker image, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
-physical game testing, concrete runtime adapters must bind the modeled session
-bus, PipeWire sink, virtual input lifecycle, compositor, capture, encoder
-lease, and launcher process tree without weakening the proven teardown
-contract. Concurrent frame, audio, and input heartbeats then become the next
-acceptance boundary.
+physical game testing, the missing `polaris-seat-runtime` implementation must
+bind the modeled session bus, PipeWire sink, virtual input lifecycle,
+compositor, capture, encoder lease, and launcher process tree without weakening
+the proven adapter and teardown contracts. Profile-specific image selection,
+display geometry, and trusted workload resolution must be explicit rather than
+inferred from the image. Concurrent frame, audio, and input heartbeats then
+become the next acceptance boundary.
 
 ## Upstream references
 

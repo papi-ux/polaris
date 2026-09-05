@@ -35,6 +35,10 @@ namespace {
   using multiseat::worker_observation_t;
   using multiseat::worker_observed_state_e;
   using multiseat::worker_stop_mode_e;
+  using multiseat::worker_runtime_component_count;
+  using multiseat::worker_runtime_component_stop_timeout;
+  using multiseat::worker_runtime_graceful_stop_margin;
+  using multiseat::worker_runtime_graceful_stop_timeout;
 
   constexpr auto gpu_id = "gpu-primary";
   constexpr auto render_node = "/dev/dri/renderD128";
@@ -307,6 +311,51 @@ namespace {
     };
   }
 }  // namespace
+
+TEST(MultiseatWorkerBroker, DefaultGracefulStopBudgetCoversWorkerReverseTeardown) {
+  const worker_broker_options_t defaults;
+  EXPECT_EQ(worker_runtime_component_count, std::size_t {7});
+  EXPECT_EQ(worker_runtime_component_stop_timeout, 5s);
+  EXPECT_EQ(worker_runtime_graceful_stop_margin, 10s);
+  EXPECT_EQ(worker_runtime_graceful_stop_timeout, 45s);
+  EXPECT_EQ(defaults.graceful_stop_timeout, worker_runtime_graceful_stop_timeout);
+}
+
+TEST(MultiseatWorkerBroker, DefaultDeadlineDoesNotForceBeforeWorkerBudgetExpires) {
+  registry_t registry {"controller-current", {shared_gpu()}};
+  fake_worker_backend_t backend;
+  fake_clock_t clock;
+  worker_broker_t broker {
+    registry,
+    backend,
+    {},
+    [&clock]() {
+      return clock.now();
+    },
+  };
+  ASSERT_TRUE(broker.reconcile().admission_ready);
+  const auto seat = admit_and_bind(
+    registry,
+    "client-a",
+    "profile-a",
+    "workload-a",
+    compositor_e::gamescope,
+    compositor_e::gamescope
+  );
+  const auto identity = identity_for(seat);
+  ASSERT_EQ(broker.start_seat(seat.handle), broker_start_result_e::started);
+  ASSERT_EQ(broker.stop_seat(seat.handle), broker_stop_result_e::stop_requested);
+
+  clock.advance(worker_runtime_graceful_stop_timeout - 1ms);
+  const auto before_deadline = broker.reconcile();
+  EXPECT_EQ(before_deadline.force_stop_requests, std::size_t {0});
+  EXPECT_EQ(backend.stop_count(identity, worker_stop_mode_e::force), std::size_t {0});
+
+  clock.advance(1ms);
+  const auto at_deadline = broker.reconcile();
+  EXPECT_EQ(at_deadline.force_stop_requests, std::size_t {1});
+  EXPECT_EQ(backend.stop_count(identity, worker_stop_mode_e::force), std::size_t {1});
+}
 
 TEST(MultiseatWorkerBroker, RequiresAuthoritativeInventoryBeforeLaunch) {
   registry_t registry {"controller-current", {shared_gpu()}};

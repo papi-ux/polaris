@@ -15,6 +15,21 @@
 
 namespace multiseat {
 
+  /**
+   * The worker drains seven components serially with a five-second bound for
+   * each. The controller allows that complete 35-second reverse teardown plus
+   * the default five-second authenticated-shutdown I/O budget and five-second
+   * backend command budget before it force-removes the exact generation.
+   */
+  inline constexpr std::size_t worker_runtime_component_count = 7;
+  inline constexpr std::chrono::milliseconds worker_runtime_component_stop_timeout {5000};
+  inline constexpr std::chrono::milliseconds worker_runtime_graceful_stop_margin {10000};
+  inline constexpr std::chrono::milliseconds worker_runtime_graceful_stop_timeout {
+    static_cast<std::chrono::milliseconds::rep>(worker_runtime_component_count) *
+      worker_runtime_component_stop_timeout.count() +
+      worker_runtime_graceful_stop_margin.count()
+  };
+
   enum class worker_observed_state_e {
     starting,
     ready,
@@ -113,7 +128,7 @@ namespace multiseat {
   };
 
   struct worker_broker_options_t {
-    std::chrono::milliseconds graceful_stop_timeout {10000};
+    std::chrono::milliseconds graceful_stop_timeout {worker_runtime_graceful_stop_timeout};
     std::chrono::milliseconds force_stop_timeout {5000};
   };
 
