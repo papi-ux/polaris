@@ -244,7 +244,11 @@ namespace multiseat {
 
     auto created = authority_store_.create(
       endpoint_identity_for(identity),
-      seat->resources.runtime_namespace
+      seat->resources.runtime_namespace,
+      {
+        .compositor = seat->selected_compositor,
+        .workload = seat->workload,
+      }
     );
     if (!created.created()) {
       startup_recovery_complete_ = false;

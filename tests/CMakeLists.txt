@@ -392,6 +392,8 @@ target_link_libraries(test_multiseat_runtime PRIVATE
     OpenSSL::Crypto
 )
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(test_multiseat_runtime PRIVATE
+        POLARIS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(test_multiseat_runtime PRIVATE
         nlohmann_json::nlohmann_json
     )
@@ -405,7 +407,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "${CMAKE_CURRENT_BINARY_DIR}/polaris-multiseat-go-interop-server")
         file(GLOB_RECURSE POLARIS_MULTISEAT_GO_TEST_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
-            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod")
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/internal/seatruntime/testdata/*.json")
         add_custom_command(
             OUTPUT "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"

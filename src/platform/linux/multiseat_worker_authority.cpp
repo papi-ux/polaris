@@ -11,6 +11,8 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -33,9 +35,13 @@ namespace multiseat::worker_ipc {
   namespace {
     constexpr std::size_t max_authority_entries = 256;
     constexpr std::size_t max_authority_record_size = 1024;
+    constexpr std::size_t max_provider_catalog_size = 1024 * 1024;
     constexpr std::array<std::uint8_t, 8> authority_record_magic {
-      'P', 'W', 'A', 'U', 'T', 'H', '0', '1'
+      'P', 'W', 'A', 'U', 'T', 'H', '0', '2'
     };
+    constexpr std::string_view provider_catalog_temporary_file_name =
+      ".runtime-providers.json.tmp";
+    constexpr std::string_view provider_root = "/usr/libexec/polaris-seat/";
 
     struct file_identity_t {
       std::uint64_t device = 0;
@@ -98,6 +104,15 @@ namespace multiseat::worker_ipc {
       return S_ISREG(metadata.st_mode) &&
              static_cast<std::uint32_t>(metadata.st_uid) == owner_uid &&
              (metadata.st_mode & 07777) == 0600;
+    }
+
+    bool immutable_private_regular_file(
+      const struct stat &metadata,
+      std::uint32_t owner_uid
+    ) {
+      return S_ISREG(metadata.st_mode) &&
+             static_cast<std::uint32_t>(metadata.st_uid) == owner_uid &&
+             (metadata.st_mode & 07777) == 0400;
     }
 
     bool private_socket(const struct stat &metadata, std::uint32_t owner_uid) {
@@ -257,6 +272,96 @@ namespace multiseat::worker_ipc {
       return written;
     }
 
+    bool create_atomic_immutable_file(
+      int parent,
+      std::string_view name,
+      std::span<const std::uint8_t> payload,
+      std::uint32_t owner_uid,
+      struct stat &metadata
+    ) {
+      const std::string owned_name {name};
+      const std::string temporary_name {provider_catalog_temporary_file_name};
+      auto descriptor = ::openat(
+        parent,
+        temporary_name.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+        0600
+      );
+      if (descriptor < 0) {
+        return false;
+      }
+      bool final_linked = false;
+      const auto cleanup = [&]() {
+        struct stat descriptor_metadata {};
+        if (::fstat(descriptor, &descriptor_metadata) == 0) {
+          for (const auto &candidate : {owned_name, temporary_name}) {
+            struct stat entry_metadata {};
+            if (::fstatat(
+                  parent,
+                  candidate.c_str(),
+                  &entry_metadata,
+                  AT_SYMLINK_NOFOLLOW
+                ) == 0 &&
+                identity_of(descriptor_metadata) == identity_of(entry_metadata)) {
+              (void) ::unlinkat(parent, candidate.c_str(), 0);
+            }
+          }
+        }
+      };
+      const auto prepared = write_all(descriptor, payload) &&
+                            ::fsync(descriptor) == 0 &&
+                            ::fchmod(descriptor, 0400) == 0 &&
+                            ::fsync(descriptor) == 0 &&
+                            ::fstat(descriptor, &metadata) == 0 &&
+                            immutable_private_regular_file(metadata, owner_uid) &&
+                            metadata.st_size == static_cast<off_t>(payload.size());
+      if (prepared &&
+          ::linkat(
+            parent,
+            temporary_name.c_str(),
+            parent,
+            owned_name.c_str(),
+            0
+          ) == 0) {
+        final_linked = true;
+      }
+      struct stat published_metadata {};
+      auto published = final_linked &&
+                       ::fstatat(
+                         parent,
+                         owned_name.c_str(),
+                         &published_metadata,
+                         AT_SYMLINK_NOFOLLOW
+                       ) == 0 &&
+                       identity_of(published_metadata) == identity_of(metadata) &&
+                       immutable_private_regular_file(published_metadata, owner_uid) &&
+                       published_metadata.st_size ==
+                         static_cast<off_t>(payload.size());
+      if (published) {
+        published = ::unlinkat(parent, temporary_name.c_str(), 0) == 0 &&
+                    ::fsync(parent) == 0;
+      }
+      struct stat stable_metadata {};
+      if (published) {
+        published = ::fstatat(
+                      parent,
+                      owned_name.c_str(),
+                      &stable_metadata,
+                      AT_SYMLINK_NOFOLLOW
+                    ) == 0 &&
+                    identity_of(stable_metadata) == identity_of(metadata) &&
+                    immutable_private_regular_file(stable_metadata, owner_uid) &&
+                    stable_metadata.st_size == static_cast<off_t>(payload.size());
+      }
+      if (!published) {
+        cleanup();
+      } else {
+        metadata = stable_metadata;
+      }
+      close_descriptor(descriptor);
+      return published;
+    }
+
     struct private_file_payload_t {
       file_identity_t identity;
       std::vector<std::uint8_t> payload;
@@ -266,7 +371,8 @@ namespace multiseat::worker_ipc {
       int parent,
       std::string_view name,
       std::uint32_t owner_uid,
-      std::size_t max_size
+      std::size_t max_size,
+      mode_t expected_mode = 0600
     ) {
       const std::string owned_name {name};
       auto descriptor = ::openat(
@@ -279,7 +385,10 @@ namespace multiseat::worker_ipc {
       }
       struct stat before {};
       if (::fstat(descriptor, &before) != 0 ||
-          !private_regular_file(before, owner_uid) ||
+          !(expected_mode == 0600 ?
+              private_regular_file(before, owner_uid) :
+              expected_mode == 0400 &&
+                immutable_private_regular_file(before, owner_uid)) ||
           before.st_size < 0 ||
           static_cast<std::uint64_t>(before.st_size) > max_size) {
         close_descriptor(descriptor);
@@ -309,7 +418,10 @@ namespace multiseat::worker_ipc {
       } while (trailing_result < 0 && errno == EINTR);
       struct stat after {};
       const auto stable = ::fstat(descriptor, &after) == 0 &&
-                          private_regular_file(after, owner_uid) &&
+                          (expected_mode == 0600 ?
+                             private_regular_file(after, owner_uid) :
+                             expected_mode == 0400 &&
+                               immutable_private_regular_file(after, owner_uid)) &&
                           identity_of(before) == identity_of(after) &&
                           before.st_size == after.st_size;
       close_descriptor(descriptor);
@@ -396,6 +508,53 @@ namespace multiseat::worker_ipc {
       payload.insert(payload.end(), value.begin(), value.end());
     }
 
+    std::optional<proof_t> sha256_digest(std::span<const std::uint8_t> payload) {
+      proof_t digest {};
+      unsigned int length = 0;
+      if (EVP_Digest(
+            payload.data(),
+            payload.size(),
+            digest.data(),
+            &length,
+            EVP_sha256(),
+            nullptr
+          ) != 1 ||
+          length != digest.size()) {
+        return std::nullopt;
+      }
+      return digest;
+    }
+
+    std::string_view compositor_name(compositor_e compositor) {
+      switch (compositor) {
+        case compositor_e::gamescope:
+          return "gamescope";
+        case compositor_e::sway:
+          return "sway";
+        case compositor_e::labwc:
+          return "labwc";
+        case compositor_e::automatic:
+          break;
+      }
+      return {};
+    }
+
+    std::string_view workload_kind_name(workload_kind_e kind) {
+      switch (kind) {
+        case workload_kind_e::gamescope:
+          return "gamescope";
+        case workload_kind_e::steam:
+          return "steam";
+        case workload_kind_e::heroic:
+          return "heroic";
+        case workload_kind_e::lutris:
+          return "lutris";
+        case workload_kind_e::unknown:
+          break;
+      }
+      return {};
+    }
+
     std::optional<proof_t> authority_record_hmac(
       const capability_t &capability,
       std::span<const std::uint8_t> payload
@@ -421,6 +580,7 @@ namespace multiseat::worker_ipc {
     std::optional<std::vector<std::uint8_t>> encode_authority_record(
       const endpoint_identity_t &identity,
       std::string_view runtime_namespace,
+      const proof_t &provider_catalog_digest,
       const capability_t &capability
     ) {
       if (!valid_identity(identity) || !opaque_name_token(runtime_namespace)) {
@@ -430,7 +590,8 @@ namespace multiseat::worker_ipc {
       payload.reserve(
         authority_record_magic.size() + 4 + 8 + 8 +
         identity.controller_epoch.size() + identity.logical_gpu_id.size() +
-        identity.worker_name.size() + runtime_namespace.size() + proof_size
+        identity.worker_name.size() + runtime_namespace.size() +
+        provider_catalog_digest.size() + proof_size
       );
       payload.insert(
         payload.end(),
@@ -443,6 +604,11 @@ namespace multiseat::worker_ipc {
       append_string(payload, identity.logical_gpu_id);
       append_string(payload, identity.worker_name);
       append_string(payload, runtime_namespace);
+      payload.insert(
+        payload.end(),
+        provider_catalog_digest.begin(),
+        provider_catalog_digest.end()
+      );
       auto proof = authority_record_hmac(capability, payload);
       if (!proof) {
         return std::nullopt;
@@ -520,13 +686,15 @@ namespace multiseat::worker_ipc {
     struct authority_record_t {
       endpoint_identity_t identity;
       std::string runtime_namespace;
+      proof_t provider_catalog_digest {};
     };
 
     std::optional<authority_record_t> parse_authority_record(
       std::span<const std::uint8_t> encoded,
       const capability_t &capability
     ) {
-      if (encoded.size() < authority_record_magic.size() + 4 + 8 + 8 + proof_size ||
+      if (encoded.size() <
+            authority_record_magic.size() + 4 + 8 + 8 + proof_size * 2 ||
           encoded.size() > max_authority_record_size) {
         return std::nullopt;
       }
@@ -559,7 +727,17 @@ namespace multiseat::worker_ipc {
           !read_string(transcript, offset, record.identity.logical_gpu_id) ||
           !read_string(transcript, offset, record.identity.worker_name) ||
           !read_string(transcript, offset, record.runtime_namespace) ||
-          offset != transcript.size() ||
+          offset > transcript.size() ||
+          transcript.size() - offset < record.provider_catalog_digest.size()) {
+        return std::nullopt;
+      }
+      std::copy_n(
+        transcript.begin() + static_cast<std::ptrdiff_t>(offset),
+        record.provider_catalog_digest.size(),
+        record.provider_catalog_digest.begin()
+      );
+      offset += record.provider_catalog_digest.size();
+      if (offset != transcript.size() ||
           !valid_identity(record.identity) ||
           !opaque_name_token(record.runtime_namespace)) {
         return std::nullopt;
@@ -690,6 +868,7 @@ namespace multiseat::worker_ipc {
       std::uint64_t expected_inode,
       const endpoint_identity_t &identity,
       std::string_view runtime_namespace,
+      const proof_t &provider_catalog_digest,
       const capability_t &capability
     ) {
       auto file = read_private_file(
@@ -707,7 +886,40 @@ namespace multiseat::worker_ipc {
       const auto record = parse_authority_record(file->payload, capability);
       return record &&
              record->identity == identity &&
-             record->runtime_namespace == runtime_namespace;
+             record->runtime_namespace == runtime_namespace &&
+             CRYPTO_memcmp(
+               record->provider_catalog_digest.data(),
+               provider_catalog_digest.data(),
+               provider_catalog_digest.size()
+             ) == 0;
+    }
+
+    bool provider_catalog_file_matches(
+      int auth_fd,
+      std::uint32_t owner_uid,
+      std::uint64_t expected_device,
+      std::uint64_t expected_inode,
+      const proof_t &expected_digest
+    ) {
+      auto file = read_private_file(
+        auth_fd,
+        authority_provider_catalog_file_name,
+        owner_uid,
+        max_provider_catalog_size,
+        0400
+      );
+      if (!file || file->payload.empty() || file->identity != file_identity_t {
+            expected_device,
+            expected_inode,
+          }) {
+        return false;
+      }
+      const auto digest = sha256_digest(file->payload);
+      return digest && CRYPTO_memcmp(
+                         digest->data(),
+                         expected_digest.data(),
+                         expected_digest.size()
+                       ) == 0;
     }
 
     bool inactive_socket(const std::filesystem::path &path) {
@@ -746,6 +958,7 @@ namespace multiseat::worker_ipc {
       paths.auth = paths.generation / authority_auth_directory_name;
       paths.capability = paths.auth / authority_capability_file_name;
       paths.record = paths.auth / authority_record_file_name;
+      paths.provider_catalog = paths.auth / authority_provider_catalog_file_name;
       paths.control_socket = paths.ipc / authority_control_socket_name;
       paths.media_socket = paths.ipc / authority_media_socket_name;
       return paths;
@@ -758,6 +971,71 @@ namespace multiseat::worker_ipc {
              ) == 1;
     }
   }  // namespace
+
+  std::optional<std::vector<std::uint8_t>> encode_provider_catalog(
+    const provider_catalog_selection_t &selection
+  ) {
+    const auto compositor = compositor_name(selection.compositor);
+    const auto workload_kind = workload_kind_name(selection.workload.kind);
+    if (compositor.empty() || workload_kind.empty() ||
+        !valid_workload_plan(selection.workload)) {
+      return std::nullopt;
+    }
+    try {
+      using json = nlohmann::json;
+      const auto provider = [](
+                              std::string_view stage,
+                              std::string_view executable,
+                              std::string_view selector = {},
+                              std::string_view target_id = {}
+                            ) {
+        json entry {
+          {"stage", stage},
+          {"executable", executable},
+          {"arguments", json::array()},
+        };
+        if (!selector.empty()) {
+          entry["selector"] = selector;
+        }
+        if (!target_id.empty()) {
+          entry["target_id"] = target_id;
+        }
+        return entry;
+      };
+      const auto executable = [](std::string_view name) {
+        return std::string {provider_root} + std::string {name};
+      };
+      json catalog {
+        {"schema", 1},
+        {"providers", json::array({
+          provider("session-bus", executable("session-bus")),
+          provider("audio", executable("audio")),
+          provider("display-capture", executable("display-capture")),
+          provider(
+            "nested-compositor",
+            executable("nested-compositor"),
+            compositor
+          ),
+          provider("virtual-input", executable("virtual-input")),
+          provider("encoder", executable("encoder")),
+          provider(
+            "launcher-process-tree",
+            executable("launcher"),
+            workload_kind,
+            selection.workload.target_id
+          ),
+        })},
+      };
+      auto encoded = catalog.dump();
+      encoded.push_back('\n');
+      if (encoded.size() > max_provider_catalog_size) {
+        return std::nullopt;
+      }
+      return std::vector<std::uint8_t> {encoded.begin(), encoded.end()};
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
 
   authority_handle_t::authority_handle_t(
     endpoint_identity_t identity,
@@ -776,6 +1054,9 @@ namespace multiseat::worker_ipc {
     std::uint64_t capability_inode,
     std::uint64_t record_device,
     std::uint64_t record_inode,
+    std::uint64_t provider_catalog_device,
+    std::uint64_t provider_catalog_inode,
+    const proof_t &provider_catalog_digest,
     int generation_fd,
     int ipc_fd,
     int auth_fd
@@ -796,6 +1077,9 @@ namespace multiseat::worker_ipc {
       capability_inode_(capability_inode),
       record_device_(record_device),
       record_inode_(record_inode),
+      provider_catalog_device_(provider_catalog_device),
+      provider_catalog_inode_(provider_catalog_inode),
+      provider_catalog_digest_(provider_catalog_digest),
       generation_fd_(generation_fd),
       ipc_fd_(ipc_fd),
       auth_fd_(auth_fd),
@@ -823,6 +1107,9 @@ namespace multiseat::worker_ipc {
       capability_inode_(other.capability_inode_),
       record_device_(other.record_device_),
       record_inode_(other.record_inode_),
+      provider_catalog_device_(other.provider_catalog_device_),
+      provider_catalog_inode_(other.provider_catalog_inode_),
+      provider_catalog_digest_(other.provider_catalog_digest_),
       generation_fd_(std::exchange(other.generation_fd_, -1)),
       ipc_fd_(std::exchange(other.ipc_fd_, -1)),
       auth_fd_(std::exchange(other.auth_fd_, -1)),
@@ -851,6 +1138,9 @@ namespace multiseat::worker_ipc {
     capability_inode_ = other.capability_inode_;
     record_device_ = other.record_device_;
     record_inode_ = other.record_inode_;
+    provider_catalog_device_ = other.provider_catalog_device_;
+    provider_catalog_inode_ = other.provider_catalog_inode_;
+    provider_catalog_digest_ = other.provider_catalog_digest_;
     generation_fd_ = std::exchange(other.generation_fd_, -1);
     ipc_fd_ = std::exchange(other.ipc_fd_, -1);
     auth_fd_ = std::exchange(other.auth_fd_, -1);
@@ -926,14 +1216,21 @@ namespace multiseat::worker_ipc {
 
   authority_create_result_t authority_store_t::create(
     const endpoint_identity_t &identity,
-    std::string runtime_namespace
+    std::string runtime_namespace,
+    const provider_catalog_selection_t &provider_selection
   ) {
     if (status_ != authority_status_e::applied) {
       return {.status = status_};
     }
+    const auto encoded_provider_catalog = encode_provider_catalog(provider_selection);
+    const auto provider_catalog_digest = encoded_provider_catalog ?
+                                           sha256_digest(*encoded_provider_catalog) :
+                                           std::nullopt;
     const auto paths = paths_for(root_, runtime_namespace);
     if (!valid_identity(identity) ||
         !opaque_name_token(runtime_namespace) ||
+        !encoded_provider_catalog ||
+        !provider_catalog_digest ||
         !socket_path_fits(paths.control_socket) ||
         !socket_path_fits(paths.media_socket)) {
       return {.status = authority_status_e::invalid_argument};
@@ -969,12 +1266,27 @@ namespace multiseat::worker_ipc {
     auto ipc_fd = -1;
     auto auth_fd = -1;
     bool token_created = false;
+    bool provider_catalog_created = false;
     bool record_created = false;
     const auto rollback = [&]() {
       if (auth_fd >= 0 && record_created) {
         (void) ::unlinkat(
           auth_fd,
           std::string {authority_record_file_name}.c_str(),
+          0
+        );
+      }
+      if (auth_fd >= 0 && provider_catalog_created) {
+        (void) ::unlinkat(
+          auth_fd,
+          std::string {authority_provider_catalog_file_name}.c_str(),
+          0
+        );
+      }
+      if (auth_fd >= 0) {
+        (void) ::unlinkat(
+          auth_fd,
+          std::string {provider_catalog_temporary_file_name}.c_str(),
           0
         );
       }
@@ -1063,9 +1375,25 @@ namespace multiseat::worker_ipc {
       return {.status = authority_status_e::io_error};
     }
 
+    struct stat provider_catalog_metadata {};
+    const auto provider_catalog_written = create_atomic_immutable_file(
+      auth_fd,
+      authority_provider_catalog_file_name,
+      *encoded_provider_catalog,
+      owner_uid_,
+      provider_catalog_metadata
+    );
+    provider_catalog_created = provider_catalog_written;
+    if (!provider_catalog_written) {
+      OPENSSL_cleanse(capability.data(), capability.size());
+      rollback();
+      return {.status = authority_status_e::io_error};
+    }
+
     auto encoded_record = encode_authority_record(
       identity,
       runtime_namespace,
+      *provider_catalog_digest,
       capability
     );
     struct stat record_metadata {};
@@ -1126,6 +1454,75 @@ namespace multiseat::worker_ipc {
     const auto auth_identity = identity_of(auth_metadata);
     const auto token_identity = identity_of(capability_metadata);
     const auto record_identity = identity_of(record_metadata);
+    const auto provider_catalog_identity = identity_of(provider_catalog_metadata);
+    const auto complete = entry_is_directory(
+                            owned_generation_fd,
+                            authority_ipc_directory_name,
+                            owner_uid_,
+                            ipc_identity.device,
+                            ipc_identity.inode
+                          ) &&
+                          entry_is_directory(
+                            owned_generation_fd,
+                            authority_auth_directory_name,
+                            owner_uid_,
+                            auth_identity.device,
+                            auth_identity.inode
+                          ) &&
+                          capability_file_matches(
+                            auth_fd,
+                            owner_uid_,
+                            token_identity.device,
+                            token_identity.inode,
+                            capability
+                          ) &&
+                          provider_catalog_file_matches(
+                            auth_fd,
+                            owner_uid_,
+                            provider_catalog_identity.device,
+                            provider_catalog_identity.inode,
+                            *provider_catalog_digest
+                          ) &&
+                          authority_record_matches(
+                            auth_fd,
+                            owner_uid_,
+                            record_identity.device,
+                            record_identity.inode,
+                            identity,
+                            runtime_namespace,
+                            *provider_catalog_digest,
+                            capability
+                          ) &&
+                          allowed_directory_entries(
+                            owned_generation_fd,
+                            {
+                              std::string {authority_ipc_directory_name},
+                              std::string {authority_auth_directory_name},
+                            },
+                            {}
+                          ) &&
+                          allowed_directory_entries(
+                            auth_fd,
+                            {
+                              std::string {authority_capability_file_name},
+                              std::string {authority_record_file_name},
+                              std::string {authority_provider_catalog_file_name},
+                            },
+                            {}
+                          ) &&
+                          allowed_directory_entries(
+                            ipc_fd,
+                            {},
+                            {
+                              std::string {authority_control_socket_name},
+                              std::string {authority_media_socket_name},
+                            }
+                          );
+    if (!complete) {
+      OPENSSL_cleanse(capability.data(), capability.size());
+      rollback();
+      return {.status = authority_status_e::integrity_violation};
+    }
     authority_handle_t handle {
       identity,
       paths,
@@ -1143,6 +1540,9 @@ namespace multiseat::worker_ipc {
       token_identity.inode,
       record_identity.device,
       record_identity.inode,
+      provider_catalog_identity.device,
+      provider_catalog_identity.inode,
+      *provider_catalog_digest,
       std::exchange(owned_generation_fd, -1),
       std::exchange(ipc_fd, -1),
       std::exchange(auth_fd, -1)
@@ -1257,6 +1657,7 @@ namespace multiseat::worker_ipc {
             {
               std::string {authority_capability_file_name},
               std::string {authority_record_file_name},
+              std::string {authority_provider_catalog_file_name},
             },
             {}
           ) ||
@@ -1279,14 +1680,31 @@ namespace multiseat::worker_ipc {
         owner_uid_,
         max_authority_record_size
       );
+      auto provider_catalog_file = read_private_file(
+        auth_fd,
+        authority_provider_catalog_file_name,
+        owner_uid_,
+        max_provider_catalog_size,
+        0400
+      );
+      const auto provider_catalog_digest = provider_catalog_file &&
+                                               !provider_catalog_file->payload.empty() ?
+                                             sha256_digest(provider_catalog_file->payload) :
+                                             std::nullopt;
       auto record = capability_file && record_file ?
                       parse_authority_record(
                         record_file->payload,
                         capability_file->capability
                       ) :
                       std::nullopt;
-      if (!capability_file || !record_file || !record ||
+      if (!capability_file || !record_file || !provider_catalog_file ||
+          !provider_catalog_digest || !record ||
           record->runtime_namespace != runtime_namespace ||
+          CRYPTO_memcmp(
+            record->provider_catalog_digest.data(),
+            provider_catalog_digest->data(),
+            provider_catalog_digest->size()
+          ) != 0 ||
           std::find(
             observed_identities.begin(),
             observed_identities.end(),
@@ -1308,6 +1726,7 @@ namespace multiseat::worker_ipc {
       const auto auth_identity = identity_of(auth_metadata);
       struct stat token_entry {};
       struct stat record_entry {};
+      struct stat provider_catalog_entry {};
       const auto stable = entry_is_directory(
                             root_fd_,
                             runtime_namespace,
@@ -1344,7 +1763,19 @@ namespace multiseat::worker_ipc {
                             AT_SYMLINK_NOFOLLOW
                           ) == 0 &&
                           private_regular_file(record_entry, owner_uid_) &&
-                          identity_of(record_entry) == record_file->identity;
+                          identity_of(record_entry) == record_file->identity &&
+                          ::fstatat(
+                            auth_fd,
+                            std::string {authority_provider_catalog_file_name}.c_str(),
+                            &provider_catalog_entry,
+                            AT_SYMLINK_NOFOLLOW
+                          ) == 0 &&
+                          immutable_private_regular_file(
+                            provider_catalog_entry,
+                            owner_uid_
+                          ) &&
+                          identity_of(provider_catalog_entry) ==
+                            provider_catalog_file->identity;
       if (!stable) {
         OPENSSL_cleanse(
           capability_file->capability.data(),
@@ -1415,6 +1846,9 @@ namespace multiseat::worker_ipc {
         capability_file->identity.inode,
         record_file->identity.device,
         record_file->identity.inode,
+        provider_catalog_file->identity.device,
+        provider_catalog_file->identity.inode,
+        *provider_catalog_digest,
         std::exchange(generation_fd, -1),
         std::exchange(ipc_fd, -1),
         std::exchange(auth_fd, -1)
@@ -1521,8 +1955,11 @@ namespace multiseat::worker_ipc {
 
     struct stat capability_metadata {};
     struct stat record_metadata {};
+    struct stat provider_catalog_metadata {};
     const auto capability_name = std::string {authority_capability_file_name};
     const auto record_name = std::string {authority_record_file_name};
+    const auto provider_catalog_name =
+      std::string {authority_provider_catalog_file_name};
     if (::fstatat(
           authority.auth_fd_,
           capability_name.c_str(),
@@ -1548,6 +1985,18 @@ namespace multiseat::worker_ipc {
           authority.record_device_,
           authority.record_inode_
         ) ||
+        ::fstatat(
+          authority.auth_fd_,
+          provider_catalog_name.c_str(),
+          &provider_catalog_metadata,
+          AT_SYMLINK_NOFOLLOW
+        ) != 0 ||
+        !immutable_private_regular_file(provider_catalog_metadata, owner_uid_) ||
+        !exact_identity(
+          provider_catalog_metadata,
+          authority.provider_catalog_device_,
+          authority.provider_catalog_inode_
+        ) ||
         !capability_file_matches(
           authority.auth_fd_,
           owner_uid_,
@@ -1562,7 +2011,15 @@ namespace multiseat::worker_ipc {
           authority.record_inode_,
           authority.identity_,
           generation_name,
+          authority.provider_catalog_digest_,
           authority.capability_
+        ) ||
+        !provider_catalog_file_matches(
+          authority.auth_fd_,
+          owner_uid_,
+          authority.provider_catalog_device_,
+          authority.provider_catalog_inode_,
+          authority.provider_catalog_digest_
         ) ||
         !allowed_directory_entries(
           authority.generation_fd_,
@@ -1577,6 +2034,7 @@ namespace multiseat::worker_ipc {
           {
             std::string {authority_capability_file_name},
             std::string {authority_record_file_name},
+            std::string {authority_provider_catalog_file_name},
           },
           {}
         ) ||
@@ -1668,8 +2126,11 @@ namespace multiseat::worker_ipc {
 
     const auto capability_name = std::string {authority_capability_file_name};
     const auto record_name = std::string {authority_record_file_name};
+    const auto provider_catalog_name =
+      std::string {authority_provider_catalog_file_name};
     struct stat capability_metadata {};
     struct stat record_metadata {};
+    struct stat provider_catalog_metadata {};
     if (::fstatat(
           authority.auth_fd_,
           capability_name.c_str(),
@@ -1694,6 +2155,18 @@ namespace multiseat::worker_ipc {
           authority.record_device_,
           authority.record_inode_
         ) ||
+        ::fstatat(
+          authority.auth_fd_,
+          provider_catalog_name.c_str(),
+          &provider_catalog_metadata,
+          AT_SYMLINK_NOFOLLOW
+        ) != 0 ||
+        !immutable_private_regular_file(provider_catalog_metadata, owner_uid_) ||
+        !exact_identity(
+          provider_catalog_metadata,
+          authority.provider_catalog_device_,
+          authority.provider_catalog_inode_
+        ) ||
         !capability_file_matches(
           authority.auth_fd_,
           owner_uid_,
@@ -1708,7 +2181,15 @@ namespace multiseat::worker_ipc {
           authority.record_inode_,
           authority.identity_,
           authority.paths_.generation.filename().native(),
+          authority.provider_catalog_digest_,
           authority.capability_
+        ) ||
+        !provider_catalog_file_matches(
+          authority.auth_fd_,
+          owner_uid_,
+          authority.provider_catalog_device_,
+          authority.provider_catalog_inode_,
+          authority.provider_catalog_digest_
         ) ||
         !entry_is_directory(
           authority.generation_fd_,
@@ -1727,6 +2208,7 @@ namespace multiseat::worker_ipc {
       return authority_status_e::integrity_violation;
     }
     if (::unlinkat(authority.auth_fd_, record_name.c_str(), 0) != 0 ||
+        ::unlinkat(authority.auth_fd_, provider_catalog_name.c_str(), 0) != 0 ||
         ::unlinkat(authority.auth_fd_, capability_name.c_str(), 0) != 0 ||
         ::fsync(authority.auth_fd_) != 0) {
       return authority_status_e::io_error;

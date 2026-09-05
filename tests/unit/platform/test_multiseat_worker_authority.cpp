@@ -65,6 +65,18 @@ namespace {
     };
   }
 
+  provider_catalog_selection_t provider_selection_for(
+    std::string target_id = "test-workload"
+  ) {
+    return {
+      .compositor = multiseat::compositor_e::gamescope,
+      .workload = {
+        .kind = multiseat::workload_kind_e::heroic,
+        .target_id = std::move(target_id),
+      },
+    };
+  }
+
   capability_factory_t capability_filled_with(std::uint8_t value) {
     return [value](capability_t &capability) {
       capability.fill(value);
@@ -81,6 +93,14 @@ namespace {
     struct stat metadata {};
     EXPECT_EQ(::lstat(path.c_str(), &metadata), 0);
     return metadata.st_mode & 07777;
+  }
+
+  std::string read_file(const std::filesystem::path &path) {
+    std::ifstream stream {path, std::ios::binary};
+    return {
+      std::istreambuf_iterator<char> {stream},
+      std::istreambuf_iterator<char> {},
+    };
   }
 
   int bind_worker_socket(const std::filesystem::path &path, bool listen) {
@@ -111,6 +131,29 @@ namespace {
   }
 }
 
+TEST(MultiseatWorkerAuthority, ProviderCatalogMatchesTheDispatcherGoldenSchema) {
+  const auto encoded = encode_provider_catalog(provider_selection_for());
+  ASSERT_TRUE(encoded.has_value());
+  const auto fixture = read_file(
+    std::filesystem::path {POLARIS_SOURCE_DIR} /
+    "multiseat_worker/internal/seatruntime/testdata/controller-catalog-v1.json"
+  );
+  ASSERT_FALSE(fixture.empty());
+  EXPECT_EQ(
+    std::string(encoded->begin(), encoded->end()),
+    fixture
+  );
+
+  auto automatic = provider_selection_for();
+  automatic.compositor = multiseat::compositor_e::automatic;
+  EXPECT_FALSE(encode_provider_catalog(automatic).has_value());
+  auto unknown_workload = provider_selection_for();
+  unknown_workload.workload.kind = multiseat::workload_kind_e::unknown;
+  EXPECT_FALSE(encode_provider_catalog(unknown_workload).has_value());
+  auto hostile_target = provider_selection_for("../../bin/sh");
+  EXPECT_FALSE(encode_provider_catalog(hostile_target).has_value());
+}
+
 TEST(MultiseatWorkerAuthority, RootMustBePrivateAbsoluteAndSymlinkFree) {
   authority_store_t relative {"relative/root"};
   EXPECT_EQ(relative.status(), authority_status_e::invalid_argument);
@@ -132,7 +175,11 @@ TEST(MultiseatWorkerAuthority, CreatesExactPrivateHierarchyAndCanonicalCapabilit
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x2a)};
   ASSERT_EQ(store.status(), authority_status_e::applied);
-  auto result = store.create(identity_for(), "polaris-runtime-controller-a1b2-7");
+  auto result = store.create(
+    identity_for(),
+    "polaris-runtime-controller-a1b2-7",
+    provider_selection_for()
+  );
   auto authority = take_authority(result);
 
   EXPECT_TRUE(authority.active());
@@ -142,6 +189,7 @@ TEST(MultiseatWorkerAuthority, CreatesExactPrivateHierarchyAndCanonicalCapabilit
   EXPECT_EQ(permissions_of(authority.paths().auth), 0700);
   EXPECT_EQ(permissions_of(authority.paths().capability), 0600);
   EXPECT_EQ(permissions_of(authority.paths().record), 0600);
+  EXPECT_EQ(permissions_of(authority.paths().provider_catalog), 0400);
   EXPECT_FALSE(std::filesystem::exists(authority.paths().control_socket));
   EXPECT_FALSE(std::filesystem::exists(authority.paths().media_socket));
 
@@ -156,6 +204,13 @@ TEST(MultiseatWorkerAuthority, CreatesExactPrivateHierarchyAndCanonicalCapabilit
   }
   expected += '\n';
   EXPECT_EQ(encoded, expected);
+  EXPECT_EQ(
+    read_file(authority.paths().provider_catalog),
+    read_file(
+      std::filesystem::path {POLARIS_SOURCE_DIR} /
+      "multiseat_worker/internal/seatruntime/testdata/controller-catalog-v1.json"
+    )
+  );
   EXPECT_EQ(store.validate(authority), authority_status_e::applied);
 
   const auto generation_path = authority.paths().generation;
@@ -167,9 +222,9 @@ TEST(MultiseatWorkerAuthority, CreatesExactPrivateHierarchyAndCanonicalCapabilit
 TEST(MultiseatWorkerAuthority, DuplicateGenerationCannotReplaceLiveAuthority) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x11)};
-  auto first_result = store.create(identity_for(), "generation-7");
+  auto first_result = store.create(identity_for(), "generation-7", provider_selection_for());
   auto first = take_authority(first_result);
-  auto duplicate = store.create(identity_for(), "generation-7");
+  auto duplicate = store.create(identity_for(), "generation-7", provider_selection_for());
 
   EXPECT_EQ(duplicate.status, authority_status_e::already_exists);
   EXPECT_FALSE(duplicate.authority.has_value());
@@ -183,7 +238,11 @@ TEST(MultiseatWorkerAuthority, RandomFailureAndAllZeroCapabilityRollBackComplete
     root.path(),
     [](capability_t &) { return false; },
   };
-  auto failure = failed.create(identity_for(), "generation-failed");
+  auto failure = failed.create(
+    identity_for(),
+    "generation-failed",
+    provider_selection_for()
+  );
   EXPECT_EQ(failure.status, authority_status_e::random_failed);
   EXPECT_FALSE(std::filesystem::exists(root.path() / "generation-failed"));
 
@@ -194,7 +253,7 @@ TEST(MultiseatWorkerAuthority, RandomFailureAndAllZeroCapabilityRollBackComplete
       return true;
     },
   };
-  auto zero_result = zero.create(identity_for(), "generation-zero");
+  auto zero_result = zero.create(identity_for(), "generation-zero", provider_selection_for());
   EXPECT_EQ(zero_result.status, authority_status_e::random_failed);
   EXPECT_FALSE(std::filesystem::exists(root.path() / "generation-zero"));
 }
@@ -205,17 +264,27 @@ TEST(MultiseatWorkerAuthority, InvalidIdentityNamespaceAndLongSocketPathCreateNo
   auto invalid_identity = identity_for();
   invalid_identity.generation = 0;
   EXPECT_EQ(
-    store.create(invalid_identity, "generation-invalid").status,
+    store.create(invalid_identity, "generation-invalid", provider_selection_for()).status,
     authority_status_e::invalid_argument
   );
   EXPECT_EQ(
-    store.create(identity_for(), "../generation").status,
+    store.create(identity_for(), "../generation", provider_selection_for()).status,
     authority_status_e::invalid_argument
   );
 
   const std::string long_namespace(100, 'a');
   EXPECT_EQ(
-    store.create(identity_for(), long_namespace).status,
+    store.create(identity_for(), long_namespace, provider_selection_for()).status,
+    authority_status_e::invalid_argument
+  );
+  auto invalid_provider_selection = provider_selection_for();
+  invalid_provider_selection.compositor = multiseat::compositor_e::automatic;
+  EXPECT_EQ(
+    store.create(
+      identity_for(),
+      "generation-invalid-catalog",
+      invalid_provider_selection
+    ).status,
     authority_status_e::invalid_argument
   );
   EXPECT_TRUE(std::filesystem::is_empty(root.path()));
@@ -224,7 +293,11 @@ TEST(MultiseatWorkerAuthority, InvalidIdentityNamespaceAndLongSocketPathCreateNo
 TEST(MultiseatWorkerAuthority, TokenMutationAndUnexpectedFilesFailClosed) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x44)};
-  auto token_result = store.create(identity_for(), "generation-token");
+  auto token_result = store.create(
+    identity_for(),
+    "generation-token",
+    provider_selection_for()
+  );
   auto token_authority = take_authority(token_result);
   {
     std::fstream token {
@@ -238,7 +311,11 @@ TEST(MultiseatWorkerAuthority, TokenMutationAndUnexpectedFilesFailClosed) {
   EXPECT_EQ(store.remove(token_authority), authority_status_e::integrity_violation);
   EXPECT_TRUE(std::filesystem::exists(token_authority.paths().generation));
 
-  auto other_result = store.create(identity_for(8), "generation-extra");
+  auto other_result = store.create(
+    identity_for(8),
+    "generation-extra",
+    provider_selection_for()
+  );
   auto other = take_authority(other_result);
   {
     std::ofstream unexpected {other.paths().generation / "unexpected"};
@@ -249,10 +326,85 @@ TEST(MultiseatWorkerAuthority, TokenMutationAndUnexpectedFilesFailClosed) {
   EXPECT_TRUE(std::filesystem::exists(other.paths().generation / "unexpected"));
 }
 
+TEST(MultiseatWorkerAuthority, ProviderCatalogModeBytesAndInodeAreFenced) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), capability_filled_with(0x45)};
+  auto mutated_result = store.create(
+    identity_for(),
+    "generation-catalog-mutated",
+    provider_selection_for()
+  );
+  auto mutated = take_authority(mutated_result);
+  EXPECT_FALSE(std::filesystem::exists(
+    mutated.paths().auth / ".runtime-providers.json.tmp"
+  ));
+  ASSERT_EQ(::chmod(mutated.paths().provider_catalog.c_str(), 0600), 0);
+  EXPECT_EQ(store.validate(mutated), authority_status_e::integrity_violation);
+  {
+    std::fstream catalog {
+      mutated.paths().provider_catalog,
+      std::ios::in | std::ios::out | std::ios::binary,
+    };
+    ASSERT_TRUE(catalog.good());
+    catalog.put('X');
+  }
+  ASSERT_EQ(::chmod(mutated.paths().provider_catalog.c_str(), 0400), 0);
+  EXPECT_EQ(store.validate(mutated), authority_status_e::integrity_violation);
+  EXPECT_EQ(store.remove(mutated), authority_status_e::integrity_violation);
+
+  auto replaced_result = store.create(
+    identity_for(8),
+    "generation-catalog-replaced",
+    provider_selection_for()
+  );
+  auto replaced = take_authority(replaced_result);
+  const auto exact_bytes = read_file(replaced.paths().provider_catalog);
+  const auto displaced = replaced.paths().auth / "catalog-displaced";
+  ASSERT_EQ(
+    ::rename(replaced.paths().provider_catalog.c_str(), displaced.c_str()),
+    0
+  );
+  {
+    std::ofstream replacement {replaced.paths().provider_catalog, std::ios::binary};
+    replacement << exact_bytes;
+  }
+  ASSERT_EQ(::chmod(replaced.paths().provider_catalog.c_str(), 0400), 0);
+  EXPECT_EQ(store.validate(replaced), authority_status_e::integrity_violation);
+  EXPECT_EQ(store.remove(replaced), authority_status_e::integrity_violation);
+  EXPECT_TRUE(std::filesystem::exists(displaced));
+}
+
+TEST(MultiseatWorkerAuthority, ProviderCatalogSymlinkFailsClosed) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), capability_filled_with(0x46)};
+  auto result = store.create(
+    identity_for(),
+    "generation-catalog-symlink",
+    provider_selection_for()
+  );
+  auto authority = take_authority(result);
+  const auto displaced = authority.paths().auth / "catalog-displaced";
+  ASSERT_EQ(
+    ::rename(authority.paths().provider_catalog.c_str(), displaced.c_str()),
+    0
+  );
+  ASSERT_EQ(
+    ::symlink(displaced.c_str(), authority.paths().provider_catalog.c_str()),
+    0
+  );
+
+  EXPECT_EQ(store.validate(authority), authority_status_e::integrity_violation);
+  EXPECT_EQ(store.remove(authority), authority_status_e::integrity_violation);
+  EXPECT_TRUE(std::filesystem::is_symlink(
+    std::filesystem::symlink_status(authority.paths().provider_catalog)
+  ));
+  EXPECT_TRUE(std::filesystem::exists(displaced));
+}
+
 TEST(MultiseatWorkerAuthority, RenamedGenerationCannotAuthorizeReplacementPath) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x55)};
-  auto result = store.create(identity_for(), "generation-reused");
+  auto result = store.create(identity_for(), "generation-reused", provider_selection_for());
   auto authority = take_authority(result);
   const auto original = authority.paths().generation;
   const auto displaced = root.path() / "generation-displaced";
@@ -269,7 +421,11 @@ TEST(MultiseatWorkerAuthority, RenamedGenerationCannotAuthorizeReplacementPath) 
 TEST(MultiseatWorkerAuthority, ReplacedRootCannotRedirectCreationOrValidation) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x56)};
-  auto result = store.create(identity_for(), "generation-before-root-swap");
+  auto result = store.create(
+    identity_for(),
+    "generation-before-root-swap",
+    provider_selection_for()
+  );
   auto authority = take_authority(result);
   const auto displaced = root.path().string() + "-displaced";
   ASSERT_EQ(::rename(root.path().c_str(), displaced.c_str()), 0);
@@ -278,7 +434,7 @@ TEST(MultiseatWorkerAuthority, ReplacedRootCannotRedirectCreationOrValidation) {
 
   EXPECT_EQ(store.validate(authority), authority_status_e::integrity_violation);
   EXPECT_EQ(
-    store.create(identity_for(8), "generation-after-root-swap").status,
+    store.create(identity_for(8), "generation-after-root-swap", provider_selection_for()).status,
     authority_status_e::unsafe_root
   );
   EXPECT_FALSE(std::filesystem::exists(
@@ -292,7 +448,11 @@ TEST(MultiseatWorkerAuthority, ReplacedRootCannotRedirectCreationOrValidation) {
 TEST(MultiseatWorkerAuthority, RemovesOnlyInactiveAllowlistedSocketNodes) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x66)};
-  auto result = store.create(identity_for(), "generation-stale-socket");
+  auto result = store.create(
+    identity_for(),
+    "generation-stale-socket",
+    provider_selection_for()
+  );
   auto authority = take_authority(result);
   const auto socket_path = authority.paths().control_socket;
   const auto descriptor = bind_worker_socket(socket_path, false);
@@ -307,7 +467,11 @@ TEST(MultiseatWorkerAuthority, RemovesOnlyInactiveAllowlistedSocketNodes) {
 TEST(MultiseatWorkerAuthority, RefusesToRemoveAnActivelyListeningWorkerSocket) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x77)};
-  auto result = store.create(identity_for(), "generation-active-socket");
+  auto result = store.create(
+    identity_for(),
+    "generation-active-socket",
+    provider_selection_for()
+  );
   auto authority = take_authority(result);
   const auto descriptor = bind_worker_socket(authority.paths().control_socket, true);
   ASSERT_GE(descriptor, 0);
@@ -322,7 +486,11 @@ TEST(MultiseatWorkerAuthority, RefusesToRemoveAnActivelyListeningWorkerSocket) {
 TEST(MultiseatWorkerAuthority, LivenessValidationPrecedesEverySocketRemoval) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x78)};
-  auto result = store.create(identity_for(), "generation-mixed-sockets");
+  auto result = store.create(
+    identity_for(),
+    "generation-mixed-sockets",
+    provider_selection_for()
+  );
   auto authority = take_authority(result);
   const auto stale = bind_worker_socket(authority.paths().control_socket, false);
   const auto active = bind_worker_socket(authority.paths().media_socket, true);
@@ -339,7 +507,7 @@ TEST(MultiseatWorkerAuthority, LivenessValidationPrecedesEverySocketRemoval) {
 TEST(MultiseatWorkerAuthority, MoveInvalidatesTheOldHandleAndPreservesCleanupFence) {
   temporary_root_t root;
   authority_store_t store {root.path(), capability_filled_with(0x7f)};
-  auto result = store.create(identity_for(), "generation-moved");
+  auto result = store.create(identity_for(), "generation-moved", provider_selection_for());
   auto authority = take_authority(result);
   authority_handle_t moved {std::move(authority)};
 
@@ -358,9 +526,17 @@ TEST(MultiseatWorkerAuthority, SignedRecoveryReturnsOnlyInventoryAbsentAuthoriti
   std::filesystem::path second_path;
   {
     authority_store_t original {root.path(), capability_filled_with(0x81)};
-    auto first_result = original.create(first_identity, "recovery-first");
+    auto first_result = original.create(
+      first_identity,
+      "recovery-first",
+      provider_selection_for("first-workload")
+    );
     auto first = take_authority(first_result);
-    auto second_result = original.create(second_identity, "recovery-second");
+    auto second_result = original.create(
+      second_identity,
+      "recovery-second",
+      provider_selection_for("second-workload")
+    );
     auto second = take_authority(second_result);
     first_path = first.paths().generation;
     second_path = second.paths().generation;
@@ -403,7 +579,7 @@ TEST(MultiseatWorkerAuthority, RecoveryRejectsTamperedRecordsAndDuplicateInvento
   std::filesystem::path record;
   {
     authority_store_t original {root.path(), capability_filled_with(0x91)};
-    auto result = original.create(identity, "recovery-tampered");
+    auto result = original.create(identity, "recovery-tampered", provider_selection_for());
     auto authority = take_authority(result);
     generation = authority.paths().generation;
     record = authority.paths().record;
@@ -429,13 +605,49 @@ TEST(MultiseatWorkerAuthority, RecoveryRejectsTamperedRecordsAndDuplicateInvento
   EXPECT_TRUE(std::filesystem::exists(generation));
 }
 
+TEST(MultiseatWorkerAuthority, RecoveryRejectsCatalogBytesNotBoundToTheSignedRecord) {
+  temporary_root_t root;
+  std::filesystem::path generation;
+  std::filesystem::path catalog;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0x93)};
+    auto result = original.create(
+      identity_for(52),
+      "recovery-catalog-tampered",
+      provider_selection_for()
+    );
+    auto authority = take_authority(result);
+    generation = authority.paths().generation;
+    catalog = authority.paths().provider_catalog;
+  }
+  ASSERT_EQ(::chmod(catalog.c_str(), 0600), 0);
+  {
+    std::fstream stream {catalog, std::ios::in | std::ios::out | std::ios::binary};
+    ASSERT_TRUE(stream.good());
+    stream.put('X');
+  }
+  ASSERT_EQ(::chmod(catalog.c_str(), 0400), 0);
+
+  authority_store_t replacement {root.path(), capability_filled_with(0x94)};
+  const auto recovered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  EXPECT_EQ(recovered.status, authority_status_e::integrity_violation);
+  EXPECT_TRUE(recovered.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(generation));
+}
+
 TEST(MultiseatWorkerAuthority, RecoveryNeverConvertsALiveSocketIntoCleanupAuthority) {
   temporary_root_t root;
   std::filesystem::path generation;
   std::filesystem::path socket_path;
   {
     authority_store_t original {root.path(), capability_filled_with(0xa1)};
-    auto result = original.create(identity_for(61), "recovery-live-socket");
+    auto result = original.create(
+      identity_for(61),
+      "recovery-live-socket",
+      provider_selection_for()
+    );
     auto authority = take_authority(result);
     generation = authority.paths().generation;
     socket_path = authority.paths().control_socket;
@@ -462,7 +674,11 @@ TEST(MultiseatWorkerAuthority, RecoveryRejectsUnexpectedRootEntriesWithoutPartia
   std::filesystem::path generation;
   {
     authority_store_t original {root.path(), capability_filled_with(0xb1)};
-    auto result = original.create(identity_for(71), "recovery-valid");
+    auto result = original.create(
+      identity_for(71),
+      "recovery-valid",
+      provider_selection_for()
+    );
     auto authority = take_authority(result);
     generation = authority.paths().generation;
   }
@@ -486,7 +702,11 @@ TEST(MultiseatWorkerAuthority, RecoveryRejectsMoreThanTheBoundedAuthorityLimit) 
   std::filesystem::path generation;
   {
     authority_store_t original {root.path(), capability_filled_with(0xc1)};
-    auto result = original.create(identity_for(81), "recovery-within-bound");
+    auto result = original.create(
+      identity_for(81),
+      "recovery-within-bound",
+      provider_selection_for()
+    );
     auto authority = take_authority(result);
     generation = authority.paths().generation;
   }
@@ -514,9 +734,17 @@ TEST(MultiseatWorkerAuthority, SignedRecordsCannotMoveBetweenRuntimeNamespaces) 
   std::filesystem::path second_record;
   {
     authority_store_t original {root.path(), capability_filled_with(0xd1)};
-    auto first_result = original.create(identity_for(91), "recovery-swap-first");
+    auto first_result = original.create(
+      identity_for(91),
+      "recovery-swap-first",
+      provider_selection_for("first-workload")
+    );
     auto first = take_authority(first_result);
-    auto second_result = original.create(identity_for(92), "recovery-swap-second");
+    auto second_result = original.create(
+      identity_for(92),
+      "recovery-swap-second",
+      provider_selection_for("second-workload")
+    );
     auto second = take_authority(second_result);
     first_generation = first.paths().generation;
     second_generation = second.paths().generation;
@@ -529,6 +757,46 @@ TEST(MultiseatWorkerAuthority, SignedRecordsCannotMoveBetweenRuntimeNamespaces) 
   ASSERT_EQ(::rename(displaced.c_str(), second_record.c_str()), 0);
 
   authority_store_t replacement {root.path(), capability_filled_with(0xd2)};
+  const auto recovered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  EXPECT_EQ(recovered.status, authority_status_e::integrity_violation);
+  EXPECT_TRUE(recovered.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(first_generation));
+  EXPECT_TRUE(std::filesystem::exists(second_generation));
+}
+
+TEST(MultiseatWorkerAuthority, SignedRecordsBindEachExactProviderCatalog) {
+  temporary_root_t root;
+  std::filesystem::path first_generation;
+  std::filesystem::path second_generation;
+  std::filesystem::path first_catalog;
+  std::filesystem::path second_catalog;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0xd3)};
+    auto first_result = original.create(
+      identity_for(93),
+      "catalog-swap-first",
+      provider_selection_for("first-workload")
+    );
+    auto first = take_authority(first_result);
+    auto second_result = original.create(
+      identity_for(94),
+      "catalog-swap-second",
+      provider_selection_for("second-workload")
+    );
+    auto second = take_authority(second_result);
+    first_generation = first.paths().generation;
+    second_generation = second.paths().generation;
+    first_catalog = first.paths().provider_catalog;
+    second_catalog = second.paths().provider_catalog;
+  }
+  const auto displaced = root.path() / "catalog-swap-temporary";
+  ASSERT_EQ(::rename(first_catalog.c_str(), displaced.c_str()), 0);
+  ASSERT_EQ(::rename(second_catalog.c_str(), first_catalog.c_str()), 0);
+  ASSERT_EQ(::rename(displaced.c_str(), second_catalog.c_str()), 0);
+
+  authority_store_t replacement {root.path(), capability_filled_with(0xd4)};
   const auto recovered = replacement.recover_inactive(
     std::span<const endpoint_identity_t> {}
   );

@@ -339,9 +339,18 @@ the worker's effective UID. That fixed path is part of the existing
 per-generation read-only auth mount, not the mutable launcher profile. Strict
 bounded JSON rejects unknown or duplicate fields and ambiguous stage
 selections. Nested-compositor entries bind the concrete compositor; launcher
-entries bind both the runtime kind and exact opaque workload target. The
-controller-side atomic creation and auth-directory allowlist change remain
-unimplemented while the dispatcher is inert.
+entries bind both the runtime kind and exact opaque workload target.
+
+The controller authority transaction now emits the matching catalog from only
+those typed selectors. Seven fixed provider locations and empty literal
+provider argv are compiled policy, not configuration input. A fully written and
+synced temporary inode is linked under the final mode-0400 catalog name, its
+SHA-256 is authenticated by the generation's signed recovery record, and the
+live handle pins its inode and digest. Validation, restart recovery, and cleanup
+all require the exact catalog alongside the token and record; wrong mode,
+changed bytes, replacement inode, swapped catalog, symlink, or an unexpected
+auth entry fails closed. The existing read-only auth bind mount is its only
+container exposure.
 
 The selected executable is subject to the same no-follow, root-owner,
 non-group/world-writable checks. The helper executes that already-open file in
@@ -356,12 +365,14 @@ descendant cleanup, literal hostile catalog arguments, and two concurrent
 helper groups.
 
 The dispatcher is built and copied into the image, but it remains inert: the
-production command still injects no adapters or data plane, and no provider
-catalog or stage-provider binaries are installed. The referenced GoW launch
-scripts couple compositor and application startup and do not expose the
-uniform private D-Bus, PipeWire, virtual-input, capture, and encoder readiness
-contract required here. Those real providers must be implemented and tested
-before Podman health can mean more than supervisor liveness.
+production command still injects no adapters or data plane, and no
+stage-provider binaries are installed. The controller/coordinator code that
+creates the per-generation catalog also remains outside the singleton runtime.
+The referenced GoW launch scripts couple compositor and application startup
+and do not expose the uniform private D-Bus, PipeWire, virtual-input, capture,
+and encoder readiness contract required here. Those real providers must be
+implemented and tested before Podman health can mean more than supervisor
+liveness.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless
@@ -388,9 +399,10 @@ exclusively creates one mode-0700, generation-scoped authority directory
 beneath that root, plus private `ipc` and `auth` children. `ipc` is
 bind-mounted read-write at `/run/polaris-ipc`; `auth` is bind-mounted
 read-only at `/run/polaris-auth`. The latter contains a controller-generated
-mode-0600, 32-byte capability encoded as canonical lowercase hex and a
-capability-authenticated binary identity record, while the IPC mount contains
-two mode-0600 Unix sockets:
+mode-0600, 32-byte capability encoded as canonical lowercase hex, a mode-0400
+provider catalog, and a capability-authenticated binary identity record. The
+record binds the catalog digest as well as the generation identity. The IPC
+mount contains two mode-0600 Unix sockets:
 
 - `control.sock` is reserved for lifecycle, input, feedback, status, and
   bounded error messages;
@@ -547,6 +559,9 @@ The test_multiseat_runtime target covers:
 - capability-authenticated authority records, bounded no-follow restart scans,
   active-orphan retention, inventory-proven inactive recovery, and refusal of
   malformed, duplicate, unexpected, replaced, or live-socket state;
+- atomic mode-0400 provider catalogs derived from typed compositor/workload
+  selection, with a Go/C++ schema golden, record-bound SHA-256, inode-fenced
+  validation and cleanup, and tamper/swap/replacement recovery refusal;
 - coordinator ownership from pre-launch authority creation through endpoint
   authentication, heartbeat, authenticated shutdown, backend absence, and
   exact cleanup, including two independently managed seats;

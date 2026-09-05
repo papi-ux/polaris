@@ -75,12 +75,26 @@ namespace {
     };
   }
 
+  provider_catalog_selection_t test_provider_selection() {
+    return {
+      .compositor = multiseat::compositor_e::gamescope,
+      .workload = {
+        .kind = multiseat::workload_kind_e::steam,
+        .target_id = "client-test-workload",
+      },
+    };
+  }
+
   authority_handle_t create_authority(
     authority_store_t &store,
     const endpoint_identity_t &identity,
     std::string runtime_namespace
   ) {
-    auto result = store.create(identity, std::move(runtime_namespace));
+    auto result = store.create(
+      identity,
+      std::move(runtime_namespace),
+      test_provider_selection()
+    );
     if (!result.created()) {
       throw std::runtime_error {"test authority could not be created"};
     }

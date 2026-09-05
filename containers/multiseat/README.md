@@ -36,12 +36,13 @@ and escalates to KILL at the component deadline.
 
 That adapter set is a concrete supervision boundary, not the missing media
 implementation. The image now carries `polaris-seat-runtime`, but the
-production `run` command injects no adapters and the image installs neither a
-provider catalog nor stage providers. It therefore does not start Gamescope,
-Steam, Heroic, Lutris, audio, capture, encoding, or virtual input. Treating its
-healthy supervisor as a streaming-capable worker would still be a false gate.
-Tests exercise both the synthetic process boundary and the real dispatcher;
-they never invoke a launcher or device.
+production `run` command injects no adapters and the image installs no stage
+providers. The unwired controller can create a generation-scoped catalog, but
+without those fixed provider executables it does not start Gamescope, Steam,
+Heroic, Lutris, audio, capture, encoding, or virtual input. Treating its healthy
+supervisor as a streaming-capable worker would still be a false gate. Tests
+exercise catalog creation, the synthetic process boundary, and the real
+dispatcher; they never invoke a launcher or device.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or
@@ -119,12 +120,16 @@ The container retains `--network=none`. Beneath a pre-created mode-0700
 runtime root, the controller exclusively creates one inode-fenced,
 mode-0700 authority directory per exact worker generation. Its `ipc` child is
 mounted read-write for the two Unix sockets, while its `auth` child is mounted
-read-only and contains the controller-generated mode-0600 capability file plus
-a mode-0600, capability-authenticated identity record used only for bounded
-controller-crash recovery. The record binds the exact seat identity and
-runtime namespace; it does not grant authority without the capability. Neither
-file is placed in argv, environment, labels, or container inspection metadata,
-and the worker cannot rewrite them through either mount.
+read-only and contains the controller-generated mode-0600 capability file,
+mode-0400 provider catalog, and mode-0600 capability-authenticated recovery
+record. The controller derives the catalog from the concrete compositor and
+exact admitted workload pair; executable locations and empty provider argv are
+compiled policy rather than configuration text. The catalog appears under its
+final name only after its complete bytes and restrictive mode are synced. Its
+SHA-256 is part of the signed record alongside the exact seat identity and
+runtime namespace, and the handle pins all three file inodes. None of these
+files is placed in argv, environment, labels, or container inspection metadata,
+and the worker cannot rewrite them through the read-only mount.
 
 The local coordinator owns the live authority handle and authenticated client
 until a complete backend inventory proves that exact worker absent. On restart

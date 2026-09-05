@@ -30,6 +30,16 @@ namespace {
   using namespace std::chrono_literals;
   using namespace multiseat::worker_ipc;
 
+  provider_catalog_selection_t interop_provider_selection() {
+    return {
+      .compositor = multiseat::compositor_e::gamescope,
+      .workload = {
+        .kind = multiseat::workload_kind_e::steam,
+        .target_id = "native-interop-workload",
+      },
+    };
+  }
+
   class temporary_tree_t {
   public:
     temporary_tree_t() {
@@ -276,7 +286,11 @@ namespace {
 TEST(MultiseatWorkerInterop, NativeClientAuthenticatesRealGoWorkerOnBothChannels) {
   temporary_tree_t tree;
   authority_store_t store {tree.authority(), interop_capability()};
-  auto created = store.create(interop_identity(), "native-interop-71");
+  auto created = store.create(
+    interop_identity(),
+    "native-interop-71",
+    interop_provider_selection()
+  );
   ASSERT_TRUE(created.created());
   auto authority = std::move(*created.authority);
   const auto log = tree.root() / "go-worker.log";

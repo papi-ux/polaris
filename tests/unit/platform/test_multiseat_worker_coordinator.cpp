@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <future>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -78,6 +79,16 @@ namespace {
       .render_node = "/dev/dri/renderD128",
       .max_seats = 2,
       .max_encoder_sessions = 2,
+    };
+  }
+
+  provider_catalog_selection_t orphan_provider_selection() {
+    return {
+      .compositor = compositor_e::gamescope,
+      .workload = {
+        .kind = workload_kind_e::steam,
+        .target_id = "orphan-test-workload",
+      },
     };
   }
 
@@ -431,6 +442,18 @@ TEST(MultiseatWorkerCoordinator, OwnsAuthorityFromLaunchThroughAuthenticatedStop
     std::string {authority_auth_directory_name} /
     std::string {authority_record_file_name}
   ));
+  const auto catalog_path = root.path() /
+                            seat.resources.runtime_namespace /
+                            std::string {authority_auth_directory_name} /
+                            std::string {authority_provider_catalog_file_name};
+  std::ifstream catalog_stream {catalog_path, std::ios::binary};
+  const std::string catalog {
+    std::istreambuf_iterator<char> {catalog_stream},
+    std::istreambuf_iterator<char> {},
+  };
+  EXPECT_NE(catalog.find("\"selector\":\"gamescope\""), std::string::npos);
+  EXPECT_NE(catalog.find("\"selector\":\"steam\""), std::string::npos);
+  EXPECT_NE(catalog.find("\"target_id\":\"steam-game\""), std::string::npos);
   EXPECT_EQ(coordinator.managed_workers(), std::vector<worker_identity_t> {identity});
 
   ASSERT_TRUE(backend.mark_ready(identity));
@@ -617,7 +640,11 @@ TEST(MultiseatWorkerCoordinator, InventoryFailureNeverAuthorizesOrphanCleanup) {
   const auto runtime_namespace = "polaris-runtime-controller-old-10";
   {
     authority_store_t original {root.path(), deterministic_capability(0x51)};
-    ASSERT_TRUE(original.create(endpoint_for(orphan), runtime_namespace).created());
+    ASSERT_TRUE(original.create(
+      endpoint_for(orphan),
+      runtime_namespace,
+      orphan_provider_selection()
+    ).created());
   }
   fake_worker_backend_t backend;
   backend.fail_inventory(true);
@@ -650,7 +677,11 @@ TEST(MultiseatWorkerCoordinator, TamperedOrphanRecordBlocksAdmissionWithoutDelet
   std::filesystem::path record;
   {
     authority_store_t original {root.path(), deterministic_capability(0x61)};
-    auto created = original.create(endpoint_for(orphan), runtime_namespace);
+    auto created = original.create(
+      endpoint_for(orphan),
+      runtime_namespace,
+      orphan_provider_selection()
+    );
     ASSERT_TRUE(created.created());
     record = created.authority->paths().record;
   }
@@ -686,7 +717,11 @@ TEST(MultiseatWorkerCoordinator, LiveSocketContradictingInventoryBlocksCleanup) 
   std::filesystem::path socket_path;
   {
     authority_store_t original {root.path(), deterministic_capability(0x71)};
-    auto created = original.create(endpoint_for(orphan), runtime_namespace);
+    auto created = original.create(
+      endpoint_for(orphan),
+      runtime_namespace,
+      orphan_provider_selection()
+    );
     ASSERT_TRUE(created.created());
     socket_path = created.authority->paths().control_socket;
   }

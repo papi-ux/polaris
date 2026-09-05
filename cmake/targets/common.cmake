@@ -137,7 +137,8 @@ if(POLARIS_BUILD_MULTISEAT_WORKER)
     set(MULTISEAT_RUNTIME_HELPER_OUTPUT "${CMAKE_BINARY_DIR}/polaris-seat-runtime")
     file(GLOB_RECURSE MULTISEAT_WORKER_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
-            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod")
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/internal/seatruntime/testdata/*.json")
     list(APPEND MULTISEAT_WORKER_SOURCES
             "${CMAKE_SOURCE_DIR}/containers/multiseat/Containerfile"
             "${CMAKE_SOURCE_DIR}/containers/multiseat/images.lock.json")

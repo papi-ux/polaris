@@ -6,6 +6,7 @@
 
 #ifdef __linux__
 
+#include "src/multiseat_runtime.h"
 #include "src/multiseat_worker_protocol.h"
 
 #include <cstddef>
@@ -24,6 +25,8 @@ namespace multiseat::worker_ipc {
   inline constexpr std::string_view authority_auth_directory_name = "auth";
   inline constexpr std::string_view authority_capability_file_name = "auth-token";
   inline constexpr std::string_view authority_record_file_name = "authority-record";
+  inline constexpr std::string_view authority_provider_catalog_file_name =
+    "runtime-providers.json";
   inline constexpr std::string_view authority_control_socket_name = "control.sock";
   inline constexpr std::string_view authority_media_socket_name = "media.sock";
 
@@ -45,6 +48,7 @@ namespace multiseat::worker_ipc {
     std::filesystem::path auth;
     std::filesystem::path capability;
     std::filesystem::path record;
+    std::filesystem::path provider_catalog;
     std::filesystem::path control_socket;
     std::filesystem::path media_socket;
 
@@ -94,6 +98,9 @@ namespace multiseat::worker_ipc {
       std::uint64_t capability_inode,
       std::uint64_t record_device,
       std::uint64_t record_inode,
+      std::uint64_t provider_catalog_device,
+      std::uint64_t provider_catalog_inode,
+      const proof_t &provider_catalog_digest,
       int generation_fd,
       int ipc_fd,
       int auth_fd
@@ -117,6 +124,9 @@ namespace multiseat::worker_ipc {
     std::uint64_t capability_inode_ = 0;
     std::uint64_t record_device_ = 0;
     std::uint64_t record_inode_ = 0;
+    std::uint64_t provider_catalog_device_ = 0;
+    std::uint64_t provider_catalog_inode_ = 0;
+    proof_t provider_catalog_digest_ {};
     int generation_fd_ = -1;
     int ipc_fd_ = -1;
     int auth_fd_ = -1;
@@ -152,12 +162,30 @@ namespace multiseat::worker_ipc {
   using capability_factory_t = std::function<bool(capability_t &)>;
 
   /**
+   * The only controller-selected keys used to construct a provider catalog.
+   *
+   * Provider executable paths and argv are compiled controller policy. No
+   * executable text crosses the configuration or worker boundary.
+   */
+  struct provider_catalog_selection_t {
+    compositor_e compositor = compositor_e::automatic;
+    workload_plan_t workload;
+
+    bool operator==(const provider_catalog_selection_t &) const = default;
+  };
+
+  /** Canonical strict JSON consumed by polaris-seat-runtime. */
+  [[nodiscard]] std::optional<std::vector<std::uint8_t>>
+  encode_provider_catalog(const provider_catalog_selection_t &selection);
+
+  /**
    * Owns generation directories below one pre-created private runtime root.
    *
    * The root must already exist, be owned by the effective user, have exact
    * mode 0700, and contain no symlink component. This class never recursively
    * deletes. Cleanup removes only the exact inode-fenced generation and its
-   * allowlisted token, signed record, and socket nodes.
+   * allowlisted token, immutable provider catalog, signed record, and socket
+   * nodes.
    */
   class authority_store_t {
   public:
@@ -175,7 +203,8 @@ namespace multiseat::worker_ipc {
     [[nodiscard]] authority_status_e status() const;
     [[nodiscard]] authority_create_result_t create(
       const endpoint_identity_t &identity,
-      std::string runtime_namespace
+      std::string runtime_namespace,
+      const provider_catalog_selection_t &provider_selection
     );
     /**
      * Reacquires only signed authority records absent from an authoritative

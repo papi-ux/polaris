@@ -2,10 +2,34 @@ package seatruntime
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestControllerCatalogFixtureMatchesDispatcherSchema(t *testing.T) {
+	content, err := os.ReadFile("testdata/controller-catalog-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := DecodeCatalog(strings.NewReader(string(content)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Providers) != 7 {
+		t.Fatalf("controller catalog provider count mismatch: %d", len(catalog.Providers))
+	}
+	request := protocolTestRequests()[6]
+	request.WorkloadID = "test-workload"
+	plan, err := catalog.Resolve(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Executable != "/usr/libexec/polaris-seat/launcher" {
+		t.Fatalf("controller launcher provider mismatch: %q", plan.Executable)
+	}
+}
 
 func catalogForTest() Catalog {
 	return Catalog{
