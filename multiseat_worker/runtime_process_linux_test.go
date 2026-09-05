@@ -193,7 +193,6 @@ func TestProcessRuntimeAdaptersDriveRealHelpersInExactOrder(t *testing.T) {
 		runtimeProcessTestHost{eventFile: eventFile},
 		processRuntimeAdapterOptions{
 			HelperExecutable: executable,
-			RuntimeProfile:   "steam",
 		},
 	)
 	if err != nil {

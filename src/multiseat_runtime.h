@@ -21,6 +21,24 @@ namespace multiseat {
     labwc,
   };
 
+  enum class runtime_profile_e {
+    unknown,
+    gamescope,
+    steam,
+    heroic,
+    lutris,
+  };
+
+  /** Immutable output requested for one seat. Refresh is canonical mHz. */
+  struct seat_display_mode_t {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t refresh_millihz = 0;
+    bool hdr = false;
+
+    bool operator==(const seat_display_mode_t &) const = default;
+  };
+
   enum class seat_state_e {
     reserved,
     starting,
@@ -59,6 +77,8 @@ namespace multiseat {
     std::string profile_key;
     std::string workload_key;
     std::string logical_gpu_id;
+    runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    seat_display_mode_t display_mode;
     compositor_e requested_compositor = compositor_e::automatic;
     std::uint32_t encoder_sessions = 1;
   };
@@ -107,6 +127,8 @@ namespace multiseat {
     std::string profile_key;
     std::string workload_key;
     std::string render_node;
+    runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    seat_display_mode_t display_mode;
     compositor_e requested_compositor = compositor_e::automatic;
     compositor_e selected_compositor = compositor_e::automatic;
     std::string selection_reason;

@@ -24,6 +24,8 @@ namespace multiseat {
         .profile_key = seat.profile_key,
         .workload_key = seat.workload_key,
         .render_node = seat.render_node,
+        .runtime_profile = seat.runtime_profile,
+        .display_mode = seat.display_mode,
         .compositor = seat.selected_compositor,
         .encoder_sessions = seat.encoder_sessions,
       };

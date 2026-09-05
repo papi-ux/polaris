@@ -94,6 +94,8 @@ namespace multiseat {
     std::string profile_key;
     std::string workload_key;
     std::string render_node;
+    runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    seat_display_mode_t display_mode;
     compositor_e compositor = compositor_e::automatic;
     std::uint32_t encoder_sessions = 1;
 

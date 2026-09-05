@@ -63,6 +63,8 @@ namespace multiseat::podman {
   struct profile_t {
     std::string profile_key;
     std::string opaque_volume_name;
+    runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    std::string image_reference;
   };
 
   struct shared_game_mount_t {
@@ -73,7 +75,6 @@ namespace multiseat::podman {
   struct options_t {
     std::filesystem::path executable {"/usr/bin/podman"};
     std::string deployment_id;
-    std::string image_reference;
     std::filesystem::path worker_entrypoint {"/usr/bin/polaris-seat-worker"};
     std::filesystem::path ipc_root;
     std::vector<gpu_t> gpus;

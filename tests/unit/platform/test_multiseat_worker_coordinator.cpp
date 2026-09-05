@@ -93,6 +93,8 @@ namespace {
       .profile_key = std::move(profile),
       .workload_key = std::move(workload),
       .logical_gpu_id = gpu_id,
+      .runtime_profile = runtime_profile_e::steam,
+      .display_mode = {1920, 1080, 60000, false},
       .requested_compositor = compositor_e::automatic,
       .encoder_sessions = 1,
     });

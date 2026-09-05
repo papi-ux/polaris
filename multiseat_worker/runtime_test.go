@@ -154,6 +154,11 @@ func runtimeTestConfig(name string, generation uint64, slot uint32) workerConfig
 		InputSeat:        "input-" + name,
 		RenderNode:       "/dev/dri/renderD128",
 		Compositor:       "gamescope",
+		RuntimeProfile:   "steam",
+		DisplayWidth:     1920,
+		DisplayHeight:    1080,
+		RefreshMillihz:   60000,
+		DisplayHDR:       false,
 		EncoderSessions:  1,
 		WorkloadKey:      "synthetic",
 	}

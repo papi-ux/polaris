@@ -35,6 +35,12 @@ namespace multiseat::podman {
     constexpr auto label_audio = "io.polaris.multiseat.audio"sv;
     constexpr auto label_input = "io.polaris.multiseat.input"sv;
     constexpr auto label_render_node = "io.polaris.multiseat.render-node"sv;
+    constexpr auto label_runtime_profile = "io.polaris.multiseat.runtime-profile"sv;
+    constexpr auto label_runtime_image = "io.polaris.multiseat.runtime-image"sv;
+    constexpr auto label_display_width = "io.polaris.multiseat.display-width"sv;
+    constexpr auto label_display_height = "io.polaris.multiseat.display-height"sv;
+    constexpr auto label_display_refresh = "io.polaris.multiseat.display-refresh-millihz"sv;
+    constexpr auto label_display_hdr = "io.polaris.multiseat.display-hdr"sv;
     constexpr auto label_compositor = "io.polaris.multiseat.compositor"sv;
     constexpr auto label_encoders = "io.polaris.multiseat.encoders"sv;
     constexpr auto capability_file = worker_ipc::authority_capability_file_name;
@@ -132,6 +138,40 @@ namespace multiseat::podman {
       return compositor == compositor_e::gamescope ||
              compositor == compositor_e::sway ||
              compositor == compositor_e::labwc;
+    }
+
+    bool concrete_runtime_profile(runtime_profile_e profile) {
+      return profile == runtime_profile_e::gamescope ||
+             profile == runtime_profile_e::steam ||
+             profile == runtime_profile_e::heroic ||
+             profile == runtime_profile_e::lutris;
+    }
+
+    std::string runtime_profile_name(runtime_profile_e profile) {
+      switch (profile) {
+        case runtime_profile_e::gamescope:
+          return "gamescope";
+        case runtime_profile_e::steam:
+          return "steam";
+        case runtime_profile_e::heroic:
+          return "heroic";
+        case runtime_profile_e::lutris:
+          return "lutris";
+        case runtime_profile_e::unknown:
+          break;
+      }
+      return {};
+    }
+
+    bool valid_runtime_profile_name(std::string_view value) {
+      return value == "gamescope" || value == "steam" ||
+             value == "heroic" || value == "lutris";
+    }
+
+    bool valid_display_mode(const seat_display_mode_t &mode) {
+      return mode.width > 0 && mode.width <= 16384 &&
+             mode.height > 0 && mode.height <= 16384 &&
+             mode.refresh_millihz >= 1000 && mode.refresh_millihz <= 1000000;
     }
 
     std::string compositor_name(compositor_e compositor) {
@@ -263,7 +303,8 @@ namespace multiseat::podman {
 
     std::vector<std::pair<std::string, std::string>> labels_for(
       const options_t &options,
-      const worker_launch_spec_t &spec
+      const worker_launch_spec_t &spec,
+      const profile_t &profile
     ) {
       return {
         {std::string {label_protocol}, "1"},
@@ -278,6 +319,12 @@ namespace multiseat::podman {
         {std::string {label_audio}, spec.resources.audio_sink},
         {std::string {label_input}, spec.resources.input_seat},
         {std::string {label_render_node}, spec.render_node},
+        {std::string {label_runtime_profile}, runtime_profile_name(spec.runtime_profile)},
+        {std::string {label_runtime_image}, profile.image_reference},
+        {std::string {label_display_width}, std::to_string(spec.display_mode.width)},
+        {std::string {label_display_height}, std::to_string(spec.display_mode.height)},
+        {std::string {label_display_refresh}, std::to_string(spec.display_mode.refresh_millihz)},
+        {std::string {label_display_hdr}, spec.display_mode.hdr ? "1" : "0"},
         {std::string {label_compositor}, compositor_name(spec.compositor)},
         {std::string {label_encoders}, std::to_string(spec.encoder_sessions)},
       };
@@ -317,7 +364,6 @@ namespace multiseat::podman {
           !safe_path(options.worker_entrypoint) ||
           !safe_path(options.ipc_root) ||
           !opaque_name_token(options.deployment_id, 64) ||
-          !pinned_image_reference(options.image_reference) ||
           options.gpus.empty() ||
           options.profiles.empty() ||
           options.workload_keys.empty() ||
@@ -366,6 +412,8 @@ namespace multiseat::podman {
       for (const auto &profile : options.profiles) {
         if (!opaque_reference(profile.profile_key) ||
             !opaque_name_token(profile.opaque_volume_name) ||
+            !concrete_runtime_profile(profile.runtime_profile) ||
+            !pinned_image_reference(profile.image_reference) ||
             !profile_keys.emplace(profile.profile_key).second ||
             !profile_volumes.emplace(profile.opaque_volume_name).second) {
           throw std::invalid_argument {"rootless Podman profile options are invalid"};
@@ -498,14 +546,17 @@ namespace multiseat::podman {
         !opaque_reference(spec.profile_key) ||
         !opaque_reference(spec.workload_key) ||
         !device_path(spec.render_node) ||
+        !concrete_runtime_profile(spec.runtime_profile) ||
+        !valid_display_mode(spec.display_mode) ||
         !concrete_compositor(spec.compositor) ||
         spec.encoder_sessions == 0) {
       return false;
     }
     const auto *gpu = gpu_for(spec);
-    return gpu &&
+    const auto *profile = profile_for(spec.profile_key);
+    return gpu && profile &&
            spec.encoder_sessions <= gpu->max_encoder_sessions &&
-           profile_for(spec.profile_key) &&
+           profile->runtime_profile == spec.runtime_profile &&
            workload_allowed(spec.workload_key);
   }
 
@@ -569,7 +620,7 @@ namespace multiseat::podman {
       "--workdir=/var/lib/polaris-seat",
     };
 
-    for (const auto &[name, value] : labels_for(options_, spec)) {
+    for (const auto &[name, value] : labels_for(options_, spec, profile)) {
       argv.push_back("--label=" + name + "=" + value);
     }
 
@@ -594,6 +645,14 @@ namespace multiseat::podman {
     add_environment("POLARIS_SEAT_SLOT", std::to_string(spec.identity.seat.slot));
     add_environment("POLARIS_SEAT_GENERATION", std::to_string(spec.identity.seat.generation));
     add_environment("POLARIS_RENDER_NODE", spec.render_node);
+    add_environment("POLARIS_RUNTIME_PROFILE", runtime_profile_name(spec.runtime_profile));
+    add_environment("POLARIS_DISPLAY_WIDTH", std::to_string(spec.display_mode.width));
+    add_environment("POLARIS_DISPLAY_HEIGHT", std::to_string(spec.display_mode.height));
+    add_environment(
+      "POLARIS_DISPLAY_REFRESH_MILLIHZ",
+      std::to_string(spec.display_mode.refresh_millihz)
+    );
+    add_environment("POLARIS_DISPLAY_HDR", spec.display_mode.hdr ? "1" : "0");
     add_environment("POLARIS_COMPOSITOR", compositor_name(spec.compositor));
     add_environment("POLARIS_ENCODER_SESSIONS", std::to_string(spec.encoder_sessions));
 
@@ -615,7 +674,7 @@ namespace multiseat::podman {
     }
 
     argv.push_back("--entrypoint=" + options_.worker_entrypoint.native());
-    argv.push_back(options_.image_reference);
+    argv.push_back(profile.image_reference);
     argv.push_back("run");
     argv.push_back("--workload-key=" + spec.workload_key);
     return argv;
@@ -863,6 +922,12 @@ namespace multiseat::podman {
         const auto audio = label_value(labels, label_audio);
         const auto input = label_value(labels, label_input);
         const auto render = label_value(labels, label_render_node);
+        const auto runtime_profile = label_value(labels, label_runtime_profile);
+        const auto runtime_image = label_value(labels, label_runtime_image);
+        const auto display_width_text = label_value(labels, label_display_width);
+        const auto display_height_text = label_value(labels, label_display_height);
+        const auto display_refresh_text = label_value(labels, label_display_refresh);
+        const auto display_hdr = label_value(labels, label_display_hdr);
         const auto compositor = label_value(labels, label_compositor);
         const auto encoders_text = label_value(labels, label_encoders);
         const auto slot = slot_text ? parse_decimal<std::uint32_t>(*slot_text) : std::nullopt;
@@ -872,6 +937,21 @@ namespace multiseat::podman {
         const auto encoders = encoders_text ?
                                 parse_decimal<std::uint32_t>(*encoders_text) :
                                 std::nullopt;
+        const auto display_width = display_width_text ?
+                                     parse_decimal<std::uint32_t>(*display_width_text) :
+                                     std::nullopt;
+        const auto display_height = display_height_text ?
+                                      parse_decimal<std::uint32_t>(*display_height_text) :
+                                      std::nullopt;
+        const auto display_refresh = display_refresh_text ?
+                                       parse_decimal<std::uint32_t>(*display_refresh_text) :
+                                       std::nullopt;
+        const seat_display_mode_t display_mode {
+          .width = display_width.value_or(0),
+          .height = display_height.value_or(0),
+          .refresh_millihz = display_refresh.value_or(0),
+          .hdr = display_hdr && *display_hdr == "1",
+        };
         if (!protocol || *protocol != "1" ||
             !deployment || *deployment != options_.deployment_id ||
             !controller || !opaque_name_token(*controller, 64) ||
@@ -883,6 +963,11 @@ namespace multiseat::podman {
             !audio || !opaque_name_token(*audio) ||
             !input || !opaque_name_token(*input) ||
             !render || !device_path(*render) ||
+            !runtime_profile || !valid_runtime_profile_name(*runtime_profile) ||
+            !runtime_image || !pinned_image_reference(*runtime_image) ||
+            !display_width || !display_height || !display_refresh ||
+            !display_hdr || (*display_hdr != "0" && *display_hdr != "1") ||
+            !valid_display_mode(display_mode) ||
             !compositor || !valid_compositor_name(*compositor) ||
             !encoders || *encoders == 0) {
           throw std::runtime_error {"incomplete Podman worker identity labels"};
@@ -925,7 +1010,11 @@ namespace multiseat::podman {
     if (record.observation.identity != spec.identity) {
       return false;
     }
-    for (const auto &[name, value] : labels_for(options_, spec)) {
+    const auto *profile = profile_for(spec.profile_key);
+    if (!profile || profile->runtime_profile != spec.runtime_profile) {
+      return false;
+    }
+    for (const auto &[name, value] : labels_for(options_, spec, *profile)) {
       const auto actual = label_value(record.labels, name);
       if (!actual || *actual != value) {
         return false;

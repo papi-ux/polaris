@@ -62,6 +62,11 @@ type runtimeAllocation struct {
 	InputSeat        string
 	RenderNode       string
 	Compositor       string
+	RuntimeProfile   string
+	DisplayWidth     uint32
+	DisplayHeight    uint32
+	RefreshMillihz   uint32
+	DisplayHDR       bool
 	EncoderSessions  uint32
 	WorkloadKey      string
 }
@@ -170,6 +175,14 @@ func runtimeAllocationFromConfig(config workerConfig) (runtimeAllocation, error)
 		config.Compositor != "labwc" {
 		return runtimeAllocation{}, errors.New("worker runtime compositor is invalid")
 	}
+	if !validRuntimeProfile(config.RuntimeProfile) {
+		return runtimeAllocation{}, errors.New("worker runtime profile allocation is invalid")
+	}
+	if config.DisplayWidth == 0 || config.DisplayWidth > 16384 ||
+		config.DisplayHeight == 0 || config.DisplayHeight > 16384 ||
+		config.RefreshMillihz < 1000 || config.RefreshMillihz > 1000000 {
+		return runtimeAllocation{}, errors.New("worker runtime display allocation is invalid")
+	}
 	if config.EncoderSessions == 0 || config.EncoderSessions > 64 {
 		return runtimeAllocation{}, errors.New("worker runtime encoder allocation is invalid")
 	}
@@ -184,6 +197,11 @@ func runtimeAllocationFromConfig(config workerConfig) (runtimeAllocation, error)
 		InputSeat:        config.InputSeat,
 		RenderNode:       config.RenderNode,
 		Compositor:       config.Compositor,
+		RuntimeProfile:   config.RuntimeProfile,
+		DisplayWidth:     config.DisplayWidth,
+		DisplayHeight:    config.DisplayHeight,
+		RefreshMillihz:   config.RefreshMillihz,
+		DisplayHDR:       config.DisplayHDR,
 		EncoderSessions:  config.EncoderSessions,
 		WorkloadKey:      config.WorkloadKey,
 	}, nil

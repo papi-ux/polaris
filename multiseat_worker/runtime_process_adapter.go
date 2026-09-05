@@ -31,7 +31,6 @@ type runtimeProcessHost interface {
 
 type processRuntimeAdapterOptions struct {
 	HelperExecutable string
-	RuntimeProfile   string
 }
 
 type processRuntimeAdapter struct {
@@ -43,15 +42,6 @@ type processRuntimeAdapter struct {
 func validRuntimeStage(stage runtimeStage) bool {
 	return stage >= runtimeStageSessionBus &&
 		stage <= runtimeStageLauncherProcessTree
-}
-
-func validRuntimeProfile(profile string) bool {
-	switch profile {
-	case "gamescope", "steam", "heroic", "lutris":
-		return true
-	default:
-		return false
-	}
 }
 
 func validRuntimeHelperPath(path string) bool {
@@ -69,9 +59,6 @@ func normalizeProcessRuntimeAdapterOptions(
 	}
 	if !validRuntimeHelperPath(options.HelperExecutable) {
 		return processRuntimeAdapterOptions{}, errors.New("worker runtime helper path is invalid")
-	}
-	if !validRuntimeProfile(options.RuntimeProfile) {
-		return processRuntimeAdapterOptions{}, errors.New("worker runtime profile is invalid")
 	}
 	return options, nil
 }
@@ -108,9 +95,8 @@ func newProcessRuntimeAdapters(
 func runtimeProcessEnvironment(
 	stage runtimeStage,
 	allocation runtimeAllocation,
-	profile string,
 ) ([]string, error) {
-	if !validRuntimeStage(stage) || !validRuntimeProfile(profile) {
+	if !validRuntimeStage(stage) || !validRuntimeProfile(allocation.RuntimeProfile) {
 		return nil, errors.New("worker runtime helper stage is invalid")
 	}
 	runtime := []string{"XDG_RUNTIME_DIR=/run/polaris"}
@@ -158,7 +144,7 @@ func runtimeProcessEnvironment(
 			"WAYLAND_DISPLAY="+allocation.WaylandSocket,
 			"POLARIS_INPUT_SEAT="+allocation.InputSeat,
 			"POLARIS_RENDER_NODE="+allocation.RenderNode,
-			"POLARIS_RUNTIME_PROFILE="+profile,
+			"POLARIS_RUNTIME_PROFILE="+allocation.RuntimeProfile,
 		), nil
 	default:
 		return nil, errors.New("worker runtime helper stage is invalid")
@@ -168,15 +154,18 @@ func runtimeProcessEnvironment(
 func runtimeProcessArguments(
 	stage runtimeStage,
 	allocation runtimeAllocation,
-	profile string,
 ) ([]string, error) {
-	if !validRuntimeStage(stage) || !validRuntimeProfile(profile) {
+	if !validRuntimeStage(stage) || !validRuntimeProfile(allocation.RuntimeProfile) {
 		return nil, errors.New("worker runtime helper stage is invalid")
 	}
 	arguments := []string{
 		"serve",
 		"--stage=" + stage.String(),
 		"--runtime-namespace=" + allocation.RuntimeNamespace,
+	}
+	displayHDR := "0"
+	if allocation.DisplayHDR {
+		displayHDR = "1"
 	}
 	switch stage {
 	case runtimeStageSessionBus:
@@ -190,6 +179,10 @@ func runtimeProcessArguments(
 			"--wayland-socket="+allocation.WaylandSocket,
 			"--render-node="+allocation.RenderNode,
 			"--compositor="+allocation.Compositor,
+			"--display-width="+strconv.FormatUint(uint64(allocation.DisplayWidth), 10),
+			"--display-height="+strconv.FormatUint(uint64(allocation.DisplayHeight), 10),
+			"--display-refresh-millihz="+strconv.FormatUint(uint64(allocation.RefreshMillihz), 10),
+			"--display-hdr="+displayHDR,
 		), nil
 	case runtimeStageVirtualInput:
 		return append(arguments,
@@ -208,7 +201,7 @@ func runtimeProcessArguments(
 		), nil
 	case runtimeStageLauncherProcessTree:
 		return append(arguments,
-			"--runtime-profile="+profile,
+			"--runtime-profile="+allocation.RuntimeProfile,
 			"--workload-key="+allocation.WorkloadKey,
 			"--wayland-socket="+allocation.WaylandSocket,
 			"--audio-sink="+allocation.AudioSink,
@@ -228,6 +221,11 @@ func validProcessRuntimeAllocation(allocation runtimeAllocation) bool {
 		InputSeat:        allocation.InputSeat,
 		RenderNode:       allocation.RenderNode,
 		Compositor:       allocation.Compositor,
+		RuntimeProfile:   allocation.RuntimeProfile,
+		DisplayWidth:     allocation.DisplayWidth,
+		DisplayHeight:    allocation.DisplayHeight,
+		RefreshMillihz:   allocation.RefreshMillihz,
+		DisplayHDR:       allocation.DisplayHDR,
 		EncoderSessions:  allocation.EncoderSessions,
 		WorkloadKey:      allocation.WorkloadKey,
 	})
@@ -246,7 +244,6 @@ func (adapter *processRuntimeAdapter) Start(
 	arguments, err := runtimeProcessArguments(
 		adapter.stage,
 		allocation,
-		adapter.options.RuntimeProfile,
 	)
 	if err != nil {
 		return nil, err
@@ -254,7 +251,6 @@ func (adapter *processRuntimeAdapter) Start(
 	environment, err := runtimeProcessEnvironment(
 		adapter.stage,
 		allocation,
-		adapter.options.RuntimeProfile,
 	)
 	if err != nil {
 		return nil, err

@@ -26,6 +26,11 @@ type workerConfig struct {
 	InputSeat        string
 	RenderNode       string
 	Compositor       string
+	RuntimeProfile   string
+	DisplayWidth     uint32
+	DisplayHeight    uint32
+	RefreshMillihz   uint32
+	DisplayHDR       bool
 	EncoderSessions  uint32
 	WorkloadKey      string
 }
@@ -70,6 +75,15 @@ func validOpaqueReference(value string) bool {
 		}
 	}
 	return true
+}
+
+func validRuntimeProfile(profile string) bool {
+	switch profile {
+	case "gamescope", "steam", "heroic", "lutris":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadWorkerConfig(
@@ -136,6 +150,48 @@ func loadWorkerConfig(
 	}
 	if config.Compositor != "gamescope" && config.Compositor != "sway" && config.Compositor != "labwc" {
 		return config, errors.New("worker compositor is not concrete")
+	}
+	if config.RuntimeProfile, err = requiredEnvironment(lookup, "POLARIS_RUNTIME_PROFILE"); err != nil {
+		return config, err
+	}
+	if !validRuntimeProfile(config.RuntimeProfile) {
+		return config, errors.New("worker runtime profile is invalid")
+	}
+	displaySettings := []struct {
+		name   string
+		target *uint32
+		max    uint64
+	}{
+		{"POLARIS_DISPLAY_WIDTH", &config.DisplayWidth, 16384},
+		{"POLARIS_DISPLAY_HEIGHT", &config.DisplayHeight, 16384},
+		{"POLARIS_DISPLAY_REFRESH_MILLIHZ", &config.RefreshMillihz, 1000000},
+	}
+	for _, setting := range displaySettings {
+		value, valueError := requiredEnvironment(lookup, setting.name)
+		if valueError != nil {
+			return config, valueError
+		}
+		parsed, valueError := parseUint(value, 32, setting.name)
+		if valueError != nil {
+			return config, valueError
+		}
+		if parsed == 0 || parsed > setting.max ||
+			(setting.name == "POLARIS_DISPLAY_REFRESH_MILLIHZ" && parsed < 1000) {
+			return config, fmt.Errorf("worker setting %s is outside the supported range", setting.name)
+		}
+		*setting.target = uint32(parsed)
+	}
+	hdr, err := requiredEnvironment(lookup, "POLARIS_DISPLAY_HDR")
+	if err != nil {
+		return config, err
+	}
+	switch hdr {
+	case "0":
+		config.DisplayHDR = false
+	case "1":
+		config.DisplayHDR = true
+	default:
+		return config, errors.New("worker display HDR setting is not canonical boolean")
 	}
 	encoders, err := requiredEnvironment(lookup, "POLARIS_ENCODER_SESSIONS")
 	if err != nil {

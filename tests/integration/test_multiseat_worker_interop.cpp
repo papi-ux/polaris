@@ -218,6 +218,11 @@ namespace {
     set("POLARIS_INPUT_SEAT", "input-native-interop");
     set("POLARIS_RENDER_NODE", "/dev/dri/renderD128");
     set("POLARIS_COMPOSITOR", "gamescope");
+    set("POLARIS_RUNTIME_PROFILE", "steam");
+    set("POLARIS_DISPLAY_WIDTH", "1920");
+    set("POLARIS_DISPLAY_HEIGHT", "1080");
+    set("POLARIS_DISPLAY_REFRESH_MILLIHZ", "60000");
+    set("POLARIS_DISPLAY_HDR", "0");
     set("POLARIS_ENCODER_SESSIONS", "1");
   }
 

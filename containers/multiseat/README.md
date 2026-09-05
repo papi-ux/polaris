@@ -59,10 +59,19 @@ launcher scripts couple compositor and application startup and do not provide
 one uniform private session-bus, PipeWire, capture, encode, and virtual-input
 service contract. The Polaris helper must own those boundaries explicitly; the
 worker must not infer readiness from a GoW entrypoint or from the existence of
-a Wayland socket alone. Before activation, the controller must also bind each
-profile to one exact runtime image/profile and supply the missing display and
-trusted workload launch plan. Those values are intentionally not guessed by
-the current adapter layer.
+a Wayland socket alone. The controller now binds each opaque profile to one
+typed runtime and one exact final image digest, carries the requested display
+mode through admission and reconciliation, and gives the worker canonical
+width, height, refresh, and HDR values. The missing workload launch plan must
+still resolve the opaque workload key through a trusted allowlist instead of
+letting an image interpret it freely.
+
+Wolf's working data plane uses a capture-producing outer Wayland compositor
+with Gamescope nested beneath it, plus separate audio, virtual-input, and
+GStreamer services. The current seven-stage adapter is only a supervision
+contract; implementing a helper requires resolving that display/capture
+ownership and encoded-media handoff. A placeholder helper that only creates
+socket nodes and reports ready would not make this image streaming-capable.
 
 The container retains `--network=none`. Beneath a pre-created mode-0700
 runtime root, the controller exclusively creates one inode-fenced,

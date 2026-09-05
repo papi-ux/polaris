@@ -48,12 +48,16 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	host := &fakeRuntimeProcessHost{recorder: recorder}
 	adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{
 		HelperExecutable: "/opt/polaris/bin/polaris-seat-runtime",
-		RuntimeProfile:   "heroic",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	config := runtimeTestConfig("worker-process-adapters", 71, 3)
+	config.RuntimeProfile = "heroic"
+	config.DisplayWidth = 3840
+	config.DisplayHeight = 2160
+	config.RefreshMillihz = 97000
+	config.DisplayHDR = true
 	config.WorkloadKey = "heroic-game;$(touch /tmp/not-executed)"
 	runtime, err := startWorkerRuntime(
 		context.Background(),
@@ -125,6 +129,10 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 		"--wayland-socket=" + config.WaylandSocket,
 		"--render-node=" + config.RenderNode,
 		"--compositor=gamescope",
+		"--display-width=3840",
+		"--display-height=2160",
+		"--display-refresh-millihz=97000",
+		"--display-hdr=1",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("compositor argv mismatch: %#v", got)
 	}
@@ -175,7 +183,6 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	wantEnvironment, err := runtimeProcessEnvironment(
 		runtimeStageLauncherProcessTree,
 		runtime.allocation,
-		"heroic",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -204,18 +211,14 @@ func TestProcessRuntimeAdapterConfigurationFailsBeforeHostTouch(t *testing.T) {
 		contains string
 	}{
 		{
-			name: "missing host",
-			options: processRuntimeAdapterOptions{
-				RuntimeProfile: "steam",
-			},
+			name:     "missing host",
+			options:  processRuntimeAdapterOptions{},
 			contains: "process host is missing",
 		},
 		{
-			name: "typed nil host",
-			host: (*fakeRuntimeProcessHost)(nil),
-			options: processRuntimeAdapterOptions{
-				RuntimeProfile: "steam",
-			},
+			name:     "typed nil host",
+			host:     (*fakeRuntimeProcessHost)(nil),
+			options:  processRuntimeAdapterOptions{},
 			contains: "process host is missing",
 		},
 		{
@@ -223,17 +226,8 @@ func TestProcessRuntimeAdapterConfigurationFailsBeforeHostTouch(t *testing.T) {
 			host: &fakeRuntimeProcessHost{},
 			options: processRuntimeAdapterOptions{
 				HelperExecutable: "polaris-seat-runtime",
-				RuntimeProfile:   "steam",
 			},
 			contains: "helper path is invalid",
-		},
-		{
-			name: "unknown profile",
-			host: &fakeRuntimeProcessHost{},
-			options: processRuntimeAdapterOptions{
-				RuntimeProfile: "automatic",
-			},
-			contains: "runtime profile is invalid",
 		},
 	}
 	for _, test := range tests {
@@ -256,16 +250,13 @@ func TestProcessRuntimeAdaptersAcceptOnlyLockedRuntimeProfiles(t *testing.T) {
 	for _, profile := range []string{"gamescope", "steam", "heroic", "lutris"} {
 		t.Run(profile, func(t *testing.T) {
 			host := &fakeRuntimeProcessHost{recorder: &fakeRuntimeRecorder{}}
-			adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{
-				RuntimeProfile: profile,
-			})
+			adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			allocation := runtimeAllocationForTest(
-				t,
-				runtimeTestConfig("worker-profile-"+profile, 73, 0),
-			)
+			config := runtimeTestConfig("worker-profile-"+profile, 73, 0)
+			config.RuntimeProfile = profile
+			allocation := runtimeAllocationForTest(t, config)
 			lease, err := adapters.LauncherProcessTree.Start(context.Background(), allocation)
 			if err != nil {
 				t.Fatal(err)
@@ -284,25 +275,41 @@ func TestProcessRuntimeAdaptersAcceptOnlyLockedRuntimeProfiles(t *testing.T) {
 }
 
 func TestProcessRuntimeAdapterRejectsInvalidAllocationBeforeHostTouch(t *testing.T) {
-	host := &fakeRuntimeProcessHost{recorder: &fakeRuntimeRecorder{}}
-	adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{
-		RuntimeProfile: "steam",
-	})
-	if err != nil {
-		t.Fatal(err)
+	tests := map[string]func(*runtimeAllocation){
+		"relative render node": func(allocation *runtimeAllocation) {
+			allocation.RenderNode = "../../dev/dri/renderD128"
+		},
+		"unknown runtime profile": func(allocation *runtimeAllocation) {
+			allocation.RuntimeProfile = "automatic"
+		},
+		"zero display width": func(allocation *runtimeAllocation) {
+			allocation.DisplayWidth = 0
+		},
+		"excessive refresh": func(allocation *runtimeAllocation) {
+			allocation.RefreshMillihz = 1000001
+		},
 	}
-	allocation := runtimeAllocationForTest(
-		t,
-		runtimeTestConfig("worker-invalid-process-allocation", 75, 0),
-	)
-	allocation.RenderNode = "../../dev/dri/renderD128"
-	lease, err := adapters.Compositor.Start(context.Background(), allocation)
-	if lease != nil || err == nil || !strings.Contains(err.Error(), "adapter is invalid") {
-		t.Fatalf("invalid process allocation was accepted: %#v, %v", lease, err)
-	}
-	_, calls := host.snapshot()
-	if calls != 0 {
-		t.Fatalf("invalid allocation touched the process host %d times", calls)
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			host := &fakeRuntimeProcessHost{recorder: &fakeRuntimeRecorder{}}
+			adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			allocation := runtimeAllocationForTest(
+				t,
+				runtimeTestConfig("worker-invalid-process-allocation", 75, 0),
+			)
+			mutate(&allocation)
+			lease, err := adapters.Compositor.Start(context.Background(), allocation)
+			if lease != nil || err == nil || !strings.Contains(err.Error(), "adapter is invalid") {
+				t.Fatalf("invalid process allocation was accepted: %#v, %v", lease, err)
+			}
+			_, calls := host.snapshot()
+			if calls != 0 {
+				t.Fatalf("invalid allocation touched the process host %d times", calls)
+			}
+		})
 	}
 }
 
@@ -324,9 +331,7 @@ func TestProcessRuntimeAdapterRedactsHostFailureAndReturnsPartialLease(t *testin
 			return partial, errors.New("private executable and device detail")
 		},
 	}
-	adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{
-		RuntimeProfile: "gamescope",
-	})
+	adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

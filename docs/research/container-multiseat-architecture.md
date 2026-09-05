@@ -1,8 +1,9 @@
 # Container multiseat architecture spike
 
 Status: architecture, an offline rootless-Podman backend, locked image inputs,
-and a supervisor/IPC proof. Nothing in this document enables multiseat,
-launches a container, or changes the current single-workload runtime.
+immutable per-seat runtime bindings, and a supervisor/IPC proof. Nothing in
+this document enables multiseat, launches a container, or changes the current
+single-workload runtime.
 
 ## Outcome
 
@@ -95,10 +96,10 @@ reconciliation and orphan cleanup remain worker-broker responsibilities.
 
 The backend boundary is deliberately smaller than a container-engine API. A
 worker receives one immutable launch specification containing the exact seat
-handle, opaque worker resources, opaque profile and workload keys, chosen
-render node, concrete compositor, and encoder lease count. Client identity,
-credentials, host paths, and container-engine authority are not part of that
-payload.
+handle, opaque worker resources, opaque profile and workload keys, typed
+runtime profile, display geometry and cadence, chosen render node, concrete
+compositor, and encoder lease count. Client identity, credentials, host paths,
+and container-engine authority are not part of that payload.
 
 The backend exposes only three operations:
 
@@ -211,7 +212,10 @@ effective UID zero and fails launch before invoking Podman if the executable,
 exact GPU/input character devices, or read-only game roots are not accessible
 to the current user.
 
-Each launch is immutable and includes:
+Each opaque profile is configured with one typed runtime and one exact image
+digest. The launch specification must match that mapping; neither the profile
+key nor the image may be reinterpreted inside the worker. Each launch is
+immutable and includes:
 
 - a digest-pinned image with pulling disabled;
 - a pre-created opaque profile volume mounted as the only persistent writable
@@ -227,8 +231,8 @@ Each launch is immutable and includes:
 - no inherited proxy environment or host-derived `/etc/hosts` entries;
 - no capabilities, `no-new-privileges`, a tiny init, and a worker-owned
   health command;
-- exact seat, resource, compositor, render-node, and encoder labels, but no
-  client identity or profile key.
+- exact seat, resource, runtime-profile, image, display, compositor,
+  render-node, and encoder labels, but no client identity or profile key.
 
 Inventory is two phase and bounded: an exact deployment-label listing returns
 full immutable container IDs, then one JSON inspection validates every ID,
@@ -302,7 +306,7 @@ capability, client key, profile key, worker name, or controller epoch.
 | --- | --- |
 | session bus | none |
 | audio | audio sink |
-| compositor | Wayland socket, render node, concrete compositor |
+| compositor | Wayland socket, render node, concrete compositor, width, height, refresh in mHz, HDR flag |
 | virtual input | input seat |
 | capture | Wayland socket, render node |
 | encoder lease | logical GPU, render node, session count |
@@ -317,10 +321,23 @@ The resource helper itself does not exist yet. It is deliberately not faked by
 calling a GoW launcher entrypoint: the referenced GoW launch scripts couple
 compositor and application startup, while the locked application roots do not
 expose one uniform private D-Bus, PipeWire, virtual-input, capture, and encoder
-contract. A real Polaris helper must implement those stage semantics and the
-controller must bind an exact runtime profile, display geometry, and trusted
-workload plan before activation. The production command still injects no
-adapters, so Podman health proves only that the supervisor contract is alive.
+contract. Polaris now binds the exact runtime profile and display mode from
+admission through the selected image and helper argv. A real helper still
+needs a trusted workload plan and must implement the actual stage semantics.
+The production command injects no adapters, so Podman health proves only that
+the supervisor contract is alive.
+
+The upstream Wolf data plane also does not map one-to-one onto the current
+seven-stage sketch. Wolf uses `gst-wayland-display` as an outer headless
+compositor that exposes a framebuffer, nests Gamescope as a Wayland client for
+its Xwayland boundary, creates virtual audio sinks through a standalone audio
+service, uses inputtino plus fake udev for virtual-device lifecycle, and sends
+the captured frames through GStreamer. Gamescope compatibility therefore does
+not imply that Gamescope itself should own the capture boundary. Before a real
+helper is added, the Polaris stage graph must identify the capture-producing
+display owner, nested compositor relationship, and encoded-media handoff. A
+process that merely opens expected sockets and reports ready would not satisfy
+that contract.
 
 The broker's default graceful-stop deadline is now 45 seconds. It covers the
 worker's 35-second worst-case serial reverse teardown plus the controller's
@@ -433,6 +450,8 @@ contract, each launcher must pass:
 The test_multiseat_runtime target covers:
 
 - two seats sharing one GPU and encoder pool;
+- typed runtime profile and display mode required at admission and preserved
+  through the broker and worker allocation;
 - unique worker/runtime/Wayland/audio/input identities;
 - concurrent admission without duplicate slot allocation;
 - independent stop and release;
@@ -455,6 +474,8 @@ The test_multiseat_runtime target covers:
 - rootless Podman launch arguments with pinned images, explicit devices,
   private namespaces, writable compatibility surfaces, explicit worker
   runtime/temp/shared-memory bounds, and no broad authority;
+- one digest-pinned image selected by each configured opaque profile, with
+  exact profile, image, geometry, cadence, and HDR reconciliation labels;
 - health-gated two-worker inventory with exact ID/label validation;
 - exact-ID graceful and forced teardown plus created-worker cleanup;
 - fail-closed root, missing-device, unknown-allocation, timeout, ambiguous
@@ -491,21 +512,27 @@ The test_multiseat_runtime target covers:
   worker toolchain, plus a no-network Containerfile build contract.
 
 This remains an offline control-plane/backend proof. A later container
-integration test must build and pin the final worker image, pre-create profile
+integration test must build and pin the final worker images, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
 physical game testing, the missing `polaris-seat-runtime` implementation must
-bind the modeled session bus, PipeWire sink, virtual input lifecycle,
-compositor, capture, encoder lease, and launcher process tree without weakening
-the proven adapter and teardown contracts. Profile-specific image selection,
-display geometry, and trusted workload resolution must be explicit rather than
-inferred from the image. Concurrent frame, audio, and input heartbeats then
-become the next acceptance boundary.
+bind the modeled session bus, audio sink, virtual input lifecycle, compositor,
+capture, encoder lease, and launcher process tree without weakening the proven
+adapter and teardown contracts. Trusted workload resolution must become an
+explicit allowlisted launch plan rather than an opaque string interpreted by
+the image. Concurrent frame, audio, and input heartbeats then become the next
+acceptance boundary.
 
 ## Upstream references
 
 - Wolf architecture:
   https://games-on-whales.github.io/wolf/stable/dev/how-it-works.html
+- Wolf custom Wayland compositor and framebuffer boundary:
+  https://games-on-whales.github.io/wolf/stable/dev/wayland.html
+- Wolf GStreamer pipeline:
+  https://games-on-whales.github.io/wolf/stable/dev/gstreamer.html
+- Wolf fake-udev input isolation:
+  https://games-on-whales.github.io/wolf/stable/dev/fake-udev.html
 - Wolf configuration and per-profile storage:
   https://games-on-whales.github.io/wolf/stable/user/configuration.html
 - Games on Whales application images:

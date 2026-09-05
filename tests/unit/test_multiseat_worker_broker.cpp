@@ -23,6 +23,7 @@ namespace {
   using multiseat::gpu_capacity_t;
   using multiseat::mutation_result_e;
   using multiseat::registry_t;
+  using multiseat::runtime_profile_e;
   using multiseat::seat_request_t;
   using multiseat::seat_snapshot_t;
   using multiseat::seat_state_e;
@@ -72,6 +73,8 @@ namespace {
       .profile_key = std::move(profile),
       .workload_key = std::move(workload),
       .logical_gpu_id = gpu_id,
+      .runtime_profile = runtime_profile_e::steam,
+      .display_mode = {1920, 1080, 60000, false},
       .requested_compositor = requested,
       .encoder_sessions = 1,
     });
@@ -476,6 +479,11 @@ TEST(MultiseatWorkerBroker, TwoFakeWorkersRunAndStopIndependently) {
   ASSERT_EQ(backend.launch_specs().size(), std::size_t {2});
   for (const auto &spec : backend.launch_specs()) {
     EXPECT_EQ(spec.render_node, render_node);
+    EXPECT_EQ(spec.runtime_profile, runtime_profile_e::steam);
+    EXPECT_EQ(spec.display_mode.width, 1920U);
+    EXPECT_EQ(spec.display_mode.height, 1080U);
+    EXPECT_EQ(spec.display_mode.refresh_millihz, 60000U);
+    EXPECT_FALSE(spec.display_mode.hdr);
     EXPECT_EQ(spec.identity.worker_name.find("client-"), std::string::npos);
   }
 

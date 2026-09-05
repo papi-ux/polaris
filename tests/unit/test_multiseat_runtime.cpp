@@ -19,6 +19,8 @@ namespace {
   using multiseat::gpu_capacity_t;
   using multiseat::mutation_result_e;
   using multiseat::registry_t;
+  using multiseat::runtime_profile_e;
+  using multiseat::seat_display_mode_t;
   using multiseat::seat_handle_t;
   using multiseat::seat_request_t;
   using multiseat::seat_snapshot_t;
@@ -45,13 +47,17 @@ namespace {
     std::string profile,
     std::string workload,
     compositor_e compositor = compositor_e::automatic,
-    std::uint32_t encoder_sessions = 1
+    std::uint32_t encoder_sessions = 1,
+    runtime_profile_e runtime_profile = runtime_profile_e::steam,
+    seat_display_mode_t display_mode = {1920, 1080, 60000, false}
   ) {
     return {
       .client_key = std::move(client),
       .profile_key = std::move(profile),
       .workload_key = std::move(workload),
       .logical_gpu_id = gpu_id,
+      .runtime_profile = runtime_profile,
+      .display_mode = display_mode,
       .requested_compositor = compositor,
       .encoder_sessions = encoder_sessions,
     };
@@ -99,7 +105,15 @@ TEST(MultiseatRuntime, TwoIndependentSeatsShareOneGpuWithDistinctResources) {
   );
   const auto second = admit_or_fail(
     registry,
-    request_for("client-beta", "profile-beta", "heroic-game")
+    request_for(
+      "client-beta",
+      "profile-beta",
+      "heroic-game",
+      compositor_e::automatic,
+      1,
+      runtime_profile_e::heroic,
+      {3840, 2160, 97000, true}
+    )
   );
 
   ASSERT_TRUE(first.handle.valid());
@@ -109,6 +123,9 @@ TEST(MultiseatRuntime, TwoIndependentSeatsShareOneGpuWithDistinctResources) {
   EXPECT_NE(first.handle.slot, second.handle.slot);
   EXPECT_NE(first.handle.generation, second.handle.generation);
   EXPECT_NE(first.resources, second.resources);
+  EXPECT_EQ(first.runtime_profile, runtime_profile_e::steam);
+  EXPECT_EQ(second.runtime_profile, runtime_profile_e::heroic);
+  EXPECT_EQ(second.display_mode, (seat_display_mode_t {3840, 2160, 97000, true}));
 
   const auto first_names = resource_names(first);
   const auto second_names = resource_names(second);
@@ -243,6 +260,38 @@ TEST(MultiseatRuntime, SeatAndEncoderBudgetsFailClosedIndependently) {
     ).rejection,
     admission_rejection_e::encoder_capacity_reached
   );
+}
+
+TEST(MultiseatRuntime, RuntimeProfileAndDisplayModeAreRequiredAtAdmission) {
+  registry_t registry {controller_epoch, {shared_gpu()}};
+
+  auto unknown_profile = request_for("client-a", "profile-a", "game-a");
+  unknown_profile.runtime_profile = runtime_profile_e::unknown;
+  EXPECT_EQ(
+    registry.admit(unknown_profile).rejection,
+    admission_rejection_e::invalid_request
+  );
+
+  const std::vector<seat_display_mode_t> invalid_modes {
+    {0, 1080, 60000, false},
+    {1920, 0, 60000, false},
+    {16385, 1080, 60000, false},
+    {1920, 16385, 60000, false},
+    {1920, 1080, 999, false},
+    {1920, 1080, 1000001, false},
+  };
+  for (std::size_t index = 0; index < invalid_modes.size(); ++index) {
+    auto request = request_for(
+      "client-display-" + std::to_string(index),
+      "profile-display-" + std::to_string(index),
+      "game-display-" + std::to_string(index)
+    );
+    request.display_mode = invalid_modes[index];
+    EXPECT_EQ(
+      registry.admit(request).rejection,
+      admission_rejection_e::invalid_request
+    );
+  }
 }
 
 TEST(MultiseatRuntime, OneClientCannotOccupyTwoSeats) {

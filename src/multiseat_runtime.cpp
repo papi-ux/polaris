@@ -22,6 +22,29 @@ namespace multiseat {
       return false;
     }
 
+    bool concrete_runtime_profile(runtime_profile_e profile) {
+      switch (profile) {
+        case runtime_profile_e::gamescope:
+        case runtime_profile_e::steam:
+        case runtime_profile_e::heroic:
+        case runtime_profile_e::lutris:
+          return true;
+        case runtime_profile_e::unknown:
+          return false;
+      }
+      return false;
+    }
+
+    bool valid_display_mode(const seat_display_mode_t &mode) {
+      constexpr std::uint32_t maximum_dimension = 16384;
+      constexpr std::uint32_t minimum_refresh_millihz = 1000;
+      constexpr std::uint32_t maximum_refresh_millihz = 1000000;
+      return mode.width > 0 && mode.width <= maximum_dimension &&
+             mode.height > 0 && mode.height <= maximum_dimension &&
+             mode.refresh_millihz >= minimum_refresh_millihz &&
+             mode.refresh_millihz <= maximum_refresh_millihz;
+    }
+
     bool ascii_alphanumeric(char value) {
       return (value >= 'a' && value <= 'z') ||
              (value >= 'A' && value <= 'Z') ||
@@ -57,6 +80,8 @@ namespace multiseat {
              !request.profile_key.empty() &&
              !request.workload_key.empty() &&
              !request.logical_gpu_id.empty() &&
+             concrete_runtime_profile(request.runtime_profile) &&
+             valid_display_mode(request.display_mode) &&
              request.encoder_sessions > 0;
     }
   }  // namespace
@@ -179,6 +204,8 @@ namespace multiseat {
       .profile_key = request.profile_key,
       .workload_key = request.workload_key,
       .render_node = gpu.capacity.render_node,
+      .runtime_profile = request.runtime_profile,
+      .display_mode = request.display_mode,
       .requested_compositor = request.requested_compositor,
       .selected_compositor = compositor_e::automatic,
       .selection_reason = {},

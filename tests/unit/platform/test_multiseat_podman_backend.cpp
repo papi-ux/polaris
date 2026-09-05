@@ -21,6 +21,7 @@
 namespace {
   using json = nlohmann::json;
   using multiseat::compositor_e;
+  using multiseat::runtime_profile_e;
   using multiseat::worker_command_result_e;
   using multiseat::worker_identity_t;
   using multiseat::worker_launch_spec_t;
@@ -115,8 +116,6 @@ namespace {
     return {
       .executable = "/usr/bin/podman",
       .deployment_id = "deployment-a1b2",
-      .image_reference = std::string {"ghcr.io/papi-ux/polaris-seat@sha256:"} +
-                         std::string(64, 'a'),
       .worker_entrypoint = "/usr/bin/polaris-seat-worker",
       .ipc_root = "/run/user/1000/polaris-workers",
       .gpus = {
@@ -131,10 +130,16 @@ namespace {
         profile_t {
           .profile_key = "profile alpha",
           .opaque_volume_name = "pv-a9f0",
+          .runtime_profile = runtime_profile_e::steam,
+          .image_reference = std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} +
+                             std::string(64, 'a'),
         },
         profile_t {
           .profile_key = "profile beta",
           .opaque_volume_name = "pv-b8e1",
+          .runtime_profile = runtime_profile_e::heroic,
+          .image_reference = std::string {"ghcr.io/papi-ux/polaris-seat-heroic@sha256:"} +
+                             std::string(64, 'b'),
         },
       },
       .workload_keys = {"steam-game;literal", "heroic-game"},
@@ -156,6 +161,9 @@ namespace {
     std::string workload_key = "steam-game;literal"
   ) {
     const auto suffix = "controller-a1b2-" + std::to_string(generation);
+    const auto runtime_profile = profile_key == "profile beta" ?
+                                   runtime_profile_e::heroic :
+                                   runtime_profile_e::steam;
     return {
       .identity = {
         .seat = {
@@ -176,6 +184,8 @@ namespace {
       .profile_key = std::move(profile_key),
       .workload_key = std::move(workload_key),
       .render_node = "/dev/dri/renderD128",
+      .runtime_profile = runtime_profile,
+      .display_mode = {3840, 2160, 97000, true},
       .compositor = compositor_e::gamescope,
       .encoder_sessions = 1,
     };
@@ -217,6 +227,12 @@ namespace {
   }
 
   json labels_for(const worker_launch_spec_t &spec) {
+    const auto image = spec.runtime_profile == runtime_profile_e::heroic ?
+                         std::string {"ghcr.io/papi-ux/polaris-seat-heroic@sha256:"} +
+                           std::string(64, 'b') :
+                         std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} +
+                           std::string(64, 'a');
+    const auto profile = spec.runtime_profile == runtime_profile_e::heroic ? "heroic" : "steam";
     return {
       {"io.polaris.multiseat.protocol", "1"},
       {"io.polaris.multiseat.deployment", "deployment-a1b2"},
@@ -230,6 +246,12 @@ namespace {
       {"io.polaris.multiseat.audio", spec.resources.audio_sink},
       {"io.polaris.multiseat.input", spec.resources.input_seat},
       {"io.polaris.multiseat.render-node", spec.render_node},
+      {"io.polaris.multiseat.runtime-profile", profile},
+      {"io.polaris.multiseat.runtime-image", image},
+      {"io.polaris.multiseat.display-width", std::to_string(spec.display_mode.width)},
+      {"io.polaris.multiseat.display-height", std::to_string(spec.display_mode.height)},
+      {"io.polaris.multiseat.display-refresh-millihz", std::to_string(spec.display_mode.refresh_millihz)},
+      {"io.polaris.multiseat.display-hdr", spec.display_mode.hdr ? "1" : "0"},
       {"io.polaris.multiseat.compositor", "gamescope"},
       {"io.polaris.multiseat.encoders", std::to_string(spec.encoder_sessions)},
     };
@@ -277,12 +299,16 @@ namespace {
 TEST(MultiseatPodmanBackend, RejectsUnpinnedImagesAndDuplicateProfileVolumes) {
   fake_host_t host;
   auto options = options_for_tests();
-  options.image_reference = "ghcr.io/papi-ux/polaris-seat:latest";
+  options.profiles.at(0).image_reference = "ghcr.io/papi-ux/polaris-seat:latest";
   EXPECT_THROW(backend_t(host, options), std::invalid_argument);
 
   options = options_for_tests();
-  options.image_reference = std::string {"dir:/tmp/worker@sha256:"} +
-                            std::string(64, 'a');
+  options.profiles.at(0).image_reference = std::string {"dir:/tmp/worker@sha256:"} +
+                                           std::string(64, 'a');
+  EXPECT_THROW(backend_t(host, options), std::invalid_argument);
+
+  options = options_for_tests();
+  options.profiles.at(0).runtime_profile = runtime_profile_e::unknown;
   EXPECT_THROW(backend_t(host, options), std::invalid_argument);
 
   options = options_for_tests();
@@ -356,6 +382,11 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_INPUT_SEAT=polaris-input-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_WORKER_NAME=polaris-worker-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_COMPOSITOR=gamescope"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_RUNTIME_PROFILE=steam"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_WIDTH=3840"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_HEIGHT=2160"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_REFRESH_MILLIHZ=97000"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_HDR=1"));
   EXPECT_TRUE(has_argument(
     argv,
     "--mount=type=bind,src=/run/user/1000/polaris-workers/"
@@ -370,6 +401,10 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   ));
   EXPECT_TRUE(has_argument(argv, "--health-on-failure=none"));
   EXPECT_TRUE(has_argument(argv, "--workload-key=steam-game;literal"));
+  EXPECT_TRUE(has_argument(
+    argv,
+    std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} + std::string(64, 'a')
+  ));
   EXPECT_TRUE(any_argument_contains(argv, "--health-cmd=[\"/usr/bin/polaris-seat-worker\",\"health\"]"));
   EXPECT_FALSE(any_argument_contains(argv, "profile alpha"));
   EXPECT_FALSE(any_argument_contains(argv, "--privileged"));
@@ -379,6 +414,36 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_FALSE(any_argument_contains(argv, "keep-groups"));
   EXPECT_FALSE(any_argument_contains(argv, "POLARIS_AUTH_TOKEN"));
   EXPECT_FALSE(any_argument_contains(argv, std::string(64, '0')));
+}
+
+TEST(MultiseatPodmanBackend, ProfileSelectsOneExactRuntimeImageAndTypedWorkerProfile) {
+  fake_host_t host;
+  backend_t backend {host, options_for_tests()};
+  const auto spec = valid_spec(
+    1,
+    2,
+    "polaris-worker-controller-a1b2-2",
+    "profile beta",
+    "heroic-game"
+  );
+  host.push({
+    .exit_status = 0,
+    .output = std::string {second_id} + "\n",
+  });
+
+  ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
+  ASSERT_EQ(host.calls.size(), std::size_t {1});
+  const auto &argv = host.calls.front();
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_RUNTIME_PROFILE=heroic"));
+  EXPECT_TRUE(has_argument(
+    argv,
+    std::string {"ghcr.io/papi-ux/polaris-seat-heroic@sha256:"} + std::string(64, 'b')
+  ));
+  EXPECT_FALSE(has_argument(
+    argv,
+    std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} + std::string(64, 'a')
+  ));
+  EXPECT_FALSE(any_argument_contains(argv, "profile beta"));
 }
 
 TEST(MultiseatPodmanBackend, LaunchRejectsPrivilegedOrInaccessibleHostsBeforeCommand) {
@@ -417,6 +482,14 @@ TEST(MultiseatPodmanBackend, LaunchRejectsUnknownOrNonConcreteAllocation) {
 
   spec = valid_spec();
   spec.render_node = "/dev/dri/renderD129";
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+
+  spec = valid_spec();
+  spec.runtime_profile = runtime_profile_e::heroic;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+
+  spec = valid_spec();
+  spec.display_mode.refresh_millihz = 0;
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
   EXPECT_TRUE(host.calls.empty());
 }
@@ -493,6 +566,38 @@ TEST(MultiseatPodmanBackend, NonzeroLaunchRejectsMissingAndQuarantinesUnsafeWork
   EXPECT_EQ(stopped_backend.launch(spec), worker_command_result_e::rejected);
 }
 
+TEST(MultiseatPodmanBackend, NonzeroLaunchQuarantinesChangedRuntimeBindings) {
+  struct mismatch_t {
+    const char *label;
+    std::string value;
+  };
+  const std::vector<mismatch_t> mismatches {
+    {"io.polaris.multiseat.runtime-profile", "heroic"},
+    {
+      "io.polaris.multiseat.runtime-image",
+      std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} + std::string(64, 'c'),
+    },
+    {"io.polaris.multiseat.display-width", "1920"},
+    {"io.polaris.multiseat.display-height", "1080"},
+    {"io.polaris.multiseat.display-refresh-millihz", "60000"},
+    {"io.polaris.multiseat.display-hdr", "0"},
+  };
+
+  for (const auto &mismatch : mismatches) {
+    SCOPED_TRACE(mismatch.label);
+    fake_host_t host;
+    backend_t backend {host, options_for_tests()};
+    const auto spec = valid_spec();
+    auto existing = container_for(spec, first_id, "running", "healthy");
+    existing["Config"]["Labels"][mismatch.label] = mismatch.value;
+    host.push({.exit_status = 125});
+    queue_inventory(host, {std::move(existing)});
+
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::indeterminate);
+    EXPECT_EQ(host.calls.size(), std::size_t {3});
+  }
+}
+
 TEST(MultiseatPodmanBackend, InventoryParsesIndependentWorkerHealthAndIdentity) {
   fake_host_t host;
   backend_t backend {host, options_for_tests()};
@@ -565,6 +670,32 @@ TEST(MultiseatPodmanBackend, InventoryRejectsTruncationAndIncompleteLabels) {
   malformed["Config"]["Labels"].erase("io.polaris.multiseat.generation");
   queue_inventory(malformed_host, {std::move(malformed)});
   EXPECT_THROW(malformed_backend.inventory(), std::runtime_error);
+}
+
+TEST(MultiseatPodmanBackend, InventoryRejectsMalformedRuntimeBindingLabels) {
+  struct malformed_t {
+    const char *label;
+    std::string value;
+  };
+  const std::vector<malformed_t> malformed_values {
+    {"io.polaris.multiseat.runtime-profile", "automatic"},
+    {"io.polaris.multiseat.runtime-image", "ghcr.io/papi-ux/polaris-seat:latest"},
+    {"io.polaris.multiseat.display-width", "0"},
+    {"io.polaris.multiseat.display-height", "16385"},
+    {"io.polaris.multiseat.display-refresh-millihz", "999"},
+    {"io.polaris.multiseat.display-hdr", "true"},
+  };
+
+  for (const auto &malformed_value : malformed_values) {
+    SCOPED_TRACE(malformed_value.label);
+    fake_host_t host;
+    backend_t backend {host, options_for_tests()};
+    auto malformed = container_for(valid_spec(), first_id, "running", "healthy");
+    malformed["Config"]["Labels"][malformed_value.label] = malformed_value.value;
+    queue_inventory(host, {std::move(malformed)});
+
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+  }
 }
 
 TEST(MultiseatPodmanBackend, InventoryRejectsIdCardinalityAndBoundViolations) {
