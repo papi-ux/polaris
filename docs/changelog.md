@@ -7,8 +7,20 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-- Fixes a Linux Vulkan Video crash at client disconnect by closing FFmpeg's codec-owned picture views before releasing Polaris's converter resources, and records bounded teardown phase markers for field verification.
-- Advertises the encoder backends compiled into the host and lets a capable Nova client choose one for a single game without rewriting `polaris.conf`. Among per-game choices, Auto is the only fallback policy; an explicit backend is live-probed strictly, bound to the deterministic launch envelope, reported in session status, and restored to the host default at teardown. Persisted host choices retain their existing fallback behavior, except Vulkan which remains strict.
+## v1.4.2 - 2026-09-04
+
+A stability and diagnostics update matched with Nova v1.4.2. Polaris lets a capable Nova client choose the encoder for a single game, closes a Linux Vulkan Video crash at disconnect, keeps SteamOS's gamescope file capability from breaking private streams, and stops stale helper installs from being debugged as Polaris bugs. Existing configurations and paired devices remain valid.
+
+- Fixes a Linux Vulkan Video crash at client disconnect by closing FFmpeg's codec-owned picture views before releasing Polaris's converter resources, and records bounded teardown phase markers for field verification
+- Advertises the encoder backends compiled into the host and lets a capable Nova client choose one for a single game without rewriting `polaris.conf`. Among per-game choices, Auto is the only fallback policy; an explicit backend is live-probed strictly, bound to the deterministic launch envelope, reported in session status, and restored to the host default at teardown. Persisted host choices retain their existing fallback behavior, except Vulkan which remains strict
+- Keeps harmless low-latency LAN RTT jitter from reducing the Auto Safe bitrate, and keeps a clean Auto Safe recovery informational in Doctor while confirmed media loss still warns
+- Makes machine-facing decimal parsing and formatting locale-independent across `/optimize`, display planning, launch profiles, compositor arguments, and telemetry, so a host running under a comma-decimal locale can launch again, and keeps GTK tray initialization from changing Polaris's numeric semantics
+- Starts the private nested gamescope compositor with `no_new_privs`, so the `cap_sys_nice` file capability SteamOS and Arch ship on gamescope can no longer hide `/proc` ownership from the same-user checks that prove which compositor owns the stream; desktop Game Mode keeps its capability
+- Runtime-masks the idle compositor unit only where one exists, repairs a leaked runtime mask on the idempotent stop path, and classifies the scripts/install layout of an idle unit with the host portal as `host-portal` instead of refusing it as inconsistent, so standalone packages and manual installs no longer wedge after a failed start
+- Skips the private portal rebind on hosts without a private portal unit instead of polling an absent bus for eight seconds and logging a warning that read like a failure
+- Resolves `polaris-gamescope-session` beside the Polaris binary before PATH, ships reference copies of the helper modules, and reports at launch when the launcher in use is shadowed by a stale copy or was installed from a different checkout
+- Captures a labwc startup client's exit status and a bounded, redacted stderr tail when no private-session window appears, and records bounded per-session evidence for encoded frames that exceed the four-block FEC protection envelope; both stay informational in Doctor unless corroborating media-loss or pacing evidence exists
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official release assets
 
 ## v1.4.1 - 2026-09-03
 
