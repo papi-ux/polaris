@@ -77,6 +77,7 @@ namespace multiseat::input {
     permission_denied,
     sequence_exhausted,
     authority_rejected,
+    session_closed,
   };
 
   struct moonlight_route_result_t {
@@ -136,6 +137,13 @@ namespace multiseat::input {
     invalid_sequence,
   };
 
+  enum class controller_feedback_ack_result_e {
+    acknowledged,
+    not_pending,
+    closed,
+    invalid_sequence,
+  };
+
   /**
    * One bounded queue per immutable seat generation. At most one latest
    * rumble state is retained for each of the sixteen controller slots.
@@ -159,6 +167,10 @@ namespace multiseat::input {
 
     [[nodiscard]] controller_feedback_queue_result_e push(
       const controller_feedback_t &feedback
+    );
+    [[nodiscard]] std::optional<moonlight_feedback_t> peek() const;
+    [[nodiscard]] controller_feedback_ack_result_e acknowledge(
+      std::uint64_t source_sequence
     );
     [[nodiscard]] std::optional<moonlight_feedback_t> pop();
     void close();

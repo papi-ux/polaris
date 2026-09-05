@@ -929,6 +929,55 @@ namespace {
     );
   }
 
+  TEST(MultiseatMoonlightInputAdapter, FeedbackPeekAckKeepsANewerSameSlotState) {
+    const auto handle = handle_for(25);
+    moonlight_controller_feedback_queue_t queue {handle};
+    ASSERT_EQ(
+      queue.push(feedback_for(handle, 1, 0, 10, 20)),
+      controller_feedback_queue_result_e::enqueued
+    );
+    const auto first = queue.peek();
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->source_sequence, 1U);
+
+    ASSERT_EQ(
+      queue.push(feedback_for(handle, 2, 0, 30, 40)),
+      controller_feedback_queue_result_e::coalesced
+    );
+    EXPECT_EQ(
+      queue.acknowledge(first->source_sequence),
+      controller_feedback_ack_result_e::not_pending
+    );
+    EXPECT_EQ(queue.pending(), 1U);
+    const auto newest = queue.peek();
+    ASSERT_TRUE(newest.has_value());
+    EXPECT_EQ(newest->source_sequence, 2U);
+    EXPECT_EQ(newest->message.data.rumble.lowfreq, 30U);
+    EXPECT_EQ(
+      queue.acknowledge(0),
+      controller_feedback_ack_result_e::invalid_sequence
+    );
+    EXPECT_EQ(
+      queue.acknowledge(3),
+      controller_feedback_ack_result_e::invalid_sequence
+    );
+    EXPECT_EQ(
+      queue.acknowledge(2),
+      controller_feedback_ack_result_e::acknowledged
+    );
+    EXPECT_FALSE(queue.peek().has_value());
+    EXPECT_EQ(
+      queue.acknowledge(2),
+      controller_feedback_ack_result_e::not_pending
+    );
+
+    queue.close();
+    EXPECT_EQ(
+      queue.acknowledge(2),
+      controller_feedback_ack_result_e::closed
+    );
+  }
+
   TEST(MultiseatMoonlightInputAdapter, FeedbackQueueIsRaceFreeUnderDrain) {
     const auto handle = handle_for(30);
     moonlight_controller_feedback_queue_t queue {handle};

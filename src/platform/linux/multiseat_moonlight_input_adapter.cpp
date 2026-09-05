@@ -714,6 +714,49 @@ namespace multiseat::input {
   }
 
   std::optional<moonlight_feedback_t>
+    moonlight_controller_feedback_queue_t::peek() const {
+    std::scoped_lock lock {mutex_};
+    std::size_t selected = pending_.size();
+    for (std::size_t index = 0; index < pending_.size(); ++index) {
+      if (!pending_[index]) {
+        continue;
+      }
+      if (selected == pending_.size() ||
+          pending_[index]->source_sequence <
+            pending_[selected]->source_sequence) {
+        selected = index;
+      }
+    }
+    return selected == pending_.size() ? std::nullopt : pending_[selected];
+  }
+
+  controller_feedback_ack_result_e
+    moonlight_controller_feedback_queue_t::acknowledge(
+      std::uint64_t source_sequence
+    ) {
+    std::scoped_lock lock {mutex_};
+    if (closed_) {
+      return controller_feedback_ack_result_e::closed;
+    }
+    if (source_sequence == 0 || source_sequence > last_sequence_) {
+      return controller_feedback_ack_result_e::invalid_sequence;
+    }
+    const auto pending = std::find_if(
+      pending_.begin(),
+      pending_.end(),
+      [source_sequence](const auto &candidate) {
+        return candidate && candidate->source_sequence == source_sequence;
+      }
+    );
+    if (pending == pending_.end()) {
+      return controller_feedback_ack_result_e::not_pending;
+    }
+    pending->reset();
+    --pending_count_;
+    return controller_feedback_ack_result_e::acknowledged;
+  }
+
+  std::optional<moonlight_feedback_t>
     moonlight_controller_feedback_queue_t::pop() {
     std::scoped_lock lock {mutex_};
     std::size_t selected = pending_.size();

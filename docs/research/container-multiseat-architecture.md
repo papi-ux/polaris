@@ -617,13 +617,42 @@ the zero state which stops rumble, while retained cross-slot states drain in
 their source-sequence order. Closing the queue clears it permanently, and a
 stale generation, gap, malformed event, or callback after close cannot enter.
 
+The offline session-ownership edge binds those adapters to one existing
+authenticated control lifetime without moving authentication into the input
+parser. Its key is the non-secret launch-session ID plus the process-lifetime
+session generation already assigned after launch authentication. A trusted
+binding source must atomically claim that exact key and return one exclusive
+lease containing the full seat handle and authoritative input/feedback
+permissions. No raw session token crosses or persists in this module. Opening
+also requires the exact input allocation to remain admitted and refuses touch,
+pen, controller, rumble authority, or feedback slots absent from its device
+plan.
+
+When feedback is authorized, a second injected source returns an owned
+subscription for the exact seat generation. Its callback captures only weak
+shared state, so retaining or invoking an old function cannot dereference a
+destroyed bridge. The queue supports peek plus sequence acknowledgement:
+retryable sends retain the state inside the same fixed sixteen slots, while a
+newer same-slot callback can supersede an in-flight value without the older
+acknowledgement erasing it. Sends are serialized and carry the complete
+authenticated binding. A closed sender or exception closes the bridge rather
+than leaving input alive without its control owner.
+
+Close order is explicit. The bridge first rejects new input, feedback, and
+drain operations. It then synchronously detaches the feedback subscription,
+waits for every already-admitted operation, clears the queue, and only then
+releases the authenticated-session lease. Lifecycle locks are not held while
+calling the input authority or feedback sender, allowing synchronous rumble
+publication during an input route without deadlock. The sender is forbidden
+from re-entering close or drain on the same bridge.
+
 These classes are still offline source seams. The live control stream does not
-invoke the packet adapter, the singleton does not construct the authority or
-feedback queue, and no session drains the converted feedback. Production
-construction, crash-persistent node discovery, rootless group/SELinux
-deployment policy, and physical container proof remain required. Steam Input
-also needs a separately mediated creation path; granting its container raw
-uinput would reintroduce the authority this contract removes.
+construct or invoke the bridge, no production implementation supplies its
+binding/feedback interfaces, and the singleton does not construct the input
+authority. Production construction, crash-persistent node discovery, rootless
+group/SELinux deployment policy, and physical container proof remain required.
+Steam Input also needs a separately mediated creation path; granting its
+container raw uinput would reintroduce the authority this contract removes.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless

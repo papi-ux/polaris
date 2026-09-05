@@ -110,14 +110,33 @@ so a zero-magnitude stop replaces an older pending rumble without growing an
 unbounded queue. Remaining states drain in source-sequence order; teardown can
 close and clear the queue permanently.
 
+An offline session bridge now owns those two directions for one exact
+authenticated control lifetime. A trusted source atomically claims the
+existing non-secret launch ID plus process-local session generation and returns
+an exclusive lease containing the seat handle, input permissions, and rumble
+permission. The bridge never accepts or stores a session token. It refuses an
+unprepared seat, permissions broader than the allocation's device plan, a
+duplicate session claim, or missing feedback dependencies.
+
+Feedback registration is also an owned subscription rather than a callback
+capturing the bridge. The callback holds only a weak state reference, and
+delivery peeks then acknowledges the queue so a retry remains within the same
+fixed sixteen slots. A newer same-slot state may supersede the state being sent
+without being erased by its older acknowledgement. Teardown stops new work,
+synchronously detaches feedback publication, waits for already-admitted work,
+clears queued feedback, and only then releases the authenticated lease. A
+closed or throwing sender fails the session closed.
+
 This is still not a usable production input data plane. Nothing invokes this
-adapter from a live control stream, constructs the backend and queue from the
-singleton runtime, or drains feedback into a client session. The worker's older
-opaque input/feedback test adapter is deliberately not treated as injection
-authority. Mediated Steam Input also remains missing. Rootless supplementary-
-group and SELinux access require an explicit deployment decision and physical
-validation; this source checkpoint does not add `keep-groups`, change host
-policy, or claim that an image can use the mapped nodes.
+bridge from a live control stream, implements its trusted binding source from a
+real session, connects its feedback subscription to the inputtino backend, or
+sends queued feedback to a client. The singleton runtime constructs none of
+these classes. The worker's older opaque input/feedback test adapter is
+deliberately not treated as injection authority. Mediated Steam Input also
+remains missing. Rootless supplementary-group and SELinux access require an
+explicit deployment decision and physical validation; this source checkpoint
+does not add `keep-groups`, change host policy, or claim that an image can use
+the mapped nodes.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or

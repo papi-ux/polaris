@@ -519,6 +519,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_input_authority.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_input_adapter.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_input_adapter.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_session_bridge.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_session_bridge.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"
