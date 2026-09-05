@@ -6,8 +6,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace launch_profile {
 
@@ -64,6 +67,46 @@ namespace launch_profile {
     std::string reason_code = "platform_desktop_only";
     bool normalized = false;
   };
+
+  /** One explicit launch field the client sent that Polaris cannot honor, and why. */
+  struct explicit_field_problem_t {
+    std::string field;
+    std::string reason;
+  };
+
+  /** The explicit launch fields of an optimize request, parsed and bound-checked once. */
+  struct explicit_launch_fields_t {
+    std::optional<int> width;
+    std::optional<int> height;
+    std::optional<int> bitrate_kbps;
+    std::optional<int> fps_millihertz;
+    std::optional<int> client_max_fps_millihertz;
+    bool display_locked = false;
+    bool bitrate_locked = false;
+    bool topology_locked = false;
+    std::optional<bool> hdr;
+    std::vector<explicit_field_problem_t> problems;
+
+    [[nodiscard]] bool any_explicit_mode() const {
+      return width.has_value() || height.has_value() || fps_millihertz.has_value();
+    }
+
+    [[nodiscard]] bool complete_explicit_mode() const {
+      return width.has_value() && height.has_value() && fps_millihertz.has_value();
+    }
+  };
+
+  using explicit_field_lookup_t = std::function<std::optional<std::string>(std::string_view)>;
+
+  /**
+   * Parse the explicit launch fields of a request. Every problem names the
+   * field and the value seen, so a rejection can say which field failed
+   * instead of the one generic sentence that hid a comma-decimal fps for weeks.
+   */
+  explicit_launch_fields_t parse_explicit_launch_fields(const explicit_field_lookup_t &lookup);
+
+  /** The sentence a client is shown for rejected explicit fields; generic when nothing is named. */
+  std::string describe_explicit_launch_rejection(const explicit_launch_fields_t &fields);
 
   std::string normalize_preset(std::string preset);
   std::string preset_label(const std::string &preset);

@@ -38,6 +38,15 @@ namespace update_status {
   nlohmann::json distro_json(const distro_info_t &distro);
   nlohmann::json host_update_status();
 
+  /**
+   * The Polaris version the OS package database reports, or empty when it
+   * reports none. Debian epochs and package releases are not part of it.
+   */
+  std::string parse_installed_package_version(std::string_view package_family, std::string_view query_output);
+
+  /** Query the host package manager for the installed polaris package; empty when unknown. */
+  std::string installed_package_version(const distro_info_t &distro);
+
 #ifdef POLARIS_TESTS
   inline distro_info_t parse_os_release_for_tests(std::string_view content) {
     return parse_os_release(content);

@@ -320,6 +320,12 @@ wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/relea
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
 
+If you installed without `-r`, or rolled back a deployment and installed again, the
+new package is only staged: the running deployment, and the version the dashboard
+reports, do not change until you reboot. `rpm-ostree status` lists the staged
+deployment above the booted one. `rpm-ostree install` answering "already installed"
+while the dashboard still shows the old version means exactly this.
+
 After the reboot, refresh `/usr/local/bin/polaris-kms` and its capability using
 the copy and `setcap` steps from [Install](#install), restart the service, and
 return to `https://127.0.0.1:47990/#/login` with the existing credentials. Do not
