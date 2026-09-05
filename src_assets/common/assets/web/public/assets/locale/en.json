@@ -1822,6 +1822,7 @@
     "network_path_tester": "Network Path Tester",
     "network_path_ceiling": "Recommended ceiling: {kbps} kbps.",
     "controller_tester": "Controller/Input Tester",
+    "gamescope_helper_tester": "Gamescope Session Helper",
     "controller_detect": "Detect controller",
     "controller_log_a": "Log A press",
     "controller_test_rumble": "Test rumble",

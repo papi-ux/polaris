@@ -1062,6 +1062,59 @@ export function buildControllerInputTestReport(input = {}) {
   }
 }
 
+export function buildGamescopeHelperReport(probe = {}) {
+  if (!probe || probe.relevant !== true) return null
+  const launcher = String(probe.launcher || '')
+  const shadowed = String(probe.shadowed || '')
+  const bundled = String(probe.bundled || '')
+  const runtimeLib = String(probe.runtimeLib || '')
+  const sessionMatch = lower(probe.sessionMatch) || 'unknown'
+  const runtimeLibMatch = lower(probe.runtimeLibMatch) || 'unknown'
+  const matchDetail = (match, subject) => ({
+    exact: `${subject} is identical to the module this build ships.`,
+    wrapped: `${subject} wraps the module this build ships (Nix or the manual installer).`,
+    mismatch: `${subject} was installed from a different checkout than this Polaris build.`,
+  })[match] || `${subject} was not compared against a bundled copy.`
+  const checks = [
+    checklistItem('launcher', 'Session launcher', launcher ? 'pass' : 'fail',
+      launcher ? `Polaris runs ${launcher}.` : 'No polaris-gamescope-session launcher beside the Polaris binary or on PATH.',
+      launcher ? 'Every nested gamescope session starts through this launcher.' : 'Install the Polaris package for this distro, or run scripts/install/03-install-gamescope-stack.sh from this Polaris version.'),
+    checklistItem('shadowed', 'Stale copy on PATH', shadowed ? 'warning' : 'pass',
+      shadowed ? `PATH would have picked ${shadowed}; the packaged launcher is used instead.` : 'No other copy of polaris-gamescope-session sits ahead on PATH.',
+      shadowed ? 'Remove that copy if it came from an older scripts/install run so nothing else can pick it up.' : 'Nothing to clean up.'),
+    checklistItem('bundle', 'Launcher matches this build', !launcher ? 'warning' : sessionMatch === 'mismatch' ? 'fail' : sessionMatch === 'unknown' ? 'warning' : 'pass',
+      launcher ? matchDetail(sessionMatch, 'The launcher in use') : 'Nothing to compare without a launcher.',
+      sessionMatch === 'mismatch' ? 'Reinstall the gamescope helpers from this Polaris version before reporting gamescope_stream problems.' : sessionMatch === 'unknown' ? 'This build ships no reference copy to compare against; a distro package or an installed build does.' : 'The session fixes in this Polaris version are the ones that run.'),
+    checklistItem('runtime-lib', 'Runtime library matches this build', runtimeLibMatch === 'mismatch' ? 'fail' : 'pass',
+      runtimeLib ? matchDetail(runtimeLibMatch, 'The runtime library beside the launcher') : 'No sibling runtime library to compare; wrapped installs inline it.',
+      runtimeLibMatch === 'mismatch' ? 'Reinstall both helpers together; the launcher sources this library.' : 'Nothing to do.'),
+  ]
+  const status = worstStatus(checks)
+  const summary = !launcher
+    ? 'gamescope_stream is configured but no session launcher is installed; nested sessions fall back to attach.'
+    : status === 'fail'
+      ? 'The gamescope session helper in use does not match this Polaris build.'
+      : status === 'warning'
+        ? (shadowed ? 'The packaged launcher is in use, but a stale copy on PATH should be removed.' : 'The launcher could not be compared against a bundled copy.')
+        : 'The gamescope session helper matches this Polaris build.'
+  return {
+    kind: 'gamescope-helper',
+    status,
+    classification: status === 'pass' ? 'clean' : 'host',
+    summary,
+    checks,
+    advancedEvidence: sanitizeDiagnosticsValue({
+      launcher,
+      shadowed,
+      bundled,
+      runtimeLib,
+      sessionMatch,
+      runtimeLibMatch,
+      advisories: Array.isArray(probe.advisories) ? probe.advisories : [],
+    }),
+  }
+}
+
 export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '' } = {}) {
   const loss = Number(stats.packet_loss)
   const latency = Number(stats.latency_ms)
