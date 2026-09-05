@@ -98,3 +98,15 @@ TEST(UpdateStatusTests, RepositoryUpgradeCommandFollowsTheHostShape) {
   // No repository is served for Ubuntu, so there is no command to offer.
   EXPECT_EQ(update_status::repository_upgrade_command_for_tests(ubuntu, false), "");
 }
+
+TEST(UpdateStatusTests, ParsesInstalledPackageVersionsAcrossPackageFamilies) {
+  using update_status::parse_installed_package_version;
+  EXPECT_EQ(parse_installed_package_version("fedora", "1.4.2\n"), "1.4.2");
+  EXPECT_EQ(parse_installed_package_version("ubuntu", "1:1.4.2-1\n"), "1.4.2");
+  EXPECT_EQ(parse_installed_package_version("arch", "polaris 1.4.2-1\n"), "1.4.2");
+  EXPECT_EQ(parse_installed_package_version("steamos", "polaris 1.4.2-1"), "1.4.2");
+  EXPECT_EQ(parse_installed_package_version("fedora", ""), "");
+  EXPECT_EQ(parse_installed_package_version("fedora", "package polaris is not installed\n"), "");
+  EXPECT_EQ(parse_installed_package_version("arch", "error: package 'polaris' was not found"), "");
+  EXPECT_EQ(parse_installed_package_version("ubuntu", "dpkg-query: no packages found matching polaris"), "");
+}

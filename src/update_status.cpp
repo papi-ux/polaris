@@ -5,7 +5,9 @@
 #include "update_status.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -242,6 +244,62 @@ namespace update_status {
     };
   }
 
+  std::string parse_installed_package_version(std::string_view package_family, std::string_view query_output) {
+    const auto trim = [](std::string text) {
+      const auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+      while (!text.empty() && is_space(text.back())) text.pop_back();
+      std::size_t start = 0;
+      while (start < text.size() && is_space(text[start])) ++start;
+      return text.substr(start);
+    };
+    std::string text = trim(std::string(query_output));
+    if (text.empty()) {
+      return {};
+    }
+    if (package_family == "arch" || package_family == "steamos") {
+      // pacman -Q prints "polaris 1.4.2-1".
+      const auto space = text.find(' ');
+      if (space == std::string::npos) {
+        return {};
+      }
+      text = trim(text.substr(space + 1));
+    }
+    if (const auto epoch = text.find(':'); epoch != std::string::npos) {
+      text = text.substr(epoch + 1);
+    }
+    if (const auto release = text.find('-'); release != std::string::npos) {
+      text = text.substr(0, release);
+    }
+    const bool version_like = !text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+      return std::isdigit(ch) != 0 || ch == '.';
+    });
+    return version_like ? text : std::string {};
+  }
+
+  std::string installed_package_version(const distro_info_t &distro) {
+#ifdef __linux__
+    const auto family = package_family(distro);
+    const char *command = "rpm -q --qf '%{VERSION}' polaris 2>/dev/null";
+    if (family == "arch" || family == "steamos") {
+      command = "pacman -Q polaris 2>/dev/null";
+    } else if (family == "ubuntu" || family == "debian") {
+      command = "dpkg-query -W -f='${Version}' polaris 2>/dev/null";
+    }
+    std::string output;
+    if (FILE *pipe = popen(command, "r")) {
+      std::array<char, 256> buffer {};
+      while (output.size() < 4096 && std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
+        output += buffer.data();
+      }
+      pclose(pipe);
+    }
+    return parse_installed_package_version(family, output);
+#else
+    (void) distro;
+    return {};
+#endif
+  }
+
   nlohmann::json host_update_status() {
     const auto distro = detect_host_distro();
 
@@ -254,6 +312,9 @@ namespace update_status {
       {"status", true},
       {"platform", POLARIS_PLATFORM},
       {"version", PROJECT_VERSION},
+      // The package database can be ahead of the running process after an
+      // install without a restart; the console turns that into a plain hint.
+      {"installed_package_version", installed_package_version(distro)},
       // A host with the repository configured is no longer on the download-a-
       // file path, so this stops claiming otherwise.
       {"manual_install_only", !repository},
