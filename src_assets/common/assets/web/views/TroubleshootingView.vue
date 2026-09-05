@@ -187,6 +187,24 @@
           </details>
         </div>
 
+        <div v-if="gamescopeHelperReport" class="surface-subtle border p-4" :class="statusTone(gamescopeHelperReport.status).card" data-readonly>
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.gamescope_helper_tester') }}</div>
+            <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(gamescopeHelperReport.status).badge">{{ statusTone(gamescopeHelperReport.status).label }}</span>
+          </div>
+          <p class="mt-2 text-sm leading-relaxed text-storm">{{ gamescopeHelperReport.summary }}</p>
+          <details class="mt-3 text-xs text-storm">
+            <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
+            <div class="mt-2 space-y-2">
+              <div v-for="check in gamescopeHelperReport.checks" :key="check.key" class="rounded-lg border border-storm/15 bg-void/40 px-3 py-2">
+                <div class="font-medium text-silver">{{ check.label }} · {{ statusTone(check.status).label }}</div>
+                <div>{{ check.detail }}</div>
+                <div class="mt-1 text-ice">{{ check.action }}</div>
+              </div>
+            </div>
+          </details>
+        </div>
+
         <div class="surface-subtle border p-4" :class="statusTone(postSessionReport.status).card" data-readonly>
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.post_session_report') }}</div>
@@ -499,6 +517,7 @@ import { requestHostRestart } from '../restart-host.js'
 import {
   buildAnonymizedDiagnosticsBundle,
   buildControllerInputTestReport,
+  buildGamescopeHelperReport,
   buildFixMyStreamChecklist,
   buildGithubIssueDraft,
   buildGithubIssueUrl,
@@ -561,6 +580,7 @@ const requestedConfirmAction = ref(null)
 const controllerEvents = ref([])
 const controllerRumbleSupported = ref(null)
 const nativeNetworkPathProbe = ref(null)
+const gamescopeHelperProbe = ref(null)
 const lastCompletedStreamStats = ref(null)
 const lastDisconnectReason = ref('')
 
@@ -735,6 +755,8 @@ const controllerInputReport = computed(() => buildControllerInputTestReport({
   rumbleSupported: controllerRumbleSupported.value,
 }))
 
+const gamescopeHelperReport = computed(() => buildGamescopeHelperReport(gamescopeHelperProbe.value))
+
 const postSessionReport = computed(() => buildPostSessionStreamReport({
   stats: lastCompletedStreamStats.value || streamStats.value || {},
   logs: logs.value,
@@ -884,6 +906,21 @@ function refreshNetworkPathProbe() {
     .catch((error) => {
       console.error("Error fetching network path probe:", error)
       nativeNetworkPathProbe.value = null
+    })
+}
+
+function refreshGamescopeHelperProbe() {
+  fetch("./api/support/gamescope-helper", { credentials: 'include' })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    })
+    .then((probe) => {
+      gamescopeHelperProbe.value = probe?.status === false ? null : probe
+    })
+    .catch((error) => {
+      console.error("Error fetching gamescope helper probe:", error)
+      gamescopeHelperProbe.value = null
     })
 }
 
@@ -1270,6 +1307,7 @@ fetch("/api/config")
 logInterval = setInterval(() => { refreshLogs() }, 5000)
 refreshLogs()
 refreshNetworkPathProbe()
+refreshGamescopeHelperProbe()
 refreshLastRun()
 refreshAiStatus()
 projection.load()
