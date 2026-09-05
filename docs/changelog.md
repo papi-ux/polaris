@@ -7,12 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.4.3 - 2026-09-05
+
+A diagnostics and packaging update matched with Nova v1.4.3. Doctor names the gamescope session helper Polaris will run, the console and Nova get a coded answer when an artwork search fails, partial configuration writes merge instead of rewriting the file, and an experimental systemd system extension image joins the packages for rpm-ostree hosts. Existing configurations and paired devices remain valid.
+
 - Shows a Gamescope Session Helper card in Doctor & Support on Linux hosts configured for `gamescope_stream`, naming the launcher Polaris will run, a stale copy shadowing it on PATH, and a launcher or runtime library installed from a different checkout
+- Falls back to the bundled `polaris-gamescope-session` reference copy when no launcher is installed beside the binary or on PATH, so AppImage and build-tree hosts can start private sessions, and adds a shell test that exercises the gamescope stack installer
 - Adds `PATCH /api/config`, which merges a partial write onto the existing configuration instead of rewriting the file from the request body the way `POST` does, and logs how many existing keys a `POST` left out
 - Names the cause when an artwork search fails: the Nova-facing candidate search and the console cover search now answer with a stable code for a missing SteamGridDB key, a rejected key, rate limiting, or an unreachable provider instead of a bare status or an empty result
 - Names the field when explicit launch fields are rejected, including the value seen, so a comma-decimal `fps` or a lock flag without its prerequisite no longer reads as "must be complete and within supported bounds"
 - Tells the console when the installed Polaris package is newer than the running process, which is what a package upgrade without a service restart looks like
 - Publishes `Polaris-sysext-x86_64.raw`, the Fedora 44 RPM repacked as an experimental systemd system extension so rpm-ostree hosts such as Bazzite can run Polaris without layering a package or rebooting
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
 
 ## v1.4.2 - 2026-09-04
 
