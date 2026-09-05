@@ -24,6 +24,7 @@ namespace platf::gamescope_session_helper {
     std::filesystem::path shadowed;  ///< a different copy PATH would have picked; empty when none
     std::filesystem::path bundled;  ///< module copy shipped with this build; empty when absent
     std::filesystem::path runtime_lib;  ///< sibling runtime library that was compared; empty when absent
+    bool bundled_fallback {false};  ///< helper is the reference copy itself: nothing was installed beside the binary or on PATH
     bundle_match_t session_match {bundle_match_t::unknown};
     bundle_match_t runtime_lib_match {bundle_match_t::unknown};
   };
@@ -35,7 +36,9 @@ namespace platf::gamescope_session_helper {
    * package ships the binary and the launcher together, so they cannot drift
    * apart, while a copy under ~/.local/bin or /usr/local/bin left by an earlier
    * scripts/install run is never updated by the package manager and would
-   * otherwise shadow the packaged one.
+   * otherwise shadow the packaged one. With neither installed, the executable
+   * reference copy shipped with this build runs, so an AppImage or a
+   * build-directory Polaris can still nest instead of silently attaching.
    *
    * @param executable_dir Directory of the running binary, when known.
    * @param path_candidate What a PATH lookup found, or empty.
