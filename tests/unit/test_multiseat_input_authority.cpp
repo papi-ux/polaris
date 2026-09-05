@@ -19,7 +19,6 @@
 #include <vector>
 
 namespace {
-  using multiseat::seat_handle_t;
   using multiseat::input::allocation_t;
   using multiseat::input::authority_t;
   using multiseat::input::backend_create_result_t;
@@ -28,11 +27,13 @@ namespace {
   using multiseat::input::device_kind_e;
   using multiseat::input::device_node_t;
   using multiseat::input::expectation_t;
+  using multiseat::input::input_event_t;
   using multiseat::input::maximum_gamepad_slots;
   using multiseat::input::maximum_input_allocations;
   using multiseat::input::maximum_input_payload_bytes;
   using multiseat::input::plan_t;
   using multiseat::input::status_e;
+  using multiseat::seat_handle_t;
 
   seat_handle_t handle_for(
     std::uint32_t slot,
@@ -119,7 +120,7 @@ namespace {
       seat_handle_t handle;
       std::string input_seat;
       std::uint64_t sequence = 0;
-      std::vector<std::uint8_t> payload;
+      input_event_t event;
     };
 
     backend_create_result_t create(const expectation_t &expectation) override {
@@ -187,7 +188,7 @@ namespace {
       const seat_handle_t &handle,
       std::string_view input_seat,
       std::uint64_t sequence,
-      std::span<const std::uint8_t> payload
+      const input_event_t &event
     ) override {
       if (throw_route) {
         throw std::runtime_error {"private route detail"};
@@ -196,7 +197,7 @@ namespace {
         .handle = handle,
         .input_seat = std::string {input_seat},
         .sequence = sequence,
-        .payload = {payload.begin(), payload.end()},
+        .event = event,
       });
       return next_route;
     }
@@ -330,12 +331,44 @@ namespace {
     ASSERT_TRUE(authority.prepare(first).prepared());
     ASSERT_TRUE(authority.prepare(second).prepared());
 
-    const std::array<std::uint8_t, 3> first_payload {1, 2, 3};
-    const std::array<std::uint8_t, 2> second_payload {9, 8};
+    const auto first_event = input_event_t {
+      .slot = 1,
+      .payload = multiseat::input::gamepad_state_event_t {
+        .buttons = 0x1000,
+        .left_trigger = 12,
+        .right_trigger = 34,
+        .left_stick_x = -200,
+        .left_stick_y = 300,
+        .right_stick_x = 400,
+        .right_stick_y = -500,
+      },
+    };
+    const auto second_event = input_event_t {
+      .payload = multiseat::input::touch_contact_event_t {
+        .pointer_id = 7,
+        .action = multiseat::input::touch_action_e::down,
+        .orientation_degrees = -30,
+        .x = 1000,
+        .y = 2000,
+        .pressure = 3000,
+      },
+    };
+    const auto followup_event = input_event_t {
+      .payload = multiseat::input::mouse_relative_event_t {
+        .delta_x = 4,
+        .delta_y = -5,
+      },
+    };
+    const auto first_payload = multiseat::input::encode_input_event(first_event);
+    const auto second_payload = multiseat::input::encode_input_event(second_event);
+    const auto followup_payload = multiseat::input::encode_input_event(followup_event);
     EXPECT_EQ(authority.route(first.handle, 1, first_payload), status_e::applied);
     EXPECT_EQ(authority.route(second.handle, 1, second_payload), status_e::applied);
     EXPECT_EQ(authority.route(first.handle, 3, first_payload), status_e::invalid_request);
-    EXPECT_EQ(authority.route(first.handle, 2, first_payload), status_e::applied);
+    auto malformed = followup_payload;
+    malformed[5] = 1;
+    EXPECT_EQ(authority.route(first.handle, 2, malformed), status_e::invalid_request);
+    EXPECT_EQ(authority.route(first.handle, 2, followup_payload), status_e::applied);
     EXPECT_EQ(
       authority.route(handle_for(0, 99), 1, first_payload),
       status_e::stale_authority
@@ -345,9 +378,12 @@ namespace {
     EXPECT_EQ(authority.route(second.handle, 2, oversized), status_e::invalid_request);
     ASSERT_EQ(backend.routes.size(), 3U);
     EXPECT_EQ(backend.routes[0].handle, first.handle);
+    EXPECT_EQ(backend.routes[0].event, first_event);
     EXPECT_EQ(backend.routes[1].handle, second.handle);
+    EXPECT_EQ(backend.routes[1].event, second_event);
     EXPECT_EQ(backend.routes[2].handle, first.handle);
     EXPECT_EQ(backend.routes[2].sequence, 2U);
+    EXPECT_EQ(backend.routes[2].event, followup_event);
   }
 
   TEST(MultiseatInputAuthority, CollidingOrMalformedCreateClosesAdmissionAndRollsBack) {
@@ -399,7 +435,12 @@ namespace {
     const auto prepared = authority.prepare(rejected);
     ASSERT_TRUE(prepared.prepared());
     backend.next_route = backend_result_e::indeterminate;
-    const std::array<std::uint8_t, 1> payload {7};
+    const auto payload = multiseat::input::encode_input_event({
+      .payload = multiseat::input::keyboard_key_event_t {
+        .key_code = 0x41,
+        .state = multiseat::input::button_state_e::pressed,
+      },
+    });
     EXPECT_EQ(
       authority.route(rejected.handle, 1, payload),
       status_e::backend_indeterminate

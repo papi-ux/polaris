@@ -73,12 +73,32 @@ can still be removed. Offline tests inject the allocation, kernel probe, host
 device metadata, command runner, and inspect JSON; no input node or container
 engine is opened.
 
-This is still not a usable input data plane. The backend's routing method
-rejects input until a typed authenticated worker bridge exists, and controller
-feedback plus mediated Steam Input remain missing. Rootless supplementary-group
-and SELinux access also require an explicit deployment decision and physical
-validation; this source checkpoint does not add `keep-groups`, change host
-policy, or claim that an image can use the mapped nodes.
+The injected authority now decodes one canonical typed event per route call.
+Keyboard, relative and absolute pointer, pointer button and scroll, touch, pen,
+and complete Xbox-style gamepad state are representable; every encoding is at
+most 24 bytes. The host backend selects only the managed inputtino object held
+by the exact generation and rejects stale handles, wrong input-seat names,
+sequence gaps, unavailable device kinds, impossible opposing D-pad states,
+duplicate key/button transitions, and invalid touch lifecycles. It never writes
+an event node and never gives the worker an injection handle. An indeterminate
+managed-device call poisons that generation's route and inventory until exact
+teardown, so a possibly partial event cannot be replayed after reconciliation.
+
+Xbox rumble callbacks have an explicit controller-facing shape: complete seat
+handle, per-generation sequence, gamepad slot, and bounded low/high magnitudes.
+Callbacks from a released generation are closed before its devices are dropped,
+and any callback already in flight still carries the old generation identity.
+The codec, managed devices, kernel observations, and feedback sink are injected
+in tests; no physical input node is opened.
+
+This is still not a usable production input data plane. Nothing translates live
+Moonlight input into the authority, constructs the backend from the singleton
+runtime, or connects its typed feedback sink to a client. The worker's older
+opaque input/feedback test adapter is deliberately not treated as injection
+authority. Mediated Steam Input also remains missing. Rootless
+supplementary-group and SELinux access require an explicit deployment decision
+and physical validation; this source checkpoint does not add `keep-groups`,
+change host policy, or claim that an image can use the mapped nodes.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or

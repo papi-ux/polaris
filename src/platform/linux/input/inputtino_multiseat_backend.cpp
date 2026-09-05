@@ -6,25 +6,26 @@
 
 #ifdef __linux__
 
-#include <inputtino/input.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cerrno>
-#include <charconv>
-#include <fcntl.h>
-#include <limits>
-#include <map>
-#include <mutex>
-#include <set>
-#include <stdexcept>
-#include <string_view>
-#include <sys/stat.h>
-#include <sys/sysmacros.h>
-#include <thread>
-#include <tuple>
-#include <unistd.h>
-#include <utility>
+  #include <algorithm>
+  #include <array>
+  #include <cerrno>
+  #include <charconv>
+  #include <fcntl.h>
+  #include <inputtino/input.hpp>
+  #include <limits>
+  #include <map>
+  #include <mutex>
+  #include <set>
+  #include <stdexcept>
+  #include <string_view>
+  #include <sys/stat.h>
+  #include <sys/sysmacros.h>
+  #include <thread>
+  #include <tuple>
+  #include <type_traits>
+  #include <unistd.h>
+  #include <utility>
+  #include <variant>
 
 namespace multiseat::input {
   namespace {
@@ -232,11 +233,171 @@ namespace multiseat::input {
                std::tie(right.character_major, right.character_minor);
     }
 
+    float normalized(std::uint16_t value) {
+      return static_cast<float>(value) /
+             static_cast<float>(std::numeric_limits<std::uint16_t>::max());
+    }
+
+    std::optional<inputtino::Mouse::MOUSE_BUTTON> native_mouse_button(
+      mouse_button_e button
+    ) {
+      switch (button) {
+        case mouse_button_e::left:
+          return inputtino::Mouse::LEFT;
+        case mouse_button_e::middle:
+          return inputtino::Mouse::MIDDLE;
+        case mouse_button_e::right:
+          return inputtino::Mouse::RIGHT;
+        case mouse_button_e::side:
+          return inputtino::Mouse::SIDE;
+        case mouse_button_e::extra:
+          return inputtino::Mouse::EXTRA;
+      }
+      return std::nullopt;
+    }
+
+    managed_device_apply_result_e apply_inputtino(
+      inputtino::Keyboard &keyboard,
+      const input_event_t &event,
+      std::uint32_t slot
+    ) {
+      const auto *key = std::get_if<keyboard_key_event_t>(&event.payload);
+      if (!key || event.slot != slot || !supported_keyboard_code(key->key_code)) {
+        return managed_device_apply_result_e::rejected;
+      }
+      if (key->state == button_state_e::pressed) {
+        keyboard.press(static_cast<short>(key->key_code));
+      } else {
+        keyboard.release(static_cast<short>(key->key_code));
+      }
+      return managed_device_apply_result_e::applied;
+    }
+
+    managed_device_apply_result_e apply_inputtino(
+      inputtino::Mouse &mouse,
+      const input_event_t &event,
+      std::uint32_t slot
+    ) {
+      if (event.slot != slot) {
+        return managed_device_apply_result_e::rejected;
+      }
+      if (const auto *relative = std::get_if<mouse_relative_event_t>(&event.payload)) {
+        mouse.move(relative->delta_x, relative->delta_y);
+      } else if (const auto *absolute =
+                   std::get_if<mouse_absolute_event_t>(&event.payload)) {
+        mouse.move_abs(
+          static_cast<int>(absolute->x),
+          static_cast<int>(absolute->y),
+          static_cast<int>(absolute->width),
+          static_cast<int>(absolute->height)
+        );
+      } else if (const auto *button =
+                   std::get_if<mouse_button_event_t>(&event.payload)) {
+        const auto native = native_mouse_button(button->button);
+        if (!native) {
+          return managed_device_apply_result_e::rejected;
+        }
+        if (button->state == button_state_e::pressed) {
+          mouse.press(*native);
+        } else {
+          mouse.release(*native);
+        }
+      } else if (const auto *scroll =
+                   std::get_if<mouse_scroll_event_t>(&event.payload)) {
+        if (scroll->vertical != 0) {
+          mouse.vertical_scroll(scroll->vertical);
+        }
+        if (scroll->horizontal != 0) {
+          mouse.horizontal_scroll(scroll->horizontal);
+        }
+      } else {
+        return managed_device_apply_result_e::rejected;
+      }
+      return managed_device_apply_result_e::applied;
+    }
+
+    managed_device_apply_result_e apply_inputtino(
+      inputtino::TouchScreen &touchscreen,
+      const input_event_t &event,
+      std::uint32_t slot
+    ) {
+      const auto *touch = std::get_if<touch_contact_event_t>(&event.payload);
+      if (!touch || event.slot != slot) {
+        return managed_device_apply_result_e::rejected;
+      }
+      if (touch->action == touch_action_e::release) {
+        touchscreen.release_finger(static_cast<int>(touch->pointer_id));
+      } else {
+        touchscreen.place_finger(
+          static_cast<int>(touch->pointer_id),
+          normalized(touch->x),
+          normalized(touch->y),
+          normalized(touch->pressure),
+          touch->orientation_degrees
+        );
+      }
+      return managed_device_apply_result_e::applied;
+    }
+
+    managed_device_apply_result_e apply_inputtino(
+      inputtino::PenTablet &tablet,
+      const input_event_t &event,
+      std::uint32_t slot
+    ) {
+      const auto *pen = std::get_if<pen_tool_event_t>(&event.payload);
+      if (!pen || event.slot != slot) {
+        return managed_device_apply_result_e::rejected;
+      }
+      tablet.set_btn(inputtino::PenTablet::PRIMARY, (pen->buttons & 0x01U) != 0);
+      tablet.set_btn(inputtino::PenTablet::SECONDARY, (pen->buttons & 0x02U) != 0);
+      tablet.set_btn(inputtino::PenTablet::TERTIARY, (pen->buttons & 0x04U) != 0);
+      const auto tool = pen->tool == pen_tool_e::eraser ?
+                          inputtino::PenTablet::ERASER :
+                          inputtino::PenTablet::PEN;
+      const auto value = normalized(pen->pressure_or_distance);
+      const bool contact = pen->proximity == pen_proximity_e::contact;
+      tablet.place_tool(
+        tool,
+        normalized(pen->x),
+        normalized(pen->y),
+        contact ? value : -1.0F,
+        contact ? -1.0F : value,
+        static_cast<float>(pen->tilt_x_degrees),
+        static_cast<float>(pen->tilt_y_degrees)
+      );
+      return managed_device_apply_result_e::applied;
+    }
+
+    managed_device_apply_result_e apply_inputtino(
+      inputtino::XboxOneJoypad &gamepad,
+      const input_event_t &event,
+      std::uint32_t slot
+    ) {
+      const auto *state = std::get_if<gamepad_state_event_t>(&event.payload);
+      if (!state || event.slot != slot) {
+        return managed_device_apply_result_e::rejected;
+      }
+      gamepad.set_pressed_buttons(state->buttons);
+      gamepad.set_triggers(state->left_trigger, state->right_trigger);
+      gamepad.set_stick(
+        inputtino::Joypad::LS,
+        state->left_stick_x,
+        state->left_stick_y
+      );
+      gamepad.set_stick(
+        inputtino::Joypad::RS,
+        state->right_stick_x,
+        state->right_stick_y
+      );
+      return managed_device_apply_result_e::applied;
+    }
+
     template <typename Device>
     class inputtino_managed_device_t final : public managed_device_t {
     public:
-      explicit inputtino_managed_device_t(Device device) :
-          device_(std::move(device)) {
+      inputtino_managed_device_t(Device device, std::uint32_t slot):
+          device_(std::move(device)),
+          slot_(slot) {
       }
 
       std::vector<std::filesystem::path> nodes() const override {
@@ -249,20 +410,45 @@ namespace multiseat::input {
         return result;
       }
 
+      managed_device_apply_result_e apply(const input_event_t &event) override {
+        return apply_inputtino(device_, event, slot_);
+      }
+
     private:
       Device device_;
+      std::uint32_t slot_ = 0;
     };
 
-    template <typename Device, typename Creator>
+    template<typename Device, typename Creator>
     std::unique_ptr<managed_device_t> create_inputtino_device(
+      const device_spec_t &spec,
+      managed_device_feedback_fn_t feedback,
       Creator &&creator
     ) {
       auto created = std::forward<Creator>(creator)();
       if (!created) {
         return {};
       }
+      if constexpr (std::is_same_v<Device, inputtino::XboxOneJoypad>) {
+        (*created).set_on_rumble(
+          [slot = spec.slot, feedback = std::move(feedback)](int low, int high) {
+            if (!feedback || low < 0 || high < 0 ||
+                low > std::numeric_limits<std::uint16_t>::max() ||
+                high > std::numeric_limits<std::uint16_t>::max()) {
+              return;
+            }
+            feedback({
+              .kind = feedback_kind_e::rumble,
+              .gamepad_slot = slot,
+              .low_frequency = static_cast<std::uint16_t>(low),
+              .high_frequency = static_cast<std::uint16_t>(high),
+            });
+          }
+        );
+      }
       return std::make_unique<inputtino_managed_device_t<Device>>(
-        std::move(*created)
+        std::move(*created),
+        spec.slot
       );
     }
   }  // namespace
@@ -414,7 +600,8 @@ namespace multiseat::input {
   }
 
   std::unique_ptr<managed_device_t> inputtino_device_factory_t::create(
-    const device_spec_t &spec
+    const device_spec_t &spec,
+    managed_device_feedback_fn_t feedback
   ) {
     inputtino::DeviceDefinition definition {
       .name = spec.kernel_name,
@@ -426,25 +613,29 @@ namespace multiseat::input {
     };
     switch (spec.kind) {
       case managed_device_kind_e::keyboard:
-        return create_inputtino_device<inputtino::Keyboard>([&]() {
+        return create_inputtino_device<inputtino::Keyboard>(spec, {}, [&]() {
           return inputtino::Keyboard::create(definition);
         });
       case managed_device_kind_e::mouse:
-        return create_inputtino_device<inputtino::Mouse>([&]() {
+        return create_inputtino_device<inputtino::Mouse>(spec, {}, [&]() {
           return inputtino::Mouse::create(definition);
         });
       case managed_device_kind_e::touch:
-        return create_inputtino_device<inputtino::TouchScreen>([&]() {
+        return create_inputtino_device<inputtino::TouchScreen>(spec, {}, [&]() {
           return inputtino::TouchScreen::create(definition);
         });
       case managed_device_kind_e::pen:
-        return create_inputtino_device<inputtino::PenTablet>([&]() {
+        return create_inputtino_device<inputtino::PenTablet>(spec, {}, [&]() {
           return inputtino::PenTablet::create(definition);
         });
       case managed_device_kind_e::gamepad:
-        return create_inputtino_device<inputtino::XboxOneJoypad>([&]() {
-          return inputtino::XboxOneJoypad::create(definition);
-        });
+        return create_inputtino_device<inputtino::XboxOneJoypad>(
+          spec,
+          std::move(feedback),
+          [&]() {
+            return inputtino::XboxOneJoypad::create(definition);
+          }
+        );
     }
     return {};
   }
@@ -688,16 +879,77 @@ namespace multiseat::input {
   }
 
   struct inputtino_host_backend_t::impl_t {
+    class feedback_gate_t {
+    public:
+      feedback_gate_t(
+        seat_handle_t handle,
+        plan_t plan,
+        controller_feedback_sink_t sink
+      ):
+          handle_(std::move(handle)),
+          plan_(plan),
+          sink_(std::move(sink)) {
+      }
+
+      void activate() {
+        std::scoped_lock lock {mutex_};
+        active_ = true;
+      }
+
+      void deactivate() {
+        std::scoped_lock lock {mutex_};
+        active_ = false;
+      }
+
+      void publish(const feedback_event_t &event) {
+        std::scoped_lock lock {mutex_};
+        if (!active_ || !sink_ || !valid_feedback_event(event) ||
+            event.gamepad_slot >= plan_.gamepad_slots || next_sequence_ == 0) {
+          return;
+        }
+        const controller_feedback_t packet {
+          .handle = handle_,
+          .sequence = next_sequence_,
+          .event = event,
+        };
+        if (next_sequence_ == std::numeric_limits<std::uint64_t>::max()) {
+          next_sequence_ = 0;
+        } else {
+          ++next_sequence_;
+        }
+        try {
+          // Keep delivery serialized with assignment. The injected sink is a
+          // bounded queue edge and must not block or re-enter this backend.
+          sink_(packet);
+        } catch (...) {
+        }
+      }
+
+    private:
+      std::mutex mutex_;
+      seat_handle_t handle_;
+      plan_t plan_;
+      controller_feedback_sink_t sink_;
+      std::uint64_t next_sequence_ = 1;
+      bool active_ = false;
+    };
+
     struct managed_state_t {
       device_spec_t spec;
       std::unique_ptr<managed_device_t> device;
       std::vector<kernel_node_snapshot_t> identities;
+      std::set<std::uint16_t> pressed_keys;
+      std::set<mouse_button_e> pressed_mouse_buttons;
+      std::set<std::uint32_t> active_touch_contacts;
     };
 
     struct active_t {
       expectation_t expectation;
       allocation_t allocation;
       std::vector<managed_state_t> devices;
+      std::shared_ptr<feedback_gate_t> feedback_gate;
+      std::uint64_t last_sequence = 0;
+      bool routing_indeterminate = false;
     };
 
     struct cleanup_target_t {
@@ -735,16 +987,24 @@ namespace multiseat::input {
       device_factory_t &factory,
       kernel_node_probe_t &probe,
       inputtino_host_backend_options_t options,
-      inputtino_backend_waiter_t waiter
-    ) :
+      inputtino_backend_waiter_t waiter,
+      controller_feedback_sink_t feedback_sink
+    ):
         factory(factory),
         probe(probe),
         options(options),
-        waiter(std::move(waiter)) {
+        waiter(std::move(waiter)),
+        feedback_sink(std::move(feedback_sink)) {
       if (!this->waiter) {
         this->waiter = [](std::chrono::milliseconds delay) {
           std::this_thread::sleep_for(delay);
         };
+      }
+    }
+
+    ~impl_t() {
+      for (auto &entry : active) {
+        entry.feedback_gate->deactivate();
       }
     }
 
@@ -758,6 +1018,87 @@ namespace multiseat::input {
              options.stable_observations <= options.discovery_attempts &&
              options.retry_delay >= std::chrono::milliseconds::zero() &&
              options.retry_delay <= std::chrono::seconds {1};
+    }
+
+    static std::pair<managed_device_kind_e, std::uint32_t> target_for(
+      const input_event_t &event
+    ) {
+      return std::visit(
+        [&event](const auto &payload) {
+          using value_t = std::remove_cvref_t<decltype(payload)>;
+          if constexpr (std::is_same_v<value_t, keyboard_key_event_t>) {
+            return std::pair {managed_device_kind_e::keyboard, 0U};
+          } else if constexpr (
+            std::is_same_v<value_t, mouse_relative_event_t> ||
+            std::is_same_v<value_t, mouse_absolute_event_t> ||
+            std::is_same_v<value_t, mouse_button_event_t> ||
+            std::is_same_v<value_t, mouse_scroll_event_t>
+          ) {
+            return std::pair {managed_device_kind_e::mouse, 0U};
+          } else if constexpr (std::is_same_v<value_t, touch_contact_event_t>) {
+            return std::pair {managed_device_kind_e::touch, 0U};
+          } else if constexpr (std::is_same_v<value_t, pen_tool_event_t>) {
+            return std::pair {managed_device_kind_e::pen, 0U};
+          } else {
+            return std::pair {managed_device_kind_e::gamepad, event.slot};
+          }
+        },
+        event.payload
+      );
+    }
+
+    static bool state_allows(
+      const managed_state_t &managed,
+      const input_event_t &event
+    ) {
+      if (const auto *key = std::get_if<keyboard_key_event_t>(&event.payload)) {
+        const bool pressed = managed.pressed_keys.contains(key->key_code);
+        return key->state == button_state_e::pressed ? !pressed : pressed;
+      }
+      if (const auto *button = std::get_if<mouse_button_event_t>(&event.payload)) {
+        const bool pressed = managed.pressed_mouse_buttons.contains(button->button);
+        return button->state == button_state_e::pressed ? !pressed : pressed;
+      }
+      if (const auto *touch = std::get_if<touch_contact_event_t>(&event.payload)) {
+        const bool active = managed.active_touch_contacts.contains(touch->pointer_id);
+        switch (touch->action) {
+          case touch_action_e::down:
+            return !active &&
+                   managed.active_touch_contacts.size() < maximum_touch_contacts;
+          case touch_action_e::move:
+          case touch_action_e::release:
+            return active;
+        }
+        return false;
+      }
+      return true;
+    }
+
+    static void commit_state(
+      managed_state_t &managed,
+      const input_event_t &event
+    ) {
+      if (const auto *key = std::get_if<keyboard_key_event_t>(&event.payload)) {
+        if (key->state == button_state_e::pressed) {
+          managed.pressed_keys.insert(key->key_code);
+        } else {
+          managed.pressed_keys.erase(key->key_code);
+        }
+      } else if (const auto *button =
+                   std::get_if<mouse_button_event_t>(&event.payload)) {
+        if (button->state == button_state_e::pressed) {
+          managed.pressed_mouse_buttons.insert(button->button);
+        } else {
+          managed.pressed_mouse_buttons.erase(button->button);
+        }
+      } else if (const auto *touch =
+                   std::get_if<touch_contact_event_t>(&event.payload)) {
+        if (touch->action == touch_action_e::down) {
+          managed.active_touch_contacts.insert(touch->pointer_id);
+        } else if (touch->action == touch_action_e::release) {
+          managed.active_touch_contacts.erase(touch->pointer_id);
+        }
+      }
     }
 
     bool identity_matches_spec(
@@ -1135,6 +1476,7 @@ namespace multiseat::input {
     kernel_node_probe_t &probe;
     inputtino_host_backend_options_t options;
     inputtino_backend_waiter_t waiter;
+    controller_feedback_sink_t feedback_sink;
     std::mutex mutex;
     std::vector<active_t> active;
     std::vector<tombstone_t> tombstones;
@@ -1144,7 +1486,8 @@ namespace multiseat::input {
     device_factory_t &factory,
     kernel_node_probe_t &probe,
     inputtino_host_backend_options_t options,
-    inputtino_backend_waiter_t waiter
+    inputtino_backend_waiter_t waiter,
+    controller_feedback_sink_t feedback_sink
   ) {
     if (!impl_t::valid_options(options)) {
       throw std::invalid_argument {"invalid multiseat input backend options"};
@@ -1153,7 +1496,8 @@ namespace multiseat::input {
       factory,
       probe,
       options,
-      std::move(waiter)
+      std::move(waiter),
+      std::move(feedback_sink)
     );
   }
 
@@ -1181,6 +1525,9 @@ namespace multiseat::input {
       if (exact->expectation != expectation) {
         return {.result = backend_result_e::rejected};
       }
+      if (exact->routing_indeterminate) {
+        return {.result = backend_result_e::indeterminate};
+      }
       if (!impl_->validate_active(*exact)) {
         return {.result = backend_result_e::indeterminate};
       }
@@ -1202,9 +1549,29 @@ namespace multiseat::input {
 
     std::vector<impl_t::managed_state_t> devices;
     devices.reserve(specs->size());
+    auto feedback_gate = std::make_shared<impl_t::feedback_gate_t>(
+      expectation.handle,
+      expectation.plan,
+      impl_->feedback_sink
+    );
     try {
       for (const auto &spec : *specs) {
-        auto device = impl_->factory.create(spec);
+        const auto expected_kind = spec.kind;
+        const auto expected_slot = spec.slot;
+        auto device = impl_->factory.create(
+          spec,
+          [gate = std::weak_ptr {feedback_gate}, expected_kind, expected_slot](
+            const feedback_event_t &event
+          ) {
+            if (expected_kind != managed_device_kind_e::gamepad ||
+                event.gamepad_slot != expected_slot) {
+              return;
+            }
+            if (const auto active_gate = gate.lock()) {
+              active_gate->publish(event);
+            }
+          }
+        );
         if (!device) {
           const auto cleaned = impl_->release_devices(
             expectation.handle,
@@ -1257,7 +1624,9 @@ namespace multiseat::input {
       .expectation = expectation,
       .allocation = allocation,
       .devices = std::move(devices),
+      .feedback_gate = feedback_gate,
     });
+    feedback_gate->activate();
     return {
       .result = backend_result_e::applied,
       .allocation = std::move(allocation),
@@ -1299,6 +1668,7 @@ namespace multiseat::input {
     if (existing->expectation.input_seat != input_seat) {
       return backend_result_e::rejected;
     }
+    existing->feedback_gate->deactivate();
     auto devices = std::move(existing->devices);
     impl_->active.erase(existing);
     return impl_->release_devices(handle, std::string {input_seat}, devices) ?
@@ -1309,11 +1679,13 @@ namespace multiseat::input {
     const seat_handle_t &handle,
     std::string_view input_seat,
     std::uint64_t sequence,
-    std::span<const std::uint8_t> payload
+    const input_event_t &event
   ) {
     std::scoped_lock lock {impl_->mutex};
-    (void) sequence;
-    (void) payload;
+    if (!handle.valid() || !valid_name_token(input_seat) || sequence == 0 ||
+        !valid_input_event(event)) {
+      return backend_result_e::rejected;
+    }
     const auto existing = std::find_if(
       impl_->active.begin(),
       impl_->active.end(),
@@ -1324,8 +1696,47 @@ namespace multiseat::input {
     if (existing == impl_->active.end()) {
       return backend_result_e::not_found;
     }
-    (void) input_seat;
-    return backend_result_e::rejected;
+    if (existing->routing_indeterminate) {
+      return backend_result_e::indeterminate;
+    }
+    if (existing->expectation.input_seat != input_seat ||
+        existing->last_sequence == std::numeric_limits<std::uint64_t>::max() ||
+        sequence != existing->last_sequence + 1) {
+      return backend_result_e::rejected;
+    }
+
+    const auto [target_kind, target_slot] = impl_t::target_for(event);
+    const auto managed = std::find_if(
+      existing->devices.begin(),
+      existing->devices.end(),
+      [target_kind, target_slot](const auto &candidate) {
+        return candidate.spec.kind == target_kind &&
+               candidate.spec.slot == target_slot;
+      }
+    );
+    if (managed == existing->devices.end() ||
+        !impl_t::state_allows(*managed, event)) {
+      return backend_result_e::rejected;
+    }
+
+    managed_device_apply_result_e applied;
+    try {
+      applied = managed->device->apply(event);
+    } catch (...) {
+      applied = managed_device_apply_result_e::indeterminate;
+    }
+    switch (applied) {
+      case managed_device_apply_result_e::applied:
+        impl_t::commit_state(*managed, event);
+        existing->last_sequence = sequence;
+        return backend_result_e::applied;
+      case managed_device_apply_result_e::rejected:
+        return backend_result_e::rejected;
+      case managed_device_apply_result_e::indeterminate:
+        existing->routing_indeterminate = true;
+        return backend_result_e::indeterminate;
+    }
+    return backend_result_e::indeterminate;
   }
 
   std::vector<allocation_t> inputtino_host_backend_t::inventory() {
@@ -1336,7 +1747,7 @@ namespace multiseat::input {
     std::vector<allocation_t> result;
     result.reserve(impl_->active.size());
     for (auto &entry : impl_->active) {
-      if (!impl_->validate_active(entry)) {
+      if (entry.routing_indeterminate || !impl_->validate_active(entry)) {
         throw std::runtime_error {"multiseat input identity changed"};
       }
       result.push_back(entry.allocation);

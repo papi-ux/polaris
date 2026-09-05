@@ -4,16 +4,16 @@
  */
 #include "src/platform/linux/input/inputtino_multiseat_backend.h"
 
-#include <gtest/gtest.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <functional>
 #include <fstream>
+#include <functional>
 #include <future>
+#include <gtest/gtest.h>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -342,9 +342,11 @@ namespace {
   public:
     fake_managed_device_t(
       std::vector<std::filesystem::path> nodes,
+      std::function<managed_device_apply_result_e(const input_event_t &)> on_apply,
       std::function<void()> on_destroy
-    ) :
+    ):
         nodes_(std::move(nodes)),
+        on_apply_(std::move(on_apply)),
         on_destroy_(std::move(on_destroy)) {
     }
 
@@ -359,27 +361,41 @@ namespace {
       return nodes_;
     }
 
+    managed_device_apply_result_e apply(const input_event_t &event) override {
+      return on_apply_(event);
+    }
+
     bool throw_nodes = false;
 
   private:
     std::vector<std::filesystem::path> nodes_;
+    std::function<managed_device_apply_result_e(const input_event_t &)> on_apply_;
     std::function<void()> on_destroy_;
   };
 
   class fake_device_factory_t final : public device_factory_t {
   public:
+    struct apply_call_t {
+      device_spec_t spec;
+      input_event_t event;
+
+      bool operator==(const apply_call_t &) const = default;
+    };
+
     explicit fake_device_factory_t(fake_kernel_probe_t &probe) :
         probe(probe) {
     }
 
     std::unique_ptr<managed_device_t> create(
-      const device_spec_t &spec
+      const device_spec_t &spec,
+      managed_device_feedback_fn_t feedback
     ) override {
       const auto call = create_calls++;
       if (fail_at_call && call == *fail_at_call) {
         return {};
       }
       created_specs.push_back(spec);
+      feedback_callbacks.push_back(std::move(feedback));
       std::vector<std::filesystem::path> paths;
       for (const auto &event : spec.event_nodes) {
         const auto index = next_event++;
@@ -410,6 +426,13 @@ namespace {
       const auto created_paths = paths;
       return std::make_unique<fake_managed_device_t>(
         std::move(paths),
+        [this, spec](const input_event_t &event) {
+          if (throw_apply) {
+            throw std::runtime_error {"injected input apply failure"};
+          }
+          apply_calls.push_back({.spec = spec, .event = event});
+          return next_apply;
+        },
         [this, created_paths]() {
           if (!retain_nodes_on_destroy) {
             for (const auto &path : created_paths) {
@@ -445,6 +468,8 @@ namespace {
 
     fake_kernel_probe_t &probe;
     std::vector<device_spec_t> created_specs;
+    std::vector<managed_device_feedback_fn_t> feedback_callbacks;
+    std::vector<apply_call_t> apply_calls;
     std::optional<std::size_t> fail_at_call;
     std::optional<std::string> name_override;
     std::optional<std::string> phys_override;
@@ -453,9 +478,12 @@ namespace {
     std::uint32_t next_joystick = 0;
     std::uint64_t next_inode = 10000;
     std::size_t create_calls = 0;
+    managed_device_apply_result_e next_apply =
+      managed_device_apply_result_e::applied;
     bool carry_phys = false;
     bool include_joystick_nodes = true;
     bool retain_nodes_on_destroy = false;
+    bool throw_apply = false;
   };
 
   inputtino_host_backend_options_t fast_options() {
@@ -534,10 +562,15 @@ namespace {
     }
     EXPECT_GE(waits, 1U);
     EXPECT_EQ(backend.inventory(), std::vector<allocation_t> {*created.allocation});
-    const std::array<std::uint8_t, 1> payload {1};
+    const input_event_t key_down {
+      .payload = keyboard_key_event_t {
+        .key_code = 0x41,
+        .state = button_state_e::pressed,
+      },
+    };
     EXPECT_EQ(
-      backend.route(expectation.handle, expectation.input_seat, 1, payload),
-      backend_result_e::rejected
+      backend.route(expectation.handle, expectation.input_seat, 1, key_down),
+      backend_result_e::applied
     );
     EXPECT_EQ(
       backend.destroy(expectation.handle, expectation.input_seat),
@@ -688,6 +721,479 @@ namespace {
     ++probe.observations[path].snapshot->inode;
 
     EXPECT_THROW(backend.inventory(), std::runtime_error);
+  }
+
+  TEST(InputtinoMultiseatBackend, RoutesEveryTypedEventToOnlyItsManagedHandle) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    inputtino_host_backend_t backend {factory, probe, fast_options()};
+    const auto expectation = expectation_for(
+      0,
+      40,
+      {.touch = true, .pen = true, .gamepad_slots = 2}
+    );
+    ASSERT_EQ(backend.create(expectation).result, backend_result_e::applied);
+
+    const std::vector<input_event_t> events {
+      {
+        .payload = keyboard_key_event_t {
+          .key_code = 0x41,
+          .state = button_state_e::pressed,
+        },
+      },
+      {
+        .payload = mouse_relative_event_t {.delta_x = 5, .delta_y = -7},
+      },
+      {
+        .payload = mouse_absolute_event_t {
+          .x = 1280,
+          .y = 720,
+          .width = 2560,
+          .height = 1440,
+        },
+      },
+      {
+        .payload = mouse_button_event_t {
+          .button = mouse_button_e::left,
+          .state = button_state_e::pressed,
+        },
+      },
+      {
+        .payload = mouse_scroll_event_t {.vertical = 120, .horizontal = -120},
+      },
+      {
+        .payload = touch_contact_event_t {
+          .pointer_id = 9,
+          .action = touch_action_e::down,
+          .orientation_degrees = 30,
+          .x = 100,
+          .y = 200,
+          .pressure = 300,
+        },
+      },
+      {
+        .payload = touch_contact_event_t {
+          .pointer_id = 9,
+          .action = touch_action_e::move,
+          .orientation_degrees = 31,
+          .x = 101,
+          .y = 201,
+          .pressure = 301,
+        },
+      },
+      {
+        .payload = touch_contact_event_t {
+          .pointer_id = 9,
+          .action = touch_action_e::release,
+        },
+      },
+      {
+        .payload = pen_tool_event_t {
+          .proximity = pen_proximity_e::contact,
+          .tool = pen_tool_e::pen,
+          .buttons = 1,
+          .x = 32000,
+          .y = 16000,
+          .pressure_or_distance = 8000,
+          .tilt_x_degrees = -20,
+          .tilt_y_degrees = 40,
+        },
+      },
+      {
+        .slot = 1,
+        .payload = gamepad_state_event_t {
+          .buttons = 0x1010,
+          .left_trigger = 10,
+          .right_trigger = 20,
+          .left_stick_x = -30,
+          .left_stick_y = 40,
+          .right_stick_x = -50,
+          .right_stick_y = 60,
+        },
+      },
+    };
+
+    for (std::size_t index = 0; index < events.size(); ++index) {
+      EXPECT_EQ(
+        backend.route(
+          expectation.handle,
+          expectation.input_seat,
+          index + 1,
+          events[index]
+        ),
+        backend_result_e::applied
+      );
+    }
+    ASSERT_EQ(factory.apply_calls.size(), events.size());
+    for (std::size_t index = 0; index < events.size(); ++index) {
+      EXPECT_EQ(factory.apply_calls[index].event, events[index]);
+    }
+    EXPECT_EQ(factory.apply_calls[0].spec.kind, managed_device_kind_e::keyboard);
+    EXPECT_EQ(factory.apply_calls[1].spec.kind, managed_device_kind_e::mouse);
+    EXPECT_EQ(factory.apply_calls[5].spec.kind, managed_device_kind_e::touch);
+    EXPECT_EQ(factory.apply_calls[8].spec.kind, managed_device_kind_e::pen);
+    EXPECT_EQ(factory.apply_calls[9].spec.kind, managed_device_kind_e::gamepad);
+    EXPECT_EQ(factory.apply_calls[9].spec.slot, 1U);
+  }
+
+  TEST(InputtinoMultiseatBackend, RouteFencesGenerationSeatSequenceAndState) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    inputtino_host_backend_t backend {factory, probe, fast_options()};
+    const auto expectation = expectation_for(0, 50);
+    ASSERT_EQ(backend.create(expectation).result, backend_result_e::applied);
+    const input_event_t key_down {
+      .payload = keyboard_key_event_t {
+        .key_code = 0x41,
+        .state = button_state_e::pressed,
+      },
+    };
+    const input_event_t key_up {
+      .payload = keyboard_key_event_t {
+        .key_code = 0x41,
+        .state = button_state_e::released,
+      },
+    };
+    const input_event_t movement {
+      .payload = mouse_relative_event_t {.delta_x = 1},
+    };
+
+    EXPECT_EQ(
+      backend.route(handle_for(0, 49), expectation.input_seat, 1, key_down),
+      backend_result_e::not_found
+    );
+    EXPECT_EQ(
+      backend.route(expectation.handle, "wrong-seat", 1, key_down),
+      backend_result_e::rejected
+    );
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 2, key_down),
+      backend_result_e::rejected
+    );
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 1, key_down),
+      backend_result_e::applied
+    );
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 2, key_down),
+      backend_result_e::rejected
+    );
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 2, key_up),
+      backend_result_e::applied
+    );
+    EXPECT_EQ(
+      backend.route(
+        expectation.handle,
+        expectation.input_seat,
+        3,
+        input_event_t {
+          .slot = 1,
+          .payload = gamepad_state_event_t {},
+        }
+      ),
+      backend_result_e::rejected
+    );
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 3, movement),
+      backend_result_e::applied
+    );
+    EXPECT_EQ(factory.apply_calls.size(), 3U);
+  }
+
+  TEST(InputtinoMultiseatBackend, BoundsTouchStateBeforeCallingInputtino) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    inputtino_host_backend_t backend {factory, probe, fast_options()};
+    const auto expectation = expectation_for(
+      0,
+      60,
+      {.touch = true, .gamepad_slots = 0}
+    );
+    ASSERT_EQ(backend.create(expectation).result, backend_result_e::applied);
+
+    for (std::uint32_t pointer = 0; pointer < maximum_touch_contacts; ++pointer) {
+      EXPECT_EQ(
+        backend.route(
+          expectation.handle,
+          expectation.input_seat,
+          pointer + 1,
+          input_event_t {
+            .payload = touch_contact_event_t {
+              .pointer_id = pointer,
+              .action = touch_action_e::down,
+              .x = 100,
+              .y = 200,
+            },
+          }
+        ),
+        backend_result_e::applied
+      );
+    }
+    const auto next_sequence = maximum_touch_contacts + 1;
+    EXPECT_EQ(
+      backend.route(
+        expectation.handle,
+        expectation.input_seat,
+        next_sequence,
+        input_event_t {
+          .payload = touch_contact_event_t {
+            .pointer_id = 99,
+            .action = touch_action_e::down,
+          },
+        }
+      ),
+      backend_result_e::rejected
+    );
+    EXPECT_EQ(
+      backend.route(
+        expectation.handle,
+        expectation.input_seat,
+        next_sequence,
+        input_event_t {
+          .payload = touch_contact_event_t {
+            .pointer_id = 99,
+            .action = touch_action_e::release,
+          },
+        }
+      ),
+      backend_result_e::rejected
+    );
+    EXPECT_EQ(
+      backend.route(
+        expectation.handle,
+        expectation.input_seat,
+        next_sequence,
+        input_event_t {
+          .payload = touch_contact_event_t {
+            .pointer_id = 0,
+            .action = touch_action_e::release,
+          },
+        }
+      ),
+      backend_result_e::applied
+    );
+    EXPECT_EQ(
+      backend.route(
+        expectation.handle,
+        expectation.input_seat,
+        next_sequence + 1,
+        input_event_t {
+          .payload = touch_contact_event_t {
+            .pointer_id = 99,
+            .action = touch_action_e::down,
+          },
+        }
+      ),
+      backend_result_e::applied
+    );
+    EXPECT_EQ(factory.apply_calls.size(), maximum_touch_contacts + 2U);
+  }
+
+  TEST(InputtinoMultiseatBackend, IndeterminateApplyPoisonsRoutingUntilTeardown) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    inputtino_host_backend_t backend {factory, probe, fast_options()};
+    const auto expectation = expectation_for(0, 70);
+    ASSERT_EQ(backend.create(expectation).result, backend_result_e::applied);
+    const input_event_t movement {
+      .payload = mouse_relative_event_t {.delta_x = 1},
+    };
+
+    factory.next_apply = managed_device_apply_result_e::rejected;
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 1, movement),
+      backend_result_e::rejected
+    );
+    factory.next_apply = managed_device_apply_result_e::applied;
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 1, movement),
+      backend_result_e::applied
+    );
+    factory.throw_apply = true;
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 2, movement),
+      backend_result_e::indeterminate
+    );
+    factory.throw_apply = false;
+    EXPECT_EQ(
+      backend.route(expectation.handle, expectation.input_seat, 2, movement),
+      backend_result_e::indeterminate
+    );
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+    EXPECT_EQ(
+      backend.create(expectation).result,
+      backend_result_e::indeterminate
+    );
+    EXPECT_EQ(
+      backend.destroy(expectation.handle, expectation.input_seat),
+      backend_result_e::applied
+    );
+  }
+
+  TEST(InputtinoMultiseatBackend, FeedbackIsGenerationStampedAndOldCallbacksClose) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    std::vector<controller_feedback_t> feedback;
+    inputtino_host_backend_t backend {
+      factory,
+      probe,
+      fast_options(),
+      {},
+      [&feedback](const controller_feedback_t &packet) {
+        feedback.push_back(packet);
+      }
+    };
+    const auto first = expectation_for(0, 80, {.gamepad_slots = 2});
+    ASSERT_EQ(backend.create(first).result, backend_result_e::applied);
+    ASSERT_EQ(factory.feedback_callbacks.size(), factory.created_specs.size());
+
+    std::size_t keyboard_callback = factory.feedback_callbacks.size();
+    std::size_t gamepad_zero_callback = factory.feedback_callbacks.size();
+    std::size_t gamepad_one_callback = factory.feedback_callbacks.size();
+    for (std::size_t index = 0; index < factory.created_specs.size(); ++index) {
+      const auto &spec = factory.created_specs[index];
+      if (spec.kind == managed_device_kind_e::keyboard) {
+        keyboard_callback = index;
+      } else if (spec.kind == managed_device_kind_e::gamepad && spec.slot == 0) {
+        gamepad_zero_callback = index;
+      } else if (spec.kind == managed_device_kind_e::gamepad && spec.slot == 1) {
+        gamepad_one_callback = index;
+      }
+    }
+    ASSERT_LT(keyboard_callback, factory.feedback_callbacks.size());
+    ASSERT_LT(gamepad_zero_callback, factory.feedback_callbacks.size());
+    ASSERT_LT(gamepad_one_callback, factory.feedback_callbacks.size());
+
+    factory.feedback_callbacks[gamepad_one_callback]({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 1,
+      .low_frequency = 10,
+      .high_frequency = 20,
+    });
+    factory.feedback_callbacks[gamepad_zero_callback]({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 0,
+      .low_frequency = 30,
+      .high_frequency = 40,
+    });
+    factory.feedback_callbacks[gamepad_zero_callback]({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 1,
+      .low_frequency = 50,
+      .high_frequency = 60,
+    });
+    factory.feedback_callbacks[keyboard_callback]({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 0,
+      .low_frequency = 70,
+      .high_frequency = 80,
+    });
+    ASSERT_EQ(feedback.size(), 2U);
+    EXPECT_EQ(feedback[0].handle, first.handle);
+    EXPECT_EQ(feedback[0].sequence, 1U);
+    EXPECT_EQ(feedback[0].event.gamepad_slot, 1U);
+    EXPECT_EQ(feedback[1].handle, first.handle);
+    EXPECT_EQ(feedback[1].sequence, 2U);
+    EXPECT_EQ(feedback[1].event.gamepad_slot, 0U);
+    EXPECT_EQ(
+      decode_feedback_event(encode_feedback_event(feedback[0].event)),
+      feedback[0].event
+    );
+
+    const auto stale_callback = factory.feedback_callbacks[gamepad_zero_callback];
+    ASSERT_EQ(
+      backend.destroy(first.handle, first.input_seat),
+      backend_result_e::applied
+    );
+    stale_callback({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 0,
+      .low_frequency = 90,
+      .high_frequency = 100,
+    });
+    EXPECT_EQ(feedback.size(), 2U);
+
+    const auto prior_callback_count = factory.feedback_callbacks.size();
+    const auto second = expectation_for(0, 81, {.gamepad_slots = 1});
+    ASSERT_EQ(backend.create(second).result, backend_result_e::applied);
+    std::size_t second_gamepad_callback = factory.feedback_callbacks.size();
+    for (std::size_t index = prior_callback_count;
+         index < factory.created_specs.size();
+         ++index) {
+      if (factory.created_specs[index].kind == managed_device_kind_e::gamepad) {
+        second_gamepad_callback = index;
+      }
+    }
+    ASSERT_LT(second_gamepad_callback, factory.feedback_callbacks.size());
+    stale_callback({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 0,
+      .low_frequency = 101,
+      .high_frequency = 102,
+    });
+    factory.feedback_callbacks[second_gamepad_callback]({
+      .kind = feedback_kind_e::rumble,
+      .gamepad_slot = 0,
+      .low_frequency = 103,
+      .high_frequency = 104,
+    });
+    ASSERT_EQ(feedback.size(), 3U);
+    EXPECT_EQ(feedback.back().handle, second.handle);
+    EXPECT_EQ(feedback.back().sequence, 1U);
+  }
+
+  TEST(InputtinoMultiseatBackend, ConcurrentFeedbackDeliveryKeepsSequenceOrder) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    std::vector<controller_feedback_t> feedback;
+    inputtino_host_backend_t backend {
+      factory,
+      probe,
+      fast_options(),
+      {},
+      [&feedback](const controller_feedback_t &packet) {
+        feedback.push_back(packet);
+      }
+    };
+    const auto expectation = expectation_for(0, 90, {.gamepad_slots = 1});
+    ASSERT_EQ(backend.create(expectation).result, backend_result_e::applied);
+    const auto callback = std::find_if(
+      factory.created_specs.begin(),
+      factory.created_specs.end(),
+      [](const auto &spec) {
+        return spec.kind == managed_device_kind_e::gamepad;
+      }
+    );
+    ASSERT_NE(callback, factory.created_specs.end());
+    const auto index = static_cast<std::size_t>(
+      std::distance(factory.created_specs.begin(), callback)
+    );
+    const auto publish = factory.feedback_callbacks[index];
+
+    constexpr std::size_t callback_count = 64;
+    std::vector<std::future<void>> futures;
+    futures.reserve(callback_count);
+    for (std::size_t call = 0; call < callback_count; ++call) {
+      futures.push_back(std::async(std::launch::async, [publish, call]() {
+        publish({
+          .kind = feedback_kind_e::rumble,
+          .gamepad_slot = 0,
+          .low_frequency = static_cast<std::uint16_t>(call),
+          .high_frequency = static_cast<std::uint16_t>(call + 1),
+        });
+      }));
+    }
+    for (auto &future : futures) {
+      future.get();
+    }
+
+    ASSERT_EQ(feedback.size(), callback_count);
+    for (std::size_t index = 0; index < feedback.size(); ++index) {
+      EXPECT_EQ(feedback[index].handle, expectation.handle);
+      EXPECT_EQ(feedback[index].sequence, index + 1);
+      EXPECT_EQ(feedback[index].event.gamepad_slot, 0U);
+    }
   }
 
   TEST(InputtinoMultiseatBackend, ConstructorRejectsUnboundedRetryPolicy) {

@@ -60,17 +60,31 @@ namespace multiseat::input {
     const expectation_t &expectation
   );
 
+  enum class managed_device_apply_result_e {
+    applied,
+    rejected,
+    indeterminate,
+  };
+
+  using managed_device_feedback_fn_t =
+    std::function<void(const feedback_event_t &)>;
+  /** Must enqueue without blocking and must not re-enter this backend. */
+  using controller_feedback_sink_t =
+    std::function<void(const controller_feedback_t &)>;
+
   class managed_device_t {
   public:
     virtual ~managed_device_t() = default;
     virtual std::vector<std::filesystem::path> nodes() const = 0;
+    virtual managed_device_apply_result_e apply(const input_event_t &event) = 0;
   };
 
   class device_factory_t {
   public:
     virtual ~device_factory_t() = default;
     virtual std::unique_ptr<managed_device_t> create(
-      const device_spec_t &spec
+      const device_spec_t &spec,
+      managed_device_feedback_fn_t feedback
     ) = 0;
   };
 
@@ -78,7 +92,8 @@ namespace multiseat::input {
   class inputtino_device_factory_t final : public device_factory_t {
   public:
     std::unique_ptr<managed_device_t> create(
-      const device_spec_t &spec
+      const device_spec_t &spec,
+      managed_device_feedback_fn_t feedback
     ) override;
   };
 
@@ -205,9 +220,11 @@ namespace multiseat::input {
   /**
    * Owns inputtino devices on the trusted host and returns exact event nodes.
    *
-   * This backend intentionally rejects route(): the typed worker input decoder
-   * and feedback transport are a later boundary. It is not wired to Podman or
-   * the singleton runtime by this checkpoint.
+   * Route input is decoded before this backend, targets only a managed handle
+   * retained by the exact generation, and applies one canonical event at a
+   * time. Controller feedback is stamped with that complete handle and a
+   * per-generation sequence. This class is still not constructed by Podman or
+   * the singleton runtime.
    */
   class inputtino_host_backend_t final : public backend_t {
   public:
@@ -215,7 +232,8 @@ namespace multiseat::input {
       device_factory_t &factory,
       kernel_node_probe_t &probe,
       inputtino_host_backend_options_t options = {},
-      inputtino_backend_waiter_t waiter = {}
+      inputtino_backend_waiter_t waiter = {},
+      controller_feedback_sink_t feedback_sink = {}
     );
     ~inputtino_host_backend_t() override;
 
@@ -233,7 +251,7 @@ namespace multiseat::input {
       const seat_handle_t &handle,
       std::string_view input_seat,
       std::uint64_t sequence,
-      std::span<const std::uint8_t> payload
+      const input_event_t &event
     ) override;
     std::vector<allocation_t> inventory() override;
 

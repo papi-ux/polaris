@@ -6,23 +6,24 @@
 
 #ifdef __linux__
 
-#include "src/multiseat_runtime.h"
+  #include "multiseat_input_protocol.h"
+  #include "src/multiseat_runtime.h"
 
-#include <cstddef>
-#include <cstdint>
-#include <filesystem>
-#include <mutex>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
+  #include <cstddef>
+  #include <cstdint>
+  #include <filesystem>
+  #include <mutex>
+  #include <optional>
+  #include <span>
+  #include <string>
+  #include <string_view>
+  #include <vector>
 
 namespace multiseat::input {
 
-  inline constexpr std::size_t maximum_input_payload_bytes = 64 * 1024;
+  inline constexpr std::size_t maximum_input_payload_bytes =
+    maximum_encoded_input_event_bytes;
   inline constexpr std::size_t maximum_input_allocations = 256;
-  inline constexpr std::uint32_t maximum_gamepad_slots = 16;
   inline constexpr std::size_t maximum_kernel_device_name_bytes = 79;
   inline constexpr std::string_view isolated_host_seat = "seat-polaris";
   inline constexpr std::string_view multiseat_kernel_device_prefix =
@@ -113,7 +114,7 @@ namespace multiseat::input {
       const seat_handle_t &handle,
       std::string_view input_seat,
       std::uint64_t sequence,
-      std::span<const std::uint8_t> payload
+      const input_event_t &event
     ) = 0;
     virtual std::vector<allocation_t> inventory() = 0;
   };

@@ -373,6 +373,7 @@ add_executable(test_multiseat_runtime
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(test_multiseat_runtime PRIVATE
         ${CMAKE_SOURCE_DIR}/src/platform/linux/input/inputtino_multiseat_backend.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_input_protocol.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_input_authority.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp
@@ -380,6 +381,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_input_authority.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_input_protocol.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_inputtino_multiseat_backend.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_authority.cpp

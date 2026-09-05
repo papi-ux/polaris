@@ -530,9 +530,10 @@ they open no real input device. Their contract:
   for an Xbox-style gamepad;
 - cannot accept `/dev/uinput`, `/dev/uhid`, a duplicate or noncanonical node,
   a contradictory nonempty phys marker, or a seat0 allocation as authoritative;
-- serializes per-seat input payloads with a strict nonzero sequence and 64-KiB
-  bound, rejects stale-generation routing, and closes admission after an
-  indeterminate backend result;
+- accepts one canonical big-endian typed event per route call, bounded at 24
+  bytes, with strict nonzero sequencing; malformed values do not consume a
+  sequence, while stale generations and indeterminate backend results fail
+  closed;
 - retains ambiguous teardown identities as reconciliation tombstones, removes only an
   exact unambiguous orphan, and confirms orphan removal through a second
   authoritative inventory.
@@ -547,17 +548,51 @@ name and `ID_SEAT=seat-polaris` readback, accepts an empty phys only for this
 known dependency behavior, and still rejects any nonempty phys that contradicts
 the expected isolation marker.
 
-This is a trusted lifecycle and identity backend, not the worker virtual-input
-provider. Its `route` method deliberately rejects all payloads until a typed
-decoder exists. Exact Podman manifest binding and bind-time identity
-revalidation now exist as a separate injected checkpoint: the adapter queries
-the authority by exact generation, verifies the full allocation and live kernel
-snapshot twice, maps only event nodes to fixed aliases, fingerprints the full
-manifest, and reconciles that fingerprint plus inspected device identities.
-The worker-side event bridge, feedback path, crash-persistent node discovery,
-rootless group/SELinux deployment policy, and physical container proof remain
-required. Steam Input also needs a separately mediated creation path; granting
-its container raw uinput would reintroduce the authority this contract removes.
+This is a trusted lifecycle, identity, and injection backend, not a worker-owned
+virtual-input provider. The route codec has a fixed version and closed event
+vocabulary: keyboard transition, relative pointer, absolute pointer, pointer
+button, two-axis scroll, touch contact, pen tool, and complete Xbox-style
+gamepad state. It rejects trailing bytes, nonzero reserved fields, unsupported
+keyboard codes and buttons, out-of-range coordinates or deltas, contradictory
+D-pad directions, noncanonical touch release fields, and events for an
+unallocated device kind or gamepad slot. Absolute, touch, pressure, distance,
+and tilt values use bounded integer representations; no native struct layout or
+floating-point bit pattern crosses the boundary.
+
+The backend independently repeats the full-handle, input-seat, and sequence
+checks before selecting the one managed inputtino object retained by that exact
+generation. It tracks key and pointer-button transitions plus no more than
+sixteen live touch contacts before calling inputtino, so duplicate transitions,
+unknown releases, or a seventeenth contact cannot reach the dependency. A
+rejected managed-device call does not advance its backend sequence. A throwing
+or otherwise indeterminate call poisons routing and inventory for that
+generation until exact teardown, preventing a possibly partial event from
+being replayed after reconciliation.
+
+Xbox rumble is the only feedback kind in this checkpoint. The production
+wrapper converts inputtino's callback to an explicit event containing a bounded
+gamepad slot and two 16-bit magnitudes. A generation-local gate adds the full
+seat handle and its own nonzero monotonic sequence before invoking an injected
+controller sink. The gate stays closed during partial creation, closes before
+teardown, rejects callbacks from a non-gamepad object or wrong slot, and leaves
+any callback already in flight stamped with the old generation so a later
+controller adapter can reject it safely.
+
+Exact Podman manifest binding and bind-time identity revalidation remain a
+separate injected checkpoint: the adapter queries the authority by exact
+generation, verifies the full allocation and live kernel snapshot twice, maps
+only event nodes to fixed aliases, fingerprints the full manifest, and
+reconciles that fingerprint plus inspected device identities. Because the host
+retains the inputtino handles, production input must terminate at this authority
+rather than granting the worker an injection endpoint. The current generic
+worker input/feedback adapter remains only a synthetic protocol fixture and is
+not wired to this route.
+
+The live Moonlight-to-typed-event adapter, controller feedback delivery,
+production construction, crash-persistent node discovery, rootless
+group/SELinux deployment policy, and physical container proof remain required.
+Steam Input also needs a separately mediated creation path; granting its
+container raw uinput would reintroduce the authority this contract removes.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless

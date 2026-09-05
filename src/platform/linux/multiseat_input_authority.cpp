@@ -555,6 +555,10 @@ namespace multiseat::input {
         payload.size() > maximum_input_payload_bytes) {
       return status_e::invalid_request;
     }
+    const auto event = decode_input_event(payload);
+    if (!event) {
+      return status_e::invalid_request;
+    }
     const auto existing = find_exact_locked(handle);
     if (existing == active_.end()) {
       return missing_status_locked(handle);
@@ -569,7 +573,7 @@ namespace multiseat::input {
         handle,
         existing->allocation.input_seat,
         sequence,
-        payload
+        *event
       );
     } catch (...) {
       result = backend_result_e::indeterminate;

@@ -414,7 +414,7 @@ namespace {
       const multiseat::seat_handle_t &,
       std::string_view,
       std::uint64_t,
-      std::span<const std::uint8_t>
+      const multiseat::input::input_event_t &
     ) override {
       return multiseat::input::backend_result_e::rejected;
     }
