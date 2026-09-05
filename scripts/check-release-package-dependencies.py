@@ -247,6 +247,24 @@ for option, expected in (
     )
 
 workflow = read(".github/workflows/build.yml")
+withdrawn_sysext_builder = ROOT / "scripts/ci/build-sysext-image.sh"
+if withdrawn_sysext_builder.exists():
+    raise AssertionError(
+        "withdrawn system-extension image builder must not remain in the repository"
+    )
+for withdrawn_marker in (
+    "  sysext-build:\n",
+    "      - sysext-build\n",
+    "name: Polaris-sysext-image",
+    "Polaris-sysext-x86_64.raw",
+    "release-assets/raw/sysext",
+    "Download systemd extension image",
+):
+    if withdrawn_marker in workflow:
+        raise AssertionError(
+            f"release workflow must not build, upload, or publish the withdrawn system extension: {withdrawn_marker.strip()}"
+        )
+
 resolve_job = workflow_job(workflow, "resolve-source")
 resolve_script = workflow_run_script(
     workflow_step(resolve_job, "Bind release tag to source commit")

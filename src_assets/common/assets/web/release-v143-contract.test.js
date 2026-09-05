@@ -9,7 +9,7 @@ const packageAssets = [
   'Polaris-steamos3.8-x86_64.pkg.tar.zst',
   'Polaris-ubuntu24.04-x86_64.deb',
 ].sort()
-const sysextAsset = 'Polaris-sysext-x86_64.raw'
+const withdrawnSysextAsset = 'Polaris-sysext-x86_64.raw'
 
 const currentChangelog = () => {
   const changelog = read('docs/changelog.md')
@@ -56,7 +56,7 @@ describe('v1.4.3 release contract', () => {
     }
   })
 
-  it('documents the merge write, the coded artwork failures, and the extension image against the source', () => {
+  it('documents the merge write, coded artwork failures, and system-extension withdrawal', () => {
     const notes = releaseNotes()
     const confighttp = read('src/confighttp.cpp')
     const artwork = read('src/game_artwork_manual.cpp')
@@ -64,15 +64,18 @@ describe('v1.4.3 release contract', () => {
     const workflow = read('.github/workflows/build.yml')
 
     expect(notes).toContain('stale or shadowed copy')
-    expect(notes).toContain('unproven on a real Bazzite host')
+    expect(notes).toContain('Bazzite system extension withdrawn on September 5, 2026')
+    expect(notes).toContain('Do not use cached copies')
+    expect(notes).toContain(withdrawnSysextAsset)
     expect(confighttp).toContain('patchConfig')
     expect(artwork).toContain('classify_search_failure')
     expect(helper).toContain('bundled')
-    expect(workflow).toContain('scripts/ci/build-sysext-image.sh')
-    expect(workflow).toContain(`release-assets/final/${sysextAsset}`)
+    expect(workflow).not.toContain('sysext-build:')
+    expect(workflow).not.toContain('Polaris-sysext-image')
+    expect(workflow).not.toContain(`release-assets/final/${withdrawnSysextAsset}`)
   })
 
-  it('pins all four install commands to v1.4.3 and lists the extension image beside the packages', () => {
+  it('pins all four install commands to v1.4.3 and lists only supported package assets', () => {
     const blocks = installBlocks()
     expect(blocks).toHaveLength(4)
     for (const asset of packageAssets) {
@@ -97,8 +100,11 @@ describe('v1.4.3 release contract', () => {
     expect(steamOs).toContain('sudo pacman-key --populate || exit $?')
     expect(steamOs).toContain('systemctl --user enable --now polaris')
 
-    const listed = [...new Set(releaseNotes().match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? [])]
-    expect(listed.sort()).toEqual([...packageAssets, sysextAsset].sort())
+    const assetsLine = releaseNotes().split('\n').find((line) => line.startsWith('**Assets:**'))
+    expect(assetsLine).toBeDefined()
+    const listed = [...new Set((assetsLine ?? '').match(/Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*/g) ?? [])]
+    expect(listed.sort()).toEqual(packageAssets)
+    expect(assetsLine).not.toContain(withdrawnSysextAsset)
   })
 
   it('publishes release-note guide links that work outside the source tree', () => {
