@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ type testWorker struct {
 	done   chan error
 }
 
-func createTestWorker(t *testing.T, name string, generation uint64, slot uint32) testWorker {
+func prepareTestWorkerPaths(t *testing.T, name string) workerPaths {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), name)
 	ipc := filepath.Join(root, "ipc")
@@ -51,6 +52,12 @@ func createTestWorker(t *testing.T, name string, generation uint64, slot uint32)
 	if err := os.WriteFile(filepath.Join(auth, capabilityFileName), []byte(encoded), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return workerPaths{IPC: ipc, Auth: auth, State: state}
+}
+
+func createTestWorker(t *testing.T, name string, generation uint64, slot uint32) testWorker {
+	t.Helper()
+	paths := prepareTestWorkerPaths(t, name)
 	config := workerConfig{
 		Identity: endpointIdentity{
 			ControllerEpoch: "controller-a1b2",
@@ -71,12 +78,12 @@ func createTestWorker(t *testing.T, name string, generation uint64, slot uint32)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- runWorker(ctx, config, workerPaths{IPC: ipc, Auth: auth, State: state}, uint32(os.Geteuid()))
+		done <- runWorker(ctx, config, paths, uint32(os.Geteuid()))
 		close(done)
 	}()
 	worker := testWorker{
 		config: config,
-		paths:  workerPaths{IPC: ipc, Auth: auth, State: state},
+		paths:  paths,
 		cancel: cancel,
 		done:   done,
 	}
@@ -370,5 +377,117 @@ func TestCancellationReturnsCleanly(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancelled worker did not return")
+	}
+}
+
+func TestInjectedRuntimeMustBeReadyBeforeWorkerPublishesHealth(t *testing.T) {
+	paths := prepareTestWorkerPaths(t, "r")
+	config := runtimeTestConfig("worker-runtime-ready", 61, 0)
+	runtimeSet := newFakeRuntimeSet()
+	releaseLauncher := make(chan struct{})
+	runtimeSet.byStage[runtimeStageLauncherProcessTree].start = func(
+		context.Context,
+		runtimeAllocation,
+	) (runtimeLease, error) {
+		<-releaseLauncher
+		return runtimeSet.leases[runtimeStageLauncherProcessTree], nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		done <- runWorkerWithRuntime(
+			ctx,
+			config,
+			paths,
+			uint32(os.Geteuid()),
+			&runtimeSet.adapters,
+			runtimeTestOptions(),
+		)
+	}()
+	waitForRuntimeEvent(t, runtimeSet.recorder, "start:launcher-process-tree")
+	if _, err := os.Lstat(filepath.Join(paths.State, readyFileName)); !os.IsNotExist(err) {
+		t.Fatalf("worker published readiness before runtime completion: %v", err)
+	}
+	close(releaseLauncher)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := checkHealth(config, paths, uint32(os.Geteuid())); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("worker exited before publishing health: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("worker did not publish health after runtime became ready")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not stop after cancellation")
+	}
+	events, _ := runtimeSet.recorder.snapshot()
+	if !reflect.DeepEqual(events, completeRuntimeEvents()) {
+		t.Fatalf("ready-gated lifecycle mismatch: %#v", events)
+	}
+}
+
+func TestInjectedRuntimeFailureClosesWorkerAndTearsDown(t *testing.T) {
+	paths := prepareTestWorkerPaths(t, "f")
+	config := runtimeTestConfig("worker-runtime-failure", 62, 0)
+	runtimeSet := newFakeRuntimeSet()
+	done := make(chan error, 1)
+	go func() {
+		done <- runWorkerWithRuntime(
+			context.Background(),
+			config,
+			paths,
+			uint32(os.Geteuid()),
+			&runtimeSet.adapters,
+			runtimeTestOptions(),
+		)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := checkHealth(config, paths, uint32(os.Geteuid())); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("worker exited before becoming healthy: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not become healthy")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	runtimeSet.leases[runtimeStageCapture].finish(errors.New("private adapter detail"))
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "capture exited unexpectedly") {
+			t.Fatalf("unexpected worker runtime failure: %v", err)
+		}
+		if strings.Contains(err.Error(), "private adapter") {
+			t.Fatalf("adapter detail escaped the worker boundary: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not stop after runtime failure")
+	}
+	if err := checkHealth(config, paths, uint32(os.Geteuid())); err == nil {
+		t.Fatal("worker remained healthy after runtime failure")
+	}
+	events, _ := runtimeSet.recorder.snapshot()
+	if !reflect.DeepEqual(events, completeRuntimeEvents()) {
+		t.Fatalf("failure teardown order mismatch: %#v", events)
 	}
 }

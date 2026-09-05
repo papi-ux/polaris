@@ -272,10 +272,26 @@ validates the immutable seat allocation, securely reads its capability,
 creates private control and media sockets, publishes a process-bound health
 record, responds to authenticated heartbeats, and handles authenticated
 shutdown. Health must complete mutual authentication and a heartbeat on both
-sockets; the existence of socket nodes alone is never a ready signal. It
-deliberately has no command that starts Gamescope, a launcher,
-audio, capture, encoding, or virtual input. Podman health therefore proves only
-that this supervisor contract is alive.
+sockets; the existence of socket nodes alone is never a ready signal.
+
+An injectable worker-runtime layer now models session bus, audio, compositor,
+virtual input, capture, encoder lease, and launcher-process-tree readiness. It
+starts them in that dependency order, admits IPC only after all seven are
+ready, propagates an unexpected terminal signal as worker failure, and tears
+down in exact reverse order. The reverse edge deliberately releases capture
+before the compositor. One 120-second total startup ceiling accommodates the
+established Gamescope readiness budget; each stop has its own five-second bound
+so a blocked, failed, or panicking adapter cannot starve later cleanup.
+Returned errors identify only the stage and operation, not adapter-provided
+paths or diagnostics.
+
+This layer is exercised by offline fakes and by the process-level C++
+controller-to-Go worker fixture. There are no concrete host-resource adapters,
+and the production command injects none, so it still has no command that
+starts Gamescope, a launcher, audio, capture, encoding, or virtual input.
+Podman health therefore proves only that the supervisor contract is alive.
+Before opt-in wiring, the controller's graceful-stop timeout must be aligned
+with the worker's bounded worst-case reverse teardown.
 
 ## Local control and media IPC checkpoint
 
@@ -429,7 +445,11 @@ The test_multiseat_runtime target covers:
   authentication, heartbeat, authenticated shutdown, backend absence, and
   exact cleanup, including two independently managed seats;
 - a real process-level C++ controller to Go worker fixture that authenticates
-  and heartbeats both Unix channels before graceful shutdown and cleanup;
+  and heartbeats both Unix channels before graceful shutdown drives exact
+  reverse-order cleanup of the injected offline runtime;
+- adversarial offline runtime coverage for complete and partial startup,
+  malformed leases, early exits, panics, errors, bounded timeouts, exact
+  reverse teardown, redacted failures, and two-seat independence;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
@@ -437,10 +457,11 @@ This remains an offline control-plane/backend proof. A later container
 integration test must build and pin the final worker image, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
-physical game testing, worker runtime adapters must add the session bus,
-PipeWire sink, virtual input lifecycle, compositor, capture, encoder lease,
-launcher process tree, and deterministic teardown. Concurrent frame, audio,
-and input heartbeats then become the next acceptance boundary.
+physical game testing, concrete runtime adapters must bind the modeled session
+bus, PipeWire sink, virtual input lifecycle, compositor, capture, encoder
+lease, and launcher process tree without weakening the proven teardown
+contract. Concurrent frame, audio, and input heartbeats then become the next
+acceptance boundary.
 
 ## Upstream references
 

@@ -433,18 +433,57 @@ func runWorker(
 	paths workerPaths,
 	expectedUID uint32,
 ) error {
+	return runWorkerWithRuntime(
+		parent,
+		config,
+		paths,
+		expectedUID,
+		nil,
+		runtimeOptions{},
+	)
+}
+
+// runWorkerWithRuntime keeps runtime activation injection-only. The production
+// entrypoint calls runWorker above with no adapters, so this slice cannot touch
+// a session bus, audio server, compositor, input device, GPU, or launcher.
+func runWorkerWithRuntime(
+	parent context.Context,
+	config workerConfig,
+	paths workerPaths,
+	expectedUID uint32,
+	adapters *runtimeAdapters,
+	options runtimeOptions,
+) (returnError error) {
+	var managedRuntime *workerRuntime
+	if adapters != nil {
+		var err error
+		managedRuntime, err = startWorkerRuntime(parent, config, *adapters, options)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			returnError = errors.Join(returnError, managedRuntime.Stop())
+		}()
+	}
+
 	server, workerContext, err := newWorkerServer(parent, config, paths, expectedUID)
 	if err != nil {
 		return err
 	}
 	defer server.close()
-	errors := make(chan error, 2)
-	go server.acceptLoop(workerContext, server.control, channelControl, errors)
-	go server.acceptLoop(workerContext, server.media, channelMedia, errors)
+	serverErrors := make(chan error, 2)
+	go server.acceptLoop(workerContext, server.control, channelControl, serverErrors)
+	go server.acceptLoop(workerContext, server.media, channelMedia, serverErrors)
+	var runtimeFailures <-chan error
+	if managedRuntime != nil {
+		runtimeFailures = managedRuntime.Failures()
+	}
 	select {
 	case <-workerContext.Done():
 		return nil
-	case err := <-errors:
+	case err := <-serverErrors:
+		return err
+	case err := <-runtimeFailures:
 		return err
 	}
 }

@@ -5,12 +5,14 @@ package main
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 )
 
 // TestNativeControllerInteropServer is launched as a standalone go test binary
-// by the C++ integration fixture. It exercises the real Go worker server while
-// keeping test-only paths and activation outside the production worker CLI.
+// by the C++ integration fixture. It exercises the real Go worker server and
+// injected runtime lifecycle while keeping resource activation outside the
+// production worker CLI.
 func TestNativeControllerInteropServer(t *testing.T) {
 	if os.Getenv("POLARIS_NATIVE_INTEROP") != "1" {
 		t.Skip("native controller interop helper is not active")
@@ -39,12 +41,19 @@ func TestNativeControllerInteropServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runWorker(
+	runtimeSet := newFakeRuntimeSet()
+	if err := runWorkerWithRuntime(
 		context.Background(),
 		config,
 		workerPaths{IPC: ipc, Auth: auth, State: state},
 		uint32(os.Geteuid()),
+		&runtimeSet.adapters,
+		defaultRuntimeOptions(),
 	); err != nil {
 		t.Fatal(err)
+	}
+	events, _ := runtimeSet.recorder.snapshot()
+	if !reflect.DeepEqual(events, completeRuntimeEvents()) {
+		t.Fatalf("authenticated shutdown runtime order mismatch: %#v", events)
 	}
 }

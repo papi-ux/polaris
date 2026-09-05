@@ -23,9 +23,25 @@ resolved upstream manifests as provenance evidence before any lock refresh.
 
 The current entrypoint is intentionally a supervisor and IPC proof. It owns
 private control and media sockets, mutual authentication, health state, and
-shutdown. It does not yet start Gamescope, Steam, Heroic, Lutris, audio,
-capture, encoding, or virtual input. Treating a healthy supervisor as a
-streaming-capable worker before those adapters exist would be a false gate.
+shutdown. The worker now has an injectable lifecycle contract for a session
+bus, audio, compositor, virtual input, capture, encoder lease, and launcher
+process tree, but only offline fakes provide those adapters. The production
+`run` command injects none and therefore does not start Gamescope, Steam,
+Heroic, Lutris,
+audio, capture, encoding, or virtual input. Treating its healthy supervisor as
+a streaming-capable worker would still be a false gate.
+
+The injected contract starts those seven resources in dependency order and
+publishes worker health only after every adapter reports ready. Startup has one
+120-second ceiling so a real Gamescope adapter is not accidentally constrained
+by the old five-second application timeout. An unexpected component exit fails
+the worker. Shutdown attempts launcher-process-tree, encoder-lease, capture,
+virtual-input, compositor, audio, and session-bus cleanup in that exact reverse
+order, with a separate five-second bound per component; a timeout, error, or
+panic cannot starve the remaining cleanup. Concrete adapters must honor
+cancellation and remain idempotent. Before this path is wired into the
+controller, its graceful-stop budget must be made consistent with the worker's
+worst-case teardown budget.
 
 The container retains `--network=none`. Beneath a pre-created mode-0700
 runtime root, the controller exclusively creates one inode-fenced,
