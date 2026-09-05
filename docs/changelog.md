@@ -12,6 +12,7 @@ starts at `v1.0.0`.
 - Names the cause when an artwork search fails: the Nova-facing candidate search and the console cover search now answer with a stable code for a missing SteamGridDB key, a rejected key, rate limiting, or an unreachable provider instead of a bare status or an empty result
 - Names the field when explicit launch fields are rejected, including the value seen, so a comma-decimal `fps` or a lock flag without its prerequisite no longer reads as "must be complete and within supported bounds"
 - Tells the console when the installed Polaris package is newer than the running process, which is what a package upgrade without a service restart looks like
+- Publishes `Polaris-sysext-x86_64.raw`, the Fedora 44 RPM repacked as an experimental systemd system extension so rpm-ostree hosts such as Bazzite can run Polaris without layering a package or rebooting
 
 ## v1.4.2 - 2026-09-04
 

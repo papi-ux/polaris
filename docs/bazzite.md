@@ -309,6 +309,37 @@ If clients connect but the stream is black, check whether logs mention
 headless labwc runtime. `HEADLESS-1` means routing worked and capture or encoder
 warnings should be inspected next.
 
+## System Extension (experimental)
+
+`Polaris-sysext-x86_64.raw` is the Fedora 44 RPM repacked as a
+[systemd system extension](https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html):
+the same files, overlaid onto `/usr` by `systemd-sysext` without a new deployment and without a
+reboot. It is experimental. The image is validated in CI as a system extension, but it has not yet
+been run on a Bazzite host, it cannot carry libraries the base image lacks (the RPM would have pulled
+them in), and on an SELinux-enforcing host the overlaid files carry no labels, so a start failure with
+a denial in `journalctl` is the extension, not Polaris. The RPM path above remains the supported one.
+
+The file must be installed as `polaris.raw`, which is the name the extension declares. Do not layer
+the RPM and the extension at the same time.
+
+```bash
+raw_name="Polaris-sysext-x86_64.raw"
+wget --output-document="./${raw_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${raw_name}" &&
+sudo install -D -m 0644 "./${raw_name}" /var/lib/extensions/polaris.raw &&
+sudo systemctl enable --now systemd-sysext.service &&
+sudo systemd-sysext refresh &&
+sudo udevadm control --reload &&
+sudo -H polaris --setup-host &&
+systemctl --user daemon-reload &&
+systemctl --user enable --now polaris
+```
+
+`systemd-sysext status` shows whether the extension is merged. To update, replace
+`/var/lib/extensions/polaris.raw` with the newer image, then run `sudo systemd-sysext refresh` and
+`systemctl --user restart polaris`. To remove it, run `sudo systemd-sysext unmerge` and delete the
+image. The extension is built from the Fedora RPM, so it is for Fedora-based atomic hosts; it does
+not run on SteamOS.
+
 ## Update
 
 Layer the newer Fedora 44 RPM and reboot. `rpm-ostree` will stage the
