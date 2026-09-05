@@ -71,9 +71,13 @@ namespace {
     auto admitted = registry.admit({
       .client_key = std::move(client),
       .profile_key = std::move(profile),
-      .workload_key = std::move(workload),
+      .workload = {multiseat::workload_kind_e::steam, std::move(workload)},
       .logical_gpu_id = gpu_id,
       .runtime_profile = runtime_profile_e::steam,
+      .data_plane = {
+        .display_topology = multiseat::display_topology_e::capture_host_with_nested_compositor,
+        .media_pipeline = multiseat::media_pipeline_e::worker_local_capture_encode,
+      },
       .display_mode = {1920, 1080, 60000, false},
       .requested_compositor = requested,
       .encoder_sessions = 1,
@@ -480,6 +484,10 @@ TEST(MultiseatWorkerBroker, TwoFakeWorkersRunAndStopIndependently) {
   for (const auto &spec : backend.launch_specs()) {
     EXPECT_EQ(spec.render_node, render_node);
     EXPECT_EQ(spec.runtime_profile, runtime_profile_e::steam);
+    EXPECT_EQ(spec.workload.kind, multiseat::workload_kind_e::steam);
+    EXPECT_TRUE(multiseat::valid_workload_plan(spec.workload));
+    EXPECT_TRUE(multiseat::valid_data_plane(spec.data_plane));
+    EXPECT_NE(spec.resources.capture_wayland_socket, spec.resources.wayland_socket);
     EXPECT_EQ(spec.display_mode.width, 1920U);
     EXPECT_EQ(spec.display_mode.height, 1080U);
     EXPECT_EQ(spec.display_mode.refresh_millihz, 60000U);

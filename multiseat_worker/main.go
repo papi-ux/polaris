@@ -22,7 +22,7 @@ func run(arguments []string) error {
 		if len(arguments) != 1 {
 			return errors.New("health does not accept arguments")
 		}
-		config, err := loadWorkerConfig(os.LookupEnv, "")
+		config, err := loadWorkerConfig(os.LookupEnv, workloadPlan{})
 		if err != nil {
 			return err
 		}

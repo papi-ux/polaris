@@ -40,6 +40,9 @@ namespace multiseat::worker_ipc {
     input = 19,
     feedback = 20,
     error = 21,
+    attach = 22,
+    attached = 23,
+    input_ack = 24,
 
     video = 32,
     audio = 33,

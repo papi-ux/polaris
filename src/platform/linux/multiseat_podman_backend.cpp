@@ -31,11 +31,16 @@ namespace multiseat::podman {
     constexpr auto label_generation = "io.polaris.multiseat.generation"sv;
     constexpr auto label_worker = "io.polaris.multiseat.worker"sv;
     constexpr auto label_runtime = "io.polaris.multiseat.runtime"sv;
+    constexpr auto label_capture_wayland = "io.polaris.multiseat.capture-wayland"sv;
     constexpr auto label_wayland = "io.polaris.multiseat.wayland"sv;
     constexpr auto label_audio = "io.polaris.multiseat.audio"sv;
     constexpr auto label_input = "io.polaris.multiseat.input"sv;
     constexpr auto label_render_node = "io.polaris.multiseat.render-node"sv;
     constexpr auto label_runtime_profile = "io.polaris.multiseat.runtime-profile"sv;
+    constexpr auto label_workload_kind = "io.polaris.multiseat.workload-kind"sv;
+    constexpr auto label_workload_target = "io.polaris.multiseat.workload-target"sv;
+    constexpr auto label_display_topology = "io.polaris.multiseat.display-topology"sv;
+    constexpr auto label_media_pipeline = "io.polaris.multiseat.media-pipeline"sv;
     constexpr auto label_runtime_image = "io.polaris.multiseat.runtime-image"sv;
     constexpr auto label_display_width = "io.polaris.multiseat.display-width"sv;
     constexpr auto label_display_height = "io.polaris.multiseat.display-height"sv;
@@ -162,6 +167,63 @@ namespace multiseat::podman {
       }
       return {};
     }
+
+    std::string workload_kind_name(workload_kind_e kind) {
+      switch (kind) {
+        case workload_kind_e::gamescope:
+          return "gamescope";
+        case workload_kind_e::steam:
+          return "steam";
+        case workload_kind_e::heroic:
+          return "heroic";
+        case workload_kind_e::lutris:
+          return "lutris";
+        case workload_kind_e::unknown:
+          break;
+      }
+      return {};
+    }
+
+    bool valid_workload_kind_name(std::string_view value) {
+      return value == "gamescope" || value == "steam" ||
+             value == "heroic" || value == "lutris";
+    }
+
+    workload_kind_e workload_kind_from_name(std::string_view value) {
+      if (value == "gamescope") {
+        return workload_kind_e::gamescope;
+      }
+      if (value == "steam") {
+        return workload_kind_e::steam;
+      }
+      if (value == "heroic") {
+        return workload_kind_e::heroic;
+      }
+      if (value == "lutris") {
+        return workload_kind_e::lutris;
+      }
+      return workload_kind_e::unknown;
+    }
+
+    runtime_profile_e runtime_profile_from_name(std::string_view value) {
+      if (value == "gamescope") {
+        return runtime_profile_e::gamescope;
+      }
+      if (value == "steam") {
+        return runtime_profile_e::steam;
+      }
+      if (value == "heroic") {
+        return runtime_profile_e::heroic;
+      }
+      if (value == "lutris") {
+        return runtime_profile_e::lutris;
+      }
+      return runtime_profile_e::unknown;
+    }
+
+    constexpr auto display_topology_name =
+      "capture-host-with-nested-compositor"sv;
+    constexpr auto media_pipeline_name = "worker-local-capture-encode"sv;
 
     bool valid_runtime_profile_name(std::string_view value) {
       return value == "gamescope" || value == "steam" ||
@@ -307,7 +369,7 @@ namespace multiseat::podman {
       const profile_t &profile
     ) {
       return {
-        {std::string {label_protocol}, "1"},
+        {std::string {label_protocol}, "2"},
         {std::string {label_deployment}, options.deployment_id},
         {std::string {label_controller}, spec.identity.seat.controller_epoch},
         {std::string {label_gpu}, spec.identity.seat.logical_gpu_id},
@@ -315,11 +377,16 @@ namespace multiseat::podman {
         {std::string {label_generation}, std::to_string(spec.identity.seat.generation)},
         {std::string {label_worker}, spec.identity.worker_name},
         {std::string {label_runtime}, spec.resources.runtime_namespace},
+        {std::string {label_capture_wayland}, spec.resources.capture_wayland_socket},
         {std::string {label_wayland}, spec.resources.wayland_socket},
         {std::string {label_audio}, spec.resources.audio_sink},
         {std::string {label_input}, spec.resources.input_seat},
         {std::string {label_render_node}, spec.render_node},
         {std::string {label_runtime_profile}, runtime_profile_name(spec.runtime_profile)},
+        {std::string {label_workload_kind}, workload_kind_name(spec.workload.kind)},
+        {std::string {label_workload_target}, spec.workload.target_id},
+        {std::string {label_display_topology}, std::string {display_topology_name}},
+        {std::string {label_media_pipeline}, std::string {media_pipeline_name}},
         {std::string {label_runtime_image}, profile.image_reference},
         {std::string {label_display_width}, std::to_string(spec.display_mode.width)},
         {std::string {label_display_height}, std::to_string(spec.display_mode.height)},
@@ -366,7 +433,7 @@ namespace multiseat::podman {
           !opaque_name_token(options.deployment_id, 64) ||
           options.gpus.empty() ||
           options.profiles.empty() ||
-          options.workload_keys.empty() ||
+          options.workloads.empty() ||
           options.input_devices.empty() ||
           options.command_timeout <= std::chrono::milliseconds::zero() ||
           options.max_command_output_bytes == 0 ||
@@ -420,11 +487,13 @@ namespace multiseat::podman {
         }
       }
 
-      std::unordered_set<std::string> workloads;
-      for (const auto &workload : options.workload_keys) {
-        if (!opaque_reference(workload) || !workloads.emplace(workload).second) {
+      std::vector<workload_plan_t> workloads;
+      for (const auto &workload : options.workloads) {
+        if (!valid_workload_plan(workload) ||
+            std::find(workloads.begin(), workloads.end(), workload) != workloads.end()) {
           throw std::invalid_argument {"rootless Podman workload options are invalid"};
         }
+        workloads.push_back(workload);
       }
 
       std::unordered_set<std::string> input_devices;
@@ -476,12 +545,12 @@ namespace multiseat::podman {
     return profile == options_.profiles.end() ? nullptr : &*profile;
   }
 
-  bool backend_t::workload_allowed(const std::string &workload_key) const {
+  bool backend_t::workload_allowed(const workload_plan_t &workload) const {
     return std::find(
-             options_.workload_keys.begin(),
-             options_.workload_keys.end(),
-             workload_key
-           ) != options_.workload_keys.end();
+             options_.workloads.begin(),
+             options_.workloads.end(),
+             workload
+           ) != options_.workloads.end();
   }
 
   bool backend_t::base_host_ready() const {
@@ -540,13 +609,16 @@ namespace multiseat::podman {
         !opaque_name_token(spec.identity.seat.logical_gpu_id) ||
         !opaque_name_token(spec.identity.worker_name) ||
         !opaque_name_token(spec.resources.runtime_namespace) ||
+        !opaque_name_token(spec.resources.capture_wayland_socket) ||
         !opaque_name_token(spec.resources.wayland_socket) ||
         !opaque_name_token(spec.resources.audio_sink) ||
         !opaque_name_token(spec.resources.input_seat) ||
         !opaque_reference(spec.profile_key) ||
-        !opaque_reference(spec.workload_key) ||
+        !valid_workload_plan(spec.workload) ||
         !device_path(spec.render_node) ||
         !concrete_runtime_profile(spec.runtime_profile) ||
+        !workload_matches_runtime_profile(spec.workload, spec.runtime_profile) ||
+        !valid_data_plane(spec.data_plane) ||
         !valid_display_mode(spec.display_mode) ||
         !concrete_compositor(spec.compositor) ||
         spec.encoder_sessions == 0) {
@@ -557,7 +629,7 @@ namespace multiseat::podman {
     return gpu && profile &&
            spec.encoder_sessions <= gpu->max_encoder_sessions &&
            profile->runtime_profile == spec.runtime_profile &&
-           workload_allowed(spec.workload_key);
+           workload_allowed(spec.workload);
   }
 
   std::vector<std::string> backend_t::launch_argv(
@@ -637,6 +709,7 @@ namespace multiseat::podman {
     add_environment("PULSE_SERVER", "unix:/run/polaris/pulse/native");
     add_environment("PULSE_SINK", spec.resources.audio_sink);
     add_environment("WAYLAND_DISPLAY", spec.resources.wayland_socket);
+    add_environment("POLARIS_CAPTURE_WAYLAND_DISPLAY", spec.resources.capture_wayland_socket);
     add_environment("POLARIS_RUNTIME_NAMESPACE", spec.resources.runtime_namespace);
     add_environment("POLARIS_WORKER_NAME", spec.identity.worker_name);
     add_environment("POLARIS_INPUT_SEAT", spec.resources.input_seat);
@@ -646,6 +719,8 @@ namespace multiseat::podman {
     add_environment("POLARIS_SEAT_GENERATION", std::to_string(spec.identity.seat.generation));
     add_environment("POLARIS_RENDER_NODE", spec.render_node);
     add_environment("POLARIS_RUNTIME_PROFILE", runtime_profile_name(spec.runtime_profile));
+    add_environment("POLARIS_DISPLAY_TOPOLOGY", std::string {display_topology_name});
+    add_environment("POLARIS_MEDIA_PIPELINE", std::string {media_pipeline_name});
     add_environment("POLARIS_DISPLAY_WIDTH", std::to_string(spec.display_mode.width));
     add_environment("POLARIS_DISPLAY_HEIGHT", std::to_string(spec.display_mode.height));
     add_environment(
@@ -676,7 +751,8 @@ namespace multiseat::podman {
     argv.push_back("--entrypoint=" + options_.worker_entrypoint.native());
     argv.push_back(profile.image_reference);
     argv.push_back("run");
-    argv.push_back("--workload-key=" + spec.workload_key);
+    argv.push_back("--workload-kind=" + workload_kind_name(spec.workload.kind));
+    argv.push_back("--workload-id=" + spec.workload.target_id);
     return argv;
   }
 
@@ -918,11 +994,16 @@ namespace multiseat::podman {
         const auto generation_text = label_value(labels, label_generation);
         const auto worker = label_value(labels, label_worker);
         const auto runtime = label_value(labels, label_runtime);
+        const auto capture_wayland = label_value(labels, label_capture_wayland);
         const auto wayland = label_value(labels, label_wayland);
         const auto audio = label_value(labels, label_audio);
         const auto input = label_value(labels, label_input);
         const auto render = label_value(labels, label_render_node);
         const auto runtime_profile = label_value(labels, label_runtime_profile);
+        const auto workload_kind = label_value(labels, label_workload_kind);
+        const auto workload_target = label_value(labels, label_workload_target);
+        const auto display_topology = label_value(labels, label_display_topology);
+        const auto media_pipeline = label_value(labels, label_media_pipeline);
         const auto runtime_image = label_value(labels, label_runtime_image);
         const auto display_width_text = label_value(labels, label_display_width);
         const auto display_height_text = label_value(labels, label_display_height);
@@ -952,18 +1033,33 @@ namespace multiseat::podman {
           .refresh_millihz = display_refresh.value_or(0),
           .hdr = display_hdr && *display_hdr == "1",
         };
-        if (!protocol || *protocol != "1" ||
+        const workload_plan_t workload {
+          .kind = workload_kind ?
+                    workload_kind_from_name(*workload_kind) :
+                    workload_kind_e::unknown,
+          .target_id = workload_target.value_or(std::string {}),
+        };
+        const auto parsed_runtime_profile = runtime_profile ?
+                                              runtime_profile_from_name(*runtime_profile) :
+                                              runtime_profile_e::unknown;
+        if (!protocol || *protocol != "2" ||
             !deployment || *deployment != options_.deployment_id ||
             !controller || !opaque_name_token(*controller, 64) ||
             !gpu || !opaque_name_token(*gpu) ||
             !slot || !generation || *generation == 0 ||
             !worker || !opaque_name_token(*worker) || *worker != *name ||
             !runtime || !opaque_name_token(*runtime) ||
+            !capture_wayland || !opaque_name_token(*capture_wayland) ||
             !wayland || !opaque_name_token(*wayland) ||
             !audio || !opaque_name_token(*audio) ||
             !input || !opaque_name_token(*input) ||
             !render || !device_path(*render) ||
             !runtime_profile || !valid_runtime_profile_name(*runtime_profile) ||
+            !workload_kind || !valid_workload_kind_name(*workload_kind) ||
+            !workload_target || !valid_workload_plan(workload) ||
+            !workload_matches_runtime_profile(workload, parsed_runtime_profile) ||
+            !display_topology || *display_topology != display_topology_name ||
+            !media_pipeline || *media_pipeline != media_pipeline_name ||
             !runtime_image || !pinned_image_reference(*runtime_image) ||
             !display_width || !display_height || !display_refresh ||
             !display_hdr || (*display_hdr != "0" && *display_hdr != "1") ||

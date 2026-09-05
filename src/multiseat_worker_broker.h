@@ -85,16 +85,18 @@ namespace multiseat {
   /**
    * Narrow launch payload passed to a future container/process backend.
    *
-   * Client identity is intentionally absent. Profile and workload keys are
-   * opaque control-plane references, not paths or credentials.
+   * Client identity is intentionally absent. The profile key stays in the
+   * control plane; the workload is a typed, allowlisted selector and never an
+   * executable, argv vector, path, environment assignment, or credential.
    */
   struct worker_launch_spec_t {
     worker_identity_t identity;
     seat_resources_t resources;
     std::string profile_key;
-    std::string workload_key;
+    workload_plan_t workload;
     std::string render_node;
     runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    seat_data_plane_t data_plane;
     seat_display_mode_t display_mode;
     compositor_e compositor = compositor_e::automatic;
     std::uint32_t encoder_sessions = 1;

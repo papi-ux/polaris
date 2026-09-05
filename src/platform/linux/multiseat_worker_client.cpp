@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <limits>
 #include <mutex>
@@ -30,6 +31,8 @@ namespace multiseat::worker_ipc {
   namespace {
     using monotonic_clock_t = std::chrono::steady_clock;
     using deadline_t = monotonic_clock_t::time_point;
+    constexpr std::size_t maximum_pending_frames = 64;
+    constexpr std::size_t maximum_pending_payload = 32 * 1024 * 1024;
 
     struct socket_identity_t {
       std::uint64_t device = 0;
@@ -441,6 +444,16 @@ namespace multiseat::worker_ipc {
       }
       return transport_status_e::applied;
     }
+
+    bool asynchronous_message(channel_e channel, message_e message) {
+      if (channel == channel_e::control) {
+        return message == message_e::feedback;
+      }
+      return message == message_e::video ||
+             message == message_e::audio ||
+             message == message_e::end_of_stream ||
+             message == message_e::discontinuity;
+    }
   }  // namespace
 
   struct controller_client_t::implementation_t {
@@ -450,17 +463,101 @@ namespace multiseat::worker_ipc {
     channel_state_t control;
     channel_state_t media {.channel = channel_e::media};
     controller_client_options_t options;
+    std::deque<frame_t> pending_control;
+    std::deque<frame_t> pending_media;
+    std::size_t pending_payload = 0;
     bool has_capability = false;
+    bool control_attached = false;
+    bool media_attached = false;
+
+    transport_status_e queue_async(frame_t frame) {
+      if (!asynchronous_message(frame.channel, frame.message) ||
+          pending_control.size() + pending_media.size() >= maximum_pending_frames ||
+          frame.payload.size() > maximum_pending_payload - pending_payload) {
+        return transport_status_e::protocol_rejected;
+      }
+      pending_payload += frame.payload.size();
+      auto &queue = frame.channel == channel_e::control ? pending_control : pending_media;
+      queue.push_back(std::move(frame));
+      return transport_status_e::applied;
+    }
+
+    transport_status_e receive_until(
+      channel_state_t &state,
+      message_e expected,
+      deadline_t deadline,
+      frame_t &result
+    ) {
+      for (std::size_t count = 0; count <= maximum_pending_frames; ++count) {
+        frame_t candidate;
+        const auto status = receive_frame(
+          state,
+          identity,
+          deadline,
+          state.channel == channel_e::control ?
+            max_control_payload : max_media_payload,
+          candidate
+        );
+        if (status != transport_status_e::applied) {
+          return status;
+        }
+        if (candidate.message == expected) {
+          result = std::move(candidate);
+          return transport_status_e::applied;
+        }
+        const bool channel_attached = state.channel == channel_e::control ?
+                                        control_attached : media_attached;
+        if (!channel_attached) {
+          return transport_status_e::protocol_rejected;
+        }
+        const auto queued = queue_async(std::move(candidate));
+        if (queued != transport_status_e::applied) {
+          return queued;
+        }
+      }
+      return transport_status_e::protocol_rejected;
+    }
+
+    transport_status_e pop_or_receive(
+      channel_state_t &state,
+      std::deque<frame_t> &queue,
+      frame_t &result
+    ) {
+      if (!queue.empty()) {
+        result = std::move(queue.front());
+        pending_payload -= result.payload.size();
+        queue.pop_front();
+        return transport_status_e::applied;
+      }
+      const auto deadline = monotonic_clock_t::now() + options.io_timeout;
+      return receive_frame(
+        state,
+        identity,
+        deadline,
+        state.channel == channel_e::control ?
+          max_control_payload : max_media_payload,
+        result
+      );
+    }
 
     void close_locked() noexcept {
       close_channel(media);
       close_channel(control);
+      pending_control.clear();
+      pending_media.clear();
+      pending_payload = 0;
+      control_attached = false;
+      media_attached = false;
       OPENSSL_cleanse(capability.data(), capability.size());
       has_capability = false;
     }
 
     [[nodiscard]] bool connected_locked() const {
       return control.descriptor >= 0 && media.descriptor >= 0 && has_capability;
+    }
+
+    [[nodiscard]] bool attached_locked() const {
+      return connected_locked() && control_attached && media_attached;
     }
   };
 
@@ -534,6 +631,150 @@ namespace multiseat::worker_ipc {
     return status;
   }
 
+  transport_status_e controller_client_t::attach_data_plane() {
+    std::scoped_lock lock {implementation_->mutex};
+    if (!implementation_->connected_locked()) {
+      return transport_status_e::closed;
+    }
+    if (implementation_->control_attached || implementation_->media_attached) {
+      return transport_status_e::invalid_argument;
+    }
+
+    const auto attach = [this](channel_state_t &state, bool &attached) {
+      const auto deadline = monotonic_clock_t::now() + implementation_->options.io_timeout;
+      auto status = send_frame(
+        state,
+        {
+          .channel = state.channel,
+          .message = message_e::attach,
+          .slot = implementation_->identity.slot,
+          .generation = implementation_->identity.generation,
+        },
+        deadline
+      );
+      frame_t response;
+      if (status == transport_status_e::applied) {
+        status = implementation_->receive_until(
+          state,
+          message_e::attached,
+          deadline,
+          response
+        );
+      }
+      if (status == transport_status_e::applied) {
+        attached = true;
+      }
+      return status;
+    };
+
+    auto status = attach(
+      implementation_->control,
+      implementation_->control_attached
+    );
+    if (status == transport_status_e::applied) {
+      status = attach(
+        implementation_->media,
+        implementation_->media_attached
+      );
+    }
+    if (status != transport_status_e::applied) {
+      implementation_->close_locked();
+    }
+    return status;
+  }
+
+  transport_status_e controller_client_t::send_input(
+    std::span<const std::uint8_t> payload
+  ) {
+    std::scoped_lock lock {implementation_->mutex};
+    if (payload.empty() || payload.size() > max_control_payload) {
+      return transport_status_e::invalid_argument;
+    }
+    if (!implementation_->attached_locked()) {
+      return transport_status_e::closed;
+    }
+    const auto deadline = monotonic_clock_t::now() + implementation_->options.io_timeout;
+    auto status = send_frame(
+      implementation_->control,
+      {
+        .channel = channel_e::control,
+        .message = message_e::input,
+        .slot = implementation_->identity.slot,
+        .generation = implementation_->identity.generation,
+        .payload = std::vector<std::uint8_t>(payload.begin(), payload.end()),
+      },
+      deadline
+    );
+    frame_t response;
+    if (status == transport_status_e::applied) {
+      status = implementation_->receive_until(
+        implementation_->control,
+        message_e::input_ack,
+        deadline,
+        response
+      );
+    }
+    if (status != transport_status_e::applied) {
+      implementation_->close_locked();
+    }
+    return status;
+  }
+
+  transport_status_e controller_client_t::receive_feedback(
+    std::vector<std::uint8_t> &payload
+  ) {
+    std::scoped_lock lock {implementation_->mutex};
+    payload.clear();
+    if (!implementation_->attached_locked()) {
+      return transport_status_e::closed;
+    }
+    frame_t received;
+    auto status = implementation_->pop_or_receive(
+      implementation_->control,
+      implementation_->pending_control,
+      received
+    );
+    if (status == transport_status_e::applied &&
+        received.message != message_e::feedback) {
+      status = transport_status_e::protocol_rejected;
+    }
+    if (status == transport_status_e::applied) {
+      payload = std::move(received.payload);
+    } else {
+      implementation_->close_locked();
+    }
+    return status;
+  }
+
+  transport_status_e controller_client_t::receive_media(
+    encoded_media_packet_t &packet
+  ) {
+    std::scoped_lock lock {implementation_->mutex};
+    packet = {};
+    if (!implementation_->attached_locked()) {
+      return transport_status_e::closed;
+    }
+    frame_t received;
+    auto status = implementation_->pop_or_receive(
+      implementation_->media,
+      implementation_->pending_media,
+      received
+    );
+    if (status == transport_status_e::applied &&
+        !asynchronous_message(channel_e::media, received.message)) {
+      status = transport_status_e::protocol_rejected;
+    }
+    if (status == transport_status_e::applied) {
+      packet = {
+        .message = received.message,
+        .payload = std::move(received.payload),
+      };
+    } else {
+      implementation_->close_locked();
+    }
+    return status;
+  }
+
   transport_status_e controller_client_t::heartbeat(channel_e channel) {
     std::scoped_lock lock {implementation_->mutex};
     if (channel != channel_e::control && channel != channel_e::media) {
@@ -558,17 +799,12 @@ namespace multiseat::worker_ipc {
     );
     frame_t response;
     if (status == transport_status_e::applied) {
-      status = receive_frame(
+      status = implementation_->receive_until(
         state,
-        implementation_->identity,
+        message_e::heartbeat_ack,
         deadline,
-        0,
         response
       );
-      if (status == transport_status_e::applied &&
-          response.message != message_e::heartbeat_ack) {
-        status = transport_status_e::protocol_rejected;
-      }
     }
     if (status != transport_status_e::applied) {
       implementation_->close_locked();
@@ -594,17 +830,12 @@ namespace multiseat::worker_ipc {
     );
     frame_t response;
     if (status == transport_status_e::applied) {
-      status = receive_frame(
+      status = implementation_->receive_until(
         implementation_->control,
-        implementation_->identity,
+        message_e::shutdown_ack,
         deadline,
-        0,
         response
       );
-      if (status == transport_status_e::applied &&
-          response.message != message_e::shutdown_ack) {
-        status = transport_status_e::protocol_rejected;
-      }
     }
     implementation_->close_locked();
     return status;
@@ -618,6 +849,11 @@ namespace multiseat::worker_ipc {
   bool controller_client_t::connected() const noexcept {
     std::scoped_lock lock {implementation_->mutex};
     return implementation_->connected_locked();
+  }
+
+  bool controller_client_t::data_plane_attached() const noexcept {
+    std::scoped_lock lock {implementation_->mutex};
+    return implementation_->attached_locked();
   }
 
 }  // namespace multiseat::worker_ipc

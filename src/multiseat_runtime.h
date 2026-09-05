@@ -29,6 +29,47 @@ namespace multiseat {
     lutris,
   };
 
+  /** Trusted launcher family. The worker never receives an executable. */
+  enum class workload_kind_e {
+    unknown,
+    gamescope,
+    steam,
+    heroic,
+    lutris,
+  };
+
+  /**
+   * Immutable launch-plan selector resolved by the controller allowlist.
+   *
+   * `target_id` is a bounded opaque catalog identifier, not argv, a path, an
+   * environment assignment, or a shell fragment. A future trusted launcher
+   * adapter resolves the exact pair without interpreting it as a command.
+   */
+  struct workload_plan_t {
+    workload_kind_e kind = workload_kind_e::unknown;
+    std::string target_id;
+
+    bool operator==(const workload_plan_t &) const = default;
+  };
+
+  enum class display_topology_e {
+    unknown,
+    capture_host_with_nested_compositor,
+  };
+
+  enum class media_pipeline_e {
+    unknown,
+    worker_local_capture_encode,
+  };
+
+  /** Exact per-seat ownership model for pixels and encoded media. */
+  struct seat_data_plane_t {
+    display_topology_e display_topology = display_topology_e::unknown;
+    media_pipeline_e media_pipeline = media_pipeline_e::unknown;
+
+    bool operator==(const seat_data_plane_t &) const = default;
+  };
+
   /** Immutable output requested for one seat. Refresh is canonical mHz. */
   struct seat_display_mode_t {
     std::uint32_t width = 0;
@@ -75,9 +116,10 @@ namespace multiseat {
   struct seat_request_t {
     std::string client_key;
     std::string profile_key;
-    std::string workload_key;
+    workload_plan_t workload;
     std::string logical_gpu_id;
     runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    seat_data_plane_t data_plane;
     seat_display_mode_t display_mode;
     compositor_e requested_compositor = compositor_e::automatic;
     std::uint32_t encoder_sessions = 1;
@@ -113,6 +155,7 @@ namespace multiseat {
   struct seat_resources_t {
     std::string worker_name;
     std::string runtime_namespace;
+    std::string capture_wayland_socket;
     std::string wayland_socket;
     std::string audio_sink;
     std::string input_seat;
@@ -125,9 +168,10 @@ namespace multiseat {
     seat_resources_t resources;
     std::string client_key;
     std::string profile_key;
-    std::string workload_key;
+    workload_plan_t workload;
     std::string render_node;
     runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    seat_data_plane_t data_plane;
     seat_display_mode_t display_mode;
     compositor_e requested_compositor = compositor_e::automatic;
     compositor_e selected_compositor = compositor_e::automatic;
@@ -135,6 +179,13 @@ namespace multiseat {
     seat_state_e state = seat_state_e::reserved;
     std::uint32_t encoder_sessions = 1;
   };
+
+  [[nodiscard]] bool valid_workload_plan(const workload_plan_t &plan);
+  [[nodiscard]] bool workload_matches_runtime_profile(
+    const workload_plan_t &plan,
+    runtime_profile_e profile
+  );
+  [[nodiscard]] bool valid_data_plane(const seat_data_plane_t &data_plane);
 
   struct admission_result_t {
     admission_rejection_e rejection = admission_rejection_e::invalid_request;

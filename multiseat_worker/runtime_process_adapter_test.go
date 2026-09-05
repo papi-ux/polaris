@@ -58,7 +58,7 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	config.DisplayHeight = 2160
 	config.RefreshMillihz = 97000
 	config.DisplayHDR = true
-	config.WorkloadKey = "heroic-game;$(touch /tmp/not-executed)"
+	config.Workload = workloadPlan{Kind: workloadKindHeroic, TargetID: "heroic-game"}
 	runtime, err := startWorkerRuntime(
 		context.Background(),
 		config,
@@ -78,10 +78,10 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	wantStages := []runtimeStage{
 		runtimeStageSessionBus,
 		runtimeStageAudio,
-		runtimeStageCompositor,
+		runtimeStageDisplayCapture,
+		runtimeStageNestedCompositor,
 		runtimeStageVirtualInput,
-		runtimeStageCapture,
-		runtimeStageEncoderLease,
+		runtimeStageEncoder,
 		runtimeStageLauncherProcessTree,
 	}
 	for index, spec := range specs {
@@ -124,19 +124,31 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	}
 	if got, want := specs[2].Arguments, []string{
 		"serve",
-		"--stage=compositor",
+		"--stage=display-capture",
 		"--runtime-namespace=" + config.RuntimeNamespace,
-		"--wayland-socket=" + config.WaylandSocket,
+		"--capture-wayland-socket=" + config.CaptureWaylandSocket,
 		"--render-node=" + config.RenderNode,
-		"--compositor=gamescope",
+		"--display-topology=capture-host-with-nested-compositor",
+		"--media-pipeline=worker-local-capture-encode",
 		"--display-width=3840",
 		"--display-height=2160",
 		"--display-refresh-millihz=97000",
 		"--display-hdr=1",
 	}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("compositor argv mismatch: %#v", got)
+		t.Fatalf("display capture argv mismatch: %#v", got)
 	}
 	if got, want := specs[3].Arguments, []string{
+		"serve",
+		"--stage=nested-compositor",
+		"--runtime-namespace=" + config.RuntimeNamespace,
+		"--parent-wayland-socket=" + config.CaptureWaylandSocket,
+		"--wayland-socket=" + config.WaylandSocket,
+		"--render-node=" + config.RenderNode,
+		"--compositor=gamescope",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("nested compositor argv mismatch: %#v", got)
+	}
+	if got, want := specs[4].Arguments, []string{
 		"serve",
 		"--stage=virtual-input",
 		"--runtime-namespace=" + config.RuntimeNamespace,
@@ -144,41 +156,35 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("virtual input argv mismatch: %#v", got)
 	}
-	if got, want := specs[4].Arguments, []string{
-		"serve",
-		"--stage=capture",
-		"--runtime-namespace=" + config.RuntimeNamespace,
-		"--wayland-socket=" + config.WaylandSocket,
-		"--render-node=" + config.RenderNode,
-	}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("capture argv mismatch: %#v", got)
-	}
 	if got, want := specs[5].Arguments, []string{
 		"serve",
-		"--stage=encoder-lease",
+		"--stage=encoder",
 		"--runtime-namespace=" + config.RuntimeNamespace,
 		"--logical-gpu-id=" + config.Identity.LogicalGPU,
 		"--render-node=" + config.RenderNode,
 		"--sessions=1",
+		"--media-pipeline=worker-local-capture-encode",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("encoder argv mismatch: %#v", got)
 	}
 	launcher := specs[6]
-	wantWorkload := "--workload-key=" + config.WorkloadKey
+	wantWorkloadKind := "--workload-kind=" + string(config.Workload.Kind)
+	wantWorkloadID := "--workload-id=" + config.Workload.TargetID
 	if !reflect.DeepEqual(launcher.Arguments, []string{
 		"serve",
 		"--stage=launcher-process-tree",
 		"--runtime-namespace=" + config.RuntimeNamespace,
 		"--runtime-profile=heroic",
-		wantWorkload,
+		wantWorkloadKind,
+		wantWorkloadID,
 		"--wayland-socket=" + config.WaylandSocket,
 		"--audio-sink=" + config.AudioSink,
 		"--input-seat=" + config.InputSeat,
 	}) {
 		t.Fatalf("launcher argv mismatch: %#v", launcher.Arguments)
 	}
-	if count := strings.Count(strings.Join(launcher.Arguments, "\n"), wantWorkload); count != 1 {
-		t.Fatalf("literal workload was split or duplicated: %#v", launcher.Arguments)
+	if count := strings.Count(strings.Join(launcher.Arguments, "\n"), wantWorkloadID); count != 1 {
+		t.Fatalf("typed workload id was split or duplicated: %#v", launcher.Arguments)
 	}
 	wantEnvironment, err := runtimeProcessEnvironment(
 		runtimeStageLauncherProcessTree,
@@ -256,6 +262,7 @@ func TestProcessRuntimeAdaptersAcceptOnlyLockedRuntimeProfiles(t *testing.T) {
 			}
 			config := runtimeTestConfig("worker-profile-"+profile, 73, 0)
 			config.RuntimeProfile = profile
+			config.Workload = workloadPlan{Kind: workloadKind(profile), TargetID: "catalog-entry"}
 			allocation := runtimeAllocationForTest(t, config)
 			lease, err := adapters.LauncherProcessTree.Start(context.Background(), allocation)
 			if err != nil {
@@ -301,7 +308,7 @@ func TestProcessRuntimeAdapterRejectsInvalidAllocationBeforeHostTouch(t *testing
 				runtimeTestConfig("worker-invalid-process-allocation", 75, 0),
 			)
 			mutate(&allocation)
-			lease, err := adapters.Compositor.Start(context.Background(), allocation)
+			lease, err := adapters.NestedCompositor.Start(context.Background(), allocation)
 			if lease != nil || err == nil || !strings.Contains(err.Error(), "adapter is invalid") {
 				t.Fatalf("invalid process allocation was accepted: %#v, %v", lease, err)
 			}

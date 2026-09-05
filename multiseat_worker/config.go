@@ -19,21 +19,46 @@ const (
 )
 
 type workerConfig struct {
-	Identity         endpointIdentity
-	RuntimeNamespace string
-	WaylandSocket    string
-	AudioSink        string
-	InputSeat        string
-	RenderNode       string
-	Compositor       string
-	RuntimeProfile   string
-	DisplayWidth     uint32
-	DisplayHeight    uint32
-	RefreshMillihz   uint32
-	DisplayHDR       bool
-	EncoderSessions  uint32
-	WorkloadKey      string
+	Identity             endpointIdentity
+	RuntimeNamespace     string
+	CaptureWaylandSocket string
+	WaylandSocket        string
+	AudioSink            string
+	InputSeat            string
+	RenderNode           string
+	Compositor           string
+	RuntimeProfile       string
+	DisplayTopology      displayTopology
+	MediaPipeline        mediaPipeline
+	DisplayWidth         uint32
+	DisplayHeight        uint32
+	RefreshMillihz       uint32
+	DisplayHDR           bool
+	EncoderSessions      uint32
+	Workload             workloadPlan
 }
+
+type workloadKind string
+
+const (
+	workloadKindGamescope workloadKind = "gamescope"
+	workloadKindSteam     workloadKind = "steam"
+	workloadKindHeroic    workloadKind = "heroic"
+	workloadKindLutris    workloadKind = "lutris"
+)
+
+type workloadPlan struct {
+	Kind     workloadKind
+	TargetID string
+}
+
+type displayTopology string
+
+const displayTopologyCaptureHostNested displayTopology = "capture-host-with-nested-compositor"
+
+type mediaPipeline string
+
+const mediaPipelineWorkerLocal mediaPipeline = "worker-local-capture-encode"
 
 type workerPaths struct {
 	IPC   string
@@ -65,18 +90,6 @@ func parseUint(value string, bits int, field string) (uint64, error) {
 	return parsed, nil
 }
 
-func validOpaqueReference(value string) bool {
-	if value == "" || len(value) > 256 {
-		return false
-	}
-	for _, character := range []byte(value) {
-		if character < 0x20 || character > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 func validRuntimeProfile(profile string) bool {
 	switch profile {
 	case "gamescope", "steam", "heroic", "lutris":
@@ -86,9 +99,31 @@ func validRuntimeProfile(profile string) bool {
 	}
 }
 
+func validWorkloadKind(kind workloadKind) bool {
+	switch kind {
+	case workloadKindGamescope, workloadKindSteam, workloadKindHeroic, workloadKindLutris:
+		return true
+	default:
+		return false
+	}
+}
+
+func validWorkloadPlan(plan workloadPlan) bool {
+	return validWorkloadKind(plan.Kind) && validNameToken(plan.TargetID, 128)
+}
+
+func workloadMatchesRuntimeProfile(plan workloadPlan, profile string) bool {
+	return validWorkloadPlan(plan) && string(plan.Kind) == profile
+}
+
+func validDataPlane(topology displayTopology, pipeline mediaPipeline) bool {
+	return topology == displayTopologyCaptureHostNested &&
+		pipeline == mediaPipelineWorkerLocal
+}
+
 func loadWorkerConfig(
 	lookup func(string) (string, bool),
-	workloadKey string,
+	workload workloadPlan,
 ) (workerConfig, error) {
 	var config workerConfig
 	var err error
@@ -127,6 +162,7 @@ func loadWorkerConfig(
 		target *string
 	}{
 		{"POLARIS_RUNTIME_NAMESPACE", &config.RuntimeNamespace},
+		{"POLARIS_CAPTURE_WAYLAND_DISPLAY", &config.CaptureWaylandSocket},
 		{"WAYLAND_DISPLAY", &config.WaylandSocket},
 		{"PULSE_SINK", &config.AudioSink},
 		{"POLARIS_INPUT_SEAT", &config.InputSeat},
@@ -139,6 +175,7 @@ func loadWorkerConfig(
 		}
 	}
 	if !validNameToken(config.RuntimeNamespace, 128) ||
+		!validNameToken(config.CaptureWaylandSocket, 128) ||
 		!validNameToken(config.WaylandSocket, 128) ||
 		!validNameToken(config.AudioSink, 128) ||
 		!validNameToken(config.InputSeat, 128) {
@@ -156,6 +193,19 @@ func loadWorkerConfig(
 	}
 	if !validRuntimeProfile(config.RuntimeProfile) {
 		return config, errors.New("worker runtime profile is invalid")
+	}
+	topology, err := requiredEnvironment(lookup, "POLARIS_DISPLAY_TOPOLOGY")
+	if err != nil {
+		return config, err
+	}
+	config.DisplayTopology = displayTopology(topology)
+	pipeline, err := requiredEnvironment(lookup, "POLARIS_MEDIA_PIPELINE")
+	if err != nil {
+		return config, err
+	}
+	config.MediaPipeline = mediaPipeline(pipeline)
+	if !validDataPlane(config.DisplayTopology, config.MediaPipeline) {
+		return config, errors.New("worker data plane allocation is invalid")
 	}
 	displaySettings := []struct {
 		name   string
@@ -202,20 +252,27 @@ func loadWorkerConfig(
 		return config, errors.New("worker encoder allocation is invalid")
 	}
 	config.EncoderSessions = uint32(parsedEncoders)
-	if workloadKey != "" && !validOpaqueReference(workloadKey) {
-		return config, errors.New("worker workload key is invalid")
+	if workload != (workloadPlan{}) &&
+		(!validWorkloadPlan(workload) ||
+			!workloadMatchesRuntimeProfile(workload, config.RuntimeProfile)) {
+		return config, errors.New("worker workload plan is invalid")
 	}
-	config.WorkloadKey = workloadKey
+	config.Workload = workload
 	return config, nil
 }
 
-func parseRunArguments(arguments []string) (string, error) {
-	if len(arguments) != 1 || !strings.HasPrefix(arguments[0], "--workload-key=") {
-		return "", errors.New("run requires exactly one workload key")
+func parseRunArguments(arguments []string) (workloadPlan, error) {
+	if len(arguments) != 2 ||
+		!strings.HasPrefix(arguments[0], "--workload-kind=") ||
+		!strings.HasPrefix(arguments[1], "--workload-id=") {
+		return workloadPlan{}, errors.New("run requires one typed workload plan")
 	}
-	value := strings.TrimPrefix(arguments[0], "--workload-key=")
-	if !validOpaqueReference(value) {
-		return "", errors.New("workload key is invalid")
+	plan := workloadPlan{
+		Kind:     workloadKind(strings.TrimPrefix(arguments[0], "--workload-kind=")),
+		TargetID: strings.TrimPrefix(arguments[1], "--workload-id="),
 	}
-	return value, nil
+	if !validWorkloadPlan(plan) {
+		return workloadPlan{}, errors.New("workload plan is invalid")
+	}
+	return plan, nil
 }

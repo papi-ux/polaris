@@ -84,10 +84,10 @@ func newProcessRuntimeAdapters(
 	return runtimeAdapters{
 		SessionBus:          adapter(runtimeStageSessionBus),
 		Audio:               adapter(runtimeStageAudio),
-		Compositor:          adapter(runtimeStageCompositor),
+		DisplayCapture:      adapter(runtimeStageDisplayCapture),
+		NestedCompositor:    adapter(runtimeStageNestedCompositor),
 		VirtualInput:        adapter(runtimeStageVirtualInput),
-		Capture:             adapter(runtimeStageCapture),
-		EncoderLease:        adapter(runtimeStageEncoderLease),
+		Encoder:             adapter(runtimeStageEncoder),
 		LauncherProcessTree: adapter(runtimeStageLauncherProcessTree),
 	}, nil
 }
@@ -111,10 +111,15 @@ func runtimeProcessEnvironment(
 			"PULSE_SERVER=unix:/run/polaris/pulse/native",
 			"PULSE_SINK="+allocation.AudioSink,
 		), nil
-	case runtimeStageCompositor:
+	case runtimeStageDisplayCapture:
 		return append(runtime,
 			dbus,
-			"WAYLAND_DISPLAY="+allocation.WaylandSocket,
+			"POLARIS_RENDER_NODE="+allocation.RenderNode,
+		), nil
+	case runtimeStageNestedCompositor:
+		return append(runtime,
+			dbus,
+			"WAYLAND_DISPLAY="+allocation.CaptureWaylandSocket,
 			"POLARIS_RENDER_NODE="+allocation.RenderNode,
 		), nil
 	case runtimeStageVirtualInput:
@@ -122,12 +127,7 @@ func runtimeProcessEnvironment(
 			"WAYLAND_DISPLAY="+allocation.WaylandSocket,
 			"POLARIS_INPUT_SEAT="+allocation.InputSeat,
 		), nil
-	case runtimeStageCapture:
-		return append(runtime,
-			"WAYLAND_DISPLAY="+allocation.WaylandSocket,
-			"POLARIS_RENDER_NODE="+allocation.RenderNode,
-		), nil
-	case runtimeStageEncoderLease:
+	case runtimeStageEncoder:
 		return []string{
 			"POLARIS_RENDER_NODE=" + allocation.RenderNode,
 		}, nil
@@ -174,35 +174,40 @@ func runtimeProcessArguments(
 		return append(arguments,
 			"--audio-sink="+allocation.AudioSink,
 		), nil
-	case runtimeStageCompositor:
+	case runtimeStageDisplayCapture:
 		return append(arguments,
-			"--wayland-socket="+allocation.WaylandSocket,
+			"--capture-wayland-socket="+allocation.CaptureWaylandSocket,
 			"--render-node="+allocation.RenderNode,
-			"--compositor="+allocation.Compositor,
+			"--display-topology="+string(allocation.DisplayTopology),
+			"--media-pipeline="+string(allocation.MediaPipeline),
 			"--display-width="+strconv.FormatUint(uint64(allocation.DisplayWidth), 10),
 			"--display-height="+strconv.FormatUint(uint64(allocation.DisplayHeight), 10),
 			"--display-refresh-millihz="+strconv.FormatUint(uint64(allocation.RefreshMillihz), 10),
 			"--display-hdr="+displayHDR,
 		), nil
+	case runtimeStageNestedCompositor:
+		return append(arguments,
+			"--parent-wayland-socket="+allocation.CaptureWaylandSocket,
+			"--wayland-socket="+allocation.WaylandSocket,
+			"--render-node="+allocation.RenderNode,
+			"--compositor="+allocation.Compositor,
+		), nil
 	case runtimeStageVirtualInput:
 		return append(arguments,
 			"--input-seat="+allocation.InputSeat,
 		), nil
-	case runtimeStageCapture:
-		return append(arguments,
-			"--wayland-socket="+allocation.WaylandSocket,
-			"--render-node="+allocation.RenderNode,
-		), nil
-	case runtimeStageEncoderLease:
+	case runtimeStageEncoder:
 		return append(arguments,
 			"--logical-gpu-id="+allocation.Identity.LogicalGPU,
 			"--render-node="+allocation.RenderNode,
 			"--sessions="+strconv.FormatUint(uint64(allocation.EncoderSessions), 10),
+			"--media-pipeline="+string(allocation.MediaPipeline),
 		), nil
 	case runtimeStageLauncherProcessTree:
 		return append(arguments,
 			"--runtime-profile="+allocation.RuntimeProfile,
-			"--workload-key="+allocation.WorkloadKey,
+			"--workload-kind="+string(allocation.Workload.Kind),
+			"--workload-id="+allocation.Workload.TargetID,
 			"--wayland-socket="+allocation.WaylandSocket,
 			"--audio-sink="+allocation.AudioSink,
 			"--input-seat="+allocation.InputSeat,
@@ -214,20 +219,23 @@ func runtimeProcessArguments(
 
 func validProcessRuntimeAllocation(allocation runtimeAllocation) bool {
 	validated, err := runtimeAllocationFromConfig(workerConfig{
-		Identity:         allocation.Identity,
-		RuntimeNamespace: allocation.RuntimeNamespace,
-		WaylandSocket:    allocation.WaylandSocket,
-		AudioSink:        allocation.AudioSink,
-		InputSeat:        allocation.InputSeat,
-		RenderNode:       allocation.RenderNode,
-		Compositor:       allocation.Compositor,
-		RuntimeProfile:   allocation.RuntimeProfile,
-		DisplayWidth:     allocation.DisplayWidth,
-		DisplayHeight:    allocation.DisplayHeight,
-		RefreshMillihz:   allocation.RefreshMillihz,
-		DisplayHDR:       allocation.DisplayHDR,
-		EncoderSessions:  allocation.EncoderSessions,
-		WorkloadKey:      allocation.WorkloadKey,
+		Identity:             allocation.Identity,
+		RuntimeNamespace:     allocation.RuntimeNamespace,
+		CaptureWaylandSocket: allocation.CaptureWaylandSocket,
+		WaylandSocket:        allocation.WaylandSocket,
+		AudioSink:            allocation.AudioSink,
+		InputSeat:            allocation.InputSeat,
+		RenderNode:           allocation.RenderNode,
+		Compositor:           allocation.Compositor,
+		RuntimeProfile:       allocation.RuntimeProfile,
+		DisplayTopology:      allocation.DisplayTopology,
+		MediaPipeline:        allocation.MediaPipeline,
+		DisplayWidth:         allocation.DisplayWidth,
+		DisplayHeight:        allocation.DisplayHeight,
+		RefreshMillihz:       allocation.RefreshMillihz,
+		DisplayHDR:           allocation.DisplayHDR,
+		EncoderSessions:      allocation.EncoderSessions,
+		Workload:             allocation.Workload,
 	})
 	return err == nil && validated == allocation
 }

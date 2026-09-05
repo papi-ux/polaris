@@ -274,6 +274,39 @@ TEST(MultiseatWorkerProtocol, EncoderRejectsWrongChannelShapeAndZeroSequence) {
   );
 }
 
+TEST(MultiseatWorkerProtocol, DataPlaneAttachmentAndDirectionShapesAreBounded) {
+  for (const auto channel : {channel_e::control, channel_e::media}) {
+    EXPECT_NO_THROW((void) encode_frame({
+      .channel = channel,
+      .message = message_e::attach,
+      .slot = 7,
+      .generation = 42,
+      .sequence = 1,
+    }));
+  }
+  EXPECT_THROW(
+    (void) encode_frame({
+      .channel = channel_e::media,
+      .message = message_e::input_ack,
+      .slot = 7,
+      .generation = 42,
+      .sequence = 1,
+    }),
+    std::invalid_argument
+  );
+  EXPECT_THROW(
+    (void) encode_frame({
+      .channel = channel_e::control,
+      .message = message_e::attached,
+      .slot = 7,
+      .generation = 42,
+      .sequence = 1,
+      .payload = {1},
+    }),
+    std::invalid_argument
+  );
+}
+
 TEST(MultiseatWorkerProtocol, SequenceGuardRejectsReplayAndGaps) {
   sequence_guard_t guard;
   EXPECT_EQ(guard.next(), 1U);

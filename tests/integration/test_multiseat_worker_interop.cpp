@@ -24,6 +24,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace {
   using namespace std::chrono_literals;
@@ -203,7 +204,8 @@ namespace {
       }
     };
     set("POLARIS_NATIVE_INTEROP", "1");
-    set("POLARIS_INTEROP_WORKLOAD_KEY", "native-interop-workload");
+    set("POLARIS_INTEROP_WORKLOAD_KIND", "steam");
+    set("POLARIS_INTEROP_WORKLOAD_ID", "native-interop-workload");
     set("POLARIS_INTEROP_IPC_PATH", authority.paths().ipc.native());
     set("POLARIS_INTEROP_AUTH_PATH", authority.paths().auth.native());
     set("POLARIS_INTEROP_STATE_PATH", state.native());
@@ -213,12 +215,15 @@ namespace {
     set("POLARIS_SEAT_GENERATION", std::to_string(identity.generation));
     set("POLARIS_WORKER_NAME", identity.worker_name);
     set("POLARIS_RUNTIME_NAMESPACE", authority.paths().generation.filename().native());
+    set("POLARIS_CAPTURE_WAYLAND_DISPLAY", "capture-native-interop");
     set("WAYLAND_DISPLAY", "wayland-native-interop");
     set("PULSE_SINK", "audio-native-interop");
     set("POLARIS_INPUT_SEAT", "input-native-interop");
     set("POLARIS_RENDER_NODE", "/dev/dri/renderD128");
     set("POLARIS_COMPOSITOR", "gamescope");
     set("POLARIS_RUNTIME_PROFILE", "steam");
+    set("POLARIS_DISPLAY_TOPOLOGY", "capture-host-with-nested-compositor");
+    set("POLARIS_MEDIA_PIPELINE", "worker-local-capture-encode");
     set("POLARIS_DISPLAY_WIDTH", "1920");
     set("POLARIS_DISPLAY_HEIGHT", "1080");
     set("POLARIS_DISPLAY_REFRESH_MILLIHZ", "60000");
@@ -288,6 +293,29 @@ TEST(MultiseatWorkerInterop, NativeClientAuthenticatesRealGoWorkerOnBothChannels
   ASSERT_EQ(client.connect(authority, options), transport_status_e::applied)
     << read_log(log);
   EXPECT_TRUE(client.connected());
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+  EXPECT_TRUE(client.data_plane_attached());
+  const std::vector<std::uint8_t> input {
+    'n', 'a', 't', 'i', 'v', 'e', '-', 'i', 'n', 'p', 'u', 't',
+  };
+  EXPECT_EQ(client.send_input(input), transport_status_e::applied);
+  std::vector<std::uint8_t> feedback;
+  ASSERT_EQ(client.receive_feedback(feedback), transport_status_e::applied);
+  EXPECT_EQ(
+    feedback,
+    (std::vector<std::uint8_t> {
+      'n', 'a', 't', 'i', 'v', 'e', '-', 'f', 'e', 'e', 'd', 'b', 'a', 'c', 'k',
+    })
+  );
+  encoded_media_packet_t media;
+  ASSERT_EQ(client.receive_media(media), transport_status_e::applied);
+  EXPECT_EQ(media.message, message_e::video);
+  EXPECT_EQ(
+    media.payload,
+    (std::vector<std::uint8_t> {
+      'n', 'a', 't', 'i', 'v', 'e', '-', 'v', 'i', 'd', 'e', 'o',
+    })
+  );
   EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::applied);
   EXPECT_EQ(client.heartbeat(channel_e::media), transport_status_e::applied);
   EXPECT_EQ(client.shutdown(), transport_status_e::applied);

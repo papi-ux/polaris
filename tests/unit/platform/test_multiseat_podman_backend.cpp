@@ -21,7 +21,10 @@
 namespace {
   using json = nlohmann::json;
   using multiseat::compositor_e;
+  using multiseat::display_topology_e;
+  using multiseat::media_pipeline_e;
   using multiseat::runtime_profile_e;
+  using multiseat::workload_kind_e;
   using multiseat::worker_command_result_e;
   using multiseat::worker_identity_t;
   using multiseat::worker_launch_spec_t;
@@ -142,7 +145,10 @@ namespace {
                              std::string(64, 'b'),
         },
       },
-      .workload_keys = {"steam-game;literal", "heroic-game"},
+      .workloads = {
+        {workload_kind_e::steam, "steam-game"},
+        {workload_kind_e::heroic, "heroic-game"},
+      },
       .input_devices = {"/dev/uinput", "/dev/uhid"},
       .shared_game_mounts = {
         shared_game_mount_t {
@@ -158,7 +164,7 @@ namespace {
     std::uint64_t generation = 1,
     std::string worker_name = "polaris-worker-controller-a1b2-1",
     std::string profile_key = "profile alpha",
-    std::string workload_key = "steam-game;literal"
+    std::string workload_id = "steam-game"
   ) {
     const auto suffix = "controller-a1b2-" + std::to_string(generation);
     const auto runtime_profile = profile_key == "profile beta" ?
@@ -177,14 +183,23 @@ namespace {
       .resources = {
         .worker_name = {},
         .runtime_namespace = "polaris-runtime-" + suffix,
+        .capture_wayland_socket = "polaris-capture-" + suffix,
         .wayland_socket = "polaris-wayland-" + suffix,
         .audio_sink = "polaris-audio-" + suffix,
         .input_seat = "polaris-input-" + suffix,
       },
       .profile_key = std::move(profile_key),
-      .workload_key = std::move(workload_key),
+      .workload = {
+        runtime_profile == runtime_profile_e::heroic ?
+          workload_kind_e::heroic : workload_kind_e::steam,
+        std::move(workload_id),
+      },
       .render_node = "/dev/dri/renderD128",
       .runtime_profile = runtime_profile,
+      .data_plane = {
+        .display_topology = display_topology_e::capture_host_with_nested_compositor,
+        .media_pipeline = media_pipeline_e::worker_local_capture_encode,
+      },
       .display_mode = {3840, 2160, 97000, true},
       .compositor = compositor_e::gamescope,
       .encoder_sessions = 1,
@@ -196,14 +211,14 @@ namespace {
     std::uint64_t generation = 1,
     std::string worker_name = "polaris-worker-controller-a1b2-1",
     std::string profile_key = "profile alpha",
-    std::string workload_key = "steam-game;literal"
+    std::string workload_id = "steam-game"
   ) {
     auto spec = spec_for(
       slot,
       generation,
       std::move(worker_name),
       std::move(profile_key),
-      std::move(workload_key)
+      std::move(workload_id)
     );
     spec.resources.worker_name = spec.identity.worker_name;
     return spec;
@@ -233,8 +248,10 @@ namespace {
                          std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} +
                            std::string(64, 'a');
     const auto profile = spec.runtime_profile == runtime_profile_e::heroic ? "heroic" : "steam";
+    const auto workload_kind = spec.workload.kind == workload_kind_e::heroic ?
+                                 "heroic" : "steam";
     return {
-      {"io.polaris.multiseat.protocol", "1"},
+      {"io.polaris.multiseat.protocol", "2"},
       {"io.polaris.multiseat.deployment", "deployment-a1b2"},
       {"io.polaris.multiseat.controller", spec.identity.seat.controller_epoch},
       {"io.polaris.multiseat.gpu", spec.identity.seat.logical_gpu_id},
@@ -242,11 +259,16 @@ namespace {
       {"io.polaris.multiseat.generation", std::to_string(spec.identity.seat.generation)},
       {"io.polaris.multiseat.worker", spec.identity.worker_name},
       {"io.polaris.multiseat.runtime", spec.resources.runtime_namespace},
+      {"io.polaris.multiseat.capture-wayland", spec.resources.capture_wayland_socket},
       {"io.polaris.multiseat.wayland", spec.resources.wayland_socket},
       {"io.polaris.multiseat.audio", spec.resources.audio_sink},
       {"io.polaris.multiseat.input", spec.resources.input_seat},
       {"io.polaris.multiseat.render-node", spec.render_node},
       {"io.polaris.multiseat.runtime-profile", profile},
+      {"io.polaris.multiseat.workload-kind", workload_kind},
+      {"io.polaris.multiseat.workload-target", spec.workload.target_id},
+      {"io.polaris.multiseat.display-topology", "capture-host-with-nested-compositor"},
+      {"io.polaris.multiseat.media-pipeline", "worker-local-capture-encode"},
       {"io.polaris.multiseat.runtime-image", image},
       {"io.polaris.multiseat.display-width", std::to_string(spec.display_mode.width)},
       {"io.polaris.multiseat.display-height", std::to_string(spec.display_mode.height)},
@@ -318,6 +340,14 @@ TEST(MultiseatPodmanBackend, RejectsUnpinnedImagesAndDuplicateProfileVolumes) {
   options = options_for_tests();
   options.ipc_root = "/run/user/1000/../polaris-workers";
   EXPECT_THROW(backend_t(host, options), std::invalid_argument);
+
+  options = options_for_tests();
+  options.workloads.push_back(options.workloads.front());
+  EXPECT_THROW(backend_t(host, options), std::invalid_argument);
+
+  options = options_for_tests();
+  options.workloads.front().target_id = "game;$(command)";
+  EXPECT_THROW(backend_t(host, options), std::invalid_argument);
 }
 
 TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
@@ -378,11 +408,14 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   ));
   EXPECT_TRUE(has_argument(argv, "--device=/dev/uinput:/dev/uinput:rw"));
   EXPECT_TRUE(has_argument(argv, "--env=WAYLAND_DISPLAY=polaris-wayland-controller-a1b2-1"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_CAPTURE_WAYLAND_DISPLAY=polaris-capture-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=PULSE_SINK=polaris-audio-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_INPUT_SEAT=polaris-input-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_WORKER_NAME=polaris-worker-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_COMPOSITOR=gamescope"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_RUNTIME_PROFILE=steam"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_TOPOLOGY=capture-host-with-nested-compositor"));
+  EXPECT_TRUE(has_argument(argv, "--env=POLARIS_MEDIA_PIPELINE=worker-local-capture-encode"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_WIDTH=3840"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_HEIGHT=2160"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_DISPLAY_REFRESH_MILLIHZ=97000"));
@@ -400,7 +433,8 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
     "ro=true,relabel=private,bind-nonrecursive"
   ));
   EXPECT_TRUE(has_argument(argv, "--health-on-failure=none"));
-  EXPECT_TRUE(has_argument(argv, "--workload-key=steam-game;literal"));
+  EXPECT_TRUE(has_argument(argv, "--workload-kind=steam"));
+  EXPECT_TRUE(has_argument(argv, "--workload-id=steam-game"));
   EXPECT_TRUE(has_argument(
     argv,
     std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} + std::string(64, 'a')
@@ -473,7 +507,11 @@ TEST(MultiseatPodmanBackend, LaunchRejectsUnknownOrNonConcreteAllocation) {
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
 
   spec = valid_spec();
-  spec.workload_key = "unknown workload";
+  spec.workload.target_id = "unknown-workload";
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+
+  spec = valid_spec();
+  spec.workload.kind = workload_kind_e::heroic;
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
 
   spec = valid_spec();
@@ -486,6 +524,14 @@ TEST(MultiseatPodmanBackend, LaunchRejectsUnknownOrNonConcreteAllocation) {
 
   spec = valid_spec();
   spec.runtime_profile = runtime_profile_e::heroic;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+
+  spec = valid_spec();
+  spec.data_plane.media_pipeline = media_pipeline_e::unknown;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+
+  spec = valid_spec();
+  spec.resources.capture_wayland_socket = "../capture";
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
 
   spec = valid_spec();
@@ -573,6 +619,11 @@ TEST(MultiseatPodmanBackend, NonzeroLaunchQuarantinesChangedRuntimeBindings) {
   };
   const std::vector<mismatch_t> mismatches {
     {"io.polaris.multiseat.runtime-profile", "heroic"},
+    {"io.polaris.multiseat.workload-kind", "heroic"},
+    {"io.polaris.multiseat.workload-target", "other-game"},
+    {"io.polaris.multiseat.display-topology", "nested-only"},
+    {"io.polaris.multiseat.media-pipeline", "controller-encode"},
+    {"io.polaris.multiseat.capture-wayland", "other-capture"},
     {
       "io.polaris.multiseat.runtime-image",
       std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} + std::string(64, 'c'),
@@ -679,6 +730,11 @@ TEST(MultiseatPodmanBackend, InventoryRejectsMalformedRuntimeBindingLabels) {
   };
   const std::vector<malformed_t> malformed_values {
     {"io.polaris.multiseat.runtime-profile", "automatic"},
+    {"io.polaris.multiseat.workload-kind", "shell"},
+    {"io.polaris.multiseat.workload-target", "game;command"},
+    {"io.polaris.multiseat.display-topology", "nested-only"},
+    {"io.polaris.multiseat.media-pipeline", "controller-encode"},
+    {"io.polaris.multiseat.capture-wayland", "../capture"},
     {"io.polaris.multiseat.runtime-image", "ghcr.io/papi-ux/polaris-seat:latest"},
     {"io.polaris.multiseat.display-width", "0"},
     {"io.polaris.multiseat.display-height", "16385"},

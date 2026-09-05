@@ -16,15 +16,20 @@
 namespace {
   using multiseat::admission_rejection_e;
   using multiseat::compositor_e;
+  using multiseat::display_topology_e;
   using multiseat::gpu_capacity_t;
+  using multiseat::media_pipeline_e;
   using multiseat::mutation_result_e;
   using multiseat::registry_t;
   using multiseat::runtime_profile_e;
+  using multiseat::seat_data_plane_t;
   using multiseat::seat_display_mode_t;
   using multiseat::seat_handle_t;
   using multiseat::seat_request_t;
   using multiseat::seat_snapshot_t;
   using multiseat::seat_state_e;
+  using multiseat::workload_kind_e;
+  using multiseat::workload_plan_t;
 
   constexpr auto gpu_id = "gpu-primary";
   constexpr auto controller_epoch = "controller-a1b2c3d4";
@@ -51,12 +56,31 @@ namespace {
     runtime_profile_e runtime_profile = runtime_profile_e::steam,
     seat_display_mode_t display_mode = {1920, 1080, 60000, false}
   ) {
+    const auto workload_kind = [&]() {
+      switch (runtime_profile) {
+        case runtime_profile_e::gamescope:
+          return workload_kind_e::gamescope;
+        case runtime_profile_e::steam:
+          return workload_kind_e::steam;
+        case runtime_profile_e::heroic:
+          return workload_kind_e::heroic;
+        case runtime_profile_e::lutris:
+          return workload_kind_e::lutris;
+        case runtime_profile_e::unknown:
+          return workload_kind_e::unknown;
+      }
+      return workload_kind_e::unknown;
+    }();
     return {
       .client_key = std::move(client),
       .profile_key = std::move(profile),
-      .workload_key = std::move(workload),
+      .workload = {workload_kind, std::move(workload)},
       .logical_gpu_id = gpu_id,
       .runtime_profile = runtime_profile,
+      .data_plane = {
+        .display_topology = display_topology_e::capture_host_with_nested_compositor,
+        .media_pipeline = media_pipeline_e::worker_local_capture_encode,
+      },
       .display_mode = display_mode,
       .requested_compositor = compositor,
       .encoder_sessions = encoder_sessions,
@@ -90,6 +114,7 @@ namespace {
     return {
       seat.resources.worker_name,
       seat.resources.runtime_namespace,
+      seat.resources.capture_wayland_socket,
       seat.resources.wayland_socket,
       seat.resources.audio_sink,
       seat.resources.input_seat,
@@ -175,7 +200,7 @@ TEST(MultiseatRuntime, StoppingOneSeatLeavesTheOtherSeatRunning) {
   const auto second_live = registry.snapshot(second.handle);
   ASSERT_TRUE(second_live);
   EXPECT_EQ(second_live->state, seat_state_e::running);
-  EXPECT_EQ(second_live->workload_key, "lutris-game");
+  EXPECT_EQ(second_live->workload, (workload_plan_t {workload_kind_e::steam, "lutris-game"}));
 
   const auto usage = registry.gpu_usage(gpu_id);
   ASSERT_TRUE(usage);
@@ -206,7 +231,7 @@ TEST(MultiseatRuntime, StaleHandleCannotMutateAReusedSlot) {
   const auto replacement_live = registry.snapshot(replacement.handle);
   ASSERT_TRUE(replacement_live);
   EXPECT_EQ(replacement_live->state, seat_state_e::reserved);
-  EXPECT_EQ(replacement_live->workload_key, "new-game");
+  EXPECT_EQ(replacement_live->workload, (workload_plan_t {workload_kind_e::steam, "new-game"}));
 }
 
 TEST(MultiseatRuntime, ControllerEpochFencesAReplacementControlPlane) {
@@ -272,6 +297,27 @@ TEST(MultiseatRuntime, RuntimeProfileAndDisplayModeAreRequiredAtAdmission) {
     admission_rejection_e::invalid_request
   );
 
+  auto mismatched_workload = request_for("client-kind", "profile-kind", "game-kind");
+  mismatched_workload.workload.kind = workload_kind_e::heroic;
+  EXPECT_EQ(
+    registry.admit(mismatched_workload).rejection,
+    admission_rejection_e::invalid_request
+  );
+
+  auto command_like_workload = request_for("client-command", "profile-command", "game");
+  command_like_workload.workload.target_id = "game;$(command)";
+  EXPECT_EQ(
+    registry.admit(command_like_workload).rejection,
+    admission_rejection_e::invalid_request
+  );
+
+  auto missing_data_plane = request_for("client-plane", "profile-plane", "game-plane");
+  missing_data_plane.data_plane.media_pipeline = media_pipeline_e::unknown;
+  EXPECT_EQ(
+    registry.admit(missing_data_plane).rejection,
+    admission_rejection_e::invalid_request
+  );
+
   const std::vector<seat_display_mode_t> invalid_modes {
     {0, 1080, 60000, false},
     {1920, 0, 60000, false},
@@ -290,6 +336,38 @@ TEST(MultiseatRuntime, RuntimeProfileAndDisplayModeAreRequiredAtAdmission) {
     EXPECT_EQ(
       registry.admit(request).rejection,
       admission_rejection_e::invalid_request
+    );
+  }
+}
+
+TEST(MultiseatRuntime, EveryLauncherFamilyUsesATypedMatchingPlan) {
+  const std::vector<std::pair<runtime_profile_e, workload_kind_e>> profiles {
+    {runtime_profile_e::gamescope, workload_kind_e::gamescope},
+    {runtime_profile_e::steam, workload_kind_e::steam},
+    {runtime_profile_e::heroic, workload_kind_e::heroic},
+    {runtime_profile_e::lutris, workload_kind_e::lutris},
+  };
+  for (std::size_t index = 0; index < profiles.size(); ++index) {
+    registry_t registry {"controller-profile-" + std::to_string(index), {shared_gpu()}};
+    const auto &[profile, kind] = profiles[index];
+    const auto result = registry.admit(request_for(
+      "client-" + std::to_string(index),
+      "profile-" + std::to_string(index),
+      "catalog-entry-" + std::to_string(index),
+      compositor_e::automatic,
+      1,
+      profile
+    ));
+    ASSERT_TRUE(result.accepted());
+    ASSERT_TRUE(result.seat);
+    EXPECT_EQ(result.seat->workload.kind, kind);
+    EXPECT_EQ(result.seat->runtime_profile, profile);
+    EXPECT_EQ(
+      result.seat->data_plane,
+      (seat_data_plane_t {
+        display_topology_e::capture_host_with_nested_compositor,
+        media_pipeline_e::worker_local_capture_encode,
+      })
     );
   }
 }
@@ -451,7 +529,7 @@ TEST(MultiseatRuntime, InvalidGpuDefinitionsAndRequestsAreRejected) {
 
   registry_t registry {controller_epoch, {shared_gpu()}};
   auto invalid = request_for("client", "profile", "game");
-  invalid.workload_key.clear();
+  invalid.workload.target_id.clear();
   EXPECT_EQ(
     registry.admit(invalid).rejection,
     admission_rejection_e::invalid_request

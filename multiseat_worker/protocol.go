@@ -33,6 +33,17 @@ const (
 	channelMedia   channel = 2
 )
 
+func (selected channel) String() string {
+	switch selected {
+	case channelControl:
+		return "control"
+	case channelMedia:
+		return "media"
+	default:
+		return "unknown"
+	}
+}
+
 type message uint8
 
 const (
@@ -48,6 +59,9 @@ const (
 	messageInput       message = 19
 	messageFeedback    message = 20
 	messageError       message = 21
+	messageAttach      message = 22
+	messageAttached    message = 23
+	messageInputAck    message = 24
 
 	messageVideo         message = 32
 	messageAudio         message = 33
@@ -182,6 +196,10 @@ func validMessage(selectedChannel channel, selectedMessage message, payloadSize 
 	case messageReady:
 		return selectedChannel == channelControl && payloadSize > 0 && payloadSize <= 4096
 	case messageShutdown, messageShutdownAck:
+		return selectedChannel == channelControl && payloadSize == 0
+	case messageAttach, messageAttached:
+		return payloadSize == 0
+	case messageInputAck:
 		return selectedChannel == channelControl && payloadSize == 0
 	case messageInput, messageFeedback:
 		return selectedChannel == channelControl && payloadSize > 0

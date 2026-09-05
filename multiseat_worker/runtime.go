@@ -24,10 +24,10 @@ type runtimeStage uint8
 const (
 	runtimeStageSessionBus runtimeStage = iota + 1
 	runtimeStageAudio
-	runtimeStageCompositor
+	runtimeStageDisplayCapture
+	runtimeStageNestedCompositor
 	runtimeStageVirtualInput
-	runtimeStageCapture
-	runtimeStageEncoderLease
+	runtimeStageEncoder
 	runtimeStageLauncherProcessTree
 )
 
@@ -37,14 +37,14 @@ func (stage runtimeStage) String() string {
 		return "session-bus"
 	case runtimeStageAudio:
 		return "audio"
-	case runtimeStageCompositor:
-		return "compositor"
+	case runtimeStageDisplayCapture:
+		return "display-capture"
+	case runtimeStageNestedCompositor:
+		return "nested-compositor"
 	case runtimeStageVirtualInput:
 		return "virtual-input"
-	case runtimeStageCapture:
-		return "capture"
-	case runtimeStageEncoderLease:
-		return "encoder-lease"
+	case runtimeStageEncoder:
+		return "encoder"
 	case runtimeStageLauncherProcessTree:
 		return "launcher-process-tree"
 	default:
@@ -55,20 +55,23 @@ func (stage runtimeStage) String() string {
 // runtimeAllocation is a value-only copy of controller-owned seat authority.
 // Adapters cannot mutate workerConfig or obtain client identity/profile data.
 type runtimeAllocation struct {
-	Identity         endpointIdentity
-	RuntimeNamespace string
-	WaylandSocket    string
-	AudioSink        string
-	InputSeat        string
-	RenderNode       string
-	Compositor       string
-	RuntimeProfile   string
-	DisplayWidth     uint32
-	DisplayHeight    uint32
-	RefreshMillihz   uint32
-	DisplayHDR       bool
-	EncoderSessions  uint32
-	WorkloadKey      string
+	Identity             endpointIdentity
+	RuntimeNamespace     string
+	CaptureWaylandSocket string
+	WaylandSocket        string
+	AudioSink            string
+	InputSeat            string
+	RenderNode           string
+	Compositor           string
+	RuntimeProfile       string
+	DisplayTopology      displayTopology
+	MediaPipeline        mediaPipeline
+	DisplayWidth         uint32
+	DisplayHeight        uint32
+	RefreshMillihz       uint32
+	DisplayHDR           bool
+	EncoderSessions      uint32
+	Workload             workloadPlan
 }
 
 // runtimeLease represents one ready resource. Done must signal its terminal
@@ -88,10 +91,10 @@ type runtimeAdapter interface {
 type runtimeAdapters struct {
 	SessionBus          runtimeAdapter
 	Audio               runtimeAdapter
-	Compositor          runtimeAdapter
+	DisplayCapture      runtimeAdapter
+	NestedCompositor    runtimeAdapter
 	VirtualInput        runtimeAdapter
-	Capture             runtimeAdapter
-	EncoderLease        runtimeAdapter
+	Encoder             runtimeAdapter
 	LauncherProcessTree runtimeAdapter
 }
 
@@ -160,6 +163,7 @@ func runtimeAllocationFromConfig(config workerConfig) (runtimeAllocation, error)
 		return runtimeAllocation{}, errors.New("worker runtime identity is invalid")
 	}
 	if !validNameToken(config.RuntimeNamespace, 128) ||
+		!validNameToken(config.CaptureWaylandSocket, 128) ||
 		!validNameToken(config.WaylandSocket, 128) ||
 		!validNameToken(config.AudioSink, 128) ||
 		!validNameToken(config.InputSeat, 128) {
@@ -178,6 +182,9 @@ func runtimeAllocationFromConfig(config workerConfig) (runtimeAllocation, error)
 	if !validRuntimeProfile(config.RuntimeProfile) {
 		return runtimeAllocation{}, errors.New("worker runtime profile allocation is invalid")
 	}
+	if !validDataPlane(config.DisplayTopology, config.MediaPipeline) {
+		return runtimeAllocation{}, errors.New("worker runtime data plane allocation is invalid")
+	}
 	if config.DisplayWidth == 0 || config.DisplayWidth > 16384 ||
 		config.DisplayHeight == 0 || config.DisplayHeight > 16384 ||
 		config.RefreshMillihz < 1000 || config.RefreshMillihz > 1000000 {
@@ -186,24 +193,28 @@ func runtimeAllocationFromConfig(config workerConfig) (runtimeAllocation, error)
 	if config.EncoderSessions == 0 || config.EncoderSessions > 64 {
 		return runtimeAllocation{}, errors.New("worker runtime encoder allocation is invalid")
 	}
-	if config.WorkloadKey == "" || !validOpaqueReference(config.WorkloadKey) {
-		return runtimeAllocation{}, errors.New("worker runtime workload key is invalid")
+	if !validWorkloadPlan(config.Workload) ||
+		!workloadMatchesRuntimeProfile(config.Workload, config.RuntimeProfile) {
+		return runtimeAllocation{}, errors.New("worker runtime workload plan is invalid")
 	}
 	return runtimeAllocation{
-		Identity:         config.Identity,
-		RuntimeNamespace: config.RuntimeNamespace,
-		WaylandSocket:    config.WaylandSocket,
-		AudioSink:        config.AudioSink,
-		InputSeat:        config.InputSeat,
-		RenderNode:       config.RenderNode,
-		Compositor:       config.Compositor,
-		RuntimeProfile:   config.RuntimeProfile,
-		DisplayWidth:     config.DisplayWidth,
-		DisplayHeight:    config.DisplayHeight,
-		RefreshMillihz:   config.RefreshMillihz,
-		DisplayHDR:       config.DisplayHDR,
-		EncoderSessions:  config.EncoderSessions,
-		WorkloadKey:      config.WorkloadKey,
+		Identity:             config.Identity,
+		RuntimeNamespace:     config.RuntimeNamespace,
+		CaptureWaylandSocket: config.CaptureWaylandSocket,
+		WaylandSocket:        config.WaylandSocket,
+		AudioSink:            config.AudioSink,
+		InputSeat:            config.InputSeat,
+		RenderNode:           config.RenderNode,
+		Compositor:           config.Compositor,
+		RuntimeProfile:       config.RuntimeProfile,
+		DisplayTopology:      config.DisplayTopology,
+		MediaPipeline:        config.MediaPipeline,
+		DisplayWidth:         config.DisplayWidth,
+		DisplayHeight:        config.DisplayHeight,
+		RefreshMillihz:       config.RefreshMillihz,
+		DisplayHDR:           config.DisplayHDR,
+		EncoderSessions:      config.EncoderSessions,
+		Workload:             config.Workload,
 	}, nil
 }
 
@@ -211,10 +222,10 @@ func (adapters runtimeAdapters) ordered() []runtimeStageAdapter {
 	return []runtimeStageAdapter{
 		{runtimeStageSessionBus, adapters.SessionBus},
 		{runtimeStageAudio, adapters.Audio},
-		{runtimeStageCompositor, adapters.Compositor},
+		{runtimeStageDisplayCapture, adapters.DisplayCapture},
+		{runtimeStageNestedCompositor, adapters.NestedCompositor},
 		{runtimeStageVirtualInput, adapters.VirtualInput},
-		{runtimeStageCapture, adapters.Capture},
-		{runtimeStageEncoderLease, adapters.EncoderLease},
+		{runtimeStageEncoder, adapters.Encoder},
 		{runtimeStageLauncherProcessTree, adapters.LauncherProcessTree},
 	}
 }

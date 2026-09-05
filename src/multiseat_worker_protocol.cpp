@@ -64,6 +64,11 @@ namespace multiseat::worker_ipc {
         case message_e::shutdown:
         case message_e::shutdown_ack:
           return channel == channel_e::control && payload_size == 0;
+        case message_e::attach:
+        case message_e::attached:
+          return payload_size == 0;
+        case message_e::input_ack:
+          return channel == channel_e::control && payload_size == 0;
         case message_e::input:
         case message_e::feedback:
           return channel == channel_e::control && payload_size > 0;

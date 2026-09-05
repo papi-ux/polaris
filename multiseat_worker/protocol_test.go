@@ -127,6 +127,27 @@ func TestProtocolRejectsWrongAuthorityAndMessageShape(t *testing.T) {
 	}
 }
 
+func TestDataPlaneAttachmentAndDirectionShapesAreBounded(t *testing.T) {
+	for _, selectedChannel := range []channel{channelControl, channelMedia} {
+		if _, err := encodeFrame(frame{
+			Channel: selectedChannel, Message: messageAttach,
+			Slot: 7, Generation: 42, Sequence: 1,
+		}); err != nil {
+			t.Fatalf("attach rejected on %s: %v", selectedChannel, err)
+		}
+	}
+	for _, invalid := range []frame{
+		{Channel: channelMedia, Message: messageInputAck, Slot: 7, Generation: 42, Sequence: 1},
+		{Channel: channelControl, Message: messageAttached, Slot: 7, Generation: 42, Sequence: 1, Payload: []byte{1}},
+		{Channel: channelControl, Message: messageFeedback, Slot: 7, Generation: 42, Sequence: 1},
+		{Channel: channelMedia, Message: messageVideo, Slot: 7, Generation: 42, Sequence: 1},
+	} {
+		if _, err := encodeFrame(invalid); err == nil {
+			t.Fatalf("invalid data-plane frame was accepted: %+v", invalid)
+		}
+	}
+}
+
 func TestSequenceGuardRejectsReplayAndGap(t *testing.T) {
 	guard := newSequenceGuard()
 	if !guard.accept(1) || guard.accept(1) || guard.accept(3) || !guard.accept(2) {

@@ -66,19 +66,22 @@ func createTestWorker(t *testing.T, name string, generation uint64, slot uint32)
 			Generation:      generation,
 			WorkerName:      name,
 		},
-		RuntimeNamespace: "runtime-" + name,
-		WaylandSocket:    "wayland-" + name,
-		AudioSink:        "audio-" + name,
-		InputSeat:        "input-" + name,
-		RenderNode:       "/dev/dri/renderD128",
-		Compositor:       "gamescope",
-		RuntimeProfile:   "steam",
-		DisplayWidth:     1920,
-		DisplayHeight:    1080,
-		RefreshMillihz:   60000,
-		DisplayHDR:       false,
-		EncoderSessions:  1,
-		WorkloadKey:      "synthetic",
+		RuntimeNamespace:     "runtime-" + name,
+		CaptureWaylandSocket: "capture-" + name,
+		WaylandSocket:        "wayland-" + name,
+		AudioSink:            "audio-" + name,
+		InputSeat:            "input-" + name,
+		RenderNode:           "/dev/dri/renderD128",
+		Compositor:           "gamescope",
+		RuntimeProfile:       "steam",
+		DisplayTopology:      displayTopologyCaptureHostNested,
+		MediaPipeline:        mediaPipelineWorkerLocal,
+		DisplayWidth:         1920,
+		DisplayHeight:        1080,
+		RefreshMillihz:       60000,
+		DisplayHDR:           false,
+		EncoderSessions:      1,
+		Workload:             workloadPlan{Kind: workloadKindSteam, TargetID: "synthetic"},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -476,10 +479,10 @@ func TestInjectedRuntimeFailureClosesWorkerAndTearsDown(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	runtimeSet.leases[runtimeStageCapture].finish(errors.New("private adapter detail"))
+	runtimeSet.leases[runtimeStageDisplayCapture].finish(errors.New("private adapter detail"))
 	select {
 	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "capture exited unexpectedly") {
+		if err == nil || !strings.Contains(err.Error(), "display-capture exited unexpectedly") {
 			t.Fatalf("unexpected worker runtime failure: %v", err)
 		}
 		if strings.Contains(err.Error(), "private adapter") {

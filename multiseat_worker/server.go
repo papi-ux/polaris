@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	handshakeTimeout = 2 * time.Second
-	idleTimeout      = 30 * time.Second
-	unixPathLimit    = 107
-	maxConnections   = 4
+	handshakeTimeout      = 2 * time.Second
+	idleTimeout           = 30 * time.Second
+	dataPlaneRouteTimeout = 5 * time.Second
+	unixPathLimit         = 107
+	maxConnections        = 4
 )
 
 type workerServer struct {
@@ -32,11 +33,118 @@ type workerServer struct {
 	controlID        fileIdentity
 	mediaID          fileIdentity
 	readyID          fileIdentity
+	context          context.Context
 	cancel           context.CancelFunc
+	dataPlane        workerDataPlane
+	failures         chan error
 	closeOnce        sync.Once
 	connectionsMutex sync.Mutex
 	connections      map[*net.UnixConn]struct{}
+	attached         map[channel]*net.UnixConn
 	closing          bool
+}
+
+type connectionFrameWriter struct {
+	mutex      sync.Mutex
+	connection *net.UnixConn
+	channel    channel
+	identity   endpointIdentity
+	sequence   uint64
+}
+
+func (writer *connectionFrameWriter) send(selectedMessage message, payload []byte) error {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	if writer.sequence == 0 {
+		return errors.New("worker IPC outgoing sequence is exhausted")
+	}
+	if err := writer.connection.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
+		return errors.New("worker IPC write deadline cannot be set")
+	}
+	if err := writeFrame(writer.connection, frame{
+		Channel:    writer.channel,
+		Message:    selectedMessage,
+		Slot:       writer.identity.Slot,
+		Generation: writer.identity.Generation,
+		Sequence:   writer.sequence,
+		Payload:    payload,
+	}); err != nil {
+		return err
+	}
+	if writer.sequence == ^uint64(0) {
+		writer.sequence = 0
+	} else {
+		writer.sequence++
+	}
+	return nil
+}
+
+func (server *workerServer) claimDataPlane(
+	connection *net.UnixConn,
+	selectedChannel channel,
+) bool {
+	server.connectionsMutex.Lock()
+	defer server.connectionsMutex.Unlock()
+	if server.closing || server.attached[selectedChannel] != nil {
+		return false
+	}
+	server.attached[selectedChannel] = connection
+	return true
+}
+
+func (server *workerServer) releaseDataPlane(
+	connection *net.UnixConn,
+	selectedChannel channel,
+) {
+	server.connectionsMutex.Lock()
+	defer server.connectionsMutex.Unlock()
+	if server.attached[selectedChannel] == connection {
+		delete(server.attached, selectedChannel)
+	}
+}
+
+func (server *workerServer) failDataPlane(route string) {
+	select {
+	case server.failures <- fmt.Errorf("worker data plane %s route failed", route):
+	default:
+	}
+	server.cancel()
+}
+
+func (server *workerServer) pumpDataPlane(
+	connectionContext context.Context,
+	connection *net.UnixConn,
+	writer *connectionFrameWriter,
+) {
+	for {
+		var output routedOutput
+		var err error
+		if writer.channel == channelControl {
+			output, err = server.dataPlane.NextFeedback(connectionContext)
+		} else {
+			output, err = server.dataPlane.NextMedia(connectionContext)
+		}
+		if err != nil {
+			if connectionContext.Err() == nil && server.context.Err() == nil {
+				server.failDataPlane(writer.channel.String())
+			}
+			_ = connection.Close()
+			return
+		}
+		if !validRoutedOutput(output, server.config.Identity, writer.channel) {
+			server.failDataPlane(writer.channel.String())
+			_ = connection.Close()
+			return
+		}
+		payload := append([]byte(nil), output.Payload...)
+		if err := writer.send(output.Message, payload); err != nil {
+			_ = connection.Close()
+			return
+		}
+		if output.Message == messageEndOfStream {
+			return
+		}
+	}
 }
 
 func listenPrivateUnix(path string, expectedUID uint32) (*net.UnixListener, fileIdentity, error) {
@@ -160,7 +268,14 @@ func (server *workerServer) serveConnection(
 	}
 	server.connections[connection] = struct{}{}
 	server.connectionsMutex.Unlock()
+	connectionContext, cancelConnection := context.WithCancel(server.context)
+	attached := false
 	defer func() {
+		cancelConnection()
+		if attached {
+			server.releaseDataPlane(connection, selectedChannel)
+			server.cancel()
+		}
 		server.connectionsMutex.Lock()
 		delete(server.connections, connection)
 		server.connectionsMutex.Unlock()
@@ -174,7 +289,12 @@ func (server *workerServer) serveConnection(
 		return
 	}
 	// Authentication consumed controller sequence 1.
-	outgoingSequence := uint64(3)
+	writer := &connectionFrameWriter{
+		connection: connection,
+		channel:    selectedChannel,
+		identity:   server.config.Identity,
+		sequence:   3,
+	}
 	for {
 		value, err := readFrame(
 			connection,
@@ -185,37 +305,59 @@ func (server *workerServer) serveConnection(
 		if err != nil || !incoming.accept(value.Sequence) {
 			return
 		}
-		if err := connection.SetDeadline(time.Now().Add(idleTimeout)); err != nil {
+		if err := connection.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
 			return
 		}
 		switch value.Message {
 		case messageHeartbeat:
-			if err := writeFrame(connection, frame{
-				Channel:    selectedChannel,
-				Message:    messageHeartbeatAck,
-				Slot:       server.config.Identity.Slot,
-				Generation: server.config.Identity.Generation,
-				Sequence:   outgoingSequence,
-			}); err != nil {
+			if err := writer.send(messageHeartbeatAck, nil); err != nil {
 				return
 			}
-			outgoingSequence++
+		case messageAttach:
+			if attached || nilRuntimeInterface(server.dataPlane) ||
+				!server.claimDataPlane(connection, selectedChannel) {
+				return
+			}
+			attached = true
+			if err := writer.send(messageAttached, nil); err != nil {
+				return
+			}
+			go server.pumpDataPlane(
+				connectionContext,
+				connection,
+				writer,
+			)
+		case messageInput:
+			if selectedChannel != channelControl || !attached ||
+				nilRuntimeInterface(server.dataPlane) {
+				return
+			}
+			routeContext, cancelRoute := context.WithTimeout(
+				connectionContext,
+				dataPlaneRouteTimeout,
+			)
+			err := server.dataPlane.RouteInput(routeContext, routedInput{
+				Identity: server.config.Identity,
+				Payload:  append([]byte(nil), value.Payload...),
+			})
+			cancelRoute()
+			if err != nil {
+				server.failDataPlane("input")
+				return
+			}
+			if err := writer.send(messageInputAck, nil); err != nil {
+				return
+			}
 		case messageShutdown:
 			if selectedChannel != channelControl {
 				return
 			}
-			_ = writeFrame(connection, frame{
-				Channel:    channelControl,
-				Message:    messageShutdownAck,
-				Slot:       server.config.Identity.Slot,
-				Generation: server.config.Identity.Generation,
-				Sequence:   outgoingSequence,
-			})
+			_ = writer.send(messageShutdownAck, nil)
 			server.cancel()
 			return
 		default:
-			// Launch, input, feedback, and media routing are intentionally not
-			// enabled by this supervisor-only slice.
+			// Directionally invalid or unsupported messages fail the exact
+			// connection closed. They never reach another seat's adapter.
 			return
 		}
 	}
@@ -374,6 +516,22 @@ func newWorkerServer(
 	paths workerPaths,
 	expectedUID uint32,
 ) (*workerServer, context.Context, error) {
+	return newWorkerServerWithDataPlane(
+		parent,
+		config,
+		paths,
+		expectedUID,
+		nil,
+	)
+}
+
+func newWorkerServerWithDataPlane(
+	parent context.Context,
+	config workerConfig,
+	paths workerPaths,
+	expectedUID uint32,
+	dataPlane workerDataPlane,
+) (*workerServer, context.Context, error) {
 	if err := privateDirectory(paths.IPC, expectedUID); err != nil {
 		return nil, nil, err
 	}
@@ -396,8 +554,12 @@ func newWorkerServer(
 		paths:       paths,
 		uid:         expectedUID,
 		capability:  capability,
+		context:     workerContext,
 		cancel:      cancel,
+		dataPlane:   dataPlane,
+		failures:    make(chan error, 1),
 		connections: make(map[*net.UnixConn]struct{}),
+		attached:    make(map[channel]*net.UnixConn),
 	}
 	server.control, server.controlID, err = listenPrivateUnix(
 		filepath.Join(paths.IPC, controlSocketName),
@@ -454,6 +616,32 @@ func runWorkerWithRuntime(
 	adapters *runtimeAdapters,
 	options runtimeOptions,
 ) (returnError error) {
+	return runWorkerWithRuntimeAndDataPlane(
+		parent,
+		config,
+		paths,
+		expectedUID,
+		adapters,
+		nil,
+		options,
+	)
+}
+
+// runWorkerWithRuntimeAndDataPlane is an injection-only executable contract.
+// The production entrypoint supplies neither side, so no gameplay resource or
+// route is activated by this checkpoint.
+func runWorkerWithRuntimeAndDataPlane(
+	parent context.Context,
+	config workerConfig,
+	paths workerPaths,
+	expectedUID uint32,
+	adapters *runtimeAdapters,
+	dataPlane workerDataPlane,
+	options runtimeOptions,
+) (returnError error) {
+	if adapters == nil && !nilRuntimeInterface(dataPlane) {
+		return errors.New("worker data plane requires a managed runtime")
+	}
 	var managedRuntime *workerRuntime
 	if adapters != nil {
 		var err error
@@ -466,7 +654,13 @@ func runWorkerWithRuntime(
 		}()
 	}
 
-	server, workerContext, err := newWorkerServer(parent, config, paths, expectedUID)
+	server, workerContext, err := newWorkerServerWithDataPlane(
+		parent,
+		config,
+		paths,
+		expectedUID,
+		dataPlane,
+	)
 	if err != nil {
 		return err
 	}
@@ -480,8 +674,15 @@ func runWorkerWithRuntime(
 	}
 	select {
 	case <-workerContext.Done():
-		return nil
+		select {
+		case err := <-server.failures:
+			return err
+		default:
+			return nil
+		}
 	case err := <-serverErrors:
+		return err
+	case err := <-server.failures:
 		return err
 	case err := <-runtimeFailures:
 		return err

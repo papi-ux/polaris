@@ -51,6 +51,22 @@ namespace multiseat {
              (value >= '0' && value <= '9');
     }
 
+    bool opaque_name_token(std::string_view value, std::size_t max_size = 128) {
+      return !value.empty() &&
+             value.size() <= max_size &&
+             ascii_alphanumeric(value.front()) &&
+             std::all_of(
+               value.begin(),
+               value.end(),
+               [](char character) {
+                 return ascii_alphanumeric(character) ||
+                        character == '-' ||
+                        character == '_' ||
+                        character == '.';
+               }
+             );
+    }
+
     bool valid_controller_epoch(std::string_view epoch) {
       return !epoch.empty() &&
              epoch.size() <= 64 &&
@@ -69,6 +85,7 @@ namespace multiseat {
       return seat_resources_t {
         .worker_name = "polaris-worker-" + suffix,
         .runtime_namespace = "polaris-runtime-" + suffix,
+        .capture_wayland_socket = "polaris-capture-" + suffix,
         .wayland_socket = "polaris-wayland-" + suffix,
         .audio_sink = "polaris-audio-" + suffix,
         .input_seat = "polaris-input-" + suffix,
@@ -78,13 +95,46 @@ namespace multiseat {
     bool valid_request(const seat_request_t &request) {
       return !request.client_key.empty() &&
              !request.profile_key.empty() &&
-             !request.workload_key.empty() &&
+             valid_workload_plan(request.workload) &&
              !request.logical_gpu_id.empty() &&
              concrete_runtime_profile(request.runtime_profile) &&
+             workload_matches_runtime_profile(request.workload, request.runtime_profile) &&
+             valid_data_plane(request.data_plane) &&
              valid_display_mode(request.display_mode) &&
              request.encoder_sessions > 0;
     }
   }  // namespace
+
+  bool valid_workload_plan(const workload_plan_t &plan) {
+    return plan.kind != workload_kind_e::unknown &&
+           opaque_name_token(plan.target_id);
+  }
+
+  bool workload_matches_runtime_profile(
+    const workload_plan_t &plan,
+    runtime_profile_e profile
+  ) {
+    switch (profile) {
+      case runtime_profile_e::gamescope:
+        return plan.kind == workload_kind_e::gamescope;
+      case runtime_profile_e::steam:
+        return plan.kind == workload_kind_e::steam;
+      case runtime_profile_e::heroic:
+        return plan.kind == workload_kind_e::heroic;
+      case runtime_profile_e::lutris:
+        return plan.kind == workload_kind_e::lutris;
+      case runtime_profile_e::unknown:
+        return false;
+    }
+    return false;
+  }
+
+  bool valid_data_plane(const seat_data_plane_t &data_plane) {
+    return data_plane.display_topology ==
+             display_topology_e::capture_host_with_nested_compositor &&
+           data_plane.media_pipeline ==
+             media_pipeline_e::worker_local_capture_encode;
+  }
 
   registry_t::registry_t(
     std::string controller_epoch,
@@ -202,9 +252,10 @@ namespace multiseat {
       .resources = resources_for(controller_epoch_, generation),
       .client_key = request.client_key,
       .profile_key = request.profile_key,
-      .workload_key = request.workload_key,
+      .workload = request.workload,
       .render_node = gpu.capacity.render_node,
       .runtime_profile = request.runtime_profile,
+      .data_plane = request.data_plane,
       .display_mode = request.display_mode,
       .requested_compositor = request.requested_compositor,
       .selected_compositor = compositor_e::automatic,

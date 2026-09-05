@@ -79,7 +79,7 @@ namespace multiseat::podman {
     std::filesystem::path ipc_root;
     std::vector<gpu_t> gpus;
     std::vector<profile_t> profiles;
-    std::vector<std::string> workload_keys;
+    std::vector<workload_plan_t> workloads;
     std::vector<std::filesystem::path> input_devices;
     std::vector<shared_game_mount_t> shared_game_mounts;
     std::chrono::milliseconds command_timeout {5000};
@@ -127,7 +127,7 @@ namespace multiseat::podman {
 
     [[nodiscard]] const gpu_t *gpu_for(const worker_launch_spec_t &spec) const;
     [[nodiscard]] const profile_t *profile_for(const std::string &profile_key) const;
-    [[nodiscard]] bool workload_allowed(const std::string &workload_key) const;
+    [[nodiscard]] bool workload_allowed(const workload_plan_t &workload) const;
     [[nodiscard]] bool base_host_ready() const;
     [[nodiscard]] bool launch_host_ready(
       const worker_launch_spec_t &spec,

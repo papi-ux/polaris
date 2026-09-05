@@ -115,10 +115,10 @@ func newFakeRuntimeSet() *fakeRuntimeSet {
 	stages := []runtimeStage{
 		runtimeStageSessionBus,
 		runtimeStageAudio,
-		runtimeStageCompositor,
+		runtimeStageDisplayCapture,
+		runtimeStageNestedCompositor,
 		runtimeStageVirtualInput,
-		runtimeStageCapture,
-		runtimeStageEncoderLease,
+		runtimeStageEncoder,
 		runtimeStageLauncherProcessTree,
 	}
 	for _, stage := range stages {
@@ -130,10 +130,10 @@ func newFakeRuntimeSet() *fakeRuntimeSet {
 	set.adapters = runtimeAdapters{
 		SessionBus:          set.byStage[runtimeStageSessionBus],
 		Audio:               set.byStage[runtimeStageAudio],
-		Compositor:          set.byStage[runtimeStageCompositor],
+		DisplayCapture:      set.byStage[runtimeStageDisplayCapture],
+		NestedCompositor:    set.byStage[runtimeStageNestedCompositor],
 		VirtualInput:        set.byStage[runtimeStageVirtualInput],
-		Capture:             set.byStage[runtimeStageCapture],
-		EncoderLease:        set.byStage[runtimeStageEncoderLease],
+		Encoder:             set.byStage[runtimeStageEncoder],
 		LauncherProcessTree: set.byStage[runtimeStageLauncherProcessTree],
 	}
 	return set
@@ -148,19 +148,22 @@ func runtimeTestConfig(name string, generation uint64, slot uint32) workerConfig
 			Generation:      generation,
 			WorkerName:      name,
 		},
-		RuntimeNamespace: "runtime-" + name,
-		WaylandSocket:    "wayland-" + name,
-		AudioSink:        "audio-" + name,
-		InputSeat:        "input-" + name,
-		RenderNode:       "/dev/dri/renderD128",
-		Compositor:       "gamescope",
-		RuntimeProfile:   "steam",
-		DisplayWidth:     1920,
-		DisplayHeight:    1080,
-		RefreshMillihz:   60000,
-		DisplayHDR:       false,
-		EncoderSessions:  1,
-		WorkloadKey:      "synthetic",
+		RuntimeNamespace:     "runtime-" + name,
+		CaptureWaylandSocket: "capture-" + name,
+		WaylandSocket:        "wayland-" + name,
+		AudioSink:            "audio-" + name,
+		InputSeat:            "input-" + name,
+		RenderNode:           "/dev/dri/renderD128",
+		Compositor:           "gamescope",
+		RuntimeProfile:       "steam",
+		DisplayTopology:      displayTopologyCaptureHostNested,
+		MediaPipeline:        mediaPipelineWorkerLocal,
+		DisplayWidth:         1920,
+		DisplayHeight:        1080,
+		RefreshMillihz:       60000,
+		DisplayHDR:           false,
+		EncoderSessions:      1,
+		Workload:             workloadPlan{Kind: workloadKindSteam, TargetID: "synthetic"},
 	}
 }
 
@@ -175,16 +178,16 @@ func completeRuntimeEvents() []string {
 	return []string{
 		"start:session-bus",
 		"start:audio",
-		"start:compositor",
+		"start:display-capture",
+		"start:nested-compositor",
 		"start:virtual-input",
-		"start:capture",
-		"start:encoder-lease",
+		"start:encoder",
 		"start:launcher-process-tree",
 		"stop:launcher-process-tree",
-		"stop:encoder-lease",
-		"stop:capture",
+		"stop:encoder",
 		"stop:virtual-input",
-		"stop:compositor",
+		"stop:nested-compositor",
+		"stop:display-capture",
 		"stop:audio",
 		"stop:session-bus",
 	}
@@ -272,24 +275,38 @@ func TestRuntimeRejectsInvalidInputsBeforeStartingResources(t *testing.T) {
 		{
 			name: "missing adapter",
 			mutate: func(_ *workerConfig, adapters *runtimeAdapters, _ *runtimeOptions) {
-				adapters.Capture = nil
+				adapters.DisplayCapture = nil
 			},
-			contains: "capture adapter is missing",
+			contains: "display-capture adapter is missing",
 		},
 		{
 			name: "typed nil adapter",
 			mutate: func(_ *workerConfig, adapters *runtimeAdapters, _ *runtimeOptions) {
 				var missing *fakeRuntimeAdapter
-				adapters.Capture = missing
+				adapters.DisplayCapture = missing
 			},
-			contains: "capture adapter is missing",
+			contains: "display-capture adapter is missing",
 		},
 		{
 			name: "missing workload",
 			mutate: func(config *workerConfig, _ *runtimeAdapters, _ *runtimeOptions) {
-				config.WorkloadKey = ""
+				config.Workload = workloadPlan{}
 			},
-			contains: "workload key is invalid",
+			contains: "workload plan is invalid",
+		},
+		{
+			name: "mismatched workload",
+			mutate: func(config *workerConfig, _ *runtimeAdapters, _ *runtimeOptions) {
+				config.Workload.Kind = workloadKindHeroic
+			},
+			contains: "workload plan is invalid",
+		},
+		{
+			name: "missing data plane",
+			mutate: func(config *workerConfig, _ *runtimeAdapters, _ *runtimeOptions) {
+				config.MediaPipeline = ""
+			},
+			contains: "data plane allocation is invalid",
 		},
 		{
 			name: "relative render node",
@@ -338,11 +355,11 @@ func TestRuntimeRejectsInvalidInputsBeforeStartingResources(t *testing.T) {
 
 func TestRuntimeStartFailureCleansPartialLeaseThenRollsBack(t *testing.T) {
 	set := newFakeRuntimeSet()
-	set.byStage[runtimeStageCapture].start = func(
+	set.byStage[runtimeStageDisplayCapture].start = func(
 		context.Context,
 		runtimeAllocation,
 	) (runtimeLease, error) {
-		return set.leases[runtimeStageCapture], errors.New("sensitive adapter detail")
+		return set.leases[runtimeStageDisplayCapture], errors.New("sensitive adapter detail")
 	}
 	_, err := startWorkerRuntime(
 		context.Background(),
@@ -350,7 +367,7 @@ func TestRuntimeStartFailureCleansPartialLeaseThenRollsBack(t *testing.T) {
 		set.adapters,
 		runtimeTestOptions(),
 	)
-	if err == nil || !strings.Contains(err.Error(), "capture start failed") {
+	if err == nil || !strings.Contains(err.Error(), "display-capture start failed") {
 		t.Fatalf("unexpected start failure: %v", err)
 	}
 	if strings.Contains(err.Error(), "sensitive adapter") {
@@ -360,12 +377,8 @@ func TestRuntimeStartFailureCleansPartialLeaseThenRollsBack(t *testing.T) {
 	want := []string{
 		"start:session-bus",
 		"start:audio",
-		"start:compositor",
-		"start:virtual-input",
-		"start:capture",
-		"stop:capture",
-		"stop:virtual-input",
-		"stop:compositor",
+		"start:display-capture",
+		"stop:display-capture",
 		"stop:audio",
 		"stop:session-bus",
 	}
@@ -543,14 +556,14 @@ func TestRuntimeBrokenStopsCannotStarveReverseCleanup(t *testing.T) {
 	) error {
 		panic("private launcher panic")
 	}
-	set.leases[runtimeStageEncoderLease].stop = func(
+	set.leases[runtimeStageEncoder].stop = func(
 		context context.Context,
 		_ *fakeRuntimeLease,
 	) error {
 		<-context.Done()
 		return context.Err()
 	}
-	set.leases[runtimeStageCapture].stop = func(
+	set.leases[runtimeStageDisplayCapture].stop = func(
 		_ context.Context,
 		lease *fakeRuntimeLease,
 	) error {
@@ -570,7 +583,7 @@ func TestRuntimeBrokenStopsCannotStarveReverseCleanup(t *testing.T) {
 	}
 	stopError := runtime.Stop()
 	set.leases[runtimeStageLauncherProcessTree].finish(nil)
-	set.leases[runtimeStageEncoderLease].finish(nil)
+	set.leases[runtimeStageEncoder].finish(nil)
 	if stopError == nil {
 		t.Fatal("broken teardown returned success")
 	}
@@ -616,10 +629,10 @@ func TestRuntimeReportsUnexpectedExitAndTwoInstancesRemainIndependent(t *testing
 		_ = second.Stop()
 	})
 
-	firstSet.leases[runtimeStageCapture].finish(errors.New("private device path"))
+	firstSet.leases[runtimeStageDisplayCapture].finish(errors.New("private device path"))
 	select {
 	case failure := <-first.Failures():
-		if failure == nil || !strings.Contains(failure.Error(), "capture exited unexpectedly") {
+		if failure == nil || !strings.Contains(failure.Error(), "display-capture exited unexpectedly") {
 			t.Fatalf("unexpected first runtime failure: %v", failure)
 		}
 		if strings.Contains(failure.Error(), "private device") {

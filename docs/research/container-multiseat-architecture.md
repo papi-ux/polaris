@@ -1,9 +1,9 @@
 # Container multiseat architecture spike
 
 Status: architecture, an offline rootless-Podman backend, locked image inputs,
-immutable per-seat runtime bindings, and a supervisor/IPC proof. Nothing in
-this document enables multiseat, launches a container, or changes the current
-single-workload runtime.
+immutable per-seat runtime/data-plane bindings, typed workload plans, and a
+supervisor/IPC routing proof. Nothing in this document enables multiseat,
+launches a container, or changes the current single-workload runtime.
 
 ## Outcome
 
@@ -55,13 +55,15 @@ workers:
         |
         +-- seat worker A
         |     GPU 0, encoder lease 0
-        |     Gamescope or selected compositor
-        |     capture A, audio A, input A, process generation A
+        |     capture display A -> nested Gamescope/compositor A
+        |     worker-local capture -> encode -> media IPC A
+        |     audio A, input/feedback A, process generation A
         |
         +-- seat worker B
               GPU 0, encoder lease 1
-              Gamescope or selected compositor
-              capture B, audio B, input B, process generation B
+              capture display B -> nested Gamescope/compositor B
+              worker-local capture -> encode -> media IPC B
+              audio B, input/feedback B, process generation B
 
 The first registry model lives outside proc_t on purpose. Folding a vector into
 the current singleton before defining admission and teardown authority would
@@ -76,10 +78,11 @@ Admission returns an opaque handle:
 - opaque controller epoch;
 - monotonically increasing generation within that epoch.
 
-The client, profile, and workload keys are retained as internal routing
-metadata but never appear in worker, runtime, Wayland, audio, or input names;
-those names use only the controller epoch and generation. That avoids leaking
-identity through process listings and host runtime paths.
+The client and profile keys plus the typed workload plan are retained as
+internal routing metadata but never appear in worker, runtime, Wayland, audio,
+or input resource names; those names use only the controller epoch and
+generation. That avoids leaking identity through host runtime paths. The
+workload target is itself a bounded opaque catalog identifier.
 
 The lifecycle is:
 
@@ -96,10 +99,11 @@ reconciliation and orphan cleanup remain worker-broker responsibilities.
 
 The backend boundary is deliberately smaller than a container-engine API. A
 worker receives one immutable launch specification containing the exact seat
-handle, opaque worker resources, opaque profile and workload keys, typed
-runtime profile, display geometry and cadence, chosen render node, concrete
-compositor, and encoder lease count. Client identity, credentials, host paths,
-and container-engine authority are not part of that payload.
+handle, opaque worker resources, opaque profile key, typed allowlisted workload
+plan, typed runtime profile, display/data-plane topology, geometry and cadence,
+chosen render node, concrete compositor, and encoder lease count. Client
+identity, credentials, host paths, executable paths, arbitrary argv, shell
+fragments, and container-engine authority are not part of that payload.
 
 The backend exposes only three operations:
 
@@ -146,6 +150,12 @@ container.
 
 Gamescope is a required and continuously tested backend. It is not forced when
 another compositor is more reliable for a workload.
+
+The capture-producing display is the outer Wayland server. Gamescope (or the
+selected alternative) is a nested client of that server and exposes a separate
+app-facing Wayland socket. Gamescope compatibility therefore never grants
+Gamescope ownership of capture. The raw-frame path stays inside the worker and
+only encoded packets cross the authenticated media socket.
 
 An explicit Gamescope request fails closed if Gamescope cannot be selected.
 Automatic mode must bind one concrete compositor and retain a reason before
@@ -231,8 +241,9 @@ immutable and includes:
 - no inherited proxy environment or host-derived `/etc/hosts` entries;
 - no capabilities, `no-new-privileges`, a tiny init, and a worker-owned
   health command;
-- exact seat, resource, runtime-profile, image, display, compositor,
-  render-node, and encoder labels, but no client identity or profile key.
+- exact seat, outer-capture and inner-app Wayland resources, runtime profile,
+  typed workload selector, image, display/data-plane topology, compositor,
+  render node, and encoder labels, but no client identity or profile key.
 
 Inventory is two phase and bounded: an exact deployment-label listing returns
 full immutable container IDs, then one JSON inspection validates every ID,
@@ -278,16 +289,16 @@ record, responds to authenticated heartbeats, and handles authenticated
 shutdown. Health must complete mutual authentication and a heartbeat on both
 sockets; the existence of socket nodes alone is never a ready signal.
 
-An injectable worker-runtime layer models session bus, audio, compositor,
-virtual input, capture, encoder lease, and launcher-process-tree readiness. It
-starts them in that dependency order, admits IPC only after all seven are
-ready, propagates an unexpected terminal signal as worker failure, and tears
-down in exact reverse order. The reverse edge deliberately releases capture
-before the compositor. One 120-second total startup ceiling accommodates the
-established Gamescope readiness budget; each stop has its own five-second bound
-so a blocked, failed, or panicking adapter cannot starve later cleanup.
-Returned errors identify only the stage and operation, not adapter-provided
-paths or diagnostics.
+An injectable worker-runtime layer models session bus, audio, the
+capture-producing outer display, nested compositor, virtual input, encoder,
+and launcher-process-tree readiness. It starts them in that dependency order,
+admits IPC only after all seven are ready, propagates an unexpected terminal
+signal as worker failure, and tears down in exact reverse order. The nested
+compositor therefore exits before the outer display/capture owner. One
+120-second total startup ceiling accommodates the established Gamescope
+readiness budget; each stop has its own five-second bound so a blocked, failed,
+or panicking adapter cannot starve later cleanup. Returned errors identify only
+the stage and operation, not adapter-provided paths or diagnostics.
 
 A process-backed adapter layer now supplies a concrete Linux supervision
 boundary. Each stage becomes a literal, shell-free `polaris-seat-runtime
@@ -306,11 +317,11 @@ capability, client key, profile key, worker name, or controller epoch.
 | --- | --- |
 | session bus | none |
 | audio | audio sink |
-| compositor | Wayland socket, render node, concrete compositor, width, height, refresh in mHz, HDR flag |
+| display capture | outer capture Wayland socket, render node, topology, worker-local media policy, width, height, refresh in mHz, HDR flag |
+| nested compositor | outer parent Wayland socket, inner app Wayland socket, render node, concrete compositor |
 | virtual input | input seat |
-| capture | Wayland socket, render node |
-| encoder lease | logical GPU, render node, session count |
-| launcher process tree | runtime profile, opaque workload key, Wayland socket, audio sink, input seat |
+| encoder | logical GPU, render node, session count, worker-local media policy |
+| launcher process tree | runtime profile, workload kind, opaque catalog target, inner Wayland socket, audio sink, input seat |
 
 Environment is independently allowlisted per stage. Only the launcher receives
 the persistent-home XDG paths and runtime-profile setting; for example, the
@@ -321,23 +332,24 @@ The resource helper itself does not exist yet. It is deliberately not faked by
 calling a GoW launcher entrypoint: the referenced GoW launch scripts couple
 compositor and application startup, while the locked application roots do not
 expose one uniform private D-Bus, PipeWire, virtual-input, capture, and encoder
-contract. Polaris now binds the exact runtime profile and display mode from
-admission through the selected image and helper argv. A real helper still
-needs a trusted workload plan and must implement the actual stage semantics.
-The production command injects no adapters, so Podman health proves only that
-the supervisor contract is alive.
+contract. Polaris now binds the exact runtime profile, typed workload plan,
+data-plane topology, two Wayland identities, and display mode from admission
+through the selected image and helper argv. A real helper still must implement
+the actual stage semantics and resolve the plan through a trusted catalog. The
+production command injects no adapters or data plane, so Podman health proves
+only that the supervisor contract is alive.
 
-The upstream Wolf data plane also does not map one-to-one onto the current
-seven-stage sketch. Wolf uses `gst-wayland-display` as an outer headless
+The upstream Wolf data plane informed, but does not dictate, this contract.
+Wolf uses `gst-wayland-display` as an outer headless
 compositor that exposes a framebuffer, nests Gamescope as a Wayland client for
 its Xwayland boundary, creates virtual audio sinks through a standalone audio
 service, uses inputtino plus fake udev for virtual-device lifecycle, and sends
 the captured frames through GStreamer. Gamescope compatibility therefore does
-not imply that Gamescope itself should own the capture boundary. Before a real
-helper is added, the Polaris stage graph must identify the capture-producing
-display owner, nested compositor relationship, and encoded-media handoff. A
-process that merely opens expected sockets and reports ready would not satisfy
-that contract.
+not imply that Gamescope itself should own the capture boundary. The Polaris
+stage graph now makes the same ownership edges explicit without prematurely
+choosing GStreamer over a Polaris-native capture/encode implementation. A
+process that merely opens expected sockets and reports ready still would not
+satisfy that contract.
 
 The broker's default graceful-stop deadline is now 45 seconds. It covers the
 worker's 35-second worst-case serial reverse teardown plus the controller's
@@ -373,11 +385,20 @@ then advances exactly without gaps or reuse.
 Every frame has a fixed 32-byte big-endian header. Parsing validates the magic,
 channel, message shape, zero reserved flags, exact slot/generation, nonzero
 sequence, and advertised length before allocating a payload. Control payloads
-are capped at 64 KiB and media payloads at 16 MiB. The protocol defines future
-input, feedback, video, audio, and end-of-stream message types, but the current
-supervisor accepts only authentication, heartbeat, and control shutdown. A
-message for an unwired data path closes that connection instead of being
-silently discarded.
+are capped at 64 KiB and media payloads at 16 MiB. Authentication alone does
+not activate data flow: a controller must explicitly attach each channel, and
+only one attached owner per channel is permitted. Health probes authenticate
+and heartbeat without attaching, so they cannot consume a stream.
+
+After attachment, input is accepted only on control and acknowledged only
+after the exact seat adapter accepts it. Feedback returns on control; encoded
+video/audio plus end-of-stream and discontinuity markers return on media. Raw
+frames never cross this IPC boundary. Each adapter output repeats the complete
+seat identity and is rejected if it names another generation, while the frame
+header independently fences every incoming packet. Losing either attached
+channel cancels the exact worker so reverse teardown cannot leave a headless
+workload running. Adapter errors are bounded and redacted at the supervisor
+boundary.
 
 The Linux controller authority store now implements that filesystem
 lifecycle without recursive deletion. It walks the pre-created root without
@@ -402,10 +423,13 @@ The controller-side client connects with bounded nonblocking deadlines,
 requires stable mode-0600 socket nodes and a same-effective-UID `SO_PEERCRED`
 peer, and completes mutual authentication independently on both channels.
 Connection is all-or-nothing: a missing or rejected media channel closes an
-already authenticated control channel. Heartbeat and shutdown responses are
-strictly sequence-checked, and handshake/ack phases impose their own zero- or
-32-byte payload limits before allocation rather than accepting the larger
-general channel limit.
+already authenticated control channel. Data-plane attachment is also
+all-or-nothing. Input acknowledgement, feedback, encoded media, heartbeat, and
+shutdown responses are strictly sequence-checked; media or feedback arriving
+before an acknowledgement is retained in a bounded exact-channel queue rather
+than confused with that acknowledgement. Handshake/ack phases impose their own
+zero- or 32-byte payload limits before allocation rather than accepting the
+larger general channel limit.
 
 The backend-neutral Linux coordinator now joins these pieces without depending
 on Podman. It creates authority before asking the broker to launch, owns the
@@ -450,9 +474,10 @@ contract, each launcher must pass:
 The test_multiseat_runtime target covers:
 
 - two seats sharing one GPU and encoder pool;
-- typed runtime profile and display mode required at admission and preserved
-  through the broker and worker allocation;
-- unique worker/runtime/Wayland/audio/input identities;
+- matching typed Gamescope, Steam, Heroic, and Lutris workload plans plus
+  runtime profile, data-plane topology, and display mode required at admission
+  and preserved through the broker and worker allocation;
+- unique worker/runtime/outer-Wayland/inner-Wayland/audio/input identities;
 - concurrent admission without duplicate slot allocation;
 - independent stop and release;
 - stale-generation rejection after slot reuse;
@@ -492,7 +517,9 @@ The test_multiseat_runtime target covers:
   active-socket preservation;
 - all-or-nothing controller authentication of both Unix channels, bounded
   connect/handshake/I/O deadlines, phase-specific allocation limits, strict
-  response sequencing, and independent two-worker shutdown;
+  response sequencing, explicit data-plane attachment, input acknowledgement,
+  bounded asynchronous media queues, cross-generation rejection, and
+  independent two-worker shutdown;
 - capability-authenticated authority records, bounded no-follow restart scans,
   active-orphan retention, inventory-proven inactive recovery, and refusal of
   malformed, duplicate, unexpected, replaced, or live-socket state;
@@ -500,14 +527,18 @@ The test_multiseat_runtime target covers:
   authentication, heartbeat, authenticated shutdown, backend absence, and
   exact cleanup, including two independently managed seats;
 - a real process-level C++ controller to Go worker fixture that authenticates
-  and heartbeats both Unix channels before graceful shutdown drives exact
-  reverse-order cleanup of the injected offline runtime;
+  and attaches both Unix channels, routes input, feedback, and encoded video,
+  heartbeats both channels, then drives exact reverse-order cleanup through
+  graceful shutdown of the injected offline runtime;
 - a real Linux process-supervision fixture proving exact readiness framing,
   literal shell-free argv, scrubbed environments, descendant group teardown,
   partial-start ownership, and bounded TERM-to-KILL escalation;
 - adversarial offline runtime coverage for complete and partial startup,
   malformed leases, early exits, panics, errors, bounded timeouts, exact
   reverse teardown, redacted failures, and two-seat independence;
+- two simultaneous injected data planes with exact input, feedback, encoded
+  video/audio routing, duplicate-owner rejection, cross-seat input/output
+  rejection, route-failure rollback, and teardown isolation;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
@@ -516,12 +547,11 @@ integration test must build and pin the final worker images, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
 physical game testing, the missing `polaris-seat-runtime` implementation must
-bind the modeled session bus, audio sink, virtual input lifecycle, compositor,
-capture, encoder lease, and launcher process tree without weakening the proven
-adapter and teardown contracts. Trusted workload resolution must become an
-explicit allowlisted launch plan rather than an opaque string interpreted by
-the image. Concurrent frame, audio, and input heartbeats then become the next
-acceptance boundary.
+bind the modeled session bus, audio sink, outer display/capture owner, nested
+compositor, virtual-input lifecycle, worker-local encoder, trusted workload
+catalog, and launcher process tree without weakening the proven adapter,
+routing, and teardown contracts. Concurrent real frame/audio/input traffic,
+not more synthetic heartbeats, is then the next acceptance boundary.
 
 ## Upstream references
 

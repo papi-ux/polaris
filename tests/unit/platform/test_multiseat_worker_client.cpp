@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -186,6 +187,7 @@ namespace {
     replay_authenticated_sequence,
     replay_heartbeat_sequence,
     wrong_generation,
+    cross_routed_media,
     oversized_handshake_payload,
     stall,
   };
@@ -264,6 +266,11 @@ namespace {
       return failed_.load();
     }
 
+    [[nodiscard]] std::vector<std::uint8_t> input() const {
+      std::scoped_lock lock {input_mutex_};
+      return input_;
+    }
+
   private:
     int create_listener(const std::filesystem::path &path) {
       const auto descriptor = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -316,6 +323,7 @@ namespace {
 
       std::uint64_t expected_incoming = 2;
       std::uint64_t outgoing = 3;
+      bool attached = false;
       while (!stopped_.load()) {
         frame_t request;
         if (!read_test_frame(connection, channel, identity_, request)) {
@@ -341,6 +349,69 @@ namespace {
             break;
           }
           ++outgoing;
+          continue;
+        }
+        if (request.message == message_e::attach) {
+          if (attached || !send_test_frame(connection, {
+                .channel = channel,
+                .message = message_e::attached,
+                .slot = identity_.slot,
+                .generation = identity_.generation,
+                .sequence = outgoing++,
+              })) {
+            failed_ = true;
+            break;
+          }
+          attached = true;
+          if (channel == channel_e::media) {
+            auto output_identity = identity_;
+            if (behavior_ == fake_behavior_e::cross_routed_media) {
+              ++output_identity.generation;
+            }
+            if (!send_test_frame(connection, {
+                  .channel = channel,
+                  .message = message_e::video,
+                  .slot = output_identity.slot,
+                  .generation = output_identity.generation,
+                  .sequence = outgoing++,
+                  .payload = {'v', 'i', 'd', 'e', 'o'},
+                }) ||
+                !send_test_frame(connection, {
+                  .channel = channel,
+                  .message = message_e::audio,
+                  .slot = output_identity.slot,
+                  .generation = output_identity.generation,
+                  .sequence = outgoing++,
+                  .payload = {'a', 'u', 'd', 'i', 'o'},
+                })) {
+              break;
+            }
+          }
+          continue;
+        }
+        if (channel == channel_e::control &&
+            request.message == message_e::input && attached) {
+          {
+            std::scoped_lock lock {input_mutex_};
+            input_ = request.payload;
+          }
+          if (!send_test_frame(connection, {
+                .channel = channel,
+                .message = message_e::input_ack,
+                .slot = identity_.slot,
+                .generation = identity_.generation,
+                .sequence = outgoing++,
+              }) ||
+              !send_test_frame(connection, {
+                .channel = channel,
+                .message = message_e::feedback,
+                .slot = identity_.slot,
+                .generation = identity_.generation,
+                .sequence = outgoing++,
+                .payload = {'r', 'u', 'm', 'b', 'l', 'e'},
+              })) {
+            break;
+          }
           continue;
         }
         if (channel == channel_e::control && request.message == message_e::shutdown) {
@@ -443,6 +514,8 @@ namespace {
     int media_listener_ = -1;
     std::thread control_thread_;
     std::thread media_thread_;
+    mutable std::mutex input_mutex_;
+    std::vector<std::uint8_t> input_;
     std::atomic<bool> stopped_ = false;
     std::atomic<bool> failed_ = false;
   };
@@ -472,6 +545,64 @@ TEST(MultiseatWorkerClient, AuthenticatesBothChannelsHeartbeatsAndShutsDown) {
   EXPECT_FALSE(client.connected());
   worker.stop();
   EXPECT_FALSE(worker.failed());
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerClient, AttachesAndRoutesInputFeedbackAndEncodedMedia) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x30)};
+  auto authority = create_authority(store, identity_for(), "generation-data-plane");
+  fake_worker_t worker {authority};
+  controller_client_t client;
+
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  EXPECT_FALSE(client.data_plane_attached());
+  const std::vector<std::uint8_t> input {'i', 'n', 'p', 'u', 't'};
+  EXPECT_EQ(client.send_input(input), transport_status_e::closed);
+  EXPECT_TRUE(client.connected());
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+  EXPECT_TRUE(client.data_plane_attached());
+  EXPECT_EQ(client.attach_data_plane(), transport_status_e::invalid_argument);
+  ASSERT_EQ(client.send_input(input), transport_status_e::applied);
+  EXPECT_EQ(worker.input(), input);
+
+  std::vector<std::uint8_t> feedback;
+  ASSERT_EQ(client.receive_feedback(feedback), transport_status_e::applied);
+  EXPECT_EQ(feedback, (std::vector<std::uint8_t> {'r', 'u', 'm', 'b', 'l', 'e'}));
+
+  // Media may arrive before a heartbeat acknowledgement. The client keeps
+  // those exact-seat packets in order rather than mistaking them for the ACK.
+  EXPECT_EQ(client.heartbeat(channel_e::media), transport_status_e::applied);
+  encoded_media_packet_t media;
+  ASSERT_EQ(client.receive_media(media), transport_status_e::applied);
+  EXPECT_EQ(media.message, message_e::video);
+  EXPECT_EQ(media.payload, (std::vector<std::uint8_t> {'v', 'i', 'd', 'e', 'o'}));
+  ASSERT_EQ(client.receive_media(media), transport_status_e::applied);
+  EXPECT_EQ(media.message, message_e::audio);
+  EXPECT_EQ(media.payload, (std::vector<std::uint8_t> {'a', 'u', 'd', 'i', 'o'}));
+
+  EXPECT_EQ(client.shutdown(), transport_status_e::applied);
+  worker.stop();
+  EXPECT_FALSE(worker.failed());
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerClient, RejectsCrossGenerationMediaAndClosesBothChannels) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x31)};
+  auto authority = create_authority(store, identity_for(), "generation-cross-route");
+  fake_worker_t worker {authority, fake_behavior_e::cross_routed_media};
+  controller_client_t client;
+
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+  encoded_media_packet_t media;
+  EXPECT_EQ(client.receive_media(media), transport_status_e::protocol_rejected);
+  EXPECT_FALSE(client.connected());
+  EXPECT_FALSE(client.data_plane_attached());
+  EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::closed);
+
+  worker.stop();
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 
