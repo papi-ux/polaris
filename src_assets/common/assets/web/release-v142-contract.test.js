@@ -61,8 +61,8 @@ describe('v1.4.2 release contract', () => {
     const session = read('nix/modules/polaris-gamescope-session.sh')
     const helper = read('src/platform/linux/gamescope_session_helper.cpp')
 
-    expect(notes).toContain('Auto is the only per-game choice that may fall back')
-    expect(notes).toContain('has not yet received physical SteamOS validation')
+    expect(notes).toContain('an explicit choice never switches on you')
+    expect(notes).toContain('still needs a field retest')
     expect(session).toContain('setpriv --no-new-privs')
     expect(session).toContain("printf 'host-portal\\n'")
     expect(session).toContain('rebind_private_portal_after_nested_start')
