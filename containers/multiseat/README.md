@@ -31,6 +31,16 @@ The container retains `--network=none`. Beneath a pre-created mode-0700
 runtime root, the controller exclusively creates one inode-fenced,
 mode-0700 authority directory per exact worker generation. Its `ipc` child is
 mounted read-write for the two Unix sockets, while its `auth` child is mounted
-read-only and contains the controller-generated mode-0600 capability file.
-The capability is never placed in argv, environment, labels, or container
-inspection metadata, and the worker cannot rewrite it through either mount.
+read-only and contains the controller-generated mode-0600 capability file plus
+a mode-0600, capability-authenticated identity record used only for bounded
+controller-crash recovery. The record binds the exact seat identity and
+runtime namespace; it does not grant authority without the capability. Neither
+file is placed in argv, environment, labels, or container inspection metadata,
+and the worker cannot rewrite them through either mount.
+
+The local coordinator owns the live authority handle and authenticated client
+until a complete backend inventory proves that exact worker absent. On restart
+it audits at most 256 root entries through no-follow descriptors and recovers
+only valid signed records absent from that authoritative inventory. Active,
+ambiguous, malformed, replaced, unexpected, or live-socket state is retained
+and blocks admission rather than being deleted by name or recursively.

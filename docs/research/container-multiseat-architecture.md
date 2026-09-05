@@ -285,8 +285,9 @@ exclusively creates one mode-0700, generation-scoped authority directory
 beneath that root, plus private `ipc` and `auth` children. `ipc` is
 bind-mounted read-write at `/run/polaris-ipc`; `auth` is bind-mounted
 read-only at `/run/polaris-auth`. The latter contains a controller-generated
-mode-0600, 32-byte capability encoded as canonical lowercase hex, while the
-IPC mount contains two mode-0600 Unix sockets:
+mode-0600, 32-byte capability encoded as canonical lowercase hex and a
+capability-authenticated binary identity record, while the IPC mount contains
+two mode-0600 Unix sockets:
 
 - `control.sock` is reserved for lifecycle, input, feedback, status, and
   bounded error messages;
@@ -314,14 +315,21 @@ silently discarded.
 The Linux controller authority store now implements that filesystem
 lifecycle without recursive deletion. It walks the pre-created root without
 following symlinks, rejects effective UID zero, uses exclusive creation and a
-CSPRNG-generated capability, pins directory and token inodes in a move-only
-handle, and validates the capability bytes as well as ownership, type, mode,
-size, and the complete child-name allowlist. Cleanup refuses a renamed or
-replaced generation, a mutated token, an unexpected entry, or an actively
-listening socket. It removes only inactive allowlisted socket nodes, the exact
-token, and the exact pinned directory hierarchy. Dropping a handle cleanses
-its in-memory capability but deliberately does not guess at filesystem
-cleanup.
+CSPRNG-generated capability, pins directory, token, and signed-record inodes
+in a move-only handle, and validates their bytes as well as ownership, type,
+mode, size, and the complete child-name allowlist. The record binds the exact
+controller epoch, GPU, slot, generation, worker name, and runtime namespace to
+the capability; it is recovery evidence, not a second credential. Cleanup
+refuses a renamed or replaced generation, a mutated token or record, an
+unexpected entry, or an actively listening socket. It removes only inactive
+allowlisted socket nodes, the exact private files, and the exact pinned
+directory hierarchy. Dropping a handle cleanses its in-memory capability but
+deliberately does not guess at filesystem cleanup.
+
+This establishes continuity and fail-closed cleanup against stale, malformed,
+or raced filesystem state. It is not a security boundary against a process
+that has already compromised the controller's effective UID and can read its
+mode-0600 capability; host account and container isolation remain required.
 
 The controller-side client connects with bounded nonblocking deadlines,
 requires stable mode-0600 socket nodes and a same-effective-UID `SO_PEERCRED`
@@ -332,14 +340,29 @@ strictly sequence-checked, and handshake/ack phases impose their own zero- or
 32-byte payload limits before allocation rather than accepting the larger
 general channel limit.
 
-These controller components compile into Polaris but remain outside the
-singleton runtime and worker broker. The Podman backend still does not create
-authority: a future coordinator must hold the move-only handle across exact
-launch/reconciliation/stop, validate it immediately before launch, connect
-both channels only after worker readiness, and remove it only after backend
-inventory proves exact worker absence. Controller-crash orphan-directory
-recovery is also intentionally unresolved; no path may infer cleanup from a
-name alone.
+The backend-neutral Linux coordinator now joins these pieces without depending
+on Podman. It creates authority before asking the broker to launch, owns the
+move-only handle and controller session together, and uses broker hooks to
+require two-channel authentication before Backend Ready can become Registry
+Running. Graceful backend stop is preceded by authenticated shutdown whenever
+a live session exists. Running sessions heartbeat both channels, and a failure
+stops only that exact generation.
+
+The broker exposes active identities only on a complete, validated inventory.
+The coordinator uses that snapshot to audit the authority root on every clean
+reconciliation. A signed authority belonging to an active worker is retained;
+an absent one is reopened through no-follow descriptors and removed through
+the same inode/liveness fences as a live handle. An unknown root entry,
+malformed or duplicate record, changed token, replacement inode, active socket
+contradicting inventory, failed inventory, or more than 256 entries blocks the
+entire recovery pass and admission. Recovery never derives deletion authority
+from a filename and never recursively deletes. Current-format crash leftovers
+are therefore recoverable, while ambiguous or partially damaged state remains
+for explicit operator inspection.
+
+These components compile into Polaris but remain outside the singleton runtime.
+No configuration path constructs the coordinator, and no worker/container is
+started by this checkpoint.
 
 ## Launcher acceptance comes second
 
@@ -399,17 +422,25 @@ The test_multiseat_runtime target covers:
 - all-or-nothing controller authentication of both Unix channels, bounded
   connect/handshake/I/O deadlines, phase-specific allocation limits, strict
   response sequencing, and independent two-worker shutdown;
+- capability-authenticated authority records, bounded no-follow restart scans,
+  active-orphan retention, inventory-proven inactive recovery, and refusal of
+  malformed, duplicate, unexpected, replaced, or live-socket state;
+- coordinator ownership from pre-launch authority creation through endpoint
+  authentication, heartbeat, authenticated shutdown, backend absence, and
+  exact cleanup, including two independently managed seats;
+- a real process-level C++ controller to Go worker fixture that authenticates
+  and heartbeats both Unix channels before graceful shutdown and cleanup;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
 This remains an offline control-plane/backend proof. A later container
 integration test must build and pin the final worker image, pre-create profile
-volumes and the private runtime root, let the controller create two exact
-authorities, and run two real supervisor containers. Before that live test,
-the broker still needs a coordinator that owns authority handles and client
-connections through reconciliation. After it passes, the runtime adapters
-must add concurrent frame, audio, and input heartbeats before physical game
-testing can begin.
+volumes and the private runtime root, instantiate the coordinator behind an
+explicit opt-in configuration, and run two real supervisor containers. Before
+physical game testing, worker runtime adapters must add the session bus,
+PipeWire sink, virtual input lifecycle, compositor, capture, encoder lease,
+launcher process tree, and deterministic teardown. Concurrent frame, audio,
+and input heartbeats then become the next acceptance boundary.
 
 ## Upstream references
 

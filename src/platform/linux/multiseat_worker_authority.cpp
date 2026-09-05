@@ -7,6 +7,8 @@
 #ifdef __linux__
 
 #include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <sys/socket.h>
@@ -24,9 +27,16 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace multiseat::worker_ipc {
   namespace {
+    constexpr std::size_t max_authority_entries = 256;
+    constexpr std::size_t max_authority_record_size = 1024;
+    constexpr std::array<std::uint8_t, 8> authority_record_magic {
+      'P', 'W', 'A', 'U', 'T', 'H', '0', '1'
+    };
+
     struct file_identity_t {
       std::uint64_t device = 0;
       std::uint64_t inode = 0;
@@ -186,7 +196,7 @@ namespace multiseat::worker_ipc {
       return descriptor;
     }
 
-    bool write_all(int descriptor, std::string_view payload) {
+    bool write_all(int descriptor, std::span<const std::uint8_t> payload) {
       std::size_t offset = 0;
       while (offset < payload.size()) {
         const auto result = ::write(
@@ -204,6 +214,357 @@ namespace multiseat::worker_ipc {
         return false;
       }
       return true;
+    }
+
+    bool create_private_file(
+      int parent,
+      std::string_view name,
+      std::span<const std::uint8_t> payload,
+      std::uint32_t owner_uid,
+      struct stat &metadata
+    ) {
+      const std::string owned_name {name};
+      auto descriptor = ::openat(
+        parent,
+        owned_name.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+        0600
+      );
+      if (descriptor < 0) {
+        return false;
+      }
+      const auto written = ::fchmod(descriptor, 0600) == 0 &&
+                           write_all(descriptor, payload) &&
+                           ::fsync(descriptor) == 0 &&
+                           ::fstat(descriptor, &metadata) == 0 &&
+                           private_regular_file(metadata, owner_uid) &&
+                           metadata.st_size == static_cast<off_t>(payload.size());
+      if (!written) {
+        struct stat descriptor_metadata {};
+        struct stat entry_metadata {};
+        if (::fstat(descriptor, &descriptor_metadata) == 0 &&
+            ::fstatat(
+              parent,
+              owned_name.c_str(),
+              &entry_metadata,
+              AT_SYMLINK_NOFOLLOW
+            ) == 0 &&
+            identity_of(descriptor_metadata) == identity_of(entry_metadata)) {
+          (void) ::unlinkat(parent, owned_name.c_str(), 0);
+        }
+      }
+      close_descriptor(descriptor);
+      return written;
+    }
+
+    struct private_file_payload_t {
+      file_identity_t identity;
+      std::vector<std::uint8_t> payload;
+    };
+
+    std::optional<private_file_payload_t> read_private_file(
+      int parent,
+      std::string_view name,
+      std::uint32_t owner_uid,
+      std::size_t max_size
+    ) {
+      const std::string owned_name {name};
+      auto descriptor = ::openat(
+        parent,
+        owned_name.c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+      );
+      if (descriptor < 0) {
+        return std::nullopt;
+      }
+      struct stat before {};
+      if (::fstat(descriptor, &before) != 0 ||
+          !private_regular_file(before, owner_uid) ||
+          before.st_size < 0 ||
+          static_cast<std::uint64_t>(before.st_size) > max_size) {
+        close_descriptor(descriptor);
+        return std::nullopt;
+      }
+      std::vector<std::uint8_t> payload(static_cast<std::size_t>(before.st_size));
+      std::size_t offset = 0;
+      while (offset < payload.size()) {
+        const auto result = ::read(
+          descriptor,
+          payload.data() + offset,
+          payload.size() - offset
+        );
+        if (result > 0) {
+          offset += static_cast<std::size_t>(result);
+          continue;
+        }
+        if (result < 0 && errno == EINTR) {
+          continue;
+        }
+        break;
+      }
+      std::uint8_t trailing = 0;
+      ssize_t trailing_result;
+      do {
+        trailing_result = ::read(descriptor, &trailing, 1);
+      } while (trailing_result < 0 && errno == EINTR);
+      struct stat after {};
+      const auto stable = ::fstat(descriptor, &after) == 0 &&
+                          private_regular_file(after, owner_uid) &&
+                          identity_of(before) == identity_of(after) &&
+                          before.st_size == after.st_size;
+      close_descriptor(descriptor);
+      if (!stable || offset != payload.size() || trailing_result != 0) {
+        if (!payload.empty()) {
+          OPENSSL_cleanse(payload.data(), payload.size());
+        }
+        return std::nullopt;
+      }
+      return private_file_payload_t {
+        .identity = identity_of(after),
+        .payload = std::move(payload),
+      };
+    }
+
+    struct capability_file_t {
+      capability_t capability {};
+      file_identity_t identity;
+    };
+
+    std::optional<capability_file_t> read_capability_file(
+      int auth_fd,
+      std::uint32_t owner_uid
+    ) {
+      auto file = read_private_file(
+        auth_fd,
+        authority_capability_file_name,
+        owner_uid,
+        capability_size * 2 + 1
+      );
+      if (!file || file->payload.size() != capability_size * 2 + 1 ||
+          file->payload.back() != '\n') {
+        if (file && !file->payload.empty()) {
+          OPENSSL_cleanse(file->payload.data(), file->payload.size());
+        }
+        return std::nullopt;
+      }
+      const std::string_view encoded {
+        reinterpret_cast<const char *>(file->payload.data()),
+        capability_size * 2,
+      };
+      auto capability = parse_capability_hex(encoded);
+      const auto nonzero = capability && std::any_of(
+        capability->begin(),
+        capability->end(),
+        [](std::uint8_t byte) {
+          return byte != 0;
+        }
+      );
+      OPENSSL_cleanse(file->payload.data(), file->payload.size());
+      if (!nonzero) {
+        if (capability) {
+          OPENSSL_cleanse(capability->data(), capability->size());
+        }
+        return std::nullopt;
+      }
+      capability_file_t result {
+        .capability = *capability,
+        .identity = file->identity,
+      };
+      OPENSSL_cleanse(capability->data(), capability->size());
+      return result;
+    }
+
+    void append_u16(std::vector<std::uint8_t> &payload, std::uint16_t value) {
+      payload.push_back(static_cast<std::uint8_t>(value >> 8U));
+      payload.push_back(static_cast<std::uint8_t>(value));
+    }
+
+    void append_u32(std::vector<std::uint8_t> &payload, std::uint32_t value) {
+      for (int shift = 24; shift >= 0; shift -= 8) {
+        payload.push_back(static_cast<std::uint8_t>(value >> shift));
+      }
+    }
+
+    void append_u64(std::vector<std::uint8_t> &payload, std::uint64_t value) {
+      for (int shift = 56; shift >= 0; shift -= 8) {
+        payload.push_back(static_cast<std::uint8_t>(value >> shift));
+      }
+    }
+
+    void append_string(std::vector<std::uint8_t> &payload, std::string_view value) {
+      append_u16(payload, static_cast<std::uint16_t>(value.size()));
+      payload.insert(payload.end(), value.begin(), value.end());
+    }
+
+    std::optional<proof_t> authority_record_hmac(
+      const capability_t &capability,
+      std::span<const std::uint8_t> payload
+    ) {
+      proof_t proof {};
+      unsigned int length = 0;
+      const auto *result = HMAC(
+        EVP_sha256(),
+        capability.data(),
+        static_cast<int>(capability.size()),
+        payload.data(),
+        payload.size(),
+        proof.data(),
+        &length
+      );
+      if (!result || length != proof.size()) {
+        OPENSSL_cleanse(proof.data(), proof.size());
+        return std::nullopt;
+      }
+      return proof;
+    }
+
+    std::optional<std::vector<std::uint8_t>> encode_authority_record(
+      const endpoint_identity_t &identity,
+      std::string_view runtime_namespace,
+      const capability_t &capability
+    ) {
+      if (!valid_identity(identity) || !opaque_name_token(runtime_namespace)) {
+        return std::nullopt;
+      }
+      std::vector<std::uint8_t> payload;
+      payload.reserve(
+        authority_record_magic.size() + 4 + 8 + 8 +
+        identity.controller_epoch.size() + identity.logical_gpu_id.size() +
+        identity.worker_name.size() + runtime_namespace.size() + proof_size
+      );
+      payload.insert(
+        payload.end(),
+        authority_record_magic.begin(),
+        authority_record_magic.end()
+      );
+      append_u32(payload, identity.slot);
+      append_u64(payload, identity.generation);
+      append_string(payload, identity.controller_epoch);
+      append_string(payload, identity.logical_gpu_id);
+      append_string(payload, identity.worker_name);
+      append_string(payload, runtime_namespace);
+      auto proof = authority_record_hmac(capability, payload);
+      if (!proof) {
+        return std::nullopt;
+      }
+      payload.insert(payload.end(), proof->begin(), proof->end());
+      OPENSSL_cleanse(proof->data(), proof->size());
+      return payload;
+    }
+
+    bool read_u16(
+      std::span<const std::uint8_t> payload,
+      std::size_t &offset,
+      std::uint16_t &value
+    ) {
+      if (offset > payload.size() || payload.size() - offset < 2) {
+        return false;
+      }
+      value = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(payload[offset]) << 8U) |
+        payload[offset + 1]
+      );
+      offset += 2;
+      return true;
+    }
+
+    bool read_u32(
+      std::span<const std::uint8_t> payload,
+      std::size_t &offset,
+      std::uint32_t &value
+    ) {
+      if (offset > payload.size() || payload.size() - offset < 4) {
+        return false;
+      }
+      value = 0;
+      for (int index = 0; index < 4; ++index) {
+        value = (value << 8U) | payload[offset++];
+      }
+      return true;
+    }
+
+    bool read_u64(
+      std::span<const std::uint8_t> payload,
+      std::size_t &offset,
+      std::uint64_t &value
+    ) {
+      if (offset > payload.size() || payload.size() - offset < 8) {
+        return false;
+      }
+      value = 0;
+      for (int index = 0; index < 8; ++index) {
+        value = (value << 8U) | payload[offset++];
+      }
+      return true;
+    }
+
+    bool read_string(
+      std::span<const std::uint8_t> payload,
+      std::size_t &offset,
+      std::string &value
+    ) {
+      std::uint16_t size = 0;
+      if (!read_u16(payload, offset, size) ||
+          offset > payload.size() ||
+          payload.size() - offset < size) {
+        return false;
+      }
+      value.assign(
+        reinterpret_cast<const char *>(payload.data() + offset),
+        size
+      );
+      offset += size;
+      return true;
+    }
+
+    struct authority_record_t {
+      endpoint_identity_t identity;
+      std::string runtime_namespace;
+    };
+
+    std::optional<authority_record_t> parse_authority_record(
+      std::span<const std::uint8_t> encoded,
+      const capability_t &capability
+    ) {
+      if (encoded.size() < authority_record_magic.size() + 4 + 8 + 8 + proof_size ||
+          encoded.size() > max_authority_record_size) {
+        return std::nullopt;
+      }
+      const auto transcript = encoded.first(encoded.size() - proof_size);
+      const auto presented = encoded.last(proof_size);
+      auto expected = authority_record_hmac(capability, transcript);
+      if (!expected || CRYPTO_memcmp(
+                         expected->data(),
+                         presented.data(),
+                         proof_size
+                       ) != 0) {
+        if (expected) {
+          OPENSSL_cleanse(expected->data(), expected->size());
+        }
+        return std::nullopt;
+      }
+      OPENSSL_cleanse(expected->data(), expected->size());
+      if (!std::equal(
+            authority_record_magic.begin(),
+            authority_record_magic.end(),
+            transcript.begin()
+          )) {
+        return std::nullopt;
+      }
+      std::size_t offset = authority_record_magic.size();
+      authority_record_t record;
+      if (!read_u32(transcript, offset, record.identity.slot) ||
+          !read_u64(transcript, offset, record.identity.generation) ||
+          !read_string(transcript, offset, record.identity.controller_epoch) ||
+          !read_string(transcript, offset, record.identity.logical_gpu_id) ||
+          !read_string(transcript, offset, record.identity.worker_name) ||
+          !read_string(transcript, offset, record.runtime_namespace) ||
+          offset != transcript.size() ||
+          !valid_identity(record.identity) ||
+          !opaque_name_token(record.runtime_namespace)) {
+        return std::nullopt;
+      }
+      return record;
     }
 
     bool allowed_directory_entries(
@@ -251,6 +612,46 @@ namespace multiseat::worker_ipc {
       return true;
     }
 
+    std::optional<std::vector<std::string>> bounded_directory_entries(
+      int descriptor,
+      std::size_t maximum
+    ) {
+      const auto independent = ::openat(
+        descriptor,
+        ".",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+      );
+      if (independent < 0) {
+        return std::nullopt;
+      }
+      auto *directory = ::fdopendir(independent);
+      if (!directory) {
+        (void) ::close(independent);
+        return std::nullopt;
+      }
+      std::vector<std::string> entries;
+      bool valid = true;
+      errno = 0;
+      while (const auto *entry = ::readdir(directory)) {
+        const std::string_view name {entry->d_name};
+        if (name != "." && name != "..") {
+          if (!opaque_name_token(name) || entries.size() >= maximum) {
+            valid = false;
+            break;
+          }
+          entries.emplace_back(name);
+        }
+        errno = 0;
+      }
+      const auto read_error = errno;
+      (void) ::closedir(directory);
+      if (!valid || read_error != 0) {
+        return std::nullopt;
+      }
+      std::sort(entries.begin(), entries.end());
+      return entries;
+    }
+
     bool socket_path_fits(const std::filesystem::path &path) {
       const auto &native = path.native();
       sockaddr_un address {};
@@ -261,59 +662,52 @@ namespace multiseat::worker_ipc {
 
     bool capability_file_matches(
       int auth_fd,
-      std::string_view name,
       std::uint32_t owner_uid,
       std::uint64_t expected_device,
       std::uint64_t expected_inode,
       const capability_t &capability
     ) {
-      const std::string owned_name {name};
-      auto descriptor = ::openat(
-        auth_fd,
-        owned_name.c_str(),
-        O_RDONLY | O_CLOEXEC | O_NOFOLLOW
-      );
-      if (descriptor < 0) {
+      auto file = read_capability_file(auth_fd, owner_uid);
+      if (!file) {
         return false;
       }
-      struct stat metadata {};
-      std::array<char, capability_size * 2 + 1> payload {};
-      std::size_t offset = 0;
-      while (offset < payload.size()) {
-        const auto result = ::read(
-          descriptor,
-          payload.data() + offset,
-          payload.size() - offset
-        );
-        if (result > 0) {
-          offset += static_cast<std::size_t>(result);
-          continue;
-        }
-        if (result < 0 && errno == EINTR) {
-          continue;
-        }
-        break;
-      }
-      char trailing = 0;
-      const auto trailing_result = ::read(descriptor, &trailing, 1);
-      const auto metadata_ready = ::fstat(descriptor, &metadata) == 0;
-      close_descriptor(descriptor);
-      auto expected = capability_hex(capability);
-      const auto matches = metadata_ready &&
-                           private_regular_file(metadata, owner_uid) &&
-                           exact_identity(metadata, expected_device, expected_inode) &&
-                           metadata.st_size == static_cast<off_t>(payload.size()) &&
-                           offset == payload.size() &&
-                           trailing_result == 0 &&
-                           payload.back() == '\n' &&
-                           CRYPTO_memcmp(
-                             payload.data(),
-                             expected.data(),
-                             expected.size()
-                           ) == 0;
-      OPENSSL_cleanse(expected.data(), expected.size());
-      OPENSSL_cleanse(payload.data(), payload.size());
+      const auto matches = file->identity == file_identity_t {
+        expected_device,
+        expected_inode,
+      } && CRYPTO_memcmp(
+        file->capability.data(),
+        capability.data(),
+        capability.size()
+      ) == 0;
+      OPENSSL_cleanse(file->capability.data(), file->capability.size());
       return matches;
+    }
+
+    bool authority_record_matches(
+      int auth_fd,
+      std::uint32_t owner_uid,
+      std::uint64_t expected_device,
+      std::uint64_t expected_inode,
+      const endpoint_identity_t &identity,
+      std::string_view runtime_namespace,
+      const capability_t &capability
+    ) {
+      auto file = read_private_file(
+        auth_fd,
+        authority_record_file_name,
+        owner_uid,
+        max_authority_record_size
+      );
+      if (!file || file->identity != file_identity_t {
+            expected_device,
+            expected_inode,
+          }) {
+        return false;
+      }
+      const auto record = parse_authority_record(file->payload, capability);
+      return record &&
+             record->identity == identity &&
+             record->runtime_namespace == runtime_namespace;
     }
 
     bool inactive_socket(const std::filesystem::path &path) {
@@ -351,6 +745,7 @@ namespace multiseat::worker_ipc {
       paths.ipc = paths.generation / authority_ipc_directory_name;
       paths.auth = paths.generation / authority_auth_directory_name;
       paths.capability = paths.auth / authority_capability_file_name;
+      paths.record = paths.auth / authority_record_file_name;
       paths.control_socket = paths.ipc / authority_control_socket_name;
       paths.media_socket = paths.ipc / authority_media_socket_name;
       return paths;
@@ -367,7 +762,7 @@ namespace multiseat::worker_ipc {
   authority_handle_t::authority_handle_t(
     endpoint_identity_t identity,
     authority_paths_t paths,
-    capability_t capability,
+    const capability_t &capability,
     std::uint32_t owner_uid,
     std::uint64_t root_device,
     std::uint64_t root_inode,
@@ -379,6 +774,8 @@ namespace multiseat::worker_ipc {
     std::uint64_t auth_inode,
     std::uint64_t capability_device,
     std::uint64_t capability_inode,
+    std::uint64_t record_device,
+    std::uint64_t record_inode,
     int generation_fd,
     int ipc_fd,
     int auth_fd
@@ -397,6 +794,8 @@ namespace multiseat::worker_ipc {
       auth_inode_(auth_inode),
       capability_device_(capability_device),
       capability_inode_(capability_inode),
+      record_device_(record_device),
+      record_inode_(record_inode),
       generation_fd_(generation_fd),
       ipc_fd_(ipc_fd),
       auth_fd_(auth_fd),
@@ -422,6 +821,8 @@ namespace multiseat::worker_ipc {
       auth_inode_(other.auth_inode_),
       capability_device_(other.capability_device_),
       capability_inode_(other.capability_inode_),
+      record_device_(other.record_device_),
+      record_inode_(other.record_inode_),
       generation_fd_(std::exchange(other.generation_fd_, -1)),
       ipc_fd_(std::exchange(other.ipc_fd_, -1)),
       auth_fd_(std::exchange(other.auth_fd_, -1)),
@@ -448,6 +849,8 @@ namespace multiseat::worker_ipc {
     auth_inode_ = other.auth_inode_;
     capability_device_ = other.capability_device_;
     capability_inode_ = other.capability_inode_;
+    record_device_ = other.record_device_;
+    record_inode_ = other.record_inode_;
     generation_fd_ = std::exchange(other.generation_fd_, -1);
     ipc_fd_ = std::exchange(other.ipc_fd_, -1);
     auth_fd_ = std::exchange(other.auth_fd_, -1);
@@ -566,7 +969,15 @@ namespace multiseat::worker_ipc {
     auto ipc_fd = -1;
     auto auth_fd = -1;
     bool token_created = false;
+    bool record_created = false;
     const auto rollback = [&]() {
+      if (auth_fd >= 0 && record_created) {
+        (void) ::unlinkat(
+          auth_fd,
+          std::string {authority_record_file_name}.c_str(),
+          0
+        );
+      }
       if (auth_fd >= 0 && token_created) {
         (void) ::unlinkat(
           auth_fd,
@@ -632,31 +1043,47 @@ namespace multiseat::worker_ipc {
       return {.status = authority_status_e::random_failed};
     }
 
-    const auto capability_name = std::string {authority_capability_file_name};
-    auto capability_fd = ::openat(
+    auto encoded_capability = capability_hex(capability) + "\n";
+    struct stat capability_metadata {};
+    const auto capability_written = create_private_file(
       auth_fd,
-      capability_name.c_str(),
-      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-      0600
+      authority_capability_file_name,
+      std::span<const std::uint8_t> {
+        reinterpret_cast<const std::uint8_t *>(encoded_capability.data()),
+        encoded_capability.size(),
+      },
+      owner_uid_,
+      capability_metadata
     );
-    if (capability_fd < 0) {
+    token_created = capability_written;
+    OPENSSL_cleanse(encoded_capability.data(), encoded_capability.size());
+    if (!capability_written) {
       OPENSSL_cleanse(capability.data(), capability.size());
       rollback();
       return {.status = authority_status_e::io_error};
     }
-    token_created = true;
-    auto encoded_capability = capability_hex(capability) + "\n";
-    struct stat capability_metadata {};
-    const auto capability_written =
-      ::fchmod(capability_fd, 0600) == 0 &&
-      write_all(capability_fd, encoded_capability) &&
-      ::fsync(capability_fd) == 0 &&
-      ::fstat(capability_fd, &capability_metadata) == 0 &&
-      private_regular_file(capability_metadata, owner_uid_) &&
-      capability_metadata.st_size == static_cast<off_t>(encoded_capability.size());
-    close_descriptor(capability_fd);
-    OPENSSL_cleanse(encoded_capability.data(), encoded_capability.size());
-    if (!capability_written) {
+
+    auto encoded_record = encode_authority_record(
+      identity,
+      runtime_namespace,
+      capability
+    );
+    struct stat record_metadata {};
+    const auto record_written = encoded_record && create_private_file(
+      auth_fd,
+      authority_record_file_name,
+      *encoded_record,
+      owner_uid_,
+      record_metadata
+    );
+    record_created = record_written;
+    if (encoded_record && !encoded_record->empty()) {
+      OPENSSL_cleanse(encoded_record->data(), encoded_record->size());
+    }
+    if (!record_written ||
+        ::fsync(auth_fd) != 0 ||
+        ::fsync(owned_generation_fd) != 0 ||
+        ::fsync(root_fd_) != 0) {
       OPENSSL_cleanse(capability.data(), capability.size());
       rollback();
       return {.status = authority_status_e::io_error};
@@ -698,6 +1125,7 @@ namespace multiseat::worker_ipc {
     const auto ipc_identity = identity_of(ipc_metadata);
     const auto auth_identity = identity_of(auth_metadata);
     const auto token_identity = identity_of(capability_metadata);
+    const auto record_identity = identity_of(record_metadata);
     authority_handle_t handle {
       identity,
       paths,
@@ -713,6 +1141,8 @@ namespace multiseat::worker_ipc {
       auth_identity.inode,
       token_identity.device,
       token_identity.inode,
+      record_identity.device,
+      record_identity.inode,
       std::exchange(owned_generation_fd, -1),
       std::exchange(ipc_fd, -1),
       std::exchange(auth_fd, -1)
@@ -722,6 +1152,298 @@ namespace multiseat::worker_ipc {
       .status = authority_status_e::applied,
       .authority = std::move(handle),
     };
+  }
+
+  authority_recovery_result_t authority_store_t::recover_inactive(
+    std::span<const endpoint_identity_t> active_identities
+  ) {
+    authority_recovery_result_t result;
+    const auto fail = [&result](authority_status_e status) {
+      result.inactive.clear();
+      result.active_identities.clear();
+      result.active = 0;
+      result.status = status;
+      return std::move(result);
+    };
+    if (status_ != authority_status_e::applied) {
+      return fail(status_);
+    }
+    if (active_identities.size() > max_authority_entries) {
+      return fail(authority_status_e::invalid_argument);
+    }
+    std::vector<endpoint_identity_t> unique_active;
+    unique_active.reserve(active_identities.size());
+    for (const auto &identity : active_identities) {
+      if (!valid_identity(identity) ||
+          std::find(unique_active.begin(), unique_active.end(), identity) !=
+            unique_active.end()) {
+        return fail(authority_status_e::invalid_argument);
+      }
+      unique_active.push_back(identity);
+    }
+
+    auto current_root = open_absolute_directory_without_symlinks(root_);
+    const auto root_matches = descriptor_is_directory(
+      current_root,
+      owner_uid_,
+      root_device_,
+      root_inode_
+    );
+    close_descriptor(current_root);
+    if (!root_matches ||
+        !descriptor_is_directory(root_fd_, owner_uid_, root_device_, root_inode_)) {
+      return fail(authority_status_e::unsafe_root);
+    }
+    const auto entries = bounded_directory_entries(root_fd_, max_authority_entries);
+    if (!entries) {
+      return fail(authority_status_e::integrity_violation);
+    }
+    result.observed = entries->size();
+    std::vector<endpoint_identity_t> observed_identities;
+    observed_identities.reserve(entries->size());
+
+    for (const auto &runtime_namespace : *entries) {
+      const auto paths = paths_for(root_, runtime_namespace);
+      if (!socket_path_fits(paths.control_socket) ||
+          !socket_path_fits(paths.media_socket)) {
+        return fail(authority_status_e::integrity_violation);
+      }
+      auto generation_fd = ::openat(
+        root_fd_,
+        runtime_namespace.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+      );
+      auto ipc_fd = -1;
+      auto auth_fd = -1;
+      const auto close_all = [&]() {
+        close_descriptor(auth_fd);
+        close_descriptor(ipc_fd);
+        close_descriptor(generation_fd);
+      };
+      struct stat generation_metadata {};
+      if (generation_fd < 0 ||
+          ::fstat(generation_fd, &generation_metadata) != 0 ||
+          !private_directory(generation_metadata, owner_uid_)) {
+        close_all();
+        return fail(authority_status_e::integrity_violation);
+      }
+      ipc_fd = ::openat(
+        generation_fd,
+        std::string {authority_ipc_directory_name}.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+      );
+      auth_fd = ::openat(
+        generation_fd,
+        std::string {authority_auth_directory_name}.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+      );
+      struct stat ipc_metadata {};
+      struct stat auth_metadata {};
+      if (ipc_fd < 0 || auth_fd < 0 ||
+          ::fstat(ipc_fd, &ipc_metadata) != 0 ||
+          ::fstat(auth_fd, &auth_metadata) != 0 ||
+          !private_directory(ipc_metadata, owner_uid_) ||
+          !private_directory(auth_metadata, owner_uid_) ||
+          !allowed_directory_entries(
+            generation_fd,
+            {
+              std::string {authority_ipc_directory_name},
+              std::string {authority_auth_directory_name},
+            },
+            {}
+          ) ||
+          !allowed_directory_entries(
+            auth_fd,
+            {
+              std::string {authority_capability_file_name},
+              std::string {authority_record_file_name},
+            },
+            {}
+          ) ||
+          !allowed_directory_entries(
+            ipc_fd,
+            {},
+            {
+              std::string {authority_control_socket_name},
+              std::string {authority_media_socket_name},
+            }
+          )) {
+        close_all();
+        return fail(authority_status_e::integrity_violation);
+      }
+
+      auto capability_file = read_capability_file(auth_fd, owner_uid_);
+      auto record_file = read_private_file(
+        auth_fd,
+        authority_record_file_name,
+        owner_uid_,
+        max_authority_record_size
+      );
+      auto record = capability_file && record_file ?
+                      parse_authority_record(
+                        record_file->payload,
+                        capability_file->capability
+                      ) :
+                      std::nullopt;
+      if (!capability_file || !record_file || !record ||
+          record->runtime_namespace != runtime_namespace ||
+          std::find(
+            observed_identities.begin(),
+            observed_identities.end(),
+            record->identity
+          ) != observed_identities.end()) {
+        if (capability_file) {
+          OPENSSL_cleanse(
+            capability_file->capability.data(),
+            capability_file->capability.size()
+          );
+        }
+        close_all();
+        return fail(authority_status_e::integrity_violation);
+      }
+      observed_identities.push_back(record->identity);
+
+      const auto generation_identity = identity_of(generation_metadata);
+      const auto ipc_identity = identity_of(ipc_metadata);
+      const auto auth_identity = identity_of(auth_metadata);
+      struct stat token_entry {};
+      struct stat record_entry {};
+      const auto stable = entry_is_directory(
+                            root_fd_,
+                            runtime_namespace,
+                            owner_uid_,
+                            generation_identity.device,
+                            generation_identity.inode
+                          ) &&
+                          entry_is_directory(
+                            generation_fd,
+                            authority_ipc_directory_name,
+                            owner_uid_,
+                            ipc_identity.device,
+                            ipc_identity.inode
+                          ) &&
+                          entry_is_directory(
+                            generation_fd,
+                            authority_auth_directory_name,
+                            owner_uid_,
+                            auth_identity.device,
+                            auth_identity.inode
+                          ) &&
+                          ::fstatat(
+                            auth_fd,
+                            std::string {authority_capability_file_name}.c_str(),
+                            &token_entry,
+                            AT_SYMLINK_NOFOLLOW
+                          ) == 0 &&
+                          private_regular_file(token_entry, owner_uid_) &&
+                          identity_of(token_entry) == capability_file->identity &&
+                          ::fstatat(
+                            auth_fd,
+                            std::string {authority_record_file_name}.c_str(),
+                            &record_entry,
+                            AT_SYMLINK_NOFOLLOW
+                          ) == 0 &&
+                          private_regular_file(record_entry, owner_uid_) &&
+                          identity_of(record_entry) == record_file->identity;
+      if (!stable) {
+        OPENSSL_cleanse(
+          capability_file->capability.data(),
+          capability_file->capability.size()
+        );
+        close_all();
+        return fail(authority_status_e::integrity_violation);
+      }
+      for (const auto socket_name : {
+             authority_control_socket_name,
+             authority_media_socket_name,
+           }) {
+        struct stat socket_metadata {};
+        const std::string owned_name {socket_name};
+        if (::fstatat(
+              ipc_fd,
+              owned_name.c_str(),
+              &socket_metadata,
+              AT_SYMLINK_NOFOLLOW
+            ) == 0) {
+          if (!private_socket(socket_metadata, owner_uid_)) {
+            OPENSSL_cleanse(
+              capability_file->capability.data(),
+              capability_file->capability.size()
+            );
+            close_all();
+            return fail(authority_status_e::integrity_violation);
+          }
+        } else if (errno != ENOENT) {
+          OPENSSL_cleanse(
+            capability_file->capability.data(),
+            capability_file->capability.size()
+          );
+          close_all();
+          return fail(authority_status_e::integrity_violation);
+        }
+      }
+
+      if (std::find(
+            unique_active.begin(),
+            unique_active.end(),
+            record->identity
+          ) != unique_active.end()) {
+        ++result.active;
+        result.active_identities.push_back(record->identity);
+        OPENSSL_cleanse(
+          capability_file->capability.data(),
+          capability_file->capability.size()
+        );
+        close_all();
+        continue;
+      }
+
+      result.inactive.emplace_back(authority_handle_t {
+        record->identity,
+        paths,
+        capability_file->capability,
+        owner_uid_,
+        root_device_,
+        root_inode_,
+        generation_identity.device,
+        generation_identity.inode,
+        ipc_identity.device,
+        ipc_identity.inode,
+        auth_identity.device,
+        auth_identity.inode,
+        capability_file->identity.device,
+        capability_file->identity.inode,
+        record_file->identity.device,
+        record_file->identity.inode,
+        std::exchange(generation_fd, -1),
+        std::exchange(ipc_fd, -1),
+        std::exchange(auth_fd, -1)
+      });
+      OPENSSL_cleanse(
+        capability_file->capability.data(),
+        capability_file->capability.size()
+      );
+    }
+
+    current_root = open_absolute_directory_without_symlinks(root_);
+    const auto final_entries = bounded_directory_entries(root_fd_, max_authority_entries);
+    const auto stable_root = descriptor_is_directory(
+      current_root,
+      owner_uid_,
+      root_device_,
+      root_inode_
+    ) && descriptor_is_directory(
+      root_fd_,
+      owner_uid_,
+      root_device_,
+      root_inode_
+    );
+    close_descriptor(current_root);
+    if (!stable_root || !final_entries || *final_entries != *entries) {
+      return fail(authority_status_e::integrity_violation);
+    }
+    result.status = authority_status_e::applied;
+    return result;
   }
 
   authority_status_e authority_store_t::validate(
@@ -798,7 +1520,9 @@ namespace multiseat::worker_ipc {
     }
 
     struct stat capability_metadata {};
+    struct stat record_metadata {};
     const auto capability_name = std::string {authority_capability_file_name};
+    const auto record_name = std::string {authority_record_file_name};
     if (::fstatat(
           authority.auth_fd_,
           capability_name.c_str(),
@@ -812,12 +1536,32 @@ namespace multiseat::worker_ipc {
           authority.capability_inode_
         ) ||
         capability_metadata.st_size != static_cast<off_t>(capability_size * 2 + 1) ||
+        ::fstatat(
+          authority.auth_fd_,
+          record_name.c_str(),
+          &record_metadata,
+          AT_SYMLINK_NOFOLLOW
+        ) != 0 ||
+        !private_regular_file(record_metadata, owner_uid_) ||
+        !exact_identity(
+          record_metadata,
+          authority.record_device_,
+          authority.record_inode_
+        ) ||
         !capability_file_matches(
           authority.auth_fd_,
-          authority_capability_file_name,
           owner_uid_,
           authority.capability_device_,
           authority.capability_inode_,
+          authority.capability_
+        ) ||
+        !authority_record_matches(
+          authority.auth_fd_,
+          owner_uid_,
+          authority.record_device_,
+          authority.record_inode_,
+          authority.identity_,
+          generation_name,
           authority.capability_
         ) ||
         !allowed_directory_entries(
@@ -830,7 +1574,10 @@ namespace multiseat::worker_ipc {
         ) ||
         !allowed_directory_entries(
           authority.auth_fd_,
-          {std::string {authority_capability_file_name}},
+          {
+            std::string {authority_capability_file_name},
+            std::string {authority_record_file_name},
+          },
           {}
         ) ||
         !allowed_directory_entries(
@@ -920,7 +1667,9 @@ namespace multiseat::worker_ipc {
     }
 
     const auto capability_name = std::string {authority_capability_file_name};
+    const auto record_name = std::string {authority_record_file_name};
     struct stat capability_metadata {};
+    struct stat record_metadata {};
     if (::fstatat(
           authority.auth_fd_,
           capability_name.c_str(),
@@ -932,6 +1681,34 @@ namespace multiseat::worker_ipc {
           capability_metadata,
           authority.capability_device_,
           authority.capability_inode_
+        ) ||
+        ::fstatat(
+          authority.auth_fd_,
+          record_name.c_str(),
+          &record_metadata,
+          AT_SYMLINK_NOFOLLOW
+        ) != 0 ||
+        !private_regular_file(record_metadata, owner_uid_) ||
+        !exact_identity(
+          record_metadata,
+          authority.record_device_,
+          authority.record_inode_
+        ) ||
+        !capability_file_matches(
+          authority.auth_fd_,
+          owner_uid_,
+          authority.capability_device_,
+          authority.capability_inode_,
+          authority.capability_
+        ) ||
+        !authority_record_matches(
+          authority.auth_fd_,
+          owner_uid_,
+          authority.record_device_,
+          authority.record_inode_,
+          authority.identity_,
+          authority.paths_.generation.filename().native(),
+          authority.capability_
         ) ||
         !entry_is_directory(
           authority.generation_fd_,
@@ -946,9 +1723,15 @@ namespace multiseat::worker_ipc {
           owner_uid_,
           authority.ipc_device_,
           authority.ipc_inode_
-        ) ||
+        )) {
+      return authority_status_e::integrity_violation;
+    }
+    if (::unlinkat(authority.auth_fd_, record_name.c_str(), 0) != 0 ||
         ::unlinkat(authority.auth_fd_, capability_name.c_str(), 0) != 0 ||
-        ::unlinkat(
+        ::fsync(authority.auth_fd_) != 0) {
+      return authority_status_e::io_error;
+    }
+    if (::unlinkat(
           authority.generation_fd_,
           std::string {authority_auth_directory_name}.c_str(),
           AT_REMOVEDIR
@@ -958,11 +1741,14 @@ namespace multiseat::worker_ipc {
           std::string {authority_ipc_directory_name}.c_str(),
           AT_REMOVEDIR
         ) != 0 ||
-        ::unlinkat(
+        ::fsync(authority.generation_fd_) != 0) {
+      return authority_status_e::io_error;
+    }
+    if (::unlinkat(
           root_fd_,
           authority.paths_.generation.filename().c_str(),
           AT_REMOVEDIR
-        ) != 0) {
+        ) != 0 || ::fsync(root_fd_) != 0) {
       return authority_status_e::io_error;
     }
 

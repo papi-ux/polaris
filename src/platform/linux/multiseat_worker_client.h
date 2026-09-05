@@ -57,7 +57,7 @@ namespace multiseat::worker_ipc {
     [[nodiscard]] transport_status_e shutdown();
     void close() noexcept;
 
-    [[nodiscard]] bool connected() const;
+    [[nodiscard]] bool connected() const noexcept;
 
   private:
     struct implementation_t;

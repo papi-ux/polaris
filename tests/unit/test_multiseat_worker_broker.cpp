@@ -328,9 +328,63 @@ TEST(MultiseatWorkerBroker, RequiresAuthoritativeInventoryBeforeLaunch) {
     broker_start_result_e::reconciliation_required
   );
   const auto report = broker.reconcile();
+  EXPECT_TRUE(report.inventory_authoritative);
+  EXPECT_TRUE(report.active_workers.empty());
   EXPECT_TRUE(report.admission_ready);
   EXPECT_TRUE(broker.admission_ready());
   EXPECT_EQ(broker.start_seat(seat.handle), broker_start_result_e::started);
+}
+
+TEST(MultiseatWorkerBroker, EndpointReadinessGatesRunningAndShutdownPrecedesBackendStop) {
+  registry_t registry {"controller-current", {shared_gpu()}};
+  fake_worker_backend_t backend;
+  fake_clock_t clock;
+  std::size_t readiness_checks = 0;
+  std::size_t shutdown_requests = 0;
+  worker_broker_t broker {
+    registry,
+    backend,
+    {
+      .graceful_stop_timeout = 5s,
+      .force_stop_timeout = 2s,
+    },
+    [&clock]() {
+      return clock.now();
+    },
+    [&readiness_checks](const worker_identity_t &) {
+      ++readiness_checks;
+      return false;
+    },
+    [&shutdown_requests](const worker_identity_t &) {
+      ++shutdown_requests;
+    },
+  };
+  ASSERT_TRUE(broker.reconcile().admission_ready);
+  const auto seat = admit_and_bind(
+    registry,
+    "client-a",
+    "profile-a",
+    "workload-a",
+    compositor_e::gamescope,
+    compositor_e::gamescope
+  );
+  const auto identity = identity_for(seat);
+  ASSERT_EQ(broker.start_seat(seat.handle), broker_start_result_e::started);
+  ASSERT_TRUE(backend.mark_ready(identity));
+
+  const auto report = broker.reconcile();
+  EXPECT_TRUE(report.inventory_authoritative);
+  EXPECT_EQ(report.active_workers, std::vector<worker_identity_t> {identity});
+  EXPECT_EQ(report.readiness_rejections, std::size_t {1});
+  EXPECT_EQ(readiness_checks, std::size_t {1});
+  EXPECT_EQ(shutdown_requests, std::size_t {1});
+  EXPECT_EQ(
+    backend.stop_count(identity, worker_stop_mode_e::graceful),
+    std::size_t {1}
+  );
+  const auto stopping = registry.snapshot(seat.handle);
+  ASSERT_TRUE(stopping);
+  EXPECT_EQ(stopping->state, seat_state_e::stopping);
 }
 
 TEST(MultiseatWorkerBroker, TwoFakeWorkersRunAndStopIndependently) {
@@ -580,6 +634,8 @@ TEST(MultiseatWorkerBroker, InventoryFailureClosesAdmissionWithoutMutation) {
 
   const auto report = broker.reconcile();
   EXPECT_TRUE(report.backend_observation_failed);
+  EXPECT_FALSE(report.inventory_authoritative);
+  EXPECT_TRUE(report.active_workers.empty());
   EXPECT_FALSE(report.admission_ready);
   EXPECT_EQ(
     broker.start_seat(seat.handle),
@@ -613,6 +669,8 @@ TEST(MultiseatWorkerBroker, DuplicateInventoryFailsClosedWithoutMutation) {
 
   const auto report = broker.reconcile();
   EXPECT_EQ(report.protocol_errors, std::size_t {1});
+  EXPECT_FALSE(report.inventory_authoritative);
+  EXPECT_TRUE(report.active_workers.empty());
   EXPECT_FALSE(report.admission_ready);
   EXPECT_FALSE(broker.admission_ready());
   const auto unchanged = registry.snapshot(seat.handle);
@@ -641,6 +699,8 @@ TEST(MultiseatWorkerBroker, MalformedInventoryFailsClosedWithoutCommands) {
 
   const auto report = broker.reconcile();
   EXPECT_EQ(report.protocol_errors, std::size_t {1});
+  EXPECT_FALSE(report.inventory_authoritative);
+  EXPECT_TRUE(report.active_workers.empty());
   EXPECT_FALSE(report.admission_ready);
   EXPECT_FALSE(broker.admission_ready());
   EXPECT_EQ(backend.worker_count(), std::size_t {0});

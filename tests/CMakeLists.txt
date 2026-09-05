@@ -375,9 +375,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_authority.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_client.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_coordinator.cpp
     )
 endif()
 set_target_properties(test_multiseat_runtime PROPERTIES
@@ -399,6 +401,28 @@ add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_program(POLARIS_TEST_GO_EXECUTABLE go)
     if(POLARIS_TEST_GO_EXECUTABLE)
+        set(POLARIS_MULTISEAT_GO_INTEROP_BINARY
+            "${CMAKE_CURRENT_BINARY_DIR}/polaris-multiseat-go-interop-server")
+        file(GLOB POLARIS_MULTISEAT_GO_TEST_SOURCES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod")
+        add_custom_command(
+            OUTPUT "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
+            COMMENT "Building native C++/Go multiseat interop fixture"
+            COMMAND ${CMAKE_COMMAND} -E env
+                    CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    ${POLARIS_TEST_GO_EXECUTABLE} test -c -trimpath
+                    -o "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}" .
+            DEPENDS ${POLARIS_MULTISEAT_GO_TEST_SOURCES}
+            VERBATIM)
+        add_custom_target(polaris-multiseat-go-interop-fixture
+            DEPENDS "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}")
+        add_dependencies(test_multiseat_runtime polaris-multiseat-go-interop-fixture)
+        target_sources(test_multiseat_runtime PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_worker_interop.cpp)
+        target_compile_definitions(test_multiseat_runtime PRIVATE
+            POLARIS_MULTISEAT_GO_INTEROP_BINARY="${POLARIS_MULTISEAT_GO_INTEROP_BINARY}")
         add_test(
             NAME polaris_multiseat_worker_go
             COMMAND ${CMAKE_COMMAND} -E env

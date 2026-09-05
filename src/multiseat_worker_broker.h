@@ -128,7 +128,10 @@ namespace multiseat {
     std::size_t force_stop_requests = 0;
     std::size_t stuck_workers = 0;
     std::size_t protocol_errors = 0;
+    std::size_t readiness_rejections = 0;
+    std::vector<worker_identity_t> active_workers;
     bool backend_observation_failed = false;
+    bool inventory_authoritative = false;
     bool admission_ready = false;
   };
 
@@ -142,12 +145,17 @@ namespace multiseat {
     using monotonic_clock_t = std::chrono::steady_clock;
     using time_point_t = monotonic_clock_t::time_point;
     using now_fn_t = std::function<time_point_t()>;
+    /** Hooks run inside broker serialization and must not re-enter the broker. */
+    using ready_fn_t = std::function<bool(const worker_identity_t &)>;
+    using shutdown_fn_t = std::function<void(const worker_identity_t &)>;
 
     worker_broker_t(
       registry_t &registry,
       worker_backend_t &backend,
       worker_broker_options_t options = {},
-      now_fn_t now = {}
+      now_fn_t now = {},
+      ready_fn_t ready = {},
+      shutdown_fn_t shutdown = {}
     );
 
     broker_start_result_e start_seat(const seat_handle_t &handle);
@@ -185,6 +193,8 @@ namespace multiseat {
     worker_backend_t &backend_;
     const worker_broker_options_t options_;
     now_fn_t now_;
+    ready_fn_t ready_;
+    shutdown_fn_t shutdown_;
     mutable std::mutex mutex_;
     std::vector<pending_stop_t> pending_stops_;
     bool admission_ready_ = false;

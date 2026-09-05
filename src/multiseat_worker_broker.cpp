@@ -74,12 +74,16 @@ namespace multiseat {
     registry_t &registry,
     worker_backend_t &backend,
     worker_broker_options_t options,
-    now_fn_t now
+    now_fn_t now,
+    ready_fn_t ready,
+    shutdown_fn_t shutdown
   ) :
       registry_(registry),
       backend_(backend),
       options_(options),
-      now_(std::move(now)) {
+      now_(std::move(now)),
+      ready_(std::move(ready)),
+      shutdown_(std::move(shutdown)) {
     if (options_.graceful_stop_timeout <= std::chrono::milliseconds::zero() ||
         options_.force_stop_timeout <= std::chrono::milliseconds::zero()) {
       throw std::invalid_argument {"multiseat worker stop timeouts must be positive"};
@@ -205,6 +209,12 @@ namespace multiseat {
       admission_ready_ = false;
       return report;
     }
+    report.inventory_authoritative = true;
+    for (const auto &observation : inventory) {
+      if (active(observation.state)) {
+        report.active_workers.push_back(observation.identity);
+      }
+    }
 
     bool orphan_seen = false;
     std::vector<worker_identity_t> current_active_workers;
@@ -248,7 +258,19 @@ namespace multiseat {
           break;
         case worker_observed_state_e::ready:
           if (seat->state == seat_state_e::starting) {
-            if (registry_.mark_running(seat->handle) == mutation_result_e::applied) {
+            bool endpoint_ready = true;
+            if (ready_) {
+              try {
+                endpoint_ready = ready_(observation.identity);
+              } catch (...) {
+                endpoint_ready = false;
+              }
+            }
+            if (!endpoint_ready) {
+              ++report.readiness_rejections;
+              registry_.begin_stop(seat->handle);
+              request_graceful_stop_locked(observation.identity, false, now, &report);
+            } else if (registry_.mark_running(seat->handle) == mutation_result_e::applied) {
               ++report.ready_transitions;
             } else {
               ++report.protocol_errors;
@@ -377,6 +399,12 @@ namespace multiseat {
       return worker_command_result_e::already_applied;
     }
 
+    if (shutdown_) {
+      try {
+        shutdown_(identity);
+      } catch (...) {
+      }
+    }
     const auto result = backend_stop_locked(identity, worker_stop_mode_e::graceful);
     if (report) {
       ++report->graceful_stop_requests;

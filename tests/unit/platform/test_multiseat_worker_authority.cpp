@@ -18,6 +18,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace {
   using namespace multiseat::worker_ipc;
@@ -140,6 +141,7 @@ TEST(MultiseatWorkerAuthority, CreatesExactPrivateHierarchyAndCanonicalCapabilit
   EXPECT_EQ(permissions_of(authority.paths().ipc), 0700);
   EXPECT_EQ(permissions_of(authority.paths().auth), 0700);
   EXPECT_EQ(permissions_of(authority.paths().capability), 0600);
+  EXPECT_EQ(permissions_of(authority.paths().record), 0600);
   EXPECT_FALSE(std::filesystem::exists(authority.paths().control_socket));
   EXPECT_FALSE(std::filesystem::exists(authority.paths().media_socket));
 
@@ -346,6 +348,194 @@ TEST(MultiseatWorkerAuthority, MoveInvalidatesTheOldHandleAndPreservesCleanupFen
   EXPECT_TRUE(moved.active());
   EXPECT_EQ(store.validate(moved), authority_status_e::applied);
   EXPECT_EQ(store.remove(moved), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerAuthority, SignedRecoveryReturnsOnlyInventoryAbsentAuthorities) {
+  temporary_root_t root;
+  const auto first_identity = identity_for(41);
+  const auto second_identity = identity_for(42);
+  std::filesystem::path first_path;
+  std::filesystem::path second_path;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0x81)};
+    auto first_result = original.create(first_identity, "recovery-first");
+    auto first = take_authority(first_result);
+    auto second_result = original.create(second_identity, "recovery-second");
+    auto second = take_authority(second_result);
+    first_path = first.paths().generation;
+    second_path = second.paths().generation;
+  }
+  ASSERT_TRUE(std::filesystem::exists(first_path));
+  ASSERT_TRUE(std::filesystem::exists(second_path));
+
+  authority_store_t replacement {root.path(), capability_filled_with(0x82)};
+  const std::array active {second_identity};
+  auto first_pass = replacement.recover_inactive(active);
+  ASSERT_TRUE(first_pass.inspected());
+  EXPECT_EQ(first_pass.observed, std::size_t {2});
+  EXPECT_EQ(first_pass.active, std::size_t {1});
+  ASSERT_EQ(first_pass.inactive.size(), std::size_t {1});
+  EXPECT_EQ(first_pass.inactive.front().identity(), first_identity);
+  EXPECT_EQ(
+    replacement.remove(first_pass.inactive.front()),
+    authority_status_e::applied
+  );
+  EXPECT_FALSE(std::filesystem::exists(first_path));
+  EXPECT_TRUE(std::filesystem::exists(second_path));
+
+  auto second_pass = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  ASSERT_TRUE(second_pass.all_inactive());
+  ASSERT_EQ(second_pass.inactive.size(), std::size_t {1});
+  EXPECT_EQ(second_pass.inactive.front().identity(), second_identity);
+  EXPECT_EQ(
+    replacement.remove(second_pass.inactive.front()),
+    authority_status_e::applied
+  );
+  EXPECT_TRUE(std::filesystem::is_empty(root.path()));
+}
+
+TEST(MultiseatWorkerAuthority, RecoveryRejectsTamperedRecordsAndDuplicateInventory) {
+  temporary_root_t root;
+  const auto identity = identity_for(51);
+  std::filesystem::path generation;
+  std::filesystem::path record;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0x91)};
+    auto result = original.create(identity, "recovery-tampered");
+    auto authority = take_authority(result);
+    generation = authority.paths().generation;
+    record = authority.paths().record;
+  }
+
+  authority_store_t replacement {root.path(), capability_filled_with(0x92)};
+  const std::array duplicate {identity, identity};
+  const auto duplicate_result = replacement.recover_inactive(duplicate);
+  EXPECT_EQ(duplicate_result.status, authority_status_e::invalid_argument);
+  EXPECT_TRUE(duplicate_result.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(generation));
+
+  {
+    std::fstream stream {record, std::ios::in | std::ios::out | std::ios::binary};
+    ASSERT_TRUE(stream.good());
+    stream.put('X');
+  }
+  const auto tampered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  EXPECT_EQ(tampered.status, authority_status_e::integrity_violation);
+  EXPECT_TRUE(tampered.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(generation));
+}
+
+TEST(MultiseatWorkerAuthority, RecoveryNeverConvertsALiveSocketIntoCleanupAuthority) {
+  temporary_root_t root;
+  std::filesystem::path generation;
+  std::filesystem::path socket_path;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0xa1)};
+    auto result = original.create(identity_for(61), "recovery-live-socket");
+    auto authority = take_authority(result);
+    generation = authority.paths().generation;
+    socket_path = authority.paths().control_socket;
+  }
+  const auto listener = bind_worker_socket(socket_path, true);
+  ASSERT_GE(listener, 0);
+
+  authority_store_t replacement {root.path(), capability_filled_with(0xa2)};
+  auto recovered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  ASSERT_TRUE(recovered.all_inactive());
+  ASSERT_EQ(recovered.inactive.size(), std::size_t {1});
+  EXPECT_EQ(
+    replacement.remove(recovered.inactive.front()),
+    authority_status_e::integrity_violation
+  );
+  EXPECT_TRUE(std::filesystem::exists(generation));
+  EXPECT_EQ(::close(listener), 0);
+}
+
+TEST(MultiseatWorkerAuthority, RecoveryRejectsUnexpectedRootEntriesWithoutPartialCleanup) {
+  temporary_root_t root;
+  std::filesystem::path generation;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0xb1)};
+    auto result = original.create(identity_for(71), "recovery-valid");
+    auto authority = take_authority(result);
+    generation = authority.paths().generation;
+  }
+  {
+    std::ofstream unexpected {root.path() / "unexpected-file"};
+    unexpected << "not an authority";
+  }
+
+  authority_store_t replacement {root.path(), capability_filled_with(0xb2)};
+  const auto recovered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  EXPECT_EQ(recovered.status, authority_status_e::integrity_violation);
+  EXPECT_TRUE(recovered.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(generation));
+  EXPECT_TRUE(std::filesystem::exists(root.path() / "unexpected-file"));
+}
+
+TEST(MultiseatWorkerAuthority, RecoveryRejectsMoreThanTheBoundedAuthorityLimit) {
+  temporary_root_t root;
+  std::filesystem::path generation;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0xc1)};
+    auto result = original.create(identity_for(81), "recovery-within-bound");
+    auto authority = take_authority(result);
+    generation = authority.paths().generation;
+  }
+  for (std::size_t index = 0; index < 256; ++index) {
+    ASSERT_TRUE(std::filesystem::create_directory(
+      root.path() / ("unexpected-" + std::to_string(index))
+    ));
+  }
+
+  authority_store_t replacement {root.path(), capability_filled_with(0xc2)};
+  const auto recovered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  EXPECT_EQ(recovered.status, authority_status_e::integrity_violation);
+  EXPECT_EQ(recovered.observed, std::size_t {0});
+  EXPECT_TRUE(recovered.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(generation));
+}
+
+TEST(MultiseatWorkerAuthority, SignedRecordsCannotMoveBetweenRuntimeNamespaces) {
+  temporary_root_t root;
+  std::filesystem::path first_generation;
+  std::filesystem::path second_generation;
+  std::filesystem::path first_record;
+  std::filesystem::path second_record;
+  {
+    authority_store_t original {root.path(), capability_filled_with(0xd1)};
+    auto first_result = original.create(identity_for(91), "recovery-swap-first");
+    auto first = take_authority(first_result);
+    auto second_result = original.create(identity_for(92), "recovery-swap-second");
+    auto second = take_authority(second_result);
+    first_generation = first.paths().generation;
+    second_generation = second.paths().generation;
+    first_record = first.paths().record;
+    second_record = second.paths().record;
+  }
+  const auto displaced = root.path() / "record-swap-temporary";
+  ASSERT_EQ(::rename(first_record.c_str(), displaced.c_str()), 0);
+  ASSERT_EQ(::rename(second_record.c_str(), first_record.c_str()), 0);
+  ASSERT_EQ(::rename(displaced.c_str(), second_record.c_str()), 0);
+
+  authority_store_t replacement {root.path(), capability_filled_with(0xd2)};
+  const auto recovered = replacement.recover_inactive(
+    std::span<const endpoint_identity_t> {}
+  );
+  EXPECT_EQ(recovered.status, authority_status_e::integrity_violation);
+  EXPECT_TRUE(recovered.inactive.empty());
+  EXPECT_TRUE(std::filesystem::exists(first_generation));
+  EXPECT_TRUE(std::filesystem::exists(second_generation));
 }
 
 #endif

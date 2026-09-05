@@ -511,6 +511,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

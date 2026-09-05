@@ -615,7 +615,7 @@ namespace multiseat::worker_ipc {
     implementation_->close_locked();
   }
 
-  bool controller_client_t::connected() const {
+  bool controller_client_t::connected() const noexcept {
     std::scoped_lock lock {implementation_->mutex};
     return implementation_->connected_locked();
   }

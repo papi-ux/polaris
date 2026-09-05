@@ -8,6 +8,7 @@
 
 #include "src/multiseat_worker_protocol.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -15,12 +16,14 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace multiseat::worker_ipc {
 
   inline constexpr std::string_view authority_ipc_directory_name = "ipc";
   inline constexpr std::string_view authority_auth_directory_name = "auth";
   inline constexpr std::string_view authority_capability_file_name = "auth-token";
+  inline constexpr std::string_view authority_record_file_name = "authority-record";
   inline constexpr std::string_view authority_control_socket_name = "control.sock";
   inline constexpr std::string_view authority_media_socket_name = "media.sock";
 
@@ -41,6 +44,7 @@ namespace multiseat::worker_ipc {
     std::filesystem::path ipc;
     std::filesystem::path auth;
     std::filesystem::path capability;
+    std::filesystem::path record;
     std::filesystem::path control_socket;
     std::filesystem::path media_socket;
 
@@ -76,7 +80,7 @@ namespace multiseat::worker_ipc {
     authority_handle_t(
       endpoint_identity_t identity,
       authority_paths_t paths,
-      capability_t capability,
+      const capability_t &capability,
       std::uint32_t owner_uid,
       std::uint64_t root_device,
       std::uint64_t root_inode,
@@ -88,6 +92,8 @@ namespace multiseat::worker_ipc {
       std::uint64_t auth_inode,
       std::uint64_t capability_device,
       std::uint64_t capability_inode,
+      std::uint64_t record_device,
+      std::uint64_t record_inode,
       int generation_fd,
       int ipc_fd,
       int auth_fd
@@ -109,6 +115,8 @@ namespace multiseat::worker_ipc {
     std::uint64_t auth_inode_ = 0;
     std::uint64_t capability_device_ = 0;
     std::uint64_t capability_inode_ = 0;
+    std::uint64_t record_device_ = 0;
+    std::uint64_t record_inode_ = 0;
     int generation_fd_ = -1;
     int ipc_fd_ = -1;
     int auth_fd_ = -1;
@@ -124,6 +132,22 @@ namespace multiseat::worker_ipc {
     }
   };
 
+  struct authority_recovery_result_t {
+    authority_status_e status = authority_status_e::invalid_argument;
+    std::size_t observed = 0;
+    std::size_t active = 0;
+    std::vector<endpoint_identity_t> active_identities;
+    std::vector<authority_handle_t> inactive;
+
+    [[nodiscard]] bool inspected() const {
+      return status == authority_status_e::applied;
+    }
+
+    [[nodiscard]] bool all_inactive() const {
+      return inspected() && active == 0;
+    }
+  };
+
   /** Returns true after filling all 32 capability bytes. */
   using capability_factory_t = std::function<bool(capability_t &)>;
 
@@ -133,7 +157,7 @@ namespace multiseat::worker_ipc {
    * The root must already exist, be owned by the effective user, have exact
    * mode 0700, and contain no symlink component. This class never recursively
    * deletes. Cleanup removes only the exact inode-fenced generation and its
-   * allowlisted token/socket nodes.
+   * allowlisted token, signed record, and socket nodes.
    */
   class authority_store_t {
   public:
@@ -152,6 +176,15 @@ namespace multiseat::worker_ipc {
     [[nodiscard]] authority_create_result_t create(
       const endpoint_identity_t &identity,
       std::string runtime_namespace
+    );
+    /**
+     * Reacquires only signed authority records absent from an authoritative
+     * backend inventory. Active identities remain untouched and are counted.
+     * Any malformed, duplicate, replaced, or unexpected entry rejects the
+     * entire scan without returning cleanup authority.
+     */
+    [[nodiscard]] authority_recovery_result_t recover_inactive(
+      std::span<const endpoint_identity_t> active_identities
     );
     [[nodiscard]] authority_status_e validate(const authority_handle_t &authority) const;
     [[nodiscard]] authority_status_e remove(authority_handle_t &authority);
