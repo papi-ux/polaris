@@ -15,9 +15,10 @@ install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/60-polaris.conf"
 # Reference copies of the gamescope_stream helpers. At launch Polaris compares
 # the polaris-gamescope-session it resolved against these, so a helper left by
 # an older scripts/install run is reported as stale instead of debugged as a
-# Polaris bug. The executable copies that actually run are installed below.
-install(FILES "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"
-              "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"
+# Polaris bug. They are executable so an AppImage or a build-directory run,
+# which has no launcher beside the binary or on PATH, can nest through them.
+install(PROGRAMS "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-session.sh"
+                 "${CMAKE_SOURCE_DIR}/nix/modules/polaris-gamescope-runtime-lib.sh"
         DESTINATION "${POLARIS_ASSETS_DIR}/gamescope")
 
 # Host integration files at their live paths, for everything that is not an

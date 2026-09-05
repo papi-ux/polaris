@@ -102,6 +102,33 @@ TEST(GamescopeSessionHelperTests, ReportsNothingWhenNoLauncherExists) {
   EXPECT_NE(helper::summary(resolution).find("no polaris-gamescope-session launcher"), std::string::npos);
 }
 
+TEST(GamescopeSessionHelperTests, RunsTheBundledCopyWhenNothingIsInstalled) {
+  scratch_t scratch;
+  fs::create_directories(scratch.root / "AppDir/usr/bin");
+  const auto bundled = scratch.file("AppDir/usr/share/polaris/assets/gamescope/polaris-gamescope-session.sh", module_body, true);
+  const auto bundled_lib = scratch.file("AppDir/usr/share/polaris/assets/gamescope/polaris-gamescope-runtime-lib.sh", library_body, false);
+
+  const auto resolution = helper::resolve(scratch.root / "AppDir/usr/bin", {}, bundled, bundled_lib);
+
+  EXPECT_EQ(resolution.helper, bundled);
+  EXPECT_TRUE(resolution.bundled_fallback);
+  EXPECT_EQ(resolution.session_match, helper::bundle_match_t::exact);
+  EXPECT_TRUE(resolution.shadowed.empty());
+  EXPECT_TRUE(helper::advisories(resolution).empty());
+  EXPECT_NE(helper::summary(resolution).find("reference copy shipped with this build"), std::string::npos);
+}
+
+TEST(GamescopeSessionHelperTests, DoesNotRunANonExecutableBundledCopy) {
+  scratch_t scratch;
+  fs::create_directories(scratch.root / "usr/bin");
+  const auto bundled = scratch.file("assets/gamescope/polaris-gamescope-session.sh", module_body, false);
+
+  const auto resolution = helper::resolve(scratch.root / "usr/bin", {}, bundled, {});
+
+  EXPECT_TRUE(resolution.helper.empty());
+  EXPECT_FALSE(resolution.bundled_fallback);
+}
+
 TEST(GamescopeSessionHelperTests, UnknownBinaryDirectoryUsesPath) {
   scratch_t scratch;
   const auto on_path = scratch.file("usr/local/bin/polaris-gamescope-session", module_body, true);

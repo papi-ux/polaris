@@ -136,6 +136,11 @@ namespace platf::gamescope_session_helper {
       }
     }
 
+    if (resolution.helper.empty() && !bundled_session.empty() && linux_util::is_executable_file(bundled_session.string())) {
+      resolution.helper = bundled_session;
+      resolution.bundled_fallback = true;
+    }
+
     if (resolution.helper.empty() || !regular_file(bundled_session)) {
       return resolution;
     }
@@ -172,6 +177,10 @@ namespace platf::gamescope_session_helper {
   std::string summary(const resolution_t &resolution) {
     if (resolution.helper.empty()) {
       return "gamescope_stream: no polaris-gamescope-session launcher beside this binary or on PATH";
+    }
+    if (resolution.bundled_fallback) {
+      return "gamescope_stream: no polaris-gamescope-session beside this binary or on PATH; running the reference copy shipped with this build [" +
+             resolution.helper.string() + "]";
     }
     std::string line = "gamescope_stream: polaris-gamescope-session [" + resolution.helper.string() + "] is " +
                        std::string(describe(resolution.session_match));

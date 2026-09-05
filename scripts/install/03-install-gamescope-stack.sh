@@ -186,8 +186,12 @@ cat >"$DROPIN_DIR/README-portal.conf.example" <<'EOF'
 # Environment=POLARIS_PORTAL_DBUS_ADDRESS=unix:path=%t/polaris-portal/bus
 EOF
 
-systemctl --user daemon-reload
-log "systemd --user daemon-reload done"
+if [ "${POLARIS_INSTALL_SKIP_SYSTEMD:-0}" = 1 ]; then
+  log "systemd --user daemon-reload skipped (POLARIS_INSTALL_SKIP_SYSTEMD=1)"
+else
+  systemctl --user daemon-reload
+  log "systemd --user daemon-reload done"
+fi
 log "next: ./04-enable-services.sh"
 log "or:    systemctl --user enable --now polaris-gamescope-idle polaris"
 log ""
