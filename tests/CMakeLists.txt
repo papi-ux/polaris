@@ -403,7 +403,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(POLARIS_TEST_GO_EXECUTABLE)
         set(POLARIS_MULTISEAT_GO_INTEROP_BINARY
             "${CMAKE_CURRENT_BINARY_DIR}/polaris-multiseat-go-interop-server")
-        file(GLOB POLARIS_MULTISEAT_GO_TEST_SOURCES CONFIGURE_DEPENDS
+        file(GLOB_RECURSE POLARIS_MULTISEAT_GO_TEST_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
             "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod")
         add_custom_command(

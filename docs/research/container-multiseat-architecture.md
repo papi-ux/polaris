@@ -328,16 +328,40 @@ the persistent-home XDG paths and runtime-profile setting; for example, the
 encoder receives only its render-node setting. The child does not inherit the
 worker's ambient environment, standard input, output, or error streams.
 
-The resource helper itself does not exist yet. It is deliberately not faked by
-calling a GoW launcher entrypoint: the referenced GoW launch scripts couple
-compositor and application startup, while the locked application roots do not
-expose one uniform private D-Bus, PipeWire, virtual-input, capture, and encoder
-contract. Polaris now binds the exact runtime profile, typed workload plan,
-data-plane topology, two Wayland identities, and display mode from admission
-through the selected image and helper argv. A real helper still must implement
-the actual stage semantics and resolve the plan through a trusted catalog. The
-production command injects no adapters or data plane, so Podman health proves
-only that the supervisor contract is alive.
+`polaris-seat-runtime` now implements the trusted dispatch boundary without
+pretending that the physical resource providers exist. The worker and helper
+share one canonical parser and environment builder. The helper rejects extra
+or reordered argv, non-canonical numbers, cross-stage fields, runtime/workload
+mismatches, and all ambient environment entries before it touches the catalog.
+It opens only the fixed `/run/polaris-auth/runtime-providers.json` path, without
+following a final symlink, and requires a non-writable regular file owned by
+the worker's effective UID. That fixed path is part of the existing
+per-generation read-only auth mount, not the mutable launcher profile. Strict
+bounded JSON rejects unknown or duplicate fields and ambiguous stage
+selections. Nested-compositor entries bind the concrete compositor; launcher
+entries bind both the runtime kind and exact opaque workload target. The
+controller-side atomic creation and auth-directory allowlist change remain
+unimplemented while the dispatcher is inert.
+
+The selected executable is subject to the same no-follow, root-owner,
+non-group/world-writable checks. The helper executes that already-open file in
+place through its descriptor, with a canonical `serve-resource-v1` argv and
+only the stage environment. Catalog arguments remain literal elements after
+an explicit `--`; no shell or executable path crosses from the controller.
+Exec-in-place preserves the exact PID and process group already owned by the
+worker, so provider readiness, descendants, TERM, and deadline KILL cannot
+escape into a second supervision tree. Offline Linux tests exercise same-PID
+dispatch, strict catalog ownership, bad readiness after provider start,
+descendant cleanup, literal hostile catalog arguments, and two concurrent
+helper groups.
+
+The dispatcher is built and copied into the image, but it remains inert: the
+production command still injects no adapters or data plane, and no provider
+catalog or stage-provider binaries are installed. The referenced GoW launch
+scripts couple compositor and application startup and do not expose the
+uniform private D-Bus, PipeWire, virtual-input, capture, and encoder readiness
+contract required here. Those real providers must be implemented and tested
+before Podman health can mean more than supervisor liveness.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless
@@ -546,12 +570,12 @@ This remains an offline control-plane/backend proof. A later container
 integration test must build and pin the final worker images, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
-physical game testing, the missing `polaris-seat-runtime` implementation must
+physical game testing, the missing stage providers and immutable catalog must
 bind the modeled session bus, audio sink, outer display/capture owner, nested
-compositor, virtual-input lifecycle, worker-local encoder, trusted workload
-catalog, and launcher process tree without weakening the proven adapter,
-routing, and teardown contracts. Concurrent real frame/audio/input traffic,
-not more synthetic heartbeats, is then the next acceptance boundary.
+compositor, virtual-input lifecycle, worker-local encoder, exact workload
+target, and launcher process tree without weakening the proven dispatcher,
+adapter, routing, and teardown contracts. Concurrent real frame/audio/input
+traffic, not more synthetic heartbeats, is then the next acceptance boundary.
 
 ## Upstream references
 

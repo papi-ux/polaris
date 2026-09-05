@@ -6,15 +6,16 @@ multiseat or make the current Polaris process a container controller.
 `images.lock.json` contains the only accepted build and runtime inputs. Every
 reference names an immutable OCI index digest; moving tags are intentionally
 absent. The plain Gamescope-capable base and the Steam, Heroic, and Lutris
-variants all receive the same static `polaris-seat-worker` binary. Keeping the
-launchers separate avoids multiplying package and credential state inside one
-large image.
+variants all receive the same static `polaris-seat-worker` and inert
+`polaris-seat-runtime` dispatcher binaries. Keeping the launchers separate
+avoids multiplying package and credential state inside one large image.
 
-The build stage has no module or package download step. The worker uses only
-the Go standard library, disables CGO and module-network access, runs its tests,
-then emits a static Linux/amd64 binary. A future image job must select a runtime
-reference from the lock, build at an exact Polaris revision, record the
-resulting image digest, and hand only that final digest to the Podman backend.
+The build stage has no module or package download step. The worker and runtime
+dispatcher use only the Go standard library, disable CGO and module-network
+access, run their tests, then emit static Linux/amd64 binaries. A future image
+job must select a runtime reference from the lock, build at an exact Polaris
+revision, record the resulting image digest, and hand only that final digest to
+the Podman backend.
 
 These locks establish immutable byte identity, not publisher trust. No
 signature, attestation, SBOM, vulnerability policy, or license bundle is
@@ -34,12 +35,37 @@ before the stage is ready. Shutdown targets the owned process group with TERM
 and escalates to KILL at the component deadline.
 
 That adapter set is a concrete supervision boundary, not the missing media
-implementation. No `polaris-seat-runtime` helper is built or copied into the
-image yet. The production `run` command injects no adapters and therefore does
-not start Gamescope, Steam, Heroic, Lutris, audio, capture, encoding, or virtual
-input. Treating its healthy supervisor as a streaming-capable worker would
-still be a false gate. Tests exercise the real Linux subprocess/readiness/group
-teardown path with a synthetic helper and never invoke a launcher or device.
+implementation. The image now carries `polaris-seat-runtime`, but the
+production `run` command injects no adapters and the image installs neither a
+provider catalog nor stage providers. It therefore does not start Gamescope,
+Steam, Heroic, Lutris, audio, capture, encoding, or virtual input. Treating its
+healthy supervisor as a streaming-capable worker would still be a false gate.
+Tests exercise both the synthetic process boundary and the real dispatcher;
+they never invoke a launcher or device.
+
+The dispatcher and worker share one canonical stage parser and environment
+builder. Before it can touch a provider, the dispatcher rejects reordered or
+extra argv, non-canonical numbers, a runtime/profile mismatch, and every
+ambient environment setting. It then opens the fixed
+`/run/polaris-auth/runtime-providers.json` path without following a final
+symlink, requires a non-writable regular catalog owned by its effective worker
+UID, and selects one exact stage entry. This location is inside the existing
+per-generation read-only auth mount; the mutable launcher home cannot replace
+it. Nested compositors are selected by their concrete compositor; launcher
+entries are selected by the exact runtime kind and opaque workload catalog ID.
+Duplicate selections, unknown JSON fields, duplicate JSON fields, moving
+executable paths, and control bytes fail closed.
+
+The selected provider must likewise be a root-owned, executable regular file
+with no group/other write access. The dispatcher opens it without following a
+final symlink and executes that already-open file in place, with one canonical
+provider argv and the same scrubbed stage environment. No shell is involved.
+The provider therefore retains the helper PID and worker-owned process group;
+it, not the dispatcher, must publish the exact readiness record only after its
+real resource is usable. Catalog-supplied arguments remain literal argv after
+an explicit `--` delimiter. Offline tests prove same-PID dispatch, descriptor
+readiness, ambient-secret removal, literal hostile arguments, partial-ready
+cleanup, descendant cleanup, and two-helper process-group isolation.
 
 The injected contract starts those seven resources in dependency order and
 publishes worker health only after every adapter reports ready. Startup has one
@@ -66,9 +92,9 @@ data-plane topology through admission and reconciliation, and gives the worker
 canonical width, height, refresh, and HDR values. It also supplies an exact
 allowlisted workload plan: a typed Gamescope, Steam, Heroic, or Lutris selector
 plus a bounded opaque catalog target. No executable path, arbitrary argv, or
-shell fragment crosses that boundary. The missing helper must resolve the
-target through a trusted catalog and reject any plan that does not match the
-selected runtime profile.
+shell fragment crosses that boundary. The dispatcher resolves the exact
+runtime kind and target through its trusted provider catalog and rejects any
+plan that does not match the selected runtime profile.
 
 Wolf's working data plane uses a capture-producing outer Wayland compositor
 with Gamescope nested beneath it, plus separate audio, virtual-input, and

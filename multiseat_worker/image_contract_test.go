@@ -72,6 +72,8 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 		"GOPROXY=off",
 		"CGO_ENABLED=0",
 		"go test -trimpath ./...",
+		"-o /out/polaris-seat-runtime ./cmd/polaris-seat-runtime",
+		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime",
 		"COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile",
 		"COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json",
 		"ENTRYPOINT [\"/usr/bin/polaris-seat-worker\"]",
@@ -92,17 +94,24 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 	}
 }
 
-func TestProcessRuntimeAdaptersRemainUnwiredAndHelperAbsent(t *testing.T) {
+func TestRuntimeHelperIsPackagedButProcessAdaptersRemainUnwired(t *testing.T) {
 	server := string(repositoryFile(t, "multiseat_worker", "server.go"))
 	main := string(repositoryFile(t, "multiseat_worker", "main.go"))
 	containerfile := string(repositoryFile(t, "containers", "multiseat", "Containerfile"))
 	if !strings.Contains(server, "expectedUID,\n\t\tnil,\n\t\truntimeOptions{}") {
 		t.Fatal("production worker no longer injects an explicit nil runtime adapter set")
 	}
-	for _, productionSource := range []string{main, server, containerfile} {
+	for _, productionSource := range []string{main, server} {
 		if strings.Contains(productionSource, "newProcessRuntimeAdapters") ||
 			strings.Contains(productionSource, "polaris-seat-runtime") {
-			t.Fatal("process-backed runtime helper was wired into the production image")
+			t.Fatal("process-backed runtime helper was activated by the production worker")
 		}
+	}
+	if !strings.Contains(containerfile,
+		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime") {
+		t.Fatal("inert runtime helper is absent from the worker image")
+	}
+	if strings.Contains(containerfile, "multiseat-runtime-providers.json") {
+		t.Fatal("worker image installed an unimplemented provider catalog")
 	}
 }

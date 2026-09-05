@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strconv"
 	"strings"
+
+	"github.com/papi-ux/polaris/multiseat_worker/internal/seatruntime"
 )
 
 const (
 	defaultRuntimeHelperPath = "/usr/bin/polaris-seat-runtime"
-	runtimeReadyFDSetting    = "POLARIS_RUNTIME_READY_FD"
-	runtimeReadyRecord       = "POLARIS-RUNTIME-READY/1\n"
+	runtimeReadyFDSetting    = seatruntime.ReadyFDSetting
+	runtimeReadyRecord       = seatruntime.ReadyRecord
 )
 
 type runtimeProcessSpec struct {
@@ -96,125 +97,72 @@ func runtimeProcessEnvironment(
 	stage runtimeStage,
 	allocation runtimeAllocation,
 ) ([]string, error) {
-	if !validRuntimeStage(stage) || !validRuntimeProfile(allocation.RuntimeProfile) {
-		return nil, errors.New("worker runtime helper stage is invalid")
+	request, err := seatRuntimeRequest(stage, allocation)
+	if err != nil {
+		return nil, err
 	}
-	runtime := []string{"XDG_RUNTIME_DIR=/run/polaris"}
-	dbus := "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/polaris/bus"
-	switch stage {
-	case runtimeStageSessionBus:
-		return append(runtime, dbus), nil
-	case runtimeStageAudio:
-		return append(runtime,
-			dbus,
-			"PIPEWIRE_RUNTIME_DIR=/run/polaris",
-			"PULSE_SERVER=unix:/run/polaris/pulse/native",
-			"PULSE_SINK="+allocation.AudioSink,
-		), nil
-	case runtimeStageDisplayCapture:
-		return append(runtime,
-			dbus,
-			"POLARIS_RENDER_NODE="+allocation.RenderNode,
-		), nil
-	case runtimeStageNestedCompositor:
-		return append(runtime,
-			dbus,
-			"WAYLAND_DISPLAY="+allocation.CaptureWaylandSocket,
-			"POLARIS_RENDER_NODE="+allocation.RenderNode,
-		), nil
-	case runtimeStageVirtualInput:
-		return append(runtime,
-			"WAYLAND_DISPLAY="+allocation.WaylandSocket,
-			"POLARIS_INPUT_SEAT="+allocation.InputSeat,
-		), nil
-	case runtimeStageEncoder:
-		return []string{
-			"POLARIS_RENDER_NODE=" + allocation.RenderNode,
-		}, nil
-	case runtimeStageLauncherProcessTree:
-		return append(runtime,
-			"HOME=/var/lib/polaris-seat",
-			"XDG_CONFIG_HOME=/var/lib/polaris-seat/.config",
-			"XDG_CACHE_HOME=/var/lib/polaris-seat/.cache",
-			"XDG_DATA_HOME=/var/lib/polaris-seat/.local/share",
-			dbus,
-			"PIPEWIRE_RUNTIME_DIR=/run/polaris",
-			"PULSE_SERVER=unix:/run/polaris/pulse/native",
-			"PULSE_SINK="+allocation.AudioSink,
-			"WAYLAND_DISPLAY="+allocation.WaylandSocket,
-			"POLARIS_INPUT_SEAT="+allocation.InputSeat,
-			"POLARIS_RENDER_NODE="+allocation.RenderNode,
-			"POLARIS_RUNTIME_PROFILE="+allocation.RuntimeProfile,
-		), nil
-	default:
-		return nil, errors.New("worker runtime helper stage is invalid")
-	}
+	return seatruntime.Environment(request)
 }
 
 func runtimeProcessArguments(
 	stage runtimeStage,
 	allocation runtimeAllocation,
 ) ([]string, error) {
+	request, err := seatRuntimeRequest(stage, allocation)
+	if err != nil {
+		return nil, err
+	}
+	return seatruntime.Arguments(request)
+}
+
+func seatRuntimeRequest(
+	stage runtimeStage,
+	allocation runtimeAllocation,
+) (seatruntime.Request, error) {
 	if !validRuntimeStage(stage) || !validRuntimeProfile(allocation.RuntimeProfile) {
-		return nil, errors.New("worker runtime helper stage is invalid")
+		return seatruntime.Request{}, errors.New("worker runtime helper stage is invalid")
 	}
-	arguments := []string{
-		"serve",
-		"--stage=" + stage.String(),
-		"--runtime-namespace=" + allocation.RuntimeNamespace,
-	}
-	displayHDR := "0"
-	if allocation.DisplayHDR {
-		displayHDR = "1"
+	request := seatruntime.Request{
+		Stage:            seatruntime.Stage(stage.String()),
+		RuntimeNamespace: allocation.RuntimeNamespace,
 	}
 	switch stage {
 	case runtimeStageSessionBus:
-		return arguments, nil
+		return request, nil
 	case runtimeStageAudio:
-		return append(arguments,
-			"--audio-sink="+allocation.AudioSink,
-		), nil
+		request.AudioSink = allocation.AudioSink
 	case runtimeStageDisplayCapture:
-		return append(arguments,
-			"--capture-wayland-socket="+allocation.CaptureWaylandSocket,
-			"--render-node="+allocation.RenderNode,
-			"--display-topology="+string(allocation.DisplayTopology),
-			"--media-pipeline="+string(allocation.MediaPipeline),
-			"--display-width="+strconv.FormatUint(uint64(allocation.DisplayWidth), 10),
-			"--display-height="+strconv.FormatUint(uint64(allocation.DisplayHeight), 10),
-			"--display-refresh-millihz="+strconv.FormatUint(uint64(allocation.RefreshMillihz), 10),
-			"--display-hdr="+displayHDR,
-		), nil
+		request.CaptureWaylandSocket = allocation.CaptureWaylandSocket
+		request.RenderNode = allocation.RenderNode
+		request.DisplayTopology = string(allocation.DisplayTopology)
+		request.MediaPipeline = string(allocation.MediaPipeline)
+		request.DisplayWidth = allocation.DisplayWidth
+		request.DisplayHeight = allocation.DisplayHeight
+		request.DisplayRefreshMillihertz = allocation.RefreshMillihz
+		request.DisplayHDR = allocation.DisplayHDR
 	case runtimeStageNestedCompositor:
-		return append(arguments,
-			"--parent-wayland-socket="+allocation.CaptureWaylandSocket,
-			"--wayland-socket="+allocation.WaylandSocket,
-			"--render-node="+allocation.RenderNode,
-			"--compositor="+allocation.Compositor,
-		), nil
+		request.ParentWaylandSocket = allocation.CaptureWaylandSocket
+		request.WaylandSocket = allocation.WaylandSocket
+		request.RenderNode = allocation.RenderNode
+		request.Compositor = allocation.Compositor
 	case runtimeStageVirtualInput:
-		return append(arguments,
-			"--input-seat="+allocation.InputSeat,
-		), nil
+		request.InputSeat = allocation.InputSeat
 	case runtimeStageEncoder:
-		return append(arguments,
-			"--logical-gpu-id="+allocation.Identity.LogicalGPU,
-			"--render-node="+allocation.RenderNode,
-			"--sessions="+strconv.FormatUint(uint64(allocation.EncoderSessions), 10),
-			"--media-pipeline="+string(allocation.MediaPipeline),
-		), nil
+		request.LogicalGPU = allocation.Identity.LogicalGPU
+		request.RenderNode = allocation.RenderNode
+		request.EncoderSessions = allocation.EncoderSessions
+		request.MediaPipeline = string(allocation.MediaPipeline)
 	case runtimeStageLauncherProcessTree:
-		return append(arguments,
-			"--runtime-profile="+allocation.RuntimeProfile,
-			"--workload-kind="+string(allocation.Workload.Kind),
-			"--workload-id="+allocation.Workload.TargetID,
-			"--wayland-socket="+allocation.WaylandSocket,
-			"--audio-sink="+allocation.AudioSink,
-			"--input-seat="+allocation.InputSeat,
-		), nil
+		request.RuntimeProfile = allocation.RuntimeProfile
+		request.WorkloadKind = seatruntime.WorkloadKind(allocation.Workload.Kind)
+		request.WorkloadID = allocation.Workload.TargetID
+		request.WaylandSocket = allocation.WaylandSocket
+		request.AudioSink = allocation.AudioSink
+		request.InputSeat = allocation.InputSeat
 	default:
-		return nil, errors.New("worker runtime helper stage is invalid")
+		return seatruntime.Request{}, errors.New("worker runtime helper stage is invalid")
 	}
+	return request, nil
 }
 
 func validProcessRuntimeAllocation(allocation runtimeAllocation) bool {
