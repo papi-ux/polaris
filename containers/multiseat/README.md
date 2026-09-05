@@ -6,16 +6,19 @@ multiseat or make the current Polaris process a container controller.
 `images.lock.json` contains the only accepted build and runtime inputs. Every
 reference names an immutable OCI index digest; moving tags are intentionally
 absent. The plain Gamescope-capable base and the Steam, Heroic, and Lutris
-variants all receive the same static `polaris-seat-worker` and inert
-`polaris-seat-runtime` dispatcher binaries. Keeping the launchers separate
-avoids multiplying package and credential state inside one large image.
+variants all receive the same static `polaris-seat-worker`,
+`polaris-seat-runtime` dispatcher, and private session-bus and audio provider
+binaries. Keeping the launchers separate avoids multiplying package and
+credential state inside one large image.
 
-The build stage has no module or package download step. The worker and runtime
-dispatcher use only the Go standard library, disable CGO and module-network
-access, run their tests, then emit static Linux/amd64 binaries. A future image
-job must select a runtime reference from the lock, build at an exact Polaris
-revision, record the resulting image digest, and hand only that final digest to
-the Podman backend.
+The build stage has no module or package download step. The worker, dispatcher,
+and two providers use only the Go standard library, disable CGO and
+module-network access, run their tests, then emit static Linux/amd64 binaries.
+The final stage fails its build unless the locked root supplies the fixed D-Bus,
+PipeWire, `pw-cli`, and `pactl` executables and both trusted PipeWire
+configuration files. A future image job must select a runtime reference from
+the lock, build at an exact Polaris revision, record the resulting image
+digest, and hand only that final digest to the Podman backend.
 
 These locks establish immutable byte identity, not publisher trust. No
 signature, attestation, SBOM, vulnerability policy, or license bundle is
@@ -35,14 +38,14 @@ before the stage is ready. Shutdown targets the owned process group with TERM
 and escalates to KILL at the component deadline.
 
 That adapter set is a concrete supervision boundary, not the missing media
-implementation. The image now carries `polaris-seat-runtime`, but the
-production `run` command injects no adapters and the image installs no stage
-providers. The unwired controller can create a generation-scoped catalog, but
-without those fixed provider executables it does not start Gamescope, Steam,
-Heroic, Lutris, audio, capture, encoding, or virtual input. Treating its healthy
-supervisor as a streaming-capable worker would still be a false gate. Tests
-exercise catalog creation, the synthetic process boundary, and the real
-dispatcher; they never invoke a launcher or device.
+implementation. The image now carries `polaris-seat-runtime` plus real private
+session-bus and audio providers, but the production `run` command still injects
+no adapters. The other five provider locations remain absent, so this image
+does not start Gamescope, Steam, Heroic, Lutris, capture, encoding, or virtual
+input. Treating its healthy supervisor as a streaming-capable worker would
+still be a false gate. Tests exercise catalog creation, the synthetic process
+boundary, the real dispatcher, and isolated host D-Bus/PipeWire processes; they
+never invoke a launcher or device.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or
@@ -67,6 +70,25 @@ real resource is usable. Catalog-supplied arguments remain literal argv after
 an explicit `--` delimiter. Offline tests prove same-PID dispatch, descriptor
 readiness, ambient-secret removal, literal hostile arguments, partial-ready
 cleanup, descendant cleanup, and two-helper process-group isolation.
+
+The session-bus provider starts one fixed `dbus-daemon` against the seat's
+mode-0700 runtime directory. It does not publish readiness until the daemon's
+exact address is validated and an EXTERNAL-authenticated D-Bus handshake
+completes. The audio provider starts a private PipeWire core with RAOP
+discovery disabled, creates one exact named null sink, starts
+Pulse-on-PipeWire, and requires the Pulse protocol to expose only that sink and
+its monitor. Pulse clients route through `PULSE_SINK`; native PipeWire clients
+receive the same sink through `PIPEWIRE_NODE`.
+
+Both providers open fixed root-owned executables without following a final
+symlink and execute the open descriptors without a shell. Their descendants
+cannot inherit the readiness descriptor and receive a parent-death kill. TERM
+is bounded and escalates to KILL. Cleanup removes only captured, same-inode
+socket, lock, PID, and private service-directory artifacts; replacements or
+unexpected directory contents are retained and fail the provider. Linux tests
+run both real protocols in temporary directories, prove two audio graphs do not
+see or stop each other, and verify clean teardown. No image was built and no
+host service was installed, restarted, or reconfigured for this checkpoint.
 
 The injected contract starts those seven resources in dependency order and
 publishes worker health only after every adapter reports ready. Startup has one

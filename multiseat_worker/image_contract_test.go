@@ -73,7 +73,17 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 		"CGO_ENABLED=0",
 		"go test -trimpath ./...",
 		"-o /out/polaris-seat-runtime ./cmd/polaris-seat-runtime",
+		"-o /out/polaris-seat-session-bus ./cmd/polaris-seat-session-bus",
+		"-o /out/polaris-seat-audio ./cmd/polaris-seat-audio",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime",
+		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-session-bus /usr/libexec/polaris-seat/session-bus",
+		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio",
+		"test -x /usr/bin/dbus-daemon",
+		"test -x /usr/bin/pipewire",
+		"test -x /usr/bin/pw-cli",
+		"test -x /usr/bin/pactl",
+		"test -r /usr/share/pipewire/pipewire.conf",
+		"test -r /usr/share/pipewire/pipewire-pulse.conf",
 		"COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile",
 		"COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json",
 		"ENTRYPOINT [\"/usr/bin/polaris-seat-worker\"]",
@@ -94,7 +104,7 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 	}
 }
 
-func TestRuntimeHelperIsPackagedButProcessAdaptersRemainUnwired(t *testing.T) {
+func TestRuntimeProvidersArePackagedButProcessAdaptersRemainUnwired(t *testing.T) {
 	server := string(repositoryFile(t, "multiseat_worker", "server.go"))
 	main := string(repositoryFile(t, "multiseat_worker", "main.go"))
 	containerfile := string(repositoryFile(t, "containers", "multiseat", "Containerfile"))
@@ -110,6 +120,14 @@ func TestRuntimeHelperIsPackagedButProcessAdaptersRemainUnwired(t *testing.T) {
 	if !strings.Contains(containerfile,
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime") {
 		t.Fatal("inert runtime helper is absent from the worker image")
+	}
+	for _, provider := range []string{
+		"/usr/libexec/polaris-seat/session-bus",
+		"/usr/libexec/polaris-seat/audio",
+	} {
+		if !strings.Contains(containerfile, provider) {
+			t.Fatalf("implemented but inert provider %q is absent from the worker image", provider)
+		}
 	}
 	if strings.Contains(containerfile, "multiseat-runtime-providers.json") {
 		t.Fatal("worker image installed an unimplemented provider catalog")

@@ -1,9 +1,10 @@
 # Container multiseat architecture spike
 
 Status: architecture, an offline rootless-Podman backend, locked image inputs,
-immutable per-seat runtime/data-plane bindings, typed workload plans, and a
-supervisor/IPC routing proof. Nothing in this document enables multiseat,
-launches a container, or changes the current single-workload runtime.
+immutable per-seat runtime/data-plane bindings, typed workload plans, a
+supervisor/IPC routing proof, and isolated session-bus/audio providers. Nothing
+in this document enables multiseat, launches a container, or changes the
+current single-workload runtime.
 
 ## Outcome
 
@@ -267,9 +268,11 @@ locked runtime profiles: a plain Gamescope-capable base, Steam, Heroic, and
 Lutris. `containers/multiseat/images.lock.json` records immutable OCI index
 digests for every runtime and for the Go build toolchain. Tags such as `edge`
 and `latest` are not build inputs. The Containerfile performs no package,
-module, or source download: it builds the standard-library-only worker with
-CGO disabled, copies that static binary into the chosen locked runtime, and
-overrides the image entrypoint.
+module, or source download: it builds the standard-library-only worker,
+dispatcher, and implemented providers with CGO disabled, copies those static
+binaries into the chosen locked runtime, and overrides the image entrypoint.
+Its final stage rejects a locked root that does not already contain the fixed
+D-Bus/PipeWire tools and trusted configurations.
 
 Separating launcher variants matters for both maintenance and isolation. It
 keeps one launcher update from silently changing every seat image and avoids
@@ -328,8 +331,8 @@ the persistent-home XDG paths and runtime-profile setting; for example, the
 encoder receives only its render-node setting. The child does not inherit the
 worker's ambient environment, standard input, output, or error streams.
 
-`polaris-seat-runtime` now implements the trusted dispatch boundary without
-pretending that the physical resource providers exist. The worker and helper
+`polaris-seat-runtime` implements the trusted dispatch boundary independently
+of any one physical resource provider. The worker and helper
 share one canonical parser and environment builder. The helper rejects extra
 or reordered argv, non-canonical numbers, cross-stage fields, runtime/workload
 mismatches, and all ambient environment entries before it touches the catalog.
@@ -364,15 +367,39 @@ dispatch, strict catalog ownership, bad readiness after provider start,
 descendant cleanup, literal hostile catalog arguments, and two concurrent
 helper groups.
 
-The dispatcher is built and copied into the image, but it remains inert: the
-production command still injects no adapters or data plane, and no
-stage-provider binaries are installed. The controller/coordinator code that
-creates the per-generation catalog also remains outside the singleton runtime.
-The referenced GoW launch scripts couple compositor and application startup
-and do not expose the uniform private D-Bus, PipeWire, virtual-input, capture,
-and encoder readiness contract required here. Those real providers must be
-implemented and tested before Podman health can mean more than supervisor
-liveness.
+Two catalog targets are now concrete but still inert in production. The
+session-bus provider validates a mode-0700, same-UID runtime directory, rejects
+preexisting artifacts, starts a descriptor-pinned root-owned `dbus-daemon`,
+validates its exact printed address, and completes an EXTERNAL-authenticated
+D-Bus handshake before readiness. It captures the socket and any standard
+private service directories by inode. On cancellation it bounds TERM/KILL,
+reaps the daemon, and removes only the same captured empty artifact set.
+
+The audio provider starts a private PipeWire core with desktop integration and
+RAOP discovery disabled, creates one exact named null sink through `pw-cli`,
+then starts Pulse-on-PipeWire from the fixed PipeWire binary and pulse
+configuration. Its readiness probe speaks the Pulse protocol and accepts only
+that sink and its monitor. Pulse and native PipeWire clients receive the same
+typed route through `PULSE_SINK` and `PIPEWIRE_NODE`. It captures its socket,
+lock, PID, and pulse-directory inodes, stops Pulse before the core, and refuses
+to delete replacements or unexpected directory contents.
+
+Both providers accept only their canonical stage invocation with an empty
+provider-argument tail. Every dependency is opened no-follow as a root-owned,
+non-group/world-writable executable and launched through that descriptor with
+a fixed environment, no shell, bounded output, and a parent-death kill. The
+readiness FIFO is sealed close-on-exec before any child starts. Real Linux tests
+exercise both protocols in temporary roots, clean normal and partial failure,
+and two simultaneous private audio graphs whose sinks and teardown remain
+independent.
+
+The providers are built and copied into their fixed catalog locations, but the
+production worker remains inert because `run` still injects no adapters or data
+plane. The controller/coordinator catalog path also remains outside the current
+singleton runtime. No OCI image was built during this checkpoint, so the
+locked GoW root's dependency check remains a future build gate. Display/capture,
+nested compositor, virtual input, encoder, and launcher providers remain
+missing; Podman health still means only supervisor liveness.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless
@@ -507,7 +534,7 @@ contract, each launcher must pass:
 
 ## Executable proof in this slice
 
-The test_multiseat_runtime target covers:
+The offline test suite covers:
 
 - two seats sharing one GPU and encoder pool;
 - matching typed Gamescope, Steam, Heroic, and Lutris workload plans plus
@@ -562,6 +589,10 @@ The test_multiseat_runtime target covers:
 - atomic mode-0400 provider catalogs derived from typed compositor/workload
   selection, with a Go/C++ schema golden, record-bound SHA-256, inode-fenced
   validation and cleanup, and tamper/swap/replacement recovery refusal;
+- real private D-Bus and PipeWire/Pulse providers with protocol-level
+  readiness, exact sink routing, descriptor-pinned dependencies, bounded
+  TERM/KILL, inode-fenced artifact cleanup, failure containment, and
+  simultaneous two-seat audio isolation;
 - coordinator ownership from pre-launch authority creation through endpoint
   authentication, heartbeat, authenticated shutdown, backend absence, and
   exact cleanup, including two independently managed seats;
@@ -581,16 +612,18 @@ The test_multiseat_runtime target covers:
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
-This remains an offline control-plane/backend proof. A later container
-integration test must build and pin the final worker images, pre-create profile
+This remains an offline control-plane/backend proof with two locally exercised
+base providers. A later container integration test must build and pin the final
+worker images, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
-physical game testing, the missing stage providers and immutable catalog must
-bind the modeled session bus, audio sink, outer display/capture owner, nested
-compositor, virtual-input lifecycle, worker-local encoder, exact workload
-target, and launcher process tree without weakening the proven dispatcher,
-adapter, routing, and teardown contracts. Concurrent real frame/audio/input
-traffic, not more synthetic heartbeats, is then the next acceptance boundary.
+physical game testing, the remaining providers and immutable catalog must bind
+the outer display/capture owner, nested compositor, virtual-input lifecycle,
+worker-local encoder, exact workload target, and launcher process tree to the
+implemented private session bus and audio sink without weakening the proven
+dispatcher, adapter, routing, and teardown contracts. Concurrent real
+frame/audio/input traffic, not more synthetic heartbeats, is then the next
+acceptance boundary.
 
 ## Upstream references
 

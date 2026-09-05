@@ -83,6 +83,22 @@ func TestCanonicalInvocationsRoundTripEveryStage(t *testing.T) {
 	}
 }
 
+func TestAudioRoutesPulseAndNativePipeWireToTheSameTypedSink(t *testing.T) {
+	for _, request := range []Request{
+		protocolTestRequests()[1],
+		protocolTestRequests()[6],
+	} {
+		environment, err := Environment(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(environment, "PULSE_SINK="+request.AudioSink) ||
+			!slices.Contains(environment, "PIPEWIRE_NODE="+request.AudioSink) {
+			t.Fatalf("stage %s has inconsistent audio routing: %#v", request.Stage, environment)
+		}
+	}
+}
+
 func TestInvocationRejectsNonCanonicalOrExpandedAuthority(t *testing.T) {
 	display := protocolTestRequests()[2]
 	arguments, environment := invocationForTest(t, display)

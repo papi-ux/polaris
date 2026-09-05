@@ -294,6 +294,7 @@ func Environment(request Request) ([]string, error) {
 		return append(runtime,
 			dbus,
 			"PIPEWIRE_RUNTIME_DIR=/run/polaris",
+			"PIPEWIRE_NODE="+request.AudioSink,
 			"PULSE_SERVER=unix:/run/polaris/pulse/native",
 			"PULSE_SINK="+request.AudioSink,
 		), nil
@@ -323,6 +324,7 @@ func Environment(request Request) ([]string, error) {
 			"XDG_DATA_HOME=/var/lib/polaris-seat/.local/share",
 			dbus,
 			"PIPEWIRE_RUNTIME_DIR=/run/polaris",
+			"PIPEWIRE_NODE="+request.AudioSink,
 			"PULSE_SERVER=unix:/run/polaris/pulse/native",
 			"PULSE_SINK="+request.AudioSink,
 			"WAYLAND_DISPLAY="+request.WaylandSocket,
