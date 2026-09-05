@@ -53,20 +53,32 @@ host D-Bus, PipeWire, Wayland, and raw-frame transports; they never invoke a
 launcher or physical device.
 
 The controller now also has an injected host-brokered input authority and a
-Linux inputtino lifecycle backend, but neither is wired to this image. The
-backend creates virtual devices outside the untrusted launcher boundary and
-derives the exact generation's event-node identity from `fstat`, sysfs, and
-udev before returning fixed worker-local paths. Its offline tests replace the
-device factory and kernel-I/O boundary, so they create no host input device.
-The eventual Podman bind still has to revalidate each identity to close a path
-replacement race.
-The rootless backend's older global input-device option remains a command-shape
-prototype, not an activation-ready isolation boundary: giving every worker raw
-`/dev/uinput` or `/dev/uhid` would let one seat create devices outside its
-manifest. Podman manifest binding, a typed worker input bridge, feedback route,
-and mediated Steam Input path are still missing. The new backend's routing
-method rejects input until that bridge exists. No input device is opened by the
-current tests.
+Linux inputtino lifecycle backend, but neither is wired to this image or the
+singleton runtime. The backend creates virtual devices outside the untrusted
+launcher boundary and derives the exact generation's event-node identity from
+`fstat`, sysfs, and udev before returning fixed worker-local paths. The Podman
+adapter consumes that allocation through a separate injected source, verifies
+the full authority and kernel snapshot twice before command invocation, and
+maps each host event node to only its fixed worker alias. The former global
+input-device option is gone; generated worker commands cannot receive raw
+`/dev/uinput`, `/dev/uhid`, or a host-wide `/dev/input` mapping.
+
+Each worker carries an opaque SHA-256 fingerprint of its complete generation
+manifest. Inventory compares that fingerprint and the inspected Podman device
+bindings against the current authority. Podman may reconstruct a different
+host path from the stored major/minor pair, so reconciliation accepts that path
+only when the character-device identity and exact worker alias still match.
+Stop remains available after input authority disappears so an orphaned worker
+can still be removed. Offline tests inject the allocation, kernel probe, host
+device metadata, command runner, and inspect JSON; no input node or container
+engine is opened.
+
+This is still not a usable input data plane. The backend's routing method
+rejects input until a typed authenticated worker bridge exists, and controller
+feedback plus mediated Steam Input remain missing. Rootless supplementary-group
+and SELinux access also require an explicit deployment decision and physical
+validation; this source checkpoint does not add `keep-groups`, change host
+policy, or claim that an image can use the mapped nodes.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or

@@ -8,11 +8,14 @@
 #ifdef __linux__
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_set>
@@ -35,6 +38,7 @@ namespace multiseat::podman {
     constexpr auto label_wayland = "io.polaris.multiseat.wayland"sv;
     constexpr auto label_audio = "io.polaris.multiseat.audio"sv;
     constexpr auto label_input = "io.polaris.multiseat.input"sv;
+    constexpr auto label_input_manifest = "io.polaris.multiseat.input-manifest"sv;
     constexpr auto label_render_node = "io.polaris.multiseat.render-node"sv;
     constexpr auto label_runtime_profile = "io.polaris.multiseat.runtime-profile"sv;
     constexpr auto label_workload_kind = "io.polaris.multiseat.workload-kind"sv;
@@ -53,6 +57,8 @@ namespace multiseat::podman {
     constexpr auto auth_directory = worker_ipc::authority_auth_directory_name;
     constexpr auto container_ipc_directory = "/run/polaris-ipc"sv;
     constexpr auto container_auth_directory = "/run/polaris-auth"sv;
+    constexpr std::size_t maximum_inspected_devices =
+      input::maximum_input_allocations + 64;
 
     bool ascii_alphanumeric(char value) {
       return (value >= 'a' && value <= 'z') ||
@@ -101,6 +107,61 @@ namespace multiseat::podman {
 
     bool device_path(const std::filesystem::path &path) {
       return safe_path(path) && path.native().starts_with("/dev/");
+    }
+
+    bool lowercase_sha256(std::string_view value) {
+      return value.size() == 64 &&
+             std::all_of(
+               value.begin(),
+               value.end(),
+               [](char character) {
+                 return (character >= '0' && character <= '9') ||
+                        (character >= 'a' && character <= 'f');
+               }
+             );
+    }
+
+    void append_fingerprint_field(std::string &record, std::string_view value) {
+      record += std::to_string(value.size());
+      record.push_back(':');
+      record.append(value);
+    }
+
+    template<class Integer>
+    void append_fingerprint_integer(std::string &record, Integer value) {
+      append_fingerprint_field(record, std::to_string(value));
+    }
+
+    bool same_character_device(
+      const character_device_identity_t &left,
+      const character_device_identity_t &right
+    ) {
+      return left.character_major == right.character_major &&
+             left.character_minor == right.character_minor;
+    }
+
+    bool exact_input_identity(
+      const character_device_identity_t &identity,
+      const input::device_node_t &node
+    ) {
+      return identity.filesystem_device == node.filesystem_device &&
+             identity.inode == node.inode &&
+             identity.character_major == node.character_major &&
+             identity.character_minor == node.character_minor;
+    }
+
+    bool exact_input_snapshot(
+      const input::kernel_node_snapshot_t &snapshot,
+      const input::device_node_t &node
+    ) {
+      return snapshot.host_path == node.host_path &&
+             snapshot.filesystem_device == node.filesystem_device &&
+             snapshot.inode == node.inode &&
+             snapshot.character_major == node.character_major &&
+             snapshot.character_minor == node.character_minor &&
+             snapshot.kernel_name == node.kernel_name &&
+             snapshot.phys == node.phys &&
+             snapshot.host_seat == node.host_seat;
     }
 
     bool pinned_image_reference(std::string_view value) {
@@ -366,10 +427,11 @@ namespace multiseat::podman {
     std::vector<std::pair<std::string, std::string>> labels_for(
       const options_t &options,
       const worker_launch_spec_t &spec,
-      const profile_t &profile
+      const profile_t &profile,
+      std::string_view input_fingerprint
     ) {
       return {
-        {std::string {label_protocol}, "2"},
+        {std::string {label_protocol}, "3"},
         {std::string {label_deployment}, options.deployment_id},
         {std::string {label_controller}, spec.identity.seat.controller_epoch},
         {std::string {label_gpu}, spec.identity.seat.logical_gpu_id},
@@ -381,6 +443,7 @@ namespace multiseat::podman {
         {std::string {label_wayland}, spec.resources.wayland_socket},
         {std::string {label_audio}, spec.resources.audio_sink},
         {std::string {label_input}, spec.resources.input_seat},
+        {std::string {label_input_manifest}, std::string {input_fingerprint}},
         {std::string {label_render_node}, spec.render_node},
         {std::string {label_runtime_profile}, runtime_profile_name(spec.runtime_profile)},
         {std::string {label_workload_kind}, workload_kind_name(spec.workload.kind)},
@@ -434,7 +497,6 @@ namespace multiseat::podman {
           options.gpus.empty() ||
           options.profiles.empty() ||
           options.workloads.empty() ||
-          options.input_devices.empty() ||
           options.command_timeout <= std::chrono::milliseconds::zero() ||
           options.max_command_output_bytes == 0 ||
           options.max_inventory_workers == 0 ||
@@ -456,7 +518,7 @@ namespace multiseat::podman {
       for (const auto &gpu : options.gpus) {
         if (!opaque_name_token(gpu.logical_gpu_id) ||
             !device_path(gpu.render_node) ||
-            gpu.devices.empty() ||
+            gpu.devices.empty() || gpu.devices.size() > 64 ||
             gpu.max_encoder_sessions == 0 ||
             !gpu_ids.emplace(gpu.logical_gpu_id).second) {
           throw std::invalid_argument {"rootless Podman GPU options are invalid"};
@@ -496,13 +558,6 @@ namespace multiseat::podman {
         workloads.push_back(workload);
       }
 
-      std::unordered_set<std::string> input_devices;
-      for (const auto &device : options.input_devices) {
-        if (!device_path(device) || !input_devices.emplace(device.native()).second) {
-          throw std::invalid_argument {"rootless Podman input devices are invalid"};
-        }
-      }
-
       std::unordered_set<std::string> mount_names;
       std::unordered_set<std::string> mount_paths;
       for (const auto &mount : options.shared_game_mounts) {
@@ -516,8 +571,95 @@ namespace multiseat::podman {
     }
   }  // namespace
 
-  backend_t::backend_t(host_t &host, options_t options) :
+  std::optional<std::string> input_manifest_fingerprint(
+    const input::allocation_t &allocation
+  ) {
+    const input::expectation_t expectation {
+      .handle = allocation.handle,
+      .input_seat = allocation.input_seat,
+      .plan = allocation.plan,
+    };
+    if (!input::valid_allocation(allocation, expectation)) {
+      return std::nullopt;
+    }
+
+    std::string record;
+    record.reserve(512 + allocation.nodes.size() * 256);
+    append_fingerprint_field(record, "polaris-input-manifest-v1");
+    append_fingerprint_field(record, allocation.handle.controller_epoch);
+    append_fingerprint_field(record, allocation.handle.logical_gpu_id);
+    append_fingerprint_integer(record, allocation.handle.slot);
+    append_fingerprint_integer(record, allocation.handle.generation);
+    append_fingerprint_field(record, allocation.input_seat);
+    append_fingerprint_integer(record, allocation.plan.touch ? 1 : 0);
+    append_fingerprint_integer(record, allocation.plan.pen ? 1 : 0);
+    append_fingerprint_integer(record, allocation.plan.gamepad_slots);
+    append_fingerprint_integer(record, allocation.nodes.size());
+    for (const auto &node : allocation.nodes) {
+      append_fingerprint_integer(record, static_cast<unsigned int>(node.kind));
+      append_fingerprint_integer(record, node.slot);
+      append_fingerprint_field(record, node.host_path.native());
+      append_fingerprint_field(record, node.worker_path.native());
+      append_fingerprint_integer(record, node.filesystem_device);
+      append_fingerprint_integer(record, node.inode);
+      append_fingerprint_integer(record, node.character_major);
+      append_fingerprint_integer(record, node.character_minor);
+      append_fingerprint_field(record, node.kernel_name);
+      append_fingerprint_field(record, node.phys);
+      append_fingerprint_field(record, node.host_seat);
+    }
+
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest {};
+    unsigned int digest_size = 0;
+    if (EVP_Digest(
+          record.data(),
+          record.size(),
+          digest.data(),
+          &digest_size,
+          EVP_sha256(),
+          nullptr
+        ) != 1 || digest_size != 32) {
+      return std::nullopt;
+    }
+    constexpr std::array<char, 16> hex {
+      '0', '1', '2', '3', '4', '5', '6', '7',
+      '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+    };
+    std::string fingerprint;
+    fingerprint.reserve(64);
+    for (std::size_t index = 0; index < digest_size; ++index) {
+      fingerprint.push_back(hex[digest[index] >> 4]);
+      fingerprint.push_back(hex[digest[index] & 0x0f]);
+    }
+    return fingerprint;
+  }
+
+  authority_input_manifest_source_t::authority_input_manifest_source_t(
+    input::authority_t &authority,
+    input::kernel_node_probe_t &probe
+  ) :
+      authority_(authority),
+      probe_(probe) {
+  }
+
+  std::optional<input::allocation_t>
+  authority_input_manifest_source_t::allocation(const seat_handle_t &handle) {
+    return authority_.allocation(handle);
+  }
+
+  input::node_observation_t authority_input_manifest_source_t::observe(
+    const std::filesystem::path &path
+  ) {
+    return probe_.observe(path);
+  }
+
+  backend_t::backend_t(
+    host_t &host,
+    input_manifest_source_t &input_manifests,
+    options_t options
+  ) :
       host_(host),
+      input_manifests_(input_manifests),
       options_(std::move(options)) {
     validate_options(options_);
   }
@@ -553,13 +695,112 @@ namespace multiseat::podman {
            ) != options_.workloads.end();
   }
 
+  std::optional<input::allocation_t> backend_t::input_allocation_for(
+    const seat_handle_t &handle,
+    std::string_view input_seat
+  ) const {
+    auto allocation = input_manifests_.allocation(handle);
+    if (!allocation) {
+      return std::nullopt;
+    }
+    const input::expectation_t expectation {
+      .handle = handle,
+      .input_seat = std::string {input_seat},
+      .plan = allocation->plan,
+    };
+    if (!input::valid_allocation(*allocation, expectation) ||
+        !input_manifest_fingerprint(*allocation)) {
+      return std::nullopt;
+    }
+    return allocation;
+  }
+
+  bool backend_t::input_allocation_current(
+    const input::allocation_t &allocation
+  ) const {
+    const auto current = input_manifests_.allocation(allocation.handle);
+    if (!current || *current != allocation) {
+      return false;
+    }
+    for (const auto &node : allocation.nodes) {
+      const auto accessible = host_.read_write_character_device(node.host_path);
+      if (!accessible || !exact_input_identity(*accessible, node)) {
+        return false;
+      }
+      const auto observation = input_manifests_.observe(node.host_path);
+      if (observation.status != input::node_observation_status_e::observed ||
+          !observation.snapshot ||
+          !exact_input_snapshot(*observation.snapshot, node)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool backend_t::inspected_bindings_match(
+    const std::vector<runtime_device_binding_t> &bindings,
+    const gpu_t &gpu,
+    const input::allocation_t &input_allocation
+  ) const {
+    struct expected_binding_t {
+      std::filesystem::path worker_path;
+      character_device_identity_t identity;
+    };
+    std::vector<expected_binding_t> expected;
+    expected.reserve(gpu.devices.size() + input_allocation.nodes.size());
+    for (const auto &device : gpu.devices) {
+      const auto identity = host_.read_write_character_device(device);
+      if (!identity) {
+        return false;
+      }
+      expected.push_back({
+        .worker_path = device,
+        .identity = *identity,
+      });
+    }
+    for (const auto &node : input_allocation.nodes) {
+      expected.push_back({
+        .worker_path = node.worker_path,
+        .identity = {
+          .filesystem_device = node.filesystem_device,
+          .inode = node.inode,
+          .character_major = node.character_major,
+          .character_minor = node.character_minor,
+        },
+      });
+    }
+    if (bindings.size() != expected.size()) {
+      return false;
+    }
+    std::vector<bool> consumed(expected.size(), false);
+    for (const auto &binding : bindings) {
+      std::optional<std::size_t> match;
+      for (std::size_t index = 0; index < expected.size(); ++index) {
+        if (!consumed[index] &&
+            binding.worker_path == expected[index].worker_path &&
+            same_character_device(binding.identity, expected[index].identity)) {
+          match = index;
+          break;
+        }
+      }
+      if (!match) {
+        return false;
+      }
+      consumed[*match] = true;
+    }
+    return std::all_of(consumed.begin(), consumed.end(), [](bool value) {
+      return value;
+    });
+  }
+
   bool backend_t::base_host_ready() const {
     return host_.effective_uid() != 0 && host_.executable_file(options_.executable);
   }
 
   bool backend_t::launch_host_ready(
     const worker_launch_spec_t &spec,
-    const gpu_t &gpu
+    const gpu_t &gpu,
+    const input::allocation_t &input_allocation
   ) const {
     if (!base_host_ready()) {
       return false;
@@ -582,12 +823,7 @@ namespace multiseat::podman {
           return false;
         }
       }
-      for (const auto &device : options_.input_devices) {
-        if (!host_.read_write_character_device(device)) {
-          return false;
-        }
-      }
-      return true;
+      return input_allocation_current(input_allocation);
     }();
     if (!devices_ready) {
       return false;
@@ -635,7 +871,9 @@ namespace multiseat::podman {
   std::vector<std::string> backend_t::launch_argv(
     const worker_launch_spec_t &spec,
     const gpu_t &gpu,
-    const profile_t &profile
+    const profile_t &profile,
+    const input::allocation_t &input_allocation,
+    std::string_view input_fingerprint
   ) const {
     std::vector<std::string> argv {
       options_.executable.native(),
@@ -692,7 +930,12 @@ namespace multiseat::podman {
       "--workdir=/var/lib/polaris-seat",
     };
 
-    for (const auto &[name, value] : labels_for(options_, spec, profile)) {
+    for (const auto &[name, value] : labels_for(
+           options_,
+           spec,
+           profile,
+           input_fingerprint
+         )) {
       argv.push_back("--label=" + name + "=" + value);
     }
 
@@ -736,9 +979,10 @@ namespace multiseat::podman {
         "--device=" + device.native() + ":" + device.native() + ":rw"
       );
     }
-    for (const auto &device : options_.input_devices) {
+    for (const auto &node : input_allocation.nodes) {
       argv.push_back(
-        "--device=" + device.native() + ":" + device.native() + ":rw"
+        "--device=" + node.host_path.native() + ":" +
+        node.worker_path.native() + ":rw"
       );
     }
     for (const auto &mount : options_.shared_game_mounts) {
@@ -765,18 +1009,44 @@ namespace multiseat::podman {
     if (!gpu || !profile) {
       return worker_command_result_e::rejected;
     }
+    std::optional<input::allocation_t> input_allocation;
     try {
-      if (!launch_host_ready(spec, *gpu)) {
+      input_allocation = input_allocation_for(
+        spec.identity.seat,
+        spec.resources.input_seat
+      );
+    } catch (...) {
+      return worker_command_result_e::indeterminate;
+    }
+    if (!input_allocation) {
+      return worker_command_result_e::rejected;
+    }
+    const auto input_fingerprint = input_manifest_fingerprint(*input_allocation);
+    if (!input_fingerprint) {
+      return worker_command_result_e::rejected;
+    }
+    try {
+      if (!launch_host_ready(spec, *gpu, *input_allocation)) {
         return worker_command_result_e::rejected;
       }
     } catch (...) {
-      return worker_command_result_e::rejected;
+      return worker_command_result_e::indeterminate;
     }
 
     command_result_t result;
     try {
+      const auto argv = launch_argv(
+        spec,
+        *gpu,
+        *profile,
+        *input_allocation,
+        *input_fingerprint
+      );
+      if (!input_allocation_current(*input_allocation)) {
+        return worker_command_result_e::rejected;
+      }
       result = host_.run(
-        launch_argv(spec, *gpu, *profile),
+        argv,
         options_.command_timeout,
         options_.max_command_output_bytes
       );
@@ -833,7 +1103,7 @@ namespace multiseat::podman {
 
     std::vector<container_record_t> records;
     try {
-      records = inventory_records();
+      records = inventory_records(false);
     } catch (...) {
       return worker_command_result_e::indeterminate;
     }
@@ -884,7 +1154,7 @@ namespace multiseat::podman {
     }
 
     try {
-      records = inventory_records();
+      records = inventory_records(false);
       const auto still_present = std::find_if(
         records.begin(),
         records.end(),
@@ -911,7 +1181,9 @@ namespace multiseat::podman {
     return observations;
   }
 
-  std::vector<backend_t::container_record_t> backend_t::inventory_records() {
+  std::vector<backend_t::container_record_t> backend_t::inventory_records(
+    bool require_input_authority
+  ) {
     if (!base_host_ready()) {
       throw std::runtime_error {"rootless Podman is unavailable"};
     }
@@ -969,6 +1241,8 @@ namespace multiseat::podman {
         const auto name = string_member(container, "Name");
         const auto *config = object_member(container, "Config");
         const auto *label_object = config ? object_member(*config, "Labels") : nullptr;
+        const auto *host_config = object_member(container, "HostConfig");
+        const auto *device_array = host_config ? object_member(*host_config, "Devices") : nullptr;
         const auto *state = object_member(container, "State");
         const auto runtime_state = state ? string_member(*state, "Status") : std::nullopt;
         if (!id || !name || !container_id(*id) ||
@@ -998,6 +1272,7 @@ namespace multiseat::podman {
         const auto wayland = label_value(labels, label_wayland);
         const auto audio = label_value(labels, label_audio);
         const auto input = label_value(labels, label_input);
+        const auto input_fingerprint = label_value(labels, label_input_manifest);
         const auto render = label_value(labels, label_render_node);
         const auto runtime_profile = label_value(labels, label_runtime_profile);
         const auto workload_kind = label_value(labels, label_workload_kind);
@@ -1042,7 +1317,7 @@ namespace multiseat::podman {
         const auto parsed_runtime_profile = runtime_profile ?
                                               runtime_profile_from_name(*runtime_profile) :
                                               runtime_profile_e::unknown;
-        if (!protocol || *protocol != "2" ||
+        if (!protocol || *protocol != "3" ||
             !deployment || *deployment != options_.deployment_id ||
             !controller || !opaque_name_token(*controller, 64) ||
             !gpu || !opaque_name_token(*gpu) ||
@@ -1053,6 +1328,7 @@ namespace multiseat::podman {
             !wayland || !opaque_name_token(*wayland) ||
             !audio || !opaque_name_token(*audio) ||
             !input || !opaque_name_token(*input) ||
+            !input_fingerprint || !lowercase_sha256(*input_fingerprint) ||
             !render || !device_path(*render) ||
             !runtime_profile || !valid_runtime_profile_name(*runtime_profile) ||
             !workload_kind || !valid_workload_kind_name(*workload_kind) ||
@@ -1069,6 +1345,65 @@ namespace multiseat::podman {
           throw std::runtime_error {"incomplete Podman worker identity labels"};
         }
 
+        const seat_handle_t seat_handle {
+          .controller_epoch = *controller,
+          .logical_gpu_id = *gpu,
+          .slot = *slot,
+          .generation = *generation,
+        };
+        bool input_binding_authoritative = false;
+        if (require_input_authority) {
+          if (!device_array || !device_array->is_array() ||
+              device_array->size() > maximum_inspected_devices) {
+            throw std::runtime_error {"invalid Podman device inventory"};
+          }
+          const auto configured_gpu = std::find_if(
+            options_.gpus.begin(),
+            options_.gpus.end(),
+            [&gpu, &render](const auto &candidate) {
+              return candidate.logical_gpu_id == *gpu &&
+                     candidate.render_node == *render;
+            }
+          );
+          const auto allocation = input_allocation_for(seat_handle, *input);
+          if (configured_gpu == options_.gpus.end() || !allocation ||
+              !input_allocation_current(*allocation)) {
+            throw std::runtime_error {"Podman input authority is not current"};
+          }
+          const auto expected_fingerprint = input_manifest_fingerprint(*allocation);
+          if (!expected_fingerprint || *expected_fingerprint != *input_fingerprint) {
+            throw std::runtime_error {"Podman input manifest label changed"};
+          }
+
+          std::vector<runtime_device_binding_t> bindings;
+          bindings.reserve(device_array->size());
+          std::set<std::filesystem::path> worker_paths;
+          for (const auto &device : *device_array) {
+            const auto host_path = string_member(device, "PathOnHost");
+            const auto worker_path = string_member(device, "PathInContainer");
+            const auto permissions = string_member(device, "CgroupPermissions");
+            if (!host_path || !worker_path ||
+                !device_path(*host_path) || !device_path(*worker_path) ||
+                (permissions && !permissions->empty() && *permissions != "rw") ||
+                !worker_paths.emplace(*worker_path).second) {
+              throw std::runtime_error {"invalid Podman device binding"};
+            }
+            const auto identity = host_.read_write_character_device(*host_path);
+            if (!identity) {
+              throw std::runtime_error {"Podman device binding is unavailable"};
+            }
+            bindings.push_back({
+              .host_path = *host_path,
+              .worker_path = *worker_path,
+              .identity = *identity,
+            });
+          }
+          if (!inspected_bindings_match(bindings, *configured_gpu, *allocation)) {
+            throw std::runtime_error {"Podman device bindings changed"};
+          }
+          input_binding_authoritative = true;
+        }
+
         std::string health_state;
         if (const auto *health = object_member(*state, "Health")) {
           health_state = string_member(*health, "Status").value_or(std::string {});
@@ -1080,10 +1415,10 @@ namespace multiseat::podman {
           .observation = {
             .identity = {
               .seat = {
-                .controller_epoch = *controller,
-                .logical_gpu_id = *gpu,
-                .slot = *slot,
-                .generation = *generation,
+                .controller_epoch = seat_handle.controller_epoch,
+                .logical_gpu_id = seat_handle.logical_gpu_id,
+                .slot = seat_handle.slot,
+                .generation = seat_handle.generation,
               },
               .worker_name = *worker,
             },
@@ -1091,6 +1426,7 @@ namespace multiseat::podman {
           },
           .runtime_state = lowercase_ascii(*runtime_state),
           .labels = std::move(labels),
+          .input_binding_authoritative = input_binding_authoritative,
         });
       }
       return records;
@@ -1103,14 +1439,31 @@ namespace multiseat::podman {
     const container_record_t &record,
     const worker_launch_spec_t &spec
   ) const {
-    if (record.observation.identity != spec.identity) {
+    if (record.observation.identity != spec.identity ||
+        !record.input_binding_authoritative) {
       return false;
     }
     const auto *profile = profile_for(spec.profile_key);
     if (!profile || profile->runtime_profile != spec.runtime_profile) {
       return false;
     }
-    for (const auto &[name, value] : labels_for(options_, spec, *profile)) {
+    const auto allocation = input_allocation_for(
+      spec.identity.seat,
+      spec.resources.input_seat
+    );
+    if (!allocation || !input_allocation_current(*allocation)) {
+      return false;
+    }
+    const auto fingerprint = input_manifest_fingerprint(*allocation);
+    if (!fingerprint) {
+      return false;
+    }
+    for (const auto &[name, value] : labels_for(
+           options_,
+           spec,
+           *profile,
+           *fingerprint
+         )) {
       const auto actual = label_value(record.labels, name);
       if (!actual || *actual != value) {
         return false;

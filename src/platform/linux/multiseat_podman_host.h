@@ -21,7 +21,8 @@ namespace multiseat::podman {
     [[nodiscard]] bool private_readable_file(
       const std::filesystem::path &path
     ) const override;
-    [[nodiscard]] bool read_write_character_device(
+    [[nodiscard]] std::optional<character_device_identity_t>
+    read_write_character_device(
       const std::filesystem::path &path
     ) const override;
     command_result_t run(

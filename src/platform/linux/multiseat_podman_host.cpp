@@ -8,8 +8,12 @@
 
 #include "misc.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
+
+#include <limits>
 
 namespace multiseat::podman {
   namespace {
@@ -59,8 +63,38 @@ namespace multiseat::podman {
     return private_accessible_as(path, S_IFREG, R_OK);
   }
 
-  bool local_host_t::read_write_character_device(const std::filesystem::path &path) const {
-    return accessible_as(path, S_IFCHR, R_OK | W_OK);
+  std::optional<character_device_identity_t>
+  local_host_t::read_write_character_device(const std::filesystem::path &path) const {
+    const auto descriptor = open(
+      path.c_str(),
+      O_PATH | O_CLOEXEC | O_NOFOLLOW
+    );
+    if (descriptor < 0) {
+      return std::nullopt;
+    }
+    struct stat metadata {};
+    const auto metadata_ready = fstat(descriptor, &metadata) == 0;
+    const auto accessible = metadata_ready &&
+                            faccessat(
+                              descriptor,
+                              "",
+                              R_OK | W_OK,
+                              AT_EMPTY_PATH | AT_EACCESS
+                            ) == 0;
+    close(descriptor);
+    const auto character_major = metadata_ready ? major(metadata.st_rdev) : 0;
+    const auto character_minor = metadata_ready ? minor(metadata.st_rdev) : 0;
+    if (!metadata_ready || !accessible || !S_ISCHR(metadata.st_mode) ||
+        character_major > std::numeric_limits<std::uint32_t>::max() ||
+        character_minor > std::numeric_limits<std::uint32_t>::max()) {
+      return std::nullopt;
+    }
+    return character_device_identity_t {
+      .filesystem_device = static_cast<std::uint64_t>(metadata.st_dev),
+      .inode = static_cast<std::uint64_t>(metadata.st_ino),
+      .character_major = static_cast<std::uint32_t>(character_major),
+      .character_minor = static_cast<std::uint32_t>(character_minor),
+    };
   }
 
   command_result_t local_host_t::run(

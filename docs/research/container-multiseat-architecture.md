@@ -249,29 +249,46 @@ immutable and includes:
   typed workload selector, image, display/data-plane topology, compositor,
   render node, and encoder labels, but no client identity or profile key.
 
-The original backend proof accepts a configured list of input character
-devices and passes that same list to each worker. That is sufficient to prove
-literal Podman argv and host-access checks, but it is not a multiseat input
-boundary and must not be activated as one. In particular, passing raw
-`/dev/uinput` or `/dev/uhid` to every application container lets each container
-create kernel-visible devices outside its own seat authority. The final backend
-must replace that prototype list with generation-specific manifests from the
-host input authority below.
+The global input-device prototype has been removed. The backend now requires
+an injected generation-fenced allocation from the host input authority. It
+validates the complete allocation and its kernel metadata twice before command
+invocation, then emits one `--device=host-event:fixed-worker-alias:rw` argument
+per exact node. Raw `/dev/uinput`, `/dev/uhid`, a host-wide `/dev/input`, and a
+caller-supplied input path are not representable in the Podman options or launch
+specification.
+
+The complete allocation has a canonical opaque SHA-256 fingerprint bound to
+the seat handle, plan, host and worker paths, filesystem and character-device
+identity, kernel name, phys, and host seat. That fingerprint is stored as an
+immutable worker label. It is a reconciliation identifier, not an
+authentication credential.
+This moves the inspected worker-label contract to protocol 3 so an older
+global-device prototype cannot reconcile as a current worker.
 
 Inventory is two phase and bounded: an exact deployment-label listing returns
 full immutable container IDs, then one JSON inspection validates every ID,
-label, state, and cardinality. A running container remains `starting` until
-its health check is explicitly healthy. Invalid, truncated, contradictory, or
-oversized output fails the complete inventory rather than returning a partial
-view. Graceful teardown signals `TERM` to the inspected immutable container ID;
-forced teardown removes that exact ID with force. It never targets a name,
-latest container, wildcard, or all containers.
+label, state, device binding, and cardinality. Podman stores device major/minor
+identity and may reconstruct an equivalent host path during inspection, so the
+backend reopens each inspected character node and requires the expected
+major/minor plus the exact worker-local destination. The complete GPU and input
+binding set and manifest fingerprint must match current authority; missing,
+extra, broadened, inaccessible, or changed bindings fail the inventory. A
+running container remains `starting` until its health check is explicitly
+healthy. Invalid, truncated, contradictory, or oversized output fails the
+complete inventory rather than returning a partial view. Graceful teardown
+signals `TERM` to the inspected immutable container ID; forced teardown removes
+that exact ID with force. Stop uses the identity-only inspection path so a
+worker can still be removed after its input allocation has disappeared. It
+never targets a name, latest container, wildcard, or all containers.
 
-The backend and live-host adapter compile into Polaris, but are not wired into
-the current singleton runtime. Tests use an injected fake host, so they inspect
-only generated argv and synthetic Podman JSON. Podman was not installed and no
+The backend, authority-manifest adapter, and live-host adapter compile into
+Polaris, but are not wired into the current singleton runtime. Tests use
+injected input authority, kernel observations, host character-device identity,
+command results, and synthetic Podman JSON. Podman was not installed and no
 container, volume, namespace, device, or profile was created during this
-checkpoint.
+checkpoint. Rootless group-only device access and SELinux policy remain a live
+deployment gate: this source slice does not preserve supplementary groups,
+change host policy, or claim physical access to a mapped event node.
 
 ## Worker image and entrypoint checkpoint
 
@@ -532,11 +549,15 @@ the expected isolation marker.
 
 This is a trusted lifecycle and identity backend, not the worker virtual-input
 provider. Its `route` method deliberately rejects all payloads until a typed
-decoder exists. Exact Podman manifest binding, bind-time identity revalidation,
-the worker-side event bridge, feedback path, and crash-persistent node discovery
-remain required. Steam Input also needs a separately mediated creation path;
-granting its container raw uinput would reintroduce the authority this contract
-removes.
+decoder exists. Exact Podman manifest binding and bind-time identity
+revalidation now exist as a separate injected checkpoint: the adapter queries
+the authority by exact generation, verifies the full allocation and live kernel
+snapshot twice, maps only event nodes to fixed aliases, fingerprints the full
+manifest, and reconciles that fingerprint plus inspected device identities.
+The worker-side event bridge, feedback path, crash-persistent node discovery,
+rootless group/SELinux deployment policy, and physical container proof remain
+required. Steam Input also needs a separately mediated creation path; granting
+its container raw uinput would reintroduce the authority this contract removes.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless

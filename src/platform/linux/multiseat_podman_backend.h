@@ -7,12 +7,15 @@
 #ifdef __linux__
 
 #include "src/multiseat_worker_broker.h"
+#include "src/platform/linux/input/inputtino_multiseat_backend.h"
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -23,6 +26,15 @@ namespace multiseat::podman {
     bool timed_out = false;
     bool output_truncated = false;
     std::string output;
+  };
+
+  struct character_device_identity_t {
+    std::uint64_t filesystem_device = 0;
+    std::uint64_t inode = 0;
+    std::uint32_t character_major = 0;
+    std::uint32_t character_minor = 0;
+
+    bool operator==(const character_device_identity_t &) const = default;
   };
 
   /**
@@ -43,7 +55,8 @@ namespace multiseat::podman {
     [[nodiscard]] virtual bool private_readable_file(
       const std::filesystem::path &path
     ) const = 0;
-    [[nodiscard]] virtual bool read_write_character_device(
+    [[nodiscard]] virtual std::optional<character_device_identity_t>
+    read_write_character_device(
       const std::filesystem::path &path
     ) const = 0;
     virtual command_result_t run(
@@ -52,6 +65,49 @@ namespace multiseat::podman {
       std::size_t max_output_bytes
     ) = 0;
   };
+
+  /**
+   * Trusted input-allocation boundary used immediately before Podman launch.
+   *
+   * The production-shaped adapter below reads allocations from the generation-
+   * fenced input authority and reuses its kernel probe. Tests inject a fake, so
+   * no input node or container engine is opened by this checkpoint.
+   */
+  class input_manifest_source_t {
+  public:
+    virtual ~input_manifest_source_t() = default;
+
+    [[nodiscard]] virtual std::optional<input::allocation_t> allocation(
+      const seat_handle_t &handle
+    ) = 0;
+    [[nodiscard]] virtual input::node_observation_t observe(
+      const std::filesystem::path &path
+    ) = 0;
+  };
+
+  class authority_input_manifest_source_t final : public input_manifest_source_t {
+  public:
+    authority_input_manifest_source_t(
+      input::authority_t &authority,
+      input::kernel_node_probe_t &probe
+    );
+
+    [[nodiscard]] std::optional<input::allocation_t> allocation(
+      const seat_handle_t &handle
+    ) override;
+    [[nodiscard]] input::node_observation_t observe(
+      const std::filesystem::path &path
+    ) override;
+
+  private:
+    input::authority_t &authority_;
+    input::kernel_node_probe_t &probe_;
+  };
+
+  /** Opaque generation fingerprint stored in the worker's inspected labels. */
+  [[nodiscard]] std::optional<std::string> input_manifest_fingerprint(
+    const input::allocation_t &allocation
+  );
 
   struct gpu_t {
     std::string logical_gpu_id;
@@ -80,7 +136,6 @@ namespace multiseat::podman {
     std::vector<gpu_t> gpus;
     std::vector<profile_t> profiles;
     std::vector<workload_plan_t> workloads;
-    std::vector<std::filesystem::path> input_devices;
     std::vector<shared_game_mount_t> shared_game_mounts;
     std::chrono::milliseconds command_timeout {5000};
     std::size_t max_command_output_bytes = 1024 * 1024;
@@ -108,7 +163,11 @@ namespace multiseat::podman {
    */
   class backend_t final : public worker_backend_t {
   public:
-    backend_t(host_t &host, options_t options);
+    backend_t(
+      host_t &host,
+      input_manifest_source_t &input_manifests,
+      options_t options
+    );
 
     worker_command_result_e launch(const worker_launch_spec_t &spec) override;
     worker_command_result_e stop(
@@ -123,6 +182,13 @@ namespace multiseat::podman {
       worker_observation_t observation;
       std::string runtime_state;
       std::vector<std::pair<std::string, std::string>> labels;
+      bool input_binding_authoritative = false;
+    };
+
+    struct runtime_device_binding_t {
+      std::filesystem::path host_path;
+      std::filesystem::path worker_path;
+      character_device_identity_t identity;
     };
 
     [[nodiscard]] const gpu_t *gpu_for(const worker_launch_spec_t &spec) const;
@@ -131,21 +197,39 @@ namespace multiseat::podman {
     [[nodiscard]] bool base_host_ready() const;
     [[nodiscard]] bool launch_host_ready(
       const worker_launch_spec_t &spec,
-      const gpu_t &gpu
+      const gpu_t &gpu,
+      const input::allocation_t &input_allocation
     ) const;
     [[nodiscard]] bool valid_spec(const worker_launch_spec_t &spec) const;
+    [[nodiscard]] std::optional<input::allocation_t> input_allocation_for(
+      const seat_handle_t &handle,
+      std::string_view input_seat
+    ) const;
+    [[nodiscard]] bool input_allocation_current(
+      const input::allocation_t &allocation
+    ) const;
+    [[nodiscard]] bool inspected_bindings_match(
+      const std::vector<runtime_device_binding_t> &bindings,
+      const gpu_t &gpu,
+      const input::allocation_t &input_allocation
+    ) const;
     [[nodiscard]] std::vector<std::string> launch_argv(
       const worker_launch_spec_t &spec,
       const gpu_t &gpu,
-      const profile_t &profile
+      const profile_t &profile,
+      const input::allocation_t &input_allocation,
+      std::string_view input_fingerprint
     ) const;
-    [[nodiscard]] std::vector<container_record_t> inventory_records();
+    [[nodiscard]] std::vector<container_record_t> inventory_records(
+      bool require_input_authority = true
+    );
     [[nodiscard]] bool record_matches_spec(
       const container_record_t &record,
       const worker_launch_spec_t &spec
     ) const;
 
     host_t &host_;
+    input_manifest_source_t &input_manifests_;
     const options_t options_;
   };
 
