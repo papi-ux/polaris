@@ -372,12 +372,15 @@ add_executable(test_multiseat_runtime
 )
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(test_multiseat_runtime PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/input/inputtino_multiseat_backend.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_input_authority.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_input_authority.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_inputtino_multiseat_backend.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_authority.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_client.cpp
@@ -397,6 +400,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(test_multiseat_runtime PRIVATE
         POLARIS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(test_multiseat_runtime PRIVATE
+        inputtino::libinputtino
         nlohmann_json::nlohmann_json
     )
 endif()

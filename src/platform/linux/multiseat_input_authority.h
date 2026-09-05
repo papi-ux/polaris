@@ -23,11 +23,15 @@ namespace multiseat::input {
   inline constexpr std::size_t maximum_input_payload_bytes = 64 * 1024;
   inline constexpr std::size_t maximum_input_allocations = 256;
   inline constexpr std::uint32_t maximum_gamepad_slots = 16;
+  inline constexpr std::size_t maximum_kernel_device_name_bytes = 79;
   inline constexpr std::string_view isolated_host_seat = "seat-polaris";
+  inline constexpr std::string_view multiseat_kernel_device_prefix =
+    "Polaris multiseat ";
 
   enum class device_kind_e {
     keyboard,
-    mouse,
+    mouse_relative,
+    mouse_absolute,
     touch,
     pen,
     gamepad,
@@ -58,6 +62,7 @@ namespace multiseat::input {
     std::uint64_t inode = 0;
     std::uint32_t character_major = 0;
     std::uint32_t character_minor = 0;
+    std::string kernel_name;
     std::string phys;
     std::string host_seat;
 
@@ -154,6 +159,18 @@ namespace multiseat::input {
     std::uint32_t slot
   );
   [[nodiscard]] std::string expected_phys(
+    std::string_view input_seat,
+    device_kind_e kind,
+    std::uint32_t slot
+  );
+  /**
+   * Exact uinput name used for udev selection and generation readback.
+   *
+   * The opaque input-seat value is represented by a SHA-256 prefix so the
+   * resulting name remains within Linux's 79-byte uinput name limit. The
+   * digest is a namespace label, not an authentication credential.
+   */
+  [[nodiscard]] std::string expected_kernel_name(
     std::string_view input_seat,
     device_kind_e kind,
     std::uint32_t slot

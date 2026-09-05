@@ -485,40 +485,58 @@ avoids depending on hotplug delivery through the worker's private network and
 mount namespaces. A launcher cannot manufacture or discover another seat's
 nodes merely because it knows their host major/minor values.
 
-`multiseat::input::authority_t` is the first executable boundary for that
-model. It remains outside the singleton runtime and uses an injected backend,
-so its tests open no real input device. Its contract:
+`multiseat::input::authority_t` and the injected Linux
+`inputtino_host_backend_t` are the first executable boundary for that model.
+They remain outside the singleton runtime, Podman command construction, and
+the worker protocol. Tests replace both inputtino creation and kernel I/O, so
+they open no real input device. Their contract:
 
 - starts admission closed and requires one complete, unambiguous backend
   inventory before any device creation, with both expected and observed
   allocation sets bounded at 256;
 - binds every allocation to the full controller epoch, GPU, slot, generation,
   and opaque input-seat name;
-- always requires one keyboard and mouse, optionally admits touch and pen, and
-  bounds generic gamepad slots at sixteen;
+- always requires one keyboard and both event nodes created by inputtino's
+  relative/absolute mouse pair, optionally admits touch and pen, and bounds
+  generic Xbox-style gamepad slots at sixteen;
 - accepts only canonical `/dev/input/eventN` host nodes with unique filesystem
-  inode and character-device identities, Linux input major 13, the existing
-  Polaris seat-isolation phys marker, and host seat `seat-polaris`;
+  inode and character-device identities, exact event-number-to-minor mapping,
+  Linux input major 13, an exact generation-derived kernel name, and host seat
+  `seat-polaris`;
 - maps those nodes to fixed worker-local paths such as
-  `/dev/input/polaris-keyboard` and `/dev/input/polaris-gamepad-0`, which reveal
-  no client or profile identity;
-- cannot accept `/dev/uinput`, `/dev/uhid`, a duplicate node, an unisolated phys
-  marker, or a seat0 allocation as authoritative;
+  `/dev/input/polaris-keyboard`, `/dev/input/polaris-mouse-relative`, and
+  `/dev/input/polaris-gamepad-0`, which reveal no client or profile identity;
+- derives each identity through `O_PATH|O_NOFOLLOW`, `fstat`, root-owned
+  non-writable sysfs attributes, and bounded `/run/udev/data` parsing; a
+  missing udev record is retryable rather than proof of isolation;
+- validates, but does not expose, an optional `/dev/input/jsN` child returned
+  for an Xbox-style gamepad;
+- cannot accept `/dev/uinput`, `/dev/uhid`, a duplicate or noncanonical node,
+  a contradictory nonempty phys marker, or a seat0 allocation as authoritative;
 - serializes per-seat input payloads with a strict nonzero sequence and 64-KiB
   bound, rejects stale-generation routing, and closes admission after an
   indeterminate backend result;
-- retains ambiguous or indeterminate state for inspection, removes only an
+- retains ambiguous teardown identities as reconciliation tombstones, removes only an
   exact unambiguous orphan, and confirms orphan removal through a second
   authoritative inventory.
 
-This is authority and lifecycle scaffolding, not the worker virtual-input
-provider. A production inputtino backend, exact Podman manifest binding,
-worker-side event bridge, feedback path, and crash-persistent node discovery
+The production factory now wraps inputtino device lifetimes, but no production
+code constructs the backend. The pinned inputtino commit accepts
+`DeviceDefinition::device_phys` but does not write it for its uinput-backed
+keyboard, mouse, touch, pen, or Xbox device. The dedicated udev rule therefore
+matches only the reserved `Polaris multiseat *` kernel-name namespace. Polaris
+hashes the opaque generation name into that bounded namespace, requires exact
+name and `ID_SEAT=seat-polaris` readback, accepts an empty phys only for this
+known dependency behavior, and still rejects any nonempty phys that contradicts
+the expected isolation marker.
+
+This is a trusted lifecycle and identity backend, not the worker virtual-input
+provider. Its `route` method deliberately rejects all payloads until a typed
+decoder exists. Exact Podman manifest binding, bind-time identity revalidation,
+the worker-side event bridge, feedback path, and crash-persistent node discovery
 remain required. Steam Input also needs a separately mediated creation path;
 granting its container raw uinput would reintroduce the authority this contract
-removes. That trusted backend must derive filesystem, character-device, phys,
-and seat identity from `fstat` plus sysfs/udev rather than caller claims, then
-revalidate the node at the Podman bind boundary to close path-replacement races.
+removes.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless

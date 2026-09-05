@@ -52,19 +52,21 @@ creation, the synthetic process boundary, the real dispatcher, and isolated
 host D-Bus, PipeWire, Wayland, and raw-frame transports; they never invoke a
 launcher or physical device.
 
-The controller now also has an injected host-brokered input-authority contract,
-but it is deliberately not wired to this image. Its final shape creates virtual
-devices outside the untrusted launcher boundary and maps only the exact
-generation's verified `/dev/input/eventN` nodes at fixed worker-local paths.
-The future trusted backend must obtain that identity from `fstat` plus
-sysfs/udev and revalidate it at the Podman bind boundary; the current injected
-contract does not inspect the host filesystem itself.
+The controller now also has an injected host-brokered input authority and a
+Linux inputtino lifecycle backend, but neither is wired to this image. The
+backend creates virtual devices outside the untrusted launcher boundary and
+derives the exact generation's event-node identity from `fstat`, sysfs, and
+udev before returning fixed worker-local paths. Its offline tests replace the
+device factory and kernel-I/O boundary, so they create no host input device.
+The eventual Podman bind still has to revalidate each identity to close a path
+replacement race.
 The rootless backend's older global input-device option remains a command-shape
 prototype, not an activation-ready isolation boundary: giving every worker raw
 `/dev/uinput` or `/dev/uhid` would let one seat create devices outside its
-manifest. A production inputtino backend, Podman manifest binding, worker input
-bridge, feedback route, and mediated Steam Input path are still missing. No
-input device is opened by the current tests.
+manifest. Podman manifest binding, a typed worker input bridge, feedback route,
+and mediated Steam Input path are still missing. The new backend's routing
+method rejects input until that bridge exists. No input device is opened by the
+current tests.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or

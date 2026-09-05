@@ -6,6 +6,8 @@
 
 #ifdef __linux__
 
+#include <openssl/evp.h>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -45,7 +47,8 @@ namespace multiseat::input {
       switch (kind) {
         case device_kind_e::keyboard:
           return "keyboard";
-        case device_kind_e::mouse:
+        case device_kind_e::mouse_relative:
+        case device_kind_e::mouse_absolute:
           return "mouse";
         case device_kind_e::touch:
           return "touch";
@@ -57,16 +60,36 @@ namespace multiseat::input {
       return {};
     }
 
-    bool canonical_event_path(const std::filesystem::path &path) {
+    std::string_view kernel_role_name(device_kind_e kind) {
+      switch (kind) {
+        case device_kind_e::keyboard:
+          return "keyboard";
+        case device_kind_e::mouse_relative:
+          return "mouse";
+        case device_kind_e::mouse_absolute:
+          return "mouse (absolute)";
+        case device_kind_e::touch:
+          return "touch";
+        case device_kind_e::pen:
+          return "pen";
+        case device_kind_e::gamepad:
+          return "gamepad";
+      }
+      return {};
+    }
+
+    std::optional<std::uint32_t> canonical_event_number(
+      const std::filesystem::path &path
+    ) {
       const auto value = path.native();
       constexpr std::string_view prefix = "/dev/input/event";
       if (value.size() <= prefix.size() ||
           std::string_view {value}.substr(0, prefix.size()) != prefix) {
-        return false;
+        return std::nullopt;
       }
       const auto suffix = std::string_view {value}.substr(prefix.size());
       if (suffix.size() > 1 && suffix.front() == '0') {
-        return false;
+        return std::nullopt;
       }
       std::uint32_t parsed = 0;
       const auto result = std::from_chars(
@@ -74,7 +97,41 @@ namespace multiseat::input {
         suffix.data() + suffix.size(),
         parsed
       );
-      return result.ec == std::errc {} && result.ptr == suffix.data() + suffix.size();
+      if (result.ec != std::errc {} ||
+          result.ptr != suffix.data() + suffix.size() ||
+          parsed > std::numeric_limits<std::uint32_t>::max() - 64) {
+        return std::nullopt;
+      }
+      return parsed;
+    }
+
+    std::optional<std::string> input_seat_digest_prefix(
+      std::string_view input_seat
+    ) {
+      std::array<unsigned char, EVP_MAX_MD_SIZE> digest {};
+      unsigned int digest_size = 0;
+      if (EVP_Digest(
+            input_seat.data(),
+            input_seat.size(),
+            digest.data(),
+            &digest_size,
+            EVP_sha256(),
+            nullptr
+          ) != 1 ||
+          digest_size < 16) {
+        return std::nullopt;
+      }
+      constexpr std::array<char, 16> hex {
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+      };
+      std::string result;
+      result.reserve(32);
+      for (std::size_t index = 0; index < 16; ++index) {
+        result.push_back(hex[digest[index] >> 4]);
+        result.push_back(hex[digest[index] & 0x0f]);
+      }
+      return result;
     }
 
     std::vector<std::pair<device_kind_e, std::uint32_t>> expected_nodes(
@@ -82,7 +139,8 @@ namespace multiseat::input {
     ) {
       std::vector<std::pair<device_kind_e, std::uint32_t>> nodes {
         {device_kind_e::keyboard, 0},
-        {device_kind_e::mouse, 0},
+        {device_kind_e::mouse_relative, 0},
+        {device_kind_e::mouse_absolute, 0},
       };
       if (plan.touch) {
         nodes.emplace_back(device_kind_e::touch, 0);
@@ -107,6 +165,7 @@ namespace multiseat::input {
       for (const auto &left_node : left.nodes) {
         for (const auto &right_node : right.nodes) {
           if (left_node.host_path == right_node.host_path ||
+              left_node.kernel_name == right_node.kernel_name ||
               std::tie(left_node.filesystem_device, left_node.inode) ==
                 std::tie(right_node.filesystem_device, right_node.inode) ||
               std::tie(left_node.character_major, left_node.character_minor) ==
@@ -191,9 +250,13 @@ namespace multiseat::input {
         return slot == 0 ?
                  std::filesystem::path {"/dev/input/polaris-keyboard"} :
                  std::filesystem::path {};
-      case device_kind_e::mouse:
+      case device_kind_e::mouse_relative:
         return slot == 0 ?
-                 std::filesystem::path {"/dev/input/polaris-mouse"} :
+                 std::filesystem::path {"/dev/input/polaris-mouse-relative"} :
+                 std::filesystem::path {};
+      case device_kind_e::mouse_absolute:
+        return slot == 0 ?
+                 std::filesystem::path {"/dev/input/polaris-mouse-absolute"} :
                  std::filesystem::path {};
       case device_kind_e::touch:
         return slot == 0 ?
@@ -230,6 +293,27 @@ namespace multiseat::input {
     return result;
   }
 
+  std::string expected_kernel_name(
+    std::string_view input_seat,
+    device_kind_e kind,
+    std::uint32_t slot
+  ) {
+    if (!valid_name_token(input_seat) || expected_worker_path(kind, slot).empty()) {
+      return {};
+    }
+    const auto digest = input_seat_digest_prefix(input_seat);
+    const auto role = kernel_role_name(kind);
+    if (!digest || role.empty()) {
+      return {};
+    }
+    auto result = std::string {multiseat_kernel_device_prefix} + *digest + " " +
+                  std::string {role};
+    if (kind == device_kind_e::gamepad) {
+      result += "-" + std::to_string(slot);
+    }
+    return result.size() <= maximum_kernel_device_name_bytes ? result : std::string {};
+  }
+
   bool valid_allocation(
     const allocation_t &allocation,
     const expectation_t &expectation
@@ -254,12 +338,24 @@ namespace multiseat::input {
       const auto &[expected_kind, expected_slot] = required[index];
       const auto &node = allocation.nodes[index];
       const auto worker_path = expected_worker_path(expected_kind, expected_slot);
+      const auto event_number = canonical_event_number(node.host_path);
+      const auto expected_node_phys = expected_phys(
+        expectation.input_seat,
+        expected_kind,
+        expected_slot
+      );
       if (node.kind != expected_kind || node.slot != expected_slot ||
-          !canonical_event_path(node.host_path) ||
+          !event_number ||
           node.worker_path != worker_path ||
           node.filesystem_device == 0 || node.inode == 0 ||
-          node.character_major != 13 || node.character_minor < 64 ||
-          node.phys != expected_phys(expectation.input_seat, expected_kind, expected_slot) ||
+          node.character_major != 13 ||
+          node.character_minor != 64 + *event_number ||
+          node.kernel_name != expected_kernel_name(
+            expectation.input_seat,
+            expected_kind,
+            expected_slot
+          ) ||
+          (!node.phys.empty() && node.phys != expected_node_phys) ||
           node.host_seat != isolated_host_seat ||
           !host_paths.emplace(node.host_path).second ||
           !worker_paths.emplace(node.worker_path).second ||

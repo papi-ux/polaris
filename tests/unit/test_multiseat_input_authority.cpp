@@ -64,7 +64,8 @@ namespace {
   ) {
     std::vector<std::pair<device_kind_e, std::uint32_t>> result {
       {device_kind_e::keyboard, 0},
-      {device_kind_e::mouse, 0},
+      {device_kind_e::mouse_relative, 0},
+      {device_kind_e::mouse_absolute, 0},
     };
     if (plan.touch) {
       result.emplace_back(device_kind_e::touch, 0);
@@ -93,12 +94,17 @@ namespace {
       allocation.nodes.push_back({
         .kind = kind,
         .slot = slot,
-        .host_path = "/dev/input/event" + std::to_string(minor),
+        .host_path = "/dev/input/event" + std::to_string(minor - 64),
         .worker_path = multiseat::input::expected_worker_path(kind, slot),
         .filesystem_device = 41,
         .inode = 10000 + minor,
         .character_major = 13,
         .character_minor = minor,
+        .kernel_name = multiseat::input::expected_kernel_name(
+          expectation.input_seat,
+          kind,
+          slot
+        ),
         .phys = multiseat::input::expected_phys(expectation.input_seat, kind, slot),
         .host_seat = std::string {multiseat::input::isolated_host_seat},
       });
@@ -250,7 +256,7 @@ namespace {
     const auto canonical = allocation_for(expectation, 64);
     EXPECT_TRUE(multiseat::input::valid_plan(expectation.plan));
     EXPECT_TRUE(multiseat::input::valid_allocation(canonical, expectation));
-    EXPECT_EQ(canonical.nodes.size(), 6U);
+    EXPECT_EQ(canonical.nodes.size(), 7U);
     for (const auto &node : canonical.nodes) {
       EXPECT_EQ(node.host_path.native().find("/dev/input/event"), 0U);
       EXPECT_NE(node.host_path, "/dev/uinput");
@@ -267,10 +273,22 @@ namespace {
     invalid.nodes[0].phys = "unisolated";
     EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
     invalid = canonical;
+    invalid.nodes[0].phys.clear();
+    EXPECT_TRUE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
+    invalid.nodes[0].kernel_name = "Polaris multiseat wrong-generation keyboard";
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
     invalid.nodes[0].host_seat = "seat0";
     EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
     invalid = canonical;
     invalid.nodes[0].character_major = 10;
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
+    invalid.nodes[0].character_minor += 1;
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
+    invalid.nodes[0].host_path = "/dev/input/event00";
     EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
     EXPECT_FALSE(multiseat::input::valid_plan({
       .gamepad_slots = maximum_gamepad_slots + 1,
