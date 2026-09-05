@@ -277,3 +277,43 @@ TEST(AppValidationTests, RejectsUnexpectedCommandShapes) {
   EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
   EXPECT_NE(error.find("unsupported field"), std::string::npos);
 }
+
+TEST(ConfigValidationTests, PatchMergeKeepsUnmentionedKeysAndDropsEmptiedOnes) {
+  // POST /api/config rewrites the file from its body; a one-key PATCH must
+  // not do that. Found the hard way when a single-key POST truncated a live
+  // config to two lines.
+  const std::unordered_map<std::string, std::string> existing {
+    {"port", "47989"},
+    {"encoder", "nvenc"},
+    {"steamgriddb_api_key", "kept-secret"},
+    {"already_blank", ""},
+  };
+  const nlohmann::json patch {
+    {"encoder", "vaapi"},
+    {"port", nullptr},
+    {"max_sessions", 2},
+    {"headless_mode", ""},
+  };
+  const auto merged = confighttp::validation::merge_config_patch(existing, patch);
+  EXPECT_EQ(merged.value("encoder", ""), "vaapi");
+  EXPECT_FALSE(merged.contains("port"));
+  EXPECT_EQ(merged.value("max_sessions", 0), 2);
+  EXPECT_EQ(merged.value("steamgriddb_api_key", ""), "kept-secret");
+  EXPECT_FALSE(merged.contains("already_blank"));
+  EXPECT_FALSE(merged.contains("headless_mode"));
+}
+
+TEST(ConfigValidationTests, PatchMergeClearsASecretOnlyThroughAnExplicitEmptyValue) {
+  const std::unordered_map<std::string, std::string> existing {
+    {"steamgriddb_api_key", "old-secret"},
+    {"ai_api_key", "other-secret"},
+    {"port", "47989"},
+  };
+  // After normalize_write_only_secret_payload, an empty secret means "clear".
+  const nlohmann::json patch {{"steamgriddb_api_key", ""}, {"port", ""}};
+  const auto merged = confighttp::validation::merge_config_patch(existing, patch);
+  ASSERT_TRUE(merged.contains("steamgriddb_api_key"));
+  EXPECT_EQ(merged["steamgriddb_api_key"], "");
+  EXPECT_EQ(merged.value("ai_api_key", ""), "other-secret");
+  EXPECT_FALSE(merged.contains("port"));
+}

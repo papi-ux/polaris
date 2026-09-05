@@ -116,6 +116,24 @@ TEST(GameArtworkManualLogging, RedactsCredentialFieldsAndOpaquePreviewTokens) {
     "/polaris/v1/games/123e4567-e89b-12d3-a456-426614174000/artwork/candidate/[REDACTED]/poster?token=[REDACTED]&query=Portal 2");
 }
 
+TEST(GameArtworkManualSearchFailure, NamesTheCauseWithAStableCode) {
+  using game_artwork::manual::classify_search_failure;
+  const auto missing = classify_search_failure(false, std::nullopt);
+  EXPECT_EQ(missing.code, "steamgriddb_key_missing");
+  EXPECT_EQ(missing.http_status, 503);
+  EXPECT_NE(missing.message.find("Polaris settings"), std::string::npos);
+
+  const auto rejected = classify_search_failure(true, 401L);
+  EXPECT_EQ(rejected.code, "steamgriddb_unauthorized");
+  EXPECT_EQ(rejected.http_status, 502);
+  EXPECT_NE(rejected.message.find("rejected"), std::string::npos);
+  EXPECT_EQ(classify_search_failure(true, 403L).code, "steamgriddb_unauthorized");
+  EXPECT_EQ(classify_search_failure(true, 429L).code, "steamgriddb_rate_limited");
+  EXPECT_EQ(classify_search_failure(true, 500L).code, "steamgriddb_unavailable");
+  EXPECT_NE(classify_search_failure(true, 500L).message.find("500"), std::string::npos);
+  EXPECT_EQ(classify_search_failure(true, std::nullopt).code, "steamgriddb_unreachable");
+}
+
 TEST(GameArtworkManualPreviewCache, IsBoundedScopedOpaqueAndExpiring) {
   const std::array tokens {
     std::string("00000000000000000000000000000001"),
