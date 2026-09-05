@@ -355,3 +355,78 @@ TEST(LaunchProfileTests, HostHdrCapabilityCanNormalizeAnExplicitRequest) {
   EXPECT_TRUE(resolved.fields.at("hdr").at("locked").get<bool>());
   EXPECT_TRUE(resolved.fields.at("hdr").at("normalized").get<bool>());
 }
+
+namespace {
+  launch_profile::explicit_field_lookup_t lookup_from(std::vector<std::pair<std::string, std::string>> args) {
+    return [args = std::move(args)](std::string_view name) -> std::optional<std::string> {
+      for (const auto &[key, value] : args) {
+        if (key == name) {
+          return value;
+        }
+      }
+      return std::nullopt;
+    };
+  }
+}  // namespace
+
+TEST(LaunchProfileExplicitFields, NamesACommaDecimalFpsInsteadOfTheGenericSentence) {
+  // nova#275: a host running under a comma-decimal locale rejected every
+  // launch with "must be complete and within supported bounds".
+  const auto fields = launch_profile::parse_explicit_launch_fields(
+    lookup_from({{"width", "1920"}, {"height", "1080"}, {"fps", "60,0"}, {"bitrate_kbps", "20000"}})
+  );
+  ASSERT_EQ(fields.problems.size(), 1u);
+  EXPECT_EQ(fields.problems[0].field, "fps");
+  EXPECT_NE(fields.problems[0].reason.find("got '60,0'"), std::string::npos);
+  EXPECT_NE(fields.problems[0].reason.find("dot as the decimal separator"), std::string::npos);
+  const auto text = launch_profile::describe_explicit_launch_rejection(fields);
+  EXPECT_NE(text.find("Explicit launch fields were rejected: fps"), std::string::npos);
+  EXPECT_EQ(text.find("must be complete and within supported bounds"), std::string::npos);
+}
+
+TEST(LaunchProfileExplicitFields, AcceptsACompleteRequestAndKeepsTheOldUnits) {
+  const auto fields = launch_profile::parse_explicit_launch_fields(lookup_from({
+    {"width", "2560"}, {"height", "1440"}, {"fps", "119.88"}, {"bitrate_kbps", "35000"},
+    {"client_max_fps", "120"}, {"display_locked", "TRUE"}, {"bitrate_locked", "0"}, {"topology_locked", "1"}, {"hdr", "on"},
+  }));
+  EXPECT_TRUE(fields.problems.empty());
+  EXPECT_EQ(fields.width, 2560);
+  EXPECT_EQ(fields.height, 1440);
+  EXPECT_EQ(fields.fps_millihertz, 119880);
+  EXPECT_EQ(fields.client_max_fps_millihertz, 120000);
+  EXPECT_EQ(fields.bitrate_kbps, 35000);
+  EXPECT_TRUE(fields.display_locked);
+  EXPECT_FALSE(fields.bitrate_locked);
+  EXPECT_TRUE(fields.topology_locked);
+  EXPECT_EQ(fields.hdr, true);
+  EXPECT_TRUE(fields.complete_explicit_mode());
+  EXPECT_EQ(launch_profile::describe_explicit_launch_rejection(fields), "Explicit launch fields must be complete and within supported bounds.");
+}
+
+TEST(LaunchProfileExplicitFields, NamesMissingModeFieldsAndLockPrerequisites) {
+  const auto partial = launch_profile::parse_explicit_launch_fields(lookup_from({{"width", "1920"}, {"display_locked", "1"}}));
+  ASSERT_EQ(partial.problems.size(), 2u);
+  EXPECT_EQ(partial.problems[0].field, "width/height/fps");
+  EXPECT_NE(partial.problems[0].reason.find("missing height, fps"), std::string::npos);
+  EXPECT_EQ(partial.problems[1].field, "display_locked");
+
+  const auto locked = launch_profile::parse_explicit_launch_fields(lookup_from({{"bitrate_locked", "true"}}));
+  ASSERT_EQ(locked.problems.size(), 1u);
+  EXPECT_EQ(locked.problems[0].reason, "bitrate_locked requires bitrate_kbps");
+
+  const auto flag = launch_profile::parse_explicit_launch_fields(lookup_from({{"topology_locked", "maybe"}}));
+  ASSERT_EQ(flag.problems.size(), 1u);
+  EXPECT_NE(flag.problems[0].reason.find("topology_locked must be 1 or 0; got 'maybe'"), std::string::npos);
+}
+
+TEST(LaunchProfileExplicitFields, BoundsAndEchoesOnlyASafeSliceOfTheValue) {
+  const std::string hostile = std::string(40, 'x') + "\x01\n";
+  const auto fields = launch_profile::parse_explicit_launch_fields(lookup_from({{"bitrate_kbps", hostile}, {"width", "100000"}}));
+  ASSERT_EQ(fields.problems.size(), 2u);
+  EXPECT_EQ(fields.problems[0].field, "width");
+  EXPECT_NE(fields.problems[0].reason.find("between 320 and 16384; got '100000'"), std::string::npos);
+  EXPECT_EQ(fields.problems[1].field, "bitrate_kbps");
+  EXPECT_NE(fields.problems[1].reason.find(std::string(32, 'x') + "...'"), std::string::npos);
+  EXPECT_EQ(fields.problems[1].reason.find('\n'), std::string::npos);
+  EXPECT_EQ(fields.problems[1].reason.find('\x01'), std::string::npos);
+}

@@ -9716,70 +9716,31 @@ namespace nvhttp {
         reply_bad_request("invalid_or_unavailable_encoder", encoder_reject_reason);
         return;
       }
-      bool invalid_argument = false;
-      auto bounded_integer = [&](const char *name, int minimum, int maximum) -> std::optional<int> {
-        const auto it = args.find(name);
-        if (it == args.end()) return std::nullopt;
-        try {
-          std::size_t consumed = 0;
-          const auto value = std::stoll(it->second, &consumed);
-          if (consumed != it->second.size() || value < minimum || value > maximum) {
-            invalid_argument = true;
+      const auto explicit_fields = launch_profile::parse_explicit_launch_fields(
+        [&](std::string_view name) -> std::optional<std::string> {
+          const auto it = args.find(std::string(name));
+          if (it == args.end()) {
             return std::nullopt;
           }
-          return static_cast<int>(value);
-        } catch (...) {
-          invalid_argument = true;
-          return std::nullopt;
+          return it->second;
         }
-      };
-      const auto explicit_width = bounded_integer("width", 320, 16384);
-      const auto explicit_height = bounded_integer("height", 240, 16384);
-      const auto explicit_bitrate = bounded_integer("bitrate_kbps", 1000, 300000);
-      std::optional<int> explicit_fps;
-      if (const auto it = args.find("fps"); it != args.end()) {
-        const auto fps = util::parse_decimal<double>(it->second);
-        if (!fps || *fps < 15.0 || *fps > 240.0) {
-          invalid_argument = true;
-        } else {
-          explicit_fps = static_cast<int>(std::round(*fps * 1000.0));
-        }
-      }
-      std::optional<int> client_max_fps;
-      if (const auto it = args.find("client_max_fps"); it != args.end()) {
-        const auto fps = util::parse_decimal<double>(it->second);
-        if (!fps || *fps < 15.0 || *fps > 360.0) {
-          invalid_argument = true;
-        } else {
-          client_max_fps = static_cast<int>(std::round(*fps * 1000.0));
-        }
-      }
-      const bool any_explicit_mode = explicit_width || explicit_height || explicit_fps;
-      const bool complete_explicit_mode = explicit_width && explicit_height && explicit_fps;
-      const auto exact_flag = [&](const char *name) {
-        const auto it = args.find(name);
-        if (it == args.end()) return false;
-        if (it->second == "1" || boost::iequals(it->second, "true")) return true;
-        if (it->second == "0" || boost::iequals(it->second, "false")) return false;
-        invalid_argument = true;
-        return false;
-      };
-      const bool display_locked = exact_flag("display_locked");
-      const bool bitrate_locked = exact_flag("bitrate_locked");
-      const bool topology_locked = exact_flag("topology_locked");
-      std::optional<bool> explicit_hdr;
-      if (const auto it = args.find("hdr"); it != args.end()) {
-        const auto value = lower_copy(it->second);
-        if (value == "1" || value == "true" || value == "on" || value == "yes") explicit_hdr = true;
-        else if (value == "0" || value == "false" || value == "off" || value == "no") explicit_hdr = false;
-        else invalid_argument = true;
-      }
-      if (invalid_argument || (any_explicit_mode && !complete_explicit_mode) ||
-          (display_locked && !complete_explicit_mode) ||
-          (bitrate_locked && !explicit_bitrate)) {
-        reply_bad_request("invalid_explicit_launch_fields");
+      );
+      if (!explicit_fields.problems.empty()) {
+        const auto reason = launch_profile::describe_explicit_launch_rejection(explicit_fields);
+        BOOST_LOG(info) << "launch_profile: rejecting explicit launch fields for ["sv << device << "]: "sv << reason;
+        reply_bad_request("invalid_explicit_launch_fields", reason);
         return;
       }
+      const auto explicit_width = explicit_fields.width;
+      const auto explicit_height = explicit_fields.height;
+      const auto explicit_bitrate = explicit_fields.bitrate_kbps;
+      const auto explicit_fps = explicit_fields.fps_millihertz;
+      const auto client_max_fps = explicit_fields.client_max_fps_millihertz;
+      const bool complete_explicit_mode = explicit_fields.complete_explicit_mode();
+      const bool display_locked = explicit_fields.display_locked;
+      const bool bitrate_locked = explicit_fields.bitrate_locked;
+      const bool topology_locked = explicit_fields.topology_locked;
+      const auto explicit_hdr = explicit_fields.hdr;
       if (!named_cert_p->name.empty()) {
         if (device != named_cert_p->name) {
           BOOST_LOG(info) << "launch_profile: Optimize API using paired client profile ["sv

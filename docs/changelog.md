@@ -7,6 +7,12 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Shows a Gamescope Session Helper card in Doctor & Support on Linux hosts configured for `gamescope_stream`, naming the launcher Polaris will run, a stale copy shadowing it on PATH, and a launcher or runtime library installed from a different checkout
+- Adds `PATCH /api/config`, which merges a partial write onto the existing configuration instead of rewriting the file from the request body the way `POST` does, and logs how many existing keys a `POST` left out
+- Names the cause when an artwork search fails: the Nova-facing candidate search and the console cover search now answer with a stable code for a missing SteamGridDB key, a rejected key, rate limiting, or an unreachable provider instead of a bare status or an empty result
+- Names the field when explicit launch fields are rejected, including the value seen, so a comma-decimal `fps` or a lock flag without its prerequisite no longer reads as "must be complete and within supported bounds"
+- Tells the console when the installed Polaris package is newer than the running process, which is what a package upgrade without a service restart looks like
+
 ## v1.4.2 - 2026-09-04
 
 A stability and diagnostics update matched with Nova v1.4.2. Polaris lets a capable Nova client choose the encoder for a single game, closes a Linux Vulkan Video crash at disconnect, keeps SteamOS's gamescope file capability from breaking private streams, and stops stale helper installs from being debugged as Polaris bugs. Existing configurations and paired devices remain valid.

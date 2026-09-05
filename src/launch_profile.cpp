@@ -10,6 +10,139 @@
 
 namespace launch_profile {
   namespace {
+    std::string shown_field_value(std::string_view value) {
+      std::string shown;
+      for (const unsigned char ch : value.substr(0, 32)) {
+        shown.push_back((ch < 0x20 || ch == 0x7f) ? '?' : static_cast<char>(ch));
+      }
+      if (value.size() > 32) {
+        shown += "...";
+      }
+      return shown;
+    }
+
+    std::string lowercase_copy(std::string_view value) {
+      std::string lowered(value);
+      std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      return lowered;
+    }
+  }  // namespace
+
+  explicit_launch_fields_t parse_explicit_launch_fields(const explicit_field_lookup_t &lookup) {
+    explicit_launch_fields_t fields;
+    const auto problem = [&](std::string_view field, std::string reason) {
+      fields.problems.push_back({std::string(field), std::move(reason)});
+    };
+    const auto bounded_integer = [&](std::string_view name, long long minimum, long long maximum) -> std::optional<int> {
+      const auto raw = lookup(name);
+      if (!raw) {
+        return std::nullopt;
+      }
+      const auto reject = [&]() {
+        problem(name, std::string(name) + " must be a whole number between " + std::to_string(minimum) + " and " +
+                        std::to_string(maximum) + "; got '" + shown_field_value(*raw) + "'");
+        return std::optional<int> {};
+      };
+      try {
+        std::size_t consumed = 0;
+        const auto value = std::stoll(*raw, &consumed);
+        if (consumed != raw->size() || value < minimum || value > maximum) {
+          return reject();
+        }
+        return static_cast<int>(value);
+      } catch (...) {
+        return reject();
+      }
+    };
+    const auto bounded_fps = [&](std::string_view name, int minimum, int maximum) -> std::optional<int> {
+      const auto raw = lookup(name);
+      if (!raw) {
+        return std::nullopt;
+      }
+      const auto fps = util::parse_decimal<double>(*raw);
+      if (!fps || *fps < minimum || *fps > maximum) {
+        problem(name, std::string(name) + " must be a number between " + std::to_string(minimum) + " and " +
+                        std::to_string(maximum) + " with a dot as the decimal separator; got '" + shown_field_value(*raw) + "'");
+        return std::nullopt;
+      }
+      return static_cast<int>(std::round(*fps * 1000.0));
+    };
+    const auto exact_flag = [&](std::string_view name) -> bool {
+      const auto raw = lookup(name);
+      if (!raw) {
+        return false;
+      }
+      const auto lowered = lowercase_copy(*raw);
+      if (lowered == "1" || lowered == "true") {
+        return true;
+      }
+      if (lowered == "0" || lowered == "false") {
+        return false;
+      }
+      problem(name, std::string(name) + " must be 1 or 0; got '" + shown_field_value(*raw) + "'");
+      return false;
+    };
+
+    fields.width = bounded_integer("width", 320, 16384);
+    fields.height = bounded_integer("height", 240, 16384);
+    fields.bitrate_kbps = bounded_integer("bitrate_kbps", 1000, 300000);
+    fields.fps_millihertz = bounded_fps("fps", 15, 240);
+    fields.client_max_fps_millihertz = bounded_fps("client_max_fps", 15, 360);
+    fields.display_locked = exact_flag("display_locked");
+    fields.bitrate_locked = exact_flag("bitrate_locked");
+    fields.topology_locked = exact_flag("topology_locked");
+    if (const auto raw = lookup("hdr")) {
+      const auto lowered = lowercase_copy(*raw);
+      if (lowered == "1" || lowered == "true" || lowered == "on" || lowered == "yes") {
+        fields.hdr = true;
+      } else if (lowered == "0" || lowered == "false" || lowered == "off" || lowered == "no") {
+        fields.hdr = false;
+      } else {
+        problem("hdr", "hdr must be 1 or 0; got '" + shown_field_value(*raw) + "'");
+      }
+    }
+
+    const auto mode_field_already_failed = std::any_of(fields.problems.begin(), fields.problems.end(), [](const auto &entry) {
+      return entry.field == "width" || entry.field == "height" || entry.field == "fps";
+    });
+    if (fields.any_explicit_mode() && !fields.complete_explicit_mode() && !mode_field_already_failed) {
+      std::string missing;
+      for (const auto &[name, present] : {std::pair {"width", fields.width.has_value()},
+                                          std::pair {"height", fields.height.has_value()},
+                                          std::pair {"fps", fields.fps_millihertz.has_value()}}) {
+        if (!present) {
+          missing += (missing.empty() ? "" : ", ") + std::string(name);
+        }
+      }
+      problem("width/height/fps", "width, height, and fps must be sent together; missing " + missing);
+    }
+    if (fields.display_locked && !fields.complete_explicit_mode()) {
+      problem("display_locked", "display_locked requires width, height, and fps");
+    }
+    if (fields.bitrate_locked && !fields.bitrate_kbps) {
+      problem("bitrate_locked", "bitrate_locked requires bitrate_kbps");
+    }
+    return fields;
+  }
+
+  std::string describe_explicit_launch_rejection(const explicit_launch_fields_t &fields) {
+    if (fields.problems.empty()) {
+      return "Explicit launch fields must be complete and within supported bounds.";
+    }
+    std::string text = "Explicit launch fields were rejected: ";
+    for (std::size_t index = 0; index < fields.problems.size(); ++index) {
+      if (index > 0) {
+        text += "; ";
+      }
+      text += fields.problems[index].reason;
+    }
+    text += ".";
+    return text;
+  }
+
+  namespace {
     struct display_mode_t {
       int width = 0;
       int height = 0;
