@@ -144,6 +144,10 @@ func seatRuntimeRequest(
 		request.ParentWaylandSocket = allocation.CaptureWaylandSocket
 		request.WaylandSocket = allocation.WaylandSocket
 		request.RenderNode = allocation.RenderNode
+		request.DisplayWidth = allocation.DisplayWidth
+		request.DisplayHeight = allocation.DisplayHeight
+		request.DisplayRefreshMillihertz = allocation.RefreshMillihz
+		request.DisplayHDR = allocation.DisplayHDR
 		request.Compositor = allocation.Compositor
 	case runtimeStageVirtualInput:
 		request.InputSeat = allocation.InputSeat

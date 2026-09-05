@@ -141,6 +141,8 @@ if(POLARIS_BUILD_MULTISEAT_WORKER)
             "${CMAKE_BINARY_DIR}/polaris-seat-audio")
     set(MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT
             "${CMAKE_BINARY_DIR}/polaris-seat-display-capture")
+    set(MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT
+            "${CMAKE_BINARY_DIR}/polaris-seat-nested-compositor")
     file(GLOB_RECURSE MULTISEAT_WORKER_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
             "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
@@ -155,6 +157,7 @@ if(POLARIS_BUILD_MULTISEAT_WORKER)
                     "${MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT}"
                     "${MULTISEAT_AUDIO_PROVIDER_OUTPUT}"
                     "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
+                    "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
             COMMENT "Building isolated multiseat worker, dispatcher, and private base providers"
             COMMAND "${CMAKE_COMMAND}" -E env
@@ -194,6 +197,13 @@ if(POLARIS_BUILD_MULTISEAT_WORKER)
                     "-ldflags=-buildid= -s -w"
                     -o "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
                     ./cmd/polaris-seat-display-capture
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}"
+                    ./cmd/polaris-seat-nested-compositor
             DEPENDS ${MULTISEAT_WORKER_SOURCES}
             VERBATIM)
     add_custom_target(multiseat-worker ALL DEPENDS
@@ -201,7 +211,8 @@ if(POLARIS_BUILD_MULTISEAT_WORKER)
             "${MULTISEAT_RUNTIME_HELPER_OUTPUT}"
             "${MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT}"
             "${MULTISEAT_AUDIO_PROVIDER_OUTPUT}"
-            "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}")
+            "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
+            "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}")
     install(PROGRAMS
             "${MULTISEAT_WORKER_OUTPUT}"
             "${MULTISEAT_RUNTIME_HELPER_OUTPUT}"
@@ -215,6 +226,9 @@ if(POLARIS_BUILD_MULTISEAT_WORKER)
     install(PROGRAMS "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
             DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris-seat"
             RENAME "display-capture")
+    install(PROGRAMS "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris-seat"
+            RENAME "nested-compositor")
 endif()
 
 # tests

@@ -183,12 +183,20 @@ func validateRequest(request Request) error {
 		base.ParentWaylandSocket = request.ParentWaylandSocket
 		base.WaylandSocket = request.WaylandSocket
 		base.RenderNode = request.RenderNode
+		base.DisplayWidth = request.DisplayWidth
+		base.DisplayHeight = request.DisplayHeight
+		base.DisplayRefreshMillihertz = request.DisplayRefreshMillihertz
+		base.DisplayHDR = request.DisplayHDR
 		base.Compositor = request.Compositor
 		if request != base ||
 			!validNameToken(request.ParentWaylandSocket, 128) ||
 			!validNameToken(request.WaylandSocket, 128) ||
 			request.ParentWaylandSocket == request.WaylandSocket ||
 			!validRenderNode(request.RenderNode) ||
+			request.DisplayWidth == 0 || request.DisplayWidth > 16384 ||
+			request.DisplayHeight == 0 || request.DisplayHeight > 16384 ||
+			request.DisplayRefreshMillihertz < 1000 ||
+			request.DisplayRefreshMillihertz > 1000000 ||
 			!validCompositor(request.Compositor) {
 			return errors.New("runtime compositor request is invalid")
 		}
@@ -266,10 +274,18 @@ func Arguments(request Request) ([]string, error) {
 			"--display-hdr="+hdr,
 		), nil
 	case StageNestedCompositor:
+		hdr := "0"
+		if request.DisplayHDR {
+			hdr = "1"
+		}
 		return append(arguments,
 			"--parent-wayland-socket="+request.ParentWaylandSocket,
 			"--wayland-socket="+request.WaylandSocket,
 			"--render-node="+request.RenderNode,
+			"--display-width="+canonicalUint(request.DisplayWidth),
+			"--display-height="+canonicalUint(request.DisplayHeight),
+			"--display-refresh-millihz="+canonicalUint(request.DisplayRefreshMillihertz),
+			"--display-hdr="+hdr,
 			"--compositor="+request.Compositor,
 		), nil
 	case StageVirtualInput:
@@ -465,7 +481,7 @@ func parseArguments(arguments []string) (Request, error) {
 			}
 		}
 	case StageNestedCompositor:
-		if len(arguments) != 7 {
+		if len(arguments) != 11 {
 			return Request{}, errors.New("runtime helper argv is invalid")
 		}
 		if request.ParentWaylandSocket, err = value(3, "--parent-wayland-socket="); err == nil {
@@ -475,7 +491,46 @@ func parseArguments(arguments []string) (Request, error) {
 			request.RenderNode, err = value(5, "--render-node=")
 		}
 		if err == nil {
-			request.Compositor, err = value(6, "--compositor=")
+			var raw string
+			raw, err = value(6, "--display-width=")
+			if err == nil {
+				parsed, parseError := parseCanonicalUint(raw, 32)
+				err = parseError
+				request.DisplayWidth = uint32(parsed)
+			}
+		}
+		if err == nil {
+			var raw string
+			raw, err = value(7, "--display-height=")
+			if err == nil {
+				parsed, parseError := parseCanonicalUint(raw, 32)
+				err = parseError
+				request.DisplayHeight = uint32(parsed)
+			}
+		}
+		if err == nil {
+			var raw string
+			raw, err = value(8, "--display-refresh-millihz=")
+			if err == nil {
+				parsed, parseError := parseCanonicalUint(raw, 32)
+				err = parseError
+				request.DisplayRefreshMillihertz = uint32(parsed)
+			}
+		}
+		if err == nil {
+			var raw string
+			raw, err = value(9, "--display-hdr=")
+			switch raw {
+			case "0":
+				request.DisplayHDR = false
+			case "1":
+				request.DisplayHDR = true
+			default:
+				err = errors.New("runtime helper HDR flag is invalid")
+			}
+		}
+		if err == nil {
+			request.Compositor, err = value(10, "--compositor=")
 		}
 	case StageVirtualInput:
 		if len(arguments) != 4 {

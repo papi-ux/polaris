@@ -144,6 +144,10 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 		"--parent-wayland-socket=" + config.CaptureWaylandSocket,
 		"--wayland-socket=" + config.WaylandSocket,
 		"--render-node=" + config.RenderNode,
+		"--display-width=3840",
+		"--display-height=2160",
+		"--display-refresh-millihz=97000",
+		"--display-hdr=1",
 		"--compositor=gamescope",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("nested compositor argv mismatch: %#v", got)

@@ -321,7 +321,7 @@ capability, client key, profile key, worker name, or controller epoch.
 | session bus | none |
 | audio | audio sink |
 | display capture | outer capture Wayland socket, render node, topology, worker-local media policy, width, height, refresh in mHz, HDR flag |
-| nested compositor | outer parent Wayland socket, inner app Wayland socket, render node, concrete compositor |
+| nested compositor | outer parent Wayland socket, inner app Wayland socket, render node, width, height, refresh in mHz, HDR flag, concrete compositor |
 | virtual input | input seat |
 | encoder | logical GPU, render node, session count, worker-local media policy |
 | launcher process tree | runtime profile, workload kind, opaque catalog target, inner Wayland socket, audio sink, input seat |
@@ -360,12 +360,14 @@ non-group/world-writable checks. The helper executes that already-open file in
 place through its descriptor, with a canonical `serve-resource-v1` argv and
 only the stage environment. Catalog arguments remain literal elements after
 an explicit `--`; no shell or executable path crosses from the controller.
-Exec-in-place preserves the exact PID and process group already owned by the
-worker, so provider readiness, descendants, TERM, and deadline KILL cannot
-escape into a second supervision tree. Offline Linux tests exercise same-PID
-dispatch, strict catalog ownership, bad readiness after provider start,
-descendant cleanup, literal hostile catalog arguments, and two concurrent
-helper groups.
+Exec-in-place preserves the exact provider PID and initial process group
+already owned by the worker. Directly supervised children receive a
+parent-death kill and bounded TERM/KILL handling. A component such as Gamescope
+can create its own descendant session, so the provider still owns normal
+Xwayland shutdown and exact container teardown remains the final backstop.
+Offline Linux tests exercise same-PID dispatch, strict catalog ownership, bad
+readiness after provider start, descendant cleanup, literal hostile catalog
+arguments, and two concurrent helper groups.
 
 Three catalog targets are now concrete but still inert in production. The
 session-bus provider validates a mode-0700, same-UID runtime directory, rejects
@@ -405,10 +407,13 @@ does not expose a typed HDR contract. The child inherits a `0077` umask, all
 artifacts are captured by inode, and cleanup retains replacements while still
 removing the other owned sockets and lock.
 
-All three providers accept only their canonical stage invocation with an empty
-provider-argument tail. Every dependency is opened no-follow as a root-owned,
-non-group/world-writable executable and launched through that descriptor with
-a fixed environment, no shell, bounded output, and a parent-death kill. The
+All four implemented providers accept only their canonical stage invocation
+with an empty provider-argument tail. Every provider-owned top-level dependency
+is opened no-follow as a root-owned, non-group/world-writable executable and
+launched through that descriptor with a fixed environment and no shell. The
+Gamescope provider additionally validates `/usr/bin/Xwayland` immediately
+before start and gives Gamescope only `/usr/bin` as its child-search path;
+Gamescope owns that child exec inside the immutable image root. The
 readiness FIFO is sealed close-on-exec before any child starts. Real Linux tests
 exercise D-Bus and audio plus the upstream compositor and raw-frame transport
 in software mode, clean normal and partial failure, and prove simultaneous
@@ -418,15 +423,46 @@ was built from `gst-wayland-display` revision
 `081feb5ab8057937b78104668bb1f507ce42e18d`; no plugin binary is vendored or
 installed by this tree.
 
+The fourth provider owns the nested Gamescope boundary without owning capture
+or a game process. It consumes and re-probes the exact capture-host socket,
+launches Gamescope's Wayland backend with one Xwayland server and the admitted
+geometry, and uses Gamescope 3.16.25's readiness FIFO record to discover the
+runtime-selected X and inner Wayland displays. Readiness then requires the
+supervised PID and UID at both protocol endpoints, exact Wayland width, height,
+and millihertz, matching X11 root dimensions, and unchanged parent-socket
+identity. Fractional refresh is inherited and verified rather than rounded.
+The worker's private `/tmp` must begin with no X display, so production
+Gamescope must select `:0`; every runtime and X11 artifact is inode-fenced.
+
+The request preserves and validates the admitted render-node path, but
+Gamescope 3.16 does not expose an exact render-node-path selector. The
+`POLARIS_RENDER_NODE` environment marker is evidence for child diagnostics, not
+device-selection enforcement. Exact GPU authority therefore remains the
+container backend's explicit character-device allowlist together with the
+outer Wayland binding; the production adapter stays inert until that complete
+boundary is activated and physically gated.
+
+The software test backend is deliberately not represented as a production
+nested smoke. Fedora's installed lavapipe can run Gamescope's headless backend
+and real Xwayland/Wayland protocols, but it lacks the present-id and
+present-wait extensions Gamescope requires for its Wayland backend. The
+installed Xwayland still opens the host render node during initialization even
+when glamor is explicitly disabled, so this opt-in test requires separate
+DRM-device authorization. Fake-process tests pin the exact production argv,
+parent socket,
+readiness record, peer identity, geometry, failure cleanup, replacement
+retention, and two-seat isolation. An authorized real-GPU test is still needed
+before the Wayland backend can become a release gate.
+
 The providers are built and copied into their fixed catalog locations, but the
 production worker remains inert because `run` still injects no adapters or data
 plane. The controller/coordinator catalog path also remains outside the current
 singleton runtime. No OCI image was built during this checkpoint. The image
 recipe now fails closed unless its locked root contains `gst-launch-1.0`,
-`gst-inspect-1.0`, `waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and
-`fakesink`; the existing locked application roots have not yet passed that
-gate. Nested compositor, virtual input, encoder, and launcher providers remain
-missing; Podman health still means only supervisor liveness.
+`gst-inspect-1.0`, `waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, `fakesink`,
+`gamescope`, and `Xwayland`; the existing locked application roots
+have not yet passed that gate. Virtual input, encoder, and launcher providers
+remain missing; Podman health still means only supervisor liveness.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless

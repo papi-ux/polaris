@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -63,6 +66,18 @@ func startRealProvider(
 	run func(context.Context, io.WriteCloser) error,
 ) *runningRealProvider {
 	t.Helper()
+	return startRealProviderWithTimeout(t, 8*time.Second, run)
+}
+
+func startRealProviderWithTimeout(
+	t *testing.T,
+	readinessTimeout time.Duration,
+	run func(context.Context, io.WriteCloser) error,
+) *runningRealProvider {
+	t.Helper()
+	if readinessTimeout <= 0 {
+		t.Fatal("real provider readiness timeout is invalid")
+	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +85,7 @@ func startRealProvider(
 	context, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- run(context, writer) }()
-	record, err := readBoundedLine(reader, 8*time.Second, 64)
+	record, err := readBoundedLine(reader, readinessTimeout, 64)
 	if err != nil || record != seatruntime.ReadyRecord {
 		cancel()
 		select {
@@ -350,4 +365,300 @@ func TestRealDisplayCapturesRemainIndependent(t *testing.T) {
 	}
 	stopRealProvider(t, second)
 	requireEmptyRuntime(t, secondPath)
+}
+
+func realNestedCompositorOptions(t *testing.T, runtimePath string) providerOptions {
+	t.Helper()
+	if os.Getenv("POLARIS_TEST_GAMESCOPE_ALLOW_DRM") != "1" {
+		t.Skip("real Gamescope/Xwayland test needs explicit DRM-device authorization")
+	}
+	icdPath := os.Getenv("POLARIS_TEST_GAMESCOPE_SOFTWARE_ICD")
+	if icdPath == "" {
+		t.Skip("POLARIS_TEST_GAMESCOPE_SOFTWARE_ICD is not set")
+	}
+	if !validAbsolutePath(icdPath) {
+		t.Fatalf("real Gamescope software ICD path is invalid: %s", icdPath)
+	}
+	status, err := os.Lstat(icdPath)
+	if err != nil || !status.Mode().IsRegular() || status.Mode().Perm()&0o022 != 0 {
+		t.Fatalf("real Gamescope software ICD is unavailable or writable: %v", err)
+	}
+	options := defaultProviderOptions()
+	options.runtimeDirectory = runtimePath
+	options.runtimeOwnerUID = uint32(os.Geteuid())
+	options.softwareGamescope = true
+	options.softwareVulkanICDPath = icdPath
+	options.allowSharedX11 = true
+	options.startupTimeout = defaultGamescopeStartupTimeout
+	options.probeTimeout = 3 * time.Second
+	requireTrustedBinary(t, options.gamescopePath, options.executableOwnerUID)
+	requireTrustedBinary(t, options.xWaylandPath, options.executableOwnerUID)
+	return options
+}
+
+func startRealNestedCompositor(
+	t *testing.T,
+	request seatruntime.Request,
+	options providerOptions,
+) *runningRealProvider {
+	t.Helper()
+	return startRealProviderWithTimeout(
+		t,
+		30*time.Second,
+		func(providerContext context.Context, ready io.WriteCloser) error {
+			return runNestedCompositor(providerContext, request, ready, options)
+		},
+	)
+}
+
+func readRealGamescopeSession(
+	t *testing.T,
+	runtimePath string,
+	request seatruntime.Request,
+) gamescopeReadyInfo {
+	t.Helper()
+	_, _, sessionName := gamescopeScopedNames(request.RuntimeNamespace)
+	sessionPath := filepath.Join(runtimePath, sessionName)
+	identity, err := lstatIdentity(sessionPath)
+	if err != nil || identity.mode&syscall.S_IFMT != syscall.S_IFREG ||
+		identity.uid != uint32(os.Geteuid()) || identity.mode&0o7777 != 0o600 {
+		t.Fatalf("real Gamescope session record is invalid: %#v, %v", identity, err)
+	}
+	content, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(content), "\n")
+	if len(lines) != 6 || lines[0] != strings.TrimSuffix(gamescopeSessionRecordHeader, "\n") ||
+		!strings.HasPrefix(lines[1], "DISPLAY=:") ||
+		lines[2] != "STEAM_GAME_DISPLAY_0="+strings.TrimPrefix(lines[1], "DISPLAY=") ||
+		lines[3] != "WAYLAND_DISPLAY="+request.WaylandSocket ||
+		lines[4] != "GAMESCOPE_WAYLAND_DISPLAY="+request.WaylandSocket ||
+		lines[5] != "" {
+		t.Fatalf("real Gamescope session record is malformed: %q", content)
+	}
+	display := strings.TrimPrefix(lines[1], "DISPLAY=")
+	info, err := parseGamescopeReadyRecord(display+" "+gamescopeWaylandSocket+"\n", true)
+	if err != nil {
+		t.Fatalf("real Gamescope display record is invalid: %q, %v", display, err)
+	}
+	return info
+}
+
+func realX11Baseline(t *testing.T) map[string]artifactIdentity {
+	t.Helper()
+	options := defaultProviderOptions()
+	sockets, err := openFixedDirectory(
+		options.x11SocketDirectory,
+		options.x11DirectoryOwnerUID,
+		options.x11DirectoryMode,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sockets.close()
+	locks, err := openFixedDirectory(
+		options.x11LockDirectory,
+		options.x11DirectoryOwnerUID,
+		options.x11DirectoryMode,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locks.close()
+	baseline, err := captureX11Baseline(sockets, locks, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return baseline
+}
+
+func runtimeProcessIDs(t *testing.T, runtimePath string) map[int]string {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setting := "XDG_RUNTIME_DIR=" + runtimePath
+	processes := make(map[int]string)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		environment, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "environ"))
+		if err != nil {
+			continue
+		}
+		matched := false
+		for _, value := range strings.Split(string(environment), "\x00") {
+			if value == setting {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		executable, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		if err != nil {
+			continue
+		}
+		processes[pid] = filepath.Base(strings.TrimSuffix(executable, " (deleted)"))
+	}
+	return processes
+}
+
+func requireRealGamescopeProcesses(t *testing.T, runtimePath string) map[int]string {
+	t.Helper()
+	processes := runtimeProcessIDs(t, runtimePath)
+	gamescopeSeen := false
+	xwaylandSeen := false
+	for _, executable := range processes {
+		if executable == "gamescope" {
+			gamescopeSeen = true
+		}
+		if executable == "Xwayland" {
+			xwaylandSeen = true
+		}
+	}
+	if !gamescopeSeen || !xwaylandSeen {
+		t.Fatalf("real Gamescope process tree was not observable for runtime %s: %v", filepath.Base(runtimePath), processes)
+	}
+	return processes
+}
+
+func requireRealX11ArtifactsGone(
+	t *testing.T,
+	info gamescopeReadyInfo,
+	baseline map[string]artifactIdentity,
+) {
+	t.Helper()
+	options := defaultProviderOptions()
+	socketPath, lockPath, err := x11DisplayPaths(
+		options.x11SocketDirectory,
+		options.x11LockDirectory,
+		info.displayNumber,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{socketPath, lockPath} {
+		if _, present := baseline[path]; present {
+			t.Fatalf("real Gamescope reused a baseline X11 artifact: %s", filepath.Base(path))
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("real Gamescope retained an X11 artifact: %s, %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestRealHeadlessGamescopePublishesBothProtocolsAndCleansUp(t *testing.T) {
+	runtimePath := privateDisplayRuntimeDirectoryForTest(t)
+	displayOptions := realDisplayProviderOptions(t, runtimePath)
+	nestedOptions := realNestedCompositorOptions(t, runtimePath)
+	x11Baseline := realX11Baseline(t)
+	display := displayRequest("real-nested", "polaris-capture-real-nested")
+	display.DisplayWidth = 1280
+	display.DisplayHeight = 720
+	outer := startRealProvider(t, func(providerContext context.Context, ready io.WriteCloser) error {
+		return runDisplayCapture(providerContext, display, ready, displayOptions)
+	})
+	outerArtifacts := snapshotDirectoryIdentities(t, runtimePath)
+	request := nestedRequestFromDisplay(display, "polaris-wayland-real-nested")
+	nested := startRealNestedCompositor(t, request, nestedOptions)
+	info := readRealGamescopeSession(t, runtimePath, request)
+	if err := probeWaylandDisplay(
+		context.Background(),
+		filepath.Join(runtimePath, request.WaylandSocket),
+		waylandProbeExpectation{
+			width: request.DisplayWidth, height: request.DisplayHeight,
+			refresh: request.DisplayRefreshMillihertz,
+			peerPID: 0, peerUID: nestedOptions.runtimeOwnerUID,
+		},
+		nestedOptions.probeTimeout,
+	); err != nil {
+		stopRealProvider(t, nested)
+		stopRealProvider(t, outer)
+		t.Fatalf("real Gamescope Wayland alias is unavailable: %v", err)
+	}
+	requireRealGamescopeProcesses(t, runtimePath)
+	stopRealProvider(t, nested)
+	if after := snapshotDirectoryIdentities(t, runtimePath); !reflect.DeepEqual(after, outerArtifacts) {
+		stopRealProvider(t, outer)
+		t.Fatalf("real Gamescope cleanup changed the outer display: before=%v after=%v", outerArtifacts, after)
+	}
+	requireRealX11ArtifactsGone(t, info, x11Baseline)
+	stopRealProvider(t, outer)
+	requireEmptyRuntime(t, runtimePath)
+}
+
+func TestTwoRealHeadlessGamescopeStacksRemainIndependent(t *testing.T) {
+	firstRuntime := privateDisplayRuntimeDirectoryForTest(t)
+	secondRuntime := privateDisplayRuntimeDirectoryForTest(t)
+	firstDisplayOptions := realDisplayProviderOptions(t, firstRuntime)
+	secondDisplayOptions := realDisplayProviderOptions(t, secondRuntime)
+	firstNestedOptions := realNestedCompositorOptions(t, firstRuntime)
+	secondNestedOptions := realNestedCompositorOptions(t, secondRuntime)
+	x11Baseline := realX11Baseline(t)
+	firstDisplay := displayRequest("real-nested-first", "polaris-capture-real-nested-first")
+	firstDisplay.DisplayWidth = 1280
+	firstDisplay.DisplayHeight = 720
+	secondDisplay := displayRequest("real-nested-second", "polaris-capture-real-nested-second")
+	secondDisplay.DisplayWidth = 960
+	secondDisplay.DisplayHeight = 540
+	secondDisplay.DisplayRefreshMillihertz = 97000
+	firstOuter := startRealProvider(t, func(providerContext context.Context, ready io.WriteCloser) error {
+		return runDisplayCapture(providerContext, firstDisplay, ready, firstDisplayOptions)
+	})
+	firstRequest := nestedRequestFromDisplay(firstDisplay, "polaris-wayland-real-nested-first")
+	first := startRealNestedCompositor(t, firstRequest, firstNestedOptions)
+	firstInfo := readRealGamescopeSession(t, firstRuntime, firstRequest)
+	secondOuter := startRealProvider(t, func(providerContext context.Context, ready io.WriteCloser) error {
+		return runDisplayCapture(providerContext, secondDisplay, ready, secondDisplayOptions)
+	})
+	secondRequest := nestedRequestFromDisplay(secondDisplay, "polaris-wayland-real-nested-second")
+	second := startRealNestedCompositor(t, secondRequest, secondNestedOptions)
+	secondInfo := readRealGamescopeSession(t, secondRuntime, secondRequest)
+	if firstInfo.displayName == secondInfo.displayName {
+		stopRealProvider(t, first)
+		stopRealProvider(t, second)
+		stopRealProvider(t, firstOuter)
+		stopRealProvider(t, secondOuter)
+		t.Fatalf("two real Gamescope stacks shared X11 display %s", firstInfo.displayName)
+	}
+	firstProcesses := requireRealGamescopeProcesses(t, firstRuntime)
+	secondProcesses := requireRealGamescopeProcesses(t, secondRuntime)
+	for pid := range firstProcesses {
+		if _, present := secondProcesses[pid]; present {
+			stopRealProvider(t, first)
+			stopRealProvider(t, second)
+			stopRealProvider(t, firstOuter)
+			stopRealProvider(t, secondOuter)
+			t.Fatalf("two real Gamescope stacks shared process %d", pid)
+		}
+	}
+	stopRealProvider(t, first)
+	stopRealProvider(t, firstOuter)
+	requireEmptyRuntime(t, firstRuntime)
+	requireRealX11ArtifactsGone(t, firstInfo, x11Baseline)
+	if err := probeWaylandDisplay(
+		context.Background(),
+		filepath.Join(secondRuntime, secondRequest.WaylandSocket),
+		waylandProbeExpectation{
+			width: secondRequest.DisplayWidth, height: secondRequest.DisplayHeight,
+			refresh: secondRequest.DisplayRefreshMillihertz,
+			peerPID: 0, peerUID: secondNestedOptions.runtimeOwnerUID,
+		},
+		secondNestedOptions.probeTimeout,
+	); err != nil {
+		stopRealProvider(t, second)
+		stopRealProvider(t, secondOuter)
+		t.Fatalf("stopping one real Gamescope stack harmed the other: %v", err)
+	}
+	requireRealGamescopeProcesses(t, secondRuntime)
+	stopRealProvider(t, second)
+	stopRealProvider(t, secondOuter)
+	requireEmptyRuntime(t, secondRuntime)
+	requireRealX11ArtifactsGone(t, secondInfo, x11Baseline)
 }

@@ -34,7 +34,10 @@ RUN go test -trimpath ./... && \
       -o /out/polaris-seat-audio ./cmd/polaris-seat-audio && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
-      -o /out/polaris-seat-display-capture ./cmd/polaris-seat-display-capture
+      -o /out/polaris-seat-display-capture ./cmd/polaris-seat-display-capture && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-nested-compositor ./cmd/polaris-seat-nested-compositor
 
 FROM ${RUNTIME_IMAGE}
 ARG POLARIS_REVISION=unknown
@@ -46,12 +49,15 @@ COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-session-bus /usr/libexec/polaris-seat/session-bus
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-display-capture /usr/libexec/polaris-seat/display-capture
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-nested-compositor /usr/libexec/polaris-seat/nested-compositor
 RUN test -x /usr/bin/dbus-daemon && \
     test -x /usr/bin/pipewire && \
     test -x /usr/bin/pw-cli && \
     test -x /usr/bin/pactl && \
     test -x /usr/bin/gst-launch-1.0 && \
     test -x /usr/bin/gst-inspect-1.0 && \
+    test -x /usr/bin/gamescope && \
+    test -x /usr/bin/Xwayland && \
     gst-inspect-1.0 waylanddisplaysrc >/dev/null && \
     gst-inspect-1.0 unixfdsink >/dev/null && \
     gst-inspect-1.0 unixfdsrc >/dev/null && \

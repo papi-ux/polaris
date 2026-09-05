@@ -51,7 +51,10 @@ func protocolTestRequests() []Request {
 			Stage: StageNestedCompositor, RuntimeNamespace: namespace,
 			ParentWaylandSocket: "polaris-capture-7",
 			WaylandSocket:       "polaris-wayland-7",
-			RenderNode:          "/dev/dri/renderD128", Compositor: "gamescope",
+			RenderNode:          "/dev/dri/renderD128",
+			DisplayWidth:        3840, DisplayHeight: 2160,
+			DisplayRefreshMillihertz: 97000, DisplayHDR: true,
+			Compositor: "gamescope",
 		},
 		{
 			Stage: StageVirtualInput, RuntimeNamespace: namespace,

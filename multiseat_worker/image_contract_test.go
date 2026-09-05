@@ -76,16 +76,20 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 		"-o /out/polaris-seat-session-bus ./cmd/polaris-seat-session-bus",
 		"-o /out/polaris-seat-audio ./cmd/polaris-seat-audio",
 		"-o /out/polaris-seat-display-capture ./cmd/polaris-seat-display-capture",
+		"-o /out/polaris-seat-nested-compositor ./cmd/polaris-seat-nested-compositor",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-session-bus /usr/libexec/polaris-seat/session-bus",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-display-capture /usr/libexec/polaris-seat/display-capture",
+		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-nested-compositor /usr/libexec/polaris-seat/nested-compositor",
 		"test -x /usr/bin/dbus-daemon",
 		"test -x /usr/bin/pipewire",
 		"test -x /usr/bin/pw-cli",
 		"test -x /usr/bin/pactl",
 		"test -x /usr/bin/gst-launch-1.0",
 		"test -x /usr/bin/gst-inspect-1.0",
+		"test -x /usr/bin/gamescope",
+		"test -x /usr/bin/Xwayland",
 		"gst-inspect-1.0 waylanddisplaysrc",
 		"gst-inspect-1.0 unixfdsink",
 		"gst-inspect-1.0 unixfdsrc",
@@ -133,6 +137,7 @@ func TestRuntimeProvidersArePackagedButProcessAdaptersRemainUnwired(t *testing.T
 		"/usr/libexec/polaris-seat/session-bus",
 		"/usr/libexec/polaris-seat/audio",
 		"/usr/libexec/polaris-seat/display-capture",
+		"/usr/libexec/polaris-seat/nested-compositor",
 	} {
 		if !strings.Contains(containerfile, provider) {
 			t.Fatalf("implemented but inert provider %q is absent from the worker image", provider)

@@ -180,9 +180,9 @@ func waylandRoundTrip(
 	return errors.New("runtime Wayland response exceeded its bound")
 }
 
-func verifyWaylandPeer(connection *net.UnixConn, expectedPID int, expectedUID uint32) error {
-	if connection == nil || expectedPID <= 0 {
-		return errors.New("runtime Wayland peer expectation is invalid")
+func verifyUnixPeer(connection *net.UnixConn, expectedPID int, expectedUID uint32) error {
+	if connection == nil || expectedPID < 0 {
+		return errors.New("runtime Unix peer expectation is invalid")
 	}
 	raw, err := connection.SyscallConn()
 	if err != nil {
@@ -197,7 +197,15 @@ func verifyWaylandPeer(connection *net.UnixConn, expectedPID int, expectedUID ui
 			syscall.SO_PEERCRED,
 		)
 	}); err != nil || controlError != nil || credential == nil ||
-		int(credential.Pid) != expectedPID || credential.Uid != expectedUID {
+		(expectedPID > 0 && int(credential.Pid) != expectedPID) ||
+		credential.Uid != expectedUID {
+		return errors.New("runtime Unix peer identity is invalid")
+	}
+	return nil
+}
+
+func verifyWaylandPeer(connection *net.UnixConn, expectedPID int, expectedUID uint32) error {
+	if err := verifyUnixPeer(connection, expectedPID, expectedUID); err != nil {
 		return errors.New("runtime Wayland peer identity is invalid")
 	}
 	return nil

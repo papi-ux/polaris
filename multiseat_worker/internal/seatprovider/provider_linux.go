@@ -24,50 +24,69 @@ const (
 	// Fedora exposes pipewire-pulse as a symlink to the same trusted binary.
 	// The explicit pulse configuration selects the service role, so pin the
 	// regular executable itself and never follow the packaging symlink.
-	defaultPipeWirePulsePath = "/usr/bin/pipewire"
-	defaultPWCLIPath         = "/usr/bin/pw-cli"
-	defaultPactlPath         = "/usr/bin/pactl"
-	defaultGSTLaunchPath     = "/usr/bin/gst-launch-1.0"
-	defaultGSTInspectPath    = "/usr/bin/gst-inspect-1.0"
+	defaultPipeWirePulsePath  = "/usr/bin/pipewire"
+	defaultPWCLIPath          = "/usr/bin/pw-cli"
+	defaultPactlPath          = "/usr/bin/pactl"
+	defaultGSTLaunchPath      = "/usr/bin/gst-launch-1.0"
+	defaultGSTInspectPath     = "/usr/bin/gst-inspect-1.0"
+	defaultGamescopePath      = "/usr/bin/gamescope"
+	defaultXWaylandPath       = "/usr/bin/Xwayland"
+	defaultX11SocketDirectory = "/tmp/.X11-unix"
+	defaultX11LockDirectory   = "/tmp"
 
 	maximumProviderOutput = 64 * 1024
 )
 
 type providerOptions struct {
-	runtimeDirectory   string
-	runtimeOwnerUID    uint32
-	executableOwnerUID uint32
-	dbusDaemonPath     string
-	pipeWirePath       string
-	pipeWirePulsePath  string
-	pwCLIPath          string
-	pactlPath          string
-	gstLaunchPath      string
-	gstInspectPath     string
-	gstPluginPath      string
-	softwareDisplay    bool
-	startupTimeout     time.Duration
-	probeTimeout       time.Duration
-	stopTimeout        time.Duration
-	probeInterval      time.Duration
+	runtimeDirectory      string
+	runtimeOwnerUID       uint32
+	executableOwnerUID    uint32
+	dbusDaemonPath        string
+	pipeWirePath          string
+	pipeWirePulsePath     string
+	pwCLIPath             string
+	pactlPath             string
+	gstLaunchPath         string
+	gstInspectPath        string
+	gstPluginPath         string
+	softwareDisplay       bool
+	gamescopePath         string
+	xWaylandPath          string
+	x11SocketDirectory    string
+	x11LockDirectory      string
+	x11DirectoryOwnerUID  uint32
+	x11DirectoryMode      uint32
+	softwareGamescope     bool
+	softwareVulkanICDPath string
+	allowSharedX11        bool
+	startupTimeout        time.Duration
+	probeTimeout          time.Duration
+	stopTimeout           time.Duration
+	probeInterval         time.Duration
 }
 
 func defaultProviderOptions() providerOptions {
 	return providerOptions{
-		runtimeDirectory:   defaultRuntimeDirectory,
-		runtimeOwnerUID:    uint32(os.Geteuid()),
-		executableOwnerUID: 0,
-		dbusDaemonPath:     defaultDBusDaemonPath,
-		pipeWirePath:       defaultPipeWirePath,
-		pipeWirePulsePath:  defaultPipeWirePulsePath,
-		pwCLIPath:          defaultPWCLIPath,
-		pactlPath:          defaultPactlPath,
-		gstLaunchPath:      defaultGSTLaunchPath,
-		gstInspectPath:     defaultGSTInspectPath,
-		startupTimeout:     5 * time.Second,
-		probeTimeout:       time.Second,
-		stopTimeout:        time.Second,
-		probeInterval:      20 * time.Millisecond,
+		runtimeDirectory:     defaultRuntimeDirectory,
+		runtimeOwnerUID:      uint32(os.Geteuid()),
+		executableOwnerUID:   0,
+		dbusDaemonPath:       defaultDBusDaemonPath,
+		pipeWirePath:         defaultPipeWirePath,
+		pipeWirePulsePath:    defaultPipeWirePulsePath,
+		pwCLIPath:            defaultPWCLIPath,
+		pactlPath:            defaultPactlPath,
+		gstLaunchPath:        defaultGSTLaunchPath,
+		gstInspectPath:       defaultGSTInspectPath,
+		gamescopePath:        defaultGamescopePath,
+		xWaylandPath:         defaultXWaylandPath,
+		x11SocketDirectory:   defaultX11SocketDirectory,
+		x11LockDirectory:     defaultX11LockDirectory,
+		x11DirectoryOwnerUID: 0,
+		x11DirectoryMode:     0o1777,
+		startupTimeout:       5 * time.Second,
+		probeTimeout:         time.Second,
+		stopTimeout:          time.Second,
+		probeInterval:        20 * time.Millisecond,
 	}
 }
 
@@ -85,8 +104,18 @@ func normalizeProviderOptions(options providerOptions) (providerOptions, error) 
 		!validAbsolutePath(options.pactlPath) ||
 		!validAbsolutePath(options.gstLaunchPath) ||
 		!validAbsolutePath(options.gstInspectPath) ||
+		!validAbsolutePath(options.gamescopePath) ||
+		!validAbsolutePath(options.xWaylandPath) ||
+		!validAbsolutePath(options.x11SocketDirectory) ||
+		!validAbsolutePath(options.x11LockDirectory) ||
 		(options.gstPluginPath != "" &&
 			!validAbsolutePath(options.gstPluginPath)) ||
+		(options.softwareVulkanICDPath != "" &&
+			!validAbsolutePath(options.softwareVulkanICDPath)) ||
+		options.x11DirectoryMode == 0 || options.x11DirectoryMode > 0o7777 ||
+		(options.softwareGamescope && options.softwareVulkanICDPath == "") ||
+		(!options.softwareGamescope &&
+			(options.softwareVulkanICDPath != "" || options.allowSharedX11)) ||
 		options.startupTimeout <= 0 || options.probeTimeout <= 0 ||
 		options.stopTimeout <= 0 || options.probeInterval <= 0 ||
 		options.probeInterval > options.startupTimeout {

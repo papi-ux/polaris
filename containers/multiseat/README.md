@@ -7,17 +7,18 @@ multiseat or make the current Polaris process a container controller.
 reference names an immutable OCI index digest; moving tags are intentionally
 absent. The plain Gamescope-capable base and the Steam, Heroic, and Lutris
 variants all receive the same static `polaris-seat-worker`,
-`polaris-seat-runtime` dispatcher, and private session-bus, audio, and
-display/capture provider binaries. Keeping the launchers separate avoids
-multiplying package and credential state inside one large image.
+`polaris-seat-runtime` dispatcher, and private session-bus, audio,
+display/capture, and nested Gamescope provider binaries. Keeping the launchers
+separate avoids multiplying package and credential state inside one large
+image.
 
 The build stage has no module or package download step. The worker, dispatcher,
-and three providers use only the Go standard library, disable CGO and
+and four providers use only the Go standard library, disable CGO and
 module-network access, run their tests, then emit static Linux/amd64 binaries.
 The final stage fails its build unless the locked root supplies the fixed D-Bus,
-PipeWire, `pw-cli`, `pactl`, and GStreamer executables, the
-`waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and `fakesink` elements, and
-both trusted PipeWire configuration files. A future image job must select a
+PipeWire, `pw-cli`, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
+`waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and `fakesink` elements; and both
+trusted PipeWire configuration files. A future image job must select a
 runtime reference from the lock, build at an exact Polaris revision, record
 the resulting image digest, and hand only that final digest to the Podman
 backend. The existing locked application roots have not yet passed that new
@@ -42,10 +43,10 @@ and escalates to KILL at the component deadline.
 
 That adapter set is a concrete supervision boundary, not the missing media
 implementation. The image now carries `polaris-seat-runtime` plus real private
-session-bus, audio, and outer display/capture providers, but the production
-`run` command still injects no adapters. The other four provider locations
-remain absent, so this image does not start Gamescope, Steam, Heroic, Lutris,
-encoding, or virtual input. Treating its healthy supervisor as a
+session-bus, audio, outer display/capture, and nested Gamescope providers, but
+the production `run` command still injects no adapters. The other three
+provider locations remain absent, so this image does not start Steam, Heroic,
+Lutris, encoding, or virtual input. Treating its healthy supervisor as a
 streaming-capable worker would still be a false gate. Tests exercise catalog
 creation, the synthetic process boundary, the real dispatcher, and isolated
 host D-Bus, PipeWire, Wayland, and raw-frame transports; they never invoke a
@@ -108,16 +109,62 @@ expose a typed HDR contract. Cleanup stops the producer first and removes only
 the same captured socket and lock inodes; replacements are retained and
 reported while other owned artifacts are still cleaned.
 
-All three providers open fixed root-owned executables without following a final
-symlink and execute the open descriptors without a shell. Their descendants
-cannot inherit the readiness descriptor and receive a parent-death kill. TERM
-is bounded and escalates to KILL. Cleanup removes only captured, same-inode
+The nested-compositor provider accepts only the typed `gamescope` selection.
+It first re-probes the exact outer socket and admitted mode, then launches the
+fixed Gamescope binary as a Wayland client with one Xwayland server, exact
+inner and outer dimensions, no application command, and a dedicated 120-second
+startup ceiling. Integer refresh rates are supplied explicitly. Fractional
+rates are never rounded: Gamescope must inherit the parent cadence and the
+post-start probe must report the exact admitted millihertz or readiness fails.
+HDR remains rejected because the outer provider has no typed HDR contract.
+The admitted render-node path is validated and retained as diagnostic evidence,
+but Gamescope 3.16 has no exact render-node-path selector. Exact GPU authority
+therefore remains the container backend's explicit device allowlist and outer
+Wayland binding, not an environment-variable claim.
+
+Gamescope 3.16.25's `--ready-fd` option is a FIFO path despite its name. It
+writes exactly one `DISPLAY WAYLAND_DISPLAY` line only after its Xwayland
+server and compositor context initialize. Polaris creates that FIFO and the
+limiter file under the private runtime, rejects any pre-existing Gamescope
+artifacts, requires the reported inner socket to be `gamescope-0`, adds a
+no-replace hard-link at the controller-allocated app socket, and then performs
+native Wayland and X11 setup handshakes. Both peers must be the supervised
+Gamescope PID and UID; Wayland must advertise the exact width, height, and mHz,
+and the X11 root screen must match the admitted dimensions. A mode-0600,
+generation-derived session record preserves the selected X display and the
+allocated app-facing Wayland name for the future launcher provider.
+
+The production container must give each worker a private `/tmp` as well as its
+private runtime. The provider requires an empty X11 namespace and therefore
+requires Gamescope to select `:0`; it captures both X socket and lock inodes and
+validates that the lock names the supervised PID. Gamescope runtime, alias,
+readiness, limiter, session, and X11 artifacts are removed only when their
+captured inodes still match. Replacements and unexpected artifacts are retained
+and reported.
+
+All four providers open fixed root-owned top-level executables without
+following a final symlink and execute the open descriptors without a shell.
+The Gamescope provider also validates `/usr/bin/Xwayland` immediately before
+start and supplies only `/usr/bin` as Gamescope's child-search path; Gamescope
+itself owns that child exec inside the immutable image root. Descendants cannot
+inherit the readiness descriptor, and each directly supervised child receives
+a parent-death kill; Gamescope owns its Xwayland lifecycle, with exact container
+teardown as the final backstop. TERM is bounded and escalates to KILL. Cleanup
+removes only captured, same-inode
 socket, lock, PID, and private service-directory artifacts; replacements or
 unexpected directory contents are retained and fail the provider. Linux tests
 run the real D-Bus and audio protocols plus the real upstream Wayland
-compositor in software mode, prove two audio graphs and two display transports
-do not see or stop each other, and verify clean teardown. The software display
-fixture never opens a GPU. No image was built and no host service was installed,
+compositor in software mode, prove two audio graphs, display transports, and
+modeled nested stacks do not see or stop each other, and verify clean teardown.
+An opt-in test can exercise the installed Gamescope with its real Xwayland and
+inner Wayland protocols through the headless backend under lavapipe. That
+lab-only substitution is explicit: this host's lavapipe lacks the
+`VK_KHR_present_id` and `VK_KHR_present_wait` extensions required by
+Gamescope's Wayland backend. Xwayland glamor is disabled, but this installed
+Xwayland still opens the host render node during initialization, so the test
+requires a separate DRM-device authorization and was not accepted as a
+GPU-free gate. A real outer-to-Gamescope Wayland smoke remains a later
+GPU-authorized gate. No image was built and no host service was installed,
 restarted, or reconfigured for this checkpoint.
 
 The injected contract starts those seven resources in dependency order and
