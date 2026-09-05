@@ -1,6 +1,8 @@
 package seatruntime
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -38,7 +40,21 @@ const (
 const (
 	DisplayTopologyCaptureHostNested = "capture-host-with-nested-compositor"
 	MediaPipelineWorkerLocal         = "worker-local-capture-encode"
+	captureMediaSocketDomain         = "polaris-capture-media-v1\x00"
+	captureMediaSocketPrefix         = "polaris-frames-"
 )
+
+// CaptureMediaSocketName derives the fixed worker-local raw-frame endpoint
+// shared by the display-capture and encoder providers. The controller does not
+// need authority over this internal transport, and the digest keeps its Unix
+// socket path bounded even when the opaque runtime namespace is long.
+func CaptureMediaSocketName(runtimeNamespace string) (string, error) {
+	if !validNameToken(runtimeNamespace, 128) {
+		return "", errors.New("runtime namespace is invalid")
+	}
+	digest := sha256.Sum256([]byte(captureMediaSocketDomain + runtimeNamespace))
+	return captureMediaSocketPrefix + hex.EncodeToString(digest[:]), nil
+}
 
 // Request is the complete least-authority contract for exactly one runtime
 // resource. Fields that do not belong to the selected stage must remain zero.

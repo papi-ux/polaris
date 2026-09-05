@@ -367,7 +367,7 @@ dispatch, strict catalog ownership, bad readiness after provider start,
 descendant cleanup, literal hostile catalog arguments, and two concurrent
 helper groups.
 
-Two catalog targets are now concrete but still inert in production. The
+Three catalog targets are now concrete but still inert in production. The
 session-bus provider validates a mode-0700, same-UID runtime directory, rejects
 preexisting artifacts, starts a descriptor-pinned root-owned `dbus-daemon`,
 validates its exact printed address, and completes an EXTERNAL-authenticated
@@ -384,21 +384,48 @@ typed route through `PULSE_SINK` and `PIPEWIRE_NODE`. It captures its socket,
 lock, PID, and pulse-directory inodes, stops Pulse before the core, and refuses
 to delete replacements or unexpected directory contents.
 
-Both providers accept only their canonical stage invocation with an empty
+The display/capture provider starts descriptor-pinned `gst-launch-1.0` with a
+scrubbed environment and no persistent plugin registry. `waylanddisplaysrc`
+owns the outer headless compositor and negotiates the admitted dimensions and
+rational refresh into an owner-only `unixfdsink` socket. The hardware pipeline
+requires DMA-BUF; its bounded raw-frame socket name is derived from the runtime
+namespace with domain-separated SHA-256, so the controller does not receive or
+route raw frames. A later encoder provider can attach with `unixfdsrc` while
+the transport remains inside that worker.
+
+The upstream compositor chooses an automatic `wayland-N` socket. Polaris keeps
+that server-owned path and adds a no-replace hard-link alias at the exact
+controller-allocated capture name. It publishes readiness only after the alias
+resolves to the supervised child's PID and UID, a bounded Wayland registry and
+callback round trip exposes compositor, shared memory, seat, XDG shell, and one
+output global, the current mode exactly matches width, height, and mHz, and one
+frame traverses `unixfdsrc`. Hardware additionally requires DMA-BUF protocol
+version 3 or newer. HDR fails before process start because this upstream source
+does not expose a typed HDR contract. The child inherits a `0077` umask, all
+artifacts are captured by inode, and cleanup retains replacements while still
+removing the other owned sockets and lock.
+
+All three providers accept only their canonical stage invocation with an empty
 provider-argument tail. Every dependency is opened no-follow as a root-owned,
 non-group/world-writable executable and launched through that descriptor with
 a fixed environment, no shell, bounded output, and a parent-death kill. The
 readiness FIFO is sealed close-on-exec before any child starts. Real Linux tests
-exercise both protocols in temporary roots, clean normal and partial failure,
-and two simultaneous private audio graphs whose sinks and teardown remain
-independent.
+exercise D-Bus and audio plus the upstream compositor and raw-frame transport
+in software mode, clean normal and partial failure, and prove simultaneous
+private audio graphs and display transports remain independent. The software
+display path does not open a GPU. The real display fixture for this checkpoint
+was built from `gst-wayland-display` revision
+`081feb5ab8057937b78104668bb1f507ce42e18d`; no plugin binary is vendored or
+installed by this tree.
 
 The providers are built and copied into their fixed catalog locations, but the
 production worker remains inert because `run` still injects no adapters or data
 plane. The controller/coordinator catalog path also remains outside the current
-singleton runtime. No OCI image was built during this checkpoint, so the
-locked GoW root's dependency check remains a future build gate. Display/capture,
-nested compositor, virtual input, encoder, and launcher providers remain
+singleton runtime. No OCI image was built during this checkpoint. The image
+recipe now fails closed unless its locked root contains `gst-launch-1.0`,
+`gst-inspect-1.0`, `waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and
+`fakesink`; the existing locked application roots have not yet passed that
+gate. Nested compositor, virtual input, encoder, and launcher providers remain
 missing; Podman health still means only supervisor liveness.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
@@ -407,11 +434,12 @@ compositor that exposes a framebuffer, nests Gamescope as a Wayland client for
 its Xwayland boundary, creates virtual audio sinks through a standalone audio
 service, uses inputtino plus fake udev for virtual-device lifecycle, and sends
 the captured frames through GStreamer. Gamescope compatibility therefore does
-not imply that Gamescope itself should own the capture boundary. The Polaris
-stage graph now makes the same ownership edges explicit without prematurely
-choosing GStreamer over a Polaris-native capture/encode implementation. A
-process that merely opens expected sockets and reports ready still would not
-satisfy that contract.
+not imply that Gamescope itself should own the capture boundary. Polaris now
+uses that upstream compositor for the outer display and GStreamer's Unix-FD
+transport for the handoff, preserving DMA-BUF-capable frames between separate
+provider processes. The later encoder remains a distinct policy boundary. A
+process that merely opens expected sockets and reports ready still does not
+satisfy the contract.
 
 The broker's default graceful-stop deadline is now 45 seconds. It covers the
 worker's 35-second worst-case serial reverse teardown plus the controller's
@@ -593,6 +621,10 @@ The offline test suite covers:
   readiness, exact sink routing, descriptor-pinned dependencies, bounded
   TERM/KILL, inode-fenced artifact cleanup, failure containment, and
   simultaneous two-seat audio isolation;
+- a real capture-producing outer Wayland provider with exact peer, global, and
+  output-mode validation, a one-frame Unix-FD readiness proof, owner-only and
+  inode-fenced artifacts, fail-closed HDR, and simultaneous software-rendered
+  display isolation without opening a GPU;
 - coordinator ownership from pre-launch authority creation through endpoint
   authentication, heartbeat, authenticated shutdown, backend absence, and
   exact cleanup, including two independently managed seats;
@@ -612,15 +644,15 @@ The offline test suite covers:
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
-This remains an offline control-plane/backend proof with two locally exercised
-base providers. A later container integration test must build and pin the final
+This remains an offline control-plane/backend proof with three locally
+exercised base providers. A later container integration test must build and pin the final
 worker images, pre-create profile
 volumes and the private runtime root, instantiate the coordinator behind an
 explicit opt-in configuration, and run two real supervisor containers. Before
 physical game testing, the remaining providers and immutable catalog must bind
-the outer display/capture owner, nested compositor, virtual-input lifecycle,
-worker-local encoder, exact workload target, and launcher process tree to the
-implemented private session bus and audio sink without weakening the proven
+the nested compositor, virtual-input lifecycle, worker-local encoder, exact
+workload target, and launcher process tree to the implemented private session
+bus, audio sink, and outer display/capture owner without weakening the proven
 dispatcher, adapter, routing, and teardown contracts. Concurrent real
 frame/audio/input traffic, not more synthetic heartbeats, is then the next
 acceptance boundary.
@@ -633,6 +665,10 @@ acceptance boundary.
   https://games-on-whales.github.io/wolf/stable/dev/wayland.html
 - Wolf GStreamer pipeline:
   https://games-on-whales.github.io/wolf/stable/dev/gstreamer.html
+- Validated `gst-wayland-display` revision:
+  https://github.com/games-on-whales/gst-wayland-display/tree/081feb5ab8057937b78104668bb1f507ce42e18d
+- GStreamer Unix-FD frame transport:
+  https://gstreamer.freedesktop.org/documentation/unixfd/index.html
 - Wolf fake-udev input isolation:
   https://games-on-whales.github.io/wolf/stable/dev/fake-udev.html
 - Wolf configuration and per-profile storage:

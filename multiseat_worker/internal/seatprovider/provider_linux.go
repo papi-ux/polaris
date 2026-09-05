@@ -27,6 +27,8 @@ const (
 	defaultPipeWirePulsePath = "/usr/bin/pipewire"
 	defaultPWCLIPath         = "/usr/bin/pw-cli"
 	defaultPactlPath         = "/usr/bin/pactl"
+	defaultGSTLaunchPath     = "/usr/bin/gst-launch-1.0"
+	defaultGSTInspectPath    = "/usr/bin/gst-inspect-1.0"
 
 	maximumProviderOutput = 64 * 1024
 )
@@ -40,6 +42,10 @@ type providerOptions struct {
 	pipeWirePulsePath  string
 	pwCLIPath          string
 	pactlPath          string
+	gstLaunchPath      string
+	gstInspectPath     string
+	gstPluginPath      string
+	softwareDisplay    bool
 	startupTimeout     time.Duration
 	probeTimeout       time.Duration
 	stopTimeout        time.Duration
@@ -56,6 +62,8 @@ func defaultProviderOptions() providerOptions {
 		pipeWirePulsePath:  defaultPipeWirePulsePath,
 		pwCLIPath:          defaultPWCLIPath,
 		pactlPath:          defaultPactlPath,
+		gstLaunchPath:      defaultGSTLaunchPath,
+		gstInspectPath:     defaultGSTInspectPath,
 		startupTimeout:     5 * time.Second,
 		probeTimeout:       time.Second,
 		stopTimeout:        time.Second,
@@ -75,6 +83,10 @@ func normalizeProviderOptions(options providerOptions) (providerOptions, error) 
 		!validAbsolutePath(options.pipeWirePulsePath) ||
 		!validAbsolutePath(options.pwCLIPath) ||
 		!validAbsolutePath(options.pactlPath) ||
+		!validAbsolutePath(options.gstLaunchPath) ||
+		!validAbsolutePath(options.gstInspectPath) ||
+		(options.gstPluginPath != "" &&
+			!validAbsolutePath(options.gstPluginPath)) ||
 		options.startupTimeout <= 0 || options.probeTimeout <= 0 ||
 		options.stopTimeout <= 0 || options.probeInterval <= 0 ||
 		options.probeInterval > options.startupTimeout {

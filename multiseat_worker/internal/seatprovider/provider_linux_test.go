@@ -71,6 +71,9 @@ func TestMain(tests *testing.M) {
 	if mode := os.Getenv(providerChildModeSetting); mode != "" {
 		os.Exit(providerChildMain(mode))
 	}
+	if displayProviderTestInvocation(os.Args[1:]) {
+		os.Exit(displayProviderChildMain(os.Args[1:], os.Environ()))
+	}
 	os.Exit(tests.Run())
 }
 

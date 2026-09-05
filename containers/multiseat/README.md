@@ -7,18 +7,21 @@ multiseat or make the current Polaris process a container controller.
 reference names an immutable OCI index digest; moving tags are intentionally
 absent. The plain Gamescope-capable base and the Steam, Heroic, and Lutris
 variants all receive the same static `polaris-seat-worker`,
-`polaris-seat-runtime` dispatcher, and private session-bus and audio provider
-binaries. Keeping the launchers separate avoids multiplying package and
-credential state inside one large image.
+`polaris-seat-runtime` dispatcher, and private session-bus, audio, and
+display/capture provider binaries. Keeping the launchers separate avoids
+multiplying package and credential state inside one large image.
 
 The build stage has no module or package download step. The worker, dispatcher,
-and two providers use only the Go standard library, disable CGO and
+and three providers use only the Go standard library, disable CGO and
 module-network access, run their tests, then emit static Linux/amd64 binaries.
 The final stage fails its build unless the locked root supplies the fixed D-Bus,
-PipeWire, `pw-cli`, and `pactl` executables and both trusted PipeWire
-configuration files. A future image job must select a runtime reference from
-the lock, build at an exact Polaris revision, record the resulting image
-digest, and hand only that final digest to the Podman backend.
+PipeWire, `pw-cli`, `pactl`, and GStreamer executables, the
+`waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and `fakesink` elements, and
+both trusted PipeWire configuration files. A future image job must select a
+runtime reference from the lock, build at an exact Polaris revision, record
+the resulting image digest, and hand only that final digest to the Podman
+backend. The existing locked application roots have not yet passed that new
+GStreamer dependency gate; no compatible image is claimed by this checkpoint.
 
 These locks establish immutable byte identity, not publisher trust. No
 signature, attestation, SBOM, vulnerability policy, or license bundle is
@@ -39,13 +42,14 @@ and escalates to KILL at the component deadline.
 
 That adapter set is a concrete supervision boundary, not the missing media
 implementation. The image now carries `polaris-seat-runtime` plus real private
-session-bus and audio providers, but the production `run` command still injects
-no adapters. The other five provider locations remain absent, so this image
-does not start Gamescope, Steam, Heroic, Lutris, capture, encoding, or virtual
-input. Treating its healthy supervisor as a streaming-capable worker would
-still be a false gate. Tests exercise catalog creation, the synthetic process
-boundary, the real dispatcher, and isolated host D-Bus/PipeWire processes; they
-never invoke a launcher or device.
+session-bus, audio, and outer display/capture providers, but the production
+`run` command still injects no adapters. The other four provider locations
+remain absent, so this image does not start Gamescope, Steam, Heroic, Lutris,
+encoding, or virtual input. Treating its healthy supervisor as a
+streaming-capable worker would still be a false gate. Tests exercise catalog
+creation, the synthetic process boundary, the real dispatcher, and isolated
+host D-Bus, PipeWire, Wayland, and raw-frame transports; they never invoke a
+launcher or physical device.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or
@@ -80,15 +84,41 @@ Pulse-on-PipeWire, and requires the Pulse protocol to expose only that sink and
 its monitor. Pulse clients route through `PULSE_SINK`; native PipeWire clients
 receive the same sink through `PIPEWIRE_NODE`.
 
-Both providers open fixed root-owned executables without following a final
+The display/capture provider starts the fixed `gst-launch-1.0` executable with
+a scrubbed environment and no persistent GStreamer registry. Its hardware path
+is `waylanddisplaysrc` with the admitted render node and exact width, height,
+and rational refresh, followed by a DMA-BUF caps boundary and `unixfdsink`.
+The raw-frame endpoint is a bounded SHA-256-derived Unix socket inside the
+seat's private runtime; a later encoder provider can consume it through
+`unixfdsrc` without moving raw frames through the controller. The compositor's
+automatic `wayland-N` socket is given a no-replace hard-link alias at the exact
+controller-allocated capture name while retaining its original server-owned
+path. A child-inherited `0077` umask makes every socket and lock owner-only.
+
+Readiness is protocol-level. Polaris requires the aliased socket's peer PID and
+UID to match the supervised producer, completes Wayland registry and callback
+round trips, requires compositor, shared-memory, seat, XDG shell, and one
+output global, requires DMA-BUF version 3 or newer on the hardware path, and
+compares the current output mode with the admitted dimensions and mHz. It then
+receives one frame through a separate `unixfdsrc` pipeline before publishing
+the provider-ready record. Socket nodes alone, a wrong mode, a non-producing
+pipeline, or a missing DMA-BUF global cannot report ready. HDR is rejected
+before process start because the selected upstream compositor does not yet
+expose a typed HDR contract. Cleanup stops the producer first and removes only
+the same captured socket and lock inodes; replacements are retained and
+reported while other owned artifacts are still cleaned.
+
+All three providers open fixed root-owned executables without following a final
 symlink and execute the open descriptors without a shell. Their descendants
 cannot inherit the readiness descriptor and receive a parent-death kill. TERM
 is bounded and escalates to KILL. Cleanup removes only captured, same-inode
 socket, lock, PID, and private service-directory artifacts; replacements or
 unexpected directory contents are retained and fail the provider. Linux tests
-run both real protocols in temporary directories, prove two audio graphs do not
-see or stop each other, and verify clean teardown. No image was built and no
-host service was installed, restarted, or reconfigured for this checkpoint.
+run the real D-Bus and audio protocols plus the real upstream Wayland
+compositor in software mode, prove two audio graphs and two display transports
+do not see or stop each other, and verify clean teardown. The software display
+fixture never opens a GPU. No image was built and no host service was installed,
+restarted, or reconfigured for this checkpoint.
 
 The injected contract starts those seven resources in dependency order and
 publishes worker health only after every adapter reports ready. Startup has one

@@ -7,6 +7,29 @@ import (
 	"testing"
 )
 
+func TestCaptureMediaSocketNameIsBoundedDeterministicAndNamespaced(t *testing.T) {
+	first, err := CaptureMediaSocketName("polaris-runtime-controller-a-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := CaptureMediaSocketName("polaris-runtime-controller-a-1")
+	if err != nil || repeated != first {
+		t.Fatalf("capture media socket derivation changed: %q, %q, %v", first, repeated, err)
+	}
+	second, err := CaptureMediaSocketName("polaris-runtime-controller-a-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || !strings.HasPrefix(first, captureMediaSocketPrefix) ||
+		len(first) != len(captureMediaSocketPrefix)+64 ||
+		strings.Contains(first, "controller-a") {
+		t.Fatalf("capture media socket is not opaque and bounded: %q, %q", first, second)
+	}
+	if _, err := CaptureMediaSocketName("../escape"); err == nil {
+		t.Fatal("invalid runtime namespace produced a media socket")
+	}
+}
+
 func protocolTestRequests() []Request {
 	const namespace = "seat-7-generation-19"
 	return []Request{

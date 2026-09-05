@@ -258,3 +258,96 @@ func TestRealPrivateAudioGraphsRemainIndependent(t *testing.T) {
 	stopRealProvider(t, secondBus)
 	requireEmptyRuntime(t, secondPath)
 }
+
+func realDisplayProviderOptions(t *testing.T, runtimePath string) providerOptions {
+	t.Helper()
+	options := defaultProviderOptions()
+	options.runtimeDirectory = runtimePath
+	options.runtimeOwnerUID = uint32(os.Geteuid())
+	options.softwareDisplay = true
+	if pluginPath := os.Getenv("POLARIS_TEST_GST_PLUGIN_PATH"); pluginPath != "" {
+		if !validAbsolutePath(pluginPath) {
+			t.Fatalf("real display plugin path is invalid: %s", pluginPath)
+		}
+		options.gstPluginPath = pluginPath
+	}
+	requireTrustedBinary(t, options.gstLaunchPath, options.executableOwnerUID)
+	requireTrustedBinary(t, options.gstInspectPath, options.executableOwnerUID)
+	environment := displayEnvironment(options)
+	for _, element := range []string{
+		"waylanddisplaysrc",
+		"unixfdsink",
+		"unixfdsrc",
+		"fakesink",
+	} {
+		if _, err := runTrustedCommand(
+			options.gstInspectPath,
+			options.executableOwnerUID,
+			[]string{element},
+			environment,
+			3*time.Second,
+		); err != nil {
+			t.Skipf("real display dependency %s is unavailable", element)
+		}
+	}
+	return options
+}
+
+func TestRealDisplayCaptureProducesFrameAndCleansUp(t *testing.T) {
+	runtimePath := privateDisplayRuntimeDirectoryForTest(t)
+	options := realDisplayProviderOptions(t, runtimePath)
+	request := displayRequest("real-display", "polaris-capture-real")
+	request.DisplayRefreshMillihertz = 59940
+	provider := startRealProvider(t, func(context context.Context, ready io.WriteCloser) error {
+		return runDisplayCapture(context, request, ready, options)
+	})
+	if identity, err := lstatIdentity(
+		filepath.Join(runtimePath, request.CaptureWaylandSocket),
+	); err != nil || identity.mode&syscall.S_IFMT != syscall.S_IFSOCK ||
+		identity.mode&0o077 != 0 {
+		stopRealProvider(t, provider)
+		t.Fatalf("real display socket is unavailable: %#v, %v", identity, err)
+	}
+	stopRealProvider(t, provider)
+	requireEmptyRuntime(t, runtimePath)
+}
+
+func TestRealDisplayCapturesRemainIndependent(t *testing.T) {
+	firstPath := privateDisplayRuntimeDirectoryForTest(t)
+	secondPath := privateDisplayRuntimeDirectoryForTest(t)
+	firstOptions := realDisplayProviderOptions(t, firstPath)
+	secondOptions := firstOptions
+	secondOptions.runtimeDirectory = secondPath
+	firstRequest := displayRequest("real-display-first", "polaris-capture-real-first")
+	secondRequest := displayRequest("real-display-second", "polaris-capture-real-second")
+	secondRequest.DisplayRefreshMillihertz = 97000
+	first := startRealProvider(t, func(context context.Context, ready io.WriteCloser) error {
+		return runDisplayCapture(context, firstRequest, ready, firstOptions)
+	})
+	second := startRealProvider(t, func(context context.Context, ready io.WriteCloser) error {
+		return runDisplayCapture(context, secondRequest, ready, secondOptions)
+	})
+	stopRealProvider(t, first)
+	requireEmptyRuntime(t, firstPath)
+	secondMediaName, err := seatruntime.CaptureMediaSocketName(secondRequest.RuntimeNamespace)
+	if err != nil {
+		stopRealProvider(t, second)
+		t.Fatal(err)
+	}
+	if _, err := runTrustedCommand(
+		secondOptions.gstLaunchPath,
+		secondOptions.executableOwnerUID,
+		displayProbeArguments(
+			secondRequest,
+			filepath.Join(secondPath, secondMediaName),
+			true,
+		),
+		displayEnvironment(secondOptions),
+		3*time.Second,
+	); err != nil {
+		stopRealProvider(t, second)
+		t.Fatalf("stopping one real display harmed the other: %v", err)
+	}
+	stopRealProvider(t, second)
+	requireEmptyRuntime(t, secondPath)
+}

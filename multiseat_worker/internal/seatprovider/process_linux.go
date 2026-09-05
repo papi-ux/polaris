@@ -9,9 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 )
+
+var childUmaskLock sync.Mutex
 
 func openTrustedExecutable(path string, expectedOwnerUID uint32) (*os.File, error) {
 	if !validAbsolutePath(path) {
@@ -94,6 +97,48 @@ func startManagedChild(
 		return nil, err
 	}
 	if err := command.Start(); err != nil {
+		_ = executable.Close()
+		return nil, errors.New("runtime provider child could not be started")
+	}
+	_ = executable.Close()
+	child := &managedChild{command: command, done: make(chan struct{})}
+	go func() {
+		_ = command.Wait()
+		close(child.done)
+	}()
+	return child, nil
+}
+
+func startManagedChildWithUmask(
+	path string,
+	expectedOwnerUID uint32,
+	arguments []string,
+	environment []string,
+	extraFiles []*os.File,
+	umask int,
+) (*managedChild, error) {
+	if umask < 0 || umask > 0o777 {
+		return nil, errors.New("runtime provider child umask is invalid")
+	}
+	command, executable, err := trustedCommand(
+		path,
+		expectedOwnerUID,
+		arguments,
+		environment,
+		extraFiles,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// The display provider is a dedicated process, but tests can exercise two
+	// providers concurrently. Serialize the process-global umask only across
+	// the fork so every socket the child later creates is owner-only.
+	childUmaskLock.Lock()
+	previousUmask := syscall.Umask(umask)
+	startError := command.Start()
+	syscall.Umask(previousUmask)
+	childUmaskLock.Unlock()
+	if startError != nil {
 		_ = executable.Close()
 		return nil, errors.New("runtime provider child could not be started")
 	}
