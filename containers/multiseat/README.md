@@ -127,11 +127,28 @@ synchronously detaches feedback publication, waits for already-admitted work,
 clears queued feedback, and only then releases the authenticated lease. A
 closed or throwing sender fails the session closed.
 
+The first production ownership adapters remain inert but replace those three
+test doubles with bounded process-local implementations. An authenticated
+session registry accepts at most 256 immutable bindings, rejects duplicate
+keys and any reuse of the same GPU seat slot, grants one exclusive bridge
+claim, and lets the session owner retire a registration while synchronously
+waiting for that claim to leave. A feedback hub supplies the inputtino backend
+with a weak, non-throwing sink and routes typed feedback only to the exact seat
+generation. Subscription detach and hub shutdown wait for callbacks already in
+flight, including a detach racing global shutdown.
+
+The matching concrete sender verifies the complete authenticated binding and
+bounded rumble shape before submitting to a typed, session-owned mailbox.
+Mailbox retry and close results map directly to the bridge without exposing an
+ENet peer or session secret. The actual `stream::session_t` mailbox endpoint
+and registration call site are intentionally still absent, so constructing
+these adapters opens no stream and changes no singleton behavior.
+
 This is still not a usable production input data plane. Nothing invokes this
 bridge from a live control stream, implements its trusted binding source from a
-real session, connects its feedback subscription to the inputtino backend, or
-sends queued feedback to a client. The singleton runtime constructs none of
-these classes. The worker's older opaque input/feedback test adapter is
+real stream session, constructs the hub as the inputtino sink, or supplies the
+mailbox endpoint which reaches a client's control thread. The singleton runtime
+constructs none of these classes. The worker's older opaque input/feedback test adapter is
 deliberately not treated as injection authority. Mediated Steam Input also
 remains missing. Rootless supplementary-group and SELinux access require an
 explicit deployment decision and physical validation; this source checkpoint

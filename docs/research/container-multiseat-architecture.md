@@ -646,11 +646,37 @@ calling the input authority or feedback sender, allowing synchronous rumble
 publication during an input route without deadlock. The sender is forbidden
 from re-entering close or drain on the same bridge.
 
+Concrete process-local ownership adapters now implement the three injected
+edges without activating them. The authenticated binding registry is bounded
+to the same 256-entry ceiling as input authority, rejects duplicate control
+keys and physical seat-slot reuse across generations, and grants only one
+claim at a time. Retiring a registration first makes it undiscoverable and then
+waits for the bridge lease to detach. Registry shutdown similarly rejects new
+authentication and waits for every outstanding claim. Registry destruction is
+non-blocking but retires every entry, allowing retained leases and registration
+owners to unwind safely without dereferencing the destroyed source object.
+
+The feedback hub exposes a weak, non-throwing sink suitable for the existing
+inputtino backend constructor. It holds at most one subscriber per physical
+seat slot, routes only an exact full-generation handle, catches callback
+exceptions, and makes both per-subscription detach and hub close wait for all
+callbacks already in flight. Its global in-flight count also covers the race
+where a subscription removes itself while hub shutdown is waiting. A retained
+backend sink becomes a harmless no-op after hub destruction.
+
+The concrete mailbox sender accepts only the exact immutable authenticated
+binding and a nonzero, in-range rumble state. It maps typed queued, retry, and
+closed mailbox outcomes to the session bridge. The mailbox interface is the
+deliberately narrow future boundary to `stream::session_t`'s existing
+control-thread queue; no ENet peer, encryption key, session token, or raw
+network send is representable here.
+
 These classes are still offline source seams. The live control stream does not
-construct or invoke the bridge, no production implementation supplies its
-binding/feedback interfaces, and the singleton does not construct the input
-authority. Production construction, crash-persistent node discovery, rootless
-group/SELinux deployment policy, and physical container proof remain required.
+construct or invoke the bridge, does not register its authenticated session,
+and does not supply the concrete stream mailbox endpoint. The singleton does
+not construct the input authority or feedback hub. Production construction,
+crash-persistent node discovery, rootless group/SELinux deployment policy, and
+physical container proof remain required.
 Steam Input also needs a separately mediated creation path; granting its
 container raw uinput would reintroduce the authority this contract removes.
 
