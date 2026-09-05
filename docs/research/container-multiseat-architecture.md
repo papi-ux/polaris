@@ -588,11 +588,42 @@ rather than granting the worker an injection endpoint. The current generic
 worker input/feedback adapter remains only a synthetic protocol fixture and is
 not wired to this route.
 
-The live Moonlight-to-typed-event adapter, controller feedback delivery,
-production construction, crash-persistent node discovery, rootless
-group/SELinux deployment policy, and physical container proof remain required.
-Steam Input also needs a separately mediated creation path; granting its
-container raw uinput would reintroduce the authority this contract removes.
+The next injected edge parses one complete decrypted Moonlight input packet
+without dereferencing packed caller storage. It treats the wire format as an
+independent protocol: the big-endian declared size, little-endian magic,
+per-field mixed endianness, exact packet length, reserved bytes, finite
+normalized floats, fixed controller sentinels, and target event semantics are
+all checked before conversion. A packet then passes an explicit keyboard,
+mouse, touch, pen, or controller permission before the generation-bound
+adapter assigns its next authority sequence. Invalid, denied, no-op, and
+unsupported packets consume no sequence.
+
+The representable subset is keyboard transitions with normalized VK codes,
+relative and absolute pointer motion, five pointer buttons, both scroll axes,
+touch down/move/single-contact release, pen hover/contact, and the base
+Xbox-style gamepad state. Modifier metadata is validated but not synthesized;
+Moonlight's actual modifier transitions remain authoritative. Non-normalized
+keyboard codes, Unicode text, touch hover/cancel-all, pen button-only or
+unknown-tool events, extended controller buttons, and controller-associated
+touch, motion, and battery packets return an explicit unsupported result. A
+fixed preallocated gamepad receives an all-zero state for a canonical inactive
+controller packet instead of allowing the packet to destroy host authority.
+
+The reverse adapter accepts only typed rumble from its complete seat handle and
+the exact next generation-local sequence, then converts it to the existing
+Moonlight feedback message. Its fixed sixteen-entry storage keeps at most the
+latest unsent state for each gamepad slot. Same-slot updates coalesce, including
+the zero state which stops rumble, while retained cross-slot states drain in
+their source-sequence order. Closing the queue clears it permanently, and a
+stale generation, gap, malformed event, or callback after close cannot enter.
+
+These classes are still offline source seams. The live control stream does not
+invoke the packet adapter, the singleton does not construct the authority or
+feedback queue, and no session drains the converted feedback. Production
+construction, crash-persistent node discovery, rootless group/SELinux
+deployment policy, and physical container proof remain required. Steam Input
+also needs a separately mediated creation path; granting its container raw
+uinput would reintroduce the authority this contract removes.
 
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless

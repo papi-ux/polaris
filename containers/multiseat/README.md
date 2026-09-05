@@ -91,14 +91,33 @@ and any callback already in flight still carries the old generation identity.
 The codec, managed devices, kernel observations, and feedback sink are injected
 in tests; no physical input node is opened.
 
-This is still not a usable production input data plane. Nothing translates live
-Moonlight input into the authority, constructs the backend from the singleton
-runtime, or connects its typed feedback sink to a client. The worker's older
+An offline adapter now parses one complete decrypted Moonlight packet without
+casting caller storage to a packed native structure. It validates the mixed
+wire endianness, declared and exact packet sizes, reserved fields, fixed
+controller sentinels, normalized finite touch/pen values, permissions, and the
+complete seat generation before assigning the next authority sequence.
+Malformed, denied, ignored, and unsupported packets consume no sequence.
+Representable keyboard, pointer, scroll, touch, pen, and Xbox-state packets are
+converted through the canonical 24-byte codec. Non-normalized keyboard input,
+Unicode text, touch cancel-all/hover, pen button-only/tool-unknown events, Xbox
+extended buttons, and controller touch/motion/battery remain explicitly
+unsupported rather than being silently misrepresented.
+
+The matching controller queue accepts only exact-generation, contiguous typed
+rumble callbacks and converts them to Polaris' existing Moonlight feedback
+message. It retains at most one latest state per each of sixteen gamepad slots,
+so a zero-magnitude stop replaces an older pending rumble without growing an
+unbounded queue. Remaining states drain in source-sequence order; teardown can
+close and clear the queue permanently.
+
+This is still not a usable production input data plane. Nothing invokes this
+adapter from a live control stream, constructs the backend and queue from the
+singleton runtime, or drains feedback into a client session. The worker's older
 opaque input/feedback test adapter is deliberately not treated as injection
-authority. Mediated Steam Input also remains missing. Rootless
-supplementary-group and SELinux access require an explicit deployment decision
-and physical validation; this source checkpoint does not add `keep-groups`,
-change host policy, or claim that an image can use the mapped nodes.
+authority. Mediated Steam Input also remains missing. Rootless supplementary-
+group and SELinux access require an explicit deployment decision and physical
+validation; this source checkpoint does not add `keep-groups`, change host
+policy, or claim that an image can use the mapped nodes.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or
