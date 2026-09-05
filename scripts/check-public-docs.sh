@@ -1361,17 +1361,16 @@ for label, section in (
         )
         sys.exit(1)
 
+# Release notes are the short, user-facing list; the changelog carries the
+# detail. Pin phrases a player would read, never internal identifiers.
 release_notes_facts = (
-    "v1.4.1",
     "Nova v1.4.2",
     "Vulkan Video",
-    "no_new_privs",
-    "cap_sys_nice",
-    "host-portal",
-    "polaris-gamescope-session",
+    "comma decimal",
+    "SteamOS",
     "Steam Input",
     "Retroid Pocket 6",
-    "physical SteamOS validation",
+    "field retest",
     "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.4.2/Polaris-fedora44-x86_64.rpm &&",
     "sudo dnf install \"./Polaris-fedora44-x86_64.rpm\" &&",
     "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.2/Polaris-arch-x86_64.pkg.tar.zst &&",
