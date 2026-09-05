@@ -1337,26 +1337,21 @@ expected_assets = Counter(
         "Polaris-ubuntu24.04-x86_64.deb": 1,
     }
 )
-# The systemd extension image is built from the Fedora RPM and may be named at
-# most once beside the packages; a release section that predates it stays valid.
-optional_assets = {"Polaris-sysext-x86_64.raw"}
+withdrawn_sysext_asset = "Polaris-sysext-x86_64.raw"
+expected_changelog_assets = expected_assets.copy()
+expected_changelog_assets[withdrawn_sysext_asset] = 1
 building_packaging = markdown_section(building, "## Packaging")
 building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
-for label, section in (
-    ("docs/building.md Packaging", building_packaging_prose),
-    ("v1.4.3 changelog", current_release_prose),
+for label, section, expected_section_assets in (
+    ("docs/building.md Packaging", building_packaging_prose, expected_assets),
+    ("v1.4.3 changelog", current_release_prose, expected_changelog_assets),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
-    for optional_asset in optional_assets:
-        if actual_assets.get(optional_asset, 0) > 1:
-            print(f"{label} names {optional_asset} more than once", file=sys.stderr)
-            sys.exit(1)
-        actual_assets.pop(optional_asset, None)
-    if actual_assets != expected_assets:
+    if actual_assets != expected_section_assets:
         print(
-            f"{label} must name exactly one of each supported asset; "
-            f"expected={dict(expected_assets)}, actual={dict(actual_assets)}",
+            f"{label} names the wrong supported/withdrawn asset set; "
+            f"expected={dict(expected_section_assets)}, actual={dict(actual_assets)}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1368,6 +1363,9 @@ release_notes_facts = (
     "SteamGridDB",
     "system extension",
     "Bazzite",
+    "Bazzite system extension withdrawn on September 5, 2026",
+    "Do not use cached copies",
+    "The supported Bazzite install remains the Fedora 44 RPM through rpm-ostree",
     "SteamOS",
     "Steam Input",
     "Retroid Pocket 6",
@@ -1388,6 +1386,26 @@ for fact in release_notes_facts:
     if fact not in release_notes:
         print(f"v1.4.3 release notes are missing release fact: {fact}", file=sys.stderr)
         sys.exit(1)
+release_asset_lines = [
+    line for line in release_notes.splitlines() if line.startswith("**Assets:**")
+]
+if len(release_asset_lines) != 1:
+    print("v1.4.3 release notes must contain exactly one Assets line", file=sys.stderr)
+    sys.exit(1)
+release_note_assets = Counter(asset_pattern.findall(release_asset_lines[0]))
+if release_note_assets != expected_assets:
+    print(
+        "v1.4.3 release-note Assets line must contain only the four supported packages; "
+        f"expected={dict(expected_assets)}, actual={dict(release_note_assets)}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if release_notes.count(withdrawn_sysext_asset) != 1:
+    print(
+        "v1.4.3 release notes must name the withdrawn system extension exactly once in the warning",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 for forbidden in (
     "history_safe",
     "profilePreference",
