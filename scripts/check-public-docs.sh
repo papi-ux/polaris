@@ -1337,6 +1337,9 @@ expected_assets = Counter(
         "Polaris-ubuntu24.04-x86_64.deb": 1,
     }
 )
+# The systemd extension image is built from the Fedora RPM and may be named at
+# most once beside the packages; a release section that predates it stays valid.
+optional_assets = {"Polaris-sysext-x86_64.raw"}
 building_packaging = markdown_section(building, "## Packaging")
 building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
@@ -1345,6 +1348,11 @@ for label, section in (
     ("v1.4.2 changelog", current_release_prose),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
+    for optional_asset in optional_assets:
+        if actual_assets.get(optional_asset, 0) > 1:
+            print(f"{label} names {optional_asset} more than once", file=sys.stderr)
+            sys.exit(1)
+        actual_assets.pop(optional_asset, None)
     if actual_assets != expected_assets:
         print(
             f"{label} must name exactly one of each supported asset; "
