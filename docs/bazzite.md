@@ -309,36 +309,41 @@ If clients connect but the stream is black, check whether logs mention
 headless labwc runtime. `HEADLESS-1` means routing worked and capture or encoder
 warnings should be inspected next.
 
-## System Extension (experimental)
+## System Extension (withdrawn)
 
-`Polaris-sysext-x86_64.raw` is the Fedora 44 RPM repacked as a
-[systemd system extension](https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html):
-the same files, overlaid onto `/usr` by `systemd-sysext` without a new deployment and without a
-reboot. It is experimental. The image is validated in CI as a system extension, but it has not yet
-been run on a Bazzite host, it cannot carry libraries the base image lacks (the RPM would have pulled
-them in), and on an SELinux-enforcing host the overlaid files carry no labels, so a start failure with
-a denial in `journalctl` is the extension, not Polaris. The RPM path above remains the supported one.
+> [!WARNING]
+> The experimental `Polaris-sysext-x86_64.raw` image was withdrawn on
+> September 5, 2026. The image did not include the runtime dependencies required by Bazzite.
+> Polaris can therefore fail to start immediately. A reported boot problem after
+> installation is also under investigation. Do not use cached copies.
 
-The file must be installed as `polaris.raw`, which is the name the extension declares. Do not layer
-the RPM and the extension at the same time.
+The supported Bazzite install remains the Fedora 44 RPM through `rpm-ostree`, as
+described in [Install](#install). The extension is not a substitute for the RPM
+until its dependency closure, SELinux behavior, failed-install rollback, and
+boot recovery have been validated on real Bazzite hardware.
+
+An installed extension remains at `/var/lib/extensions/polaris.raw`. That path is
+outside an individual rpm-ostree `/usr` deployment, so selecting another
+deployment does not remove the image. If the host still reaches Desktop Mode, a
+TTY, or SSH, remove the extension before rebooting again:
 
 ```bash
-raw_name="Polaris-sysext-x86_64.raw"
-wget --output-document="./${raw_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${raw_name}" &&
-sudo install -D -m 0644 "./${raw_name}" /var/lib/extensions/polaris.raw &&
-sudo systemctl enable --now systemd-sysext.service &&
-sudo systemd-sysext refresh &&
-sudo udevadm control --reload &&
-sudo -H polaris --setup-host &&
-systemctl --user daemon-reload &&
-systemctl --user enable --now polaris
+systemctl --user disable --now polaris 2>/dev/null || true
+sudo systemd-sysext unmerge
+sudo rm -f /var/lib/extensions/polaris.raw
+sudo systemd-sysext refresh
+systemctl --user daemon-reload
+sudo systemd-sysext status
 ```
 
-`systemd-sysext status` shows whether the extension is merged. To update, replace
-`/var/lib/extensions/polaris.raw` with the newer image, then run `sudo systemd-sysext refresh` and
-`systemctl --user restart polaris`. To remove it, run `sudo systemd-sysext unmerge` and delete the
-image. The extension is built from the Fedora RPM, so it is for Fedora-based atomic hosts; it does
-not run on SteamOS.
+The final status must not list `polaris`. The `refresh` step restores any other
+installed system extensions after Polaris is removed. After cleanup, use the
+Fedora 44 RPM install path above.
+
+If the host no longer reaches a login, do not keep switching deployments or
+reinstall Bazzite. Ask in the
+[public Polaris Matrix room](https://matrix.to/#/#polaris:papi-ux.com) before
+making more changes so recovery can be matched to the exact boot symptom.
 
 ## Update
 
