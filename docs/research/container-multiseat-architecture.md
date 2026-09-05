@@ -2,8 +2,9 @@
 
 Status: architecture, an offline rootless-Podman backend, locked image inputs,
 immutable per-seat runtime/data-plane bindings, typed workload plans, a
-supervisor/IPC routing proof, and isolated session-bus/audio providers. Nothing
-in this document enables multiseat, launches a container, or changes the
+supervisor/IPC routing proof, four isolated runtime providers, and a
+host-brokered virtual-input authority contract. Nothing in this document
+enables multiseat, launches a container, opens an input device, or changes the
 current single-workload runtime.
 
 ## Outcome
@@ -198,7 +199,9 @@ when it comes from a different client.
 The worker backend will eventually need a narrow contract for:
 
 - the chosen GPU render and encoder devices;
-- uinput and uhid access;
+- host-brokered uinput and uhid creation without exposing either creation
+  endpoint to an untrusted launcher;
+- only the exact generation's verified event nodes in each worker;
 - udev visibility without granting the host seat access to virtual devices;
 - an isolated runtime directory and session bus;
 - audio and compositor startup;
@@ -245,6 +248,15 @@ immutable and includes:
 - exact seat, outer-capture and inner-app Wayland resources, runtime profile,
   typed workload selector, image, display/data-plane topology, compositor,
   render node, and encoder labels, but no client identity or profile key.
+
+The original backend proof accepts a configured list of input character
+devices and passes that same list to each worker. That is sufficient to prove
+literal Podman argv and host-access checks, but it is not a multiseat input
+boundary and must not be activated as one. In particular, passing raw
+`/dev/uinput` or `/dev/uhid` to every application container lets each container
+create kernel-visible devices outside its own seat authority. The final backend
+must replace that prototype list with generation-specific manifests from the
+host input authority below.
 
 Inventory is two phase and bounded: an exact deployment-label listing returns
 full immutable container IDs, then one JSON inspection validates every ID,
@@ -464,6 +476,50 @@ recipe now fails closed unless its locked root contains `gst-launch-1.0`,
 have not yet passed that gate. Virtual input, encoder, and launcher providers
 remain missing; Podman health still means only supervisor liveness.
 
+## Host-brokered virtual-input authority checkpoint
+
+Virtual input must be created before the worker launch, on the trusted host
+side. This lets Podman map only known event nodes into the worker's private
+`/dev`, while the host broker retains `/dev/uinput` and `/dev/uhid`. It also
+avoids depending on hotplug delivery through the worker's private network and
+mount namespaces. A launcher cannot manufacture or discover another seat's
+nodes merely because it knows their host major/minor values.
+
+`multiseat::input::authority_t` is the first executable boundary for that
+model. It remains outside the singleton runtime and uses an injected backend,
+so its tests open no real input device. Its contract:
+
+- starts admission closed and requires one complete, unambiguous backend
+  inventory before any device creation, with both expected and observed
+  allocation sets bounded at 256;
+- binds every allocation to the full controller epoch, GPU, slot, generation,
+  and opaque input-seat name;
+- always requires one keyboard and mouse, optionally admits touch and pen, and
+  bounds generic gamepad slots at sixteen;
+- accepts only canonical `/dev/input/eventN` host nodes with unique filesystem
+  inode and character-device identities, Linux input major 13, the existing
+  Polaris seat-isolation phys marker, and host seat `seat-polaris`;
+- maps those nodes to fixed worker-local paths such as
+  `/dev/input/polaris-keyboard` and `/dev/input/polaris-gamepad-0`, which reveal
+  no client or profile identity;
+- cannot accept `/dev/uinput`, `/dev/uhid`, a duplicate node, an unisolated phys
+  marker, or a seat0 allocation as authoritative;
+- serializes per-seat input payloads with a strict nonzero sequence and 64-KiB
+  bound, rejects stale-generation routing, and closes admission after an
+  indeterminate backend result;
+- retains ambiguous or indeterminate state for inspection, removes only an
+  exact unambiguous orphan, and confirms orphan removal through a second
+  authoritative inventory.
+
+This is authority and lifecycle scaffolding, not the worker virtual-input
+provider. A production inputtino backend, exact Podman manifest binding,
+worker-side event bridge, feedback path, and crash-persistent node discovery
+remain required. Steam Input also needs a separately mediated creation path;
+granting its container raw uinput would reintroduce the authority this contract
+removes. That trusted backend must derive filesystem, character-device, phys,
+and seat identity from `fstat` plus sysfs/udev rather than caller claims, then
+revalidate the node at the Podman bind boundary to close path-replacement races.
+
 The upstream Wolf data plane informed, but does not dictate, this contract.
 Wolf uses `gst-wayland-display` as an outer headless
 compositor that exposes a framebuffer, nests Gamescope as a Wayland client for
@@ -680,12 +736,13 @@ The offline test suite covers:
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
-This remains an offline control-plane/backend proof with three locally
-exercised base providers. A later container integration test must build and pin the final
-worker images, pre-create profile
-volumes and the private runtime root, instantiate the coordinator behind an
-explicit opt-in configuration, and run two real supervisor containers. Before
-physical game testing, the remaining providers and immutable catalog must bind
+This remains an offline control-plane/backend proof with four locally
+exercised runtime providers and an injected host-input authority. A later
+container integration test must build and pin the final worker images,
+pre-create profile volumes and the private runtime root, instantiate the
+coordinator behind an explicit opt-in configuration, and run two real
+supervisor containers. Before physical game testing, the remaining providers
+and immutable catalog must bind
 the nested compositor, virtual-input lifecycle, worker-local encoder, exact
 workload target, and launcher process tree to the implemented private session
 bus, audio sink, and outer display/capture owner without weakening the proven
