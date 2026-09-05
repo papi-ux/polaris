@@ -7991,6 +7991,13 @@ namespace nvhttp {
       response->write(manifest.dump(), headers);
     };
 
+    // A failed artwork search answers with a body Nova can act on instead of a bare status.
+    static const auto write_artwork_search_failure = [](resp_https_t response, const game_artwork::manual::search_failure_t &failure) {
+      nlohmann::json body {{"status", false}, {"code", failure.code}, {"error", failure.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(static_cast<SimpleWeb::StatusCode>(failure.http_status), body.dump(), headers);
+    };
     auto polarisSearchGameArtworkMatches = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
       if (!get_verified_cert(request)) {
@@ -8012,7 +8019,7 @@ namespace nvhttp {
       }
       const auto api_key = config::sunshine.steamgriddb_api_key;
       if (!nonblank_artwork_api_key(api_key)) {
-        response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+        write_artwork_search_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt));
         return;
       }
       const auto args = request->parse_query_string();
@@ -8036,7 +8043,13 @@ namespace nvhttp {
             !game_artwork::is_allowed_provider_url(
               game_artwork::provider_e::steamgriddb,
               search_response->final_url.empty() ? search_request->url : search_response->final_url)) {
-          response->write(SimpleWeb::StatusCode::server_error_bad_gateway);
+          write_artwork_search_failure(
+            response,
+            game_artwork::manual::classify_search_failure(
+              true,
+              search_response ? std::optional<long>(static_cast<long>(search_response->status_code)) : std::optional<long> {}
+            )
+          );
           return;
         }
         const std::string search_body(search_response->body.begin(), search_response->body.end());
