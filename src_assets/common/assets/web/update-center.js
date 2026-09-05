@@ -189,6 +189,16 @@ function buildActionMetadata(status, asset, installCommand, releaseUrl) {
     }
   }
 
+  if (status === 'restart_required') {
+    return {
+      statusTone: 'restart',
+      statusLightLabel: 'Installed version is not running',
+      primaryActionLabel: 'Details',
+      primaryActionKind: 'scroll_to_update_center',
+      primaryActionSummary: 'A newer Polaris package is installed than the one running.',
+    }
+  }
+
   if (status === 'ahead') {
     return {
       statusTone: 'ahead',
@@ -236,6 +246,15 @@ function isReleaseGreater(release, version, includeIncremental = false) {
   if (!release || !version) return false
   try {
     return new PolarisVersion(release, null).isGreater(new PolarisVersion(null, version), includeIncremental)
+  } catch {
+    return false
+  }
+}
+
+function isInstalledNewerThanRunning(installedVersion, runningVersion) {
+  if (!installedVersion || !runningVersion) return false
+  try {
+    return new PolarisVersion(null, installedVersion).isGreater(new PolarisVersion(null, runningVersion))
   } catch {
     return false
   }
@@ -305,6 +324,17 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     summary = 'This host is running a build newer than the selected release channel.'
   }
 
+  // The package database can be ahead of the running process: dnf, apt, and
+  // pacman replace the binary but leave the old process running, and rpm-ostree
+  // hosts keep running the booted deployment. That confusion reads like a
+  // failed update, so it gets its own state ahead of everything else.
+  const installedVersion = String(host.installed_package_version || '').trim()
+  if (installedVersion && isInstalledNewerThanRunning(installedVersion, currentVersion)) {
+    status = 'restart_required'
+    statusLabel = 'Installed, not running'
+    summary = `Polaris ${installedVersion} is installed but this host is still running ${currentVersion}. Restart Polaris to use it.`
+  }
+
   const asset = selectReleaseAsset(candidateRelease, host)
   const packageFamily = normalizeToken(asset?.packageFamily || inferPackageFamily(host))
   // A configured repository wins over the download command: it upgrades the
@@ -341,6 +371,8 @@ export function updateStatusLightClass(statusTone) {
       return 'bg-ice shadow-[0_0_18px_color-mix(in_srgb,var(--color-ice)_75%,transparent)] animate-pulse'
     case 'ahead':
       return 'bg-accent shadow-[0_0_14px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]'
+    case 'restart':
+      return 'bg-ice shadow-[0_0_14px_color-mix(in_srgb,var(--color-ice)_55%,transparent)]'
     case 'warning':
       return 'bg-warning shadow-[0_0_14px_color-mix(in_srgb,var(--color-warning)_55%,transparent)]'
     case 'disabled':

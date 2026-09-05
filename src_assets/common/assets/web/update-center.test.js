@@ -8,6 +8,7 @@ import {
   buildRepositoryUpgradeCommand,
   buildUpdateCenterState,
   selectReleaseAsset,
+  updateStatusLightClass,
 } from './update-center.js'
 
 const release = {
@@ -223,6 +224,39 @@ const expectFailureSafeSteamOsCommand = (failSudo, failedCommand) => {
 }
 
 describe('Update Center release awareness', () => {
+  it('says when the installed package is newer than the running process', () => {
+    const state = buildUpdateCenterState({
+      currentVersion: '1.4.1',
+      latestRelease: { ...release, tag_name: 'v1.4.2', name: 'v1.4.2' },
+      host: {
+        platform: 'linux',
+        distro: { id: 'fedora', version_id: '44' },
+        installed_package_version: '1.4.2',
+      },
+    })
+
+    expect(state.status).toBe('restart_required')
+    expect(state.statusLabel).toBe('Installed, not running')
+    expect(state.summary).toContain('1.4.2 is installed but this host is still running 1.4.1')
+    expect(state.statusTone).toBe('restart')
+    expect(state.primaryActionKind).toBe('scroll_to_update_center')
+    expect(updateStatusLightClass('restart')).toContain('bg-ice')
+
+    const current = buildUpdateCenterState({
+      currentVersion: '1.4.2',
+      latestRelease: { ...release, tag_name: 'v1.4.2', name: 'v1.4.2' },
+      host: { platform: 'linux', distro: { id: 'fedora', version_id: '44' }, installed_package_version: '1.4.2' },
+    })
+    expect(current.status).toBe('current')
+
+    const unknown = buildUpdateCenterState({
+      currentVersion: '1.4.2',
+      latestRelease: { ...release, tag_name: 'v1.4.2', name: 'v1.4.2' },
+      host: { platform: 'linux', distro: { id: 'fedora', version_id: '44' }, installed_package_version: '' },
+    })
+    expect(unknown.status).toBe('current')
+  })
+
   it('detects a stable update and selects the Arch/CachyOS package', () => {
     const state = buildUpdateCenterState({
       currentVersion: '1.2.1',
