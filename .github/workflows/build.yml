@@ -1409,6 +1409,59 @@ jobs:
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.err
           if-no-files-found: warn
 
+  sysext-build:
+    name: Systemd extension image
+    needs:
+      - resolve-source
+      - fedora-rpm-build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-source.outputs.commit }}
+      - name: Install image tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools rpm2cpio cpio systemd-container
+      - name: Download Fedora 44 RPM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: fedora-44-rpm-artifacts
+          path: sysext/raw
+      - name: Build the extension image from the Fedora 44 RPM
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # The artifact carries the package as an unversioned Polaris.rpm; only a
+          # regular binary RPM is a valid input, whatever CPack named it.
+          mapfile -t binary_rpms < <(
+            find sysext/raw -type f -name '*.rpm' ! -name '*.src.rpm' | sort
+          )
+          if [ "${#binary_rpms[@]}" -ne 1 ]; then
+            echo "Expected exactly one Fedora 44 binary RPM, found ${#binary_rpms[@]}: ${binary_rpms[*]}" >&2
+            find sysext/raw -maxdepth 3 -printf '%y %p\n' >&2
+            exit 1
+          fi
+          bash scripts/ci/build-sysext-image.sh "${binary_rpms[0]}" sysext/out/Polaris-sysext-x86_64.raw
+      - name: Validate the image as a system extension
+        run: |
+          set -euo pipefail
+          # The extension declares the name polaris, so systemd only accepts the
+          # image as a sysext under that file name; the release asset keeps the
+          # Polaris-* name and the guide installs it as polaris.raw.
+          cp sysext/out/Polaris-sysext-x86_64.raw sysext/out/polaris.raw
+          sudo systemd-dissect sysext/out/polaris.raw | tee sysext/out/dissect.txt
+          grep -q 'sysext for system' sysext/out/dissect.txt
+          grep -q 'ID=_any' sysext/out/dissect.txt
+          rm -f sysext/out/polaris.raw
+      - name: Upload the extension image
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-sysext-image
+          path: sysext/out/Polaris-sysext-x86_64.raw
+          if-no-files-found: error
+
   release-assets:
     name: Release assets
     needs:
@@ -1418,6 +1471,7 @@ jobs:
       - steamos-build
       - ubuntu-build
       - fedora-rpm-build
+      - sysext-build
       - cpp-sanitizer-tests
     if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
     runs-on: ubuntu-24.04
@@ -1453,6 +1507,11 @@ jobs:
         with:
           name: Polaris-steamos3.8-package
           path: release-assets/raw/steamos3.8
+      - name: Download systemd extension image
+        uses: actions/download-artifact@v8
+        with:
+          name: Polaris-sysext-image
+          path: release-assets/raw/sysext
 
       - name: Prepare release asset names
         run: |
@@ -1543,6 +1602,12 @@ jobs:
           fi
 
           cp "${ubuntu_debs[0]}" "release-assets/final/Polaris-ubuntu24.04-x86_64.deb"
+          sysext_images=(release-assets/raw/sysext/*.raw)
+          if [ "${#sysext_images[@]}" -ne 1 ]; then
+            echo "Expected exactly one systemd extension image, found ${#sysext_images[@]}" >&2
+            exit 1
+          fi
+          cp "${sysext_images[0]}" "release-assets/final/Polaris-sysext-x86_64.raw"
 
           ls -la release-assets/staged release-assets/final
 
