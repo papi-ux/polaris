@@ -99,6 +99,20 @@ namespace platf::gamescope_session_helper {
     return "not compared against a bundled copy";
   }
 
+  std::string_view match_key(bundle_match_t match) {
+    switch (match) {
+      case bundle_match_t::exact:
+        return "exact";
+      case bundle_match_t::wrapped:
+        return "wrapped";
+      case bundle_match_t::mismatch:
+        return "mismatch";
+      case bundle_match_t::unknown:
+        break;
+    }
+    return "unknown";
+  }
+
   resolution_t resolve(
     const std::optional<fs::path> &executable_dir,
     const fs::path &path_candidate,

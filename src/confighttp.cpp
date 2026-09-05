@@ -92,6 +92,7 @@
 
 #ifdef __linux__
   #include "platform/linux/executable_path.h"
+  #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_runtime.h"
@@ -6889,6 +6890,49 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  /**
+   * @brief Read-only probe of the gamescope_stream session launcher this host would run.
+   *
+   * Doctor shows which polaris-gamescope-session Polaris resolves, whether a
+   * stale copy on PATH shadows it, and whether it matches the module this
+   * build ships, so a helper left by an older scripts/install run is named
+   * instead of debugged as a Polaris bug.
+   */
+  void getGamescopeHelperProbe(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["kind"] = "gamescope-helper";
+#ifdef __linux__
+    namespace helper = platf::gamescope_session_helper;
+    const auto resolution = helper::resolve_default();
+    const auto path_or_null = [](const std::filesystem::path &path) {
+      return path.empty() ? nlohmann::json(nullptr) : nlohmann::json(path.string());
+    };
+    output["platform"] = "linux";
+    output["relevant"] = config::video.linux_display.stream_mode == "gamescope_stream" ||
+                         config::video.linux_display.private_runtime == "gamescope";
+    output["launcher"] = path_or_null(resolution.helper);
+    output["shadowed"] = path_or_null(resolution.shadowed);
+    output["bundled"] = path_or_null(resolution.bundled);
+    output["runtimeLib"] = path_or_null(resolution.runtime_lib);
+    output["sessionMatch"] = std::string(helper::match_key(resolution.session_match));
+    output["runtimeLibMatch"] = std::string(helper::match_key(resolution.runtime_lib_match));
+    output["summary"] = helper::summary(resolution);
+    output["advisories"] = helper::advisories(resolution);
+#else
+    output["platform"] = "other";
+    output["relevant"] = false;
+#endif
+
+    send_response(response, output);
+  }
+
   nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats) {
     stats_json["tuning"] = settings_metadata::build_tuning_json(
       adaptive_bitrate::get_state(),
@@ -7265,6 +7309,7 @@ namespace confighttp {
     server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
     server.resource["^/api/stats/stream-sse$"]["GET"] = getStreamStatsSSE;
     server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
+    server.resource["^/api/support/gamescope-helper$"]["GET"] = getGamescopeHelperProbe;
     server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
     server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);

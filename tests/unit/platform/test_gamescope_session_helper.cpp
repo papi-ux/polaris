@@ -197,6 +197,14 @@ TEST(GamescopeSessionHelperTests, ShadowedStaleCopyIsNamedButNotUsed) {
   EXPECT_NE(advisories[0].find("scripts/install"), std::string::npos);
 }
 
+TEST(GamescopeSessionHelperTests, MatchKeysAreStableWords) {
+  // The Doctor probe publishes these words; the web report switches on them.
+  EXPECT_EQ(helper::match_key(helper::bundle_match_t::exact), "exact");
+  EXPECT_EQ(helper::match_key(helper::bundle_match_t::wrapped), "wrapped");
+  EXPECT_EQ(helper::match_key(helper::bundle_match_t::mismatch), "mismatch");
+  EXPECT_EQ(helper::match_key(helper::bundle_match_t::unknown), "unknown");
+}
+
 TEST(GamescopeSessionHelperTests, CompareWithBundleClassifiesContent) {
   EXPECT_EQ(helper::compare_with_bundle("", module_body), helper::bundle_match_t::unknown);
   EXPECT_EQ(helper::compare_with_bundle(module_body, ""), helper::bundle_match_t::unknown);

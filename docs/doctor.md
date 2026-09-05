@@ -30,6 +30,13 @@ capture latency, and encoder time remain inside the active stream's real FPS bud
 when those measurements show pressure; it does not lower a healthy 120 FPS stream merely because
 its compatibility path is CPU-backed.
 
+On a Linux host configured for `gamescope_stream`, Doctor & Support also shows a **Gamescope Session
+Helper** card. It names the `polaris-gamescope-session` launcher this Polaris will run, warns when a
+stale copy under `~/.local/bin` or `/usr/local/bin` sits ahead of it on PATH, and fails when the
+launcher or its runtime library was installed from a different checkout than the running build,
+which is the state that makes already-fixed session bugs reappear. Reinstall the helpers from this
+Polaris version, or install the distro package, and the card turns green.
+
 ## Pick the offered action
 
 Doctor uses a small action vocabulary so the button says what will happen:

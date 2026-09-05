@@ -5,6 +5,7 @@ import {
   buildAnonymizedDiagnosticsBundle,
   buildControllerInputTestReport,
   buildFixMyStreamChecklist,
+  buildGamescopeHelperReport,
   buildGithubIssueDraft,
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
@@ -634,6 +635,79 @@ describe('support self-service reports', () => {
     expect(report.checks.find((check) => check.key === 'host-isolation').status).toBe('pass')
     expect(report.checks.find((check) => check.key === 'host-isolation').detail).toContain('strict_bwrap')
     expect(report.advancedEvidence.native.virtualControllerKind).toBe('xone')
+  })
+
+  it('reports a packaged gamescope helper that matches the build as clean', () => {
+    const report = buildGamescopeHelperReport({
+      relevant: true,
+      launcher: '/usr/bin/polaris-gamescope-session',
+      shadowed: null,
+      bundled: '/usr/share/polaris/assets/gamescope/polaris-gamescope-session.sh',
+      runtimeLib: '/usr/bin/polaris-gamescope-runtime-lib.sh',
+      sessionMatch: 'exact',
+      runtimeLibMatch: 'exact',
+      advisories: [],
+    })
+
+    expect(report.status).toBe('pass')
+    expect(report.classification).toBe('clean')
+    expect(report.summary).toContain('matches this Polaris build')
+    expect(report.checks.map((check) => check.key)).toEqual(['launcher', 'shadowed', 'bundle', 'runtime-lib'])
+    expect(report.checks.find((check) => check.key === 'launcher').detail).toContain('/usr/bin/polaris-gamescope-session')
+  })
+
+  it('names a stale helper on PATH without failing the packaged launcher', () => {
+    const report = buildGamescopeHelperReport({
+      relevant: true,
+      launcher: '/usr/bin/polaris-gamescope-session',
+      shadowed: '/srv/example/.local/bin/polaris-gamescope-session',
+      bundled: '/usr/share/polaris/assets/gamescope/polaris-gamescope-session.sh',
+      runtimeLib: '/usr/bin/polaris-gamescope-runtime-lib.sh',
+      sessionMatch: 'exact',
+      runtimeLibMatch: 'exact',
+    })
+
+    expect(report.status).toBe('warning')
+    expect(report.summary).toContain('stale copy on PATH')
+    expect(report.checks.find((check) => check.key === 'shadowed').status).toBe('warning')
+    expect(report.checks.find((check) => check.key === 'shadowed').detail).toContain('.local/bin')
+    expect(report.checks.find((check) => check.key === 'bundle').status).toBe('pass')
+  })
+
+  it('fails a helper installed from another checkout and a missing launcher', () => {
+    const stale = buildGamescopeHelperReport({
+      relevant: true,
+      launcher: '/usr/local/bin/polaris-gamescope-session',
+      bundled: '/usr/share/polaris/assets/gamescope/polaris-gamescope-session.sh',
+      runtimeLib: '/usr/local/bin/polaris-gamescope-runtime-lib.sh',
+      sessionMatch: 'mismatch',
+      runtimeLibMatch: 'mismatch',
+    })
+    expect(stale.status).toBe('fail')
+    expect(stale.classification).toBe('host')
+    expect(stale.summary).toContain('does not match this Polaris build')
+    expect(stale.checks.find((check) => check.key === 'bundle').action).toContain('Reinstall the gamescope helpers')
+    expect(stale.checks.find((check) => check.key === 'runtime-lib').status).toBe('fail')
+
+    const missing = buildGamescopeHelperReport({ relevant: true, launcher: null, sessionMatch: 'unknown', runtimeLibMatch: 'unknown' })
+    expect(missing.status).toBe('fail')
+    expect(missing.summary).toContain('no session launcher is installed')
+  })
+
+  it('accepts a wrapped launcher and hides the report when gamescope_stream is not in use', () => {
+    const wrapped = buildGamescopeHelperReport({
+      relevant: true,
+      launcher: '/nix/store/abc-polaris-gamescope-session/bin/polaris-gamescope-session',
+      bundled: '/nix/store/def-polaris/share/polaris/assets/gamescope/polaris-gamescope-session.sh',
+      runtimeLib: null,
+      sessionMatch: 'wrapped',
+      runtimeLibMatch: 'unknown',
+    })
+    expect(wrapped.status).toBe('pass')
+    expect(wrapped.checks.find((check) => check.key === 'runtime-lib').detail).toContain('wrapped installs inline it')
+
+    expect(buildGamescopeHelperReport({ relevant: false, platform: 'other' })).toBeNull()
+    expect(buildGamescopeHelperReport(null)).toBeNull()
   })
 
   it('builds a post-session report with issue owner and next launch profile', () => {

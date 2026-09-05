@@ -56,6 +56,9 @@ namespace platf::gamescope_session_helper {
 
   std::string_view describe(bundle_match_t match);
 
+  /// Stable machine word for a match state: exact, wrapped, mismatch, or unknown.
+  std::string_view match_key(bundle_match_t match);
+
   /// One line naming the launcher in use and how it relates to the shipped module.
   std::string summary(const resolution_t &resolution);
 
