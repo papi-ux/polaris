@@ -8,6 +8,7 @@
 
 // standard includes
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -50,6 +51,7 @@
 #include "entry_handler.h"
 #include "file_handler.h"
 #include "game_artwork.h"
+#include "game_artwork_manual.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -4413,76 +4415,99 @@ namespace confighttp {
    *
    * @api_examples{/api/config| POST| {"key":"value"}}
    */
+  /**
+   * @brief Serialize `tree` into the config file and apply the live toggles it carries.
+   *
+   * Every key comes from `tree`; only write-only secrets the payload leaves
+   * alone are carried over from the existing file. A writer that wants to
+   * keep unmentioned keys must merge them in first (see patchConfig). Answers
+   * the request itself on failure and returns false.
+   */
+  bool write_config_tree(resp_https_t response, req_https_t request, const nlohmann::json &tree, const std::string &writer) {
+    std::stringstream config_stream;
+    const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    std::vector<std::string> written_keys;
+    for (const auto &[k, v] : tree.items()) {
+      if (v.is_null()) {
+        continue;
+      }
+      if (v.is_string() && v.get<std::string>().empty() && !is_write_only_secret_config_key(k)) {
+        continue;
+      }
+      // v.dump() will dump valid json, which we do not want for strings in the config right now
+      // we should migrate the config file to straight json and get rid of all this nonsense
+      config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
+      written_keys.push_back(k);
+    }
+    std::size_t dropped = 0;
+    for (const auto &[key, value] : existing_vars) {
+      if (tree.contains(key) || value.empty()) {
+        continue;
+      }
+      if (is_write_only_secret_config_key(key)) {
+        config_stream << key << " = " << value << std::endl;
+        continue;
+      }
+      ++dropped;
+    }
+    if (dropped > 0) {
+      BOOST_LOG(info) << "SaveConfig: "sv << writer << " left "sv << dropped << " existing key(s) out of the payload; they revert to defaults"sv;
+    }
+    if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+      const std::string message = "Failed to write config file: " + config::sunshine.config_file;
+      BOOST_LOG(error) << "SaveConfig: "sv << message;
+      bad_request(response, request, message);
+      return false;
+    }
+    settings_metadata::note_config_write(writer, std::move(written_keys));
+    if (tree.contains("adaptive_bitrate_enabled")) {
+      doctor_actions::set_adaptive_enabled(
+        json_config_enabled(tree["adaptive_bitrate_enabled"])
+      );
+    }
+    if (tree.contains("ai_enabled")) {
+      ai_optimizer::set_enabled(json_config_enabled(tree["ai_enabled"]));
+    }
+    return true;
+  }
+
+  /**
+   * @brief Parse and validate a config write body, or answer the request and return false.
+   */
+  bool read_config_payload(resp_https_t response, req_https_t request, nlohmann::json &input_tree) {
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    input_tree = nlohmann::json::parse(ss);
+    std::string validation_error;
+    for (auto it = input_tree.begin(); it != input_tree.end();) {
+      if (validation::is_response_only_config_key(it.key())) {
+        it = input_tree.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (!validation::validate_config_payload(input_tree, validation_error)) {
+      bad_request(response, request, validation_error);
+      return false;
+    }
+    validation::normalize_write_only_secret_payload(input_tree);
+    return true;
+  }
+
   void saveConfig(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
     }
-
     print_req(request);
-
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      std::stringstream config_stream;
+      nlohmann::json input_tree;
+      if (!read_config_payload(response, request, input_tree)) {
+        return;
+      }
+      if (!write_config_tree(response, request, input_tree, "web_ui")) {
+        return;
+      }
       nlohmann::json output_tree;
-      nlohmann::json input_tree = nlohmann::json::parse(ss);
-      std::string validation_error;
-      for (auto it = input_tree.begin(); it != input_tree.end();) {
-        if (validation::is_response_only_config_key(it.key())) {
-          it = input_tree.erase(it);
-        } else {
-          ++it;
-        }
-      }
-      if (!validation::validate_config_payload(input_tree, validation_error)) {
-        bad_request(response, request, validation_error);
-        return;
-      }
-      validation::normalize_write_only_secret_payload(input_tree);
-      const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
-      for (const auto &[k, v] : input_tree.items()) {
-        if (v.is_null()) {
-          continue;
-        }
-
-        if (v.is_string() && v.get<std::string>().empty() && !is_write_only_secret_config_key(k)) {
-          continue;
-        }
-
-        // v.dump() will dump valid json, which we do not want for strings in the config right now
-        // we should migrate the config file to straight json and get rid of all this nonsense
-        config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
-      }
-      for (const auto &[key, value] : existing_vars) {
-        if (!is_write_only_secret_config_key(key) || input_tree.contains(key) || value.empty()) {
-          continue;
-        }
-        config_stream << key << " = " << value << std::endl;
-      }
-      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
-        const std::string message = "Failed to write config file: " + config::sunshine.config_file;
-        BOOST_LOG(error) << "SaveConfig: "sv << message;
-        bad_request(response, request, message);
-        return;
-      }
-      {
-        std::vector<std::string> written_keys;
-        for (const auto &[k, v] : input_tree.items()) {
-          if (v.is_null() || (v.is_string() && v.get<std::string>().empty() && !is_write_only_secret_config_key(k))) {
-            continue;
-          }
-          written_keys.push_back(k);
-        }
-        settings_metadata::note_config_write("web_ui", std::move(written_keys));
-      }
-      if (input_tree.contains("adaptive_bitrate_enabled")) {
-        doctor_actions::set_adaptive_enabled(
-          json_config_enabled(input_tree["adaptive_bitrate_enabled"])
-        );
-      }
-      if (input_tree.contains("ai_enabled")) {
-        ai_optimizer::set_enabled(json_config_enabled(input_tree["ai_enabled"]));
-      }
       output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
@@ -4491,6 +4516,40 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Update part of the configuration.
+   *
+   * Unlike POST, which rewrites the file from its body alone, keys absent from
+   * a PATCH body keep their current values. A key set to null or an empty
+   * string is removed and reverts to its default. Write-only secrets follow
+   * the POST rules: an empty value leaves the stored secret alone unless the
+   * matching clear flag is set.
+   *
+   * @api_examples{/api/config| PATCH| {"steamgriddb_api_key":"..."}}
+   */
+  void patchConfig(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+    try {
+      nlohmann::json input_tree;
+      if (!read_config_payload(response, request, input_tree)) {
+        return;
+      }
+      const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+      const auto merged = validation::merge_config_patch(existing_vars, input_tree);
+      if (!write_config_tree(response, request, merged, "api_patch")) {
+        return;
+      }
+      nlohmann::json output_tree;
+      output_tree["status"] = true;
+      send_response(response, output_tree);
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "PatchConfig: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
   /**
    * @brief Upload a cover image.
    * @param response The HTTP response object.
@@ -4626,11 +4685,19 @@ namespace confighttp {
 
     nlohmann::json output;
 
-    if (config::sunshine.steamgriddb_api_key.empty()) {
+    const auto answer_search_failure = [&](const game_artwork::manual::search_failure_t &failure) {
       output["status"] = false;
-      output["error"] = "SteamGridDB API key not configured. Set steamgriddb_api_key in config.";
+      output["code"] = failure.code;
+      output["error"] = failure.message;
       output["covers"] = nlohmann::json::array();
       send_response(response, output);
+    };
+    const auto &configured_key = config::sunshine.steamgriddb_api_key;
+    const bool key_present = std::any_of(configured_key.begin(), configured_key.end(), [](unsigned char ch) {
+      return !std::isspace(ch);
+    });
+    if (!key_present) {
+      answer_search_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
       return;
     }
 
@@ -4674,9 +4741,17 @@ namespace confighttp {
     if (res != CURLE_OK) {
       curl_easy_cleanup(curl);
       curl_slist_free_all(headers);
-      output["status"] = false;
-      output["error"] = "SteamGridDB search failed";
-      send_response(response, output);
+      answer_search_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
+      return;
+    }
+    long search_status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &search_status);
+    if (search_status < 200 || search_status >= 300) {
+      // A rejected key comes back as 401 with no `data`; answering "no covers"
+      // there hid the real cause from the console and from Nova.
+      curl_easy_cleanup(curl);
+      curl_slist_free_all(headers);
+      answer_search_failure(game_artwork::manual::classify_search_failure(true, search_status));
       return;
     }
 
@@ -7274,6 +7349,7 @@ namespace confighttp {
     server.resource["^/api/settings/metadata$"]["GET"] = getSettingsMetadata;
     server.resource["^/api/update-status$"]["GET"] = getUpdateStatus;
     server.resource["^/api/config$"]["POST"] = withCsrf(saveConfig);
+    server.resource["^/api/config$"]["PATCH"] = withCsrf(patchConfig);
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = withCsrf(restart);
     server.resource["^/api/quit$"]["POST"] = withCsrf(quit);

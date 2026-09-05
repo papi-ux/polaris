@@ -277,4 +277,22 @@ namespace game_artwork::manual {
     std::lock_guard lock(mutex_);
     return entries_.size();
   }
+  search_failure_t classify_search_failure(bool key_present, std::optional<long> upstream_status) {
+    if (!key_present) {
+      return {"steamgriddb_key_missing", "SteamGridDB is not configured on the host. Add a SteamGridDB API key in Polaris settings.", 503};
+    }
+    if (!upstream_status) {
+      return {"steamgriddb_unreachable", "Polaris could not reach SteamGridDB.", 502};
+    }
+    switch (*upstream_status) {
+      case 401:
+      case 403:
+        return {"steamgriddb_unauthorized", "SteamGridDB rejected the host's API key. Update it in Polaris settings.", 502};
+      case 429:
+        return {"steamgriddb_rate_limited", "SteamGridDB is rate limiting this host. Try again in a minute.", 502};
+      default:
+        return {"steamgriddb_unavailable", "SteamGridDB did not answer (HTTP " + std::to_string(*upstream_status) + ").", 502};
+    }
+  }
+
 }  // namespace game_artwork::manual

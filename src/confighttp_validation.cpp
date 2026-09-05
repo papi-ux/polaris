@@ -459,6 +459,37 @@ namespace confighttp::validation {
     }
   }
 
+  nlohmann::json merge_config_patch(
+    const std::unordered_map<std::string, std::string> &existing,
+    const nlohmann::json &patch
+  ) {
+    static constexpr std::array<std::string_view, 3> write_only_secret_keys {"ai_api_key", "api_key", "steamgriddb_api_key"};
+    const auto is_secret = [&](std::string_view key) {
+      return std::find(write_only_secret_keys.begin(), write_only_secret_keys.end(), key) != write_only_secret_keys.end();
+    };
+    nlohmann::json merged = nlohmann::json::object();
+    for (const auto &[key, value] : existing) {
+      if (!value.empty()) {
+        merged[key] = value;
+      }
+    }
+    if (!patch.is_object()) {
+      return merged;
+    }
+    for (const auto &[key, value] : patch.items()) {
+      const bool emptied = value.is_null() || (value.is_string() && value.get_ref<const std::string &>().empty());
+      if (emptied) {
+        merged.erase(key);
+        if (value.is_string() && is_secret(key)) {
+          merged[key] = "";
+        }
+        continue;
+      }
+      merged[key] = value;
+    }
+    return merged;
+  }
+
   bool validate_app_payload(const nlohmann::json &payload, std::string &error) {
     if (!payload.is_object()) {
       error = "App payload must be a JSON object";

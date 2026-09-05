@@ -53,6 +53,19 @@ namespace game_artwork::manual {
     const std::vector<std::pair<std::string, std::string>> &query
   );
   [[nodiscard]] std::optional<std::string> sanitize_search_query(std::string_view query);
+
+  /** Why a SteamGridDB search could not answer, in a shape clients can act on. */
+  struct search_failure_t {
+    std::string code;  ///< stable machine word: steamgriddb_key_missing, steamgriddb_unauthorized, steamgriddb_rate_limited, steamgriddb_unreachable, steamgriddb_unavailable
+    std::string message;  ///< player-facing sentence naming the fix
+    int http_status;  ///< status Polaris answers with (503 without a key, 502 for upstream trouble)
+  };
+
+  /**
+   * Classify a failed search from the host's key state and the upstream status.
+   * Callers pass std::nullopt when SteamGridDB could not be reached at all.
+   */
+  [[nodiscard]] search_failure_t classify_search_failure(bool key_present, std::optional<long> upstream_status);
   [[nodiscard]] std::optional<match_selection_t> parse_match_selection(std::string_view body);
 
   class preview_cache_t {
