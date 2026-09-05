@@ -20,6 +20,9 @@ for tool in rpm2cpio cpio mksquashfs; do
   fi
 done
 [ -f "$rpm_path" ] || { printf 'build-sysext-image.sh: no such RPM: %s\n' "$rpm_path" >&2; exit 1; }
+# The extraction below runs inside the scratch tree, so a relative RPM path must be pinned first.
+rpm_path="$(cd "$(dirname "$rpm_path")" && pwd)/$(basename "$rpm_path")"
+case "$output" in /*) ;; *) output="$PWD/$output" ;; esac
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/polaris-sysext.XXXXXX")"
 trap 'rm -rf "$work"' EXIT

@@ -1433,10 +1433,10 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          # The artifact carries CPack's unversioned Polaris.rpm symlink beside the
-          # real package; only a regular, versioned binary RPM is a valid input.
+          # The artifact carries the package as an unversioned Polaris.rpm; only a
+          # regular binary RPM is a valid input, whatever CPack named it.
           mapfile -t binary_rpms < <(
-            find sysext/raw -type f -name 'Polaris-*.rpm' ! -name '*.src.rpm' | sort
+            find sysext/raw -type f -name '*.rpm' ! -name '*.src.rpm' | sort
           )
           if [ "${#binary_rpms[@]}" -ne 1 ]; then
             echo "Expected exactly one Fedora 44 binary RPM, found ${#binary_rpms[@]}: ${binary_rpms[*]}" >&2
