@@ -20,6 +20,7 @@
  */
 #pragma once
 
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -104,6 +105,21 @@ namespace platf::input_access {
    * the account that asked for it.
    */
   std::string setup_host_target_user();
+
+  /// Injectable account/path access probe used by the setup-host readiness check.
+  using input_node_access_probe_t =
+    std::function<bool(std::string_view user, std::string_view path, int mode)>;
+
+  /**
+   * @brief Whether the live process account can open both virtual-input nodes.
+   *
+   * The injectable overload keeps the account/path routing contract testable.
+   * If `SUDO_USER` differs from the running process account, readiness is unknown
+   * and fails closed without invoking the probe; database membership cannot prove
+   * which supplementary groups the original shell currently has.
+   */
+  bool setup_host_target_can_access_input_nodes(const input_node_access_probe_t &probe);
+  bool setup_host_target_can_access_input_nodes();
 
   /**
    * @brief Advice for `--setup-host` to print, or empty when the account is ready.
