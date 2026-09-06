@@ -35,6 +35,7 @@ extern "C" {
 #include "nvhttp.h"
 #include "platform/common.h"
 #ifdef __linux__
+  #include "platform/linux/multiseat_moonlight_live_session.h"
   #include "platform/linux/session_media.h"
 #endif
 #include "process.h"
@@ -469,6 +470,15 @@ namespace stream {
 
     std::shared_ptr<input::input_t> input;
 
+#ifdef __linux__
+    // Immutable after start(). It is populated only by the explicit gated
+    // bind_multiseat_input seam while this session is still stopped.
+    std::shared_ptr<multiseat::input::moonlight_live_session_t>
+      multiseat_input;
+    mutable std::mutex multiseat_input_binding_mutex;
+    bool multiseat_input_selection_closed = false;
+#endif
+
     std::thread audioThread;
     std::thread videoThread;
 
@@ -563,6 +573,76 @@ namespace stream {
 
     std::atomic<session::state_e> state;
   };
+
+#ifdef __linux__
+  namespace {
+    multiseat::input::moonlight_input_permissions_t
+    multiseat_permissions(const crypto::PERM permission) {
+      return {
+        .keyboard = !!(permission & crypto::PERM::input_kbd),
+        .mouse = !!(permission & crypto::PERM::input_mouse),
+        .touch = !!(permission & crypto::PERM::input_touch),
+        .pen = !!(permission & crypto::PERM::input_pen),
+        .controller = !!(permission & crypto::PERM::input_controller),
+      };
+    }
+
+    void close_multiseat_input(session_t &session) noexcept {
+      if (session.multiseat_input) {
+        session.multiseat_input->close();
+      }
+    }
+
+    void route_session_input(
+      session_t *session,
+      std::vector<std::uint8_t> plaintext
+    ) {
+      if (session->multiseat_input) {
+        // Once a session selects multiseat, a closed or rejected route must
+        // never fall through into the process-global singleton input path.
+        (void) session->multiseat_input->route_input(
+          std::span<const std::uint8_t> {plaintext.data(), plaintext.size()}
+        );
+        return;
+      }
+      input::passthrough(
+        session->input,
+        std::move(plaintext),
+        session->permission
+      );
+    }
+
+    void drain_multiseat_feedback(session_t *session) {
+      if (!session->multiseat_input) {
+        return;
+      }
+
+      // A controller slot coalesces pending state, but cap each control-loop
+      // pass so continuously arriving feedback cannot starve ENet traffic.
+      constexpr std::size_t maximum_feedback_per_pass = 32;
+      for (std::size_t count = 0; count < maximum_feedback_per_pass; ++count) {
+        const auto result = session->multiseat_input->drain_feedback();
+        if (result !=
+            multiseat::input::moonlight_session_drain_result_e::sent) {
+          break;
+        }
+      }
+    }
+  }  // namespace
+#else
+  namespace {
+    void route_session_input(
+      session_t *session,
+      std::vector<std::uint8_t> plaintext
+    ) {
+      input::passthrough(
+        session->input,
+        std::move(plaintext),
+        session->permission
+      );
+    }
+  }  // namespace
+#endif
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -1220,7 +1300,7 @@ namespace stream {
         std::copy(payload.end() - 16, payload.end(), std::begin(iv));
       }
 
-      input::passthrough(session->input, std::move(plaintext), session->permission);
+      route_session_input(session, std::move(plaintext));
     });
 
     server->map(packetTypes[IDX_EXEC_SERVER_CMD], [server](session_t *session, const std::string_view &payload) {
@@ -1350,7 +1430,7 @@ namespace stream {
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
-        input::passthrough(session->input, std::move(plaintext), session->permission);
+        route_session_input(session, std::move(plaintext));
       } else {
         server->call(type, session, next_payload, true);
       }
@@ -1411,6 +1491,9 @@ namespace stream {
           } else {
             has_active_session = true;
 
+#ifdef __linux__
+            drain_multiseat_feedback(session);
+#endif
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
@@ -2327,12 +2410,32 @@ namespace stream {
     }
 
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm) {
+#ifdef __linux__
+      const auto previous_inputs = static_cast<std::uint32_t>(
+        session.permission & crypto::PERM::_all_inputs
+      );
+      const auto updated_inputs = static_cast<std::uint32_t>(
+        newPerm & crypto::PERM::_all_inputs
+      );
+      const bool bound_input_permissions_changed =
+        session.multiseat_input && previous_inputs != updated_inputs;
+#endif
       session.permission = newPerm;
       if (!(newPerm & crypto::PERM::_allow_view)) {
         BOOST_LOG(debug) << "Session: View permission revoked for [" << session.device_name << "], disconnecting...";
         graceful_stop(session);
         return true;
       }
+
+#ifdef __linux__
+      if (bound_input_permissions_changed) {
+        BOOST_LOG(info) << "Session: Multiseat input permission changed for ["sv
+                        << session.device_name
+                        << "], reconnecting with a fresh immutable binding"sv;
+        graceful_stop(session);
+        return true;
+      }
+#endif
 
       BOOST_LOG(debug) << "Session: Permission updated for [" << session.device_name << "]";
 
@@ -2344,8 +2447,75 @@ namespace stream {
       return false;
     }
 
+#ifdef __linux__
+    multiseat_input_bind_status_e bind_multiseat_input(
+      session_t &session,
+      multiseat::input::authority_t &authority,
+      multiseat::input::moonlight_session_binding_registry_t &binding_registry,
+      multiseat::seat_handle_t handle,
+      std::shared_ptr<
+        multiseat::input::moonlight_controller_feedback_hub_t
+      > feedback_hub,
+      bool controller_feedback
+    ) {
+      std::scoped_lock lock {session.multiseat_input_binding_mutex};
+      if (session.state.load(std::memory_order_acquire) != state_e::STOPPED ||
+          session.multiseat_input_selection_closed) {
+        return multiseat_input_bind_status_e::invalid_session_state;
+      }
+      if (session.multiseat_input) {
+        return multiseat_input_bind_status_e::already_bound;
+      }
+
+      auto feedback_queue = session.control.feedback_queue;
+      auto opened = multiseat::input::open_moonlight_live_session(
+        authority,
+        binding_registry,
+        {
+          .key = {
+            .launch_session_id = session.launch_session_id,
+            .session_generation = session.session_generation,
+          },
+          .input_permissions = multiseat_permissions(session.permission),
+        },
+        std::move(handle),
+        std::move(feedback_hub),
+        [feedback_queue](const multiseat::input::moonlight_feedback_t &feedback) {
+          if (!feedback_queue) {
+            return multiseat::input::moonlight_feedback_mailbox_result_e::closed;
+          }
+          feedback_queue->raise(feedback.message);
+          return multiseat::input::moonlight_feedback_mailbox_result_e::queued;
+        },
+        controller_feedback
+      );
+      if (opened.status !=
+            multiseat::input::moonlight_live_session_open_status_e::opened ||
+          !opened.session) {
+        BOOST_LOG(warning)
+          << "Session: Refusing multiseat input binding for ["sv
+          << session.device_name << "] (status "sv
+          << static_cast<int>(opened.status) << ')';
+        return multiseat_input_bind_status_e::open_failed;
+      }
+
+      session.multiseat_input = std::move(opened.session);
+      BOOST_LOG(info) << "Session: Bound authenticated multiseat input for ["sv
+                      << session.device_name << "]"sv;
+      return multiseat_input_bind_status_e::bound;
+    }
+
+    bool multiseat_input_bound(const session_t &session) {
+      std::scoped_lock lock {session.multiseat_input_binding_mutex};
+      return static_cast<bool>(session.multiseat_input);
+    }
+#endif
+
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
+#ifdef __linux__
+      close_multiseat_input(session);
+#endif
       auto expected = state_e::RUNNING;
       auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
       if (already_stopping) {
@@ -2357,6 +2527,9 @@ namespace stream {
 
     void graceful_stop(session_t& session) {
       while_starting_do_nothing(session.state);
+#ifdef __linux__
+      close_multiseat_input(session);
+#endif
       auto expected = state_e::RUNNING;
       auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
       if (already_stopping) {
@@ -2389,6 +2562,9 @@ namespace stream {
     }
 
     void join(session_t &session) {
+#ifdef __linux__
+      close_multiseat_input(session);
+#endif
       // Current Nvidia drivers have a bug where NVENC can deadlock the encoder thread with hardware-accelerated
       // GPU scheduling enabled. If this happens, we will terminate ourselves and the service can restart.
       // The alternative is that Sunshine can never start another session until it's manually restarted.
@@ -2414,7 +2590,9 @@ namespace stream {
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
       BOOST_LOG(debug) << "Resetting Input..."sv;
-      input::reset(session.input);
+      if (session.input) {
+        input::reset(session.input);
+      }
 
       if (!session.undo_cmds.empty()) {
         auto exec_thread = std::thread([cmd_list = session.undo_cmds]{
@@ -2522,7 +2700,17 @@ namespace stream {
         }
       }
 
+#ifdef __linux__
+      {
+        std::scoped_lock lock {session.multiseat_input_binding_mutex};
+        session.multiseat_input_selection_closed = true;
+        if (!session.multiseat_input) {
+          session.input = input::alloc(session.mail);
+        }
+      }
+#else
       session.input = input::alloc(session.mail);
+#endif
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {

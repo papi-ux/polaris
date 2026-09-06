@@ -671,12 +671,24 @@ deliberately narrow future boundary to `stream::session_t`'s existing
 control-thread queue; no ENet peer, encryption key, session token, or raw
 network send is representable here.
 
-These classes are still offline source seams. The live control stream does not
-construct or invoke the bridge, does not register its authenticated session,
-and does not supply the concrete stream mailbox endpoint. The singleton does
-not construct the input authority or feedback hub. Production construction,
-crash-persistent node discovery, rootless group/SELinux deployment policy, and
-physical container proof remain required.
+An explicitly activated production owner now joins registration, bridge,
+feedback subscription, and the existing control-thread mailbox for one live
+session. `stream::session_t` derives the non-secret key and immutable input
+permissions from its already-authenticated launch state; callers can supply
+only an admitted seat handle, authority, registry, and typed feedback hub. A
+selected multiseat session never falls back to singleton input after rejection
+or close. Teardown closes the mailbox edge, quiesces and detaches the bridge,
+then retires registration, while permission changes require a fresh session.
+ENet transmission remains on the existing control thread.
+
+This seam is default-off: no configuration, launch, coordinator, worker, or
+container path calls `bind_multiseat_input()`, and the singleton does not
+construct the input authority, registry, or feedback hub. A physical client
+smoke at this checkpoint proves only that compiling the inert seam into the
+production server does not regress ordinary streaming, controller input, or
+disconnect teardown. Production construction, crash-persistent node discovery,
+rootless group/SELinux deployment policy, and physical container proof remain
+required.
 Steam Input also needs a separately mediated creation path; granting its
 container raw uinput would reintroduce the authority this contract removes.
 
@@ -893,6 +905,9 @@ The offline test suite covers:
 - two simultaneous injected data planes with exact input, feedback, encoded
   video/audio routing, duplicate-owner rejection, cross-seat input/output
   rejection, route-failure rollback, and teardown isolation;
+- production live-session ownership with exact registration and seat claims,
+  routed input, typed control-mailbox feedback, retry retention, bridge-open
+  rollback, and callback-quiescent close;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
