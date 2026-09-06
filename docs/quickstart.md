@@ -54,7 +54,8 @@ first-run installation. If the credentials are no longer known, use the bounded 
 > [!TIP]
 > If you changed `port` in `~/.config/polaris/polaris.conf`, the web UI is at
 > `https://localhost:<port + 1>`. For background autostart, enable the user service with
-> `systemctl --user enable --now polaris`.
+> `systemctl --user enable --now polaris`. The application menu entry starts that same service,
+> so a desktop launch and autostart never run two copies.
 
 ## 3. Confirm the recommended Linux path
 
