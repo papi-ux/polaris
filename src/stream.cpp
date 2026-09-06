@@ -35,6 +35,7 @@ extern "C" {
 #include "nvhttp.h"
 #include "platform/common.h"
 #ifdef __linux__
+  #include "platform/linux/multiseat_moonlight_activation.h"
   #include "platform/linux/multiseat_moonlight_live_session.h"
   #include "platform/linux/session_media.h"
 #endif
@@ -537,6 +538,10 @@ namespace stream {
     } control;
 
     std::uint32_t launch_session_id;
+    // Exact generation admitted by /launch or /resume. Unlike the per-alloc
+    // stream generation, this is known before RTSP constructs session_t and
+    // can therefore fence a pending multiseat seat selection.
+    std::uint64_t launch_lifecycle_generation = 0;
     std::string device_name;
     std::string device_uuid;
     std::string session_token;
@@ -2401,6 +2406,10 @@ namespace stream {
       return session.launch_session_id;
     }
 
+    std::uint64_t launch_lifecycle_generation(const session_t& session) {
+      return session.launch_lifecycle_generation;
+    }
+
     bool uuid_match(const session_t &session, const std::string_view& uuid) {
       return session.device_uuid == uuid;
     }
@@ -2701,6 +2710,23 @@ namespace stream {
       }
 
 #ifdef __linux__
+      const auto multiseat_activation =
+        multiseat::input::activate_registered_moonlight_session(session);
+      switch (multiseat_activation) {
+        case multiseat::input::moonlight_session_activation_status_e::not_installed:
+        case multiseat::input::moonlight_session_activation_status_e::unselected:
+        case multiseat::input::moonlight_session_activation_status_e::bound:
+          break;
+        case multiseat::input::moonlight_session_activation_status_e::gate_disabled:
+        case multiseat::input::moonlight_session_activation_status_e::selected_binding_failed:
+        case multiseat::input::moonlight_session_activation_status_e::selection_in_progress:
+        case multiseat::input::moonlight_session_activation_status_e::gate_closed:
+        case multiseat::input::moonlight_session_activation_status_e::invalid_session:
+          BOOST_LOG(warning)
+            << "Refusing stream at the multiseat input activation gate (status "sv
+            << static_cast<int>(multiseat_activation) << ')';
+          return -1;
+      }
       {
         std::scoped_lock lock {session.multiseat_input_binding_mutex};
         session.multiseat_input_selection_closed = true;
@@ -2842,6 +2868,8 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
+      session->launch_lifecycle_generation =
+        launch_session.lifecycle_generation.value_or(0);
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
       session->session_token = launch_session.session_token;

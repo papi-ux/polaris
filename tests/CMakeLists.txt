@@ -248,6 +248,12 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
 )
 
+if (NOT WIN32 AND NOT APPLE)
+    list(APPEND TEST_STREAM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_activation.cpp
+    )
+endif()
+
 set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
 )

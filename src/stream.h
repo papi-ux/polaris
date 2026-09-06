@@ -91,6 +91,7 @@ namespace stream {
     std::string uuid(const session_t& session);
     std::string session_token(const session_t& session);
     std::uint32_t launch_session_id(const session_t& session);
+    std::uint64_t launch_lifecycle_generation(const session_t& session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm);
@@ -104,8 +105,8 @@ namespace stream {
 
     /**
      * Explicitly replace singleton input for a not-yet-started authenticated
-     * session with one already-admitted multiseat seat. No production caller
-     * invokes this unless a future launch path has selected multiseat.
+     * session with one already-admitted multiseat seat. The default-off
+     * activation gate is the only production caller.
      */
     multiseat_input_bind_status_e bind_multiseat_input(
       session_t &session,

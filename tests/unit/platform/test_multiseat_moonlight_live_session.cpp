@@ -217,7 +217,7 @@ namespace {
     return count;
   }
 
-  TEST(MultiseatMoonlightLiveSession, ProductionBindSeamHasNoCallsite) {
+  TEST(MultiseatMoonlightLiveSession, ProductionBindSeamHasOneGatedCallsite) {
     const auto source_root =
       std::filesystem::path {POLARIS_SOURCE_DIR} / "src";
     std::size_t occurrences = 0;
@@ -234,9 +234,9 @@ namespace {
       occurrences += count_text(contents.str(), "bind_multiseat_input(");
     }
 
-    // One declaration and one definition. Any third occurrence activates the
-    // path and must arrive with its own configuration and physical proof.
-    EXPECT_EQ(occurrences, 2U);
+    // One declaration, one definition, and one call from the default-off
+    // launch activation gate. Any other caller bypasses that selection fence.
+    EXPECT_EQ(occurrences, 3U);
   }
 
   TEST(MultiseatMoonlightLiveSession, RejectsInvalidInputsWithoutResidue) {

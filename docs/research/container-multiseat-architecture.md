@@ -673,22 +673,33 @@ network send is representable here.
 
 An explicitly activated production owner now joins registration, bridge,
 feedback subscription, and the existing control-thread mailbox for one live
-session. `stream::session_t` derives the non-secret key and immutable input
-permissions from its already-authenticated launch state; callers can supply
-only an admitted seat handle, authority, registry, and typed feedback hub. A
-selected multiseat session never falls back to singleton input after rejection
-or close. Teardown closes the mailbox edge, quiesces and detaches the bridge,
-then retires registration, while permission changes require a fresh session.
-ENet transmission remains on the existing control thread.
+session. `stream::session_t` derives the non-secret per-stream key and immutable
+input permissions from its already-authenticated launch state; callers can
+supply only an admitted seat handle, authority, registry, and typed feedback
+hub. A selected multiseat session never falls back to singleton input after
+rejection or close. Teardown closes the mailbox edge, quiesces and detaches the
+bridge, then retires registration, while permission changes require a fresh
+session. ENet transmission remains on the existing control thread.
 
-This seam is default-off: no configuration, launch, coordinator, worker, or
-container path calls `bind_multiseat_input()`, and the singleton does not
-construct the input authority, registry, or feedback hub. A physical client
-smoke at this checkpoint proves only that compiling the inert seam into the
+The production construction boundary is now present but default-off.
+`stream::session::start()` asks one process-global activation gate before it
+closes input selection or allocates singleton input. With no installed gate,
+ordinary sessions follow the unchanged singleton path. An explicitly enabled
+gate accepts only an already-admitted seat and keys that pending selection to
+the authenticated launch ID plus its lifecycle generation. The exact RTSP
+session converts that selection into the process-lifetime-monotonic stream key;
+a reused launch ID with a stale generation remains unselected. Duplicate
+session or physical-seat selections are rejected, selection is bounded, and a
+selected bind failure remains a fail-closed tombstone instead of falling back.
+
+No configuration, launch, coordinator, worker, or container path installs the
+activation gate yet, and the singleton still does not construct the input
+authority, registry, or feedback hub. Physical client smoke at this checkpoint
+therefore proves only that compiling the dormant construction boundary into the
 production server does not regress ordinary streaming, controller input, or
-disconnect teardown. Production construction, crash-persistent node discovery,
-rootless group/SELinux deployment policy, and physical container proof remain
-required.
+disconnect teardown. Explicit coordinator ownership, crash-persistent node
+discovery, rootless group/SELinux deployment policy, and physical container
+proof remain required.
 Steam Input also needs a separately mediated creation path; granting its
 container raw uinput would reintroduce the authority this contract removes.
 
@@ -908,6 +919,9 @@ The offline test suite covers:
 - production live-session ownership with exact registration and seat claims,
   routed input, typed control-mailbox feedback, retry retention, bridge-open
   rollback, and callback-quiescent close;
+- default-off production activation with exact launch-generation selection,
+  selected-versus-unselected isolation, duplicate seat/session refusal,
+  stale-launch fencing, fail-closed bind tombstones, and RAII installation;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
