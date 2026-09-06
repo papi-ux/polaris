@@ -534,6 +534,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_worker_adapter.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_worker_adapter.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

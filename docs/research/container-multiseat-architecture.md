@@ -886,6 +886,19 @@ These components compile into Polaris but remain outside the singleton runtime.
 No configuration path constructs the coordinator, and no worker/container is
 started by this checkpoint.
 
+The trusted controller composition owner now closes the local lifecycle graph
+without changing that default-off boundary. Disabled creation does not invoke
+its dependency factory. Enabled, injected construction owns the registry,
+worker authority store, Moonlight input runtime, worker backend/coordinator,
+and authenticated worker-to-Moonlight adapter in dependency-safe order. Initial
+and retry reconciliation always establishes authoritative worker absence before
+it may prune host input. Starting a seat prepares its exact host input before
+launching the worker; a proven worker rejection rolls that allocation back,
+while an indeterminate launch retains it until inventory proves the generation
+absent. Stop and shutdown similarly refuse to release input while an exact
+worker or claimed stream can still own it. There is still no production caller,
+configuration switch, HTTP path, container activation, or device mutation.
+
 ## Launcher acceptance comes second
 
 Steam, Heroic, and Lutris are all first-class targets, but installing their
@@ -994,6 +1007,10 @@ The offline test suite covers:
 - serialized worker-to-launch authorization with exact running-generation,
   private-record, dual-channel, paired-client, input-seat, and permission
   checks, without a request-facing caller;
+- trusted default-off controller composition with input-before-worker startup,
+  worker-first reconciliation, proven-rejection rollback, indeterminate-owner
+  retention, paired-client launch selection, and worker/stream shutdown
+  barriers, using only injected fake backends and no production caller;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
@@ -1001,8 +1018,8 @@ This remains an offline control-plane/backend proof with four locally
 exercised runtime providers and an injected host-input authority. A later
 container integration test must build and pin the final worker images,
 pre-create profile volumes and the private runtime root, construct the
-authenticated worker-to-Moonlight adapter from the future trusted controller,
-and run two real supervisor containers. Before physical game testing, the
+production dependencies behind the trusted controller owner, and run two real
+supervisor containers. Before physical game testing, the
 remaining providers and immutable catalog must bind
 the nested compositor, virtual-input lifecycle, worker-local encoder, exact
 workload target, and launcher process tree to the implemented private session
