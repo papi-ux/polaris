@@ -81,6 +81,7 @@ namespace platf::input_access {
       groups.resize(static_cast<std::size_t>(count));
       return std::find(groups.begin(), groups.end(), gid) != groups.end();
     }
+
   }  // namespace
 
   seat_isolation_options_t configured_seat_isolation() {
@@ -216,6 +217,33 @@ namespace platf::input_access {
     }
 
     return account_name_for(geteuid());
+  }
+
+  bool setup_host_target_can_access_input_nodes(const input_node_access_probe_t &probe) {
+    if (!probe) {
+      return false;
+    }
+
+    const auto user = setup_host_target_user();
+    // The running process' supplementary groups are the only trustworthy answer
+    // for current access. After sudo, reconstructing groups from the account
+    // database can claim access that the invoking shell does not have until its
+    // next login, so cross-boundary readiness always fails closed.
+    if (user != account_name_for(geteuid())) {
+      return false;
+    }
+
+    constexpr int required_access = R_OK | W_OK;
+    return probe(user, "/dev/uinput", required_access) &&
+           probe(user, "/dev/uhid", required_access);
+  }
+
+  bool setup_host_target_can_access_input_nodes() {
+    return setup_host_target_can_access_input_nodes(
+      [](std::string_view, std::string_view path, int mode) {
+        return access(std::string(path).c_str(), mode) == 0;
+      }
+    );
   }
 
   std::string setup_host_input_group_advice() {

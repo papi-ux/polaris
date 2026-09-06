@@ -9,6 +9,9 @@
 
   #include <cstdlib>
   #include <string>
+  #include <tuple>
+  #include <unistd.h>
+  #include <vector>
 
 namespace {
   using platf::input_access::input_group_status_t;
@@ -147,6 +150,63 @@ TEST(InputGroupAccessTests, SetupHostReportsOnTheAccountThatInvokedSudo) {
   if (!restore.empty()) {
     ASSERT_EQ(0, ::setenv("SUDO_USER", restore.c_str(), 1));
   }
+}
+
+TEST(InputGroupAccessTests, SetupHostDoesNotInferVirtualInputAccessAcrossSudo) {
+  using platf::input_access::setup_host_target_can_access_input_nodes;
+
+  constexpr auto sentinel = "polaris-setup-host-access-sentinel";
+  const auto *original = std::getenv("SUDO_USER");
+  const std::string restore = original ? original : "";
+  ASSERT_EQ(0, ::setenv("SUDO_USER", sentinel, 1));
+
+  bool probe_called = false;
+  const bool ready = setup_host_target_can_access_input_nodes(
+    [&probe_called](std::string_view, std::string_view, int) {
+      probe_called = true;
+      return true;
+    }
+  );
+
+  if (!restore.empty()) {
+    ASSERT_EQ(0, ::setenv("SUDO_USER", restore.c_str(), 1));
+  } else {
+    ASSERT_EQ(0, ::unsetenv("SUDO_USER"));
+  }
+
+  EXPECT_FALSE(ready);
+  EXPECT_FALSE(probe_called);
+}
+
+TEST(InputGroupAccessTests, SetupHostChecksVirtualInputForTheLiveProcessAccount) {
+  using platf::input_access::setup_host_target_can_access_input_nodes;
+  using platf::input_access::setup_host_target_user;
+
+  const auto *original = std::getenv("SUDO_USER");
+  const std::string restore = original ? original : "";
+  ASSERT_EQ(0, ::unsetenv("SUDO_USER"));
+  const auto expected_user = setup_host_target_user();
+
+  std::vector<std::tuple<std::string, std::string, int>> probes;
+  const bool ready = setup_host_target_can_access_input_nodes(
+    [&probes](std::string_view user, std::string_view path, int mode) {
+      probes.emplace_back(user, path, mode);
+      return true;
+    }
+  );
+
+  if (!restore.empty()) {
+    ASSERT_EQ(0, ::setenv("SUDO_USER", restore.c_str(), 1));
+  }
+
+  EXPECT_TRUE(ready);
+  ASSERT_EQ(2u, probes.size());
+  EXPECT_EQ(expected_user, std::get<0>(probes[0]));
+  EXPECT_EQ("/dev/uinput", std::get<1>(probes[0]));
+  EXPECT_EQ(R_OK | W_OK, std::get<2>(probes[0]));
+  EXPECT_EQ(expected_user, std::get<0>(probes[1]));
+  EXPECT_EQ("/dev/uhid", std::get<1>(probes[1]));
+  EXPECT_EQ(R_OK | W_OK, std::get<2>(probes[1]));
 }
 
 TEST(InputGroupAccessTests, TheProcessAndDatabaseLookupsAgreeOnThisHost) {

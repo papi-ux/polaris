@@ -466,8 +466,8 @@ namespace args {
     // actually usable, which is the thing the whole step exists to arrange.
     const bool etc_copies_absent = !fs::exists("/etc/udev/rules.d/60-polaris.rules") &&
                                    !fs::exists("/etc/modules-load.d/60-polaris.conf");
-    const bool input_nodes_ready = access("/dev/uinput", R_OK | W_OK) == 0 &&
-                                   access("/dev/uhid", R_OK | W_OK) == 0;
+    const auto setup_target_user = platf::input_access::setup_host_target_user();
+    const bool input_nodes_ready = platf::input_access::setup_host_target_can_access_input_nodes();
     // Membership is not something host setup can arrange — usermod would have to
     // pick a target account, and this command deliberately never guesses which
     // account streams. It reports it so a user preparing the host learns it here
@@ -479,7 +479,7 @@ namespace args {
       std::cout
         << "Linux host setup: nothing to do."sv << std::endl
         << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
-        << "and /dev/uhid are already usable by this account. Re-run with --enable-kms only if you"sv << std::endl
+        << "and /dev/uhid are already usable by ["sv << setup_target_user << "]. Re-run with --enable-kms only if you"sv << std::endl
         << "need DRM/KMS capture."sv << std::endl;
       if (!input_group_advice.empty()) {
         std::cout << std::endl
