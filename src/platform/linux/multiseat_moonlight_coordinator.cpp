@@ -199,6 +199,7 @@ namespace multiseat::input {
   moonlight_session_coordinator_t::select_launch(
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
     seat_handle_t handle,
+    std::string_view expected_input_seat,
     bool controller_feedback
   ) {
     std::scoped_lock lock {state_mutex_};
@@ -219,6 +220,7 @@ namespace multiseat::input {
     auto selected = activation_gate_->register_selection(
       *key,
       handle,
+      expected_input_seat,
       controller_feedback
     );
     if (selected.status != moonlight_launch_selection_status_e::registered ||

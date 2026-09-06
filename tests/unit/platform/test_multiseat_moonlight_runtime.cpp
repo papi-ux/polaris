@@ -283,6 +283,7 @@ namespace {
     const auto selected = select_authenticated_moonlight_launch(
       launch,
       expectation.handle,
+      expectation.input_seat,
       true
     );
     ASSERT_EQ(selected, moonlight_launch_selection_status_e::registered);
@@ -322,6 +323,7 @@ namespace {
       created.runtime->select_authenticated_launch(
         launch,
         expectation.handle,
+        expectation.input_seat,
         false
       ),
       moonlight_launch_selection_status_e::registered
@@ -358,6 +360,7 @@ namespace {
       created.runtime->select_authenticated_launch(
         selected,
         expectation.handle,
+        expectation.input_seat,
         false
       ),
       moonlight_launch_selection_status_e::registered
@@ -396,6 +399,7 @@ namespace {
       created.runtime->select_authenticated_launch(
         launch,
         expectation.handle,
+        expectation.input_seat,
         false
       ),
       moonlight_launch_selection_status_e::registered
@@ -440,6 +444,7 @@ namespace {
       created.runtime->select_authenticated_launch(
         first_launch,
         first_expectation.handle,
+        first_expectation.input_seat,
         false
       ),
       moonlight_launch_selection_status_e::registered
@@ -448,6 +453,7 @@ namespace {
       created.runtime->select_authenticated_launch(
         second_launch,
         second_expectation.handle,
+        second_expectation.input_seat,
         false
       ),
       moonlight_launch_selection_status_e::registered
@@ -490,6 +496,7 @@ namespace {
       created.runtime->select_authenticated_launch(
         launch,
         expectation.handle,
+        expectation.input_seat,
         false
       ),
       moonlight_launch_selection_status_e::registered
@@ -515,6 +522,7 @@ namespace {
       select_authenticated_moonlight_launch(
         runtime_launch(709, 809),
         runtime_handle(17),
+        runtime_expectation(17).input_seat,
         false
       ),
       std::nullopt

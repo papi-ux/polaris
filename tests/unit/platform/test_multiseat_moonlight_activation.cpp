@@ -241,6 +241,7 @@ namespace {
     const auto selected = gate->register_selection(
       key_for(201, 301),
       handle_for(1),
+      expectation_for(1).input_seat,
       true
     );
     EXPECT_EQ(
@@ -308,7 +309,21 @@ namespace {
       registry,
       hub
     );
-    auto selected = gate->register_selection(key_for(202, 302), handle, true);
+    EXPECT_EQ(
+      gate->register_selection(
+        key_for(202, 302),
+        handle,
+        "polaris-input-wrong",
+        true
+      ).status,
+      moonlight_launch_selection_status_e::seat_not_admitted
+    );
+    auto selected = gate->register_selection(
+      key_for(202, 302),
+      handle,
+      expectation_for(10).input_seat,
+      true
+    );
     ASSERT_EQ(
       selected.status,
       moonlight_launch_selection_status_e::registered
@@ -361,7 +376,12 @@ namespace {
       registry,
       std::make_shared<moonlight_controller_feedback_hub_t>()
     );
-    auto selected = gate->register_selection(key_for(204, 305), handle, false);
+    auto selected = gate->register_selection(
+      key_for(204, 305),
+      handle,
+      expectation_for(11).input_seat,
+      false
+    );
     ASSERT_TRUE(selected.selection);
     auto installed = install_moonlight_session_activation_gate(gate);
     ASSERT_TRUE(installed.installation);
@@ -394,7 +414,12 @@ namespace {
       registry,
       std::make_shared<moonlight_controller_feedback_hub_t>()
     );
-    auto selected = gate->register_selection(key_for(205, 306), handle, false);
+    auto selected = gate->register_selection(
+      key_for(205, 306),
+      handle,
+      expectation_for(12).input_seat,
+      false
+    );
     ASSERT_TRUE(selected.selection);
     auto installed = install_moonlight_session_activation_gate(gate);
     ASSERT_TRUE(installed.installation);
@@ -431,7 +456,12 @@ namespace {
       registry,
       std::make_shared<moonlight_controller_feedback_hub_t>()
     );
-    auto selected = gate->register_selection(key_for(212, 312), handle, false);
+    auto selected = gate->register_selection(
+      key_for(212, 312),
+      handle,
+      expectation_for(16).input_seat,
+      false
+    );
     ASSERT_TRUE(selected.selection);
     auto installed = install_moonlight_session_activation_gate(gate);
     ASSERT_TRUE(installed.installation);
@@ -444,7 +474,12 @@ namespace {
       moonlight_session_activation_status_e::selection_cancelled
     );
     EXPECT_EQ(
-      gate->register_selection(key_for(212, 312), handle, false).status,
+      gate->register_selection(
+        key_for(212, 312),
+        handle,
+        expectation_for(16).input_seat,
+        false
+      ).status,
       moonlight_launch_selection_status_e::duplicate_session
     );
 
@@ -471,6 +506,7 @@ namespace {
     auto first = gate->register_selection(
       key_for(206, 307),
       first_handle,
+      expectation_for(13, 0).input_seat,
       true
     );
     ASSERT_TRUE(first.selection);
@@ -479,21 +515,37 @@ namespace {
     EXPECT_EQ(gate->active_selections(), 1U);
 
     EXPECT_EQ(
-      gate->register_selection(key_for(206, 307), second_handle, true).status,
+      gate->register_selection(
+        key_for(206, 307),
+        second_handle,
+        expectation_for(14, 1).input_seat,
+        true
+      ).status,
       moonlight_launch_selection_status_e::duplicate_session
     );
     EXPECT_EQ(
-      gate->register_selection(key_for(207, 308), first_handle, true).status,
+      gate->register_selection(
+        key_for(207, 308),
+        first_handle,
+        expectation_for(13, 0).input_seat,
+        true
+      ).status,
       moonlight_launch_selection_status_e::duplicate_seat
     );
     EXPECT_EQ(
-      gate->register_selection({}, second_handle, true).status,
+      gate->register_selection(
+        {},
+        second_handle,
+        expectation_for(14, 1).input_seat,
+        true
+      ).status,
       moonlight_launch_selection_status_e::invalid_selection
     );
     EXPECT_EQ(
       gate->register_selection(
         key_for(208, 309),
         handle_for(999, 2),
+        expectation_for(999, 2).input_seat,
         true
       ).status,
       moonlight_launch_selection_status_e::seat_not_admitted
@@ -510,6 +562,7 @@ namespace {
       no_feedback_gate->register_selection(
         key_for(210, 311),
         second_handle,
+        expectation_for(14, 1).input_seat,
         true
       ).status,
       moonlight_launch_selection_status_e::missing_feedback_dependency
@@ -526,6 +579,7 @@ namespace {
     auto replacement = gate->register_selection(
       key_for(206, 307),
       first_handle,
+      expectation_for(13, 0).input_seat,
       true
     );
     EXPECT_EQ(
@@ -549,7 +603,12 @@ namespace {
     gate->close();
     EXPECT_TRUE(gate->closed());
     EXPECT_EQ(
-      gate->register_selection(key_for(209, 310), handle_for(15), false).status,
+      gate->register_selection(
+        key_for(209, 310),
+        handle_for(15),
+        expectation_for(15).input_seat,
+        false
+      ).status,
       moonlight_launch_selection_status_e::gate_closed
     );
     auto session = stream_for(key_for(209, 310));

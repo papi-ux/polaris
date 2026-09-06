@@ -13,6 +13,7 @@
   #include <memory>
   #include <mutex>
   #include <optional>
+  #include <string_view>
   #include <vector>
 
 namespace rtsp_stream {
@@ -154,6 +155,7 @@ namespace multiseat::input {
     [[nodiscard]] moonlight_launch_selection_status_e select_launch(
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
       seat_handle_t handle,
+      std::string_view expected_input_seat,
       bool controller_feedback
     );
     [[nodiscard]] moonlight_coordinator_cancel_status_e cancel_launch(

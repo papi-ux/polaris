@@ -284,7 +284,12 @@ namespace {
     );
     auto launch = coordinator_launch(400, 500);
     EXPECT_EQ(
-      created.coordinator->select_launch(launch, expectation.handle, true),
+      created.coordinator->select_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        true
+      ),
       moonlight_launch_selection_status_e::gate_disabled
     );
     EXPECT_EQ(
@@ -416,6 +421,7 @@ namespace {
       created.coordinator->select_launch(
         selected_launch,
         selected_expectation.handle,
+        selected_expectation.input_seat,
         true
       ),
       moonlight_launch_selection_status_e::registered
@@ -493,7 +499,12 @@ namespace {
     ASSERT_TRUE(created.coordinator->prepare_input(expectation).input.prepared());
     auto launch = coordinator_launch(403, 503);
     ASSERT_EQ(
-      created.coordinator->select_launch(launch, expectation.handle, false),
+      created.coordinator->select_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
       moonlight_launch_selection_status_e::registered
     );
     auto lookalike = coordinator_launch(403, 503);
@@ -524,7 +535,12 @@ namespace {
       moonlight_session_activation_status_e::selection_cancelled
     );
     EXPECT_EQ(
-      created.coordinator->select_launch(launch, expectation.handle, false),
+      created.coordinator->select_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
       moonlight_launch_selection_status_e::duplicate_session
     );
     EXPECT_EQ(
@@ -569,7 +585,12 @@ namespace {
     ASSERT_TRUE(created.coordinator->prepare_input(expectation).input.prepared());
     auto launch = coordinator_launch(404, 504);
     ASSERT_EQ(
-      created.coordinator->select_launch(launch, expectation.handle, true),
+      created.coordinator->select_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        true
+      ),
       moonlight_launch_selection_status_e::registered
     );
     auto stream = coordinator_stream(*launch);

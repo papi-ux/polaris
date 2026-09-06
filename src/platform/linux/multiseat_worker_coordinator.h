@@ -6,6 +6,7 @@
 
 #ifdef __linux__
 
+#include "multiseat_worker_launch_authority.h"
 #include "multiseat_worker_authority.h"
 #include "multiseat_worker_client.h"
 #include "src/multiseat_worker_broker.h"
@@ -90,7 +91,7 @@ namespace multiseat {
    * session exists. Crash leftovers are removed only after a clean complete
    * backend inventory proves their signed identity absent.
    */
-  class worker_coordinator_t {
+  class worker_coordinator_t final : public authenticated_worker_seat_authority_t {
   public:
     worker_coordinator_t(
       registry_t &registry,
@@ -117,6 +118,11 @@ namespace multiseat {
 
     [[nodiscard]] bool admission_ready() const;
     [[nodiscard]] std::vector<worker_identity_t> managed_workers() const;
+    [[nodiscard]] worker_seat_authorization_status_e
+    with_authenticated_worker_seat(
+      const seat_handle_t &handle,
+      const authenticated_worker_seat_action_t &action
+    ) override;
 
   private:
     struct managed_worker_t {

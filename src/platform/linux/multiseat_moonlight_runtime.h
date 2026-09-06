@@ -12,6 +12,7 @@
   #include <cstdint>
   #include <memory>
   #include <optional>
+  #include <string_view>
   #include <vector>
 
 namespace multiseat::input {
@@ -84,7 +85,8 @@ namespace multiseat::input {
     );
 
     /**
-     * Stage one exact launch only after the caller has authenticated it.
+     * Stage one exact launch only after the caller has authenticated it and
+     * supplied the input-seat name from that same worker authority.
      * This must run after all request validation and immediately before the
      * common RTSP raise. A rejected raise is retired by that common boundary.
      */
@@ -92,6 +94,7 @@ namespace multiseat::input {
     select_authenticated_launch(
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
       seat_handle_t handle,
+      std::string_view expected_input_seat,
       bool controller_feedback
     );
 
@@ -129,12 +132,14 @@ namespace multiseat::input {
 
   /**
    * Narrow process-global seam for a future authenticated seat authority.
-   * No network request can supply a seat handle through this API directly.
+   * No network request can supply a seat handle or input-seat name through
+   * this API directly.
    */
   [[nodiscard]] std::optional<moonlight_launch_selection_status_e>
   select_authenticated_moonlight_launch(
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
     seat_handle_t handle,
+    std::string_view expected_input_seat,
     bool controller_feedback
   );
 

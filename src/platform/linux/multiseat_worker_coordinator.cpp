@@ -531,6 +531,55 @@ namespace multiseat {
     return identities;
   }
 
+  worker_seat_authorization_status_e
+  worker_coordinator_t::with_authenticated_worker_seat(
+    const seat_handle_t &handle,
+    const authenticated_worker_seat_action_t &action
+  ) {
+    if (!handle.valid() || !action) {
+      return worker_seat_authorization_status_e::invalid_request;
+    }
+
+    std::scoped_lock lock {mutex_};
+    if (!admission_ready_locked()) {
+      return worker_seat_authorization_status_e::reconciliation_required;
+    }
+    const auto seat = registry_.snapshot(handle);
+    if (!seat) {
+      return worker_seat_authorization_status_e::seat_not_found;
+    }
+    if (seat->state != seat_state_e::running) {
+      return worker_seat_authorization_status_e::seat_not_running;
+    }
+
+    const auto identity = worker_identity_for(*seat);
+    auto *worker = find_managed_locked(identity);
+    if (!worker) {
+      return worker_seat_authorization_status_e::worker_not_managed;
+    }
+    if (authority_store_.validate(worker->authority) !=
+        worker_ipc::authority_status_e::applied) {
+      authority_blocked_ = true;
+      return worker_seat_authorization_status_e::authority_rejected;
+    }
+    if (!worker->session || !worker->session->connected()) {
+      return worker_seat_authorization_status_e::endpoint_not_authenticated;
+    }
+
+    const authenticated_worker_seat_t authenticated {
+      .handle = seat->handle,
+      .worker_name = seat->resources.worker_name,
+      .input_seat = seat->resources.input_seat,
+      .client_key = seat->client_key,
+    };
+    try {
+      action(authenticated);
+    } catch (...) {
+      return worker_seat_authorization_status_e::action_failed;
+    }
+    return worker_seat_authorization_status_e::applied;
+  }
+
 }  // namespace multiseat
 
 #endif

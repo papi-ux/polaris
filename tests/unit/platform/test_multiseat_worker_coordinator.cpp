@@ -874,4 +874,174 @@ TEST(MultiseatWorkerCoordinator, RejectedLaunchRollsBackAuthorityAndSeatBudget) 
   EXPECT_EQ(usage->encoder_sessions, 0U);
 }
 
+TEST(MultiseatWorkerCoordinator, AuthorizesOnlyExactRunningAuthenticatedSeat) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability()};
+  registry_t registry {"controller-current", {shared_gpu()}};
+  auto sessions = std::make_shared<session_state_t>();
+  fake_worker_backend_t backend;
+  worker_coordinator_t coordinator {
+    registry, backend, store, short_options(), {}, session_factory(sessions)
+  };
+  ASSERT_TRUE(coordinator.reconcile().admission_ready);
+  const auto seat = admit_and_bind(
+    registry,
+    "paired-client",
+    "profile-authorized",
+    "authorized-game"
+  );
+  authenticated_worker_seat_t observed;
+  auto capture = [&observed](const authenticated_worker_seat_t &authorized) {
+    observed = authorized;
+  };
+
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat({}, capture),
+    worker_seat_authorization_status_e::invalid_request
+  );
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat(seat.handle, capture),
+    worker_seat_authorization_status_e::seat_not_running
+  );
+  ASSERT_EQ(
+    coordinator.start_seat(seat.handle),
+    coordinator_start_result_e::started
+  );
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat(seat.handle, capture),
+    worker_seat_authorization_status_e::seat_not_running
+  );
+  const auto identity = identity_for(seat);
+  ASSERT_TRUE(backend.mark_ready(identity));
+  ASSERT_EQ(coordinator.reconcile().broker.ready_transitions, std::size_t {1});
+
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat(seat.handle, capture),
+    worker_seat_authorization_status_e::applied
+  );
+  EXPECT_EQ(observed.handle, seat.handle);
+  EXPECT_EQ(observed.worker_name, seat.resources.worker_name);
+  EXPECT_EQ(observed.input_seat, seat.resources.input_seat);
+  EXPECT_EQ(observed.client_key, seat.client_key);
+
+  auto stale = seat.handle;
+  ++stale.generation;
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat(stale, capture),
+    worker_seat_authorization_status_e::seat_not_found
+  );
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat(
+      seat.handle,
+      [](const authenticated_worker_seat_t &) {
+        throw std::runtime_error {"test action failure"};
+      }
+    ),
+    worker_seat_authorization_status_e::action_failed
+  );
+}
+
+TEST(MultiseatWorkerCoordinator, AuthorizationSerializesWithExactStop) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability()};
+  registry_t registry {"controller-current", {shared_gpu()}};
+  auto sessions = std::make_shared<session_state_t>();
+  fake_worker_backend_t backend;
+  worker_coordinator_t coordinator {
+    registry, backend, store, short_options(), {}, session_factory(sessions)
+  };
+  ASSERT_TRUE(coordinator.reconcile().admission_ready);
+  const auto seat = admit_and_bind(
+    registry,
+    "paired-client",
+    "profile-serialized",
+    "serialized-game"
+  );
+  const auto identity = identity_for(seat);
+  ASSERT_EQ(
+    coordinator.start_seat(seat.handle),
+    coordinator_start_result_e::started
+  );
+  ASSERT_TRUE(backend.mark_ready(identity));
+  ASSERT_EQ(coordinator.reconcile().broker.ready_transitions, std::size_t {1});
+
+  std::promise<void> entered;
+  std::promise<void> release;
+  auto release_future = release.get_future().share();
+  auto authorization = std::async(std::launch::async, [&]() {
+    return coordinator.with_authenticated_worker_seat(
+      seat.handle,
+      [&](const authenticated_worker_seat_t &) {
+        entered.set_value();
+        release_future.wait();
+      }
+    );
+  });
+  entered.get_future().wait();
+  auto stop = std::async(std::launch::async, [&]() {
+    return coordinator.stop_seat(seat.handle);
+  });
+  EXPECT_EQ(
+    stop.wait_for(std::chrono::milliseconds {20}),
+    std::future_status::timeout
+  );
+
+  release.set_value();
+  EXPECT_EQ(
+    authorization.get(),
+    worker_seat_authorization_status_e::applied
+  );
+  EXPECT_EQ(stop.get().broker, broker_stop_result_e::stop_requested);
+  ASSERT_TRUE(backend.complete(identity));
+  EXPECT_EQ(coordinator.reconcile().removed_authorities, std::size_t {1});
+}
+
+TEST(MultiseatWorkerCoordinator, TamperedAuthorityCannotAuthorizeLaunchAction) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability()};
+  registry_t registry {"controller-current", {shared_gpu()}};
+  auto sessions = std::make_shared<session_state_t>();
+  fake_worker_backend_t backend;
+  worker_coordinator_t coordinator {
+    registry, backend, store, short_options(), {}, session_factory(sessions)
+  };
+  ASSERT_TRUE(coordinator.reconcile().admission_ready);
+  const auto seat = admit_and_bind(
+    registry,
+    "paired-client",
+    "profile-tampered",
+    "tampered-game"
+  );
+  const auto identity = identity_for(seat);
+  ASSERT_EQ(
+    coordinator.start_seat(seat.handle),
+    coordinator_start_result_e::started
+  );
+  ASSERT_TRUE(backend.mark_ready(identity));
+  ASSERT_EQ(coordinator.reconcile().broker.ready_transitions, std::size_t {1});
+
+  const auto record = root.path() /
+                      seat.resources.runtime_namespace /
+                      std::string {authority_auth_directory_name} /
+                      std::string {authority_record_file_name};
+  const auto descriptor = ::open(record.c_str(), O_WRONLY | O_CLOEXEC);
+  ASSERT_GE(descriptor, 0);
+  const char changed = 'X';
+  ASSERT_EQ(::write(descriptor, &changed, 1), 1);
+  ASSERT_EQ(::close(descriptor), 0);
+  bool invoked = false;
+
+  EXPECT_EQ(
+    coordinator.with_authenticated_worker_seat(
+      seat.handle,
+      [&invoked](const authenticated_worker_seat_t &) {
+        invoked = true;
+      }
+    ),
+    worker_seat_authorization_status_e::authority_rejected
+  );
+  EXPECT_FALSE(invoked);
+  EXPECT_FALSE(coordinator.admission_ready());
+}
+
 #endif

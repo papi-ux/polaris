@@ -723,15 +723,28 @@ returns before creating the production device factory, backend, coordinator, or
 activation gate. The web configuration model preserves that default without
 exposing a checkbox. Enabling the option constructs the host-input owner and
 installs an empty authenticated-launch gate; it does not select a seat. The only
-selection entry point requires both the exact shared RTSP launch object and an
-immutable seat handle already admitted by a separate trusted authority. There
-is deliberately no production caller for that entry point at this checkpoint.
+selection entry point requires the exact shared RTSP launch object, an immutable
+seat handle, and the worker's exact input-seat name. The allocation must match
+both pieces of authority. There is deliberately no request-facing caller for
+that entry point at this checkpoint.
+
+A narrow worker-to-Moonlight adapter now supplies that seam without treating a
+raw handle as authority. The worker coordinator revalidates the exact running
+generation, its private authority record, and its authenticated dual-channel
+control session while holding its lifecycle lock through selection. The adapter
+also requires the paired-client UUID on the retained launch to equal the seat's
+admitted client key, passes the coordinator-owned input-seat name, and derives
+controller-feedback intent from the launch's authenticated permissions. A
+stale, merely starting, unauthenticated, tampered, cross-client, or cross-wired
+seat therefore cannot register a selection. The adapter is compiled but is not
+constructed or invoked by HTTP, configuration, or the singleton launch path.
 
 RTSP handshake cleanup and authenticated launch completion are now separate
 lifecycle edges. Connecting the control channel may release pending handshake
-state, but it does not cancel the selected launch. Rejection, timeout, failed
-RTSP setup, failed stream start, and normal selected-stream stop all retire the
-exact launch-generation selection. Stream teardown closes the live input bridge
+state, but it does not cancel the selected launch. Rejection, timeout, every
+rejected RTSP ANNOUNCE path, failed RTSP setup, failed stream start, and normal
+selected-stream stop all retire the exact launch-generation selection. Stream
+teardown closes the live input bridge
 and releases its physical-seat claim before reporting launch completion. The
 last selected stream also sweeps conservative cancelled tombstones left while
 another process-wide seat claim was live.
@@ -742,9 +755,10 @@ input dependencies. If exact input cleanup remains indeterminate, the runtime
 keeps the already-closed owner alive for process exit instead of destroying
 dependencies beneath a retryable cleanup edge.
 
-No worker, container, or authenticated seat-authority path activates a real
-selection yet, and ordinary singleton input remains unchanged whether the
-option is disabled or an enabled empty gate has no selection. Physical client
+No worker, container, HTTP, or configuration path activates a real selection
+yet; the authenticated adapter remains an uncalled process-local boundary, and
+ordinary singleton input remains unchanged whether the option is disabled or
+an enabled empty gate has no selection. Physical client
 smoke at this checkpoint can prove that the production lifecycle wiring does
 not regress ordinary streaming, controller input, or disconnect teardown; it
 cannot prove multiseat input isolation. Crash-persistent node discovery,
@@ -977,14 +991,17 @@ The offline test suite covers:
   launch-selection lifetimes, including disabled no-op construction,
   selected/unselected coexistence, cancellation tombstones, shutdown barriers,
   and retryable exact input cleanup;
+- serialized worker-to-launch authorization with exact running-generation,
+  private-record, dual-channel, paired-client, input-seat, and permission
+  checks, without a request-facing caller;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 
 This remains an offline control-plane/backend proof with four locally
 exercised runtime providers and an injected host-input authority. A later
 container integration test must build and pin the final worker images,
-pre-create profile volumes and the private runtime root, connect the default-off
-Moonlight input runtime to a separately authenticated worker/seat authority,
+pre-create profile volumes and the private runtime root, construct the
+authenticated worker-to-Moonlight adapter from the future trusted controller,
 and run two real supervisor containers. Before physical game testing, the
 remaining providers and immutable catalog must bind
 the nested compositor, virtual-input lifecycle, worker-local encoder, exact

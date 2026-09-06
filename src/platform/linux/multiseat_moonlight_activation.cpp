@@ -164,6 +164,7 @@ namespace multiseat::input {
     moonlight_session_activation_gate_t::register_selection(
       moonlight_launch_selection_key_t key,
       seat_handle_t handle,
+      std::string_view expected_input_seat,
       bool controller_feedback
     ) {
     if (!state_->enabled) {
@@ -171,7 +172,7 @@ namespace multiseat::input {
         .status = moonlight_launch_selection_status_e::gate_disabled,
       };
     }
-    if (!key.valid() || !handle.valid()) {
+    if (!key.valid() || !handle.valid() || expected_input_seat.empty()) {
       return {
         .status = moonlight_launch_selection_status_e::invalid_selection,
       };
@@ -195,6 +196,7 @@ namespace multiseat::input {
     const auto authority_ready = state_->authority.admission_ready();
     const auto allocation = state_->authority.allocation(handle);
     if (!authority_ready || !allocation ||
+        allocation->input_seat != expected_input_seat ||
         (controller_feedback && allocation->plan.gamepad_slots == 0)) {
       return {
         .status = moonlight_launch_selection_status_e::seat_not_admitted,

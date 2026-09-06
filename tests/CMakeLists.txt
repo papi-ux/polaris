@@ -253,6 +253,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_activation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_runtime.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_worker_adapter.cpp
     )
 endif()
 

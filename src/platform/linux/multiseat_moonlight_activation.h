@@ -11,6 +11,7 @@
   #include <cstddef>
   #include <cstdint>
   #include <memory>
+  #include <string_view>
 
 namespace stream {
   struct session_t;
@@ -132,6 +133,7 @@ namespace multiseat::input {
     [[nodiscard]] moonlight_launch_selection_result_t register_selection(
       moonlight_launch_selection_key_t key,
       seat_handle_t handle,
+      std::string_view expected_input_seat,
       bool controller_feedback
     );
     [[nodiscard]] moonlight_session_activation_status_e activate(

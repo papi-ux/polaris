@@ -1480,6 +1480,16 @@ namespace rtsp_stream {
   void cmd_announce(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
+    // Any rejected ANNOUNCE is terminal for this exact launch. Keep selected
+    // multiseat authority from lingering until the pending-launch timer, while
+    // preserving the ordinary unselected path through the same no-op seam.
+    auto finish_rejected_launch = util::fail_guard([&session]() {
+      launch_session_finish(
+        session.id,
+        session.lifecycle_generation.value_or(0)
+      );
+    });
+
     // I know these string literals will not be modified
     option.option = const_cast<char *>("CSeq");
 
@@ -1754,6 +1764,7 @@ namespace rtsp_stream {
         session.id,
         session.lifecycle_generation.value_or(0)
       );
+      finish_rejected_launch.disable();
       respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
       return;
     }
@@ -1767,6 +1778,7 @@ namespace rtsp_stream {
         session.id,
         session.lifecycle_generation.value_or(0)
       );
+      finish_rejected_launch.disable();
       respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
       return;
     }
@@ -1777,11 +1789,13 @@ namespace rtsp_stream {
         session.id,
         session.lifecycle_generation.value_or(0)
       );
+      finish_rejected_launch.disable();
       request_abandoned_desktop_takeover_teardown(failed_session_token);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }
 
+    finish_rejected_launch.disable();
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
