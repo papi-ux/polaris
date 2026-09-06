@@ -45,8 +45,10 @@ namespace multiseat::input {
   /**
    * RAII ownership for one pending launch-to-seat selection.
    *
-   * Destroying this object cancels the selection. If activation is already in
-   * progress, close() waits until the selected bind reaches a terminal state.
+   * cancel() leaves a fail-closed tombstone for the exact launch key. close()
+   * retires that tombstone and must only be used after the authenticated launch
+   * lifecycle can no longer enter RTSP setup. Both wait for an activation which
+   * is already in progress to reach a terminal state.
    */
   class moonlight_launch_selection_t final {
   public:
@@ -61,6 +63,7 @@ namespace multiseat::input {
       moonlight_launch_selection_t &&
     ) = delete;
 
+    void cancel() noexcept;
     void close() noexcept;
     [[nodiscard]] bool active() const;
     [[nodiscard]] const moonlight_launch_selection_key_t &key() const;
@@ -90,6 +93,7 @@ namespace multiseat::input {
     bound,
     selected_binding_failed,
     selection_in_progress,
+    selection_cancelled,
     gate_closed,
     invalid_session,
   };

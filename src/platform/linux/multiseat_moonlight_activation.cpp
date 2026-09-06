@@ -109,7 +109,7 @@ namespace multiseat::input {
     close();
   }
 
-  void moonlight_launch_selection_t::close() noexcept {
+  void moonlight_launch_selection_t::cancel() noexcept {
     std::unique_lock lock {state_->mutex};
     state_->changed.wait(lock, [this]() {
       return entry_->phase != selection_phase_e::activating;
@@ -117,6 +117,15 @@ namespace multiseat::input {
     if (entry_->phase == selection_phase_e::cancelled) {
       return;
     }
+    entry_->phase = selection_phase_e::cancelled;
+    state_->changed.notify_all();
+  }
+
+  void moonlight_launch_selection_t::close() noexcept {
+    std::unique_lock lock {state_->mutex};
+    state_->changed.wait(lock, [this]() {
+      return entry_->phase != selection_phase_e::activating;
+    });
     entry_->phase = selection_phase_e::cancelled;
     erase_selection(*state_, entry_);
   }
@@ -207,8 +216,7 @@ namespace multiseat::input {
           state_->entries.begin(),
           state_->entries.end(),
           [&entry](const auto &candidate) {
-            return candidate->phase != selection_phase_e::cancelled &&
-                   candidate->key == entry->key;
+            return candidate->key == entry->key;
           }
         )) {
       return {
@@ -274,8 +282,7 @@ namespace multiseat::input {
         state_->entries.begin(),
         state_->entries.end(),
         [&key](const auto &candidate) {
-          return candidate->phase != selection_phase_e::cancelled &&
-                 candidate->key == key;
+          return candidate->key == key;
         }
       );
       if (found == state_->entries.end()) {
@@ -296,7 +303,7 @@ namespace multiseat::input {
         case selection_phase_e::failed:
           return moonlight_session_activation_status_e::selected_binding_failed;
         case selection_phase_e::cancelled:
-          return moonlight_session_activation_status_e::unselected;
+          return moonlight_session_activation_status_e::selection_cancelled;
       }
     }
 

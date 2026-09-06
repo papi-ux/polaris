@@ -2720,6 +2720,7 @@ namespace stream {
         case multiseat::input::moonlight_session_activation_status_e::gate_disabled:
         case multiseat::input::moonlight_session_activation_status_e::selected_binding_failed:
         case multiseat::input::moonlight_session_activation_status_e::selection_in_progress:
+        case multiseat::input::moonlight_session_activation_status_e::selection_cancelled:
         case multiseat::input::moonlight_session_activation_status_e::gate_closed:
         case multiseat::input::moonlight_session_activation_status_e::invalid_session:
           BOOST_LOG(warning)

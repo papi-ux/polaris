@@ -251,6 +251,7 @@ set(TEST_STREAM_SOURCES
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_STREAM_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_activation.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_coordinator.cpp
     )
 endif()
 

@@ -692,13 +692,37 @@ a reused launch ID with a stale generation remains unselected. Duplicate
 session or physical-seat selections are rejected, selection is bounded, and a
 selected bind failure remains a fail-closed tombstone instead of falling back.
 
-No configuration, launch, coordinator, worker, or container path installs the
-activation gate yet, and the singleton still does not construct the input
-authority, registry, or feedback hub. Physical client smoke at this checkpoint
-therefore proves only that compiling the dormant construction boundary into the
-production server does not regress ordinary streaming, controller input, or
-disconnect teardown. Explicit coordinator ownership, crash-persistent node
-discovery, rootless group/SELinux deployment policy, and physical container
+One process-local coordinator now owns the feedback hub, injected host backend,
+input authority, binding registry, activation gate, installation, and pending
+launch selections in dependency-safe order. Its backend factory receives the
+retained feedback sink before constructing the authority. Configuration is a
+typed option which defaults to disabled: that state installs no gate and cannot
+reconcile, create, release, or select input. The enabled test path derives each
+selection key from the real authenticated launch object rather than accepting
+an identity from the media or input packet. Reconciliation cannot omit a seat
+while any launch selection still retains its exact authority. The coordinator
+owns that exact shared launch object until explicit retirement and rejects
+another object even if it repeats the same numeric identity, so a copied stream
+key cannot outlive the authoritative cancellation edge.
+
+Cancellation keeps an exact fail-closed tombstone while the RTSP launch remains
+admissible. The coordinator will retire it only after the same launch object is
+atomically cancelled and no selected stream remains bound to the registry.
+Until the registry exposes a seat-keyed claim query, that retirement check is
+deliberately process-wide and conservative. Shutdown first closes the
+still-installed activation gate, waits for live bindings and their feedback
+callbacks to detach, closes the registry and hub, and releases every exact input
+allocation. An indeterminate input teardown retains the closed gate for an
+explicit retry while the coordinator remains alive. A future production owner
+must observe a successful shutdown report before destroying the coordinator;
+its destructor can make only one best-effort cleanup pass.
+
+No configuration parser, launch handler, main runtime, worker, or container path
+constructs this coordinator yet, and the singleton still constructs none of its
+dependencies. Physical client smoke at this checkpoint therefore proves only
+that compiling the dormant owner into the production server does not regress
+ordinary streaming, controller input, or disconnect teardown. Crash-persistent
+node discovery, rootless group/SELinux deployment policy, and physical container
 proof remain required.
 Steam Input also needs a separately mediated creation path; granting its
 container raw uinput would reintroduce the authority this contract removes.
@@ -922,6 +946,10 @@ The offline test suite covers:
 - default-off production activation with exact launch-generation selection,
   selected-versus-unselected isolation, duplicate seat/session refusal,
   stale-launch fencing, fail-closed bind tombstones, and RAII installation;
+- coordinator-owned backend, authority, registry, feedback, activation, and
+  launch-selection lifetimes, including disabled no-op construction,
+  selected/unselected coexistence, cancellation tombstones, shutdown barriers,
+  and retryable exact input cleanup;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 

@@ -421,6 +421,41 @@ namespace {
     installed.installation->close();
   }
 
+  TEST(MultiseatMoonlightActivation, CancelledSelectionRemainsFailClosed) {
+    prepared_activation_authority_t prepared;
+    const auto handle = prepared.prepare(16);
+    moonlight_session_binding_registry_t registry;
+    auto gate = std::make_shared<moonlight_session_activation_gate_t>(
+      true,
+      prepared.authority,
+      registry,
+      std::make_shared<moonlight_controller_feedback_hub_t>()
+    );
+    auto selected = gate->register_selection(key_for(212, 312), handle, false);
+    ASSERT_TRUE(selected.selection);
+    auto installed = install_moonlight_session_activation_gate(gate);
+    ASSERT_TRUE(installed.installation);
+    auto session = stream_for(key_for(212, 312));
+
+    selected.selection->cancel();
+    EXPECT_FALSE(selected.selection->active());
+    EXPECT_EQ(
+      activate_registered_moonlight_session(*session),
+      moonlight_session_activation_status_e::selection_cancelled
+    );
+    EXPECT_EQ(
+      gate->register_selection(key_for(212, 312), handle, false).status,
+      moonlight_launch_selection_status_e::duplicate_session
+    );
+
+    selected.selection->close();
+    EXPECT_EQ(
+      activate_registered_moonlight_session(*session),
+      moonlight_session_activation_status_e::unselected
+    );
+    installed.installation->close();
+  }
+
   TEST(MultiseatMoonlightActivation, RejectsAmbiguousSelectionsWithoutResidue) {
     prepared_activation_authority_t prepared;
     const auto first_handle = prepared.prepare(13, 0);
@@ -555,12 +590,12 @@ namespace {
     EXPECT_LT(activate, selection_closed);
     EXPECT_LT(selection_closed, singleton_alloc);
 
-    // The install API has its friend declaration, public declaration, and
-    // definition only. Until a future coordinator receives explicit
-    // configuration, production remains off.
+    // The install API has its friend declaration, public declaration,
+    // definition, and one call from the default-off coordinator factory.
+    // No production runtime constructs that coordinator.
     EXPECT_EQ(
       count_source_occurrences("install_moonlight_session_activation_gate("),
-      3U
+      4U
     );
     // Declaration, definition, and the single session::start construction edge.
     EXPECT_EQ(
