@@ -478,6 +478,7 @@ namespace stream {
       multiseat_input;
     mutable std::mutex multiseat_input_binding_mutex;
     bool multiseat_input_selection_closed = false;
+    bool multiseat_launch_finished = false;
 #endif
 
     std::thread audioThread;
@@ -593,8 +594,23 @@ namespace stream {
     }
 
     void close_multiseat_input(session_t &session) noexcept {
-      if (session.multiseat_input) {
+      bool finish_launch = false;
+      {
+        std::scoped_lock lock {session.multiseat_input_binding_mutex};
+        if (!session.multiseat_input) {
+          return;
+        }
         session.multiseat_input->close();
+        if (!session.multiseat_launch_finished) {
+          session.multiseat_launch_finished = true;
+          finish_launch = true;
+        }
+      }
+      if (finish_launch) {
+        rtsp_stream::launch_session_finish(
+          session.launch_session_id,
+          session.launch_lifecycle_generation
+        );
       }
     }
 
@@ -2728,6 +2744,9 @@ namespace stream {
             << static_cast<int>(multiseat_activation) << ')';
           return -1;
       }
+      auto abort_multiseat_start = util::fail_guard([&session]() {
+        close_multiseat_input(session);
+      });
       {
         std::scoped_lock lock {session.multiseat_input_binding_mutex};
         session.multiseat_input_selection_closed = true;
@@ -2859,6 +2878,9 @@ namespace stream {
         exec_thread.detach();
       }
 
+#ifdef __linux__
+      abort_multiseat_start.disable();
+#endif
       return 0;
     }
 

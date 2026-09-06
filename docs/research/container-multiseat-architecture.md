@@ -717,13 +717,40 @@ explicit retry while the coordinator remains alive. A future production owner
 must observe a successful shutdown report before destroying the coordinator;
 its destructor can make only one best-effort cleanup pass.
 
-No configuration parser, launch handler, main runtime, worker, or container path
-constructs this coordinator yet, and the singleton still constructs none of its
-dependencies. Physical client smoke at this checkpoint therefore proves only
-that compiling the dormant owner into the production server does not regress
-ordinary streaming, controller input, or disconnect teardown. Crash-persistent
-node discovery, rootless group/SELinux deployment policy, and physical container
-proof remain required.
+The Linux-only `multiseat_moonlight_input` configuration now constructs this
+owner through the main runtime, but it defaults to false. The disabled path
+returns before creating the production device factory, backend, coordinator, or
+activation gate. The web configuration model preserves that default without
+exposing a checkbox. Enabling the option constructs the host-input owner and
+installs an empty authenticated-launch gate; it does not select a seat. The only
+selection entry point requires both the exact shared RTSP launch object and an
+immutable seat handle already admitted by a separate trusted authority. There
+is deliberately no production caller for that entry point at this checkpoint.
+
+RTSP handshake cleanup and authenticated launch completion are now separate
+lifecycle edges. Connecting the control channel may release pending handshake
+state, but it does not cancel the selected launch. Rejection, timeout, failed
+RTSP setup, failed stream start, and normal selected-stream stop all retire the
+exact launch-generation selection. Stream teardown closes the live input bridge
+and releases its physical-seat claim before reporting launch completion. The
+last selected stream also sweeps conservative cancelled tombstones left while
+another process-wide seat claim was live.
+
+Main shutdown first closes and uninstalls the activation gate, waits for calls
+already admitted through that gate, then shuts down the coordinator and its
+input dependencies. If exact input cleanup remains indeterminate, the runtime
+keeps the already-closed owner alive for process exit instead of destroying
+dependencies beneath a retryable cleanup edge.
+
+No worker, container, or authenticated seat-authority path activates a real
+selection yet, and ordinary singleton input remains unchanged whether the
+option is disabled or an enabled empty gate has no selection. Physical client
+smoke at this checkpoint can prove that the production lifecycle wiring does
+not regress ordinary streaming, controller input, or disconnect teardown; it
+cannot prove multiseat input isolation. Crash-persistent node discovery,
+rootless group/SELinux deployment policy, and physical container proof remain
+required.
+
 Steam Input also needs a separately mediated creation path; granting its
 container raw uinput would reintroduce the authority this contract removes.
 
@@ -956,10 +983,10 @@ The offline test suite covers:
 This remains an offline control-plane/backend proof with four locally
 exercised runtime providers and an injected host-input authority. A later
 container integration test must build and pin the final worker images,
-pre-create profile volumes and the private runtime root, instantiate the
-coordinator behind an explicit opt-in configuration, and run two real
-supervisor containers. Before physical game testing, the remaining providers
-and immutable catalog must bind
+pre-create profile volumes and the private runtime root, connect the default-off
+Moonlight input runtime to a separately authenticated worker/seat authority,
+and run two real supervisor containers. Before physical game testing, the
+remaining providers and immutable catalog must bind
 the nested compositor, virtual-input lifecycle, worker-local encoder, exact
 workload target, and launcher process tree to the implemented private session
 bus, audio sink, and outer display/capture owner without weakening the proven

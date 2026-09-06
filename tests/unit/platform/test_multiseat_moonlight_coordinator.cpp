@@ -650,20 +650,33 @@ namespace {
     EXPECT_FALSE(moonlight_session_activation_gate_installed());
   }
 
-  TEST(MultiseatMoonlightCoordinator, SourceRemainsDefaultOffAndUnconstructed) {
+  TEST(MultiseatMoonlightCoordinator, SourceRemainsDefaultOffAndRuntimeOwned) {
     const auto header = coordinator_read_source(
       std::filesystem::path {POLARIS_SOURCE_DIR} /
       "src/platform/linux/multiseat_moonlight_coordinator.h"
     );
     EXPECT_NE(header.find("bool enabled = false;"), std::string::npos);
 
-    // The one qualified occurrence is the factory definition. No production
-    // runtime, launch, configuration, or main path constructs this owner yet.
+    // One occurrence is the factory definition and one is the new runtime
+    // owner. No request handler or ordinary stream path constructs it.
     EXPECT_EQ(
       coordinator_source_occurrences(
         "moonlight_session_coordinator_t::create("
       ),
-      1U
+      2U
+    );
+
+    const auto runtime = coordinator_read_source(
+      std::filesystem::path {POLARIS_SOURCE_DIR} /
+      "src/platform/linux/multiseat_moonlight_runtime.cpp"
+    );
+    EXPECT_NE(
+      runtime.find("if (!options.enabled)"),
+      std::string::npos
+    );
+    EXPECT_LT(
+      runtime.find("if (!options.enabled)"),
+      runtime.find("moonlight_session_coordinator_t::create(")
     );
   }
 }  // namespace
