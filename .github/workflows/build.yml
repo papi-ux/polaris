@@ -42,6 +42,9 @@ jobs:
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
+      - name: Verify Bazzite validation receipt gate
+        run: python3 scripts/validation/bazzite/test_validate_receipt.py
+
       - name: Bind release tag to source commit
         id: source
         env:
