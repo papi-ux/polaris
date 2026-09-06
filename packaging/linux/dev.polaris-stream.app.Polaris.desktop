@@ -2,7 +2,7 @@
 Actions=RunInTerminal;
 Categories=RemoteAccess;Network;
 Comment=@PROJECT_DESCRIPTION@
-Exec=polaris
+Exec=sh -c "systemctl --user start polaris.service 2>/dev/null || exec polaris"
 Icon=@POLARIS_DESKTOP_ICON@
 Keywords=gamestream;stream;moonlight;remote play;
 Name=@PROJECT_NAME@

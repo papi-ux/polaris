@@ -51,6 +51,11 @@ systemctl --user enable --now polaris
 Polaris runs as a user service, so it starts with your graphical session and has access to it. Check
 status with `systemctl --user status polaris`.
 
+The application menu entry starts this same service, so opening Polaris from the desktop and
+autostart never run two copies. Quitting from the tray stops it; the menu entry, the next login, or
+`systemctl --user start polaris` brings it back. For a host that boots with no desktop at all, see
+[Headless Boot](bazzite.md#headless-boot-and-deck-images).
+
 ## Verify the stream path
 
 Confirm the recommended Linux configuration in the first-run wizard or

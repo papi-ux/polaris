@@ -229,6 +229,10 @@ before any login) and hooks the Polaris user service into `default.target`. Run
 it from Desktop Mode's terminal or over SSH, as your normal user via sudo. Undo
 it later with `--disable-headless-boot`.
 
+Opening Polaris from the Desktop Mode application menu starts this same user
+service rather than a second process, so a desktop launch does not replace the
+boot instance with one that ends when you quit it or log out.
+
 Verify after a reboot, over SSH if there is no display:
 
 ```bash
