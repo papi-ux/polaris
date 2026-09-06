@@ -447,6 +447,16 @@ namespace multiseat::input {
     return impl_->coordinator->input_allocations();
   }
 
+  std::optional<allocation_t> moonlight_session_runtime_t::input_allocation(
+    const seat_handle_t &handle
+  ) const {
+    std::scoped_lock lock {impl_->state_mutex};
+    if (impl_->shutting_down || impl_->closed) {
+      return std::nullopt;
+    }
+    return impl_->coordinator->input_allocation(handle);
+  }
+
   std::size_t moonlight_session_runtime_t::claimed_sessions() const {
     std::scoped_lock lock {impl_->state_mutex};
     return impl_->coordinator->claimed_sessions();

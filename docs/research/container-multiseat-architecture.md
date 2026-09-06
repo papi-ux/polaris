@@ -899,6 +899,18 @@ absent. Stop and shutdown similarly refuse to release input while an exact
 worker or claimed stream can still own it. There is still no production caller,
 configuration switch, HTTP path, container activation, or device mutation.
 
+A concrete Linux dependency factory now proves that this owner can be composed
+from one trusted GPU catalog without duplicating capacity or device authority.
+It derives both registry capacity and the rootless Podman allowlist from each
+catalog entry, creates the private worker authority store, and binds the Podman
+input manifest source to a read-only, exact-generation allocation view owned by
+the Moonlight runtime. The view returns no authority once release or shutdown
+begins. Disabled construction returns before catalog validation or any factory;
+enabled tests inject the UUID, input backend, Podman host, kernel probe, and
+worker transport, so they execute no process, container, or device operation.
+The real dependency defaults exist only behind this uncalled factory; wiring it
+to configuration and admitting a seat remain later, separately reviewed work.
+
 ## Launcher acceptance comes second
 
 Steam, Heroic, and Lutris are all first-class targets, but installing their
@@ -1011,6 +1023,10 @@ The offline test suite covers:
   worker-first reconciliation, proven-rejection rollback, indeterminate-owner
   retention, paired-client launch selection, and worker/stream shutdown
   barriers, using only injected fake backends and no production caller;
+- default-off concrete dependency composition from one GPU catalog, including
+  ambiguous-catalog rejection, factory-free disabled construction, failure
+  unwind, offline Podman reconciliation, and exact-generation read-only input
+  manifest lookup with no production caller or live host mutation;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 

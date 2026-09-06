@@ -114,6 +114,13 @@ namespace multiseat::input {
     [[nodiscard]] std::size_t active_launches() const;
     [[nodiscard]] std::size_t retained_launches() const;
     [[nodiscard]] std::size_t input_allocations() const;
+    /**
+     * Read-only exact-generation manifest authority for a trusted worker
+     * backend. Returns no allocation after shutdown begins.
+     */
+    [[nodiscard]] std::optional<allocation_t> input_allocation(
+      const seat_handle_t &handle
+    ) const;
     [[nodiscard]] std::size_t claimed_sessions() const;
 
   private:

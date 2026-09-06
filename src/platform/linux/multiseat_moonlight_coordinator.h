@@ -183,6 +183,9 @@ namespace multiseat::input {
     [[nodiscard]] std::size_t active_launches() const;
     [[nodiscard]] std::size_t retained_launches() const;
     [[nodiscard]] std::size_t input_allocations() const;
+    [[nodiscard]] std::optional<allocation_t> input_allocation(
+      const seat_handle_t &handle
+    ) const;
     [[nodiscard]] std::size_t registered_sessions() const;
     [[nodiscard]] std::size_t claimed_sessions() const;
     [[nodiscard]] std::size_t feedback_subscriptions() const;
