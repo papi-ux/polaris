@@ -48,6 +48,10 @@ rather than deleting it; see [Troubleshooting](troubleshooting.md) for the check
 systemctl --user enable --now polaris
 ```
 
+The application menu entry starts this same user service, so a desktop launch and autostart never
+run two copies. Quitting from the tray stops it; the menu entry or `systemctl --user start polaris`
+brings it back.
+
 ## Arch derivatives
 
 CachyOS is expected to work through this package path. If a derivative renames dependencies or ships

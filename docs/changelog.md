@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Launching Polaris from the application menu now starts the packaged user service instead of a second process. A desktop launch used to make the running service instance exit, and nothing brought it back once that window was quit or the session ended, which left a host that had been streaming fine with no Polaris until the next login. The menu entry, autostart, and headless boot now all point at the one service
+
 ## v1.4.3 - 2026-09-05
 
 A diagnostics and packaging update matched with Nova v1.4.3. Doctor names the gamescope session helper Polaris will run, the console and Nova get a coded answer when an artwork search fails, and partial configuration writes merge instead of rewriting the file. The standalone system extension initially shipped with this release and was withdrawn on September 5, 2026 because it did not include the runtime dependencies required by Bazzite. Existing configurations and paired devices remain valid.
