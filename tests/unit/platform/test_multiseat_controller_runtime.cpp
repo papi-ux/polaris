@@ -172,12 +172,12 @@ namespace {
       allocation.nodes.push_back({
         .kind = kind,
         .slot = slot,
-        .host_path = "/dev/input/event" + std::to_string(identity),
+        .host_path = "/dev/input/event" + std::to_string(256 + identity),
         .worker_path = input::expected_worker_path(kind, slot),
         .filesystem_device = 61,
         .inode = 15000 + identity,
         .character_major = 13,
-        .character_minor = static_cast<std::uint32_t>(64 + identity),
+        .character_minor = static_cast<std::uint32_t>(256 + identity),
         .kernel_name = input::expected_kernel_name(
           expectation.input_seat,
           kind,

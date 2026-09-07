@@ -293,6 +293,28 @@ namespace multiseat::input {
     return result;
   }
 
+  std::optional<std::uint32_t> expected_event_minor(std::uint64_t event_number) {
+    if (event_number < evdev_static_minor_count) {
+      return evdev_static_minor_base + static_cast<std::uint32_t>(event_number);
+    }
+    if (event_number >= input_first_dynamic_minor &&
+        event_number <= std::numeric_limits<std::uint32_t>::max()) {
+      return static_cast<std::uint32_t>(event_number);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::uint32_t> expected_joystick_minor(
+    std::uint64_t joystick_number
+  ) {
+    if (joystick_number < joydev_static_minor_count ||
+        (joystick_number >= input_first_dynamic_minor &&
+         joystick_number <= std::numeric_limits<std::uint32_t>::max())) {
+      return static_cast<std::uint32_t>(joystick_number);
+    }
+    return std::nullopt;
+  }
+
   std::string expected_kernel_name(
     std::string_view input_seat,
     device_kind_e kind,
@@ -348,8 +370,8 @@ namespace multiseat::input {
           !event_number ||
           node.worker_path != worker_path ||
           node.filesystem_device == 0 || node.inode == 0 ||
-          node.character_major != 13 ||
-          node.character_minor != 64 + *event_number ||
+          node.character_major != linux_input_major ||
+          expected_event_minor(*event_number) != node.character_minor ||
           node.kernel_name != expected_kernel_name(
             expectation.input_seat,
             expected_kind,

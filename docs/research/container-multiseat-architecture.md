@@ -236,7 +236,9 @@ key nor the image may be reinterpreted inside the worker. Each launch is
 immutable and includes:
 
 - a digest-pinned image with pulling disabled;
-- a pre-created opaque profile volume mounted as the only persistent writable
+- a pre-created opaque profile volume, whose existence the backend verifies
+  with `podman volume exists` immediately before launch because `podman run`
+  would otherwise create it silently, mounted as the only persistent writable
   home, with implicit volume creation disabled;
 - explicit allowlisted GPU and virtual-input devices;
 - read-only shared game roots at derived `/mnt/games/<opaque-name>` paths;
@@ -271,7 +273,33 @@ global-device prototype cannot reconcile as a current worker.
 
 Inventory is two phase and bounded: an exact deployment-label listing returns
 full immutable container IDs, then one JSON inspection validates every ID,
-label, state, device binding, and cardinality. Podman may reconstruct an
+label, state, device binding, and cardinality. Rootless Podman applies
+`--device` as bind mounts and reports none of them in its inspection output,
+so when a record points at its OCI runtime spec the inventory reads the spec
+and treats it as the device set, and any inspected device list Podman does
+fill in must agree with the spec entry for entry rather than add to it. The
+spec path is accepted only in Podman's `<storage>/<driver>-containers/<id>/
+userdata/config.json` shape with the record's own immutable ID, as a regular
+file owned by the controller uid, never through a symbolic link on its final
+component, and within the command output bound. Every mount in the spec is
+classified: Podman's pseudo-filesystems and the controller's tmpfs mounts may
+not sit on a device directory, nor cover `/dev` or `/` after a device binding,
+because the runtime applies mounts in order; a bind may come only from
+Podman's own per-container files at their known destinations, the worker's
+own profile volume (named by an immutable worker label and anchored to the
+storage root the spec lives in) at its mount point read-write, the
+controller's authority directories and shared game mounts at their exact
+destinations and permissions, Podman's init binary (read-only at
+`/run/podman-init`, an executable regular file, never a device), or a `/dev`
+path, which becomes a device binding that must land on a `/dev` path; any
+other bind, including `/dev` or `/` bound whole, fails the inventory, as does
+a spec that lists device nodes under `linux.devices`. A FIPS-mode host, where
+Podman binds the image's crypto policy from the overlay merged directory, is
+not supported by this classifier and fails closed. A container Podman created
+but never initialized has no spec; once its allocation is gone it is reported
+as stopped so it is reaped rather than blinding the inventory. Inventory
+failures carry the specific reason in the exception so an operator can tell a
+missing spec from drift. Podman may reconstruct an
 equivalent input host path, so input inspection still requires its expected
 major/minor plus the exact worker-local destination. GPU bindings are stricter:
 their host path and full identity must match the immutable admitted baseline,
@@ -528,7 +556,9 @@ they open no real input device. Their contract:
   relative/absolute mouse pair, optionally admits touch and pen, and bounds
   generic Xbox-style gamepad slots at sixteen;
 - accepts only canonical `/dev/input/eventN` host nodes with unique filesystem
-  inode and character-device identities, exact event-number-to-minor mapping,
+  inode and character-device identities, the kernel's event-number-to-minor
+  mapping (static minor 64 + N for event0 through event31, dynamic minor N
+  from event256 upward, nothing in between),
   Linux input major 13, an exact generation-derived kernel name, and host seat
   `seat-polaris`;
 - maps those nodes to fixed worker-local paths such as

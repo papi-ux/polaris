@@ -170,6 +170,37 @@ namespace {
     ));
   }
 
+  TEST(LinuxKernelNodeProbe, AcceptsDynamicKernelMinorsAndRejectsTheStaticGap) {
+    fake_kernel_io_t io;
+    io.install("/dev/input/event256", 256, "Polaris multiseat abc keyboard");
+    io.install("/dev/input/event31", 95, "Polaris multiseat abc mouse");
+    io.install("/dev/input/event40", 104, "Polaris multiseat abc touch");
+    io.install("/dev/input/js16", 16, "Polaris multiseat abc gamepad-0", std::nullopt);
+    io.install("/dev/input/js256", 256, "Polaris multiseat abc gamepad-0", std::nullopt);
+    linux_kernel_node_probe_t probe {io};
+
+    const auto dynamic_event = probe.observe("/dev/input/event256");
+    ASSERT_EQ(dynamic_event.status, node_observation_status_e::observed);
+    ASSERT_TRUE(dynamic_event.snapshot.has_value());
+    EXPECT_EQ(dynamic_event.snapshot->character_minor, 256U);
+
+    const auto last_static = probe.observe("/dev/input/event31");
+    ASSERT_EQ(last_static.status, node_observation_status_e::observed);
+    EXPECT_EQ(last_static.snapshot->character_minor, 95U);
+
+    EXPECT_EQ(
+      probe.observe("/dev/input/event40").status,
+      node_observation_status_e::unsafe
+    );
+    EXPECT_EQ(
+      probe.observe("/dev/input/js16").status,
+      node_observation_status_e::unsafe
+    );
+    const auto dynamic_joystick = probe.observe("/dev/input/js256");
+    ASSERT_EQ(dynamic_joystick.status, node_observation_status_e::observed);
+    EXPECT_EQ(dynamic_joystick.snapshot->character_minor, 256U);
+  }
+
   TEST(LinuxKernelNodeProbe, RejectsNoncanonicalOrContradictoryKernelIdentity) {
     fake_kernel_io_t io;
     io.install("/dev/input/event2", 66, "Polaris multiseat abc keyboard");

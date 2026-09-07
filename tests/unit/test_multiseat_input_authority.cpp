@@ -5,6 +5,7 @@
 #include "src/platform/linux/multiseat_input_authority.h"
 
 #include <gtest/gtest.h>
+#include <limits>
 
 #include <algorithm>
 #include <array>
@@ -95,7 +96,7 @@ namespace {
       allocation.nodes.push_back({
         .kind = kind,
         .slot = slot,
-        .host_path = "/dev/input/event" + std::to_string(minor - 64),
+        .host_path = "/dev/input/event" + std::to_string(minor < 96 ? minor - 64 : minor),
         .worker_path = multiseat::input::expected_worker_path(kind, slot),
         .filesystem_device = 41,
         .inode = 10000 + minor,
@@ -144,6 +145,10 @@ namespace {
       }
       auto allocation = allocation_for(expectation, next_minor);
       next_minor += static_cast<std::uint32_t>(allocation.nodes.size()) + 4;
+      if (next_minor > 95 && next_minor < 256) {
+        // The kernel has no minors between the static evdev range and 256.
+        next_minor = 256;
+      }
       if (mutate_created) {
         mutate_created(allocation);
       }
@@ -470,6 +475,52 @@ namespace {
     EXPECT_EQ(authority.release(expectation.handle), status_e::applied);
     EXPECT_FALSE(authority.allocation(expectation.handle).has_value());
     EXPECT_EQ(authority.release(expectation.handle), status_e::not_found);
+  }
+
+  TEST(MultiseatInputAuthority, KernelMinorMappingCoversStaticAndDynamicRanges) {
+    using multiseat::input::expected_event_minor;
+    using multiseat::input::expected_joystick_minor;
+    EXPECT_EQ(expected_event_minor(0), 64U);
+    EXPECT_EQ(expected_event_minor(31), 95U);
+    EXPECT_FALSE(expected_event_minor(32).has_value());
+    EXPECT_FALSE(expected_event_minor(255).has_value());
+    EXPECT_EQ(expected_event_minor(256), 256U);
+    EXPECT_EQ(expected_event_minor(258), 258U);
+    EXPECT_EQ(
+      expected_event_minor(std::numeric_limits<std::uint32_t>::max()),
+      std::numeric_limits<std::uint32_t>::max()
+    );
+    EXPECT_FALSE(expected_event_minor(
+      std::uint64_t {std::numeric_limits<std::uint32_t>::max()} + 1
+    ).has_value());
+    EXPECT_EQ(expected_joystick_minor(0), 0U);
+    EXPECT_EQ(expected_joystick_minor(15), 15U);
+    EXPECT_FALSE(expected_joystick_minor(16).has_value());
+    EXPECT_FALSE(expected_joystick_minor(255).has_value());
+    EXPECT_EQ(expected_joystick_minor(256), 256U);
+  }
+
+  TEST(MultiseatInputAuthority, ValidAllocationAcceptsDynamicMinorsAndRejectsTheGap) {
+    const auto expectation = expectation_for(0, 1);
+    auto dynamic = allocation_for(expectation, 64);
+    ASSERT_TRUE(multiseat::input::valid_allocation(dynamic, expectation));
+    for (std::size_t index = 0; index < dynamic.nodes.size(); ++index) {
+      auto &node = dynamic.nodes[index];
+      node.host_path = "/dev/input/event" + std::to_string(256 + index);
+      node.character_minor = static_cast<std::uint32_t>(256 + index);
+      node.inode = 20000 + index;
+    }
+    EXPECT_TRUE(multiseat::input::valid_allocation(dynamic, expectation));
+
+    auto gap = allocation_for(expectation, 64);
+    gap.nodes.front().host_path = "/dev/input/event40";
+    gap.nodes.front().character_minor = 104;
+    EXPECT_FALSE(multiseat::input::valid_allocation(gap, expectation));
+
+    auto shifted = allocation_for(expectation, 64);
+    shifted.nodes.front().host_path = "/dev/input/event256";
+    shifted.nodes.front().character_minor = 320;
+    EXPECT_FALSE(multiseat::input::valid_allocation(shifted, expectation));
   }
 
   TEST(MultiseatInputAuthority, ReleaseAllAttemptsEveryAllocationAndRetainsFailuresForRetry) {
