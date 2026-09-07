@@ -1,0 +1,6 @@
+; Opt-in event reading for explicitly mounted, reserved multiseat nodes.
+; No generic event_device_t, input_device_t, uinput or device write permission.
+(type polaris_multiseat_input_device_t)
+(typeattributeset device_node (polaris_multiseat_input_device_t))
+(roletype object_r polaris_multiseat_input_device_t)
+(allow container_t polaris_multiseat_input_device_t (chr_file (getattr open read)))

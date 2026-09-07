@@ -1,0 +1,3 @@
+# Opt-in companion to polaris_multiseat_input.cil; install the policy first.
+# 60-polaris.rules reserves these names and assigns seat-polaris before this rule.
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ATTRS{name}=="Polaris multiseat *", ENV{ID_SEAT}=="seat-polaris", SECLABEL{selinux}="system_u:object_r:polaris_multiseat_input_device_t:s0"

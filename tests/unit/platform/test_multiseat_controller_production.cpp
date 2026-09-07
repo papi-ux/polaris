@@ -356,6 +356,8 @@ namespace {
     }
     return {
       {"ociVersion", "1.2.0"},
+      {"annotations", {{"run.oci.keep_original_groups", "1"}}},
+      {"process", {{"user", {{"uid", 1000}}}}},
       {"mounts", std::move(mounts)},
       {"linux", nlohmann::json::object()},
     };
@@ -375,6 +377,14 @@ namespace {
 
     bool executable_file(const std::filesystem::path &path) const override {
       return path == "/usr/bin/podman" || path == "/usr/libexec/podman/catatonit";
+    }
+
+    bool trusted_runtime_file(const std::filesystem::path &path) const override {
+      return path == "/usr/bin/crun";
+    }
+
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override {
+      return std::vector<std::uint64_t> {104, 105};
     }
 
     bool readable_directory(const std::filesystem::path &) const override {
@@ -434,7 +444,9 @@ namespace {
           .output = {},
         };
       }
-      return simulate_locked(argv);
+      auto command = argv;
+      if (command.at(2) == "--runtime=/usr/bin/crun") command.erase(command.begin() + 2);
+      return simulate_locked(command);
     }
 
   private:
@@ -553,8 +565,9 @@ namespace {
           document.push_back({
             {"Id", found->id},
             {"Name", found->name},
-            {"Config", {{"Labels", std::move(labels)}}},
-            {"HostConfig", {{"Devices", nlohmann::json::array()}}},
+            {"Config", {{"Labels", std::move(labels)}, {"User", "1000"}}},
+            {"OCIRuntime", "/usr/bin/crun"},
+            {"HostConfig", {{"Devices", nlohmann::json::array()}, {"GroupAdd", nlohmann::json::array()}}},
             {"OCIConfigPath", runtime_spec_path_for(found->id)},
             {"State", {{"Status", found->status}}},
           });
@@ -1062,7 +1075,7 @@ namespace {
         host_state->commands.begin(),
         host_state->commands.end(),
         [](const auto &command) {
-          return command.size() > 2 && command.at(2) == "run";
+          return command.size() > 3 && command.at(2) == "--runtime=/usr/bin/crun" && command.at(3) == "run";
         }
       ));
     }
@@ -1181,7 +1194,8 @@ namespace {
           host_state->commands.begin(),
           host_state->commands.end(),
           [verb](const auto &command) {
-            return command.size() > 2 && command.at(2) == verb;
+            const auto index = command.size() > 2 && command.at(2) == "--runtime=/usr/bin/crun" ? 3U : 2U;
+            return command.size() > index && command.at(index) == verb;
           }
         );
       };
