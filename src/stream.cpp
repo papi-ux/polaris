@@ -2822,9 +2822,7 @@ namespace stream {
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
         session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
-        session.config.monitor.encodingFramerate > 1000 ?
-          static_cast<double>(session.config.monitor.encodingFramerate) / 1000.0 :
-          static_cast<double>(session.config.monitor.encodingFramerate),
+        av_q2d(video::encoding_framerate_to_rational(session.config.monitor)),
         session.pacing_policy,
         session.optimization_source,
         session.optimization_confidence,

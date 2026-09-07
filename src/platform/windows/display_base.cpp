@@ -195,6 +195,7 @@ namespace platf::dxgi {
 
   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
+      if (client_frame_rate_strict.Numerator > 0) return client_frame_rate_strict;
       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
       if (display_refresh_rate.Denominator > 1) {
         DXGI_RATIONAL candidate = display_refresh_rate;
@@ -714,6 +715,10 @@ namespace platf::dxgi {
     }
 
     client_frame_rate = config.framerate;
+    if (video::rate::valid(config.stream_rate)) {
+      const auto fps = video::framerate_to_rational(config);
+      client_frame_rate_strict = {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
+    }
     dxgi::output6_t output6 {};
     status = output->QueryInterface(IID_IDXGIOutput6, (void **) &output6);
     if (SUCCEEDED(status)) {

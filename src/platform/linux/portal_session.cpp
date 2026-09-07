@@ -6,6 +6,12 @@
  * portal_grab.cpp. session_media remains sole ordered media teardown owner.
  */
 
+#include "pipewire_rate.h"
+#include "src/utility.h"
+#include <functional>
+#include <condition_variable>
+#include <thread>
+
 #include "portal_session.h"
 
 #ifdef __linux__
@@ -119,6 +125,58 @@ namespace portal {
       GCancellable *cancellable_ = nullptr;
     };
   }  // namespace
+
+  namespace {
+#ifdef POLARIS_TESTS
+    thread_local const std::function<void(GCancellable *)> *kwin_query_hook = nullptr;
+#endif
+  }
+
+  bool running_kwin_uses_fixed_rate() {
+    cancellable_ptr_t cancellable_owner {g_cancellable_new()};
+    auto *cancellable = cancellable_owner.get();
+    pending_request_registration_t registration {cancellable};
+    if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) {
+      g_cancellable_cancel(cancellable);
+    }
+    std::mutex timer_mutex;
+    std::condition_variable_any timer_cv;
+    std::jthread deadline([&](std::stop_token stop) {
+      std::unique_lock lock(timer_mutex);
+      timer_cv.wait_for(lock, stop, std::chrono::milliseconds(500), [] { return false; });
+      if (!stop.stop_requested()) g_cancellable_cancel(cancellable);
+    });
+#ifdef POLARIS_TESTS
+    if (kwin_query_hook) {
+      (*kwin_query_hook)(cancellable);
+      return false;
+    }
+#endif
+    auto *connection = g_bus_get_sync(G_BUS_TYPE_SESSION, cancellable, nullptr);
+    if (!connection) return false;
+    auto *reply = g_dbus_connection_call_sync(connection, "org.kde.KWin", "/KWin", "org.kde.KWin",
+      "supportInformation", nullptr, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NO_AUTO_START,
+      500, cancellable, nullptr);
+    bool fixed = false;
+    if (reply) {
+      const gchar *information = nullptr;
+      g_variant_get(reply, "(&s)", &information);
+      if (information && g_variant_get_size(reply) <= 65536 && !g_cancellable_is_cancelled(cancellable)) {
+        fixed = pipewire_capture::kwin_uses_fixed_rate(information);
+      }
+      g_variant_unref(reply);
+    }
+    g_object_unref(connection);
+    return fixed;
+  }
+
+#ifdef POLARIS_TESTS
+  bool kwin_rate_query_with_hook_for_tests(const std::function<void(GCancellable *)> &hook) {
+    kwin_query_hook = &hook;
+    auto restore = util::fail_guard([] { kwin_query_hook = nullptr; });
+    return running_kwin_uses_fixed_rate();
+  }
+#endif
 
   void cancel_pending_requests(const void *owner_tag) {
     std::vector<GCancellable *> pending;

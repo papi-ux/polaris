@@ -177,7 +177,8 @@ namespace platf {
     }
     BOOST_LOG(info) << "Configuring selected display ("sv << display->display_id << ") to stream"sv;
 
-    display->av_capture = [[AVVideo alloc] initWithDisplay:display->display_id frameRate:config.framerate];
+    const auto fps = video::framerate_to_rational(config);
+    display->av_capture = [[AVVideo alloc] initWithDisplay:display->display_id frameRateNumerator:fps.num denominator:fps.den];
 
     if (!display->av_capture) {
       BOOST_LOG(error) << "Video setup failed."sv;

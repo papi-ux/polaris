@@ -400,7 +400,7 @@ namespace platf {
         BOOST_LOG(error) << "Invalid X11 capture framerate: "sv << config.framerate;
         return -1;
       }
-      delay = std::chrono::nanoseconds {1s} / config.framerate;
+      delay = ::video::capture_frame_interval(config);
 
       xwindow = DefaultRootWindow(xdisplay.get());
 

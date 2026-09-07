@@ -3223,8 +3223,9 @@ namespace video {
       ctx.reset(avcodec_alloc_context3(codec));
       ctx->width = config.width;
       ctx->height = config.height;
-      ctx->time_base = AVRational {1, config.framerate};
-      ctx->framerate = AVRational {config.framerate, 1};
+      const auto fps = framerate_to_rational(config);
+      ctx->time_base = AVRational {fps.den, fps.num};
+      ctx->framerate = fps;
 
       switch (config.videoFormat) {
         case 0:
@@ -3718,7 +3719,7 @@ namespace video {
     // set max frame time based on client-requested target framerate.
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target * 1000 : std::max(config.encodingFramerate / 5, 10000);
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
-    auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
+    auto encode_frame_threshold = encoding_frame_interval(config);
     auto frame_variation_threshold = encode_frame_threshold / 4;
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
@@ -3791,9 +3792,7 @@ namespace video {
     double accumulated_frame_age_ms = 0.0;
     double accumulated_jitter_ms = 0.0;
     std::optional<std::chrono::steady_clock::time_point> last_source_frame_timestamp;
-    const double encode_target_fps = config.encodingFramerate > 1000 ?
-      static_cast<double>(config.encodingFramerate) / 1000.0 :
-      static_cast<double>(config.encodingFramerate);
+    const double encode_target_fps = av_q2d(encoding_framerate_to_rational(config));
     const double target_frame_interval_ms = encode_target_fps > 0.0 ? 1000.0 / encode_target_fps : 0.0;
     int applied_adaptive_bitrate = config.bitrate;
 
@@ -3928,9 +3927,7 @@ namespace video {
           }
 
         if (frame_nr % 30 == 0) {
-          double target_fps = config.encodingFramerate > 1000
-            ? static_cast<double>(config.encodingFramerate) / 1000.0
-            : static_cast<double>(config.encodingFramerate);
+          double target_fps = av_q2d(encoding_framerate_to_rational(config));
           double current_fps = (measured_fps > 0) ? measured_fps : target_fps;
           // Clamp to reasonable range
           if (current_fps <= 0 || current_fps > target_fps * 1.5) {
