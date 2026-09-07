@@ -415,3 +415,142 @@ TEST(VideoCacheTests, HeadlessCageUsesDeferredCageTopologyKeyForColdLaunchAdvert
   EXPECT_NE(topology.find(";displays=deferred-cage"), std::string::npos);
 }
 #endif
+
+TEST(CaptureEventLifecycle, AtomicDrainCompetesWithConsumerWithoutWaiting) {
+  for (int iteration = 0; iteration < 100; ++iteration) {
+    safe::event_t<std::shared_ptr<int>> event;
+    auto value = std::make_shared<int>(iteration);
+    std::weak_ptr<int> lifetime = value;
+    event.raise(std::move(value));
+    std::atomic<int> consumed {0};
+    std::atomic<bool> start {false};
+    const auto consume = [&] {
+      while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+      if (event.try_pop()) ++consumed;
+    };
+    std::thread encoder {consume};
+    std::thread drain {consume};
+    start.store(true, std::memory_order_release);
+    encoder.join();
+    drain.join();
+    EXPECT_EQ(consumed.load(), 1);
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_FALSE(event.try_pop());
+  }
+}
+
+TEST(CaptureEventLifecycle, StopWakesCaptureConsumerAndRejectsFurtherFrames) {
+  safe::event_t<std::shared_ptr<int>> event;
+  std::thread consumer {[&] { EXPECT_FALSE(event.pop()); }};
+  event.stop();
+  consumer.join();
+  event.raise(std::make_shared<int>(1));
+  EXPECT_FALSE(event.peek());
+  EXPECT_FALSE(event.running());
+  EXPECT_FALSE(event.try_pop());
+}
+
+TEST(EncodedPacketLifecycle, ReplacementBytesSurviveTheirSourceAndSession) {
+  auto packet = std::make_unique<video::packet_raw_avcodec>();
+  {
+    std::string original = "old parameter set";
+    std::string replacement = "new parameter set";
+    auto replacements = std::make_shared<std::vector<video::packet_raw_t::replace_t>>();
+    replacements->emplace_back(original, replacement);
+    packet->replacements = replacements;
+    original.assign(4096, 'x');
+    replacement.assign(4096, 'y');
+  }
+  ASSERT_EQ(packet->replacements->size(), 1);
+  EXPECT_EQ(packet->replacements->front().old, "old parameter set");
+  EXPECT_EQ(packet->replacements->front()._new, "new parameter set");
+}
+
+namespace {
+  class LifetimeDisplay final: public platf::display_t {
+  public:
+    explicit LifetimeDisplay(std::vector<std::string> &order): order {order} {}
+    ~LifetimeDisplay() override { order.emplace_back("display"); }
+    platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override { return platf::capture_e::ok; }
+    std::shared_ptr<platf::img_t> alloc_img() override { return {}; }
+    int dummy_img(platf::img_t *) override { return -1; }
+    std::vector<std::string> &order;
+  };
+  class LifetimeConverter final: public video::frame_converter_t {
+  public:
+    explicit LifetimeConverter(std::vector<std::string> &order): order {order} {}
+    ~LifetimeConverter() override { order.emplace_back("converter"); }
+    std::string_view name() const override { return "lifetime-test"; }
+    bool supports(const video::frame_t &, const video::conversion_request_t &) const override { return false; }
+    int convert(video::frame_t &, const video::conversion_request_t &) override { return -1; }
+    std::vector<std::string> &order;
+  };
+}
+
+TEST(EncodedPacketLifecycle, DriverReferencesReleaseOnEncoderThreadBeforePacketDelivery) {
+  const auto owner = std::this_thread::get_id();
+  std::vector<std::string> order;
+  auto packet = std::make_unique<video::packet_raw_avcodec>();
+  struct DriverBuffer {
+    std::thread::id owner;
+    std::vector<std::string> *order;
+    std::unique_ptr<LifetimeConverter> converter;
+  };
+  auto driver = new DriverBuffer {owner, &order, std::make_unique<LifetimeConverter>(order)};
+  packet->av_packet->buf = av_buffer_create(
+    static_cast<uint8_t *>(av_malloc(AV_INPUT_BUFFER_PADDING_SIZE + 4)), 4,
+    [](void *opaque, uint8_t *data) {
+      auto driver = static_cast<DriverBuffer *>(opaque);
+      EXPECT_EQ(std::this_thread::get_id(), driver->owner);
+      driver->order->emplace_back("driver-buffer");
+      delete driver;
+      av_free(data);
+    }, driver, 0);
+  ASSERT_NE(packet->av_packet->buf, nullptr);
+  packet->av_packet->data = packet->av_packet->buf->data;
+  packet->av_packet->size = 4;
+  std::memcpy(packet->av_packet->data, "data", 4);
+  packet->av_packet->pts = 42;
+  packet->av_packet->flags = AV_PKT_FLAG_KEY;
+  packet->av_packet->opaque_ref = av_buffer_ref(packet->av_packet->buf);
+  auto metadata = av_packet_new_side_data(packet->av_packet, AV_PKT_DATA_STRINGS_METADATA, 4);
+  ASSERT_NE(metadata, nullptr);
+  std::memcpy(metadata, "meta", 4);
+  ASSERT_TRUE(packet->detach_encoder_buffer());
+  EXPECT_EQ(order, (std::vector<std::string> {"driver-buffer", "converter"}));
+  std::thread consumer {[packet = std::move(packet)]() mutable {
+    EXPECT_EQ(packet->frame_index(), 42);
+    EXPECT_TRUE(packet->is_idr());
+    size_t metadata_size = 0;
+    auto metadata = av_packet_get_side_data(packet->av_packet, AV_PKT_DATA_STRINGS_METADATA, &metadata_size);
+    ASSERT_NE(metadata, nullptr);
+    EXPECT_EQ(std::string_view(reinterpret_cast<char *>(metadata), metadata_size), "meta");
+    EXPECT_EQ(std::string_view(reinterpret_cast<char *>(packet->data()), packet->data_size()), "data");
+    packet.reset();
+  }};
+  consumer.join();
+  EXPECT_EQ(order.size(), 2);
+}
+
+TEST(CaptureEventLifecycle, CaptureReinitCanStopWhileConsumerRetainsDisplay) {
+  std::vector<std::string> order;
+  std::shared_ptr<platf::display_t> display = std::make_shared<LifetimeDisplay>(order);
+  safe::queue_t<std::shared_ptr<platf::display_t>> packets;
+  packets.raise(display);
+  packets.stop();
+  EXPECT_FALSE(packets.pop());
+  safe::queue_t<int> capture_control;
+  safe::signal_t draining;
+  bool released = true;
+  std::thread capture {[&] {
+    released = video::wait_for_capture_display_release(display,
+      [&] { return capture_control.running(); }, [&] { draining.raise(true); });
+  }};
+  const auto entered_wait = draining.pop(std::chrono::seconds(1));
+  capture_control.stop();
+  capture.join();
+  EXPECT_TRUE(entered_wait);
+  EXPECT_FALSE(released);
+  EXPECT_TRUE(order.empty());
+  EXPECT_EQ(display.use_count(), 2);
+}
