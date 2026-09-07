@@ -7,6 +7,7 @@
 // standard includes
 #include <functional>
 #include <optional>
+#include <span>
 
 // local includes
 #include "platform/common.h"
@@ -26,6 +27,13 @@ namespace input {
 
   void preallocate_gamepad();
   std::shared_ptr<input_t> alloc(safe::mail_t mail);
+
+#ifdef POLARIS_TESTS
+  bool is_valid_input_packet_for_tests(std::span<const std::uint8_t> packet);
+  std::shared_ptr<input_t> alloc_queue_for_tests();
+  std::size_t queued_input_packet_count_for_tests(const std::shared_ptr<input_t> &input);
+  bool batch_input_packets_for_tests(std::vector<std::uint8_t> &dest, const std::vector<std::uint8_t> &src);
+#endif
 
   struct touch_port_t: public platf::touch_port_t {
     int env_width, env_height;

@@ -71,9 +71,19 @@ namespace crypto {
    * @return nullptr if the certificate is valid, otherwise an error string.
    */
   const char * cert_chain_t::verify(x509_t::element_type *cert, p_named_cert_t& named_cert_out) {
-    int err_code = 0;
+    named_cert_out.reset();
+    const auto presented_fingerprint = x509_fingerprint(cert);
+    if (!presented_fingerprint) {
+      return "Invalid client certificate";
+    }
+    int err_code = X509_V_ERR_CERT_REJECTED;
     std::lock_guard lock {_certs_mutex};
     for (auto &[fingerprint, named_cert_p, x509_store] : _certs) {
+      // Pairing trusts one canonical certificate, not certificates it can sign.
+      // Compare the DER fingerprint so equivalent PEM encodings keep working.
+      if (fingerprint != *presented_fingerprint) {
+        continue;
+      }
       x509_store_ctx_t cert_ctx { X509_STORE_CTX_new() };
       if (!cert_ctx) {
         return "Unable to allocate certificate verification context";

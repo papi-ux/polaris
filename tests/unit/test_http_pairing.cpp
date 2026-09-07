@@ -4,6 +4,7 @@
  */
 
 #include "../tests_common.h"
+#include "../certificate_test_utils.h"
 
 #include <atomic>
 #include <filesystem>
@@ -434,6 +435,51 @@ TEST(CertChainTest, CanonicallyEquivalentCertificateReplacesExistingIdentity) {
   EXPECT_EQ(verified.get(), replacement.get());
 }
 
+TEST(CertChainTest, RequiresExactPairedIdentityAndClearsFailedOutput) {
+  const auto issuer = test_utils::certificates::generate_ca_credentials();
+  const auto derived = test_utils::certificates::generate_derived_leaf(issuer);
+  auto paired_cert = crypto::x509(issuer.x509);
+  auto derived_cert = crypto::x509(derived.x509);
+  auto named = std::make_shared<crypto::named_cert_t>();
+  named->cert = issuer.x509;
+  crypto::cert_chain_t chain;
+  chain.add(named);
+
+  crypto::p_named_cert_t verified;
+  ASSERT_EQ(chain.verify(paired_cert.get(), verified), nullptr);
+  ASSERT_EQ(verified, named);
+  EXPECT_NE(chain.verify(derived_cert.get(), verified), nullptr);
+  EXPECT_FALSE(verified);
+
+  // A directly paired leaf is allowed even when its issuer is also paired.
+  auto paired_leaf = std::make_shared<crypto::named_cert_t>();
+  paired_leaf->cert = derived.x509;
+  chain.add(paired_leaf);
+  ASSERT_EQ(chain.verify(derived_cert.get(), verified), nullptr);
+  EXPECT_EQ(verified, paired_leaf);
+
+  verified = named;
+  EXPECT_NE(chain.verify(nullptr, verified), nullptr);
+  EXPECT_FALSE(verified);
+
+  chain.clear();
+  EXPECT_NE(chain.verify(paired_cert.get(), verified), nullptr);
+  EXPECT_FALSE(verified);
+}
+
+TEST(CertChainTest, PreservesExpiredPairedCertificatesForClientsWithoutAccurateClocks) {
+  const auto credentials = test_utils::certificates::expire_credentials(
+    crypto::gen_creds("Expired paired client", 2048));
+  auto certificate = crypto::x509(credentials.x509);
+  auto named = std::make_shared<crypto::named_cert_t>();
+  named->cert = credentials.x509;
+  crypto::cert_chain_t chain;
+  chain.add(named);
+  crypto::p_named_cert_t verified;
+  EXPECT_EQ(chain.verify(certificate.get(), verified), nullptr);
+  EXPECT_EQ(verified, named);
+}
+
 struct PairingAccessPresetTest: testing::Test {
   void SetUp() override {
     previous_fresh_state = config::sunshine.flags.test(config::flag::FRESH_STATE);
@@ -646,6 +692,38 @@ TEST_F(PairingAccessPresetTest, EstablishedRequestSnapshotIsRejectedAfterRevocat
   EXPECT_FALSE(resolve_authorized_client_for_tests(request_snapshot, "/serverinfo"));
   EXPECT_FALSE(game_stream_request_authorized_for_tests(request_snapshot, "/serverinfo"));
   EXPECT_FALSE(confighttp::config_request_authorized_for_tests(request_snapshot, "/api/clients/list"));
+}
+
+TEST_F(PairingAccessPresetTest, ConcurrentRevocationRejectsEstablishedAuthorization) {
+  auto session = successful_pairing_session("concurrent-revocation");
+  complete_successful_pairing(session);
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  auto certificate = crypto::x509(PUBLIC_CERT);
+  auto snapshot = verify_client_cert_for_tests(certificate.get(), 1);
+  ASSERT_TRUE(snapshot);
+  std::atomic<bool> started {false};
+  std::atomic<bool> revoked {false};
+  std::atomic<int> stale_authorizations {0};
+  std::thread reader([&] {
+    started.store(true, std::memory_order_release);
+    while (!revoked.load(std::memory_order_acquire)) {
+      (void) resolve_authorized_client_for_tests(snapshot, "/serverinfo");
+    }
+    for (int i = 0; i < 100; ++i) {
+      if (resolve_authorized_client_for_tests(snapshot, "/serverinfo")) {
+        ++stale_authorizations;
+      }
+    }
+  });
+  while (!started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  const auto result = unpair_client_result(clients[0]["uuid"].get<std::string>());
+  revoked.store(true, std::memory_order_release);
+  reader.join();
+  EXPECT_EQ(result, client_mutation_result_t::success);
+  EXPECT_EQ(stale_authorizations.load(), 0);
 }
 
 TEST_F(PairingAccessPresetTest, SameUuidDifferentCertificateRejectsEstablishedRequestSnapshot) {

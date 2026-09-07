@@ -201,6 +201,7 @@ if (NOT WIN32 AND NOT APPLE)
 endif()
 
 set(TEST_INPUT_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_input_packet.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_gamepad_feedback_router.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_mouse.cpp
 )
