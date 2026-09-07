@@ -148,6 +148,32 @@ TEST(SessionStopContractTests, TerminateSessionsUsesGracefulStopBeforeJoin) {
   EXPECT_EQ(clear_body.find("stream::session::stop("), std::string::npos);
 }
 
+TEST(SessionStopContractTests, RejectedAnnounceFinishesExactLaunch) {
+  const auto source = read_rtsp_source_for_contract();
+  const auto start = source.find("void cmd_announce(");
+  const auto end = source.find("void cmd_play(", start);
+  ASSERT_NE(start, std::string::npos);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  const auto guard = body.find(
+    "auto finish_rejected_launch = util::fail_guard"
+  );
+  const auto parsing = body.find("try {");
+  const auto stream_start = body.find("insert_and_start_if_not_cancelled");
+  const auto success_disable = body.rfind("finish_rejected_launch.disable()");
+  const auto success_response = body.rfind(
+    "respond(sock, session, &option, 200, \"OK\""
+  );
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(parsing, std::string::npos);
+  ASSERT_NE(stream_start, std::string::npos);
+  ASSERT_NE(success_disable, std::string::npos);
+  ASSERT_NE(success_response, std::string::npos);
+  EXPECT_LT(guard, parsing);
+  EXPECT_LT(stream_start, success_disable);
+  EXPECT_LT(success_disable, success_response);
+}
+
 TEST(SessionStopContractTests, StreamJoinCancelsOwnPendingMediaStartBeforeVideoJoin) {
   const auto source = read_source_for_contract("src/stream.cpp");
   const auto start = source.find("void join(session_t &session)");

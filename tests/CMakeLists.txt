@@ -248,6 +248,17 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
 )
 
+if (NOT WIN32 AND NOT APPLE)
+    list(APPEND TEST_STREAM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_activation.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_coordinator.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_runtime.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_worker_adapter.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_runtime.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_production.cpp
+    )
+endif()
+
 set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
 )
@@ -358,6 +369,142 @@ target_link_libraries(test_game_artwork PRIVATE
     nlohmann_json::nlohmann_json
 )
 add_test(NAME test_game_artwork COMMAND test_game_artwork)
+
+# Keep the multiseat test executable independent of the current singleton
+# runtime. Linux adds the Podman adapter contract and its JSON inventory
+# parser; the IPC proof uses only OpenSSL's crypto primitive.
+add_executable(test_multiseat_runtime
+    ${CMAKE_SOURCE_DIR}/src/multiseat_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/src/multiseat_worker_broker.cpp
+    ${CMAKE_SOURCE_DIR}/src/multiseat_worker_protocol.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_worker_broker.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_worker_protocol.cpp
+)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(test_multiseat_runtime PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/input/inputtino_multiseat_backend.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_input_protocol.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_input_authority.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_input_adapter.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_session_bridge.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_session_adapters.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_live_session.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_input_authority.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_input_protocol.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_input_adapter.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_session_bridge.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_session_adapters.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_live_session.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_inputtino_multiseat_backend.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_authority.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_client.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_coordinator.cpp
+    )
+endif()
+set_target_properties(test_multiseat_runtime PROPERTIES
+    CXX_STANDARD 23
+    INTERPROCEDURAL_OPTIMIZATION OFF
+)
+target_compile_options(test_multiseat_runtime PRIVATE ${POLARIS_COMPILE_OPTIONS})
+target_link_libraries(test_multiseat_runtime PRIVATE
+    gtest_main
+    OpenSSL::Crypto
+)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(test_multiseat_runtime PRIVATE
+        POLARIS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    # The Linux sources include src/platform/common.h, which needs Boost.Process.
+    # When the system Boost is too old the project fetches a modular Boost whose
+    # process headers are only reachable through its imported targets, so link
+    # the same Boost libraries every other test target links.
+    target_link_libraries(test_multiseat_runtime PRIVATE
+        inputtino::libinputtino
+        nlohmann_json::nlohmann_json
+        ${Boost_LIBRARIES}
+    )
+endif()
+add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(POLARIS_TEST_GO_EXECUTABLE go)
+    # The fixture is built with GOTOOLCHAIN=local, so the Go that is found must
+    # already satisfy the go directive in multiseat_worker/go.mod. Distributions
+    # that ship an older Go (Ubuntu 24.04 has 1.22) skip the fixture and its
+    # tests instead of failing the whole build.
+    set(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED FALSE)
+    if(POLARIS_TEST_GO_EXECUTABLE)
+        file(STRINGS "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
+            POLARIS_MULTISEAT_GO_DIRECTIVE
+            REGEX "^go [0-9]+(\\.[0-9]+)*$" LIMIT_COUNT 1)
+        string(REGEX REPLACE "^go " "" POLARIS_MULTISEAT_GO_REQUIRED
+            "${POLARIS_MULTISEAT_GO_DIRECTIVE}")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E env GOTOOLCHAIN=local
+                    ${POLARIS_TEST_GO_EXECUTABLE} env GOVERSION
+            OUTPUT_VARIABLE POLARIS_MULTISEAT_GO_FOUND
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE POLARIS_MULTISEAT_GO_VERSION_RESULT
+            ERROR_QUIET)
+        # GOVERSION reads like go1.22.2, go1.24rc1, or go1.26.7-X:nodwarf5.
+        string(REGEX MATCH "^go([0-9]+(\\.[0-9]+)*)" POLARIS_MULTISEAT_GO_MATCH
+            "${POLARIS_MULTISEAT_GO_FOUND}")
+        set(POLARIS_MULTISEAT_GO_FOUND_VERSION "${CMAKE_MATCH_1}")
+        if(POLARIS_MULTISEAT_GO_VERSION_RESULT EQUAL 0
+                AND POLARIS_MULTISEAT_GO_REQUIRED
+                AND POLARIS_MULTISEAT_GO_FOUND_VERSION
+                AND NOT POLARIS_MULTISEAT_GO_FOUND_VERSION VERSION_LESS
+                    POLARIS_MULTISEAT_GO_REQUIRED)
+            set(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED TRUE)
+        else()
+            message(STATUS
+                "Skipping the multiseat Go interop fixture: "
+                "${POLARIS_TEST_GO_EXECUTABLE} reports go "
+                "'${POLARIS_MULTISEAT_GO_FOUND_VERSION}' and multiseat_worker/go.mod "
+                "requires go ${POLARIS_MULTISEAT_GO_REQUIRED} with GOTOOLCHAIN=local")
+        endif()
+    endif()
+    if(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED)
+        set(POLARIS_MULTISEAT_GO_INTEROP_BINARY
+            "${CMAKE_CURRENT_BINARY_DIR}/polaris-multiseat-go-interop-server")
+        file(GLOB_RECURSE POLARIS_MULTISEAT_GO_TEST_SOURCES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/internal/seatruntime/testdata/*.json")
+        add_custom_command(
+            OUTPUT "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
+            COMMENT "Building native C++/Go multiseat interop fixture"
+            COMMAND ${CMAKE_COMMAND} -E env
+                    CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    ${POLARIS_TEST_GO_EXECUTABLE} test -c -trimpath
+                    -o "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}" .
+            DEPENDS ${POLARIS_MULTISEAT_GO_TEST_SOURCES}
+            VERBATIM)
+        add_custom_target(polaris-multiseat-go-interop-fixture
+            DEPENDS "${POLARIS_MULTISEAT_GO_INTEROP_BINARY}")
+        add_dependencies(test_multiseat_runtime polaris-multiseat-go-interop-fixture)
+        target_sources(test_multiseat_runtime PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_worker_interop.cpp)
+        target_compile_definitions(test_multiseat_runtime PRIVATE
+            POLARIS_MULTISEAT_GO_INTEROP_BINARY="${POLARIS_MULTISEAT_GO_INTEROP_BINARY}")
+        add_test(
+            NAME polaris_multiseat_worker_go
+            COMMAND ${CMAKE_COMMAND} -E env
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    ${POLARIS_TEST_GO_EXECUTABLE} test -trimpath ./...
+        )
+        set_tests_properties(polaris_multiseat_worker_go PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
+        )
+    endif()
+endif()
 
 configure_polaris_test_target(${PROJECT_NAME}
     $<TARGET_OBJECTS:test_polaris_main_objects>

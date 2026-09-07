@@ -148,6 +148,15 @@ TEST(ConfigValidationTests, AcceptsClientGamepadSeatIsolationConfigKey) {
   EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
 }
 
+TEST(ConfigValidationTests, AcceptsExplicitMoonlightMultiseatInputKey) {
+  nlohmann::json payload = {
+    {"multiseat_moonlight_input", "enabled"}
+  };
+
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+}
+
 TEST(ResponseOnlyConfigKeyTests, CoversEveryKeyTheLegacyListsScrubbed) {
   // Union of the two lists previously hardcoded in confighttp.cpp (saveConfig)
   // and config.cpp (apply_config). Removing any of these from the canonical

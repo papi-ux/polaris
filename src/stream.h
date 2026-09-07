@@ -6,7 +6,9 @@
 
 // standard includes
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -17,6 +19,18 @@
 #include "audio.h"
 #include "crypto.h"
 #include "video.h"
+
+#ifdef __linux__
+namespace multiseat {
+  struct seat_handle_t;
+
+  namespace input {
+    class authority_t;
+    class moonlight_controller_feedback_hub_t;
+    class moonlight_session_binding_registry_t;
+  }  // namespace input
+}  // namespace multiseat
+#endif
 
 namespace stream {
   constexpr auto VIDEO_STREAM_PORT = 9;
@@ -78,9 +92,35 @@ namespace stream {
     std::string uuid(const session_t& session);
     std::string session_token(const session_t& session);
     std::uint32_t launch_session_id(const session_t& session);
+    std::uint64_t launch_lifecycle_generation(const session_t& session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm);
+#ifdef __linux__
+    enum class multiseat_input_bind_status_e {
+      bound,
+      invalid_session_state,
+      already_bound,
+      open_failed,
+    };
+
+    /**
+     * Explicitly replace singleton input for a not-yet-started authenticated
+     * session with one already-admitted multiseat seat. The default-off
+     * activation gate is the only production caller.
+     */
+    multiseat_input_bind_status_e bind_multiseat_input(
+      session_t &session,
+      multiseat::input::authority_t &authority,
+      multiseat::input::moonlight_session_binding_registry_t &binding_registry,
+      multiseat::seat_handle_t handle,
+      std::shared_ptr<
+        multiseat::input::moonlight_controller_feedback_hub_t
+      > feedback_hub,
+      bool controller_feedback
+    );
+    bool multiseat_input_bound(const session_t &session);
+#endif
     int start(session_t &session, const std::string &addr_string);
     void stop(session_t &session);
     void graceful_stop(session_t& session);
@@ -89,6 +129,13 @@ namespace stream {
     state_e state(session_t &session);
 #ifdef POLARIS_TESTS
     void set_state_for_tests(session_t &session, state_e state);
+#ifdef __linux__
+    /** Exercise the bound bridge without entering the network control loop. */
+    bool route_multiseat_input_for_tests(
+      session_t &session,
+      std::span<const std::uint8_t> packet
+    );
+#endif
 #endif
     unsigned active_count();
     inline bool send(session_t& session, const std::string_view &payload);

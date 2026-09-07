@@ -270,6 +270,7 @@ namespace config {
     bool headless_gamepad_isolation;
     bool client_gamepad_seat_isolation;
     bool client_keyboard_mouse_seat_isolation;
+    bool multiseat_moonlight_input;
 
     bool keyboard;
     bool mouse;

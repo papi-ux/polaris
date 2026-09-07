@@ -35,6 +35,7 @@
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
 #elif __linux__
+  #include "platform/linux/multiseat_moonlight_runtime.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
@@ -484,6 +485,32 @@ int main(int argc, char *argv[]) {
   reed_solomon_init();
   auto input_deinit_guard = input::init();
 
+#ifdef __linux__
+  auto multiseat_runtime_created =
+    multiseat::input::create_production_moonlight_session_runtime({
+      .enabled = config::input.multiseat_moonlight_input,
+    });
+  auto multiseat_runtime = std::move(multiseat_runtime_created.runtime);
+  switch (multiseat_runtime_created.status) {
+    case multiseat::input::moonlight_runtime_create_status_e::ready_disabled:
+      break;
+    case multiseat::input::moonlight_runtime_create_status_e::ready_enabled:
+      BOOST_LOG(warning)
+        << "Experimental Moonlight multiseat input owner is enabled; "sv
+        << "only previously admitted authenticated launch selections can use it"sv;
+      break;
+    case multiseat::input::moonlight_runtime_create_status_e::invalid_factory:
+    case multiseat::input::moonlight_runtime_create_status_e::backend_unavailable:
+    case multiseat::input::moonlight_runtime_create_status_e::activation_install_rejected:
+    case multiseat::input::moonlight_runtime_create_status_e::runtime_install_rejected:
+      BOOST_LOG(error)
+        << "Moonlight multiseat input owner was unavailable (status "sv
+        << static_cast<int>(multiseat_runtime_created.status)
+        << "); ordinary unselected streaming remains active"sv;
+      break;
+  }
+#endif
+
   if (input::probe_gamepads()) {
     BOOST_LOG(warning) << "No gamepad input is available"sv;
   }
@@ -601,6 +628,25 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+
+#ifdef __linux__
+  if (multiseat_runtime) {
+    const auto report = multiseat_runtime->shutdown();
+    if (report.status !=
+          multiseat::input::moonlight_coordinator_shutdown_status_e::closed &&
+        report.status !=
+          multiseat::input::moonlight_coordinator_shutdown_status_e::already_closed) {
+      BOOST_LOG(error)
+        << "Moonlight multiseat input cleanup remained incomplete; "sv
+        << "retaining its closed owner until process exit (failures="sv
+        << report.cleanup_failures << ')';
+      // Destruction cannot safely release dependencies after an indeterminate
+      // input teardown. The process is already exiting, so retain the closed
+      // owner and let the kernel reclaim it without reopening singleton input.
+      (void) multiseat_runtime.release();
+    }
+  }
+#endif
 
   task_pool.stop();
   task_pool.join();

@@ -335,6 +335,7 @@ const tabs = ref([
       "headless_gamepad_isolation": "enabled",
       "client_gamepad_seat_isolation": "disabled",
       "client_keyboard_mouse_seat_isolation": "disabled",
+      "multiseat_moonlight_input": "disabled",
       "back_button_timeout": -1,
       "keyboard": "enabled",
       "key_repeat_delay": 500,

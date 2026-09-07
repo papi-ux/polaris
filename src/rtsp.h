@@ -194,6 +194,16 @@ namespace rtsp_stream {
   void launch_session_clear(uint32_t launch_session_id);
 
   /**
+   * Finish one exact authenticated launch after abort or selected-stream
+   * teardown. Unlike launch_session_clear(), this atomically cancels any
+   * matching pending RTSP state and retires its multiseat selection.
+   */
+  void launch_session_finish(
+    uint32_t launch_session_id,
+    std::uint64_t lifecycle_generation
+  );
+
+  /**
    * @brief Get the number of active sessions.
    * @return Count of active sessions.
    */

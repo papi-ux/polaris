@@ -96,6 +96,25 @@ TEST(VirtualInputUdevContract, IsolatedNamesUseDedicatedSeat) {
   }
 }
 
+TEST(VirtualInputUdevContract, MultiseatBrokerNamespaceUsesDedicatedSeat) {
+  const auto rules = read_source_file("src_assets/linux/misc/60-polaris.rules");
+  const auto authority = read_source_file(
+    "src/platform/linux/multiseat_input_authority.h"
+  );
+  ASSERT_FALSE(rules.empty());
+  ASSERT_FALSE(authority.empty());
+
+  const auto matches = rules_for_name(rules, "Polaris multiseat *");
+  ASSERT_EQ(matches.size(), 1U);
+  EXPECT_TRUE(contains(matches[0], "SUBSYSTEMS==\"input\""));
+  EXPECT_TRUE(contains(matches[0], "ATTRS{name}==\"Polaris multiseat *\""));
+  EXPECT_TRUE(contains(matches[0], "ENV{ID_SEAT}=\"seat-polaris\""));
+  EXPECT_TRUE(contains(matches[0], "GROUP=\"input\""));
+  EXPECT_TRUE(contains(matches[0], "MODE=\"0660\""));
+  EXPECT_FALSE(contains(matches[0], "TAG+=\"uaccess\""));
+  EXPECT_TRUE(contains(authority, "Polaris multiseat "));
+}
+
 TEST(VirtualInputUdevContract, SeatIsolationIdentityHelpersPreserveEnabledAndDisabledBehavior) {
   using platf::gamepad::isolation::client_gamepad_device_name;
   using platf::gamepad::isolation::client_gamepad_identity;

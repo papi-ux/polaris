@@ -126,6 +126,111 @@ if(POLARIS_ENABLE_BROWSER_STREAM)
     endif()
 endif()
 
+if(POLARIS_BUILD_MULTISEAT_WORKER)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+            NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR
+                "POLARIS_BUILD_MULTISEAT_WORKER currently supports only Linux/amd64 locked images")
+    endif()
+    find_program(POLARIS_GO_EXECUTABLE go REQUIRED)
+    set(MULTISEAT_WORKER_OUTPUT "${CMAKE_BINARY_DIR}/polaris-seat-worker")
+    set(MULTISEAT_RUNTIME_HELPER_OUTPUT "${CMAKE_BINARY_DIR}/polaris-seat-runtime")
+    set(MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT
+            "${CMAKE_BINARY_DIR}/polaris-seat-session-bus")
+    set(MULTISEAT_AUDIO_PROVIDER_OUTPUT
+            "${CMAKE_BINARY_DIR}/polaris-seat-audio")
+    set(MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT
+            "${CMAKE_BINARY_DIR}/polaris-seat-display-capture")
+    set(MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT
+            "${CMAKE_BINARY_DIR}/polaris-seat-nested-compositor")
+    file(GLOB_RECURSE MULTISEAT_WORKER_SOURCES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/*.go"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
+            "${CMAKE_SOURCE_DIR}/multiseat_worker/internal/seatruntime/testdata/*.json")
+    list(APPEND MULTISEAT_WORKER_SOURCES
+            "${CMAKE_SOURCE_DIR}/containers/multiseat/Containerfile"
+            "${CMAKE_SOURCE_DIR}/containers/multiseat/images.lock.json")
+    add_custom_command(
+            OUTPUT
+                    "${MULTISEAT_WORKER_OUTPUT}"
+                    "${MULTISEAT_RUNTIME_HELPER_OUTPUT}"
+                    "${MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT}"
+                    "${MULTISEAT_AUDIO_PROVIDER_OUTPUT}"
+                    "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
+                    "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/multiseat_worker"
+            COMMENT "Building isolated multiseat worker, dispatcher, and private base providers"
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" test -trimpath ./...
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_WORKER_OUTPUT}" .
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_RUNTIME_HELPER_OUTPUT}" ./cmd/polaris-seat-runtime
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT}"
+                    ./cmd/polaris-seat-session-bus
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_AUDIO_PROVIDER_OUTPUT}"
+                    ./cmd/polaris-seat-audio
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
+                    ./cmd/polaris-seat-display-capture
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+                    GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+                    "${POLARIS_GO_EXECUTABLE}" build -trimpath -buildvcs=false
+                    "-ldflags=-buildid= -s -w"
+                    -o "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}"
+                    ./cmd/polaris-seat-nested-compositor
+            DEPENDS ${MULTISEAT_WORKER_SOURCES}
+            VERBATIM)
+    add_custom_target(multiseat-worker ALL DEPENDS
+            "${MULTISEAT_WORKER_OUTPUT}"
+            "${MULTISEAT_RUNTIME_HELPER_OUTPUT}"
+            "${MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT}"
+            "${MULTISEAT_AUDIO_PROVIDER_OUTPUT}"
+            "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
+            "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}")
+    install(PROGRAMS
+            "${MULTISEAT_WORKER_OUTPUT}"
+            "${MULTISEAT_RUNTIME_HELPER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(PROGRAMS "${MULTISEAT_SESSION_BUS_PROVIDER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris-seat"
+            RENAME "session-bus")
+    install(PROGRAMS "${MULTISEAT_AUDIO_PROVIDER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris-seat"
+            RENAME "audio")
+    install(PROGRAMS "${MULTISEAT_DISPLAY_CAPTURE_PROVIDER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris-seat"
+            RENAME "display-capture")
+    install(PROGRAMS "${MULTISEAT_NESTED_COMPOSITOR_PROVIDER_OUTPUT}"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris-seat"
+            RENAME "nested-compositor")
+endif()
+
 # tests
 if(BUILD_TESTS)
     add_subdirectory(tests)
