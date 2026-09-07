@@ -1,364 +1,348 @@
 /**
  * @file tests/integration/test_multiseat_physical.cpp
- * @brief Opt-in physical smoke of the production multiseat composition.
- *
- * Skipped unless POLARIS_MULTISEAT_PHYSICAL=1. Everything else about the run
- * comes from the environment so no host detail is compiled in:
- *   POLARIS_PHYSICAL_IMAGE         digest-pinned worker image reference
- *   POLARIS_PHYSICAL_IPC_ROOT      pre-created mode-0700 runtime root
- *   POLARIS_PHYSICAL_RENDER_NODE   render node path (default /dev/dri/renderD128)
- *   POLARIS_PHYSICAL_GPU_DEVICES   comma-separated device paths, must include
- *                                  the render node (default: the render node)
- *   POLARIS_PHYSICAL_PODMAN        podman executable (default /usr/bin/podman)
- *   POLARIS_PHYSICAL_VOLUME        pre-created profile volume name
- *   POLARIS_PHYSICAL_READY_SECONDS seconds to wait for the worker (default 120)
- *
- * This drives the real controller with the real rootless Podman host, the real
- * inputtino backend, and the real worker transport. It creates virtual input
- * devices on the host and starts one container; it never touches the running
- * Polaris process.
+ * @brief Opt-in two-seat input acceptance through the isolated controller.
+ * Required: POLARIS_MULTISEAT_PHYSICAL=1, POLARIS_PHYSICAL_IMAGE (digest),
+ * POLARIS_PHYSICAL_IPC_ROOT (private parent), POLARIS_PHYSICAL_VOLUME and
+ * POLARIS_PHYSICAL_VOLUME_B (distinct pre-created volumes). PROFILE selects
+ * gamescope/steam/heroic/lutris. No launcher or production adapter is activated.
  */
 #include "src/platform/linux/multiseat_controller_production.h"
+#include "src/platform/linux/multiseat_podman_host.h"
+#include "src/platform/linux/multiseat_moonlight_activation.h"
+#include "src/rtsp.h"
+#include "src/stream.h"
 
 #ifdef __linux__
-
-  #include <chrono>
-  #include <cstdio>
-  #include <cstdlib>
-  #include <filesystem>
-  #include <gtest/gtest.h>
-  #include <iostream>
-  #include <memory>
-  #include <sstream>
-  #include <string>
-  #include <thread>
-  #include <vector>
+extern "C" {
+  #include <moonlight-common-c/src/Input.h>
+}
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cctype>
+#include <fstream>
+#include <map>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+#include <sstream>
+#include <sys/stat.h>
+#include <thread>
+#include <unistd.h>
 
 namespace {
   using namespace multiseat;
+  using namespace std::chrono_literals;
+  using json = nlohmann::json;
   namespace input = multiseat::input;
   namespace podman = multiseat::podman;
+  constexpr auto probe = "/usr/bin/polaris-seat-input-probe";
 
-  std::string env_or(const char *name, const std::string &fallback) {
+  std::string env_or(const char *name, const std::string &fallback = {}) {
     const auto *value = std::getenv(name);
-    return value && *value ? std::string {value} : fallback;
+    return value && *value ? value : fallback;
   }
-
   std::vector<std::filesystem::path> split_paths(const std::string &value) {
     std::vector<std::filesystem::path> paths;
     std::stringstream stream {value};
     std::string item;
-    while (std::getline(stream, item, ',')) {
-      if (!item.empty()) {
-        paths.emplace_back(item);
-      }
-    }
+    while (std::getline(stream, item, ',')) if (!item.empty()) paths.emplace_back(item);
     return paths;
   }
+  std::string nonce() { return crypto::rand_alphabet(32, "0123456789abcdef"); }
 
-  std::string shell_output(const std::string &command) {
-    std::string output;
-    if (auto *pipe = ::popen(command.c_str(), "r")) {
-      char buffer[4096];
-      while (auto read = std::fread(buffer, 1, sizeof(buffer), pipe)) {
-        output.append(buffer, read);
-      }
-      ::pclose(pipe);
+  // Own one unique directory. Only remove it when it is still the same inode
+  // and empty; controller reconciliation owns all authority-file cleanup.
+  class private_root_t {
+  public:
+    explicit private_root_t(const std::filesystem::path &parent) {
+      podman::local_host_t host;
+      if (!host.private_read_write_directory(parent)) throw std::runtime_error {"private IPC parent is unavailable"};
+      auto pattern = (parent / "physical-XXXXXX").string();
+      const auto created = mkdtemp(pattern.data());
+      if (!created) throw std::runtime_error {"private IPC root creation failed"};
+      path = created;
+      if (lstat(path.c_str(), &identity) != 0) throw std::runtime_error {"private root identity failed"};
     }
-    return output;
-  }
-
-  void log(const std::string &line) {
-    std::cout << "[physical] " << line << std::endl;
-  }
-
-  void log_podman(const std::string &podman, const std::string &deployment) {
-    log("podman ps:\n" + shell_output(
-      podman + " ps -a --filter label=io.polaris.multiseat.deployment=" +
-      deployment + " --format '{{.ID}} {{.Names}} {{.Status}}' 2>&1"
-    ));
-  }
-
-  void log_worker_inspect(const std::string &podman, const std::string &deployment) {
-    const auto ids = shell_output(
-      podman + " ps -a --filter label=io.polaris.multiseat.deployment=" +
-      deployment + " --format '{{.ID}}' 2>/dev/null"
-    );
-    std::stringstream stream {ids};
-    std::string id;
-    while (std::getline(stream, id)) {
-      if (!id.empty()) {
-        log("inspect " + id + ": " + shell_output(
-          podman + " container inspect " + id +
-          " --format 'Name={{.Name}} Status={{.State.Status}} Health={{.State.Health.Status}} "
-          "Devices={{json .HostConfig.Devices}} Mounts={{json .Mounts}}' 2>&1 | cut -c1-1200"
-        ));
+    bool remove_empty() {
+      struct stat current {};
+      if (lstat(path.c_str(), &current) != 0 || current.st_dev != identity.st_dev || current.st_ino != identity.st_ino) return false;
+      if (rmdir(path.c_str()) != 0) return false;
+      return lstat(path.c_str(), &current) != 0 && errno == ENOENT;
+    }
+    ~private_root_t() {
+      struct stat current {};
+      if (lstat(path.c_str(), &current) == 0 && current.st_dev == identity.st_dev && current.st_ino == identity.st_ino) {
+        // rmdir cannot recursively erase residue or another run's state.
+        (void) rmdir(path.c_str());
       }
     }
+    std::filesystem::path path;
+    struct stat identity {};
+  };
+
+  // Delegate every authority check to the real host, retaining only bounded
+  // command failure output in private test evidence (never argv or auth files).
+  class observed_host_t final : public podman::host_t {
+  public:
+    explicit observed_host_t(std::string &failure): failure_(failure) {}
+    std::uint64_t effective_uid() const override { return host_.effective_uid(); }
+    bool executable_file(const std::filesystem::path &path) const override { const auto result = host_.executable_file(path); if (!result) failure_ = "executable_file: " + path.filename().string(); return result; }
+    bool trusted_runtime_file(const std::filesystem::path &path) const override { const auto result = host_.trusted_runtime_file(path); if (!result) failure_ = "trusted_runtime_file: " + path.filename().string(); return result; }
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return host_.supplementary_groups(); }
+    bool readable_directory(const std::filesystem::path &path) const override { const auto result = host_.readable_directory(path); if (!result) failure_ = "readable_directory: " + path.filename().string(); return result; }
+    bool private_read_write_directory(const std::filesystem::path &path) const override { const auto result = host_.private_read_write_directory(path); if (!result) failure_ = "private_read_write_directory: " + path.filename().string(); return result; }
+    bool private_readable_file(const std::filesystem::path &path) const override { const auto result = host_.private_readable_file(path); if (!result) failure_ = "private_readable_file: " + path.filename().string(); return result; }
+    std::optional<podman::character_device_identity_t> read_write_character_device(const std::filesystem::path &path) const override { const auto result = host_.read_write_character_device(path); if (!result) failure_ = "device access: " + path.filename().string(); return result; }
+    std::optional<std::string> read_owned_regular_file(const std::filesystem::path &path, std::size_t maximum) const override { return host_.read_owned_regular_file(path, maximum); }
+    podman::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds timeout, std::size_t maximum) override {
+      auto result = host_.run(argv, timeout, maximum);
+      if (result.exit_status != 0 || result.timed_out) failure_ = result.output.substr(0,4096);
+      return result;
+    }
+  private:
+    podman::local_host_t host_;
+    std::string &failure_;
+  };
+
+  using bytes = std::vector<std::uint8_t>;
+  void le16(bytes &out, std::uint16_t value) { out.push_back(value); out.push_back(value >> 8); }
+  void be16(bytes &out, std::uint16_t value) { out.push_back(value >> 8); out.push_back(value); }
+  bytes packet(std::uint32_t magic, bytes body) {
+    const auto length = static_cast<std::uint32_t>(body.size() + 4);
+    bytes result {static_cast<std::uint8_t>(length >> 24), static_cast<std::uint8_t>(length >> 16), static_cast<std::uint8_t>(length >> 8), static_cast<std::uint8_t>(length)};
+    for (int byte = 0; byte < 4; ++byte) result.push_back(magic >> (8*byte));
+    result.insert(result.end(), body.begin(), body.end());
+    return result;
+  }
+  bytes keyboard(bool released) { return packet(released ? KEY_UP_EVENT_MAGIC : KEY_DOWN_EVENT_MAGIC, {0, 0x41, 0, 0, 0, 0}); }
+  bytes gamepad(bool pressed) {
+    bytes body;
+    for (auto word : {MC_HEADER_B, 0, 1, MC_MID_B, pressed ? 0x1000 : 0}) le16(body, word);
+    body.resize(20, 0);
+    le16(body, MC_TAIL_A); le16(body, 0); le16(body, MC_TAIL_B);
+    return packet(MULTI_CONTROLLER_MAGIC_GEN5, body);
+  }
+  void send_markers(stream::session_t &stream, int position) {
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(stream, keyboard(false)));
+    bytes relative; be16(relative, 7); be16(relative, 0);
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(stream, packet(MOUSE_MOVE_REL_MAGIC_GEN5, relative)));
+    bytes absolute; for (auto value : {position, 700, 0, 1920, 1080}) be16(absolute, value);
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(stream, packet(MOUSE_MOVE_ABS_MAGIC, absolute)));
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(stream, gamepad(true)));
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(stream, keyboard(true)));
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(stream, gamepad(false)));
   }
 
-  /** Force-remove anything the controller left behind so the host stays clean. */
-  void cleanup_leftovers(
-    const std::string &podman,
-    const std::string &deployment,
-    const std::string &ipc_root
-  ) {
-    const auto ids = shell_output(
-      podman + " ps -a --filter label=io.polaris.multiseat.deployment=" +
-      deployment + " --format '{{.ID}}' 2>/dev/null"
-    );
-    std::stringstream stream {ids};
-    std::string id;
-    while (std::getline(stream, id)) {
-      if (!id.empty()) {
-        log("LEFTOVER container force-removed: " + id + " " +
-            shell_output(podman + " rm -f " + id + " 2>&1"));
-      }
-    }
-    std::error_code ignored;
-    for (const auto &entry : std::filesystem::directory_iterator {ipc_root, ignored}) {
-      if (entry.path().filename().string().starts_with("polaris-runtime-")) {
-        log("LEFTOVER authority directory removed: " + entry.path().string());
-        std::filesystem::remove_all(entry.path(), ignored);
-      }
-    }
+  bool container_id_valid(std::string_view id) {
+    return id.size() == 64 && std::all_of(id.begin(),id.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');});
   }
 
-  void log_worker_logs(const std::string &podman, const std::string &deployment) {
-    const auto ids = shell_output(
-      podman + " ps -a --filter label=io.polaris.multiseat.deployment=" +
-      deployment + " --format '{{.ID}}' 2>/dev/null"
-    );
-    std::stringstream stream {ids};
-    std::string id;
-    while (std::getline(stream, id)) {
-      if (!id.empty()) {
-        log("podman logs " + id + ":\n" + shell_output(podman + " logs " + id + " 2>&1 | tail -40"));
-        log("podman inspect state " + id + ": " + shell_output(
-          podman + " inspect --format '{{.State.Status}} health={{.State.Health.Status}} exit={{.State.ExitCode}}' " + id + " 2>&1"
-        ));
-      }
-    }
-  }
+  struct seat_t {
+    seat_snapshot_t snapshot;
+    input::allocation_t allocation;
+    std::string container_id;
+    std::shared_ptr<rtsp_stream::launch_session_t> launch;
+    std::shared_ptr<stream::session_t> stream;
+  };
 
-  const char *input_status_name(input::status_e status) {
-    switch (status) {
-      case input::status_e::applied: return "applied";
-      case input::status_e::already_applied: return "already_applied";
-      case input::status_e::reconciliation_required: return "reconciliation_required";
-      case input::status_e::invalid_request: return "invalid_request";
-      case input::status_e::not_found: return "not_found";
-      case input::status_e::stale_authority: return "stale_authority";
-      case input::status_e::backend_rejected: return "backend_rejected";
-      case input::status_e::backend_indeterminate: return "backend_indeterminate";
-      case input::status_e::backend_protocol_error: return "backend_protocol_error";
-    }
-    return "?";
-  }
-
-  const char *reconcile_name(controller_reconcile_status_e status) {
-    switch (status) {
-      case controller_reconcile_status_e::ready: return "ready";
-      case controller_reconcile_status_e::controller_shutting_down: return "controller_shutting_down";
-      case controller_reconcile_status_e::invalid_input_expectations: return "invalid_input_expectations";
-      case controller_reconcile_status_e::worker_reconciliation_required: return "worker_reconciliation_required";
-      case controller_reconcile_status_e::input_reconciliation_required: return "input_reconciliation_required";
-    }
-    return "?";
-  }
-
-  std::string describe(const controller_reconcile_result_t &result) {
-    std::ostringstream text;
-    const auto &b = result.worker.broker;
-    text << "status=" << reconcile_name(result.status)
-         << " ready=" << (result.ready() ? "yes" : "no")
-         << " worker.admission_ready=" << result.worker.admission_ready
-         << " startup_recovery=" << result.worker.startup_recovery_complete
-         << " authority_blocked=" << result.worker.authority_blocked
-         << " broker{obs=" << b.observations << " current=" << b.current_workers
-         << " orphan=" << b.orphan_workers << " ready_transitions=" << b.ready_transitions
-         << " missing=" << b.missing_workers << " released=" << b.released_seats
-         << " graceful=" << b.graceful_stop_requests << " force=" << b.force_stop_requests
-         << " stuck=" << b.stuck_workers << " protocol_errors=" << b.protocol_errors
-         << " readiness_rejections=" << b.readiness_rejections
-         << " observation_failed=" << b.backend_observation_failed
-         << " authoritative=" << b.inventory_authoritative << "}"
-         << " endpoints{connect=" << result.worker.endpoint_connections
-         << " fail=" << result.worker.endpoint_failures
-         << " heartbeats=" << result.worker.endpoint_heartbeats << "}";
-    if (result.input) {
-      text << " input{status=" << static_cast<int>(result.input->status)
-           << " admission_ready=" << result.input->report.admission_ready << "}";
-    }
-    return text.str();
-  }
-
-  TEST(MultiseatPhysical, OneRealSupervisorWorkerStartsReportsReadyAndTearsDown) {
-    if (env_or("POLARIS_MULTISEAT_PHYSICAL", "") != "1") {
-      GTEST_SKIP() << "set POLARIS_MULTISEAT_PHYSICAL=1 to run against real Podman";
-    }
-    const auto image = env_or("POLARIS_PHYSICAL_IMAGE", "");
-    const auto ipc_root = env_or("POLARIS_PHYSICAL_IPC_ROOT", "");
-    const auto render_node = env_or("POLARIS_PHYSICAL_RENDER_NODE", "/dev/dri/renderD128");
-    const auto devices = split_paths(env_or("POLARIS_PHYSICAL_GPU_DEVICES", render_node));
-    const auto podman_path = env_or("POLARIS_PHYSICAL_PODMAN", "/usr/bin/podman");
-    const auto volume = env_or("POLARIS_PHYSICAL_VOLUME", "pv-physical-a1b2");
-    const auto ready_seconds = std::stoul(env_or("POLARIS_PHYSICAL_READY_SECONDS", "120"));
-    ASSERT_FALSE(image.empty()) << "POLARIS_PHYSICAL_IMAGE is required";
-    ASSERT_FALSE(ipc_root.empty()) << "POLARIS_PHYSICAL_IPC_ROOT is required";
-    const std::string deployment = "physical-smoke";
-
+  TEST(MultiseatPhysical, TwoWorkersReadOnlyTheirAllocatedInputAndStopIndependently) {
+    if (env_or("POLARIS_MULTISEAT_PHYSICAL") != "1") GTEST_SKIP() << "opt-in physical harness";
+    const auto image = env_or("POLARIS_PHYSICAL_IMAGE");
+    const auto parent = env_or("POLARIS_PHYSICAL_IPC_ROOT");
+    const std::array volumes {env_or("POLARIS_PHYSICAL_VOLUME"), env_or("POLARIS_PHYSICAL_VOLUME_B")};
+    ASSERT_FALSE(image.empty()); ASSERT_FALSE(parent.empty());
+    RecordProperty("worker_image", image);
+    RecordProperty("access_policy", "crun-keep-groups-explicit-uid");
+    ASSERT_FALSE(volumes[0].empty()); ASSERT_FALSE(volumes[1].empty()); ASSERT_NE(volumes[0], volumes[1]);
+    const auto profile_name = env_or("POLARIS_PHYSICAL_PROFILE", "gamescope");
+    const std::map<std::string, std::pair<runtime_profile_e, workload_kind_e>> profiles {
+      {"gamescope", {runtime_profile_e::gamescope, workload_kind_e::gamescope}},
+      {"steam", {runtime_profile_e::steam, workload_kind_e::steam}},
+      {"heroic", {runtime_profile_e::heroic, workload_kind_e::heroic}},
+      {"lutris", {runtime_profile_e::lutris, workload_kind_e::lutris}},
+    };
+    ASSERT_TRUE(profiles.contains(profile_name));
+    RecordProperty("runtime_profile", profile_name);
+    const auto [profile, kind] = profiles.at(profile_name);
+    const auto render = env_or("POLARIS_PHYSICAL_RENDER_NODE", "/dev/dri/renderD128");
+    const auto devices = split_paths(env_or("POLARIS_PHYSICAL_GPU_DEVICES", render));
+    const auto executable = env_or("POLARIS_PHYSICAL_PODMAN", "/usr/bin/podman");
+    const auto deployment = "physical-" + nonce();
+    private_root_t root {parent};
+    podman::local_host_t host;
+    const auto command = [&](std::vector<std::string> arguments, std::chrono::milliseconds timeout = 5s) {
+      arguments.insert(arguments.begin(), {executable, "--remote=false"});
+      return host.run(arguments, timeout, 1024*1024);
+    };
     production_controller_options_t options;
     options.enabled = true;
-    options.gpus = {{
-      .logical_gpu_id = "gpu-physical",
-      .render_node = render_node,
-      .devices = devices,
-      .max_seats = 2,
-      .max_encoder_sessions = 2,
-    }};
-    options.podman.executable = podman_path;
+    options.gpus = {{.logical_gpu_id="physical-gpu", .render_node=render, .devices=devices, .max_seats=2, .max_encoder_sessions=2}};
+    options.podman.executable = executable;
+    options.podman.runtime_executable = env_or("POLARIS_PHYSICAL_CRUN", "/usr/bin/crun");
     options.podman.deployment_id = deployment;
-    options.podman.worker_entrypoint = "/usr/bin/polaris-seat-worker";
-    options.podman.ipc_root = ipc_root;
-    options.podman.profiles = {{
-      .profile_key = "physical-gamescope",
-      .opaque_volume_name = volume,
-      .runtime_profile = runtime_profile_e::gamescope,
-      .image_reference = image,
-    }};
-    options.podman.workloads = {{
-      .kind = workload_kind_e::gamescope,
-      .target_id = "physical-smoke",
-    }};
-
-    log("image=" + image + " ipc_root=" + ipc_root + " render=" + render_node +
-        " devices=" + std::to_string(devices.size()) + " podman=" + podman_path);
-    auto created = create_production_controller_runtime(std::move(options));
-    log("create status=" + std::to_string(static_cast<int>(created.status)));
+    options.podman.ipc_root = root.path;
+    for (int index = 0; index < 2; ++index) options.podman.profiles.push_back({
+      .profile_key="physical-profile-"+std::to_string(index), .opaque_volume_name=volumes[index], .runtime_profile=profile, .image_reference=image});
+    options.podman.workloads = {{.kind=kind, .target_id="physical-input-proof"}};
+    ASSERT_TRUE(host.trusted_runtime_file(options.podman.runtime_executable));
+    std::string command_failure;
+    production_controller_factories_t factories;
+    factories.podman_host = [&] { return std::make_unique<observed_host_t>(command_failure); };
+    auto created = create_production_controller_runtime(std::move(options), std::move(factories));
     ASSERT_EQ(created.status, controller_runtime_create_status_e::ready_enabled);
-    ASSERT_TRUE(created.runtime);
     auto controller = std::move(created.runtime);
-
-    const auto initial = controller->reconcile();
-    log("initial reconcile: " + describe(initial));
-    log_podman(podman_path, deployment);
-    ASSERT_TRUE(initial.ready()) << describe(initial);
-
-    seat_request_t request {
-      .client_key = "physical-client",
-      .profile_key = "physical-gamescope",
-      .workload = {.kind = workload_kind_e::gamescope, .target_id = "physical-smoke"},
-      .logical_gpu_id = "gpu-physical",
-      .runtime_profile = runtime_profile_e::gamescope,
-      .data_plane = {
-        .display_topology = display_topology_e::capture_host_with_nested_compositor,
-        .media_pipeline = media_pipeline_e::worker_local_capture_encode,
-      },
-      .display_mode = {1920, 1080, 60000, false},
-      .requested_compositor = compositor_e::gamescope,
-      .encoder_sessions = 1,
+    ASSERT_TRUE(controller);
+    std::array<seat_t, 2> seats;
+    // Scoped failure recovery never scans another deployment or recursively
+    // removes authority. A fallback is test failure, followed by exact-ID reap.
+    auto cleanup = util::fail_guard([&] {
+      for (auto &seat : seats) if (seat.stream) { stream::session::stop(*seat.stream); seat.stream.reset(); }
+      for (int attempt = 0; attempt < 5 && !controller->closed(); ++attempt) {
+        (void) controller->shutdown();
+        if (!controller->closed()) std::this_thread::sleep_for(100ms);
+      }
+      if (!controller->closed()) {
+        ADD_FAILURE() << "controller cleanup required exact-container fallback";
+        for (const auto &seat : seats) if (container_id_valid(seat.container_id)) (void) command({"rm", "--force", "--", seat.container_id});
+        (void) controller->reconcile();
+        (void) controller->shutdown();
+      }
+    });
+    ASSERT_TRUE(controller->reconcile().ready()) << command_failure;
+    for (int index = 0; index < 2; ++index) {
+      seat_request_t request {
+        .client_key="physical-client-"+std::to_string(index), .profile_key="physical-profile-"+std::to_string(index),
+        .workload={.kind=kind, .target_id="physical-input-proof"}, .logical_gpu_id="physical-gpu", .runtime_profile=profile,
+        .data_plane={.display_topology=display_topology_e::capture_host_with_nested_compositor, .media_pipeline=media_pipeline_e::worker_local_capture_encode},
+        .display_mode={1920,1080,60000,false}, .requested_compositor=compositor_e::gamescope, .encoder_sessions=1};
+      const auto admission = controller->admit(request);
+      ASSERT_TRUE(admission.accepted()); ASSERT_TRUE(admission.seat);
+      auto &seat = seats[index]; seat.snapshot = *admission.seat;
+      ASSERT_LT((root.path / seat.snapshot.resources.runtime_namespace / "ipc/control.sock").native().size(), 108U) << "choose a shorter private IPC parent";
+      ASSERT_EQ(controller->bind_runtime(seat.snapshot.handle, compositor_e::gamescope, "isolated input acceptance"), mutation_result_e::applied);
+      const auto started = controller->start_seat(seat.snapshot.handle, {.gamepad_slots=1});
+      ASSERT_TRUE(started.input.input.allocation);
+      seat.allocation = *started.input.input.allocation;
+      ASSERT_TRUE(started.started()) << "status=" << static_cast<int>(started.status) << " worker=" << (started.worker ? static_cast<int>(*started.worker) : -1) << " " << command_failure;
+      const auto inspected = command({"inspect", "--format={{.Id}}", seat.snapshot.resources.worker_name});
+      ASSERT_EQ(inspected.exit_status, 0) << inspected.output;
+      auto candidate_id = inspected.output;
+      while (!candidate_id.empty() && std::isspace(static_cast<unsigned char>(candidate_id.back()))) candidate_id.pop_back();
+      ASSERT_TRUE(container_id_valid(candidate_id));
+      seat.container_id = std::move(candidate_id);
+    }
+    ASSERT_NE(seats[0].container_id, seats[1].container_id);
+    ASSERT_NE(seats[0].snapshot.resources.runtime_namespace, seats[1].snapshot.resources.runtime_namespace);
+    ASSERT_NE(seats[0].snapshot.resources.audio_sink, seats[1].snapshot.resources.audio_sink);
+    const auto deadline = std::chrono::steady_clock::now()+120s;
+    bool selected = false;
+    while (std::chrono::steady_clock::now()<deadline) {
+      (void) controller->reconcile(); selected = true;
+      for (int index=0; index<2; ++index) {
+        auto &seat=seats[index];
+        if (seat.stream) continue;
+        if (!seat.launch) {
+          seat.launch=std::make_shared<rtsp_stream::launch_session_t>();
+          seat.launch->id=100+index; seat.launch->lifecycle_generation=200+index;
+          seat.launch->unique_id="physical-client-"+std::to_string(index);
+          seat.launch->device_name="isolated-input-proof"; seat.launch->session_token=nonce();
+          seat.launch->gcm_key.resize(16); seat.launch->iv.resize(16);
+          seat.launch->perm=static_cast<crypto::PERM>(static_cast<std::uint32_t>(crypto::PERM::input_kbd) | static_cast<std::uint32_t>(crypto::PERM::input_mouse) | static_cast<std::uint32_t>(crypto::PERM::input_controller)); seat.launch->watch_only=false;
+        }
+        if (!controller->select_authenticated_launch(seat.launch,seat.snapshot.handle).selected()) { selected=false; continue; }
+        stream::config_t stream_config {};
+        seat.stream=stream::session::alloc(stream_config,*seat.launch); ASSERT_TRUE(seat.stream);
+        ASSERT_EQ(input::activate_registered_moonlight_session(*seat.stream),input::moonlight_session_activation_status_e::bound);
+      }
+      if (selected) break;
+      std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(selected) << "workers did not reach authenticated input readiness";
+    int observation_round = 0;
+    const auto observe = [&](int target, bool both) {
+      std::array<podman::command_result_t,2> results;
+      std::array<std::string,2> tokens {nonce(),nonce()};
+      std::vector<std::jthread> readers;
+      for (int index=0; index<2; ++index) {
+        if (!both && index!=target) continue;
+        json manifest {{"token",tokens[index]}, {"devices",json::array()}, {"absent",json::array()}};
+        for (const auto &node: seats[index].allocation.nodes) manifest["devices"].push_back({{"path",node.worker_path.native()},{"major",node.character_major},{"minor",node.character_minor}});
+        for (const auto &other: seats) for (const auto &node:other.allocation.nodes) manifest["absent"].push_back(node.host_path.native());
+        readers.emplace_back([&,index,body=manifest.dump()] {
+          results[index]=command({"exec","--tty",seats[index].container_id,probe,"observe",body},12s);
+        });
+      }
+      bool ready=false;
+      const auto deadline=std::chrono::steady_clock::now()+2s;
+      while (std::chrono::steady_clock::now()<deadline) {
+        ready=true;
+        for (int index=0; index<2; ++index) if (both || index==target) {
+          if (command({"exec",seats[index].container_id,probe,"ready",tokens[index]},1s).exit_status!=0) ready=false;
+        }
+        if (ready) break;
+        std::this_thread::sleep_for(20ms);
+      }
+      EXPECT_TRUE(ready) << "input readers could not open every allocated node";
+      if (ready) send_markers(*seats[target].stream, 1000 + 100 * observation_round++);
+      // No observer can report success before this host signal, issued only
+      // after every ready observer covered the injection boundary.
+      for (int index=0; index<2; ++index) if (both || index==target) {
+        EXPECT_EQ(command({"exec",seats[index].container_id,probe,"finish",tokens[index]},1s).exit_status,0);
+      }
+      readers.clear(); // join before parsing the completed bounded observation
+      for (int index=0; index<2; ++index) if (both || index==target) {
+        ASSERT_EQ(results[index].exit_status,0) << results[index].output;
+        const auto observation=json::parse(results[index].output);
+        RecordProperty("observation_" + std::to_string(observation_round) + "_seat_" + std::to_string(index), observation.dump());
+        for (int device=0;device<4;++device) {
+          if (index==target) EXPECT_GT(observation["markers"][device].get<int>(),0);
+          else EXPECT_EQ(observation["events"][device].get<int>(),0);
+        }
+      }
     };
-    const auto admitted = controller->admit(request);
-    log("admit rejection=" + std::to_string(static_cast<int>(admitted.rejection)));
-    ASSERT_TRUE(admitted.accepted());
-    ASSERT_TRUE(admitted.seat);
-    const auto handle = admitted.seat->handle;
-    log("seat epoch=" + handle.controller_epoch + " gpu=" + handle.logical_gpu_id +
-        " slot=" + std::to_string(handle.slot) + " gen=" + std::to_string(handle.generation) +
-        " worker=" + admitted.seat->resources.worker_name +
-        " ns=" + admitted.seat->resources.runtime_namespace +
-        " input_seat=" + admitted.seat->resources.input_seat);
-    ASSERT_EQ(
-      controller->bind_runtime(handle, compositor_e::gamescope, "physical smoke"),
-      mutation_result_e::applied
-    );
-
-    const auto started = controller->start_seat(handle, input::plan_t {.gamepad_slots = 1});
-    log("start status=" + std::to_string(static_cast<int>(started.status)) +
-        " worker=" + (started.worker ? std::to_string(static_cast<int>(*started.worker)) : "none") +
-        " input.status=" + std::to_string(static_cast<int>(started.input.status)) +
-        " authority=" + input_status_name(started.input.input.status) +
-        " nodes=" + (started.input.input.allocation ? std::to_string(started.input.input.allocation->nodes.size()) : std::string {"none"}) +
-        " input.prepared=" + (started.input.input.prepared() ? "yes" : "no"));
-    if (started.input.input.allocation) {
-      for (const auto &node : started.input.input.allocation->nodes) {
-        log("  node " + node.host_path.string() + " -> " + node.worker_path.string() +
-            " kernel_name='" + node.kernel_name + "' seat='" + node.host_seat + "' phys='" + node.phys + "'");
+    observe(0,true);
+    observe(1,true);
+    stream::session::stop(*seats[0].stream); seats[0].stream.reset();
+    (void) controller->stop_seat(seats[0].snapshot.handle);
+    const auto stop_deadline=std::chrono::steady_clock::now()+30s;
+    while (controller->seats()>1 && std::chrono::steady_clock::now()<stop_deadline) {
+      (void) controller->reconcile(); std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_EQ(controller->seats(),1U);
+    observe(1,false);
+    stream::session::stop(*seats[1].stream); seats[1].stream.reset();
+    (void) controller->stop_seat(seats[1].snapshot.handle);
+    for (int attempt=0;attempt<300 && controller->seats()!=0;++attempt) {
+      (void) controller->reconcile(); std::this_thread::sleep_for(100ms);
+    }
+    EXPECT_EQ(controller->seats(),0U); EXPECT_EQ(controller->managed_workers(),0U);
+    EXPECT_TRUE(controller->shutdown().closed()); EXPECT_EQ(controller->input_allocations(),0U);
+    const auto listed=command({"ps","--all","--no-trunc","--filter=label=io.polaris.multiseat.deployment="+deployment,"--format={{.ID}}"});
+    EXPECT_EQ(listed.exit_status,0); EXPECT_TRUE(listed.output.empty());
+    EXPECT_TRUE(std::filesystem::is_empty(root.path));
+    for (const auto &seat:seats) for (const auto &node:seat.allocation.nodes) {
+      struct stat current {};
+      if (lstat(node.host_path.c_str(),&current)==0) {
+        EXPECT_FALSE(S_ISCHR(current.st_mode) && static_cast<std::uint64_t>(current.st_dev)==node.filesystem_device && static_cast<std::uint64_t>(current.st_ino)==node.inode);
+      } else {
+        EXPECT_EQ(errno, ENOENT);
+      }
+      const auto sysfs_name = std::filesystem::path {"/sys/dev/char"} /
+        (std::to_string(node.character_major)+":"+std::to_string(node.character_minor)) / "device/name";
+      std::error_code error;
+      const auto exists = std::filesystem::exists(sysfs_name,error);
+      EXPECT_FALSE(error);
+      if (exists) {
+        std::ifstream source {sysfs_name};
+        std::string name;
+        ASSERT_TRUE(static_cast<bool>(std::getline(source,name)));
+        EXPECT_NE(name,node.kernel_name);
       }
     }
-    log_podman(podman_path, deployment);
-    if (!started.started()) {
-      log_worker_logs(podman_path, deployment);
-      const auto report = controller->shutdown();
-      log("shutdown after failed start: status=" + std::to_string(static_cast<int>(report.status)));
-      cleanup_leftovers(podman_path, deployment, ipc_root);
-      FAIL() << "worker did not start";
-    }
-    EXPECT_EQ(controller->seats(), 1U);
-    EXPECT_EQ(controller->managed_workers(), 1U);
-    EXPECT_EQ(controller->input_allocations(), 1U);
-
-    // Poll until the worker is observed ready and its endpoint is connected.
-    bool ready = false;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {ready_seconds};
-    while (std::chrono::steady_clock::now() < deadline) {
-      std::this_thread::sleep_for(std::chrono::seconds {2});
-      const auto result = controller->reconcile();
-      log("reconcile: " + describe(result));
-      if (result.worker.broker.ready_transitions != 0 ||
-          result.worker.endpoint_connections != 0) {
-        ready = true;
-        break;
-      }
-      if (controller->seats() == 0) {
-        log("seat vanished during startup");
-        break;
-      }
-    }
-    log_podman(podman_path, deployment);
-    log_worker_inspect(podman_path, deployment);
-    log_worker_logs(podman_path, deployment);
-    EXPECT_TRUE(ready) << "worker never became ready within " << ready_seconds << "s";
-
-    // Heartbeat the endpoint a few times if it connected.
-    for (int i = 0; i < 3 && ready; ++i) {
-      std::this_thread::sleep_for(std::chrono::seconds {2});
-      const auto result = controller->reconcile();
-      log("steady reconcile: " + describe(result));
-    }
-
-    const auto stopped = controller->stop_seat(handle);
-    log("stop status=" + std::to_string(static_cast<int>(stopped.status)) +
-        " broker=" + std::to_string(static_cast<int>(stopped.worker.broker)));
-    const auto stop_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {90};
-    while (std::chrono::steady_clock::now() < stop_deadline &&
-           (controller->seats() != 0 || controller->managed_workers() != 0)) {
-      std::this_thread::sleep_for(std::chrono::seconds {2});
-      const auto result = controller->reconcile();
-      log("teardown reconcile: " + describe(result) +
-          " seats=" + std::to_string(controller->seats()) +
-          " managed=" + std::to_string(controller->managed_workers()));
-    }
-    log_podman(podman_path, deployment);
-    EXPECT_EQ(controller->seats(), 0U);
-    EXPECT_EQ(controller->managed_workers(), 0U);
-
-    controller_shutdown_report_t report;
-    for (int attempt = 0; attempt < 5; ++attempt) {
-      report = controller->shutdown();
-      log("shutdown attempt " + std::to_string(attempt) + ": status=" +
-          std::to_string(static_cast<int>(report.status)));
-      if (report.closed()) {
-        break;
-      }
-      std::this_thread::sleep_for(std::chrono::seconds {3});
-    }
-    EXPECT_TRUE(report.closed());
-    EXPECT_EQ(controller->input_allocations(), 0U);
-    log_podman(podman_path, deployment);
-    cleanup_leftovers(podman_path, deployment, ipc_root);
+    EXPECT_TRUE(root.remove_empty()) << "private authority root was not removed";
   }
-}  // namespace
-
+}
 #endif

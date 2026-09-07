@@ -150,10 +150,10 @@ real stream session, constructs the hub as the inputtino sink, or supplies the
 mailbox endpoint which reaches a client's control thread. The singleton runtime
 constructs none of these classes. The worker's older opaque input/feedback test adapter is
 deliberately not treated as injection authority. Mediated Steam Input also
-remains missing. Rootless supplementary-group and SELinux access require an
-explicit deployment decision and physical validation; this source checkpoint
-does not add `keep-groups`, change host policy, or claim that an image can use
-the mapped nodes.
+remains missing. Rootless launches now require trusted crun, the actual launching UID and
+`keep-groups`. The optional policy under `selinux/` labels only reserved
+multiseat event nodes. Policy installation remains explicit; the isolated
+harness must establish device access for each selected final image.
 
 The dispatcher and worker share one canonical stage parser and environment
 builder. Before it can touch a provider, the dispatcher rejects reordered or
@@ -339,3 +339,45 @@ it audits at most 256 root entries through no-follow descriptors and recovers
 only valid signed records absent from that authoritative inventory. Active,
 ambiguous, malformed, replaced, unexpected, or live-socket state is retained
 and blocks admission rather than being deleted by name or recursively.
+
+## Isolated input acceptance with crun
+
+The Linux worker backend explicitly selects `/usr/bin/crun` and combines
+`--group-add=keep-groups` with `--userns=keep-id`. The runtime must be a
+root-owned regular executable below root-owned directories that are not
+writable by other users. Launch reads the calling process's supplementary
+groups with `getgroups()` and rechecks that snapshot and device access at
+invocation. Account membership alone is insufficient: a user service must
+actually inherit the needed groups. Runtime and group failures reject new
+launches; stopping an existing worker remains available.
+
+Authoritative inventory requires the selected crun path and the OCI
+`run.oci.keep_original_groups=1` annotation. Podman consumes `keep-groups`
+while creating the OCI specification, so its inspected `HostConfig.GroupAdd`
+is empty. OCI `additionalGids` describe namespace IDs and are not evidence
+that host supplementary groups were retained. The existing exact device and
+mount classifier still applies. SELinux stays enforcing.
+
+`MultiseatPhysical.TwoWorkersReadOnlyTheirAllocatedInputAndStopIndependently`
+is an opt-in acceptance test. Set `POLARIS_MULTISEAT_PHYSICAL=1`, an exact
+`POLARIS_PHYSICAL_IMAGE`, a private `POLARIS_PHYSICAL_IPC_ROOT` parent, and
+two distinct pre-created profile volumes through `POLARIS_PHYSICAL_VOLUME`
+and `POLARIS_PHYSICAL_VOLUME_B`. `POLARIS_PHYSICAL_PROFILE` selects gamescope,
+steam, heroic, or lutris. The image must contain the separately packaged
+`polaris-seat-input-probe` acceptance helper. GPU device paths must belong to
+the explicit catalog supplied through the physical harness environment.
+
+The harness creates a unique deployment and authority root, opens every
+allocated event alias inside both workers, checks major/minor identity and
+absence of other input nodes, and sends bounded synthetic input through the
+host authority. It checks the second worker again after stopping the first.
+Any forced container cleanup fails acceptance; cleanup only targets captured
+container IDs and never recursively removes caller-provided authority roots.
+Passing this test establishes isolated input and worker lifecycle. Production
+provider selection and multiseat activation remain off; it does not establish
+successful game streaming.
+
+The worker UID is passed explicitly, because an image `USER` can override
+Podman's implicit `keep-id` choice. Live inventory requires matching Config.User
+and OCI process.user.uid evidence. Use a short private IPC parent for the
+physical harness so both generated Unix socket paths fit Linux's 108-byte limit.
