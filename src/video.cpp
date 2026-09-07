@@ -1432,8 +1432,9 @@ namespace video {
         BOOST_LOG(info) << "Vulkan encoder teardown: draining codec"sv;
       }
 
-      // Flush any remaining frames in the encoder
-      const auto flush_status = avcodec_send_frame(avcodec_ctx.get(), nullptr);
+      // Some hardware encoders cannot flush an initialized session that never
+      // accepted a frame (for example, capture aborting before its first frame).
+      const auto flush_status = frame_submitted ? avcodec_send_frame(avcodec_ctx.get(), nullptr) : AVERROR_EOF;
       int drain_status = flush_status;
       std::size_t drained_packets = 0;
       if (flush_status == 0) {
@@ -1465,20 +1466,8 @@ namespace video {
       }
     }
 
-    // Ensure objects are destroyed in the correct order
-    avcodec_encode_session_t &operator=(avcodec_encode_session_t &&other) {
-      converter = std::move(other.converter);
-      avcodec_ctx = std::move(other.avcodec_ctx);
-      replacements = std::move(other.replacements);
-      sps = std::move(other.sps);
-      vps = std::move(other.vps);
-
-      conversion_request = other.conversion_request;
-      inject = other.inject;
-      runtime_bitrate_supported = other.runtime_bitrate_supported;
-
-      return *this;
-    }
+    // Replacing a live session must use its ordered destructor.
+    avcodec_encode_session_t &operator=(avcodec_encode_session_t &&other) = delete;
 
     int convert(frame_t &frame) override {
       if (!converter) {
@@ -1534,7 +1523,8 @@ namespace video {
     std::unique_ptr<encode_device_frame_converter_t<platf::avcodec_encode_device_t>> converter;
     conversion_request_t conversion_request;
 
-    std::vector<packet_raw_t::replace_t> replacements;
+    std::shared_ptr<std::vector<packet_raw_t::replace_t>> replacements = std::make_shared<std::vector<packet_raw_t::replace_t>>();
+    bool frame_submitted = false;
 
     cbs::nal_t sps;
     cbs::nal_t vps;
@@ -2498,6 +2488,19 @@ namespace video {
     }
   }
 
+  bool wait_for_capture_display_release(
+    const std::shared_ptr<platf::display_t> &display,
+    const std::function<bool()> &running,
+    const std::function<void()> &drain_images
+  ) {
+    while (display.use_count() != 1) {
+      if (!running()) return false;
+      drain_images();
+      std::this_thread::sleep_for(20ms);
+    }
+    return running();
+  }
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -2754,7 +2757,9 @@ namespace video {
             // display_wp is modified in this thread only
             // Wait for the other shared_ptr's of display to be destroyed.
             // New displays will only be created in this thread.
-            while (display_wp->use_count() != 1) {
+            const auto released = wait_for_capture_display_release(disp, [&] {
+              return capture_ctx_queue->running();
+            }, [&] {
               // Free images that weren't consumed by the encoders. These can reference the display and prevent
               // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
               // conditions where the encoding loop might free a good frame after reinitializing if we capture
@@ -2765,15 +2770,15 @@ namespace video {
                   continue;
                 }
 
-                while (capture_ctx->images->peek()) {
-                  capture_ctx->images->pop();
-                }
+                while (capture_ctx->images->try_pop()) {}
 
                 ++capture_ctx;
               });
 
-              std::this_thread::sleep_for(20ms);
-            }
+            });
+            // Stopped packet queues can retain their display until after this
+            // thread joins. Their ownership remains intact while we exit.
+            if (!released) return;
 
             while (capture_ctx_queue->running()) {
               // Release the display before reenumerating displays, since some capture backends
@@ -2892,6 +2897,7 @@ namespace video {
       return -1;
     }
 
+    session.frame_submitted = true;
     while (ret >= 0) {
       auto packet = std::make_unique<packet_raw_avcodec>();
       auto av_packet = packet.get()->av_packet;
@@ -2922,7 +2928,7 @@ namespace video {
           sps = std::move(hevc.sps);
           vps = std::move(hevc.vps);
 
-          session.replacements.emplace_back(
+          session.replacements->emplace_back(
             std::string_view((char *) std::begin(vps.old), vps.old.size()),
             std::string_view((char *) std::begin(vps._new), vps._new.size())
           );
@@ -2930,7 +2936,7 @@ namespace video {
 
         session.inject = 0;
 
-        session.replacements.emplace_back(
+        session.replacements->emplace_back(
           std::string_view((char *) std::begin(sps.old), sps.old.size()),
           std::string_view((char *) std::begin(sps._new), sps._new.size())
         );
@@ -2941,7 +2947,10 @@ namespace video {
         packet->encode_done_timestamp = std::chrono::steady_clock::now();
       }
 
-      packet->replacements = &session.replacements;
+      packet->replacements = session.replacements;
+      // Hardware packet buffers may depend on thread-affine conversion
+      // resources. Detach them here so teardown stays on the encoder thread.
+      if (!packet->detach_encoder_buffer()) return AVERROR(ENOMEM);
       packet->channel_data = channel_data;
       packets->raise(std::move(packet));
     }
@@ -3476,16 +3485,17 @@ namespace video {
     return std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
   }
 
-  std::unique_ptr<encode_session_t> make_encode_session(platf::display_t *disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+    std::unique_ptr<encode_session_t> session;
     if (dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get())) {
       auto avcodec_encode_device = boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(encode_device));
-      return make_avcodec_encode_session(disp, encoder, config, width, height, std::move(avcodec_encode_device));
+      session = make_avcodec_encode_session(disp.get(), encoder, config, width, height, std::move(avcodec_encode_device));
+      if (session) session->capture_display_owner = disp;
     } else if (dynamic_cast<platf::nvenc_encode_device_t *>(encode_device.get())) {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
-      return make_nvenc_encode_session(encoder, config, std::move(nvenc_encode_device));
+      session = make_nvenc_encode_session(encoder, config, std::move(nvenc_encode_device));
     }
-
-    return nullptr;
+    return session;
   }
 
   void encode_run(
@@ -3501,7 +3511,7 @@ namespace video {
     void *channel_data,
     packet_queue_t packets
   ) {
-    auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
+    auto session = make_encode_session(disp, encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
         false,
@@ -3584,6 +3594,8 @@ namespace video {
     if (config.input_only) {
       BOOST_LOG(info) << "Input only session, video will not be captured."sv;
 
+      // Recheck after dummy-frame conversion, which can block in a driver.
+      if (shutdown_event->peek() || !images->running() || reinit_event.peek()) return;
       // Encode the dummy img only once
       if (encode(frame_nr++, *session, packets, channel_data, std::chrono::steady_clock::now())) {
         BOOST_LOG(error) << "Could not encode dummy video packet"sv;
@@ -3707,6 +3719,12 @@ namespace video {
         } else if (!images->running()) {
           break;
         }
+      }
+
+      // Capture waits and conversion may span shutdown or display reinit.
+      // Keep the early check too, so a stopped stream never begins another wait.
+      if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
+        break;
       }
 
       {
@@ -4007,7 +4025,7 @@ namespace video {
   }
 
   std::optional<sync_session_t> make_synced_session(
-    platf::display_t *disp,
+    const std::shared_ptr<platf::display_t> &disp,
     const encoder_t &encoder,
     frame_t &frame,
     sync_session_ctx_t &ctx,
@@ -4028,7 +4046,7 @@ namespace video {
     }
 
     // absolute mouse coordinates require that the dimensions of the screen are known
-    ctx.touch_port_events->raise(make_port(disp, ctx.config));
+    ctx.touch_port_events->raise(make_port(disp.get(), ctx.config));
 
     // Update client with our current HDR display state
     ctx.hdr_events->raise(make_hdr_info(*encode_device));
@@ -4163,7 +4181,7 @@ namespace video {
     std::vector<sync_session_t> synced_sessions;
     for (auto &ctx : synced_session_ctxs) {
       bool retired_gpu_native_route = false;
-      auto synced_session = make_synced_session(disp.get(), encoder, initial_frame, *ctx, retired_gpu_native_route);
+      auto synced_session = make_synced_session(disp, encoder, initial_frame, *ctx, retired_gpu_native_route);
       if (!synced_session) {
         // Retiring the route already selected SHM for the next attempt, so
         // reinitialize instead of ending the session with no video.
@@ -4200,7 +4218,7 @@ namespace video {
           synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*incoming_sync_ctx)));
 
           bool retired_gpu_native_route = false;
-          auto encode_session = make_synced_session(disp.get(), encoder, frame, *synced_session_ctxs.back(), retired_gpu_native_route);
+          auto encode_session = make_synced_session(disp, encoder, frame, *synced_session_ctxs.back(), retired_gpu_native_route);
           if (!encode_session) {
             ec = retired_gpu_native_route ? platf::capture_e::reinit : platf::capture_e::error;
             return false;
@@ -4250,6 +4268,13 @@ namespace video {
             frame_timestamp = frame.timestamp;
           }
 
+          // Conversion can block while shutdown or a display switch arrives.
+          if (!encode_session_ctx_queue.running()) return false;
+          if (ctx->shutdown_event->peek()) continue;
+          if (switch_display_event->peek() && display_switch_allowed_for_exact_capture(exact_display_name)) {
+            ec = platf::capture_e::reinit;
+            return false;
+          }
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             ctx->shutdown_event->raise(true);
@@ -4491,7 +4516,7 @@ namespace video {
       dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get()) &&
       !static_cast<platf::avcodec_encode_device_t *>(encode_device.get())->data;
 
-    auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
+    auto session = make_encode_session(disp, encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
       return -1;
     }
@@ -5683,7 +5708,7 @@ namespace video {
         return false;
       }
 
-      auto session = make_encode_session(disp.get(), *chosen_encoder, config, frame.width, frame.height, std::move(encode_device));
+      auto session = make_encode_session(disp, *chosen_encoder, config, frame.width, frame.height, std::move(encode_device));
       if (!session) {
         BOOST_LOG(debug) << "Live GPU capture probe could not create an encode session for conversion validation"sv;
         return false;

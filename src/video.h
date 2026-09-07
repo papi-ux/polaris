@@ -308,6 +308,12 @@ namespace video {
     uint32_t flags;
   };
 
+  bool wait_for_capture_display_release(
+    const std::shared_ptr<platf::display_t> &display,
+    const std::function<bool()> &running,
+    const std::function<void()> &drain_images
+  );
+
   struct encode_session_t {
     enum class bitrate_update_e {
       rejected,
@@ -316,6 +322,9 @@ namespace video {
     };
 
     virtual ~encode_session_t() = default;
+
+    // Base members are destroyed after derived codec and converter resources.
+    std::shared_ptr<platf::display_t> capture_display_owner;
 
     virtual int convert(frame_t &frame) = 0;
 
@@ -375,18 +384,19 @@ namespace video {
     virtual size_t data_size() = 0;
 
     struct replace_t {
-      std::string_view old;
-      std::string_view _new;
+      std::string old;
+      std::string _new;
 
       KITTY_DEFAULT_CONSTR_MOVE(replace_t)
 
-      replace_t(std::string_view old, std::string_view _new) noexcept:
+      replace_t(std::string_view old, std::string_view _new):
           old {std::move(old)},
           _new {std::move(_new)} {
       }
     };
 
-    std::vector<replace_t> *replacements = nullptr;
+    // Packets can remain queued after their encoder session has been retired.
+    std::shared_ptr<const std::vector<replace_t>> replacements;
     void *channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
@@ -407,6 +417,26 @@ namespace video {
 
     ~packet_raw_avcodec() {
       av_packet_free(&this->av_packet);
+    }
+
+    // Copy encoded bytes and side data before releasing any driver-owned
+    // buffer/opaque reference. Call only from the encoder's owning thread.
+    bool detach_encoder_buffer() {
+      AVPacket *detached = av_packet_alloc();
+      if (!detached) return false;
+      if (av_new_packet(detached, av_packet->size) < 0 ||
+          av_packet_copy_props(detached, av_packet) < 0) {
+        av_packet_free(&detached);
+        return false;
+      }
+      if (av_packet->size > 0) std::memcpy(detached->data, av_packet->data, av_packet->size);
+      // Opaque references are never used by packet consumers and may own
+      // hardware state. The remaining metadata is independently allocated.
+      detached->opaque = nullptr;
+      av_buffer_unref(&detached->opaque_ref);
+      av_packet_free(&av_packet);
+      av_packet = detached;
+      return true;
     }
 
     bool is_idr() override {
