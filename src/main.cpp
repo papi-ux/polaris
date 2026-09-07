@@ -3,6 +3,10 @@
  * @brief Definitions for the main entry point for Sunshine.
  */
 // standard includes
+#ifdef __linux__
+  #include "platform/linux/labwc_supervisor.h"
+#endif
+
 #include <clocale>
 #include <codecvt>
 #include <csignal>
@@ -182,6 +186,10 @@ void mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) 
 }
 
 int main(int argc, char *argv[]) {
+#ifdef __linux__
+  if (const auto result = labwc_supervisor::dispatch(argc, argv)) return *result;
+#endif
+
   // Polaris protocol and config decimals always use an ASCII full stop. Keep
   // that invariant even when a desktop toolkit initializes another locale.
   std::setlocale(LC_NUMERIC, "C");
