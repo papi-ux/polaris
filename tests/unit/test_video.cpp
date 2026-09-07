@@ -619,6 +619,25 @@ TEST(VideoProbeReuseTests, CaptureFailureDoesNotNeedAnEncoderWriterLock) {
   EXPECT_FALSE(cache.reusable(identity, "nvenc", "", false));
 }
 
+TEST(VideoProbeReuseTests, PublishedVaapiSettingsInvalidateIdentityWithoutMutatingStartupConfig) {
+  const auto saved = config::vaapi::snapshot();
+  auto restore = util::fail_guard([&] { config::vaapi::publish(saved); });
+  const config::video_t startup {};
+  config::vaapi::publish({});
+  const auto automatic = video::encoder_probe_settings_for_tests(startup);
+  auto check = [&](const config::vaapi::settings_t &settings) {
+    config::vaapi::publish(settings);
+    EXPECT_NE(video::encoder_probe_settings_for_tests(startup), automatic);
+    config::vaapi::publish({});
+    EXPECT_EQ(video::encoder_probe_settings_for_tests(startup), automatic);
+  };
+  check({.strict_rc_buffer = true});
+  check({.quality = config::vaapi::quality_e::speed});
+  check({.rc = config::vaapi::rc_e::cqp});
+  check({.blbrc = true});
+  check({.blbrc = false});
+}
+
 TEST(VideoProbeReuseTests, CapabilitySettingsRetireReuseAcrossEncoderFamilies) {
   const config::video_t original {};
   const auto key = video::encoder_probe_settings_for_tests(original);
