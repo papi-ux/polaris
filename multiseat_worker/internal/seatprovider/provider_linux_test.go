@@ -4,12 +4,14 @@ package seatprovider
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -376,7 +378,7 @@ func TestCleanupRefusesReplacementArtifacts(t *testing.T) {
 	if err := syscall.Bind(listener, &syscall.SockaddrUnix{Name: busPath}); err != nil {
 		t.Fatal(err)
 	}
-	original, err := lstatIdentity(busPath)
+	original, err := runtime.pins.capture(busPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,11 +408,11 @@ func TestCleanupRefusesReplacementArtifacts(t *testing.T) {
 	if err := os.WriteFile(pidPath, []byte("1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pulseIdentity, err := lstatIdentity(pulsePath)
+	pulseIdentity, err := runtime.pins.capture(pulsePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pidIdentity, err := lstatIdentity(pidPath)
+	pidIdentity, err := runtime.pins.capture(pidPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,6 +432,91 @@ func TestCleanupRefusesReplacementArtifacts(t *testing.T) {
 	content, err := os.ReadFile(pidPath)
 	if err != nil || string(content) != "2\n" {
 		t.Fatalf("replacement audio artifact was not retained: %q, %v", content, err)
+	}
+}
+
+func TestArtifactPinsPreserveUnlinkedInodesAndReleaseDescriptors(t *testing.T) {
+	var pins artifactPins
+	defer pins.close()
+	path := filepath.Join(t.TempDir(), "owned")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := pins.capture(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pins.capture(path); err != nil || len(pins.files) != 1 {
+		t.Fatalf("same inode was not deduplicated: %v", err)
+	}
+	file := pins.files[[2]uint64{original.dev, original.ino}]
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, file.Fd(), syscall.F_GETFD, 0)
+	if errno != 0 || flags&syscall.FD_CLOEXEC == 0 {
+		t.Fatal("ownership pin could reach a child")
+	}
+	flags, _, errno = syscall.Syscall(syscall.SYS_FCNTL, file.Fd(), syscall.F_GETFL, 0)
+	if errno != 0 || flags&linuxOPath == 0 {
+		t.Fatal("ownership pin grants data access")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := lstatIdentity(path)
+	if err != nil || sameIdentity(original, replacement) {
+		t.Fatalf("unlinked ownership was reused: %v", err)
+	}
+	var status syscall.Stat_t
+	if err := syscall.Fstat(int(file.Fd()), &status); err != nil || status.Nlink != 0 || status.Ino != original.ino {
+		t.Fatalf("original inode was not retained: %v", err)
+	}
+	pins.close()
+	if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatal("ownership descriptor remained open")
+	}
+	if _, err := pins.capture(path); err == nil {
+		t.Fatal("closed ownership scope accepted an artifact")
+	}
+}
+
+func TestArtifactPinsRejectSymlinksAndBoundDescriptorUse(t *testing.T) {
+	var pins artifactPins
+	defer pins.close()
+	directory := t.TempDir()
+	link := filepath.Join(directory, "link")
+	if err := os.Symlink("missing", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pins.capture(link); err == nil || len(pins.files) != 0 {
+		t.Fatal("symlink acquired ownership")
+	}
+	for index := 0; index <= maximumArtifactPins; index++ {
+		path := filepath.Join(directory, strconv.Itoa(index))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := pins.capture(path)
+		if (index < maximumArtifactPins) != (err == nil) {
+			t.Fatalf("ownership bound at %d: %v", index, err)
+		}
+	}
+	if len(pins.files) != maximumArtifactPins {
+		t.Fatal("ownership descriptors exceeded their bound")
+	}
+	if _, err := pins.capture(filepath.Join(directory, "0")); err != nil {
+		t.Fatalf("existing ownership lost at capacity: %v", err)
+	}
+	files := make([]*os.File, 0, len(pins.files))
+	for _, file := range pins.files {
+		files = append(files, file)
+	}
+	pins.close()
+	for _, file := range files {
+		if _, err := file.Stat(); err == nil {
+			t.Fatal("bounded ownership leaked a descriptor")
+		}
 	}
 }
 
