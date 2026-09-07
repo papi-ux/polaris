@@ -1,5 +1,6 @@
 """Exercise corrupted and substituted inputs at the offline artifact boundary."""
 import hashlib
+import gzip
 import importlib.util
 import io
 import json
@@ -46,7 +47,8 @@ class ArtifactIntegrity(unittest.TestCase):
                         inputs.verify_inputs(root, root, 'runtime')
 
     def test_export_is_bound_to_config_and_all_layers(self):
-        for mutation in ['valid', 'config', 'layer', 'size', 'duplicate', 'symlink']:
+        for mutation in ['valid', 'gzip', 'config', 'layer', 'size', 'duplicate', 'symlink',
+                         'substituted', 'additional', 'reordered', 'encoding']:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
                 blobs = {}
 
@@ -55,11 +57,25 @@ class ArtifactIntegrity(unittest.TestCase):
                     blobs['blobs/sha256/' + digest] = data
                     return {'digest': 'sha256:' + digest, 'size': len(data), 'mediaType': media_type}
 
-                config = blob(b'{"architecture":"amd64","os":"linux"}', 'application/vnd.oci.image.config.v1+json')
                 layer = blob(b'original layer', 'application/vnd.oci.image.layer.v1.tar')
+                second = blob(b'second original layer', 'application/vnd.oci.image.layer.v1.tar')
+                config = blob(json.dumps({'architecture': 'amd64', 'os': 'linux',
+                                         'rootfs': {'type': 'layers', 'diff_ids': [layer['digest'], second['digest']]}}).encode(),
+                              'application/vnd.oci.image.config.v1+json')
+                layers = [layer, second]
                 if mutation == 'size':
                     layer['size'] += 1
-                manifest = blob(json.dumps({'schemaVersion': 2, 'config': config, 'layers': [layer]}).encode(),
+                elif mutation == 'substituted':
+                    layers[0] = blob(b'self-consistent substitution', 'application/vnd.oci.image.layer.v1.tar')
+                elif mutation == 'additional':
+                    layers.append(blob(b'added layer', 'application/vnd.oci.image.layer.v1.tar'))
+                elif mutation == 'reordered':
+                    layers.reverse()
+                elif mutation == 'encoding':
+                    layer['mediaType'] += '+unsupported'
+                elif mutation == 'gzip':
+                    layers[0] = blob(gzip.compress(b'original layer'), 'application/vnd.oci.image.layer.v1.tar+gzip')
+                manifest = blob(json.dumps({'schemaVersion': 2, 'config': config, 'layers': layers}).encode(),
                                 'application/vnd.oci.image.manifest.v1+json')
                 if mutation == 'layer':
                     blobs['blobs/sha256/' + layer['digest'][7:]] = b'tampered layer'
@@ -78,7 +94,7 @@ class ArtifactIntegrity(unittest.TestCase):
                             member.linkname = '/etc/passwd'
                         archive.addfile(member)
                 expected = 'sha256:' + '0' * 64 if mutation == 'config' else config['digest']
-                if mutation == 'valid':
+                if mutation in ['valid', 'gzip']:
                     self.assertEqual(verify_archive(path, expected), manifest['digest'])
                 else:
                     with self.assertRaises(ValueError):

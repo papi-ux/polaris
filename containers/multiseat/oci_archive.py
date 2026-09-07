@@ -1,5 +1,6 @@
 """Read and verify the single-platform OCI artifact without extracting files."""
 import hashlib
+import gzip
 import json
 import re
 import tarfile
@@ -49,6 +50,22 @@ def verify_archive(path, expected_config):
         config = read_json(verify_descriptor(manifest['config']))
         if config['architecture'] != 'amd64' or config['os'] != 'linux':
             raise ValueError('exported worker architecture mismatch')
-        for layer in manifest['layers']:
-            verify_descriptor(layer)
+        rootfs = config.get('rootfs', {})
+        diff_ids = rootfs.get('diff_ids', [])
+        if rootfs.get('type') != 'layers' or len(diff_ids) != len(manifest['layers']):
+            raise ValueError('exported layer count differs from validated configuration')
+        for layer, expected in zip(manifest['layers'], diff_ids):
+            name = verify_descriptor(layer)
+            media_type = layer['mediaType']
+            if media_type not in ('application/vnd.oci.image.layer.v1.tar',
+                                   'application/vnd.oci.image.layer.v1.tar+gzip'):
+                raise ValueError('unsupported OCI layer encoding')
+            with archive.extractfile(members[name]) as raw:
+                if media_type.endswith('+gzip'):
+                    with gzip.GzipFile(fileobj=raw) as stream:
+                        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+                else:
+                    actual = hashlib.file_digest(raw, 'sha256').hexdigest()
+            if expected != 'sha256:' + actual:
+                raise ValueError('exported layer contents or order differ from validated configuration')
         return descriptor['digest']
