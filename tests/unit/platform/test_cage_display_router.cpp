@@ -244,6 +244,11 @@ exit 0
   ASSERT_EQ(setenv("FAKE_LABWC_CHILD_PID_FILE", pid_file.c_str(), 1), 0);
   ASSERT_EQ(setenv("FAKE_LABWC_COMPOSITOR_PID_FILE", compositor_pid_file.c_str(), 1), 0);
 
+  const std::string mode_report = R"JSON([{"name":"HEADLESS-1","enabled":true,"modes":[{"width":1280,"height":720,"refresh":60.0,"current":true}]}])JSON";
+  auto query_mode = [&](const std::string &) -> std::optional<std::string> { return mode_report; };
+  std::optional<std::string> previous_topology;
+  EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+
   for (int cycle = 0; cycle < 2; ++cycle) {
     std::error_code ec;
     fs::remove(pid_file, ec);
@@ -257,6 +262,48 @@ exit 0
       false,
       "external-exit-cycle-" + std::to_string(cycle)
     ));
+
+    const auto topology = cage_display_router::encoder_probe_topology_for_tests(query_mode);
+    ASSERT_TRUE(topology);
+    EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    if (previous_topology) EXPECT_NE(topology, previous_topology);
+    previous_topology = topology;
+    for (const auto invalid : {"[]", "{}", "malformed", "[{\"name\":\"HEADLESS-1\",\"enabled\":false}]"}) {
+      EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+        [&](const std::string &) -> std::optional<std::string> { return invalid; }
+      ));
+    }
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+      [](const std::string &) -> std::optional<std::string> { return std::nullopt; }
+    ));
+    EXPECT_TRUE(cage_display_router::ensure_output_refresh(60, true));
+    EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    // A mode mutation between observations must survive even if it returns to
+    // exactly the same output bytes. Mutation during a query cannot publish.
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+      [&](const std::string &) -> std::optional<std::string> {
+        // The fake compositor rejects 120 Hz and still reports 60 Hz. The
+        // attempted mutation must nevertheless retire the old observation.
+        EXPECT_FALSE(cage_display_router::ensure_output_refresh(120, false));
+        return mode_report;
+      }
+    ));
+    EXPECT_NE(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    // Pinning prevents inode reuse but does not make a pathname immutable.
+    // Replace it during the observation and require the post-query read-back.
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+      [&](const std::string &socket) -> std::optional<std::string> {
+        const auto saved = socket + ".saved-probe";
+        fs::rename(socket, saved);
+        { std::ofstream replacement(socket); replacement << "replacement"; }
+        return mode_report;
+      }
+    ));
+    const auto socket = runtime_dir / cage_display_router::get_wayland_socket();
+    ASSERT_TRUE(fs::remove(socket));
+    fs::rename(socket.string() + ".saved-probe", socket);
+    // A detected endpoint replacement remains uncertain for this generation.
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
 
     const auto runtime_state = cage_display_router::runtime_state();
     EXPECT_TRUE(runtime_state.requested_headless);
@@ -280,7 +327,9 @@ exit 0
 
     ASSERT_EQ(kill(compositor_pid, SIGTERM), 0);
     ASSERT_TRUE(wait_for_router_exit(std::chrono::seconds(3)));
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
     cage_display_router::stop();
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
 
     const bool worker_exited = wait_for_process_exit(worker, std::chrono::seconds(2));
     EXPECT_TRUE(worker_exited)
@@ -422,6 +471,7 @@ exit 0
     "pidfd-unavailable-external-exit"
   ));
   EXPECT_FALSE(cage_display_router::cage_pidfd_available_for_tests());
+  EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
   const auto no_pidfd_supervisor_pid = cage_display_router::get_pid();
   ASSERT_GT(no_pidfd_supervisor_pid, 0);
   const auto no_pidfd_compositor_pid = wait_for_pid_file(compositor_pid_file);

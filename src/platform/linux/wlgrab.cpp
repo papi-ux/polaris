@@ -60,6 +60,10 @@ namespace wl {
 
   class wlr_t: public platf::display_t {
   public:
+    std::string encoder_probe_route() const override {
+      return private_compositor_capture ? std::string("private-wlr/") + typeid(*this).name() : std::string {};
+    }
+
     bool capture_profile_enabled() const {
       return config::video.linux_display.capture_profile;
     }

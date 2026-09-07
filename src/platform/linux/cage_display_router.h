@@ -12,6 +12,7 @@
 #include "wlgrab_capture_policy.h"
 
 #include <optional>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -76,6 +77,12 @@ namespace cage_display_router {
 
   /** @brief Cached last-settled whole-Hz output mode; meaningful while the cage is running. */
   int current_output_refresh_hz();
+  std::optional<std::string> encoder_probe_topology();
+#ifdef POLARIS_TESTS
+  std::optional<std::string> encoder_probe_topology_for_tests(
+    const std::function<std::optional<std::string>(const std::string &)> &query
+  );
+#endif
 
   /**
    * @brief Re-apply the running compositor's output refresh for a resuming session.
