@@ -6,6 +6,10 @@
 #include "src/rtsp.h"
 #include "src/stream.h"
 
+extern "C" {
+  #include <moonlight-common-c/src/Input.h>
+}
+
 #include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -19,6 +23,28 @@
 namespace {
   using namespace multiseat;
   using namespace multiseat::input;
+
+  std::vector<std::uint8_t> runtime_keyboard_packet(std::uint16_t key) {
+    std::vector<std::uint8_t> body {0};
+    body.push_back(static_cast<std::uint8_t>(key));
+    body.push_back(static_cast<std::uint8_t>(key >> 8U));
+    body.push_back(0);
+    body.push_back(0);
+    body.push_back(0);
+
+    std::vector<std::uint8_t> packet;
+    const auto declared = static_cast<std::uint32_t>(body.size() + 4);
+    packet.push_back(static_cast<std::uint8_t>(declared >> 24U));
+    packet.push_back(static_cast<std::uint8_t>(declared >> 16U));
+    packet.push_back(static_cast<std::uint8_t>(declared >> 8U));
+    packet.push_back(static_cast<std::uint8_t>(declared));
+    const auto magic = static_cast<std::uint32_t>(KEY_DOWN_EVENT_MAGIC);
+    for (std::size_t index = 0; index < 4; ++index) {
+      packet.push_back(static_cast<std::uint8_t>(magic >> (index * 8U)));
+    }
+    packet.insert(packet.end(), body.begin(), body.end());
+    return packet;
+  }
 
   seat_handle_t runtime_handle(
     std::uint64_t generation,
@@ -122,6 +148,7 @@ namespace {
       std::uint64_t,
       const input_event_t &
     ) override {
+      ++route_calls;
       return backend_result_e::applied;
     }
 
@@ -133,6 +160,7 @@ namespace {
     std::vector<allocation_t> allocations;
     std::size_t create_calls = 0;
     std::size_t destroy_calls = 0;
+    std::size_t route_calls = 0;
     std::size_t inventory_calls = 0;
     bool reject_destroy = false;
   };
@@ -576,6 +604,97 @@ namespace {
     EXPECT_EQ(report.status, moonlight_coordinator_shutdown_status_e::closed);
     EXPECT_EQ(report.released_allocations, 1U);
     EXPECT_FALSE(created.runtime->input_allocation(expectation.handle));
+  }
+
+  TEST(MultiseatMoonlightRuntime, DetachProcessGlobalsFencesSelectionAndStaysShutdownable) {
+    auto factory = std::make_shared<runtime_factory_state_t>();
+    auto created = ready_runtime(factory);
+    ASSERT_TRUE(created.runtime);
+    const auto expectation = runtime_expectation(32);
+    admit(*created.runtime, expectation);
+    ASSERT_TRUE(moonlight_session_runtime_installed());
+    ASSERT_TRUE(moonlight_session_activation_gate_installed());
+
+    created.runtime->detach_process_globals();
+
+    EXPECT_FALSE(moonlight_session_runtime_installed());
+    EXPECT_FALSE(moonlight_session_activation_gate_installed());
+    EXPECT_FALSE(created.runtime->installed());
+    EXPECT_TRUE(created.runtime->shutting_down());
+    EXPECT_FALSE(created.runtime->closed());
+    EXPECT_EQ(
+      created.runtime->select_authenticated_launch(
+        runtime_launch(732, 832),
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
+      moonlight_launch_selection_status_e::gate_closed
+    );
+    EXPECT_EQ(
+      select_authenticated_moonlight_launch(
+        runtime_launch(733, 833),
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
+      std::nullopt
+    );
+    EXPECT_TRUE(created.runtime->input_allocation(expectation.handle));
+
+    const auto report = created.runtime->shutdown();
+    EXPECT_EQ(report.status, moonlight_coordinator_shutdown_status_e::closed);
+    EXPECT_EQ(report.released_allocations, 1U);
+    EXPECT_TRUE(created.runtime->closed());
+    EXPECT_FALSE(created.runtime->input_allocation(expectation.handle));
+  }
+
+  // Leaks the retained graph by design; exclude from leak-detecting runs.
+  TEST(
+    MultiseatMoonlightRuntime,
+    DirectDestructorDetachesGlobalsAndRetainsAuthorityGraphForBoundStream
+  ) {
+    auto factory = std::make_shared<runtime_factory_state_t>();
+    auto created = ready_runtime(factory);
+    ASSERT_TRUE(created.runtime);
+    const auto expectation = runtime_expectation(31);
+    admit(*created.runtime, expectation);
+    auto launch = runtime_launch(731, 831);
+    ASSERT_EQ(
+      created.runtime->select_authenticated_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
+      moonlight_launch_selection_status_e::registered
+    );
+    auto stream = runtime_stream(*launch);
+    ASSERT_EQ(
+      activate_registered_moonlight_session(*stream),
+      moonlight_session_activation_status_e::bound
+    );
+    ASSERT_TRUE(moonlight_session_runtime_installed());
+    ASSERT_TRUE(moonlight_session_activation_gate_installed());
+
+    // The direct owner ignores the retry contract while a stream is bound.
+    created.runtime.reset();
+
+    EXPECT_FALSE(moonlight_session_runtime_installed());
+    EXPECT_FALSE(moonlight_session_activation_gate_installed());
+    EXPECT_TRUE(stream::session::multiseat_input_bound(*stream));
+    ASSERT_NE(factory->backend, nullptr);
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(
+      *stream,
+      runtime_keyboard_packet(0x41)
+    ));
+    EXPECT_EQ(factory->backend->route_calls, 1U);
+    stream::session::stop(*stream);
+    EXPECT_FALSE(stream::session::route_multiseat_input_for_tests(
+      *stream,
+      runtime_keyboard_packet(0x42)
+    ));
+    EXPECT_EQ(factory->backend->route_calls, 1U);
   }
 
   TEST(MultiseatMoonlightRuntime, FailedCleanupStaysClosedAndCanRetry) {

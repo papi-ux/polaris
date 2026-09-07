@@ -102,10 +102,12 @@ namespace multiseat {
     }
     const auto report = shutdown();
     if (!report.closed()) {
-      // Exact worker or input ownership is still live or indeterminate. The
-      // process-global Moonlight callbacks still point into this graph, so
-      // fail-closed retention is safer than destroying authority underneath
-      // them. Callers must normally retry shutdown instead of reaching here.
+      // Exact worker or input ownership is still live or indeterminate. Apply
+      // the same fail-closed policy as the Moonlight runtime and coordinator:
+      // detach every process-global entry point this graph installed, then
+      // retain the graph rather than destroying authority underneath a bound
+      // stream. Callers must normally retry shutdown instead of reaching here.
+      impl_->moonlight_runtime->detach_process_globals();
       (void) impl_.release();
     }
   }

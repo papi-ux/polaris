@@ -9,6 +9,10 @@
 
 #ifdef __linux__
 
+extern "C" {
+  #include <moonlight-common-c/src/Input.h>
+}
+
   #include <algorithm>
   #include <array>
   #include <chrono>
@@ -201,6 +205,7 @@ namespace {
     bool input_present_at_last_worker_launch = false;
     std::size_t input_create_calls = 0;
     std::size_t input_destroy_calls = 0;
+    std::size_t input_route_calls = 0;
     std::size_t input_inventory_calls = 0;
     std::size_t worker_launch_calls = 0;
     std::size_t worker_inventory_calls = 0;
@@ -268,6 +273,11 @@ namespace {
     [[nodiscard]] std::size_t input_count() const {
       std::scoped_lock lock {mutex};
       return input_allocations.size();
+    }
+
+    [[nodiscard]] std::size_t input_route_count() const {
+      std::scoped_lock lock {mutex};
+      return input_route_calls;
     }
 
     [[nodiscard]] std::size_t input_inventory_count() const {
@@ -347,6 +357,8 @@ namespace {
       std::uint64_t,
       const input::input_event_t &
     ) override {
+      std::scoped_lock lock {state_->mutex};
+      ++state_->input_route_calls;
       return input::backend_result_e::applied;
     }
 
@@ -606,6 +618,28 @@ namespace {
   ) {
     stream::config_t config {};
     return stream::session::alloc(config, launch);
+  }
+
+  std::vector<std::uint8_t> controller_keyboard_packet(std::uint16_t key) {
+    std::vector<std::uint8_t> body {0};
+    body.push_back(static_cast<std::uint8_t>(key));
+    body.push_back(static_cast<std::uint8_t>(key >> 8U));
+    body.push_back(0);
+    body.push_back(0);
+    body.push_back(0);
+
+    std::vector<std::uint8_t> packet;
+    const auto declared = static_cast<std::uint32_t>(body.size() + 4);
+    packet.push_back(static_cast<std::uint8_t>(declared >> 24U));
+    packet.push_back(static_cast<std::uint8_t>(declared >> 16U));
+    packet.push_back(static_cast<std::uint8_t>(declared >> 8U));
+    packet.push_back(static_cast<std::uint8_t>(declared));
+    const auto magic = static_cast<std::uint32_t>(KEY_DOWN_EVENT_MAGIC);
+    for (std::size_t index = 0; index < 4; ++index) {
+      packet.push_back(static_cast<std::uint8_t>(magic >> (index * 8U)));
+    }
+    packet.insert(packet.end(), body.begin(), body.end());
+    return packet;
   }
 
   std::string controller_source(std::string_view relative_path) {
@@ -979,6 +1013,58 @@ namespace {
     EXPECT_EQ(controller_->seats(), 0U);
     EXPECT_EQ(controller_->managed_workers(), 0U);
     EXPECT_EQ(controller_->input_allocations(), 0U);
+  }
+
+  // Leaks the retained graph by design; exclude from leak-detecting runs.
+  TEST_F(
+    MultiseatControllerRuntimeTest,
+    DirectDestructorDetachesMoonlightGlobalsAndRetainsGraphForBoundStream
+  ) {
+    create_ready_controller();
+    const auto seat = admit_and_bind();
+    ASSERT_TRUE(seat.handle.valid());
+    const auto identity = controller_worker_identity(seat);
+    ASSERT_TRUE(controller_->start_seat(
+      seat.handle,
+      controller_input_plan()
+    ).started());
+    ASSERT_TRUE(state_->mark_worker_ready(identity));
+    ASSERT_TRUE(controller_->reconcile().ready());
+
+    auto launch = controller_launch(1904, 2904);
+    ASSERT_TRUE(controller_->select_authenticated_launch(
+      launch,
+      seat.handle
+    ).selected());
+    auto stream = controller_stream(*launch);
+    ASSERT_TRUE(stream);
+    ASSERT_EQ(
+      input::activate_registered_moonlight_session(*stream),
+      input::moonlight_session_activation_status_e::bound
+    );
+    ASSERT_TRUE(input::moonlight_session_runtime_installed());
+    ASSERT_TRUE(input::moonlight_session_activation_gate_installed());
+
+    // The direct owner ignores the retry contract while a stream is bound and
+    // a worker is live. Shutdown reports streams_pending, so the destructor
+    // must detach both Moonlight globals and retain the graph.
+    controller_.reset();
+
+    EXPECT_FALSE(input::moonlight_session_runtime_installed());
+    EXPECT_FALSE(input::moonlight_session_activation_gate_installed());
+    EXPECT_TRUE(stream::session::multiseat_input_bound(*stream));
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(
+      *stream,
+      controller_keyboard_packet(0x41)
+    ));
+    EXPECT_EQ(state_->input_route_count(), 1U);
+    EXPECT_EQ(state_->input_count(), 1U);
+    stream::session::stop(*stream);
+    EXPECT_FALSE(stream::session::route_multiseat_input_for_tests(
+      *stream,
+      controller_keyboard_packet(0x42)
+    ));
+    EXPECT_EQ(state_->input_route_count(), 1U);
   }
 
   TEST_F(

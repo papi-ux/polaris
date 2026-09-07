@@ -1399,7 +1399,21 @@ namespace multiseat::podman {
           .generation = *generation,
         };
         bool input_binding_authoritative = false;
-        if (require_input_authority) {
+        const auto allocation = require_input_authority ?
+                                  input_allocation_for(seat_handle, *input) :
+                                  std::nullopt;
+        // A stopped worker with no exact allocation to authenticate against
+        // (released, or no longer resolving for this seat label, plan, or
+        // fingerprint) cannot use input and has nothing left to prove. It
+        // stays visible as stopped without input authority, so the broker can
+        // release its seat and the container can be reaped instead of failing
+        // every inventory until Podman removes it. A stopped worker whose
+        // allocation still resolves keeps the full check.
+        const bool released_stopped_worker =
+          require_input_authority && !allocation &&
+          observed_state(*runtime_state, std::string {}) ==
+            worker_observed_state_e::stopped;
+        if (require_input_authority && !released_stopped_worker) {
           if (!device_array || !device_array->is_array() ||
               device_array->size() > maximum_inspected_devices) {
             throw std::runtime_error {"invalid Podman device inventory"};
@@ -1412,7 +1426,6 @@ namespace multiseat::podman {
                      candidate.render_node == *render;
             }
           );
-          const auto allocation = input_allocation_for(seat_handle, *input);
           if (configured_gpu == options_.gpus.end() ||
               !gpu_catalog_current() || !allocation ||
               !input_allocation_current(*allocation)) {

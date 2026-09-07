@@ -732,6 +732,7 @@ namespace {
     EXPECT_FALSE(created.coordinator->input_allocation(expectation.handle));
   }
 
+  // Leaks the retained graph by design; exclude from leak-detecting runs.
   TEST(
     MultiseatMoonlightCoordinator,
     DirectDestructorRetainsAuthorityGraphForBoundStream

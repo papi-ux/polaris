@@ -146,14 +146,21 @@ namespace multiseat::input {
     // The public owner may be destroyed directly. Remove its process-global
     // entry point, then retain the complete raw-reference graph so an already
     // bound stream or activation can never outlive authority or its backend.
-    {
-      std::scoped_lock state_lock {impl_->state_mutex_};
-      if (impl_->activation_installation_) {
-        impl_->activation_installation_->close();
-        impl_->activation_installation_.reset();
-      }
-    }
+    uninstall_activation();
     (void) impl_.release();
+  }
+
+  void moonlight_session_coordinator_t::uninstall_activation() noexcept {
+    if (!impl_) {
+      return;
+    }
+    std::scoped_lock state_lock {impl_->state_mutex_};
+    // No new selection or input mutation may target a gate nobody can reach.
+    impl_->shutting_down_ = true;
+    if (impl_->activation_installation_) {
+      impl_->activation_installation_->close();
+      impl_->activation_installation_.reset();
+    }
   }
 
   moonlight_coordinator_operation_status_e

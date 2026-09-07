@@ -57,7 +57,10 @@ namespace multiseat::input {
    * while an activation or claimed stream remains. The exact-generation
    * allocation view stays readable through quiesce and a pending shutdown so
    * authoritative worker inventory can still prove absence; it returns no
-   * authority after release or once shutdown has closed.
+   * authority after release or once shutdown has closed. The destructor is a
+   * last-resort fence: after an incomplete shutdown it detaches the runtime
+   * lifecycle target and the coordinator's activation entry, then retains the
+   * complete graph rather than destroying authority beneath a bound stream.
    */
   class moonlight_session_runtime_t final {
   public:
@@ -112,6 +115,15 @@ namespace multiseat::input {
     /** Close new launch selection and activation without waiting for streams. */
     [[nodiscard]] moonlight_coordinator_quiesce_report_t quiesce() noexcept;
     [[nodiscard]] moonlight_coordinator_shutdown_report_t shutdown() noexcept;
+
+    /**
+     * Remove the runtime lifecycle target and the coordinator's activation
+     * entry without destroying either, and refuse further launch selection.
+     * A direct owner calls this after an incomplete shutdown and then retains
+     * the complete graph, so bound streams keep valid authority while new
+     * sessions take the ordinary path.
+     */
+    void detach_process_globals() noexcept;
 
     [[nodiscard]] bool installed() const;
     [[nodiscard]] bool shutting_down() const;

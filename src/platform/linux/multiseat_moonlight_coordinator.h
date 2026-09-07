@@ -188,6 +188,15 @@ namespace multiseat::input {
     /** Release dependencies only after quiesce reports no stream owner. */
     [[nodiscard]] moonlight_coordinator_shutdown_report_t shutdown() noexcept;
 
+    /**
+     * Remove the process-global activation entry without releasing anything,
+     * and refuse further selection and input mutation. A direct owner calls
+     * this after an incomplete shutdown, before retaining the graph, so new
+     * sessions take the ordinary path instead of reaching a gate nobody owns.
+     * The closed gate itself stays alive for bound streams.
+     */
+    void uninstall_activation() noexcept;
+
     [[nodiscard]] bool enabled() const;
     [[nodiscard]] bool activation_installed() const;
     [[nodiscard]] bool shutting_down() const;

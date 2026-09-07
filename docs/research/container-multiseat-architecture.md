@@ -277,7 +277,13 @@ major/minor plus the exact worker-local destination. GPU bindings are stricter:
 their host path and full identity must match the immutable admitted baseline,
 and the complete GPU catalog must still be disjoint. The complete GPU and input
 binding set and manifest fingerprint must match current authority; missing,
-extra, broadened, inaccessible, aliased, or changed bindings fail the inventory. A
+extra, broadened, inaccessible, aliased, or changed bindings fail the inventory.
+The one exception is a stopped worker with no exact allocation left to
+authenticate against, because it was released or no longer resolves for that
+seat label, plan, or fingerprint: it stays visible as stopped without input
+authority, so the broker can release its seat and the container can be reaped
+rather than failing every inventory until Podman removes it. A stopped worker
+whose allocation still resolves keeps the full binding check. A
 running container remains `starting` until its health check is explicitly
 healthy. Invalid, truncated, contradictory, or oversized output fails the
 complete inventory rather than returning a partial view. Graceful teardown
@@ -720,10 +726,15 @@ callbacks to detach, closes the registry and hub, and releases every exact input
 allocation. An indeterminate input teardown retains the closed gate for an
 explicit retry while the coordinator remains alive. A future production owner
 must observe a successful shutdown report before destroying the coordinator.
-If a direct owner ignores that contract, the destructor uninstalls the global
-activation entry point and deliberately retains the complete implementation
-graph while a stream, activation, or exact input cleanup is still pending, so
-no bridge can outlive its raw authority reference. Final input cleanup walks the
+If a direct owner ignores that contract, the controller, the Moonlight runtime,
+and the coordinator apply one fail-closed policy: each detaches the
+process-global entry points this graph installed (the runtime lifecycle target
+and the activation gate), refuses further selection, and deliberately retains
+the complete implementation graph while a stream, activation, or exact input
+cleanup is still pending. No bridge can outlive its raw authority reference,
+and new sessions take the ordinary single-seat path instead of reaching a graph
+nobody owns. The process-exit owner in `main.cpp` only retains, which is moot
+because the process is leaving. Final input cleanup walks the
 authority in place rather than allocating a snapshot, and the public `noexcept`
 shutdown edge converts any remaining exception into an explicit retryable
 incomplete report.
@@ -1042,7 +1053,8 @@ The offline test suite covers:
 - coordinator-owned backend, authority, registry, feedback, activation, and
   launch-selection lifetimes, including disabled no-op construction,
   selected/unselected coexistence, cancellation tombstones, registry-first
-  nonblocking quiesce, claimed-stream retry, direct-owner fail-closed retention,
+  nonblocking quiesce, claimed-stream retry, direct-owner fail-closed retention
+  with one detach policy at the coordinator, runtime, and controller,
   and allocation-free retryable exact input cleanup;
 - serialized worker-to-launch authorization with exact running-generation,
   private-record, dual-channel, paired-client, input-seat, and permission

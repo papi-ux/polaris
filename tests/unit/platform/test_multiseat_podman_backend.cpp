@@ -1442,6 +1442,71 @@ TEST(MultiseatPodmanBackend, GracefulStopRemovesAWorkerThatNeverStarted) {
   );
 }
 
+TEST(MultiseatPodmanBackend, InventoryKeepsReleasedStoppedWorkerVisibleWithoutInputAuthority) {
+  const auto spec = valid_spec();
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  inputs.missing = true;
+  backend_t backend {host, inputs, options_for_tests()};
+  queue_inventory(host, {container_for(spec, first_id, "exited", "")});
+
+  const auto observations = backend.inventory();
+
+  ASSERT_EQ(observations.size(), 1U);
+  EXPECT_EQ(observations.front().identity, spec.identity);
+  EXPECT_EQ(observations.front().state, worker_observed_state_e::stopped);
+  EXPECT_EQ(host.calls.size(), 2U);
+
+  fake_host_t running_host;
+  fake_input_manifest_source_t running_inputs;
+  running_inputs.missing = true;
+  backend_t running_backend {running_host, running_inputs, options_for_tests()};
+  queue_inventory(running_host, {container_for(spec, first_id, "running", "healthy")});
+  EXPECT_THROW(running_backend.inventory(), std::runtime_error);
+
+  fake_host_t stopping_host;
+  fake_input_manifest_source_t stopping_inputs;
+  stopping_inputs.missing = true;
+  backend_t stopping_backend {stopping_host, stopping_inputs, options_for_tests()};
+  queue_inventory(stopping_host, {container_for(spec, first_id, "stopping", "")});
+  EXPECT_THROW(stopping_backend.inventory(), std::runtime_error);
+
+  fake_host_t literal_stopped_host;
+  fake_input_manifest_source_t literal_stopped_inputs;
+  literal_stopped_inputs.missing = true;
+  backend_t literal_stopped_backend {
+    literal_stopped_host,
+    literal_stopped_inputs,
+    options_for_tests(),
+  };
+  queue_inventory(literal_stopped_host, {container_for(spec, first_id, "stopped", "")});
+  const auto literal_stopped = literal_stopped_backend.inventory();
+  ASSERT_EQ(literal_stopped.size(), 1U);
+  EXPECT_EQ(literal_stopped.front().state, worker_observed_state_e::stopped);
+  ASSERT_EQ(literal_stopped_host.calls.size(), 2U);
+  EXPECT_EQ(literal_stopped_host.calls.at(0).at(2), "ps");
+  EXPECT_EQ(literal_stopped_host.calls.at(1).at(2), "container");
+  EXPECT_EQ(literal_stopped_host.calls.at(1).at(3), "inspect");
+
+  // A stopped worker whose allocation still resolves keeps the full check:
+  // its host input node vanishing must still fail the inventory.
+  fake_host_t stale_stopped_host;
+  fake_input_manifest_source_t stale_stopped_inputs;
+  backend_t stale_stopped_backend {
+    stale_stopped_host,
+    stale_stopped_inputs,
+    options_for_tests(),
+  };
+  for (const auto &node : input_allocation_for(spec.identity.seat).nodes) {
+    stale_stopped_host.accessible_devices.erase(node.host_path.native());
+  }
+  queue_inventory(stale_stopped_host, {container_for(spec, first_id, "exited", "")});
+  EXPECT_THROW(stale_stopped_backend.inventory(), std::runtime_error);
+  // Looked up once to resolve, once more inside the currency check, then the
+  // vanished host node failed it: the allocation was consulted, not skipped.
+  EXPECT_EQ(stale_stopped_inputs.allocation_calls, 2U);
+}
+
 TEST(MultiseatPodmanBackend, StopRemainsAvailableAfterInputAuthorityIsGone) {
   fake_host_t host;
   fake_input_manifest_source_t inputs;

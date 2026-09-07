@@ -163,8 +163,9 @@ namespace multiseat {
    * worker teardown while an activation or selected stream may still own the
    * seat, and then closes input only after worker absence is authoritative.
    * Callers must retain the owner and retry an incomplete shutdown; as a last
-   * resort the destructor retains the closed-over dependencies rather than
-   * destroying authority beneath a live worker.
+   * resort the destructor detaches the process-global Moonlight entry points
+   * and retains the closed-over dependencies rather than destroying authority
+   * beneath a live worker or bound stream.
    */
   class controller_runtime_t final {
   public:

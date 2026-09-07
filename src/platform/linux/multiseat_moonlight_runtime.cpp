@@ -225,14 +225,27 @@ namespace multiseat::input {
     }
 
     // A direct owner which ignored the retry contract must not destroy input
-    // authority beneath a live stream. Remove the raw process-global target,
-    // then deliberately retain the closed-over graph as a last-resort fence.
+    // authority beneath a live stream. Remove every process-global entry this
+    // graph installed, then deliberately retain the closed-over graph as a
+    // last-resort fence.
+    detach_process_globals();
+    (void) impl_.release();
+  }
+
+  void moonlight_session_runtime_t::detach_process_globals() noexcept {
+    if (!impl_) {
+      return;
+    }
     uninstall_runtime(*this);
     {
       std::scoped_lock state_lock {impl_->state_mutex};
       impl_->installed = false;
+      // No new selection may target a gate that no stream can reach.
+      impl_->shutting_down = true;
     }
-    (void) impl_.release();
+    if (impl_->coordinator) {
+      impl_->coordinator->uninstall_activation();
+    }
   }
 
   moonlight_runtime_create_result_t moonlight_session_runtime_t::create(
