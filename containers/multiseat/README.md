@@ -3,30 +3,31 @@
 This directory defines an offline-reviewable image recipe. It does not enable
 multiseat or make the current Polaris process a container controller.
 
-`images.lock.json` contains the only accepted build and runtime inputs. Every
-reference names an immutable OCI index digest; moving tags are intentionally
-absent. The plain Gamescope-capable base and the Steam, Heroic, and Lutris
-variants all receive the same static `polaris-seat-worker`,
+`images.lock.json` distinguishes immutable source roots, dependency locks, and
+produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
+each receive an offline runtime dependency stage, a Wayland GStreamer plugin
+compiled against that root's ABI, pinned Gamescope 3.16.19, and the same static `polaris-seat-worker`,
 `polaris-seat-runtime` dispatcher, and private session-bus, audio,
 display/capture, and nested Gamescope provider binaries. Keeping the launchers
 separate avoids multiplying package and credential state inside one large
 image.
 
-The build stage has no module or package download step. The worker, dispatcher,
+Final build stages have no module or package download step. The worker, dispatcher,
 and four providers use only the Go standard library, disable CGO and
 module-network access, run their tests, then emit static Linux/amd64 binaries.
 The final stage fails its build unless the locked root supplies the fixed D-Bus,
 PipeWire, `pw-cli`, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
 `waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and `fakesink` elements; and both
-trusted PipeWire configuration files. A future image job must select a
-runtime reference from the lock, build at an exact Polaris revision, record
-the resulting image digest, and hand only that final digest to the Podman
-backend. The existing locked application roots have not yet passed that new
-GStreamer dependency gate; no compatible image is claimed by this checkpoint.
+trusted PipeWire configuration files. The image job builds all four Linux/amd64
+profiles at an exact Polaris revision and exports downloadable OCI archives,
+verified manifest and configuration digests, package manifests, CycloneDX SBOMs,
+dependency lock hashes, and isolated real-provider receipts. See
+[RUNTIME-IMAGES.md](RUNTIME-IMAGES.md) for the fetch/build split, NVIDIA physical
+lane, acceptance scope, and lock refresh procedure.
 
 These locks establish immutable byte identity, not publisher trust. No
-signature, attestation, SBOM, vulnerability policy, or license bundle is
-claimed by this spike. A publishable image must add those gates and retain the
+signature, attestation, vulnerability policy, or complete license bundle is
+claimed by this milestone. A publishable image must add those gates and retain the
 resolved upstream manifests as provenance evidence before any lock refresh.
 
 The current entrypoint is intentionally a supervisor and IPC proof. It owns
@@ -225,7 +226,7 @@ but Gamescope 3.16 has no exact render-node-path selector. Exact GPU authority
 therefore remains the container backend's explicit device allowlist and outer
 Wayland binding, not an environment-variable claim.
 
-Gamescope 3.16.25's `--ready-fd` option is a FIFO path despite its name. It
+Gamescope 3.16.19's `--ready-fd` option is a FIFO path despite its name. It
 writes exactly one `DISPLAY WAYLAND_DISPLAY` line only after its Xwayland
 server and compositor context initialize. Polaris creates that FIFO and the
 limiter file under the private runtime, rejects any pre-existing Gamescope
