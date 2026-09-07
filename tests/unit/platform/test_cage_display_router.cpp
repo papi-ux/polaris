@@ -319,6 +319,10 @@ exit 0
     std::error_code ec;
     fs::remove(pid_file, ec);
     fs::remove(compositor_pid_file, ec);
+    if (const auto drop = getenv("POLARIS_TEST_DROP_PARENT_CAPABILITIES"); drop && std::string_view(drop) == "1") {
+      ASSERT_EQ(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0)
+        << "File capability re-exec evidence requires no-new-privileges to be unset";
+    }
     ASSERT_TRUE(cage_display_router::start(
       1280,
       720,
