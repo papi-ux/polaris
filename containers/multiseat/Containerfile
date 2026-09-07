@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+
+# Both defaults are immutable OCI index digests mirrored in images.lock.json.
+# The runtime can be replaced only with another digest from that lock file.
+ARG GO_BUILDER_IMAGE=docker.io/library/golang@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514
+ARG RUNTIME_IMAGE=ghcr.io/games-on-whales/base-app@sha256:1d7b61da242e767bc5c80c5fe897392b6a9e6854345d3dea6d2f799e7ea98a14
+
+FROM ${GO_BUILDER_IMAGE} AS worker-build
+WORKDIR /src
+ENV CGO_ENABLED=0 \
+    GOOS=linux \
+    GOARCH=amd64 \
+    GOTOOLCHAIN=local \
+    GOPROXY=off \
+    GOSUMDB=off
+COPY multiseat_worker/go.mod ./go.mod
+COPY multiseat_worker/*.go ./
+COPY multiseat_worker/internal ./internal
+COPY multiseat_worker/cmd ./cmd
+COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile
+COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json
+RUN go test -trimpath ./... && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-worker . && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-runtime ./cmd/polaris-seat-runtime && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-session-bus ./cmd/polaris-seat-session-bus && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-audio ./cmd/polaris-seat-audio && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-display-capture ./cmd/polaris-seat-display-capture && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-nested-compositor ./cmd/polaris-seat-nested-compositor
+
+FROM ${RUNTIME_IMAGE}
+ARG POLARIS_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
+      org.opencontainers.image.revision="${POLARIS_REVISION}" \
+      org.opencontainers.image.description="Isolated Polaris multiseat worker"
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-worker /usr/bin/polaris-seat-worker
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-session-bus /usr/libexec/polaris-seat/session-bus
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-display-capture /usr/libexec/polaris-seat/display-capture
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-nested-compositor /usr/libexec/polaris-seat/nested-compositor
+RUN test -x /usr/bin/dbus-daemon && \
+    test -x /usr/bin/pipewire && \
+    test -x /usr/bin/pw-cli && \
+    test -x /usr/bin/pactl && \
+    test -x /usr/bin/gst-launch-1.0 && \
+    test -x /usr/bin/gst-inspect-1.0 && \
+    test -x /usr/bin/gamescope && \
+    test -x /usr/bin/Xwayland && \
+    gst-inspect-1.0 waylanddisplaysrc >/dev/null && \
+    gst-inspect-1.0 unixfdsink >/dev/null && \
+    gst-inspect-1.0 unixfdsrc >/dev/null && \
+    gst-inspect-1.0 fakesink >/dev/null && \
+    test -r /usr/share/pipewire/pipewire.conf && \
+    test -r /usr/share/pipewire/pipewire-pulse.conf
+HEALTHCHECK NONE
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/bin/polaris-seat-worker"]
+CMD ["run"]

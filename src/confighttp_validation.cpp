@@ -226,6 +226,7 @@ namespace confighttp::validation {
       "motion_as_ds4"sv,
       "mouse"sv,
       "mouse_cursor_visible"sv,
+      "multiseat_moonlight_input"sv,
       "native_pen_touch"sv,
       "notify_pre_releases"sv,
       "nvenc_h264_cavlc"sv,

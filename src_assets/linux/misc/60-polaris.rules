@@ -16,6 +16,11 @@ SUBSYSTEMS=="input", ATTRS{name}=="Polaris Nintendo (virtual) pad", ENV{ID_SEAT}
 SUBSYSTEMS=="input", ATTRS{name}=="Polaris PS5 (virtual) pad*", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
 SUBSYSTEMS=="input", ATTRS{name}=="Polaris gamepad (virtual) motion sensors", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
 
+# Reserved generation-derived names used only by the trusted multiseat host
+# broker. The pinned uinput backend does not propagate device_phys, so the
+# broker verifies this exact kernel name and the resulting ID_SEAT readback.
+SUBSYSTEMS=="input", ATTRS{name}=="Polaris multiseat *", ENV{ID_SEAT}="seat-polaris", GROUP="input", MODE="0660"
+
 # Dedicated marker emitted when client_gamepad_seat_isolation is enabled.
 # Assigning the device to a dedicated seat prevents logind from granting the
 # active local desktop user an automatic uaccess ACL. The input-group boundary

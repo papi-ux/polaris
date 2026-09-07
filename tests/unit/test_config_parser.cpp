@@ -47,6 +47,10 @@ namespace {
   }
 }  // namespace
 
+TEST(ConfigParserTests, MoonlightMultiseatInputDefaultsOff) {
+  EXPECT_FALSE(config::input.multiseat_moonlight_input);
+}
+
 TEST(ConfigParserTests, BooleanValuesParseRegardlessOfCase) {
   // The lowercasing in to_bool() was a no-op, so every capitalized spelling in a
   // hand-edited polaris.conf read as false without saying anything.

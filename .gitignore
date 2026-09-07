@@ -20,6 +20,7 @@
 *.mod
 *.smod
 !browser_stream_helper/go.mod
+!multiseat_worker/go.mod
 
 # Compiled Static libraries
 *.lai

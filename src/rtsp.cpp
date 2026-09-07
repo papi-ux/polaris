@@ -39,6 +39,10 @@ extern "C" {
 #include "sync.h"
 #include "video.h"
 
+#ifdef __linux__
+  #include "platform/linux/multiseat_moonlight_runtime.h"
+#endif
+
 namespace asio = boost::asio;
 
 using asio::ip::tcp;
@@ -169,6 +173,16 @@ namespace rtsp_stream {
       std::thread([session_token = std::move(session_token)]() {
         proc::proc.terminate_abandoned_desktop_takeover(session_token);
       }).detach();
+    }
+
+    void cancel_registered_multiseat_launch(
+      const std::shared_ptr<launch_session_t> &launch
+    ) {
+#ifdef __linux__
+      (void) multiseat::input::cancel_registered_moonlight_launch(launch);
+#else
+      (void) launch;
+#endif
     }
   }  // namespace
 
@@ -686,22 +700,27 @@ namespace rtsp_stream {
      * @param launch_session Streaming session information.
      */
     bool expire_pending_launch(uint32_t launch_session_id, std::uint64_t timer_generation) {
-      std::lock_guard timer_lock(_launch_timer_mutex);
-      if (_raised_timer_generation.load() != timer_generation) {
-        return false;
-      }
+      bool cancelled = false;
+      std::shared_ptr<launch_session_t> discarded;
+      {
+        std::lock_guard timer_lock(_launch_timer_mutex);
+        if (_raised_timer_generation.load() != timer_generation) {
+          return false;
+        }
 
-      auto pending = launch_event.view(0s);
-      if (!pending || pending->id != launch_session_id) {
-        return false;
-      }
+        auto pending = launch_event.view(0s);
+        if (!pending || pending->id != launch_session_id) {
+          return false;
+        }
 
-      const bool cancelled = pending->cancel_for_timeout();
-      auto discarded = launch_event.pop_if([launch_session_id](const auto &candidate) {
-        return candidate && candidate->id == launch_session_id;
-      });
+        cancelled = pending->cancel_for_timeout();
+        discarded = launch_event.pop_if([launch_session_id](const auto &candidate) {
+          return candidate && candidate->id == launch_session_id;
+        });
+      }
       if (cancelled && discarded) {
         BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+        cancel_registered_multiseat_launch(discarded);
       }
       return cancelled && static_cast<bool>(discarded);
     }
@@ -752,13 +771,39 @@ namespace rtsp_stream {
       }
     }
 
-    void cancel_pending_session() {
+    std::shared_ptr<launch_session_t> cancel_session(
+      uint32_t launch_session_id,
+      std::optional<std::uint64_t> lifecycle_generation = std::nullopt
+    ) {
       std::lock_guard timer_lock(_launch_timer_mutex);
+      auto launch_session = launch_event.view(0s);
+      if (!launch_session || launch_session->id != launch_session_id ||
+          (lifecycle_generation &&
+           launch_session->lifecycle_generation != lifecycle_generation)) {
+        return {};
+      }
+
       ++_raised_timer_generation;
       raised_timer.cancel();
-      auto launch_session = launch_event.pop(0s);
+      launch_session->cancel();
+      return launch_event.pop_if([&launch_session](const auto &candidate) {
+        return candidate == launch_session;
+      });
+    }
+
+    void cancel_pending_session() {
+      std::shared_ptr<launch_session_t> launch_session;
+      {
+        std::lock_guard timer_lock(_launch_timer_mutex);
+        ++_raised_timer_generation;
+        raised_timer.cancel();
+        launch_session = launch_event.pop(0s);
+        if (launch_session) {
+          launch_session->cancel();
+        }
+      }
       if (launch_session) {
-        launch_session->cancel();
+        cancel_registered_multiseat_launch(launch_session);
       }
     }
 
@@ -1026,11 +1071,37 @@ namespace rtsp_stream {
   rtsp_server_t server {};
 
   bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
-    return server.session_raise(std::move(launch_session));
+    auto retained_launch = launch_session;
+    const auto raised = server.session_raise(std::move(launch_session));
+    if (!raised && retained_launch) {
+      retained_launch->cancel();
+      cancel_registered_multiseat_launch(retained_launch);
+    }
+    return raised;
   }
 
   void launch_session_clear(uint32_t launch_session_id) {
     server.session_clear(launch_session_id);
+  }
+
+  void launch_session_finish(
+    uint32_t launch_session_id,
+    std::uint64_t lifecycle_generation
+  ) {
+    auto launch = server.cancel_session(
+      launch_session_id,
+      lifecycle_generation
+    );
+    if (launch) {
+      cancel_registered_multiseat_launch(launch);
+      return;
+    }
+#ifdef __linux__
+    (void) multiseat::input::finish_registered_moonlight_stream({
+      .launch_session_id = launch_session_id,
+      .lifecycle_generation = lifecycle_generation,
+    });
+#endif
   }
 
   int session_count() {
@@ -1409,6 +1480,16 @@ namespace rtsp_stream {
   void cmd_announce(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
+    // Any rejected ANNOUNCE is terminal for this exact launch. Keep selected
+    // multiseat authority from lingering until the pending-launch timer, while
+    // preserving the ordinary unselected path through the same no-op seam.
+    auto finish_rejected_launch = util::fail_guard([&session]() {
+      launch_session_finish(
+        session.id,
+        session.lifecycle_generation.value_or(0)
+      );
+    });
+
     // I know these string literals will not be modified
     option.option = const_cast<char *>("CSeq");
 
@@ -1679,6 +1760,11 @@ namespace rtsp_stream {
 
     if (session.is_cancelled()) {
       BOOST_LOG(info) << "Rejecting RTSP setup for a cancelled launch session"sv;
+      launch_session_finish(
+        session.id,
+        session.lifecycle_generation.value_or(0)
+      );
+      finish_rejected_launch.disable();
       respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
       return;
     }
@@ -1688,18 +1774,28 @@ namespace rtsp_stream {
     const auto start_result = server->insert_and_start_if_not_cancelled(stream_session, session, remote_address);
     if (start_result == rtsp_server_t::insert_start_result_e::cancelled) {
       BOOST_LOG(info) << "Rejecting RTSP setup cancelled during session handoff"sv;
+      launch_session_finish(
+        session.id,
+        session.lifecycle_generation.value_or(0)
+      );
+      finish_rejected_launch.disable();
       respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
       return;
     }
     if (start_result == rtsp_server_t::insert_start_result_e::failed) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
       const auto failed_session_token = session.session_token;
-      server->session_clear(session.id);
+      launch_session_finish(
+        session.id,
+        session.lifecycle_generation.value_or(0)
+      );
+      finish_rejected_launch.disable();
       request_abandoned_desktop_takeover_teardown(failed_session_token);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }
 
+    finish_rejected_launch.disable();
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 

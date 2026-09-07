@@ -896,7 +896,11 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   ASSERT_NE(setup_failure_start, std::string::npos);
   ASSERT_NE(setup_failure_end, std::string::npos);
   const auto setup_failure = rtsp.substr(setup_failure_start, setup_failure_end - setup_failure_start);
-  EXPECT_NE(setup_failure.find("server->session_clear(session.id)"), std::string::npos);
+  EXPECT_NE(setup_failure.find("launch_session_finish("), std::string::npos);
+  EXPECT_NE(
+    setup_failure.find("session.lifecycle_generation.value_or(0)"),
+    std::string::npos
+  );
   EXPECT_NE(setup_failure.find("request_abandoned_desktop_takeover_teardown"), std::string::npos);
 }
 
