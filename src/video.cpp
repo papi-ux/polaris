@@ -58,6 +58,7 @@ extern "C" {
   #include "platform/linux/encoder_probe_identity.h"
   #include "platform/linux/encoder_probe_driver_proof.h"
   #include "platform/linux/vaapi.h"
+  #include "platform/linux/kms_connector_selection.h"
   #ifdef POLARIS_BUILD_VULKAN
     #include "platform/linux/vulkan_encode.h"
   #endif
@@ -2547,7 +2548,11 @@ namespace video {
         return index;
       }
     }
+#ifdef __linux__
+    return platf::kms_selection::find_alias(display_names, requested_display_name);
+#else
     return std::nullopt;
+#endif
   }
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
@@ -2576,6 +2581,10 @@ namespace video {
    * @param current_display_index The current display index or -1 if not yet known.
    * @return true when the current/preferred identity remains selectable.
    */
+#ifdef POLARIS_TESTS
+  thread_local const std::vector<std::string> *display_enumeration_override {};
+#endif
+
   bool refresh_displays(
     platf::mem_type_e dev_type,
     std::vector<std::string> &display_names,
@@ -2596,6 +2605,12 @@ namespace video {
 
     // Refresh the display names
     auto old_display_names = std::move(display_names);
+#ifdef POLARIS_TESTS
+    if (display_enumeration_override) {
+      display_names = *display_enumeration_override;
+    } else
+#endif
+    {
 #ifdef __linux__
     display_names = capture_config != nullptr ?
       platf::display_names(dev_type, *capture_config) :
@@ -2603,6 +2618,7 @@ namespace video {
 #else
     display_names = platf::display_names(dev_type);
 #endif
+    }
 
     // If we now have no displays, let's put the old display array back and fail
     if (display_names.empty() && !old_display_names.empty()) {
@@ -2648,7 +2664,7 @@ namespace video {
   ) {
     static std::string empty_str = "";
     if (!refresh_displays(dev_type, display_names, current_display_index, empty_str, capture_config)) {
-      current_display_index = display_names.empty() ? -1 : 0;
+      current_display_index = -1;
     }
   }
 
@@ -2724,8 +2740,8 @@ namespace video {
         display_p,
         &capture_ctxs.front().config
       );
-      if (display_names.empty()) {
-        BOOST_LOG(error) << "No displays were found for initial capture setup"sv;
+      if (display_p < 0 || display_p >= display_names.size()) {
+        BOOST_LOG(error) << "Requested display is unavailable for initial capture setup"sv;
         return;
       }
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
@@ -3000,8 +3016,8 @@ namespace video {
                 }
               }
 
-              if (display_names.empty()) {
-                BOOST_LOG(error) << "No displays were found after reenumeration"sv;
+              if (display_p < 0 || display_p >= display_names.size()) {
+                BOOST_LOG(error) << "Requested display is unavailable after reenumeration"sv;
                 return;
               }
 
@@ -4327,8 +4343,8 @@ namespace video {
         }
       }
 
-      if (display_names.empty()) {
-        BOOST_LOG(error) << "No displays were found for synchronous capture setup"sv;
+      if (display_p < 0 || display_p >= display_names.size()) {
+        BOOST_LOG(error) << "Requested display is unavailable for synchronous capture setup"sv;
         invalidate_live_probe_reuse();
         return encode_e::error;
       }
@@ -6056,6 +6072,17 @@ namespace video {
     std::string_view requested_display_name
   ) {
     return find_display_index(display_names, requested_display_name);
+  }
+
+  int refresh_display_selection_for_tests(std::vector<std::string> previous, int previous_index,
+                                         std::string requested, const std::vector<std::string> &enumerated) {
+    const auto saved = display_enumeration_override;
+    auto restore = util::fail_guard([&] { display_enumeration_override = saved; });
+    display_enumeration_override = &enumerated;
+    config_t config {};
+    config.capture_generation.requested_output_name = std::move(requested);
+    refresh_displays(platf::mem_type_e::unknown, previous, previous_index, &config);
+    return previous_index;
   }
 
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count) {

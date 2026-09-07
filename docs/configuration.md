@@ -572,3 +572,27 @@ These settings follow the [libva quality and rate-control API](https://github.co
 and [FFmpeg VA-API mode handling](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavcodec/vaapi_encode.c).
 Hardware acceptance on AMD and Intel is required before changing automatic
 encoder defaults.
+
+### Stable KMS connector selection
+
+With KMS capture, `output_name` accepts the connector's kernel name (for example
+`DP-1` or `HDMI-A-1`) when that name identifies one available output. The log
+also lists a qualified form such as `kms:pci-0000:01:00.0/DP-1`. Qualification
+uses the GPU's PCI address, not its changing `/dev/dri/cardN` number. The
+`pci-0000:01:00.0/DP-1` shorthand is accepted too.
+
+Use the qualified form when different GPUs expose the same connector name.
+An ambiguous or missing request fails; Polaris does not select another output.
+Named capture rechecks the opened GPU, connector, and CRTC during initialization
+and rechecks the connector binding while capturing. A disconnect or reassignment
+requires capture reinitialization. Replugging the same physical port can resolve
+its qualified name even when card or display enumeration order changes.
+
+Existing numeric configurations retain the original enumeration positions. The
+list is not sorted or renumbered by the new names. A GPU without a reliable PCI
+identity, or a connector with multiple active capture planes, retains numeric
+selection. When unnamed entries remain, use qualified names for named requests;
+a plain connector alias cannot rule out ambiguity with those entries.
+
+These identifiers select KMS capture outputs. They do not change the X11,
+Wayland private-runtime, Windows, or macOS display-selection contracts.

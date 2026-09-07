@@ -933,3 +933,29 @@ TEST(VideoRateTests, CaptureAndEncodingLimiterKeepSeparateWarpAndLaunchRates) {
   EXPECT_EQ(video::capture_frame_interval(config), std::chrono::nanoseconds(16683333));
   EXPECT_EQ(video::encoding_frame_interval(config), video::capture_frame_interval(config));
 }
+
+#ifdef __linux__
+TEST(VideoDisplaySelectionTests, KmsConnectorAliasesAreUniqueAndLegacyIndicesKeepTheirMapping) {
+  const std::vector<std::string> displays {"kms:pci-0000:01:00.0/DP-1", "kms:pci-0000:03:00.0/DP-1", "kms:pci-0000:01:00.0/HDMI-A-1"};
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "0"), 0);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "1"), 1);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "2"), 2);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "3"), std::nullopt);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "DP-1"), std::nullopt);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "HDMI-A-1"), 2);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "pci-0000:03:00.0/DP-1"), 1);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "kms:pci-0000:03:00.0/DP-1"), 1);
+}
+#endif
+
+TEST(VideoDisplaySelectionTests, ActualRefreshWrapperDoesNotTurnMissingOrAmbiguousNamesIntoDisplayZero) {
+  const std::vector<std::string> before {"kms:pci-0000:01:00.0/DP-1", "kms:pci-0000:03:00.0/DP-1"};
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "missing-output", before), -1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests(before, 0, "", {before[1]}), -1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "1", before), 1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "", before), 0);
+#ifdef __linux__
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "DP-1", before), -1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests(before, 0, "", {before[1], before[0]}), 1);
+#endif
+}

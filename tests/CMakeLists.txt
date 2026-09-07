@@ -209,6 +209,12 @@ if(LIBVA_FOUND)
     )
 endif()
 
+if(LIBDRM_FOUND AND LIBCAP_FOUND)
+    list(APPEND TEST_PLATFORM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_named_binding.cpp
+    )
+endif()
+
 set(TEST_INPUT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_input_packet.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_gamepad_feedback_router.cpp
