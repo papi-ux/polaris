@@ -7,7 +7,14 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-- Launching Polaris from the application menu now starts the packaged user service instead of a second process. A desktop launch used to make the running service instance exit, and nothing brought it back once that window was quit or the session ended, which left a host that had been streaming fine with no Polaris until the next login. The menu entry, autostart, and headless boot now all point at the one service
+## v1.4.4 - 2026-09-06
+
+A packaging and setup update matched with Nova v1.4.4. The application menu entry starts the same Polaris service that autostart and headless boot use, and a privileged setup run no longer mistakes root's own device access for a ready desktop account. Existing configurations and paired devices remain valid.
+
+- Starts the packaged user service instead of a second process. A desktop launch used to make the running service instance exit, and nothing brought it back once that window was quit or the session ended, which left a host that had been streaming fine with no Polaris until the next login. The menu entry, autostart, and headless boot now all point at the one service
+- Stops a privileged `--setup-host` run from treating root's own access to `/dev/uinput` and `/dev/uhid` as proof that the desktop account is ready, so a user still missing the input group is reported instead of passed
+- Adds a fail-closed Bazzite validation receipt checker that binds candidate bytes, source identity, image and driver identity, SELinux results, and physical hardware results, and runs it before release artifacts are bound
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
 
 ## v1.4.3 - 2026-09-05
 
