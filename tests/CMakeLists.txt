@@ -429,7 +429,43 @@ add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_program(POLARIS_TEST_GO_EXECUTABLE go)
+    # The fixture is built with GOTOOLCHAIN=local, so the Go that is found must
+    # already satisfy the go directive in multiseat_worker/go.mod. Distributions
+    # that ship an older Go (Ubuntu 24.04 has 1.22) skip the fixture and its
+    # tests instead of failing the whole build.
+    set(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED FALSE)
     if(POLARIS_TEST_GO_EXECUTABLE)
+        file(STRINGS "${CMAKE_SOURCE_DIR}/multiseat_worker/go.mod"
+            POLARIS_MULTISEAT_GO_DIRECTIVE
+            REGEX "^go [0-9]+(\\.[0-9]+)*$" LIMIT_COUNT 1)
+        string(REGEX REPLACE "^go " "" POLARIS_MULTISEAT_GO_REQUIRED
+            "${POLARIS_MULTISEAT_GO_DIRECTIVE}")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E env GOTOOLCHAIN=local
+                    ${POLARIS_TEST_GO_EXECUTABLE} env GOVERSION
+            OUTPUT_VARIABLE POLARIS_MULTISEAT_GO_FOUND
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE POLARIS_MULTISEAT_GO_VERSION_RESULT
+            ERROR_QUIET)
+        # GOVERSION reads like go1.22.2, go1.24rc1, or go1.26.7-X:nodwarf5.
+        string(REGEX MATCH "^go([0-9]+(\\.[0-9]+)*)" POLARIS_MULTISEAT_GO_MATCH
+            "${POLARIS_MULTISEAT_GO_FOUND}")
+        set(POLARIS_MULTISEAT_GO_FOUND_VERSION "${CMAKE_MATCH_1}")
+        if(POLARIS_MULTISEAT_GO_VERSION_RESULT EQUAL 0
+                AND POLARIS_MULTISEAT_GO_REQUIRED
+                AND POLARIS_MULTISEAT_GO_FOUND_VERSION
+                AND NOT POLARIS_MULTISEAT_GO_FOUND_VERSION VERSION_LESS
+                    POLARIS_MULTISEAT_GO_REQUIRED)
+            set(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED TRUE)
+        else()
+            message(STATUS
+                "Skipping the multiseat Go interop fixture: "
+                "${POLARIS_TEST_GO_EXECUTABLE} reports go "
+                "'${POLARIS_MULTISEAT_GO_FOUND_VERSION}' and multiseat_worker/go.mod "
+                "requires go ${POLARIS_MULTISEAT_GO_REQUIRED} with GOTOOLCHAIN=local")
+        endif()
+    endif()
+    if(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED)
         set(POLARIS_MULTISEAT_GO_INTEROP_BINARY
             "${CMAKE_CURRENT_BINARY_DIR}/polaris-multiseat-go-interop-server")
         file(GLOB_RECURSE POLARIS_MULTISEAT_GO_TEST_SOURCES CONFIGURE_DEPENDS
