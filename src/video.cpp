@@ -3467,6 +3467,10 @@ namespace video {
         }
       }
 
+      // Report codec read-back after FFmpeg has applied driver constraints.
+#ifdef POLARIS_BUILD_VAAPI
+      if (encoder.name == "vaapi") va::log_effective_tuning(ctx.get());
+#endif
       // Successfully opened the codec
       break;
     }

@@ -1251,6 +1251,40 @@ namespace config {
     return opts;
   }
 
+  int write_config_with_vaapi_settings(const std::string &path, const std::string &contents) {
+    if (const auto result = file_handler::write_file(path.c_str(), contents); result != 0) return result;
+    vaapi::publish(parse_vaapi_settings(parse_config(contents)));
+    return 0;
+  }
+
+  vaapi::settings_t parse_vaapi_settings(const std::unordered_map<std::string, std::string> &vars,
+                                       vaapi::settings_t initial) {
+    const auto text = [&](const char *key) -> std::string_view {
+      const auto found = vars.find(key);
+      return found == vars.end() ? std::string_view {} : found->second;
+    };
+    const auto option = [&](const char *key, auto &setting, const auto &names) {
+      const auto value = text(key);
+      if (value.empty()) return;
+      if (const auto parsed = vaapi::parse(value, names)) setting = *parsed;
+      else BOOST_LOG(warning) << "Ignoring invalid " << key << ": " << value;
+    };
+    option("vaapi_quality", initial.quality, vaapi::quality_names);
+    option("vaapi_rc", initial.rc, vaapi::rc_names);
+    const auto block = text("vaapi_blbrc");
+    if (block == "auto") initial.blbrc.reset();
+    else if (!block.empty()) {
+      if (const auto parsed = parse_bool(block)) initial.blbrc = *parsed;
+      else BOOST_LOG(warning) << "Ignoring invalid vaapi_blbrc: " << block;
+    }
+    const auto strict = text("vaapi_strict_rc_buffer");
+    if (!strict.empty()) {
+      if (const auto parsed = parse_bool(strict)) initial.strict_rc_buffer = *parsed;
+      else BOOST_LOG(warning) << "Ignoring invalid vaapi_strict_rc_buffer: " << strict;
+    }
+    return initial;
+  }
+
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
@@ -1350,7 +1384,9 @@ namespace config {
     int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);
     int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
 
-    bool_f(vars, "vaapi_strict_rc_buffer", video.vaapi.strict_rc_buffer);
+    video.vaapi = parse_vaapi_settings(vars, video.vaapi);
+    vaapi::publish(video.vaapi);
+    for (const auto key : {"vaapi_quality", "vaapi_rc", "vaapi_blbrc", "vaapi_strict_rc_buffer"}) vars.erase(key);
 
     int_f(vars, "vk_tune", video.vk.tune);
     int_f(vars, "vk_rc_mode", video.vk.rc_mode);
