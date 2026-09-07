@@ -111,16 +111,21 @@ namespace multiseat::input {
         return std::nullopt;
       }
       const auto index = canonical_number(suffix);
-      if (!index ||
-          (node_class == input_node_class_e::event &&
-           *index > std::numeric_limits<std::uint32_t>::max() - 64)) {
+      if (!index) {
+        return std::nullopt;
+      }
+      // The kernel names static nodes from a per-driver base and dynamic
+      // nodes after their minor; names in the gap cannot exist.
+      const auto minor = node_class == input_node_class_e::event ?
+                           expected_event_minor(*index) :
+                           expected_joystick_minor(*index);
+      if (!minor) {
         return std::nullopt;
       }
       return parsed_input_node_t {
         .node_class = node_class,
         .index = *index,
-        .character_minor = node_class == input_node_class_e::event ?
-                             64 + *index : *index,
+        .character_minor = *minor,
         .filename = std::string {filename},
       };
     }

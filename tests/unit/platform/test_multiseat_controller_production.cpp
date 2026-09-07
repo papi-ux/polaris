@@ -88,12 +88,12 @@ namespace {
       allocation.nodes.push_back({
         .kind = kind,
         .slot = slot,
-        .host_path = "/dev/input/event" + std::to_string(40 + index),
+        .host_path = "/dev/input/event" + std::to_string(256 + index),
         .worker_path = input::expected_worker_path(kind, slot),
         .filesystem_device = 73,
         .inode = 18000 + index,
         .character_major = 13,
-        .character_minor = static_cast<std::uint32_t>(104 + index),
+        .character_minor = static_cast<std::uint32_t>(256 + index),
         .kernel_name = input::expected_kernel_name(
           expectation.input_seat,
           kind,
@@ -365,9 +365,9 @@ namespace {
           .output = std::move(ids),
         };
       }
-      if (verb == "container" && argv.size() > 5 && argv.at(3) == "inspect") {
+      if (verb == "container" && argv.size() > 4 && argv.at(3) == "inspect") {
         auto document = nlohmann::json::array();
-        for (std::size_t index = 5; index < argv.size(); ++index) {
+        for (std::size_t index = 4; index < argv.size(); ++index) {
           const auto found = find_container_locked(argv.at(index));
           if (found == state_->containers.end()) {
             return failure;
@@ -926,12 +926,12 @@ namespace {
     host_state->observe_allocated_input_nodes = true;
     for (std::uint32_t index = 0; index < 3; ++index) {
       host_state->character_devices.emplace(
-        "/dev/input/event" + std::to_string(40 + index),
+        "/dev/input/event" + std::to_string(256 + index),
         podman::character_device_identity_t {
           .filesystem_device = 73,
           .inode = 18000 + index,
           .character_major = 13,
-          .character_minor = 104 + index,
+          .character_minor = 256 + index,
         }
       );
     }

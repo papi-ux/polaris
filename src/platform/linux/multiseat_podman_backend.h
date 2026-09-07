@@ -204,6 +204,8 @@ namespace multiseat::podman {
     [[nodiscard]] bool workload_allowed(const workload_plan_t &workload) const;
     [[nodiscard]] bool base_host_ready() const;
     [[nodiscard]] bool gpu_catalog_current() const;
+    /** True/false when the profile volume is present/absent; empty on error. */
+    [[nodiscard]] std::optional<bool> profile_volume_exists(const profile_t &profile);
     [[nodiscard]] bool launch_host_ready(
       const worker_launch_spec_t &spec,
       const input::allocation_t &input_allocation

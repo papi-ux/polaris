@@ -29,6 +29,29 @@ namespace multiseat::input {
   inline constexpr std::string_view multiseat_kernel_device_prefix =
     "Polaris multiseat ";
 
+  /**
+   * Linux input character minors. evdev owns 32 static minors from 64, so
+   * event0 through event31 are minor 64 + N. joydev owns 16 static minors from
+   * 0, so js0 through js15 are minor N. Once a host has more devices than a
+   * static range holds, the kernel allocates dynamic minors from 256 upward
+   * and names the node after the minor, so eventN and jsN with N >= 256 are
+   * minor N. No node exists in the gaps between the ranges.
+   */
+  inline constexpr std::uint32_t linux_input_major = 13;
+  inline constexpr std::uint32_t evdev_static_minor_base = 64;
+  inline constexpr std::uint32_t evdev_static_minor_count = 32;
+  inline constexpr std::uint32_t joydev_static_minor_count = 16;
+  inline constexpr std::uint32_t input_first_dynamic_minor = 256;
+
+  /** Minor the kernel assigns to /dev/input/event<number>, if such a node can exist. */
+  [[nodiscard]] std::optional<std::uint32_t> expected_event_minor(
+    std::uint64_t event_number
+  );
+  /** Minor the kernel assigns to /dev/input/js<number>, if such a node can exist. */
+  [[nodiscard]] std::optional<std::uint32_t> expected_joystick_minor(
+    std::uint64_t joystick_number
+  );
+
   enum class device_kind_e {
     keyboard,
     mouse_relative,

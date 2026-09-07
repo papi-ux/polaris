@@ -842,6 +842,30 @@ namespace multiseat::podman {
     return true;
   }
 
+  std::optional<bool> backend_t::profile_volume_exists(const profile_t &profile) {
+    const auto result = host_.run(
+      {
+        options_.executable.native(),
+        "--remote=false",
+        "volume",
+        "exists",
+        profile.opaque_volume_name,
+      },
+      options_.command_timeout,
+      options_.max_command_output_bytes
+    );
+    if (result.timed_out || result.output_truncated) {
+      return std::nullopt;
+    }
+    if (result.exit_status == 0) {
+      return true;
+    }
+    if (result.exit_status == 1) {
+      return false;
+    }
+    return std::nullopt;
+  }
+
   bool backend_t::launch_host_ready(
     const worker_launch_spec_t &spec,
     const input::allocation_t &input_allocation
@@ -956,7 +980,7 @@ namespace multiseat::podman {
       "--health-max-log-count=" + std::to_string(options_.health_log_count),
       "--health-max-log-size=" + std::to_string(options_.health_log_size),
       "--stop-signal=TERM",
-      "--volume=" + profile.opaque_volume_name + ":/var/lib/polaris-seat:rw,nosuid,nodev,nocreate",
+      "--volume=" + profile.opaque_volume_name + ":/var/lib/polaris-seat:rw,nosuid,nodev",
       "--mount=type=bind,src=" +
         (options_.ipc_root / spec.resources.runtime_namespace / ipc_directory).native() +
         ",dst=" + std::string {container_ipc_directory} +
@@ -1070,6 +1094,21 @@ namespace multiseat::podman {
       }
     } catch (...) {
       return worker_command_result_e::indeterminate;
+    }
+    // podman run silently creates a missing named volume and offers no option
+    // to refuse, so the pre-created-volume contract is checked explicitly here,
+    // before the final identity recheck that stays adjacent to the run.
+    std::optional<bool> volume_present;
+    try {
+      volume_present = profile_volume_exists(*profile);
+    } catch (...) {
+      return worker_command_result_e::indeterminate;
+    }
+    if (!volume_present) {
+      return worker_command_result_e::indeterminate;
+    }
+    if (!*volume_present) {
+      return worker_command_result_e::rejected;
     }
 
     command_result_t result;
@@ -1261,7 +1300,6 @@ namespace multiseat::podman {
       "--remote=false",
       "container",
       "inspect",
-      "--type=container",
     };
     inspect_argv.insert(inspect_argv.end(), ids.begin(), ids.end());
     const auto inspected = host_.run(

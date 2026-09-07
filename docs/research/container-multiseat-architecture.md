@@ -236,7 +236,9 @@ key nor the image may be reinterpreted inside the worker. Each launch is
 immutable and includes:
 
 - a digest-pinned image with pulling disabled;
-- a pre-created opaque profile volume mounted as the only persistent writable
+- a pre-created opaque profile volume, whose existence the backend verifies
+  with `podman volume exists` immediately before launch because `podman run`
+  would otherwise create it silently, mounted as the only persistent writable
   home, with implicit volume creation disabled;
 - explicit allowlisted GPU and virtual-input devices;
 - read-only shared game roots at derived `/mnt/games/<opaque-name>` paths;
@@ -528,7 +530,9 @@ they open no real input device. Their contract:
   relative/absolute mouse pair, optionally admits touch and pen, and bounds
   generic Xbox-style gamepad slots at sixteen;
 - accepts only canonical `/dev/input/eventN` host nodes with unique filesystem
-  inode and character-device identities, exact event-number-to-minor mapping,
+  inode and character-device identities, the kernel's event-number-to-minor
+  mapping (static minor 64 + N for event0 through event31, dynamic minor N
+  from event256 upward, nothing in between),
   Linux input major 13, an exact generation-derived kernel name, and host seat
   `seat-polaris`;
 - maps those nodes to fixed worker-local paths such as

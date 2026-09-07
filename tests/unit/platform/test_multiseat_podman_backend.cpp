@@ -765,11 +765,14 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
     changed_authority,
     options_for_tests(),
   };
+  changed_authority_host.push({.exit_status = 0});
   EXPECT_EQ(
     changed_authority_backend.launch(spec),
     worker_command_result_e::rejected
   );
-  EXPECT_TRUE(changed_authority_host.calls.empty());
+  // The authority changed at the recheck that follows the volume check.
+  ASSERT_EQ(changed_authority_host.calls.size(), std::size_t {1});
+  EXPECT_EQ(changed_authority_host.calls.front().at(2), "volume");
 
   fake_host_t changed_kernel_host;
   fake_input_manifest_source_t changed_kernel;
@@ -784,8 +787,10 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
     changed_kernel,
     options_for_tests(),
   };
+  changed_kernel_host.push({.exit_status = 0});
   EXPECT_EQ(changed_kernel_backend.launch(spec), worker_command_result_e::rejected);
-  EXPECT_TRUE(changed_kernel_host.calls.empty());
+  ASSERT_EQ(changed_kernel_host.calls.size(), std::size_t {1});
+  EXPECT_EQ(changed_kernel_host.calls.front().at(2), "volume");
   EXPECT_EQ(changed_kernel.observation_calls, std::size_t {5});
 
   fake_host_t changed_gpu_at_run_host;
@@ -800,11 +805,14 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
     changed_gpu_at_run_inputs,
     options_for_tests(),
   };
+  changed_gpu_at_run_host.push({.exit_status = 0});
   EXPECT_EQ(
     changed_gpu_at_run_backend.launch(spec),
     worker_command_result_e::rejected
   );
-  EXPECT_TRUE(changed_gpu_at_run_host.calls.empty());
+  // Only the volume existence check ran; the run itself never did.
+  ASSERT_EQ(changed_gpu_at_run_host.calls.size(), std::size_t {1});
+  EXPECT_EQ(changed_gpu_at_run_host.calls.front().at(2), "volume");
   EXPECT_GE(changed_gpu_at_run_host.character_device_calls, 7U);
 }
 
@@ -812,15 +820,25 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
   const auto spec = valid_spec();
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 0,
     .output = std::string {first_id} + "\n",
   });
 
   ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
-  ASSERT_EQ(host.calls.size(), std::size_t {1});
-  const auto &argv = host.calls.front();
+  ASSERT_EQ(host.calls.size(), std::size_t {2});
+  const std::vector<std::string> expected_volume_check {
+    "/usr/bin/podman", "--remote=false", "volume", "exists", "pv-a9f0",
+  };
+  EXPECT_EQ(host.calls.front(), expected_volume_check);
+  const auto &argv = host.calls.at(1);
   ASSERT_GE(argv.size(), std::size_t {3});
+  EXPECT_TRUE(has_argument(
+    argv,
+    "--volume=pv-a9f0:/var/lib/polaris-seat:rw,nosuid,nodev"
+  ));
+  EXPECT_FALSE(any_argument_contains(argv, "nocreate"));
   EXPECT_EQ(argv.at(0), "/usr/bin/podman");
   EXPECT_EQ(argv.at(1), "--remote=false");
   EXPECT_EQ(argv.at(2), "run");
@@ -850,10 +868,6 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_FALSE(has_argument(argv, "--read-only-tmpfs=false"));
   EXPECT_TRUE(has_argument(argv, "--pull=never"));
   EXPECT_TRUE(has_argument(argv, "--rm"));
-  EXPECT_TRUE(has_argument(
-    argv,
-    "--volume=pv-a9f0:/var/lib/polaris-seat:rw,nosuid,nodev,nocreate"
-  ));
   EXPECT_TRUE(has_argument(argv, "--workdir=/var/lib/polaris-seat"));
   EXPECT_TRUE(has_argument(argv, "--env=HOME=/var/lib/polaris-seat"));
   EXPECT_TRUE(has_argument(
@@ -944,14 +958,16 @@ TEST(MultiseatPodmanBackend, ProfileSelectsOneExactRuntimeImageAndTypedWorkerPro
     "profile beta",
     "heroic-game"
   );
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 0,
     .output = std::string {second_id} + "\n",
   });
 
   ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
-  ASSERT_EQ(host.calls.size(), std::size_t {1});
-  const auto &argv = host.calls.front();
+  ASSERT_EQ(host.calls.size(), std::size_t {2});
+  EXPECT_EQ(host.calls.front().at(4), "pv-b8e1");
+  const auto &argv = host.calls.at(1);
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_RUNTIME_PROFILE=heroic"));
   EXPECT_TRUE(has_argument(
     argv,
@@ -1029,43 +1045,73 @@ TEST(MultiseatPodmanBackend, LaunchRejectsUnknownOrNonConcreteAllocation) {
   EXPECT_TRUE(host.calls.empty());
 }
 
+TEST(MultiseatPodmanBackend, LaunchRequiresPreexistingProfileVolume) {
+  const auto spec = valid_spec();
+
+  fake_host_t absent_host;
+  backend_t absent_backend {absent_host, input_manifests_for_tests(), options_for_tests()};
+  absent_host.push({.exit_status = 1});
+  EXPECT_EQ(absent_backend.launch(spec), worker_command_result_e::rejected);
+  ASSERT_EQ(absent_host.calls.size(), std::size_t {1});
+  const std::vector<std::string> expected_volume_check {
+    "/usr/bin/podman", "--remote=false", "volume", "exists", "pv-a9f0",
+  };
+  EXPECT_EQ(absent_host.calls.front(), expected_volume_check);
+
+  fake_host_t error_host;
+  backend_t error_backend {error_host, input_manifests_for_tests(), options_for_tests()};
+  error_host.push({.exit_status = 125});
+  EXPECT_EQ(error_backend.launch(spec), worker_command_result_e::indeterminate);
+  EXPECT_EQ(error_host.calls.size(), std::size_t {1});
+
+  fake_host_t timeout_host;
+  backend_t timeout_backend {timeout_host, input_manifests_for_tests(), options_for_tests()};
+  timeout_host.push({.exit_status = 124, .timed_out = true});
+  EXPECT_EQ(timeout_backend.launch(spec), worker_command_result_e::indeterminate);
+  EXPECT_EQ(timeout_host.calls.size(), std::size_t {1});
+}
+
 TEST(MultiseatPodmanBackend, TimedOutLaunchIsIndeterminate) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 124,
     .timed_out = true,
   });
 
   EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::indeterminate);
-  EXPECT_EQ(host.calls.size(), std::size_t {1});
+  EXPECT_EQ(host.calls.size(), std::size_t {2});
 }
 
 TEST(MultiseatPodmanBackend, AmbiguousSuccessfulLaunchOutputIsIndeterminate) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 0,
     .output = std::string {first_id} + "\nunexpected output\n",
   });
 
   EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::indeterminate);
-  EXPECT_EQ(host.calls.size(), std::size_t {1});
+  EXPECT_EQ(host.calls.size(), std::size_t {2});
 }
 
 TEST(MultiseatPodmanBackend, NonzeroLaunchReconcilesAnExactExistingWorker) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
   const auto spec = valid_spec();
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 125,
   });
   queue_inventory(host, {container_for(spec, first_id, "running", "healthy")});
 
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::already_applied);
-  ASSERT_EQ(host.calls.size(), std::size_t {3});
-  EXPECT_EQ(host.calls.at(1).at(2), "ps");
-  EXPECT_EQ(host.calls.at(2).at(2), "container");
+  ASSERT_EQ(host.calls.size(), std::size_t {4});
+  EXPECT_EQ(host.calls.at(0).at(2), "volume");
+  EXPECT_EQ(host.calls.at(2).at(2), "ps");
+  EXPECT_EQ(host.calls.at(3).at(2), "container");
 }
 
 TEST(MultiseatPodmanBackend, NonzeroLaunchRejectsMissingAndQuarantinesUnsafeWorkers) {
@@ -1073,29 +1119,33 @@ TEST(MultiseatPodmanBackend, NonzeroLaunchRejectsMissingAndQuarantinesUnsafeWork
 
   fake_host_t missing_host;
   backend_t missing_backend {missing_host, input_manifests_for_tests(), options_for_tests()};
+  missing_host.push({.exit_status = 0});
   missing_host.push({.exit_status = 125});
   queue_inventory(missing_host, {});
   EXPECT_EQ(missing_backend.launch(spec), worker_command_result_e::rejected);
-  EXPECT_EQ(missing_host.calls.size(), std::size_t {2});
+  EXPECT_EQ(missing_host.calls.size(), std::size_t {3});
 
   fake_host_t mismatch_host;
   backend_t mismatch_backend {mismatch_host, input_manifests_for_tests(), options_for_tests()};
   auto mismatched = container_for(spec, first_id, "running", "healthy");
   mismatched["Config"]["Labels"]["io.polaris.multiseat.runtime"] =
     "polaris-runtime-controller-a1b2-wrong";
+  mismatch_host.push({.exit_status = 0});
   mismatch_host.push({.exit_status = 125});
   queue_inventory(mismatch_host, {std::move(mismatched)});
   EXPECT_EQ(mismatch_backend.launch(spec), worker_command_result_e::indeterminate);
-  EXPECT_EQ(mismatch_host.calls.size(), std::size_t {3});
+  EXPECT_EQ(mismatch_host.calls.size(), std::size_t {4});
 
   fake_host_t failed_host;
   backend_t failed_backend {failed_host, input_manifests_for_tests(), options_for_tests()};
+  failed_host.push({.exit_status = 0});
   failed_host.push({.exit_status = 125});
   queue_inventory(failed_host, {container_for(spec, first_id, "running", "unhealthy")});
   EXPECT_EQ(failed_backend.launch(spec), worker_command_result_e::indeterminate);
 
   fake_host_t stopped_host;
   backend_t stopped_backend {stopped_host, input_manifests_for_tests(), options_for_tests()};
+  stopped_host.push({.exit_status = 0});
   stopped_host.push({.exit_status = 125});
   queue_inventory(stopped_host, {container_for(spec, first_id, "exited", "")});
   EXPECT_EQ(stopped_backend.launch(spec), worker_command_result_e::rejected);
@@ -1130,11 +1180,12 @@ TEST(MultiseatPodmanBackend, NonzeroLaunchQuarantinesChangedRuntimeBindings) {
     const auto spec = valid_spec();
     auto existing = container_for(spec, first_id, "running", "healthy");
     existing["Config"]["Labels"][mismatch.label] = mismatch.value;
+    host.push({.exit_status = 0});
     host.push({.exit_status = 125});
     queue_inventory(host, {std::move(existing)});
 
     EXPECT_EQ(backend.launch(spec), worker_command_result_e::indeterminate);
-    EXPECT_EQ(host.calls.size(), std::size_t {3});
+    EXPECT_EQ(host.calls.size(), std::size_t {4});
   }
 }
 

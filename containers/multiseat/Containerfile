@@ -19,6 +19,10 @@ COPY multiseat_worker/internal ./internal
 COPY multiseat_worker/cmd ./cmd
 COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile
 COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json
+# The image contract tests read these two production sources through the same
+# repository-relative path they use for the Containerfile and lock above.
+COPY multiseat_worker/main.go /multiseat_worker/main.go
+COPY multiseat_worker/server.go /multiseat_worker/server.go
 RUN go test -trimpath ./... && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
