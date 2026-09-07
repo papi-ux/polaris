@@ -8,15 +8,60 @@ import pathlib
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from oci_archive import verify_archive
 
 spec = importlib.util.spec_from_file_location('verify_inputs', pathlib.Path(__file__).with_name('verify-inputs.py'))
 inputs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(inputs)
+spec = importlib.util.spec_from_file_location('build_image', pathlib.Path(__file__).with_name('build-image.py'))
+build = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(build)
 
 
 class ArtifactIntegrity(unittest.TestCase):
+    def test_committed_context_excludes_ignored_injection_and_concurrent_edits(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(build, 'REPO', pathlib.Path(temporary)):
+            root = pathlib.Path(temporary)
+            here = root / 'containers/multiseat'
+            (here / 'locks').mkdir(parents=True)
+            (root / 'multiseat_worker').mkdir()
+            (root / '.gitignore').write_text('*sync-conflict*\nbuild/\n')
+            original = 'package main\n'
+            source = root / 'multiseat_worker/main.go'
+            source.write_text(original)
+            checksum = hashlib.sha256(b'locked').hexdigest()
+            packages = {'platform': 'linux/amd64', 'source_root': 'locked-root',
+                        'runtime': [{'filename': 'pkg.deb', 'sha256': checksum}],
+                        'build': [{'filename': 'pkg.deb', 'sha256': checksum}]}
+            (here / 'locks/gamescope.packages.json').write_text(json.dumps(packages))
+            locks = {name: 'locks/' + name + '.json' for name in ['rust', 'plugin', 'gamescope']}
+            for name, path in locks.items():
+                (here / path).write_text(json.dumps({'sha256': checksum, 'url': 'https://example.invalid/rust.tar.xz'}))
+            (here / 'images.lock.json').write_text(json.dumps({
+                'runtime_profiles': [{'id': 'gamescope', 'dependency_lock': 'locks/gamescope.packages.json'}],
+                'dependency_locks': locks}))
+            for filename in ['gamescope/runtime/pkg.deb', 'gamescope/build/pkg.deb',
+                             'toolchains/rust.tar.xz', 'plugin.tar', 'gamescope.tar']:
+                path = root / 'build/runtime-inputs' / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'locked')
+            build.run(['git', 'init', '-q'])
+            build.run(['git', 'add', '.'])
+            build.run(['git', '-c', 'user.name=Artifact Test', '-c', 'user.email=artifact@example.invalid',
+                       '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
+            revision = build.output(['git', 'rev-parse', 'HEAD']).strip()
+            (root / 'multiseat_worker/extra.sync-conflict-local.go').write_text('package main\nfunc init() {}\n')
+            source.write_text('edited during build')
+            (here / 'locks/plugin.json').write_text('{}')
+            with build.materialized_context(revision, 'gamescope', False) as context:
+                self.assertFalse((context / 'multiseat_worker/extra.sync-conflict-local.go').exists())
+                self.assertEqual((context / 'multiseat_worker/main.go').read_text(), original)
+                self.assertEqual(json.loads((context / 'containers/multiseat/locks/plugin.json').read_text())['sha256'], checksum)
+                (root / 'build/runtime-inputs/plugin.tar').write_bytes(b'changed cache')
+                self.assertEqual((context / 'build/runtime-inputs/plugin.tar').read_bytes(), b'locked')
+
     def test_offline_packages_reject_substitution(self):
         for mutation in ['valid', 'modified', 'missing', 'extra', 'symlink', 'traversal', 'duplicate']:
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
