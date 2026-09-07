@@ -206,6 +206,22 @@ namespace nvhttp {
   crypto::PERM pairing_access_preset_perm(pairing_access_preset_t preset);
   std::string_view pairing_access_preset_name(pairing_access_preset_t preset);
 
+  inline constexpr std::size_t PAIRING_ID_SIZE = 32;
+  inline constexpr std::size_t MAX_PENDING_PAIRING_SESSIONS = 32;
+  inline constexpr auto PAIRING_SESSION_TIMEOUT = 5min;
+
+  struct pending_pairing_t {
+    std::string id;
+    std::string name;
+    std::string address;
+  };
+
+  enum class pair_session_insert_e { ADDED, ALREADY_EXISTS, FULL };
+  bool is_valid_pairing_id(std::string_view pairing_id);
+  std::vector<pending_pairing_t> get_pending_pairings();
+  bool cancel_pairing(std::string_view pairing_id);
+  void expire_pair_sessions(std::chrono::steady_clock::time_point now);
+
   struct pair_session_t {
     struct {
       std::string uniqueID = {};
@@ -226,6 +242,11 @@ namespace nvhttp {
         std::shared_ptr<typename SimpleWeb::ServerBase<PolarisHTTPS>::Response>>
         response;
       std::string salt = {};
+      std::string id = {};
+      std::string device_name = {};
+      std::string address = {};
+      std::chrono::steady_clock::time_point expires_at = {};
+
     } async_insert_pin;
 
     std::optional<crypto::PERM> pairing_perm = {};
@@ -235,6 +256,7 @@ namespace nvhttp {
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
+    bool failed = false;
   };
 
   /**
@@ -242,6 +264,7 @@ namespace nvhttp {
    * @param sess
    */
   void remove_session(const pair_session_t &sess);
+  pair_session_insert_e insert_pair_session(pair_session_t sess, std::string &pairing_id);
 
   /**
    * @brief Pair, phase 1
@@ -300,10 +323,11 @@ namespace nvhttp {
    * @param name The user supplied name.
    * @return `true` if the pin is correct, `false` otherwise.
    * @examples
-   * bool pin_status = nvhttp::pin("1234", "laptop");
+   * bool pin_status = nvhttp::pin(pairing_id, "1234", "laptop");
    * @examples_end
    */
   bool pin(
+    std::string_view pairing_id,
     std::string pin,
     std::string name,
     std::optional<crypto::PERM> pairing_perm = std::nullopt,
@@ -455,6 +479,11 @@ namespace nvhttp {
   nlohmann::json auto_quality_status_json();
 
 #ifdef POLARIS_TESTS
+  nlohmann::json pairing_options_for_tests(std::string_view id);
+  void pair_http_for_tests(
+    std::shared_ptr<SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response> response,
+    std::shared_ptr<SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request> request
+  );
   bool is_in_trusted_subnet_for_tests(const boost::asio::ip::address &addr);
   bool pairing_unique_id_valid_for_tests(std::string_view unique_id);
   enum class pairing_state_write_fault_t {
