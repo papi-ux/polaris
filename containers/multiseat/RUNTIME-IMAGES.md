@@ -17,8 +17,10 @@ python3 containers/multiseat/build-image.py gamescope
 ```
 
 Repeat for `steam`, `heroic`, and `lutris`. Both commands accept `--nvidia` for
-the driver-matched physical lane. The build command requires a clean commit.
-`--development` marks exploratory output as dirty and unsuitable for acceptance.
+the driver-matched physical lane. The build command requires a clean commit and materializes sources and locks
+from that exact Git object into a private build context. Ignored files and edits
+made during a build cannot enter the image or change its later provenance.
+Only independently copied and hash-verified locked inputs enter that context.
 The CI matrix fetches exact locked inputs, runs integrity tests, builds with
 `--network=none --pull=never`, validates dependencies, and exercises the real
 session-bus, private-audio, and software-display providers. Dependency skips fail
