@@ -256,6 +256,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_worker_adapter.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_runtime.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_production.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_host.cpp
         ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_physical.cpp
     )
 endif()

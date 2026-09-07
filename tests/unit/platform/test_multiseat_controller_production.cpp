@@ -175,6 +175,7 @@ namespace {
     std::vector<std::vector<std::string>> commands;
     std::size_t probe_calls = 0;
     std::size_t device_identity_calls = 0;
+    std::size_t runtime_spec_reads = 0;
 
     /**
      * Opt-in offline Podman emulation: `run` records a container from its own
@@ -188,6 +189,10 @@ namespace {
       std::string status;
       std::vector<std::pair<std::string, std::string>> labels;
       std::vector<std::array<std::string, 3>> devices;
+      std::vector<std::array<std::string, 3>> binds;
+      std::vector<std::array<std::string, 2>> volumes;
+      std::vector<std::string> tmpfs;
+      bool init = false;
     };
     bool simulate_containers = false;
     bool observe_allocated_input_nodes = false;
@@ -234,6 +239,128 @@ namespace {
       };
   };
 
+  /**
+   * Rootless Podman 5.8 shape: `container inspect` reports no devices in
+   * `HostConfig` and points at the OCI runtime spec, whose bind mounts are
+   * the only record of the `--device` bindings the runtime applied.
+   */
+  std::string runtime_spec_path_for(const std::string &id) {
+    return "/srv/seat-operator/containers/storage/overlay-containers/" +
+           id + "/userdata/config.json";
+  }
+
+  nlohmann::json runtime_spec_for(
+    const production_host_state_t::simulated_container_t &container
+  ) {
+    const auto userdata =
+      "/srv/seat-operator/containers/storage/overlay-containers/" +
+      container.id + "/userdata";
+    const auto run_userdata =
+      "/run/user/1000/containers/overlay-containers/" + container.id + "/userdata";
+    const auto podman_bind = [](std::string destination, std::string source) {
+      return nlohmann::json {
+        {"destination", std::move(destination)},
+        {"type", "bind"},
+        {"source", std::move(source)},
+        {"options", {"bind", "rprivate"}},
+      };
+    };
+    auto mounts = nlohmann::json::array({
+      {
+        {"destination", "/proc"},
+        {"type", "proc"},
+        {"source", "proc"},
+        {"options", {"nosuid", "noexec", "nodev"}},
+      },
+      {
+        {"destination", "/dev"},
+        {"type", "tmpfs"},
+        {"source", "tmpfs"},
+        {"options", {"nosuid", "strictatime", "mode=755", "size=65536k"}},
+      },
+      {
+        {"destination", "/sys"},
+        {"type", "sysfs"},
+        {"source", "sysfs"},
+        {"options", {"nosuid", "noexec", "nodev", "ro"}},
+      },
+      {
+        {"destination", "/dev/pts"},
+        {"type", "devpts"},
+        {"source", "devpts"},
+        {"options", {"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
+      },
+      {
+        {"destination", "/dev/mqueue"},
+        {"type", "mqueue"},
+        {"source", "mqueue"},
+        {"options", {"nosuid", "noexec", "nodev"}},
+      },
+      podman_bind("/etc/resolv.conf", run_userdata + "/resolv.conf"),
+      podman_bind("/etc/hosts", run_userdata + "/hosts"),
+      {
+        {"destination", "/dev/shm"},
+        {"type", "bind"},
+        {"source", userdata + "/shm"},
+        {"options", {"bind", "rprivate", "nosuid", "noexec", "nodev"}},
+      },
+      podman_bind("/run/.containerenv", run_userdata + "/.containerenv"),
+      podman_bind("/run/secrets", run_userdata + "/run/secrets"),
+      podman_bind("/etc/hostname", run_userdata + "/hostname"),
+      {
+        {"destination", "/sys/fs/cgroup"},
+        {"type", "cgroup"},
+        {"source", "cgroup"},
+        {"options", {"rprivate", "nosuid", "noexec", "nodev", "relatime", "ro"}},
+      },
+    });
+    if (container.init) {
+      mounts.push_back({
+        {"destination", "/run/podman-init"},
+        {"type", "bind"},
+        {"source", "/usr/libexec/podman/catatonit"},
+        {"options", {"bind", "ro", "private"}},
+      });
+    }
+    for (const auto &destination : container.tmpfs) {
+      mounts.push_back({
+        {"destination", destination},
+        {"type", "tmpfs"},
+        {"source", "tmpfs"},
+        {"options", {"rw", "rprivate", "nosuid", "nodev", "tmpcopyup"}},
+      });
+    }
+    for (const auto &volume : container.volumes) {
+      mounts.push_back({
+        {"destination", volume.at(1)},
+        {"type", "bind"},
+        {"source", "/srv/seat-operator/containers/storage/volumes/" + volume.at(0) + "/_data"},
+        {"options", {"rw", "rprivate", "nosuid", "nodev", "rbind"}},
+      });
+    }
+    for (const auto &bind : container.binds) {
+      mounts.push_back({
+        {"destination", bind.at(1)},
+        {"type", "bind"},
+        {"source", bind.at(0)},
+        {"options", {bind.at(2), "bind", "private", "nosuid", "nodev"}},
+      });
+    }
+    for (const auto &device : container.devices) {
+      mounts.push_back({
+        {"destination", device.at(1)},
+        {"type", "bind"},
+        {"source", device.at(0)},
+        {"options", {"slave", "nosuid", "noexec", device.at(2), "rbind"}},
+      });
+    }
+    return {
+      {"ociVersion", "1.2.0"},
+      {"mounts", std::move(mounts)},
+      {"linux", nlohmann::json::object()},
+    };
+  }
+
   class production_fake_host_t final : public podman::host_t {
   public:
     explicit production_fake_host_t(
@@ -247,7 +374,7 @@ namespace {
     }
 
     bool executable_file(const std::filesystem::path &path) const override {
-      return path == "/usr/bin/podman";
+      return path == "/usr/bin/podman" || path == "/usr/libexec/podman/catatonit";
     }
 
     bool readable_directory(const std::filesystem::path &) const override {
@@ -273,6 +400,25 @@ namespace {
       const auto found = state_->character_devices.find(path.native());
       return found == state_->character_devices.end() ?
                std::nullopt : std::optional {found->second};
+    }
+
+    std::optional<std::string> read_owned_regular_file(
+      const std::filesystem::path &path,
+      std::size_t max_bytes
+    ) const override {
+      std::scoped_lock lock {state_->mutex};
+      ++state_->runtime_spec_reads;
+      for (const auto &container : state_->containers) {
+        if (runtime_spec_path_for(container.id) != path.native()) {
+          continue;
+        }
+        auto text = runtime_spec_for(container).dump();
+        if (text.size() > max_bytes) {
+          return std::nullopt;
+        }
+        return text;
+      }
+      return std::nullopt;
     }
 
     podman::command_result_t run(
@@ -347,6 +493,34 @@ namespace {
               binding.substr(first + 1, second - first - 1),
               binding.substr(second + 1),
             });
+          } else if (argument.starts_with("--mount=type=bind,src=")) {
+            const auto rest = argument.substr(std::string_view {"--mount=type=bind,src="}.size());
+            const auto separator = rest.find(",dst=");
+            if (separator == std::string::npos) {
+              return failure;
+            }
+            const auto tail = rest.substr(separator + std::string_view {",dst="}.size());
+            container.binds.push_back({
+              rest.substr(0, separator),
+              tail.substr(0, tail.find(',')),
+              tail.find(",ro=true") == std::string::npos ? "rw" : "ro",
+            });
+          } else if (argument == "--init") {
+            container.init = true;
+          } else if (argument.starts_with("--mount=type=tmpfs,dst=")) {
+            const auto rest = argument.substr(std::string_view {"--mount=type=tmpfs,dst="}.size());
+            container.tmpfs.push_back(rest.substr(0, rest.find(',')));
+          } else if (argument.starts_with("--volume=")) {
+            const auto binding = argument.substr(std::string_view {"--volume="}.size());
+            const auto first = binding.find(':');
+            if (first == std::string::npos) {
+              return failure;
+            }
+            const auto tail = binding.substr(first + 1);
+            container.volumes.push_back({
+              binding.substr(0, first),
+              tail.substr(0, tail.find(':')),
+            });
           }
         }
         state_->containers.push_back(std::move(container));
@@ -376,19 +550,12 @@ namespace {
           for (const auto &[key, value] : found->labels) {
             labels[key] = value;
           }
-          auto devices = nlohmann::json::array();
-          for (const auto &device : found->devices) {
-            devices.push_back({
-              {"PathOnHost", device.at(0)},
-              {"PathInContainer", device.at(1)},
-              {"CgroupPermissions", device.at(2)},
-            });
-          }
           document.push_back({
             {"Id", found->id},
             {"Name", found->name},
             {"Config", {{"Labels", std::move(labels)}}},
-            {"HostConfig", {{"Devices", std::move(devices)}}},
+            {"HostConfig", {{"Devices", nlohmann::json::array()}}},
+            {"OCIConfigPath", runtime_spec_path_for(found->id)},
             {"State", {{"Status", found->status}}},
           });
         }
@@ -972,6 +1139,9 @@ namespace {
       std::scoped_lock lock {host_state->mutex};
       ASSERT_EQ(host_state->containers.size(), 1U);
       EXPECT_EQ(host_state->containers.front().status, "running");
+      // The post-run launch check is identity-only; the runtime spec is
+      // evidence for the authoritative inventory, not for launch.
+      EXPECT_EQ(host_state->runtime_spec_reads, 0U);
     }
 
     // One pass: quiesce fences Moonlight first, the graceful stop leaves an
@@ -1002,6 +1172,10 @@ namespace {
       std::scoped_lock lock {host_state->mutex};
       ASSERT_EQ(host_state->containers.size(), 1U);
       EXPECT_EQ(host_state->containers.front().status, "exited");
+      // Rootless Podman reports no devices in HostConfig, so the one
+      // authoritative inventory proved the stopped worker through its OCI
+      // runtime spec.
+      EXPECT_EQ(host_state->runtime_spec_reads, 1U);
       const auto verb_count = [&host_state](std::string_view verb) {
         return std::count_if(
           host_state->commands.begin(),

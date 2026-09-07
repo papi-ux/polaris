@@ -25,6 +25,10 @@ namespace multiseat::podman {
     read_write_character_device(
       const std::filesystem::path &path
     ) const override;
+    [[nodiscard]] std::optional<std::string> read_owned_regular_file(
+      const std::filesystem::path &path,
+      std::size_t max_bytes
+    ) const override;
     command_result_t run(
       const std::vector<std::string> &argv,
       std::chrono::milliseconds timeout,

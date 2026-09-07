@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -58,6 +59,16 @@ namespace multiseat::podman {
     [[nodiscard]] virtual std::optional<character_device_identity_t>
     read_write_character_device(
       const std::filesystem::path &path
+    ) const = 0;
+    /**
+     * Bounded read of a regular file owned by the effective uid. The final
+     * path component is never followed as a symbolic link. Empty when the
+     * file is missing, not a regular file, owned by someone else, unreadable,
+     * or larger than `max_bytes`; an empty file reads as an empty string.
+     */
+    [[nodiscard]] virtual std::optional<std::string> read_owned_regular_file(
+      const std::filesystem::path &path,
+      std::size_t max_bytes
     ) const = 0;
     virtual command_result_t run(
       const std::vector<std::string> &argv,
@@ -199,6 +210,13 @@ namespace multiseat::podman {
       character_device_identity_t identity;
     };
 
+    /** A device binding as Podman declares it, before identity is read. */
+    struct declared_device_binding_t {
+      std::string host_path;
+      std::string worker_path;
+      std::string permissions;
+    };
+
     [[nodiscard]] const gpu_t *gpu_for(const worker_launch_spec_t &spec) const;
     [[nodiscard]] const profile_t *profile_for(const std::string &profile_key) const;
     [[nodiscard]] bool workload_allowed(const workload_plan_t &workload) const;
@@ -222,6 +240,33 @@ namespace multiseat::podman {
       const std::vector<runtime_device_binding_t> &bindings,
       const gpu_t &gpu,
       const input::allocation_t &input_allocation
+    ) const;
+    /** Where and how a controller-requested bind must land in the worker. */
+    struct expected_bind_t {
+      std::string destination;
+      std::string permissions;
+    };
+    /** What a worker's runtime spec may bind besides its devices. */
+    struct runtime_spec_expectations_t {
+      std::string_view container_id;
+      std::string volume_name;
+      /** Exact host sources the controller itself asked Podman to bind. */
+      std::map<std::string, expected_bind_t> controller_binds;
+    };
+    /**
+     * The device bindings the container runtime applied, read from the
+     * container's OCI runtime spec. Rootless Podman implements `--device` as
+     * bind mounts and reports none of them in its inspection output, so the
+     * spec is the only record of what the worker was actually given. Every
+     * mount is classified: Podman's pseudo-filesystems, its own per-container
+     * files at their known destinations, the worker's profile volume, the
+     * controller's authority and game mounts at their exact destinations and
+     * permissions, and Podman's read-only init binary are allowed, device
+     * paths become bindings, anything else fails.
+     */
+    [[nodiscard]] std::vector<declared_device_binding_t> runtime_spec_device_bindings(
+      const std::filesystem::path &spec_path,
+      const runtime_spec_expectations_t &expectations
     ) const;
     [[nodiscard]] std::vector<std::string> launch_argv(
       const worker_launch_spec_t &spec,
