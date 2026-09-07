@@ -203,6 +203,12 @@ if (NOT WIN32 AND NOT APPLE)
     )
 endif()
 
+if(LIBVA_FOUND)
+    list(APPEND TEST_PLATFORM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_vaapi_tuning.cpp
+    )
+endif()
+
 set(TEST_INPUT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_input_packet.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_gamepad_feedback_router.cpp

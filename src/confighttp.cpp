@@ -4100,7 +4100,11 @@ namespace confighttp {
   nlohmann::json client_settings_restart_config_fields_json() {
     return nlohmann::json::array({
       "linux_stream_mode",
-      "fallback_mode"
+      "fallback_mode",
+      "vaapi_quality",
+      "vaapi_rc",
+      "vaapi_blbrc",
+      "vaapi_strict_rc_buffer"
     });
   }
 
@@ -4453,7 +4457,7 @@ namespace confighttp {
     if (dropped > 0) {
       BOOST_LOG(info) << "SaveConfig: "sv << writer << " left "sv << dropped << " existing key(s) out of the payload; they revert to defaults"sv;
     }
-    if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+    if (config::write_config_with_vaapi_settings(config::sunshine.config_file, config_stream.str()) != 0) {
       const std::string message = "Failed to write config file: " + config::sunshine.config_file;
       BOOST_LOG(error) << "SaveConfig: "sv << message;
       bad_request(response, request, message);

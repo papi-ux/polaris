@@ -18,7 +18,10 @@ namespace egl {
   struct surface_descriptor_t;
 }
 
+struct AVCodecContext;
+
 namespace va {
+  void log_effective_tuning(AVCodecContext *ctx);
   enum class dmabuf_surface_action_e {
     blank,
     reuse,
