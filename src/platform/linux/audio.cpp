@@ -3,6 +3,8 @@
  * @brief Definitions for audio control on Linux.
  */
 // standard includes
+#include "process_environment.h"
+
 #include <atomic>
 #include <bitset>
 #include <chrono>
@@ -120,11 +122,11 @@ namespace platf {
 
           if (!xdg_runtime) {
             BOOST_LOG(info) << "Setting XDG_RUNTIME_DIR to: "sv << runtime_dir;
-            setenv("XDG_RUNTIME_DIR", runtime_dir.c_str(), 0);
+            process_environment::set("XDG_RUNTIME_DIR", runtime_dir.c_str(), 0);
           }
 
           // Always set PIPEWIRE_RUNTIME_DIR to ensure pw_context_connect finds it
-          setenv("PIPEWIRE_RUNTIME_DIR", runtime_dir.c_str(), 0);
+          process_environment::set("PIPEWIRE_RUNTIME_DIR", runtime_dir.c_str(), 0);
 
           return true;
         }

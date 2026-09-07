@@ -4,6 +4,7 @@
 #pragma once
 
 #include "encoder_probe_identity.h"
+#include "process_environment.h"
 #include <dlfcn.h>
 #include <atomic>
 #include <fcntl.h>
@@ -95,6 +96,11 @@ namespace platf::encoder_probe_identity {
   }
 
   inline std::optional<std::string> provider_selection_key() {
+    const auto environment_snapshot = process_environment::snapshot();
+    const auto lookup = [&](const char *name) -> const char * {
+      const auto found = environment_snapshot.find(name);
+      return found == environment_snapshot.end() ? nullptr : found->second.c_str();
+    };
     // Nonstandard loader/provider overrides need an explicit observer; their
     // unchanged text does not prove the files they select remain unchanged.
     for (const char *name : {"LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LIBVA_DRIVERS_PATH",
@@ -105,18 +111,18 @@ namespace platf::encoder_probe_identity {
          "NVIDIA_VISIBLE_DEVICES", "__NV_PRIME_RENDER_OFFLOAD", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH",
          "VK_INSTANCE_LAYERS", "VK_LOADER_LAYERS_ENABLE", "VK_LOADER_LAYERS_DISABLE", "VK_LOADER_LAYERS_ALLOW",
          "CUDA_MODULE_LOADING", "CUDA_FORCE_PTX_JIT", "CUDA_DISABLE_PTX_JIT", "CUDA_CACHE_PATH", "CUDA_CACHE_DISABLE"}) {
-      const auto value = getenv(name);
+      const auto value = lookup(name);
       if (value && *value) return std::nullopt;
     }
     try {
       std::set<fs::path> roots {"/etc", "/etc/xdg", "/usr/share", "/usr/local/share"};
       std::ostringstream environment;
-      const auto home = getenv("HOME");
+      const auto home = lookup("HOME");
       if (!home || !fs::path(home).is_absolute()) return std::nullopt;
       roots.insert(fs::path(home) / ".config");
       roots.insert(fs::path(home) / ".local/share");
       for (const char *name : {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_DIRS"}) {
-        const auto value = getenv(name);
+        const auto value = lookup(name);
         environment << std::quoted(name) << ':' << (value != nullptr) << std::quoted(value ? value : "");
         if (value && *value) {
           std::istringstream values(value);
