@@ -114,8 +114,7 @@ func normalizeProviderOptions(options providerOptions) (providerOptions, error) 
 			!validAbsolutePath(options.softwareVulkanICDPath)) ||
 		options.x11DirectoryMode == 0 || options.x11DirectoryMode > 0o7777 ||
 		(options.softwareGamescope && options.softwareVulkanICDPath == "") ||
-		(!options.softwareGamescope &&
-			(options.softwareVulkanICDPath != "" || options.allowSharedX11)) ||
+		(!options.softwareGamescope && options.softwareVulkanICDPath != "") ||
 		options.startupTimeout <= 0 || options.probeTimeout <= 0 ||
 		options.stopTimeout <= 0 || options.probeInterval <= 0 ||
 		options.probeInterval > options.startupTimeout {

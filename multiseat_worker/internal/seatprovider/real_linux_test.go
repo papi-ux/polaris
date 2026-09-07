@@ -377,7 +377,7 @@ func TestRealDisplayCapturesRemainIndependent(t *testing.T) {
 		displayProbeArguments(
 			secondRequest,
 			filepath.Join(secondPath, secondMediaName),
-			true,
+			secondOptions.softwareDisplay,
 		),
 		displayEnvironment(secondOptions),
 		3*time.Second,
