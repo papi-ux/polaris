@@ -96,6 +96,27 @@ NVIDIA support must never import arbitrary CDI-generated mounts. SELinux remains
 enforcing; denied GPU access is a separate admission failure, not permission to
 enable blanket container device access or disable labeling.
 
+For SELinux hosts whose ordinary container domain cannot access NVIDIA nodes,
+`selinux/polaris_nvidia_worker.te` provides a separate opt-in physical-test domain.
+Build it using the host-compatible reference-policy development headers, including
+the installed `container_domain_template` interface, in a private working directory:
+
+```sh
+make -f /usr/share/selinux/devel/Makefile polaris_nvidia_worker.pp
+```
+
+It requires the dedicated input-device type from the input-access policy. Inspect
+the expanded policy and verify the module is absent before temporary installation.
+Record the installed module checksum from `semodule -l -m`. Explicit physical
+containers select `--security-opt=label=type:polaris_nvidia_worker_t` and retain
+Podman's fresh MCS categories, private namespaces, dropped capabilities, and exact
+catalog devices. Verify the effective process label and distinct MCS categories.
+Ordinary `container_t`, existing device labels, and broad device booleans remain
+unchanged. The standard template includes file-management permissions; Linux
+capability removal and mount admission are essential complementary controls.
+After validation, remove only the module matching the recorded checksum, once
+all test containers have stopped. No code installs this policy automatically.
+
 The test-only `provider-nvidia-test` stage includes real-provider tests and a
 private X11 socket-directory fixture. The worker artifact excludes that test
 binary. Run the eight real provider tests with exact device admission, requiring
@@ -111,6 +132,13 @@ input harness must open each seat's exact allocated nodes, receive bounded host
 authority events, reject other-seat and singleton nodes, and stop one worker
 without affecting the other. Repeat that harness for each produced profile,
 including from a user service with its actual supplementary groups.
+
+Providers retain bounded `O_PATH` descriptors for captured artifacts until
+child shutdown and cleanup finish, preventing inode reuse from turning a
+replacement into an apparently owned artifact. Pins are close-on-exec, deduplicate
+aliases, reject symlinks, and fail closed at their descriptor limit. Private
+runtime directories remain part of the trust boundary: inode retention does not
+make a pathname check followed by unlink atomic against a concurrent writer.
 
 None of these receipts proves successful game streaming. Production `run` still
 injects no lifecycle adapters. Virtual-input provider integration, worker-local
