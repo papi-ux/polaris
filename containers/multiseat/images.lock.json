@@ -1,36 +1,61 @@
 {
-  "schema": 1,
+  "schema": 2,
   "platform": "linux/amd64",
-  "resolved_date": "2026-09-04",
+  "resolved_date": "2026-09-07",
   "builder": {
     "id": "go",
     "reference": "docker.io/library/golang@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514",
-    "source": "https://github.com/docker-library/golang"
+    "source": "https://github.com/docker-library/golang",
+    "role": "toolchain_root"
   },
   "runtime_profiles": [
     {
       "id": "gamescope",
       "launcher": "none",
       "reference": "ghcr.io/games-on-whales/base-app@sha256:1d7b61da242e767bc5c80c5fe897392b6a9e6854345d3dea6d2f799e7ea98a14",
-      "source": "https://github.com/games-on-whales/gow"
+      "source": "https://github.com/games-on-whales/gow",
+      "role": "source_root",
+      "dependency_lock": "locks/gamescope.packages.json",
+      "produced_worker_manifest": "gamescope/<variant>/artifact.json"
     },
     {
       "id": "steam",
       "launcher": "steam",
       "reference": "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632",
-      "source": "https://github.com/games-on-whales/gow"
+      "source": "https://github.com/games-on-whales/gow",
+      "role": "source_root",
+      "dependency_lock": "locks/steam.packages.json",
+      "produced_worker_manifest": "steam/<variant>/artifact.json"
     },
     {
       "id": "heroic",
       "launcher": "heroic",
       "reference": "ghcr.io/games-on-whales/heroic-games-launcher@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f",
-      "source": "https://github.com/games-on-whales/gow"
+      "source": "https://github.com/games-on-whales/gow",
+      "role": "source_root",
+      "dependency_lock": "locks/heroic.packages.json",
+      "produced_worker_manifest": "heroic/<variant>/artifact.json"
     },
     {
       "id": "lutris",
       "launcher": "lutris",
       "reference": "ghcr.io/games-on-whales/lutris@sha256:207005d9e1a839814c7c2b91fa25190d40c388c7dc004eec593556bd807f99f2",
-      "source": "https://github.com/games-on-whales/gow"
+      "source": "https://github.com/games-on-whales/gow",
+      "role": "source_root",
+      "dependency_lock": "locks/lutris.packages.json",
+      "produced_worker_manifest": "lutris/<variant>/artifact.json"
     }
-  ]
+  ],
+  "dependency_locks": {
+    "rust": "locks/rust.json",
+    "plugin": "locks/plugin.json",
+    "gamescope": "locks/gamescope.json",
+    "nvidia": "locks/nvidia.json"
+  },
+  "produced_workers": {
+    "directory": "build/worker-artifacts",
+    "digest_field": "worker_digest",
+    "publication": "downloadable OCI artifacts only",
+    "catalog_promotion": "separate review; never inferred from source root or dependency checks"
+  }
 }

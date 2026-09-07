@@ -1,0 +1,16 @@
+policy_module(polaris_nvidia_worker, 1.0.0)
+
+gen_require(`
+    type container_file_t;
+    type xserver_misc_device_t;
+    type polaris_multiseat_input_device_t;
+')
+
+# Opt-in physical worker domain. Preserve the reference policy's container
+# lifecycle and MCS constraints; never widen the generic container_t domain.
+container_domain_template(polaris_nvidia_worker, container)
+
+# Device admission still comes exclusively from the exact GPU catalog. This
+# domain does not create, mount, relabel, or discover additional host devices.
+allow polaris_nvidia_worker_t xserver_misc_device_t:chr_file { getattr open read write ioctl map };
+allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read };
