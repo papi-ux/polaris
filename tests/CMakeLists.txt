@@ -420,9 +420,14 @@ target_link_libraries(test_multiseat_runtime PRIVATE
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(test_multiseat_runtime PRIVATE
         POLARIS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    # The Linux sources include src/platform/common.h, which needs Boost.Process.
+    # When the system Boost is too old the project fetches a modular Boost whose
+    # process headers are only reachable through its imported targets, so link
+    # the same Boost libraries every other test target links.
     target_link_libraries(test_multiseat_runtime PRIVATE
         inputtino::libinputtino
         nlohmann_json::nlohmann_json
+        ${Boost_LIBRARIES}
     )
 endif()
 add_test(NAME test_multiseat_runtime COMMAND test_multiseat_runtime)
