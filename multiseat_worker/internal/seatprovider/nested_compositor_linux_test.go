@@ -205,12 +205,20 @@ func fakeGamescopeProducer(arguments []string, environment []string, mode string
 	if mode == "exit-early" {
 		return 119
 	}
+	if mode == "replace-limiter" {
+		if err := os.WriteFile(limiterPath+".replacement", []byte("retain"), 0o600); err != nil {
+			return 122
+		}
+		if err := os.Rename(limiterPath+".replacement", limiterPath); err != nil {
+			return 123
+		}
+	}
 	waylandMode := mode
 	if mode == "wrong-wayland-mode" {
 		waylandMode = "wrong-mode"
 	}
 	if mode == "wrong-x-mode" || mode == "socket-only-x" ||
-		mode == "bad-ready" || mode == "wrong-x-display" {
+		mode == "bad-ready" || mode == "wrong-x-display" || mode == "replace-limiter" {
 		waylandMode = "good"
 	}
 	go serveFakeWayland(waylandListener, width, height, refresh, waylandMode)
@@ -407,6 +415,72 @@ func TestGamescopeEnvironmentIsScrubbedAndCarriesExactParent(t *testing.T) {
 	software := gamescopeEnvironment(request, paths, options)
 	if !slices.Contains(software, "XWAYLAND_NO_GLAMOR=1") {
 		t.Fatalf("software Xwayland was allowed to open a GPU: %#v", software)
+	}
+}
+
+func TestFailedGamescopeCreationIsNeverAdoptedByPartialCleanup(t *testing.T) {
+	for _, scenario := range []string{"existing-file", "existing-fifo", "replaced-open-file"} {
+		t.Run(scenario, func(t *testing.T) {
+			directory := privateNestedDirectoryForTest(t)
+			runtime, err := openRuntimeDirectory(directory, uint32(os.Geteuid()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.close()
+			readyName, limiterName, sessionName := gamescopeScopedNames("failed-creation")
+			paths := gamescopePaths{
+				readyFIFO: filepath.Join(directory, readyName), limiterFile: filepath.Join(directory, limiterName),
+				sessionRecord: filepath.Join(directory, sessionName), targetSocket: filepath.Join(directory, "app-wayland"),
+			}
+			target := paths.sessionRecord
+			var rejected artifactIdentity
+			if scenario == "existing-fifo" {
+				target = paths.readyFIFO
+				if err := syscall.Mkfifo(target, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				_, rejected, err = createGamescopeReadyFIFO(runtime, target)
+			} else if scenario == "existing-file" {
+				if err := os.WriteFile(target, []byte("replacement"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rejected, err = createGamescopeRegularArtifact(runtime, target, nil)
+			} else {
+				file, openError := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+				if openError != nil {
+					t.Fatal(openError)
+				}
+				defer file.Close()
+				if err := os.Rename(target, filepath.Join(directory, "original")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, []byte("replacement"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rejected, err = captureCreatedArtifact(runtime, target, int(file.Fd()))
+			}
+			if err == nil {
+				t.Fatal("invalid creation was admitted")
+			}
+			owned, err := createGamescopeRegularArtifact(runtime, paths.limiterFile, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			known := map[string]artifactIdentity{paths.limiterFile: owned}
+			// Match the callers: a zero return would lose the detected rejection.
+			if rejected != (artifactIdentity{}) {
+				known[target] = rejected
+			}
+			if err := cleanupGamescopeRuntimeArtifacts(runtime, paths, known, true); err == nil {
+				t.Fatal("partial cleanup adopted a rejected creation")
+			}
+			if _, err := os.Lstat(target); err != nil {
+				t.Fatalf("detected replacement was removed: %v", err)
+			}
+			if _, err := os.Lstat(paths.limiterFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("owned companion artifact was not cleaned: %v", err)
+			}
+		})
 	}
 }
 
@@ -622,6 +696,39 @@ func TestUnexpectedGamescopeArtifactIsRetainedAndReported(t *testing.T) {
 	}
 	stopRealProvider(t, outer)
 	requireEmptyRuntime(t, runtimePath)
+}
+
+func TestFinalCaptureFailureRetainsReplacementDuringPartialCleanup(t *testing.T) {
+	runtimePath := privateDisplayRuntimeDirectoryForTest(t)
+	display := displayRequest("final-capture-replacement", "polaris-capture-final-replacement")
+	outer, _ := startNestedOuterDisplay(t, runtimePath, display)
+	defer stopRealProvider(t, outer)
+	before := snapshotDirectoryIdentities(t, runtimePath)
+	request := nestedRequestFromDisplay(display, "polaris-wayland-final-replacement")
+	options := fakeNestedOptions(t, runtimePath, "replace-limiter")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	providerContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = runNestedCompositor(providerContext, request, writer, options)
+	ready, readError := io.ReadAll(reader)
+	_, limiterName, _ := gamescopeScopedNames(request.RuntimeNamespace)
+	replacement := filepath.Join(runtimePath, limiterName)
+	content, contentError := os.ReadFile(replacement)
+	if err == nil || readError != nil || len(ready) != 0 || contentError != nil || string(content) != "retain" {
+		t.Fatalf("final capture rejection was lost during cleanup: %v, %q, %v, %q, %v", err, ready, readError, content, contentError)
+	}
+	if err := os.Remove(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotDirectoryIdentities(t, runtimePath); !reflect.DeepEqual(after, before) {
+		t.Fatalf("owned companions were not cleaned independently: before=%v after=%v", before, after)
+	}
+	requireDirectoryEmpty(t, options.x11SocketDirectory)
+	requireDirectoryEmpty(t, options.x11LockDirectory)
 }
 
 func TestNestedCleanupRefusesReplacementAlias(t *testing.T) {

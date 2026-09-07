@@ -114,7 +114,7 @@ func displayProducerArguments(
 	}
 	return append(arguments,
 		displayCaps(request, software), "!", "unixfdsink",
-		"socket-path=" + mediaSocket,
+		"socket-path="+mediaSocket,
 		"sync=false", "async=false", "enable-last-sample=false", "wait-for-connection=false",
 	)
 }
@@ -380,7 +380,7 @@ func prepareDisplayArtifacts(
 		if err := runtime.verify(); err != nil {
 			return known, err
 		}
-		identity, err := lstatIdentity(artifact.path)
+		identity, err := runtime.pins.capture(artifact.path)
 		if err != nil || !validDisplayArtifact(identity, artifact.mode, runtime.uid) {
 			return known, errors.New("runtime display artifact changed before capture")
 		}
@@ -392,7 +392,7 @@ func prepareDisplayArtifacts(
 	if err := os.Link(candidate.sourceSocket, targetSocket); err != nil {
 		return known, errors.New("runtime display socket alias could not be created")
 	}
-	targetIdentity, err := lstatIdentity(targetSocket)
+	targetIdentity, err := runtime.pins.capture(targetSocket)
 	if err != nil || !sameIdentity(targetIdentity, known[candidate.sourceSocket]) {
 		return known, errors.New("runtime display socket alias identity is invalid")
 	}
@@ -467,7 +467,7 @@ func capturePartialDisplayArtifacts(
 		if !displayArtifactMatchesName(path, targetSocket, mediaSocket) {
 			continue
 		}
-		identity, err := lstatIdentity(path)
+		identity, err := runtime.pins.capture(path)
 		if err != nil || identity.uid != runtime.uid || identity.mode&0o077 != 0 {
 			return known, errors.New("runtime display partial artifact is invalid")
 		}
