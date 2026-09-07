@@ -6,26 +6,62 @@
 #include "src/rtsp.h"
 #include "src/stream.h"
 
+extern "C" {
+  #include <moonlight-common-c/src/Input.h>
+}
+
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <gtest/gtest.h>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
-  using namespace std::chrono_literals;
   using namespace multiseat;
   using namespace multiseat::input;
+
+  using coordinator_bytes_t = std::vector<std::uint8_t>;
+
+  void coordinator_append_u16_le(
+    coordinator_bytes_t &bytes,
+    std::uint16_t value
+  ) {
+    bytes.push_back(static_cast<std::uint8_t>(value));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 8U));
+  }
+
+  void coordinator_append_u32_le(
+    coordinator_bytes_t &bytes,
+    std::uint32_t value
+  ) {
+    for (std::size_t index = 0; index < 4; ++index) {
+      bytes.push_back(static_cast<std::uint8_t>(value >> (index * 8U)));
+    }
+  }
+
+  coordinator_bytes_t coordinator_keyboard_packet(std::uint16_t key) {
+    coordinator_bytes_t body {0};
+    coordinator_append_u16_le(body, key);
+    body.push_back(0);
+    coordinator_append_u16_le(body, 0);
+
+    coordinator_bytes_t packet;
+    const auto declared = static_cast<std::uint32_t>(body.size() + 4);
+    packet.push_back(static_cast<std::uint8_t>(declared >> 24U));
+    packet.push_back(static_cast<std::uint8_t>(declared >> 16U));
+    packet.push_back(static_cast<std::uint8_t>(declared >> 8U));
+    packet.push_back(static_cast<std::uint8_t>(declared));
+    coordinator_append_u32_le(packet, KEY_DOWN_EVENT_MAGIC);
+    packet.insert(packet.end(), body.begin(), body.end());
+    return packet;
+  }
 
   seat_handle_t coordinator_handle(
     std::uint64_t generation,
@@ -111,6 +147,9 @@ namespace {
       std::string_view input_seat
     ) override {
       ++destroy_calls;
+      if (throw_destroy) {
+        throw std::runtime_error {"injected destroy failure"};
+      }
       if (reject_destroy) {
         return backend_result_e::rejected;
       }
@@ -150,6 +189,7 @@ namespace {
     std::size_t destroy_calls = 0;
     std::size_t route_calls = 0;
     std::size_t inventory_calls = 0;
+    bool throw_destroy = false;
     bool reject_destroy = false;
   };
 
@@ -573,7 +613,7 @@ namespace {
     );
   }
 
-  TEST(MultiseatMoonlightCoordinator, ShutdownWaitsForBoundStreamAndClosesGate) {
+  TEST(MultiseatMoonlightCoordinator, ShutdownReturnsForBoundStreamAndClosesGate) {
     auto factory = std::make_shared<coordinator_backend_factory_state_t>();
     auto created = moonlight_session_coordinator_t::create(
       {.enabled = true},
@@ -600,27 +640,33 @@ namespace {
       moonlight_session_activation_status_e::bound
     );
 
-    auto shutdown = std::async(std::launch::async, [&created]() {
-      return created.coordinator->shutdown();
-    });
+    const auto quiesced = created.coordinator->quiesce();
+    EXPECT_EQ(
+      quiesced.status,
+      moonlight_coordinator_quiesce_status_e::streams_pending
+    );
+    EXPECT_EQ(quiesced.claimed_sessions, 1U);
+    EXPECT_EQ(quiesced.activations_in_flight, 0U);
+    const auto pending = created.coordinator->shutdown();
     auto control_launch = coordinator_launch(405, 505);
     auto control_stream = coordinator_stream(*control_launch);
-    auto gate_closed = false;
-    for (auto attempt = 0; attempt < 200 && !gate_closed; ++attempt) {
-      gate_closed =
-        activate_registered_moonlight_session(*control_stream) ==
-        moonlight_session_activation_status_e::gate_closed;
-      if (!gate_closed) {
-        std::this_thread::sleep_for(1ms);
-      }
-    }
-    const auto waited_for_owner = shutdown.wait_for(20ms) ==
-                                  std::future_status::timeout;
-    stream::session::stop(*stream);
-    const auto report = shutdown.get();
+    const auto gate_closed =
+      activate_registered_moonlight_session(*control_stream) ==
+      moonlight_session_activation_status_e::gate_closed;
 
+    EXPECT_EQ(
+      pending.status,
+      moonlight_coordinator_shutdown_status_e::streams_pending
+    );
+    EXPECT_TRUE(created.coordinator->shutting_down());
+    EXPECT_FALSE(created.coordinator->closed());
+    EXPECT_TRUE(created.coordinator->activation_installed());
+    EXPECT_EQ(created.coordinator->claimed_sessions(), 1U);
     EXPECT_TRUE(gate_closed);
-    EXPECT_TRUE(waited_for_owner);
+
+    stream::session::stop(*stream);
+    const auto report = created.coordinator->shutdown();
+
     EXPECT_EQ(report.status, moonlight_coordinator_shutdown_status_e::closed);
     EXPECT_EQ(report.released_allocations, 1U);
     EXPECT_EQ(report.cleanup_failures, 0U);
@@ -629,6 +675,108 @@ namespace {
     EXPECT_EQ(created.coordinator->feedback_subscriptions(), 0U);
     EXPECT_TRUE(created.coordinator->closed());
     EXPECT_FALSE(moonlight_session_activation_gate_installed());
+  }
+
+  TEST(
+    MultiseatMoonlightCoordinator,
+    QuiesceKeepsExactAllocationViewReadableUntilClosed
+  ) {
+    auto factory = std::make_shared<coordinator_backend_factory_state_t>();
+    auto created = moonlight_session_coordinator_t::create(
+      {.enabled = true},
+      coordinator_backend_factory(factory)
+    );
+    ASSERT_TRUE(created.coordinator);
+    ASSERT_TRUE(created.coordinator->reconcile_inputs({}).report.admission_ready);
+    const auto expectation = coordinator_expectation(72);
+    ASSERT_TRUE(created.coordinator->prepare_input(expectation).input.prepared());
+    auto launch = coordinator_launch(472, 572);
+    ASSERT_EQ(
+      created.coordinator->select_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
+      moonlight_launch_selection_status_e::registered
+    );
+    auto stream = coordinator_stream(*launch);
+    ASSERT_TRUE(stream);
+    ASSERT_EQ(
+      activate_registered_moonlight_session(*stream),
+      moonlight_session_activation_status_e::bound
+    );
+
+    EXPECT_EQ(
+      created.coordinator->quiesce().status,
+      moonlight_coordinator_quiesce_status_e::streams_pending
+    );
+    EXPECT_TRUE(created.coordinator->shutting_down());
+    const auto during_quiesce = created.coordinator->input_allocation(
+      expectation.handle
+    );
+    ASSERT_TRUE(during_quiesce);
+    EXPECT_EQ(during_quiesce->handle, expectation.handle);
+    EXPECT_EQ(during_quiesce->input_seat, expectation.input_seat);
+    EXPECT_EQ(
+      created.coordinator->shutdown().status,
+      moonlight_coordinator_shutdown_status_e::streams_pending
+    );
+    EXPECT_TRUE(created.coordinator->input_allocation(expectation.handle));
+
+    stream::session::stop(*stream);
+    const auto report = created.coordinator->shutdown();
+    EXPECT_EQ(report.status, moonlight_coordinator_shutdown_status_e::closed);
+    EXPECT_EQ(report.released_allocations, 1U);
+    EXPECT_TRUE(created.coordinator->closed());
+    EXPECT_FALSE(created.coordinator->input_allocation(expectation.handle));
+  }
+
+  TEST(
+    MultiseatMoonlightCoordinator,
+    DirectDestructorRetainsAuthorityGraphForBoundStream
+  ) {
+    auto factory = std::make_shared<coordinator_backend_factory_state_t>();
+    auto created = moonlight_session_coordinator_t::create(
+      {.enabled = true},
+      coordinator_backend_factory(factory)
+    );
+    ASSERT_TRUE(created.coordinator);
+    ASSERT_TRUE(created.coordinator->reconcile_inputs({}).report.admission_ready);
+    const auto expectation = coordinator_expectation(70);
+    ASSERT_TRUE(created.coordinator->prepare_input(expectation).input.prepared());
+    auto launch = coordinator_launch(470, 570);
+    ASSERT_EQ(
+      created.coordinator->select_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
+      moonlight_launch_selection_status_e::registered
+    );
+    auto stream = coordinator_stream(*launch);
+    ASSERT_TRUE(stream);
+    ASSERT_EQ(
+      activate_registered_moonlight_session(*stream),
+      moonlight_session_activation_status_e::bound
+    );
+
+    created.coordinator.reset();
+
+    EXPECT_FALSE(moonlight_session_activation_gate_installed());
+    ASSERT_NE(factory->backend, nullptr);
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(
+      *stream,
+      coordinator_keyboard_packet(0x41)
+    ));
+    EXPECT_EQ(factory->backend->route_calls, 1U);
+    stream::session::stop(*stream);
+    EXPECT_FALSE(stream::session::route_multiseat_input_for_tests(
+      *stream,
+      coordinator_keyboard_packet(0x42)
+    ));
+    EXPECT_EQ(factory->backend->route_calls, 1U);
   }
 
   TEST(MultiseatMoonlightCoordinator, FailedInputCleanupKeepsClosedGateForRetry) {
@@ -664,6 +812,40 @@ namespace {
     );
 
     factory->backend->reject_destroy = false;
+    const auto retried = created.coordinator->shutdown();
+    EXPECT_EQ(retried.status, moonlight_coordinator_shutdown_status_e::closed);
+    EXPECT_EQ(retried.released_allocations, 1U);
+    EXPECT_EQ(retried.cleanup_failures, 0U);
+    EXPECT_FALSE(moonlight_session_activation_gate_installed());
+  }
+
+  TEST(
+    MultiseatMoonlightCoordinator,
+    ThrowingInputCleanupReturnsRetryableReportFromNoexceptShutdown
+  ) {
+    auto factory = std::make_shared<coordinator_backend_factory_state_t>();
+    auto created = moonlight_session_coordinator_t::create(
+      {.enabled = true},
+      coordinator_backend_factory(factory)
+    );
+    ASSERT_TRUE(created.coordinator);
+    ASSERT_TRUE(created.coordinator->reconcile_inputs({}).report.admission_ready);
+    const auto expectation = coordinator_expectation(71);
+    ASSERT_TRUE(created.coordinator->prepare_input(expectation).input.prepared());
+    factory->backend->throw_destroy = true;
+
+    const auto failed = created.coordinator->shutdown();
+
+    EXPECT_EQ(
+      failed.status,
+      moonlight_coordinator_shutdown_status_e::input_cleanup_incomplete
+    );
+    EXPECT_EQ(failed.released_allocations, 0U);
+    EXPECT_EQ(failed.cleanup_failures, 1U);
+    EXPECT_TRUE(created.coordinator->shutting_down());
+    EXPECT_FALSE(created.coordinator->closed());
+
+    factory->backend->throw_destroy = false;
     const auto retried = created.coordinator->shutdown();
     EXPECT_EQ(retried.status, moonlight_coordinator_shutdown_status_e::closed);
     EXPECT_EQ(retried.released_allocations, 1U);

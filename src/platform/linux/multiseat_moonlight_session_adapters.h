@@ -75,8 +75,10 @@ namespace multiseat::input {
    * Process-local source of exact authenticated session bindings.
    *
    * Registration contains no raw authentication secret. A bridge receives at
-   * most one exclusive lease for a registered key. close() is an explicit
-   * process-shutdown barrier and must run after all owning bridges are closed.
+   * most one exclusive lease for a registered key. quiesce() closes new
+   * registration and attachment without waiting; finish_close() succeeds only
+   * after every existing bridge claim has detached. close() remains the
+   * synchronous barrier for owners which have already proved that condition.
    */
   class moonlight_session_binding_registry_t final:
       public moonlight_session_binding_source_t {
@@ -104,6 +106,8 @@ namespace multiseat::input {
       const moonlight_control_session_key_t &key
     ) override;
 
+    [[nodiscard]] std::size_t quiesce() noexcept;
+    [[nodiscard]] bool finish_close() noexcept;
     void close() noexcept;
     [[nodiscard]] std::size_t registered_sessions() const;
     [[nodiscard]] std::size_t claimed_sessions() const;

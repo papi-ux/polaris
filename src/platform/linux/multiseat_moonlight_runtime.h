@@ -53,7 +53,11 @@ namespace multiseat::input {
    * An enabled owner installs both the existing activation gate and one
    * lifecycle target used by RTSP timeout/abort and selected-stream teardown.
    * The opaque dependency owner, when supplied, outlives the coordinator and
-   * its backend.
+   * its backend. Shutdown is retryable: its quiesce phase returns immediately
+   * while an activation or claimed stream remains. The exact-generation
+   * allocation view stays readable through quiesce and a pending shutdown so
+   * authoritative worker inventory can still prove absence; it returns no
+   * authority after release or once shutdown has closed.
    */
   class moonlight_session_runtime_t final {
   public:
@@ -105,6 +109,8 @@ namespace multiseat::input {
       moonlight_launch_selection_key_t key
     );
 
+    /** Close new launch selection and activation without waiting for streams. */
+    [[nodiscard]] moonlight_coordinator_quiesce_report_t quiesce() noexcept;
     [[nodiscard]] moonlight_coordinator_shutdown_report_t shutdown() noexcept;
 
     [[nodiscard]] bool installed() const;
@@ -127,6 +133,8 @@ namespace multiseat::input {
     struct impl_t;
 
     explicit moonlight_session_runtime_t(std::unique_ptr<impl_t> impl);
+    [[nodiscard]] moonlight_coordinator_quiesce_report_t
+    quiesce_locked() noexcept;
 
     std::unique_ptr<impl_t> impl_;
   };

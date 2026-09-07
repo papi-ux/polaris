@@ -9,9 +9,56 @@
   #include "src/rtsp.h"
 
   #include <algorithm>
+  #include <mutex>
   #include <utility>
+  #include <vector>
 
 namespace multiseat::input {
+
+  struct moonlight_session_coordinator_t::impl_t {
+    struct selection_owner_t {
+      moonlight_launch_selection_key_t key;
+      seat_handle_t handle;
+      std::shared_ptr<rtsp_stream::launch_session_t> launch;
+      bool cancelled = false;
+      std::unique_ptr<moonlight_launch_selection_t> selection;
+    };
+
+    impl_t(
+      moonlight_session_coordinator_options_t options,
+      std::shared_ptr<moonlight_controller_feedback_hub_t> feedback_hub,
+      std::unique_ptr<backend_t> backend
+    ):
+        options_(options),
+        feedback_hub_(std::move(feedback_hub)),
+        backend_(std::move(backend)),
+        authority_(*backend_),
+        activation_gate_(
+          std::make_shared<moonlight_session_activation_gate_t>(
+            options_.enabled,
+            authority_,
+            binding_registry_,
+            feedback_hub_
+          )
+        ) {
+    }
+
+    // Declaration order is the ownership contract: reverse destruction keeps
+    // the feedback hub and backend alive beyond authority and session state.
+    const moonlight_session_coordinator_options_t options_;
+    const std::shared_ptr<moonlight_controller_feedback_hub_t> feedback_hub_;
+    const std::unique_ptr<backend_t> backend_;
+    authority_t authority_;
+    moonlight_session_binding_registry_t binding_registry_;
+    const std::shared_ptr<moonlight_session_activation_gate_t> activation_gate_;
+    std::unique_ptr<moonlight_activation_installation_t>
+      activation_installation_;
+    mutable std::mutex state_mutex_;
+    std::mutex shutdown_mutex_;
+    std::vector<selection_owner_t> selections_;
+    bool shutting_down_ = false;
+    bool closed_ = false;
+  };
 
   moonlight_coordinator_create_result_t
   moonlight_session_coordinator_t::create(
@@ -54,7 +101,7 @@ namespace multiseat::input {
     }
 
     auto installed = install_moonlight_session_activation_gate(
-      coordinator->activation_gate_
+      coordinator->impl_->activation_gate_
     );
     const auto activation_status = installed.status;
     if (activation_status != moonlight_activation_install_status_e::installed ||
@@ -65,7 +112,7 @@ namespace multiseat::input {
         .activation_status = activation_status,
       };
     }
-    coordinator->activation_installation_ = std::move(installed.installation);
+    coordinator->impl_->activation_installation_ = std::move(installed.installation);
     return {
       .status = moonlight_coordinator_create_status_e::ready_enabled,
       .activation_status = activation_status,
@@ -78,30 +125,43 @@ namespace multiseat::input {
     std::shared_ptr<moonlight_controller_feedback_hub_t> feedback_hub,
     std::unique_ptr<backend_t> backend
   ):
-      options_(options),
-      feedback_hub_(std::move(feedback_hub)),
-      backend_(std::move(backend)),
-      authority_(*backend_),
-      activation_gate_(
-        std::make_shared<moonlight_session_activation_gate_t>(
-          options_.enabled,
-          authority_,
-          binding_registry_,
-          feedback_hub_
-        )
-      ) {
+      impl_(std::make_unique<impl_t>(
+        options,
+        std::move(feedback_hub),
+        std::move(backend)
+      )) {
   }
 
   moonlight_session_coordinator_t::~moonlight_session_coordinator_t() {
-    (void) shutdown();
+    if (!impl_) {
+      return;
+    }
+    const auto report = shutdown();
+    if (report.status == moonlight_coordinator_shutdown_status_e::closed ||
+        report.status ==
+          moonlight_coordinator_shutdown_status_e::already_closed) {
+      return;
+    }
+
+    // The public owner may be destroyed directly. Remove its process-global
+    // entry point, then retain the complete raw-reference graph so an already
+    // bound stream or activation can never outlive authority or its backend.
+    {
+      std::scoped_lock state_lock {impl_->state_mutex_};
+      if (impl_->activation_installation_) {
+        impl_->activation_installation_->close();
+        impl_->activation_installation_.reset();
+      }
+    }
+    (void) impl_.release();
   }
 
   moonlight_coordinator_operation_status_e
   moonlight_session_coordinator_t::operation_status_locked() const {
-    if (shutting_down_ || closed_) {
+    if (impl_->shutting_down_ || impl_->closed_) {
       return moonlight_coordinator_operation_status_e::shutting_down;
     }
-    return options_.enabled ?
+    return impl_->options_.enabled ?
              moonlight_coordinator_operation_status_e::applied :
              moonlight_coordinator_operation_status_e::disabled;
   }
@@ -110,14 +170,14 @@ namespace multiseat::input {
   moonlight_session_coordinator_t::reconcile_inputs(
     const std::vector<expectation_t> &expected
   ) {
-    std::scoped_lock lock {state_mutex_};
+    std::scoped_lock lock {impl_->state_mutex_};
     const auto status = operation_status_locked();
     if (status != moonlight_coordinator_operation_status_e::applied) {
       return {.status = status};
     }
     if (std::any_of(
-          selections_.begin(),
-          selections_.end(),
+          impl_->selections_.begin(),
+          impl_->selections_.end(),
           [&expected](const auto &owner) {
             return std::none_of(
               expected.begin(),
@@ -135,7 +195,7 @@ namespace multiseat::input {
     }
     return {
       .status = status,
-      .report = authority_.reconcile(expected),
+      .report = impl_->authority_.reconcile(expected),
     };
   }
 
@@ -143,14 +203,14 @@ namespace multiseat::input {
   moonlight_session_coordinator_t::prepare_input(
     const expectation_t &expectation
   ) {
-    std::scoped_lock lock {state_mutex_};
+    std::scoped_lock lock {impl_->state_mutex_};
     const auto status = operation_status_locked();
     if (status != moonlight_coordinator_operation_status_e::applied) {
       return {.status = status};
     }
     return {
       .status = status,
-      .input = authority_.prepare(expectation),
+      .input = impl_->authority_.prepare(expectation),
     };
   }
 
@@ -158,14 +218,14 @@ namespace multiseat::input {
   moonlight_session_coordinator_t::release_input(
     const seat_handle_t &handle
   ) {
-    std::scoped_lock lock {state_mutex_};
+    std::scoped_lock lock {impl_->state_mutex_};
     const auto status = operation_status_locked();
     if (status != moonlight_coordinator_operation_status_e::applied) {
       return {.status = status};
     }
     if (std::any_of(
-          selections_.begin(),
-          selections_.end(),
+          impl_->selections_.begin(),
+          impl_->selections_.end(),
           [&handle](const auto &owner) {
             return owner.handle == handle;
           }
@@ -177,7 +237,7 @@ namespace multiseat::input {
     }
     return {
       .status = status,
-      .input_status = authority_.release(handle),
+      .input_status = impl_->authority_.release(handle),
     };
   }
 
@@ -202,11 +262,11 @@ namespace multiseat::input {
     std::string_view expected_input_seat,
     bool controller_feedback
   ) {
-    std::scoped_lock lock {state_mutex_};
-    if (shutting_down_ || closed_) {
+    std::scoped_lock lock {impl_->state_mutex_};
+    if (impl_->shutting_down_ || impl_->closed_) {
       return moonlight_launch_selection_status_e::gate_closed;
     }
-    if (!options_.enabled) {
+    if (!impl_->options_.enabled) {
       return moonlight_launch_selection_status_e::gate_disabled;
     }
     if (!launch) {
@@ -217,7 +277,7 @@ namespace multiseat::input {
       return moonlight_launch_selection_status_e::invalid_selection;
     }
 
-    auto selected = activation_gate_->register_selection(
+    auto selected = impl_->activation_gate_->register_selection(
       *key,
       handle,
       expected_input_seat,
@@ -227,7 +287,7 @@ namespace multiseat::input {
         !selected.selection) {
       return selected.status;
     }
-    selections_.push_back({
+    impl_->selections_.push_back({
       .key = *key,
       .handle = std::move(handle),
       .launch = launch,
@@ -240,11 +300,11 @@ namespace multiseat::input {
   moonlight_session_coordinator_t::cancel_launch(
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch
   ) {
-    std::scoped_lock lock {state_mutex_};
-    if (shutting_down_ || closed_) {
+    std::scoped_lock lock {impl_->state_mutex_};
+    if (impl_->shutting_down_ || impl_->closed_) {
       return moonlight_coordinator_cancel_status_e::coordinator_shutting_down;
     }
-    if (!options_.enabled) {
+    if (!impl_->options_.enabled) {
       return moonlight_coordinator_cancel_status_e::coordinator_disabled;
     }
     if (!launch) {
@@ -255,13 +315,13 @@ namespace multiseat::input {
       return moonlight_coordinator_cancel_status_e::invalid_launch;
     }
     const auto found = std::find_if(
-      selections_.begin(),
-      selections_.end(),
+      impl_->selections_.begin(),
+      impl_->selections_.end(),
       [&key](const auto &owner) {
         return owner.key == *key;
       }
     );
-    if (found == selections_.end()) {
+    if (found == impl_->selections_.end()) {
       return moonlight_coordinator_cancel_status_e::launch_not_found;
     }
     if (found->launch != launch) {
@@ -279,11 +339,11 @@ namespace multiseat::input {
   moonlight_session_coordinator_t::retire_cancelled_launch(
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch
   ) {
-    std::scoped_lock lock {state_mutex_};
-    if (shutting_down_ || closed_) {
+    std::scoped_lock lock {impl_->state_mutex_};
+    if (impl_->shutting_down_ || impl_->closed_) {
       return moonlight_coordinator_retire_status_e::coordinator_shutting_down;
     }
-    if (!options_.enabled) {
+    if (!impl_->options_.enabled) {
       return moonlight_coordinator_retire_status_e::coordinator_disabled;
     }
     if (!launch) {
@@ -294,13 +354,13 @@ namespace multiseat::input {
       return moonlight_coordinator_retire_status_e::invalid_launch;
     }
     const auto found = std::find_if(
-      selections_.begin(),
-      selections_.end(),
+      impl_->selections_.begin(),
+      impl_->selections_.end(),
       [&key](const auto &owner) {
         return owner.key == *key;
       }
     );
-    if (found == selections_.end()) {
+    if (found == impl_->selections_.end()) {
       return moonlight_coordinator_retire_status_e::launch_not_found;
     }
     if (found->launch != launch) {
@@ -312,86 +372,122 @@ namespace multiseat::input {
     // The registry currently exposes a process-wide claim count. Refuse
     // conservatively while any selected stream can still reference authority;
     // a later seat-keyed teardown edge can narrow this without weakening it.
-    if (binding_registry_.claimed_sessions() != 0) {
+    if (impl_->binding_registry_.claimed_sessions() != 0) {
       return moonlight_coordinator_retire_status_e::stream_still_bound;
     }
     found->selection->cancel();
     found->selection->close();
-    selections_.erase(found);
+    impl_->selections_.erase(found);
     return moonlight_coordinator_retire_status_e::retired;
   }
 
   moonlight_coordinator_shutdown_report_t
   moonlight_session_coordinator_t::shutdown() noexcept {
-    std::scoped_lock shutdown_lock {shutdown_mutex_};
-    {
-      std::scoped_lock state_lock {state_mutex_};
-      if (closed_) {
-        return {
-          .status = moonlight_coordinator_shutdown_status_e::already_closed,
-        };
-      }
-      shutting_down_ = true;
-    }
-
-    // Keep the closed gate installed until every referenced dependency is
-    // quiescent. New RTSP sessions fail closed throughout this interval.
-    activation_gate_->close();
-    binding_registry_.close();
-    feedback_hub_->close();
-
     moonlight_coordinator_shutdown_report_t report;
-    for (const auto &allocation : authority_.allocations()) {
-      const auto released = authority_.release(allocation.handle);
-      if (released == status_e::applied) {
-        ++report.released_allocations;
-      } else {
-        ++report.cleanup_failures;
+    try {
+      std::scoped_lock shutdown_lock {impl_->shutdown_mutex_};
+      const auto quiesced = quiesce_locked();
+      if (quiesced.status ==
+          moonlight_coordinator_quiesce_status_e::already_closed) {
+        report.status =
+          moonlight_coordinator_shutdown_status_e::already_closed;
+        return report;
       }
-    }
-    if (report.cleanup_failures != 0) {
-      report.status =
-        moonlight_coordinator_shutdown_status_e::input_cleanup_incomplete;
+      if (quiesced.status ==
+          moonlight_coordinator_quiesce_status_e::streams_pending) {
+        report.status = moonlight_coordinator_shutdown_status_e::streams_pending;
+        return report;
+      }
+      if (!impl_->activation_gate_->finish_close() ||
+          !impl_->binding_registry_.finish_close()) {
+        report.status = moonlight_coordinator_shutdown_status_e::streams_pending;
+        return report;
+      }
+
+      impl_->feedback_hub_->close();
+
+      const auto cleanup = impl_->authority_.release_all();
+      report.released_allocations = cleanup.released_allocations;
+      report.cleanup_failures = cleanup.cleanup_failures;
+      if (report.cleanup_failures != 0) {
+        return report;
+      }
+
+      {
+        std::scoped_lock state_lock {impl_->state_mutex_};
+        impl_->selections_.clear();
+        if (impl_->activation_installation_) {
+          impl_->activation_installation_->close();
+          impl_->activation_installation_.reset();
+        }
+        impl_->closed_ = true;
+        report.status = moonlight_coordinator_shutdown_status_e::closed;
+      }
+      return report;
+    } catch (...) {
+      ++report.cleanup_failures;
       return report;
     }
+  }
 
+  moonlight_coordinator_quiesce_report_t
+  moonlight_session_coordinator_t::quiesce() noexcept {
+    std::scoped_lock shutdown_lock {impl_->shutdown_mutex_};
+    return quiesce_locked();
+  }
+
+  moonlight_coordinator_quiesce_report_t
+  moonlight_session_coordinator_t::quiesce_locked() noexcept {
     {
-      std::scoped_lock state_lock {state_mutex_};
-      selections_.clear();
-      if (activation_installation_) {
-        activation_installation_->close();
-        activation_installation_.reset();
+      std::scoped_lock state_lock {impl_->state_mutex_};
+      if (impl_->closed_) {
+        return {
+          .status = moonlight_coordinator_quiesce_status_e::already_closed,
+        };
       }
-      closed_ = true;
-      report.status = moonlight_coordinator_shutdown_status_e::closed;
+      impl_->shutting_down_ = true;
     }
-    return report;
+
+    // Closing the registry first is the commit barrier. An activation which
+    // has not already claimed a binding cannot acquire one after this point;
+    // closing the gate then prevents any new activation from entering.
+    const auto claimed_sessions = impl_->binding_registry_.quiesce();
+    const auto activations_in_flight = impl_->activation_gate_->quiesce();
+    const auto status = claimed_sessions != 0 || activations_in_flight != 0 ?
+                          moonlight_coordinator_quiesce_status_e::streams_pending :
+                          moonlight_coordinator_quiesce_status_e::quiesced;
+    return {
+      .status = status,
+      .claimed_sessions = claimed_sessions,
+      .activations_in_flight = activations_in_flight,
+    };
   }
 
   bool moonlight_session_coordinator_t::enabled() const {
-    return options_.enabled;
+    return impl_->options_.enabled;
   }
 
   bool moonlight_session_coordinator_t::activation_installed() const {
-    std::scoped_lock lock {state_mutex_};
-    return activation_installation_ && activation_installation_->installed();
+    std::scoped_lock lock {impl_->state_mutex_};
+    return impl_->activation_installation_ &&
+           impl_->activation_installation_->installed();
   }
 
   bool moonlight_session_coordinator_t::shutting_down() const {
-    std::scoped_lock lock {state_mutex_};
-    return shutting_down_;
+    std::scoped_lock lock {impl_->state_mutex_};
+    return impl_->shutting_down_;
   }
 
   bool moonlight_session_coordinator_t::closed() const {
-    std::scoped_lock lock {state_mutex_};
-    return closed_;
+    std::scoped_lock lock {impl_->state_mutex_};
+    return impl_->closed_;
   }
 
   std::size_t moonlight_session_coordinator_t::active_launches() const {
-    std::scoped_lock lock {state_mutex_};
+    std::scoped_lock lock {impl_->state_mutex_};
     return std::count_if(
-      selections_.begin(),
-      selections_.end(),
+      impl_->selections_.begin(),
+      impl_->selections_.end(),
       [](const auto &owner) {
         return !owner.cancelled;
       }
@@ -399,37 +495,38 @@ namespace multiseat::input {
   }
 
   std::size_t moonlight_session_coordinator_t::retained_launches() const {
-    std::scoped_lock lock {state_mutex_};
-    return selections_.size();
+    std::scoped_lock lock {impl_->state_mutex_};
+    return impl_->selections_.size();
   }
 
   std::size_t moonlight_session_coordinator_t::input_allocations() const {
-    std::scoped_lock lock {state_mutex_};
-    return authority_.allocations().size();
+    std::scoped_lock lock {impl_->state_mutex_};
+    return impl_->authority_.allocations().size();
   }
 
   std::optional<allocation_t>
   moonlight_session_coordinator_t::input_allocation(
     const seat_handle_t &handle
   ) const {
-    std::scoped_lock lock {state_mutex_};
-    if (operation_status_locked() !=
-        moonlight_coordinator_operation_status_e::applied) {
+    std::scoped_lock lock {impl_->state_mutex_};
+    // Readable while shutting down: the authoritative worker inventory that
+    // proves a seat's worker is gone runs after quiesce and before close.
+    if (!impl_->options_.enabled || impl_->closed_) {
       return std::nullopt;
     }
-    return authority_.allocation(handle);
+    return impl_->authority_.allocation(handle);
   }
 
   std::size_t moonlight_session_coordinator_t::registered_sessions() const {
-    return binding_registry_.registered_sessions();
+    return impl_->binding_registry_.registered_sessions();
   }
 
   std::size_t moonlight_session_coordinator_t::claimed_sessions() const {
-    return binding_registry_.claimed_sessions();
+    return impl_->binding_registry_.claimed_sessions();
   }
 
   std::size_t moonlight_session_coordinator_t::feedback_subscriptions() const {
-    return feedback_hub_->subscriptions();
+    return impl_->feedback_hub_->subscriptions();
   }
 
 }  // namespace multiseat::input

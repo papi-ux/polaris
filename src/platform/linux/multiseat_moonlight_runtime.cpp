@@ -217,7 +217,22 @@ namespace multiseat::input {
   }
 
   moonlight_session_runtime_t::~moonlight_session_runtime_t() {
-    (void) shutdown();
+    const auto report = shutdown();
+    if (report.status == moonlight_coordinator_shutdown_status_e::closed ||
+        report.status ==
+          moonlight_coordinator_shutdown_status_e::already_closed) {
+      return;
+    }
+
+    // A direct owner which ignored the retry contract must not destroy input
+    // authority beneath a live stream. Remove the raw process-global target,
+    // then deliberately retain the closed-over graph as a last-resort fence.
+    uninstall_runtime(*this);
+    {
+      std::scoped_lock state_lock {impl_->state_mutex};
+      impl_->installed = false;
+    }
+    (void) impl_.release();
   }
 
   moonlight_runtime_create_result_t moonlight_session_runtime_t::create(
@@ -378,21 +393,18 @@ namespace multiseat::input {
   moonlight_coordinator_shutdown_report_t
   moonlight_session_runtime_t::shutdown() noexcept {
     std::scoped_lock shutdown_lock {impl_->shutdown_mutex};
-    {
-      std::scoped_lock state_lock {impl_->state_mutex};
-      if (impl_->closed) {
-        return {
-          .status = moonlight_coordinator_shutdown_status_e::already_closed,
-        };
-      }
-      impl_->shutting_down = true;
-      for (auto &entry : impl_->launches) {
-        entry.launch->cancel();
-        if (!entry.cancelled) {
-          (void) impl_->coordinator->cancel_launch(entry.launch);
-          entry.cancelled = true;
-        }
-      }
+    const auto quiesced = quiesce_locked();
+    if (quiesced.status ==
+        moonlight_coordinator_quiesce_status_e::already_closed) {
+      return {
+        .status = moonlight_coordinator_shutdown_status_e::already_closed,
+      };
+    }
+    if (quiesced.status ==
+        moonlight_coordinator_quiesce_status_e::streams_pending) {
+      return {
+        .status = moonlight_coordinator_shutdown_status_e::streams_pending,
+      };
     }
 
     uninstall_runtime(*this);
@@ -410,6 +422,30 @@ namespace multiseat::input {
       impl_->closed = true;
     }
     return report;
+  }
+
+  moonlight_coordinator_quiesce_report_t
+  moonlight_session_runtime_t::quiesce() noexcept {
+    std::scoped_lock shutdown_lock {impl_->shutdown_mutex};
+    return quiesce_locked();
+  }
+
+  moonlight_coordinator_quiesce_report_t
+  moonlight_session_runtime_t::quiesce_locked() noexcept {
+    {
+      std::scoped_lock state_lock {impl_->state_mutex};
+      if (impl_->closed) {
+        return {
+          .status = moonlight_coordinator_quiesce_status_e::already_closed,
+        };
+      }
+      impl_->shutting_down = true;
+      for (auto &entry : impl_->launches) {
+        entry.launch->cancel();
+        entry.cancelled = true;
+      }
+    }
+    return impl_->coordinator->quiesce();
   }
 
   bool moonlight_session_runtime_t::installed() const {
@@ -451,7 +487,11 @@ namespace multiseat::input {
     const seat_handle_t &handle
   ) const {
     std::scoped_lock lock {impl_->state_mutex};
-    if (impl_->shutting_down || impl_->closed) {
+    // Quiesce fences new selection and activation, but the exact allocation
+    // view must stay readable until close: authoritative worker inventory
+    // during a pending shutdown still has to prove that each listed worker
+    // owns exactly the input it was launched with before it may be released.
+    if (impl_->closed) {
       return std::nullopt;
     }
     return impl_->coordinator->input_allocation(handle);

@@ -11,7 +11,6 @@
   #include <cstddef>
   #include <functional>
   #include <memory>
-  #include <mutex>
   #include <optional>
   #include <string_view>
   #include <vector>
@@ -85,7 +84,21 @@ namespace multiseat::input {
   enum class moonlight_coordinator_shutdown_status_e {
     closed,
     already_closed,
+    streams_pending,
     input_cleanup_incomplete,
+  };
+
+  enum class moonlight_coordinator_quiesce_status_e {
+    quiesced,
+    streams_pending,
+    already_closed,
+  };
+
+  struct moonlight_coordinator_quiesce_report_t {
+    moonlight_coordinator_quiesce_status_e status =
+      moonlight_coordinator_quiesce_status_e::streams_pending;
+    std::size_t claimed_sessions = 0;
+    std::size_t activations_in_flight = 0;
   };
 
   struct moonlight_coordinator_shutdown_report_t {
@@ -112,13 +125,14 @@ namespace multiseat::input {
    * must outlive this coordinator. Default options do not install a gate and
    * every mutating operation remains disabled.
    *
-   * shutdown() closes the activation gate first, then waits for selected
-   * stream owners to detach from the registry before closing feedback and
-   * releasing input allocations. The coordinator must therefore outlive every
-   * selected stream, and callers must not invoke shutdown from a stream close
-   * callback which is needed to release that same claim. Enabled owners must
-   * observe a successful shutdown report before destruction; the destructor
-   * performs one best-effort shutdown pass but cannot retry rejected cleanup.
+   * quiesce() atomically rejects new registry claims and activation without
+   * waiting for an activation or stream already in flight. shutdown() returns
+   * streams_pending until those owners detach, then closes feedback and
+   * releases input allocations. Enabled owners must observe a successful
+   * shutdown report before destruction. As a last-resort safety fence, the
+   * destructor uninstalls the process-global gate and deliberately retains the
+   * complete dependency graph whenever a stream, activation, or input cleanup
+   * is still pending.
    */
   class moonlight_session_coordinator_t final {
   public:
@@ -168,12 +182,10 @@ namespace multiseat::input {
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch
     );
 
-    /**
-     * Synchronously quiesce and release owned dependencies.
-     *
-     * This waits for already-bound stream owners. A failed input teardown
-     * leaves the closed gate installed and can be retried safely.
-     */
+    /** Close new selection/claims and report existing owners without waiting. */
+    [[nodiscard]] moonlight_coordinator_quiesce_report_t quiesce() noexcept;
+
+    /** Release dependencies only after quiesce reports no stream owner. */
     [[nodiscard]] moonlight_coordinator_shutdown_report_t shutdown() noexcept;
 
     [[nodiscard]] bool enabled() const;
@@ -183,6 +195,11 @@ namespace multiseat::input {
     [[nodiscard]] std::size_t active_launches() const;
     [[nodiscard]] std::size_t retained_launches() const;
     [[nodiscard]] std::size_t input_allocations() const;
+    /**
+     * Exact live allocation for a seat. Stays readable through quiesce and a
+     * pending shutdown so worker inventory can prove absence; empty when
+     * disabled, after release, or once shutdown has closed.
+     */
     [[nodiscard]] std::optional<allocation_t> input_allocation(
       const seat_handle_t &handle
     ) const;
@@ -191,13 +208,7 @@ namespace multiseat::input {
     [[nodiscard]] std::size_t feedback_subscriptions() const;
 
   private:
-    struct selection_owner_t {
-      moonlight_launch_selection_key_t key;
-      seat_handle_t handle;
-      std::shared_ptr<rtsp_stream::launch_session_t> launch;
-      bool cancelled = false;
-      std::unique_ptr<moonlight_launch_selection_t> selection;
-    };
+    struct impl_t;
 
     moonlight_session_coordinator_t(
       moonlight_session_coordinator_options_t options,
@@ -209,22 +220,10 @@ namespace multiseat::input {
     launch_key(const rtsp_stream::launch_session_t &launch);
     [[nodiscard]] moonlight_coordinator_operation_status_e
     operation_status_locked() const;
+    [[nodiscard]] moonlight_coordinator_quiesce_report_t
+    quiesce_locked() noexcept;
 
-    const moonlight_session_coordinator_options_t options_;
-    // Declaration order is the ownership contract: reverse destruction keeps
-    // the feedback hub and backend alive beyond authority and session state.
-    const std::shared_ptr<moonlight_controller_feedback_hub_t> feedback_hub_;
-    const std::unique_ptr<backend_t> backend_;
-    authority_t authority_;
-    moonlight_session_binding_registry_t binding_registry_;
-    const std::shared_ptr<moonlight_session_activation_gate_t> activation_gate_;
-    std::unique_ptr<moonlight_activation_installation_t>
-      activation_installation_;
-    mutable std::mutex state_mutex_;
-    std::mutex shutdown_mutex_;
-    std::vector<selection_owner_t> selections_;
-    bool shutting_down_ = false;
-    bool closed_ = false;
+    std::unique_ptr<impl_t> impl_;
   };
 
 }  // namespace multiseat::input

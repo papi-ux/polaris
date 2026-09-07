@@ -159,7 +159,8 @@ namespace {
       std::string_view input_seat
     ) override {
       destroyed.emplace_back(handle, input_seat);
-      if (throw_destroy) {
+      if (throw_destroy ||
+          (throw_destroy_for && *throw_destroy_for == handle)) {
         throw std::runtime_error {"private destroy detail"};
       }
       if (next_destroy != backend_result_e::applied &&
@@ -234,6 +235,7 @@ namespace {
     std::uint32_t next_minor = 64;
     std::size_t create_calls = 0;
     std::size_t inventory_calls = 0;
+    std::optional<seat_handle_t> throw_destroy_for;
     bool throw_create = false;
     bool throw_destroy = false;
     bool throw_route = false;
@@ -468,6 +470,53 @@ namespace {
     EXPECT_EQ(authority.release(expectation.handle), status_e::applied);
     EXPECT_FALSE(authority.allocation(expectation.handle).has_value());
     EXPECT_EQ(authority.release(expectation.handle), status_e::not_found);
+  }
+
+  TEST(MultiseatInputAuthority, ReleaseAllAttemptsEveryAllocationAndRetainsFailuresForRetry) {
+    fake_backend_t backend;
+    authority_t authority {backend};
+    open_admission(authority);
+    const auto first = expectation_for(0, 1);
+    const auto second = expectation_for(1, 2);
+    ASSERT_TRUE(authority.prepare(first).prepared());
+    ASSERT_TRUE(authority.prepare(second).prepared());
+
+    backend.throw_destroy_for = first.handle;
+    const auto partial = authority.release_all();
+    EXPECT_EQ(partial.released_allocations, 1U);
+    EXPECT_EQ(partial.cleanup_failures, 1U);
+    EXPECT_TRUE(authority.allocation(first.handle).has_value());
+    EXPECT_FALSE(authority.allocation(second.handle).has_value());
+    ASSERT_EQ(backend.destroyed.size(), 2U);
+    EXPECT_EQ(backend.destroyed[0].first, first.handle);
+    EXPECT_EQ(backend.destroyed[1].first, second.handle);
+
+    backend.throw_destroy_for.reset();
+    const auto retry = authority.release_all();
+    EXPECT_EQ(retry.released_allocations, 1U);
+    EXPECT_EQ(retry.cleanup_failures, 0U);
+    EXPECT_FALSE(authority.allocation(first.handle).has_value());
+    EXPECT_EQ(backend.allocations.size(), 0U);
+  }
+
+  TEST(MultiseatInputAuthority, ReleaseAllRetainsUnknownBackendResultsWithoutSpinning) {
+    fake_backend_t backend;
+    authority_t authority {backend};
+    open_admission(authority);
+    const auto expectation = expectation_for(0, 1);
+    ASSERT_TRUE(authority.prepare(expectation).prepared());
+
+    backend.next_destroy = static_cast<backend_result_e>(0x7f);
+    const auto unknown = authority.release_all();
+    EXPECT_EQ(unknown.released_allocations, 0U);
+    EXPECT_EQ(unknown.cleanup_failures, 1U);
+    EXPECT_TRUE(authority.allocation(expectation.handle).has_value());
+
+    backend.next_destroy = backend_result_e::applied;
+    const auto retry = authority.release_all();
+    EXPECT_EQ(retry.released_allocations, 1U);
+    EXPECT_EQ(retry.cleanup_failures, 0U);
+    EXPECT_FALSE(authority.allocation(expectation.handle).has_value());
   }
 
   TEST(MultiseatInputAuthority, ReconcileRetainsCurrentAndRemovesExactOrphan) {

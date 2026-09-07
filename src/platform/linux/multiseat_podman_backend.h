@@ -109,10 +109,18 @@ namespace multiseat::podman {
     const input::allocation_t &allocation
   );
 
+  struct gpu_device_t {
+    std::filesystem::path path;
+    character_device_identity_t admitted_identity;
+
+    bool operator==(const gpu_device_t &) const = default;
+  };
+
   struct gpu_t {
     std::string logical_gpu_id;
     std::filesystem::path render_node;
-    std::vector<std::filesystem::path> devices;
+    /** Exact immutable path/identity pairs admitted by the trusted catalog. */
+    std::vector<gpu_device_t> devices;
     std::uint32_t max_encoder_sessions = 1;
   };
 
@@ -195,9 +203,9 @@ namespace multiseat::podman {
     [[nodiscard]] const profile_t *profile_for(const std::string &profile_key) const;
     [[nodiscard]] bool workload_allowed(const workload_plan_t &workload) const;
     [[nodiscard]] bool base_host_ready() const;
+    [[nodiscard]] bool gpu_catalog_current() const;
     [[nodiscard]] bool launch_host_ready(
       const worker_launch_spec_t &spec,
-      const gpu_t &gpu,
       const input::allocation_t &input_allocation
     ) const;
     [[nodiscard]] bool valid_spec(const worker_launch_spec_t &spec) const;

@@ -224,7 +224,11 @@ shell, a Docker-compatible socket, host networking, host PID/IPC/UTS
 namespaces, wildcard devices, or privileged mode. It refuses to operate with
 effective UID zero and fails launch before invoking Podman if the executable,
 exact GPU/input character devices, or read-only game roots are not accessible
-to the current user.
+to the current user. Every GPU path is paired with the immutable filesystem,
+inode, and character-device identity admitted by the trusted construction
+boundary. The complete catalog is re-read against that baseline during launch
+readiness and again immediately before `podman run`; replacement, aliasing, or
+drift in an unrelated logical GPU therefore closes the whole admission edge.
 
 Each opaque profile is configured with one typed runtime and one exact image
 digest. The launch specification must match that mapping; neither the profile
@@ -267,12 +271,13 @@ global-device prototype cannot reconcile as a current worker.
 
 Inventory is two phase and bounded: an exact deployment-label listing returns
 full immutable container IDs, then one JSON inspection validates every ID,
-label, state, device binding, and cardinality. Podman stores device major/minor
-identity and may reconstruct an equivalent host path during inspection, so the
-backend reopens each inspected character node and requires the expected
-major/minor plus the exact worker-local destination. The complete GPU and input
+label, state, device binding, and cardinality. Podman may reconstruct an
+equivalent input host path, so input inspection still requires its expected
+major/minor plus the exact worker-local destination. GPU bindings are stricter:
+their host path and full identity must match the immutable admitted baseline,
+and the complete GPU catalog must still be disjoint. The complete GPU and input
 binding set and manifest fingerprint must match current authority; missing,
-extra, broadened, inaccessible, or changed bindings fail the inventory. A
+extra, broadened, inaccessible, aliased, or changed bindings fail the inventory. A
 running container remains `starting` until its health check is explicitly
 healthy. Invalid, truncated, contradictory, or oversized output fails the
 complete inventory rather than returning a partial view. Graceful teardown
@@ -714,8 +719,14 @@ still-installed activation gate, waits for live bindings and their feedback
 callbacks to detach, closes the registry and hub, and releases every exact input
 allocation. An indeterminate input teardown retains the closed gate for an
 explicit retry while the coordinator remains alive. A future production owner
-must observe a successful shutdown report before destroying the coordinator;
-its destructor can make only one best-effort cleanup pass.
+must observe a successful shutdown report before destroying the coordinator.
+If a direct owner ignores that contract, the destructor uninstalls the global
+activation entry point and deliberately retains the complete implementation
+graph while a stream, activation, or exact input cleanup is still pending, so
+no bridge can outlive its raw authority reference. Final input cleanup walks the
+authority in place rather than allocating a snapshot, and the public `noexcept`
+shutdown edge converts any remaining exception into an explicit retryable
+incomplete report.
 
 The Linux-only `multiseat_moonlight_input` configuration now constructs this
 owner through the main runtime, but it defaults to false. The disabled path
@@ -895,21 +906,37 @@ and retry reconciliation always establishes authoritative worker absence before
 it may prune host input. Starting a seat prepares its exact host input before
 launching the worker; a proven worker rejection rolls that allocation back,
 while an indeterminate launch retains it until inventory proves the generation
-absent. Stop and shutdown similarly refuse to release input while an exact
-worker or claimed stream can still own it. There is still no production caller,
-configuration switch, HTTP path, container activation, or device mutation.
+absent. Shutdown first quiesces Moonlight selection and registry claims without
+waiting, and it does not begin worker teardown while an activation or claimed
+stream remains. A caller retries after those owners close. Stop and shutdown
+similarly refuse to release input while an exact worker or stream can still own
+it. There is still no production caller, configuration switch, HTTP path,
+container activation, or device mutation.
 
 A concrete Linux dependency factory now proves that this owner can be composed
 from one trusted GPU catalog without duplicating capacity or device authority.
 It derives both registry capacity and the rootless Podman allowlist from each
-catalog entry, creates the private worker authority store, and binds the Podman
-input manifest source to a read-only, exact-generation allocation view owned by
-the Moonlight runtime. The view returns no authority once release or shutdown
-begins. Disabled construction returns before catalog validation or any factory;
-enabled tests inject the UUID, input backend, Podman host, kernel probe, and
-worker transport, so they execute no process, container, or device operation.
-The real dependency defaults exist only behind this uncalled factory; wiring it
-to configuration and admitting a seat remain later, separately reviewed work.
+catalog entry, rejects cross-entry path overlap, and verifies that every
+allowlisted path resolves to a character-device identity owned by exactly one
+logical GPU before constructing either capacity view. It persists those exact
+path/identity pairs in the Podman catalog and revalidates the complete baseline
+before launch and authoritative inventory, preventing a later device-node
+replacement from receiving an independent seat or encoder budget. Per-GPU
+device lists are exclusive; a future legitimately shared global node must use a
+separate, budget-neutral owner rather than being duplicated across GPU entries. The
+factory creates the private worker authority store and binds the Podman input
+manifest source to a read-only, exact-generation allocation view owned by the
+Moonlight runtime. The view stays readable through quiesce and a pending
+shutdown, because the authoritative worker inventory that proves a stopped
+worker is gone runs after Moonlight quiesce and before input close; it returns
+no authority after release or once shutdown has closed. Disabled construction
+returns before catalog validation or any factory;
+enabled tests inject the UUID, input backend, Podman host, kernel probe, and a
+fail-closed worker transport, so they execute no process, container, or device
+operation. A complete-source-tree guard keeps this factory outside production
+callers. The real dependency defaults exist only behind this uncalled factory;
+wiring it to configuration and admitting a seat remain later, separately
+reviewed work.
 
 ## Launcher acceptance comes second
 
@@ -1014,19 +1041,23 @@ The offline test suite covers:
   stale-launch fencing, fail-closed bind tombstones, and RAII installation;
 - coordinator-owned backend, authority, registry, feedback, activation, and
   launch-selection lifetimes, including disabled no-op construction,
-  selected/unselected coexistence, cancellation tombstones, shutdown barriers,
-  and retryable exact input cleanup;
+  selected/unselected coexistence, cancellation tombstones, registry-first
+  nonblocking quiesce, claimed-stream retry, direct-owner fail-closed retention,
+  and allocation-free retryable exact input cleanup;
 - serialized worker-to-launch authorization with exact running-generation,
   private-record, dual-channel, paired-client, input-seat, and permission
   checks, without a request-facing caller;
 - trusted default-off controller composition with input-before-worker startup,
   worker-first reconciliation, proven-rejection rollback, indeterminate-owner
-  retention, paired-client launch selection, and worker/stream shutdown
-  barriers, using only injected fake backends and no production caller;
+  retention, paired-client launch selection, and activation/stream-before-worker
+  shutdown barriers, using only injected fake backends and no production caller;
 - default-off concrete dependency composition from one GPU catalog, including
-  ambiguous-catalog rejection, factory-free disabled construction, failure
-  unwind, offline Podman reconciliation, and exact-generation read-only input
-  manifest lookup with no production caller or live host mutation;
+  lexical and character-device alias rejection, factory-free disabled
+  construction, immutable physical-identity revalidation, failure unwind,
+  offline Podman reconciliation, a quiesced shutdown that reconciles a listed
+  stopped worker through the still-readable manifest view, and
+  exact-generation read-only input manifest lookup with no production caller or
+  live host mutation;
 - digest-only image locks for Gamescope, Steam, Heroic, Lutris, and the static
   worker toolchain, plus a no-network Containerfile build contract.
 

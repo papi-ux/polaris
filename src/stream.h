@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -128,6 +129,13 @@ namespace stream {
     state_e state(session_t &session);
 #ifdef POLARIS_TESTS
     void set_state_for_tests(session_t &session, state_e state);
+#ifdef __linux__
+    /** Exercise the bound bridge without entering the network control loop. */
+    bool route_multiseat_input_for_tests(
+      session_t &session,
+      std::span<const std::uint8_t> packet
+    );
+#endif
 #endif
     unsigned active_count();
     inline bool send(session_t& session, const std::string_view &payload);

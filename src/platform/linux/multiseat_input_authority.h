@@ -154,6 +154,11 @@ namespace multiseat::input {
     bool admission_ready = false;
   };
 
+  struct cleanup_report_t {
+    std::size_t released_allocations = 0;
+    std::size_t cleanup_failures = 0;
+  };
+
   [[nodiscard]] bool valid_plan(const plan_t &plan);
   [[nodiscard]] std::filesystem::path expected_worker_path(
     device_kind_e kind,
@@ -207,6 +212,8 @@ namespace multiseat::input {
       const seat_handle_t &handle
     ) const;
     [[nodiscard]] std::vector<allocation_t> allocations() const;
+    /** Attempt every active teardown without allocating a snapshot vector. */
+    [[nodiscard]] cleanup_report_t release_all();
     [[nodiscard]] bool admission_ready() const;
 
   private:

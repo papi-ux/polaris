@@ -7,20 +7,16 @@
 #include "src/stream.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
-#include <future>
 #include <gtest/gtest.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
-  using namespace std::chrono_literals;
   using namespace multiseat;
   using namespace multiseat::input;
 
@@ -485,7 +481,7 @@ namespace {
     );
   }
 
-  TEST(MultiseatMoonlightRuntime, ShutdownRemovesLifecycleBeforeDependencies) {
+  TEST(MultiseatMoonlightRuntime, ShutdownQuiescesBeforeWaitingForStreams) {
     auto factory = std::make_shared<runtime_factory_state_t>();
     auto created = ready_runtime(factory);
     ASSERT_TRUE(created.runtime);
@@ -507,17 +503,13 @@ namespace {
       moonlight_session_activation_status_e::bound
     );
 
-    auto shutdown = std::async(std::launch::async, [&created]() {
-      return created.runtime->shutdown();
-    });
-    bool uninstalled = false;
-    for (auto attempt = 0; attempt < 200 && !uninstalled; ++attempt) {
-      uninstalled = !moonlight_session_runtime_installed();
-      if (!uninstalled) {
-        std::this_thread::sleep_for(1ms);
-      }
-    }
-    EXPECT_TRUE(uninstalled);
+    const auto pending = created.runtime->shutdown();
+    EXPECT_EQ(
+      pending.status,
+      moonlight_coordinator_shutdown_status_e::streams_pending
+    );
+    EXPECT_TRUE(created.runtime->installed());
+    EXPECT_TRUE(moonlight_session_runtime_installed());
     EXPECT_EQ(
       select_authenticated_moonlight_launch(
         runtime_launch(709, 809),
@@ -525,16 +517,65 @@ namespace {
         runtime_expectation(17).input_seat,
         false
       ),
-      std::nullopt
+      moonlight_launch_selection_status_e::gate_closed
     );
-    EXPECT_EQ(shutdown.wait_for(20ms), std::future_status::timeout);
     stream::session::stop(*stream);
-    const auto report = shutdown.get();
+    const auto report = created.runtime->shutdown();
     EXPECT_EQ(report.status, moonlight_coordinator_shutdown_status_e::closed);
     EXPECT_EQ(report.released_allocations, 1U);
     EXPECT_TRUE(launch->is_cancelled());
     EXPECT_TRUE(created.runtime->closed());
     EXPECT_FALSE(moonlight_session_activation_gate_installed());
+  }
+
+  TEST(MultiseatMoonlightRuntime, QuiesceKeepsExactAllocationViewReadableUntilClosed) {
+    auto factory = std::make_shared<runtime_factory_state_t>();
+    auto created = ready_runtime(factory);
+    ASSERT_TRUE(created.runtime);
+    const auto expectation = runtime_expectation(30);
+    admit(*created.runtime, expectation);
+    auto launch = runtime_launch(730, 830);
+    ASSERT_EQ(
+      created.runtime->select_authenticated_launch(
+        launch,
+        expectation.handle,
+        expectation.input_seat,
+        false
+      ),
+      moonlight_launch_selection_status_e::registered
+    );
+    auto stream = runtime_stream(*launch);
+    ASSERT_EQ(
+      activate_registered_moonlight_session(*stream),
+      moonlight_session_activation_status_e::bound
+    );
+
+    const auto quiesced = created.runtime->quiesce();
+    EXPECT_EQ(
+      quiesced.status,
+      moonlight_coordinator_quiesce_status_e::streams_pending
+    );
+    const auto during_quiesce = created.runtime->input_allocation(
+      expectation.handle
+    );
+    ASSERT_TRUE(during_quiesce);
+    EXPECT_EQ(during_quiesce->handle, expectation.handle);
+    EXPECT_EQ(during_quiesce->input_seat, expectation.input_seat);
+
+    EXPECT_EQ(
+      created.runtime->shutdown().status,
+      moonlight_coordinator_shutdown_status_e::streams_pending
+    );
+    EXPECT_TRUE(created.runtime->input_allocation(expectation.handle));
+    auto stale = expectation.handle;
+    ++stale.generation;
+    EXPECT_FALSE(created.runtime->input_allocation(stale));
+
+    stream::session::stop(*stream);
+    const auto report = created.runtime->shutdown();
+    EXPECT_EQ(report.status, moonlight_coordinator_shutdown_status_e::closed);
+    EXPECT_EQ(report.released_allocations, 1U);
+    EXPECT_FALSE(created.runtime->input_allocation(expectation.handle));
   }
 
   TEST(MultiseatMoonlightRuntime, FailedCleanupStaysClosedAndCanRetry) {

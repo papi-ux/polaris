@@ -140,6 +140,12 @@ namespace multiseat::podman {
              left.character_minor == right.character_minor;
     }
 
+    bool valid_character_device_identity(
+      const character_device_identity_t &identity
+    ) {
+      return identity.filesystem_device != 0 && identity.inode != 0;
+    }
+
     bool exact_input_identity(
       const character_device_identity_t &identity,
       const input::device_node_t &node
@@ -515,6 +521,9 @@ namespace multiseat::podman {
       }
 
       std::unordered_set<std::string> gpu_ids;
+      std::unordered_set<std::string> gpu_device_paths;
+      std::set<std::pair<std::uint64_t, std::uint64_t>> gpu_inode_identities;
+      std::set<std::pair<std::uint32_t, std::uint32_t>> gpu_character_identities;
       for (const auto &gpu : options.gpus) {
         if (!opaque_name_token(gpu.logical_gpu_id) ||
             !device_path(gpu.render_node) ||
@@ -523,13 +532,23 @@ namespace multiseat::podman {
             !gpu_ids.emplace(gpu.logical_gpu_id).second) {
           throw std::invalid_argument {"rootless Podman GPU options are invalid"};
         }
-        std::unordered_set<std::string> devices;
         bool render_node_present = false;
         for (const auto &device : gpu.devices) {
-          if (!device_path(device) || !devices.emplace(device.native()).second) {
+          if (!device_path(device.path) ||
+              !valid_character_device_identity(device.admitted_identity) ||
+              !gpu_device_paths.emplace(device.path.native()).second ||
+              !gpu_inode_identities.emplace(
+                device.admitted_identity.filesystem_device,
+                device.admitted_identity.inode
+              ).second ||
+              !gpu_character_identities.emplace(
+                device.admitted_identity.character_major,
+                device.admitted_identity.character_minor
+              ).second) {
             throw std::invalid_argument {"rootless Podman GPU devices are invalid"};
           }
-          render_node_present = render_node_present || device == gpu.render_node;
+          render_node_present = render_node_present ||
+                                device.path == gpu.render_node;
         }
         if (!render_node_present) {
           throw std::invalid_argument {"rootless Podman GPU device set omits its render node"};
@@ -743,23 +762,24 @@ namespace multiseat::podman {
     const input::allocation_t &input_allocation
   ) const {
     struct expected_binding_t {
+      std::filesystem::path host_path;
       std::filesystem::path worker_path;
       character_device_identity_t identity;
+      bool exact_host_identity = false;
     };
     std::vector<expected_binding_t> expected;
     expected.reserve(gpu.devices.size() + input_allocation.nodes.size());
     for (const auto &device : gpu.devices) {
-      const auto identity = host_.read_write_character_device(device);
-      if (!identity) {
-        return false;
-      }
       expected.push_back({
-        .worker_path = device,
-        .identity = *identity,
+        .host_path = device.path,
+        .worker_path = device.path,
+        .identity = device.admitted_identity,
+        .exact_host_identity = true,
       });
     }
     for (const auto &node : input_allocation.nodes) {
       expected.push_back({
+        .host_path = node.host_path,
         .worker_path = node.worker_path,
         .identity = {
           .filesystem_device = node.filesystem_device,
@@ -778,7 +798,10 @@ namespace multiseat::podman {
       for (std::size_t index = 0; index < expected.size(); ++index) {
         if (!consumed[index] &&
             binding.worker_path == expected[index].worker_path &&
-            same_character_device(binding.identity, expected[index].identity)) {
+            same_character_device(binding.identity, expected[index].identity) &&
+            (!expected[index].exact_host_identity ||
+             (binding.host_path == expected[index].host_path &&
+              binding.identity == expected[index].identity))) {
           match = index;
           break;
         }
@@ -797,9 +820,30 @@ namespace multiseat::podman {
     return host_.effective_uid() != 0 && host_.executable_file(options_.executable);
   }
 
+  bool backend_t::gpu_catalog_current() const {
+    std::set<std::pair<std::uint64_t, std::uint64_t>> inode_identities;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> character_identities;
+    for (const auto &gpu : options_.gpus) {
+      for (const auto &device : gpu.devices) {
+        const auto current = host_.read_write_character_device(device.path);
+        if (!current || *current != device.admitted_identity ||
+            !inode_identities.emplace(
+              current->filesystem_device,
+              current->inode
+            ).second ||
+            !character_identities.emplace(
+              current->character_major,
+              current->character_minor
+            ).second) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   bool backend_t::launch_host_ready(
     const worker_launch_spec_t &spec,
-    const gpu_t &gpu,
     const input::allocation_t &input_allocation
   ) const {
     if (!base_host_ready()) {
@@ -817,14 +861,8 @@ namespace multiseat::podman {
         !host_.private_readable_file(worker_auth_directory / capability_file)) {
       return false;
     }
-    const auto devices_ready = [&]() {
-      for (const auto &device : gpu.devices) {
-        if (!host_.read_write_character_device(device)) {
-          return false;
-        }
-      }
-      return input_allocation_current(input_allocation);
-    }();
+    const auto devices_ready = gpu_catalog_current() &&
+                               input_allocation_current(input_allocation);
     if (!devices_ready) {
       return false;
     }
@@ -976,7 +1014,8 @@ namespace multiseat::podman {
 
     for (const auto &device : gpu.devices) {
       argv.push_back(
-        "--device=" + device.native() + ":" + device.native() + ":rw"
+        "--device=" + device.path.native() + ":" +
+        device.path.native() + ":rw"
       );
     }
     for (const auto &node : input_allocation.nodes) {
@@ -1026,7 +1065,7 @@ namespace multiseat::podman {
       return worker_command_result_e::rejected;
     }
     try {
-      if (!launch_host_ready(spec, *gpu, *input_allocation)) {
+      if (!launch_host_ready(spec, *input_allocation)) {
         return worker_command_result_e::rejected;
       }
     } catch (...) {
@@ -1042,7 +1081,8 @@ namespace multiseat::podman {
         *input_allocation,
         *input_fingerprint
       );
-      if (!input_allocation_current(*input_allocation)) {
+      if (!gpu_catalog_current() ||
+          !input_allocation_current(*input_allocation)) {
         return worker_command_result_e::rejected;
       }
       result = host_.run(
@@ -1187,6 +1227,12 @@ namespace multiseat::podman {
     if (!base_host_ready()) {
       throw std::runtime_error {"rootless Podman is unavailable"};
     }
+    const auto require_current_gpu_catalog = [this, require_input_authority]() {
+      if (require_input_authority && !gpu_catalog_current()) {
+        throw std::runtime_error {"Podman GPU authority is not current"};
+      }
+    };
+    require_current_gpu_catalog();
 
     const auto listed = host_.run(
       {
@@ -1206,6 +1252,7 @@ namespace multiseat::podman {
     }
     const auto ids = parse_container_ids(listed.output, options_.max_inventory_workers);
     if (ids.empty()) {
+      require_current_gpu_catalog();
       return {};
     }
 
@@ -1366,7 +1413,8 @@ namespace multiseat::podman {
             }
           );
           const auto allocation = input_allocation_for(seat_handle, *input);
-          if (configured_gpu == options_.gpus.end() || !allocation ||
+          if (configured_gpu == options_.gpus.end() ||
+              !gpu_catalog_current() || !allocation ||
               !input_allocation_current(*allocation)) {
             throw std::runtime_error {"Podman input authority is not current"};
           }
@@ -1429,6 +1477,7 @@ namespace multiseat::podman {
           .input_binding_authoritative = input_binding_authoritative,
         });
       }
+      require_current_gpu_catalog();
       return records;
     } catch (...) {
       throw std::runtime_error {"rootless Podman returned invalid worker inventory"};

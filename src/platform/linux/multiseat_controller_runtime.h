@@ -159,10 +159,12 @@ namespace multiseat {
    *
    * Input is prepared before worker launch. Indeterminate worker ownership
    * retains input until authoritative reconciliation proves absence. shutdown
-   * similarly refuses to close input while a worker or selected stream may
-   * still own it. Callers must retain the owner and retry an incomplete
-   * shutdown; as a last resort the destructor retains the closed-over
-   * dependencies rather than destroying authority beneath a live worker.
+   * first quiesces new Moonlight activation without waiting, refuses to begin
+   * worker teardown while an activation or selected stream may still own the
+   * seat, and then closes input only after worker absence is authoritative.
+   * Callers must retain the owner and retry an incomplete shutdown; as a last
+   * resort the destructor retains the closed-over dependencies rather than
+   * destroying authority beneath a live worker.
    */
   class controller_runtime_t final {
   public:

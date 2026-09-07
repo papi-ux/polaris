@@ -2404,6 +2404,18 @@ namespace stream {
     void set_state_for_tests(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
     }
+
+#ifdef __linux__
+    bool route_multiseat_input_for_tests(
+      session_t &session,
+      std::span<const std::uint8_t> packet
+    ) {
+      std::scoped_lock lock {session.multiseat_input_binding_mutex};
+      return session.multiseat_input &&
+             session.multiseat_input->route_input(packet).status ==
+               multiseat::input::moonlight_route_status_e::applied;
+    }
+#endif
 #endif
 
     inline bool send(session_t& session, const std::string_view &payload) {

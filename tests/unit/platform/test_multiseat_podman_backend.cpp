@@ -35,6 +35,7 @@ namespace {
   using multiseat::podman::backend_t;
   using multiseat::podman::character_device_identity_t;
   using multiseat::podman::command_result_t;
+  using multiseat::podman::gpu_device_t;
   using multiseat::podman::gpu_t;
   using multiseat::podman::host_t;
   using multiseat::podman::input_manifest_source_t;
@@ -56,6 +57,17 @@ namespace {
       .inode = 10000 + minor,
       .character_major = major,
       .character_minor = minor,
+    };
+  }
+
+  gpu_device_t admitted_gpu_device(
+    std::filesystem::path path,
+    std::uint32_t major,
+    std::uint32_t minor
+  ) {
+    return {
+      .path = std::move(path),
+      .admitted_identity = device_identity(major, minor),
     };
   }
 
@@ -84,6 +96,13 @@ namespace {
     std::optional<character_device_identity_t> read_write_character_device(
       const std::filesystem::path &path
     ) const override {
+      ++character_device_calls;
+      if (replacement_after_character_device_call != 0 &&
+          character_device_calls >= replacement_after_character_device_call &&
+          path == replacement_character_device_path &&
+          replacement_character_device_identity) {
+        return replacement_character_device_identity;
+      }
       const auto device = accessible_devices.find(path.native());
       return device == accessible_devices.end() ?
                std::nullopt : std::optional {device->second};
@@ -137,6 +156,11 @@ namespace {
       {"/dev/input/event22", device_identity(13, 86)},
       {"/dev/input/event23", device_identity(13, 87)},
     };
+    mutable std::size_t character_device_calls = 0;
+    std::size_t replacement_after_character_device_call = 0;
+    std::filesystem::path replacement_character_device_path;
+    std::optional<character_device_identity_t>
+      replacement_character_device_identity;
     std::deque<command_result_t> results;
     std::vector<std::vector<std::string>> calls;
   };
@@ -151,7 +175,10 @@ namespace {
         gpu_t {
           .logical_gpu_id = "gpu-primary",
           .render_node = "/dev/dri/renderD128",
-          .devices = {"/dev/dri/renderD128", "/dev/dri/card0"},
+          .devices = {
+            admitted_gpu_device("/dev/dri/renderD128", 226, 128),
+            admitted_gpu_device("/dev/dri/card0", 226, 0),
+          },
           .max_encoder_sessions = 2,
         },
       },
@@ -620,6 +647,11 @@ TEST(MultiseatPodmanBackend, RejectsUnpinnedImagesAndDuplicateProfileVolumes) {
   options = options_for_tests();
   options.workloads.front().target_id = "game;$(command)";
   EXPECT_THROW(backend_t(host, input_manifests_for_tests(), options), std::invalid_argument);
+
+  options = options_for_tests();
+  options.gpus.front().devices.at(1).admitted_identity =
+    options.gpus.front().devices.front().admitted_identity;
+  EXPECT_THROW(backend_t(host, input_manifests_for_tests(), options), std::invalid_argument);
 }
 
 TEST(MultiseatPodmanBackend, InputManifestFingerprintBindsGenerationAndIdentity) {
@@ -755,6 +787,25 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
   EXPECT_EQ(changed_kernel_backend.launch(spec), worker_command_result_e::rejected);
   EXPECT_TRUE(changed_kernel_host.calls.empty());
   EXPECT_EQ(changed_kernel.observation_calls, std::size_t {5});
+
+  fake_host_t changed_gpu_at_run_host;
+  changed_gpu_at_run_host.replacement_after_character_device_call = 7;
+  changed_gpu_at_run_host.replacement_character_device_path =
+    "/dev/dri/renderD128";
+  changed_gpu_at_run_host.replacement_character_device_identity =
+    device_identity(226, 0);
+  fake_input_manifest_source_t changed_gpu_at_run_inputs;
+  backend_t changed_gpu_at_run_backend {
+    changed_gpu_at_run_host,
+    changed_gpu_at_run_inputs,
+    options_for_tests(),
+  };
+  EXPECT_EQ(
+    changed_gpu_at_run_backend.launch(spec),
+    worker_command_result_e::rejected
+  );
+  EXPECT_TRUE(changed_gpu_at_run_host.calls.empty());
+  EXPECT_GE(changed_gpu_at_run_host.character_device_calls, 7U);
 }
 
 TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
@@ -1127,6 +1178,33 @@ TEST(MultiseatPodmanBackend, InventoryRejectsChangedInputManifestAndBindings) {
   auto missing_host_config = container_for(spec, first_id, "running", "healthy");
   missing_host_config.erase("HostConfig");
   expect_inventory_rejected(std::move(missing_host_config));
+
+  fake_host_t changed_gpu_host;
+  fake_input_manifest_source_t changed_gpu_inputs;
+  backend_t changed_gpu_backend {
+    changed_gpu_host,
+    changed_gpu_inputs,
+    options_for_tests(),
+  };
+  changed_gpu_host.accessible_devices["/dev/dri/renderD128"] =
+    device_identity(226, 0);
+  queue_inventory(
+    changed_gpu_host,
+    {container_for(spec, first_id, "running", "healthy")}
+  );
+  EXPECT_THROW(changed_gpu_backend.inventory(), std::runtime_error);
+}
+
+TEST(MultiseatPodmanBackend, EmptyInventoryRejectsGpuDriftAtReturnBoundary) {
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.replacement_after_character_device_call = 3;
+  host.replacement_character_device_path = "/dev/dri/renderD128";
+  host.replacement_character_device_identity = device_identity(226, 0);
+  queue_inventory(host, {});
+
+  EXPECT_THROW(backend.inventory(), std::runtime_error);
+  EXPECT_EQ(host.calls.size(), 1U);
 }
 
 TEST(MultiseatPodmanBackend, InventoryAcceptsEquivalentReconstructedHostNode) {

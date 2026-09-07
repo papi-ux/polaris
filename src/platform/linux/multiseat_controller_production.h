@@ -21,7 +21,10 @@ namespace multiseat {
 
   /**
    * One trusted GPU catalog entry. The factory derives both registry capacity
-   * and the Podman device allowlist from this single value.
+   * and the Podman device allowlist from this single value. Every path and
+   * character-device identity in devices is exclusive to this logical GPU;
+   * the render node must appear in that list. Shared global devices are not
+   * represented here and require a separate budget-neutral owner.
    */
   struct production_controller_gpu_t {
     std::string logical_gpu_id;

@@ -84,6 +84,30 @@ namespace multiseat::input {
       return state;
     }
 
+#ifdef POLARIS_TESTS
+    struct activation_test_hook_state_t {
+      std::mutex mutex;
+      moonlight_activation_before_bind_hook_t before_bind;
+    };
+
+    activation_test_hook_state_t &activation_test_hook_state() {
+      static activation_test_hook_state_t state;
+      return state;
+    }
+
+    void run_activation_before_bind_hook_for_tests() {
+      moonlight_activation_before_bind_hook_t hook;
+      {
+        auto &state = activation_test_hook_state();
+        std::scoped_lock lock {state.mutex};
+        hook = state.before_bind;
+      }
+      if (hook) {
+        hook();
+      }
+    }
+#endif
+
     void erase_selection(
       moonlight_session_activation_gate_state_t &state,
       const std::shared_ptr<moonlight_launch_selection_entry_t> &entry
@@ -311,6 +335,9 @@ namespace multiseat::input {
 
     auto bound = false;
     try {
+#ifdef POLARIS_TESTS
+      run_activation_before_bind_hook_for_tests();
+#endif
       bound = stream::session::bind_multiseat_input(
                 session,
                 state_->authority,
@@ -332,9 +359,44 @@ namespace multiseat::input {
                    moonlight_session_activation_status_e::selected_binding_failed;
   }
 
-  void moonlight_session_activation_gate_t::close() noexcept {
-    std::unique_lock lock {state_->mutex};
+  std::size_t moonlight_session_activation_gate_t::quiesce() noexcept {
+    std::scoped_lock lock {state_->mutex};
     state_->closed = true;
+    std::size_t activations_in_flight = 0;
+    for (const auto &entry : state_->entries) {
+      if (entry->phase == selection_phase_e::activating) {
+        ++activations_in_flight;
+      } else {
+        entry->phase = selection_phase_e::cancelled;
+      }
+    }
+    state_->changed.notify_all();
+    return activations_in_flight;
+  }
+
+  bool moonlight_session_activation_gate_t::finish_close() noexcept {
+    std::scoped_lock lock {state_->mutex};
+    state_->closed = true;
+    if (std::any_of(
+          state_->entries.begin(),
+          state_->entries.end(),
+          [](const auto &entry) {
+            return entry->phase == selection_phase_e::activating;
+          }
+        )) {
+      return false;
+    }
+    for (const auto &entry : state_->entries) {
+      entry->phase = selection_phase_e::cancelled;
+    }
+    state_->entries.clear();
+    state_->changed.notify_all();
+    return true;
+  }
+
+  void moonlight_session_activation_gate_t::close() noexcept {
+    (void) quiesce();
+    std::unique_lock lock {state_->mutex};
     state_->changed.wait(lock, [this]() {
       return std::none_of(
         state_->entries.begin(),
@@ -458,6 +520,16 @@ namespace multiseat::input {
     std::scoped_lock lock {installed.mutex};
     return static_cast<bool>(installed.gate);
   }
+
+#ifdef POLARIS_TESTS
+  void set_moonlight_activation_before_bind_hook_for_tests(
+    moonlight_activation_before_bind_hook_t hook
+  ) {
+    auto &state = activation_test_hook_state();
+    std::scoped_lock lock {state.mutex};
+    state.before_bind = std::move(hook);
+  }
+#endif
 
 }  // namespace multiseat::input
 

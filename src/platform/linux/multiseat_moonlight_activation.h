@@ -10,6 +10,7 @@
 
   #include <cstddef>
   #include <cstdint>
+  #include <functional>
   #include <memory>
   #include <string_view>
 
@@ -140,6 +141,10 @@ namespace multiseat::input {
       stream::session_t &session
     );
 
+    /** Close new activation without waiting for an activation already entered. */
+    [[nodiscard]] std::size_t quiesce() noexcept;
+    /** Clear retained selections only when no activation remains in flight. */
+    [[nodiscard]] bool finish_close() noexcept;
     void close() noexcept;
     [[nodiscard]] bool enabled() const;
     [[nodiscard]] bool closed() const;
@@ -219,6 +224,15 @@ namespace multiseat::input {
   activate_registered_moonlight_session(stream::session_t &session);
 
   [[nodiscard]] bool moonlight_session_activation_gate_installed();
+
+#ifdef POLARIS_TESTS
+  using moonlight_activation_before_bind_hook_t = std::function<void()>;
+
+  /** Deterministic concurrency seam; production builds contain no hook. */
+  void set_moonlight_activation_before_bind_hook_for_tests(
+    moonlight_activation_before_bind_hook_t hook
+  );
+#endif
 
 }  // namespace multiseat::input
 

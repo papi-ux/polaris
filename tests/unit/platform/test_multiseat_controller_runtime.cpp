@@ -12,11 +12,13 @@
   #include <algorithm>
   #include <array>
   #include <chrono>
+  #include <condition_variable>
   #include <cstddef>
   #include <cstdint>
   #include <cstdlib>
   #include <filesystem>
   #include <fstream>
+  #include <future>
   #include <gtest/gtest.h>
   #include <memory>
   #include <mutex>
@@ -35,6 +37,59 @@ namespace {
   namespace input = multiseat::input;
 
   constexpr auto controller_gpu = "gpu-controller-runtime";
+
+  class activation_pause_t {
+  public:
+    void pause() {
+      std::unique_lock lock {mutex_};
+      entered_ = true;
+      changed_.notify_all();
+      changed_.wait(lock, [this]() {
+        return released_;
+      });
+    }
+
+    [[nodiscard]] bool wait_until_entered(
+      std::chrono::milliseconds timeout
+    ) {
+      std::unique_lock lock {mutex_};
+      return changed_.wait_for(lock, timeout, [this]() {
+        return entered_;
+      });
+    }
+
+    void release() {
+      std::scoped_lock lock {mutex_};
+      released_ = true;
+      changed_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool entered_ = false;
+    bool released_ = false;
+  };
+
+  class activation_hook_guard_t {
+  public:
+    explicit activation_hook_guard_t(
+      input::moonlight_activation_before_bind_hook_t hook
+    ) {
+      input::set_moonlight_activation_before_bind_hook_for_tests(
+        std::move(hook)
+      );
+    }
+
+    ~activation_hook_guard_t() {
+      input::set_moonlight_activation_before_bind_hook_for_tests({});
+    }
+
+    activation_hook_guard_t(const activation_hook_guard_t &) = delete;
+    activation_hook_guard_t &operator=(
+      const activation_hook_guard_t &
+    ) = delete;
+  };
 
   class temporary_controller_root_t {
   public:
@@ -855,25 +910,116 @@ namespace {
 
   TEST_F(
     MultiseatControllerRuntimeTest,
-    CompositionRootRemainsOutsideProductionRequestPaths
+    ShutdownQuiesceWinsActivationRaceWithoutStoppingWorker
   ) {
-    const auto implementation = controller_source(
-      "src/platform/linux/multiseat_controller_runtime.cpp"
+    create_ready_controller();
+    const auto seat = admit_and_bind();
+    ASSERT_TRUE(seat.handle.valid());
+    const auto identity = controller_worker_identity(seat);
+    ASSERT_TRUE(controller_->start_seat(
+      seat.handle,
+      controller_input_plan()
+    ).started());
+    ASSERT_TRUE(state_->mark_worker_ready(identity));
+    ASSERT_TRUE(controller_->reconcile().ready());
+
+    auto launch = controller_launch(1903, 2903);
+    ASSERT_TRUE(controller_->select_authenticated_launch(
+      launch,
+      seat.handle
+    ).selected());
+    auto stream = controller_stream(*launch);
+    ASSERT_TRUE(stream);
+
+    auto pause = std::make_shared<activation_pause_t>();
+    activation_hook_guard_t hook_guard {[pause]() {
+      pause->pause();
+    }};
+    auto activation = std::async(std::launch::async, [&stream]() {
+      return input::activate_registered_moonlight_session(*stream);
+    });
+    const auto activation_entered = pause->wait_until_entered(
+      std::chrono::seconds {2}
+    );
+    if (!activation_entered) {
+      pause->release();
+    }
+    ASSERT_TRUE(activation_entered);
+
+    auto shutdown = std::async(std::launch::async, [this]() {
+      return controller_->shutdown();
+    });
+    const auto bounded = shutdown.wait_for(std::chrono::seconds {2}) ==
+                         std::future_status::ready;
+    if (!bounded) {
+      pause->release();
+    }
+    const auto pending = shutdown.get();
+
+    EXPECT_TRUE(bounded);
+    EXPECT_EQ(pending.status, controller_shutdown_status_e::streams_pending);
+    EXPECT_EQ(pending.stop_requests, 0U);
+    EXPECT_FALSE(pending.worker);
+    EXPECT_FALSE(stream::session::multiseat_input_bound(*stream));
+    EXPECT_EQ(controller_->seats(), 1U);
+    EXPECT_EQ(controller_->managed_workers(), 1U);
+    EXPECT_EQ(controller_->input_allocations(), 1U);
+
+    pause->release();
+    EXPECT_EQ(
+      activation.get(),
+      input::moonlight_session_activation_status_e::selected_binding_failed
+    );
+    EXPECT_FALSE(stream::session::multiseat_input_bound(*stream));
+    EXPECT_TRUE(launch->is_cancelled());
+
+    const auto closed = controller_->shutdown();
+    EXPECT_EQ(closed.status, controller_shutdown_status_e::closed);
+    EXPECT_TRUE(controller_->closed());
+    EXPECT_EQ(controller_->seats(), 0U);
+    EXPECT_EQ(controller_->managed_workers(), 0U);
+    EXPECT_EQ(controller_->input_allocations(), 0U);
+  }
+
+  TEST_F(
+    MultiseatControllerRuntimeTest,
+    CompositionRootRemainsOutsideCompleteProductionSourceTree
+  ) {
+    const auto factory = controller_source(
+      "src/platform/linux/multiseat_controller_production.cpp"
     );
     ASSERT_NE(
-      implementation.find("moonlight_worker_launch_adapter_t"),
+      factory.find("create_production_controller_runtime("),
       std::string::npos
     );
-    for (const auto path : {
-           "src/main.cpp",
-           "src/nvhttp.cpp",
-           "src/confighttp.cpp",
-         }) {
-      const auto source = controller_source(path);
-      ASSERT_FALSE(source.empty()) << path;
-      EXPECT_EQ(source.find("controller_runtime_t"), std::string::npos)
-        << path;
+
+    const auto source_root =
+      std::filesystem::path {POLARIS_SOURCE_DIR} / "src";
+    std::vector<std::string> unexpected_callers;
+    for (const auto &entry :
+         std::filesystem::recursive_directory_iterator {source_root}) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const auto relative = std::filesystem::relative(
+        entry.path(),
+        std::filesystem::path {POLARIS_SOURCE_DIR}
+      ).generic_string();
+      if (relative ==
+            "src/platform/linux/multiseat_controller_production.cpp" ||
+          relative ==
+            "src/platform/linux/multiseat_controller_production.h") {
+        continue;
+      }
+      const auto source = controller_source(relative);
+      ASSERT_FALSE(source.empty()) << relative;
+      if (source.find("create_production_controller_runtime") !=
+          std::string::npos) {
+        unexpected_callers.push_back(relative);
+      }
     }
+    EXPECT_TRUE(unexpected_callers.empty())
+      << testing::PrintToString(unexpected_callers);
   }
 }  // namespace
 

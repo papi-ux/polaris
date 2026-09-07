@@ -723,6 +723,42 @@ namespace multiseat::input {
     return result;
   }
 
+  cleanup_report_t authority_t::release_all() {
+    std::scoped_lock lock {mutex_};
+    cleanup_report_t report;
+    for (auto active = active_.begin(); active != active_.end();) {
+      backend_result_e result;
+      try {
+        result = backend_.destroy(
+          active->allocation.handle,
+          active->allocation.input_seat
+        );
+      } catch (...) {
+        result = backend_result_e::indeterminate;
+      }
+      switch (result) {
+        case backend_result_e::applied:
+        case backend_result_e::already_applied:
+        case backend_result_e::not_found:
+          active = active_.erase(active);
+          ++report.released_allocations;
+          break;
+        case backend_result_e::rejected:
+        case backend_result_e::indeterminate:
+          admission_ready_ = false;
+          ++report.cleanup_failures;
+          ++active;
+          break;
+        default:
+          admission_ready_ = false;
+          ++report.cleanup_failures;
+          ++active;
+          break;
+      }
+    }
+    return report;
+  }
+
   bool authority_t::admission_ready() const {
     std::scoped_lock lock {mutex_};
     return admission_ready_;

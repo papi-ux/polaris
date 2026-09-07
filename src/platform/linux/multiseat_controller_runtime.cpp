@@ -527,6 +527,13 @@ namespace multiseat {
       impl_->shutting_down = true;
       impl_->admission_ready = false;
 
+      const auto quiesced = impl_->moonlight_runtime->quiesce();
+      if (quiesced.status ==
+          input::moonlight_coordinator_quiesce_status_e::streams_pending) {
+        result.status = controller_shutdown_status_e::streams_pending;
+        return result;
+      }
+
       for (const auto &seat : impl_->registry->seats()) {
         const auto stopped = impl_->workers->stop_seat(seat.handle);
         if (stopped.broker != broker_stop_result_e::seat_not_found) {
@@ -540,13 +547,13 @@ namespace multiseat {
         result.status = controller_shutdown_status_e::workers_pending;
         return result;
       }
-      if (impl_->moonlight_runtime->claimed_sessions() != 0) {
+      result.status = controller_shutdown_status_e::input_cleanup_incomplete;
+      result.input = impl_->moonlight_runtime->shutdown();
+      if (result.input->status ==
+          input::moonlight_coordinator_shutdown_status_e::streams_pending) {
         result.status = controller_shutdown_status_e::streams_pending;
         return result;
       }
-
-      result.status = controller_shutdown_status_e::input_cleanup_incomplete;
-      result.input = impl_->moonlight_runtime->shutdown();
       if (result.input->status !=
             input::moonlight_coordinator_shutdown_status_e::closed &&
           result.input->status !=
