@@ -1821,14 +1821,14 @@ namespace cuda {
           BOOST_LOG(error) << "Invalid NvFBC capture framerate: "sv << config.framerate;
           return -1;
         }
-        delay = std::chrono::nanoseconds {1s} / config.framerate;
+        delay = ::video::capture_frame_interval(config);
 
         capture_params = NVFBC_CREATE_CAPTURE_SESSION_PARAMS {NVFBC_CREATE_CAPTURE_SESSION_PARAMS_VER};
 
         capture_params.eCaptureType = NVFBC_CAPTURE_SHARED_CUDA;
         capture_params.bDisableAutoModesetRecovery = nv_bool(true);
 
-        capture_params.dwSamplingRateMs = 1000 /* ms */ / config.framerate;
+        capture_params.dwSamplingRateMs = std::chrono::duration_cast<std::chrono::milliseconds>(video::capture_frame_interval(config)).count();
 
         if (streamedMonitor != -1) {
           auto &output = status_params->outputs[streamedMonitor];

@@ -51,6 +51,9 @@ namespace portal {
   };
 
   bool is_portal_available();
+  // Complete bus acquisition and version query share one bounded, owner-scoped
+  // cancellable. Unknown or unavailable KWin versions use variable capture.
+  bool running_kwin_uses_fixed_rate();
 
   /**
    * @brief Cancel in-flight portal D-Bus calls and response waits.

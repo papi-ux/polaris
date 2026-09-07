@@ -874,3 +874,43 @@ TEST_F(ProbeProviderFixture, NonregularProviderManifestCannotBlockTheEncoderWrit
   EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(1));
 }
 #endif
+TEST(VideoRateTests, PreservesExplicitMillihertzAndNormalizesOnlyDisplayHints) {
+  const std::vector<std::tuple<int, int, AVRational>> cases {
+    {60, 0, {60, 1}}, {60, 5994, {60000, 1001}}, {120, 11988, {120000, 1001}},
+    {24, 2397, {24000, 1001}}, {24, 2398, {24000, 1001}}, {95, 9498, {4749, 50}},
+    {59940, 5994, {2997, 50}}, {23976, 2398, {2997, 125}}, {60000, 11988, {60, 1}},
+    {240, 6000, {240, 1}}, {4000, 6000, {4000, 1}}, {4001, 6000, {4001, 1000}}
+  };
+  for (const auto &[wire, hint, expected] : cases) {
+    const auto actual = video::rate::from_wire(wire, hint);
+    EXPECT_EQ(av_cmp_q(actual, expected), 0) << wire << '/' << hint;
+  }
+}
+
+TEST(VideoRateTests, DisplayRateCannotRaiseOrReplaceTheRequestedStreamRate) {
+  for (const auto hint : {0, -1, 12000, 11988, 3000, 6050, 5950, INT_MAX}) {
+    EXPECT_EQ(av_cmp_q(video::rate::from_wire(60, hint), AVRational {60, 1}), 0) << hint;
+  }
+  EXPECT_FALSE(video::rate::valid(video::rate::from_wire(0, 6000)));
+  EXPECT_FALSE(video::rate::valid(video::rate::from_wire(-60, 6000)));
+  EXPECT_EQ(video::rate::interval({0, 1}), std::chrono::nanoseconds::zero());
+  EXPECT_EQ(video::rate::interval({60, 0}), std::chrono::nanoseconds::zero());
+  EXPECT_TRUE(video::rate::valid(video::rate::from_wire(INT_MAX, INT_MAX)));
+  EXPECT_TRUE(video::rate::valid(video::rate::from_hundredths(INT_MAX)));
+}
+
+TEST(VideoRateTests, CaptureAndEncodingLimiterKeepSeparateWarpAndLaunchRates) {
+  video::config_t config {};
+  config.framerate = 240;  // Warp frame budget stays 240 FPS.
+  config.encodingFramerate = 59940;  // Original launch millihertz contract.
+  config.stream_rate = video::rate::from_wire(240, 5994);
+  config.encode_rate = video::rate::from_millihertz(59940);
+  EXPECT_EQ(video::capture_frame_interval(config), std::chrono::nanoseconds(4166666));
+  EXPECT_EQ(video::encoding_frame_interval(config), std::chrono::nanoseconds(16683350));
+  EXPECT_EQ(config.framerate, 240);
+  EXPECT_EQ(config.encodingFramerate, 59940);
+  config.stream_rate = video::rate::from_wire(60, 5994);
+  config.encode_rate = config.stream_rate;  // Limiter disabled follows stream.
+  EXPECT_EQ(video::capture_frame_interval(config), std::chrono::nanoseconds(16683333));
+  EXPECT_EQ(video::encoding_frame_interval(config), video::capture_frame_interval(config));
+}

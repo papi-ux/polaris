@@ -13,6 +13,7 @@
 #include "platform/common.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
+#include "video_rate.h"
 
 #include <cstddef>
 #include <optional>
@@ -60,7 +61,28 @@ namespace video {
     int encodingFramerate; // Requested display framerate
     bool input_only;
     capture_generation::identity_t capture_generation;
+    // Appended fields preserve positional initializers used by existing clients.
+    AVRational stream_rate {0, 1};  // RTSP stream request, before integer budget rounding
+    AVRational encode_rate {0, 1};  // Host limiter: launch rate when enabled, stream rate otherwise
+
   };
+
+  inline AVRational framerate_to_rational(const config_t &config) {
+    return rate::valid(config.stream_rate) ? config.stream_rate : rate::fraction(config.framerate, 1);
+  }
+
+  inline AVRational encoding_framerate_to_rational(const config_t &config) {
+    if (rate::valid(config.encode_rate)) return config.encode_rate;
+    return config.encodingFramerate > 0 ? rate::from_millihertz(config.encodingFramerate) : framerate_to_rational(config);
+  }
+
+  inline std::chrono::nanoseconds capture_frame_interval(const config_t &config) {
+    return rate::interval(framerate_to_rational(config));
+  }
+
+  inline std::chrono::nanoseconds encoding_frame_interval(const config_t &config) {
+    return rate::interval(encoding_framerate_to_rational(config));
+  }
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);

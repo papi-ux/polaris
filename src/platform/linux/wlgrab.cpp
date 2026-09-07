@@ -87,7 +87,7 @@ namespace wl {
     }
 
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-      delay = std::chrono::nanoseconds {1s} / config.framerate;
+      delay = ::video::capture_frame_interval(config);
       mem_type = hwdevice_type;
       const auto generation_policy = wlgrab_capture_policy::resolve_generation_policy(
         config.capture_generation,
