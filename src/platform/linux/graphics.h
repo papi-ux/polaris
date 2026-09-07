@@ -304,7 +304,7 @@ namespace egl {
       dmabuf_buffer_key = 0;
     }
 
-    surface_descriptor_t sd;
+    surface_descriptor_t sd {.fds = {-1, -1, -1, -1}};
 
     // Increment sequence when new rgb_t needs to be created
     std::uint64_t sequence;

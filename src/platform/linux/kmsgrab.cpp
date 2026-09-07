@@ -29,6 +29,10 @@
 #include "src/utility.h"
 #include "src/video.h"
 #include "kms_capture_metadata.h"
+#include "kms_connector_selection.h"
+#include "kms_named_binding.h"
+#include "kms_frame_transfer.h"
+#include <format>
 #include "vaapi.h"
 #include "vulkan_encode.h"
 #include "wayland.h"
@@ -37,6 +41,7 @@ using namespace std::literals;
 namespace fs = std::filesystem;
 
 namespace platf {
+  std::vector<std::string> kms_display_names(mem_type_e hwdevice_type);
 
   namespace kms {
 
@@ -154,6 +159,7 @@ namespace platf {
       std::uint32_t connector_id;
 
       bool connected;
+      std::uint32_t kernel_index;
     };
 
     struct monitor_t {
@@ -165,6 +171,8 @@ namespace platf {
       std::uint32_t monitor_index;
 
       platf::touch_port_t viewport;
+      std::uint32_t kernel_index {};
+      bool connected {};
     };
 
     struct card_descriptor_t {
@@ -299,6 +307,15 @@ namespace platf {
     class card_t {
     public:
       using connector_interal_t = util::safe_ptr<drmModeConnector, drmModeFreeConnector>;
+
+      std::string gpu_identity() const {
+        drmDevicePtr device = nullptr;
+        if (drmGetDevice2(fd.el, 0, &device) != 0 || !device) return {};
+        auto release = util::fail_guard([&] { drmFreeDevice(&device); });
+        if (device->bustype != DRM_BUS_PCI || !device->businfo.pci) return {};
+        const auto &pci = *device->businfo.pci;
+        return std::format("pci-{:04x}:{:02x}:{:02x}.{:x}", pci.domain, pci.bus, pci.dev, pci.func);
+      }
 
       int init(const char *path) {
         cap_sys_admin admin;
@@ -482,6 +499,7 @@ namespace platf {
             index,
             conn->connector_id,
             conn->connection == DRM_MODE_CONNECTED,
+            conn->connector_type_id,
           });
         });
 
@@ -553,10 +571,14 @@ namespace platf {
       std::map<std::uint32_t, monitor_t> result;
 
       for (auto &connector : connectors) {
-        result.emplace(connector.crtc_id, monitor_t {
+        const auto [entry, inserted] = result.emplace(connector.crtc_id, monitor_t {
                                             connector.type,
                                             connector.index,
                                           });
+        if (inserted) {
+          entry->second.kernel_index = connector.kernel_index;
+          entry->second.connected = connector.connected;
+        }
       }
 
       return result;
@@ -611,7 +633,20 @@ namespace platf {
       int init(const std::string &display_name, const ::video::config_t &config) {
         delay = ::video::capture_frame_interval(config);
 
-        int monitor_index = util::from_view(display_name);
+        const auto legacy = kms_selection::legacy_index(display_name);
+        int monitor_index = legacy.value_or(-1);
+        std::string named_target;
+        if (!legacy) {
+          const auto names = kms_display_names(mem_type);
+          const auto selected = kms_selection::find_alias(names, display_name);
+          if (!selected) {
+            BOOST_LOG(error) << "KMS connector [" << display_name << "] is missing or ambiguous; use its GPU-qualified name";
+            return -1;
+          }
+          monitor_index = *selected;
+          named_target = names[*selected];
+        }
+        const auto named = kms_selection::split_name(named_target);
         int monitor = 0;
 
         fs::path card_dir {"/dev/dri"sv};
@@ -637,6 +672,35 @@ namespace platf {
             }
           }
 
+          std::optional<uint32_t> named_plane;
+          std::optional<uint32_t> named_connector;
+          if (named) {
+            if (card.gpu_identity() != named->first) continue;
+            kms::conn_type_count_t unused_counts;
+            uint32_t named_crtc = 0;
+            for (const auto &connector : card.monitors(unused_counts)) {
+              const auto *type = drmModeGetConnectorTypeName(connector.type);
+              if (type && std::format("{}-{}", type, connector.kernel_index) == named->second && connector.connected && connector.crtc_id) {
+                if (named_connector) {
+                  BOOST_LOG(error) << "KMS connector identity became ambiguous during initialization";
+                  return -1;
+                }
+                named_connector = connector.connector_id;
+                named_crtc = connector.crtc_id;
+              }
+            }
+            if (!named_connector) return -1;
+            for (auto candidate = std::begin(card); candidate != std::end(card); ++candidate) {
+              if (!candidate->fb_id || candidate->crtc_id != named_crtc || card.is_cursor(candidate->plane_id)) continue;
+              if (named_plane) {
+                BOOST_LOG(error) << "KMS connector has multiple active capture planes; use a legacy numeric selection";
+                return -1;
+              }
+              named_plane = candidate->plane_id;
+            }
+            if (!named_plane) return -1;
+          }
+
           auto end = std::end(card);
           for (auto plane = std::begin(card); plane != end; ++plane) {
             // Skip unused planes
@@ -648,7 +712,7 @@ namespace platf {
               continue;
             }
 
-            if (monitor != monitor_index) {
+            if (named ? plane->plane_id != *named_plane : monitor != monitor_index) {
               ++monitor;
               continue;
             }
@@ -756,6 +820,33 @@ namespace platf {
                 auto connector_props = card.connector_props(*connector_id);
                 hdr_metadata_blob_id = card.prop_value_by_name(connector_props, "HDR_OUTPUT_METADATA"sv);
               }
+            }
+
+            if (named) {
+              // Resolve again from the opened card after the framebuffer and
+              // CRTC reads. Hotplug or CRTC reassignment cannot select another
+              // connector merely because it inherited the same numeric index.
+              const auto current = card.connector(*named_connector);
+              const auto encoder = current && current->encoder_id ? card.encoder(current->encoder_id) : kms::encoder_t {};
+              const auto *type = current ? drmModeGetConnectorTypeName(current->connector_type) : nullptr;
+              if (!current || current->connection != DRM_MODE_CONNECTED || !encoder ||
+                  encoder->crtc_id != crtc_id || !type ||
+                  std::format("{}-{}", type, current->connector_type_id) != named->second ||
+                  card.gpu_identity() != named->first) {
+                BOOST_LOG(error) << "KMS connector changed during initialization; refusing another output";
+                return -1;
+              }
+              kms_selection::native_drm_api_t api;
+              if (!kms_selection::binding_matches(api, card.fd.el, {
+                    std::string(named->second), *named_connector, static_cast<uint32_t>(crtc_id), static_cast<uint32_t>(plane_id)
+                  })) {
+                BOOST_LOG(error) << "KMS capture plane changed during initialization";
+                return -1;
+              }
+              named_connector_name = std::string(named->second);
+              connector_id = *named_connector;
+              const auto connector_props = card.connector_props(*connector_id);
+              hdr_metadata_blob_id = card.prop_value_by_name(connector_props, "HDR_OUTPUT_METADATA"sv);
             }
 
             this->card = std::move(card);
@@ -1058,7 +1149,18 @@ namespace platf {
         }
       }
 
+      bool named_binding_matches() {
+        if (named_connector_name.empty()) return true;
+        if (!connector_id) return false;
+        kms_selection::native_drm_api_t api;
+        return kms_selection::binding_matches(api, card.fd.el, {
+          named_connector_name, *connector_id, static_cast<uint32_t>(crtc_id), static_cast<uint32_t>(plane_id)
+        });
+      }
+
       inline capture_e refresh(file_t *file, egl::surface_descriptor_t *sd, std::optional<std::chrono::steady_clock::time_point> &frame_timestamp) {
+        if (!named_binding_matches()) return capture_e::reinit;
+
         // Check for a change in HDR metadata
         if (connector_id) {
           auto connector_props = card.connector_props(*connector_id);
@@ -1069,6 +1171,7 @@ namespace platf {
         }
 
         plane_t plane = drmModeGetPlane(card.fd.el, plane_id);
+        if (!plane || plane->crtc_id != crtc_id || !plane->fb_id) return capture_e::reinit;
         frame_timestamp = std::chrono::steady_clock::now();
 
         auto fb = card.fb(plane.get());
@@ -1118,6 +1221,7 @@ namespace platf {
         }
 
         update_cursor();
+        if (!named_binding_matches()) return capture_e::reinit;
 
         return capture_e::ok;
       }
@@ -1149,6 +1253,7 @@ namespace platf {
       int crtc_id;
       int crtc_index;
 
+      std::string named_connector_name;
       std::optional<uint32_t> connector_id;
       std::optional<uint64_t> hdr_metadata_blob_id;
 
@@ -1489,15 +1594,13 @@ namespace platf {
       }
 
       capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds /* timeout */, bool cursor) {
-        file_t fb_fd[4];
-
         if (!pull_free_image_cb(img_out)) {
           return platf::capture_e::interrupted;
         }
         auto img = (egl::img_descriptor_t *) img_out.get();
-        img->reset();
-
-        auto status = refresh(fb_fd, &img->sd, img->frame_timestamp);
+        const auto status = kms_capture::refresh_owned_frame(*img, [&](auto *fds, auto *surface, auto &timestamp) {
+          return refresh(fds, surface, timestamp);
+        });
         if (status != capture_e::ok) {
           return status;
         }
@@ -1525,9 +1628,6 @@ namespace platf {
           img->data = nullptr;
         }
 
-        for (auto x = 0; x < 4; ++x) {
-          fb_fd[x].release();
-        }
         return capture_e::ok;
       }
 
@@ -1580,6 +1680,17 @@ namespace platf {
 
     return disp;
   }
+
+#ifdef POLARIS_TESTS
+  std::optional<std::string> kms_capture_binding_for_tests(display_t &display) {
+    auto *capture = dynamic_cast<kms::display_t *>(&display);
+    if (!capture || !capture->connector_id) return std::nullopt;
+    const auto gpu = capture->card.gpu_identity();
+    if (gpu.empty()) return std::nullopt;
+    return gpu + "/" + std::to_string(*capture->connector_id) + "/" +
+      std::to_string(capture->crtc_id) + "/" + std::to_string(capture->plane_id);
+  }
+#endif
 
   /**
    * On Wayland, it's not possible to determine the position of the monitor on the desktop with KMS.
@@ -1661,7 +1772,7 @@ namespace platf {
     kms::conn_type_count_t conn_type_count;
 
     std::vector<kms::card_descriptor_t> cds;
-    std::vector<std::string> display_names;
+    std::vector<kms_selection::output_t> outputs;
 
     fs::path card_dir {"/dev/dri"sv};
     for (auto &entry : fs::directory_iterator {card_dir}) {
@@ -1741,7 +1852,11 @@ namespace platf {
 
         kms::print(plane.get(), fb.get(), crtc.get());
 
-        display_names.emplace_back(std::to_string(count++));
+        const auto *connector_type = it != crtc_to_monitor.end() ? drmModeGetConnectorTypeName(it->second.type) : nullptr;
+        const auto connector = connector_type && it->second.kernel_index != 0 ?
+          std::format("{}-{}", connector_type, it->second.kernel_index) : std::string {};
+        outputs.push_back({card.gpu_identity(), connector, it != crtc_to_monitor.end() && it->second.connected, plane->crtc_id});
+        ++count;
       }
 
       cds.emplace_back(kms::card_descriptor_t {
@@ -1773,7 +1888,11 @@ namespace platf {
 
     kms::card_descriptors = std::move(cds);
 
-    return display_names;
+    const auto names = kms_selection::display_names(outputs);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      BOOST_LOG(info) << "KMS display: " << names[i] << " (legacy id: " << i << ')';
+    }
+    return names;
   }
 
 }  // namespace platf

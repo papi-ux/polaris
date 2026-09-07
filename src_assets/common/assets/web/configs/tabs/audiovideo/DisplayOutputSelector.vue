@@ -9,7 +9,9 @@ const props = defineProps([
 ])
 
 const config = ref(props.config)
-const outputNamePlaceholder = (props.platform === 'windows') ? '{de9bb7e2-186e-505b-9e93-f48793333810}' : '0'
+const outputNamePlaceholder = props.platform === 'windows'
+  ? '{de9bb7e2-186e-505b-9e93-f48793333810}'
+  : props.platform === 'linux' ? 'DP-1' : '0'
 </script>
 
 <template>
@@ -35,12 +37,9 @@ const outputNamePlaceholder = (props.platform === 'windows') ? '{de9bb7e2-186e-5
         </template>
         <template #linux>
           <pre class="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-xs text-silver">
-            Info: Detecting displays
-            Info: Detected display: DVI-D-0 (id: 0) connected: false
-            Info: Detected display: HDMI-0 (id: 1) connected: true
-            Info: Detected display: DP-0 (id: 2) connected: true
-            Info: Detected display: DP-1 (id: 3) connected: false
-            Info: Detected display: DVI-D-1 (id: 4) connected: false
+            Info: KMS display: kms:pci-0000:01:00.0/DP-1 (legacy id: 0)
+            Info: KMS display: kms:pci-0000:03:00.0/DP-1 (legacy id: 1)
+            Info: KMS display: kms:pci-0000:01:00.0/HDMI-A-1 (legacy id: 2)
           </pre>
         </template>
         <template #macos>

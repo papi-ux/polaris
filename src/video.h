@@ -716,6 +716,9 @@ namespace video {
     std::string_view requested_display_name
   );
 
+  int refresh_display_selection_for_tests(std::vector<std::string> previous, int previous_index,
+                                         std::string requested, const std::vector<std::string> &enumerated);
+
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count);
 
   bool hdr_metadata_is_usable_for_tests(const SS_HDR_METADATA &metadata);
