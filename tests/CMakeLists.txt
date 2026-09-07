@@ -76,6 +76,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/src/recovery_profile.cpp
     ${CMAKE_SOURCE_DIR}/src/stream_fec.cpp
+    ${CMAKE_SOURCE_DIR}/tests/fixtures/nanors_cpu_dispatch.c
     ${CMAKE_SOURCE_DIR}/src/web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/display_planner.cpp
@@ -84,7 +85,9 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
     ${CMAKE_SOURCE_DIR}/src/update_status.cpp
     ${CMAKE_SOURCE_DIR}/src/verified_action.cpp
-    ${CMAKE_SOURCE_DIR}/src/rswrapper.c
+    ${CMAKE_SOURCE_DIR}/third-party/nanors/rs.c
+    ${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_common.c
+    ${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_lite.c
 )
 
 if(NOT WIN32 AND NOT APPLE AND NOT POLARIS_HAVE_LIBVA_MAP_BUFFER2)
@@ -138,7 +141,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_stream_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pulse_mainloop_contract.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_reed_solomon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_source_safety_contracts.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_fec.cpp
