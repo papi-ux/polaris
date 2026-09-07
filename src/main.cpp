@@ -49,9 +49,7 @@
 
 #define PROBE_DISPLAY_UUID "38F72B96-B00C-4F21-8B6C-E1BFF1602B0E"
 
-extern "C" {
-#include "rswrapper.h"
-}
+#include <rs.h>
 
 using namespace std::literals;
 
@@ -490,7 +488,14 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(error) << "Proc failed to initialize"sv;
   }
 
-  reed_solomon_init();
+  // nanors dispatches per codec. Its table initializer is intentionally not
+  // synchronized, so warm it before any audio/video stream can create a codec.
+  auto fec_warmup = reed_solomon_new(1, 1);
+  if (!fec_warmup) {
+    BOOST_LOG(fatal) << "Unable to initialize FEC encoder"sv;
+    return 1;
+  }
+  reed_solomon_release(fec_warmup);
   auto input_deinit_guard = input::init();
 
 #ifdef __linux__
