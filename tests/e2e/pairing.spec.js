@@ -121,16 +121,26 @@ test.describe('pairing', () => {
   test('manual PIN approval defaults to Game Control', async ({ loggedInPage }) => {
     let payload = null
     await loggedInPage.route('**/api/pin', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({ json: { pairings: [
+          { id: 'a'.repeat(32), name: 'Same name', address: '192.0.2.1' },
+          { id: 'b'.repeat(32), name: 'Same name', address: '192.0.2.2' },
+        ] } })
+        return
+      }
       payload = route.request().postDataJSON()
       await route.fulfill({ json: { status: true, access_preset: 'game_control' } })
     })
 
     await loggedInPage.getByRole('navigation').getByRole('link', { name: /^devices$/i }).click()
     await loggedInPage.getByRole('button', { name: /manual pin/i }).click()
+    await expect(loggedInPage.getByRole('button', { name: /^send$/i })).toBeDisabled()
+    await loggedInPage.locator('#pairing-request').selectOption('b'.repeat(32))
     await loggedInPage.locator('#pin-input').fill('1234')
     await loggedInPage.getByRole('button', { name: /^send$/i }).click()
 
     await expect.poll(() => payload?.access_preset).toBe('game_control')
+    await expect.poll(() => payload?.pairing_id).toBe('b'.repeat(32))
   })
 
   test('shows existing Game Control clients as a named preset', async ({ loggedInPage }) => {

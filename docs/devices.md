@@ -85,3 +85,23 @@ device connects (**do**) and disconnects (**undo**). Commands run detached.
 Renaming or re-pairing a device can leave a display profile behind under the old name. When that
 happens a **Stale profile aliases** section appears at the bottom of the page listing them;
 **Remove stale** deletes the aliases without unpairing any real device.
+
+## Manual pairing approval API
+
+Manual PIN approval now requires selecting a pending request. Administrative clients must first call authenticated `GET /api/pin`, which returns:
+
+```json
+{"pairings":[{"id":"0123456789abcdef0123456789abcdef","name":"Living room","address":"192.0.2.10"}]}
+```
+
+Names are reported by clients. Check the source address and select the intended request. Submit its exact ID with the PIN using authenticated, CSRF-protected `POST /api/pin`:
+
+```json
+{"pairing_id":"0123456789abcdef0123456789abcdef","pin":"1234","name":"Living room","access_preset":"game_control","temporary_authorization":false}
+```
+
+`pairing_id` is mandatory. Missing or malformed IDs return HTTP 400; expired, cancelled, already approved, or unknown requests return `status: false`. Approval never selects another pending request. Existing access presets and temporary guest authorization retain their behavior. An empty administrative name preserves the client-reported name.
+
+Authenticated, CSRF-protected `DELETE /api/pin` accepts `{"pairing_id":"..."}` and cancels only that pending request. IDs contain 32 random hexadecimal characters. Sessions expire five minutes after creation; the host retains at most 32 and rejects duplicate pending client identifiers. Refresh the request list after an expiration, cancellation, or failed approval.
+
+This administrative API change does not alter Nova or Moonlight's normal pairing protocol. QR/OTP and explicitly requested trusted-network pairing retain their existing behavior.

@@ -7,6 +7,10 @@
 #include "../certificate_test_utils.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <future>
+#include <Simple-Web-Server/client_http.hpp>
+#include <Simple-Web-Server/server_http.hpp>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -1543,4 +1547,514 @@ TEST_F(PairingAccessPresetTest, LegacyPairingDefaultsEveryNewClientToGameControl
   ASSERT_EQ(clients.size(), 2);
   EXPECT_EQ(clients[0]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
   EXPECT_EQ(clients[1]["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::_game_control));
+}
+
+namespace {
+  /**
+   * @brief Stream buffer that holds console input until a pairing test releases it.
+   */
+  class gated_input_buffer: public std::streambuf {
+  public:
+    /**
+     * @brief Make the buffered input available to its reader.
+     */
+    void release() {
+      {
+        std::lock_guard lock {mutex_};
+        released_ = true;
+      }
+      condition_.notify_all();
+    }
+
+  protected:
+    /**
+     * @brief Wait for release and expose the buffered PIN to the input stream.
+     *
+     * @return The first buffered character, or end-of-file after it is consumed.
+     */
+    int_type underflow() override {
+      std::unique_lock lock {mutex_};
+      condition_.wait(lock, [this]() {
+        return released_;
+      });
+      if (gptr() == nullptr) {
+        setg(input_.data(), input_.data(), input_.data() + input_.size());
+      }
+      return gptr() == egptr() ? traits_type::eof() : traits_type::to_int_type(*gptr());
+    }
+
+  private:
+    std::string input_ = "1234\n";  ///< PIN text released to the pairing handler.
+    std::mutex mutex_;  ///< Protects the release flag.
+    std::condition_variable condition_;  ///< Wakes the blocked input reader.
+    bool released_ = false;  ///< Whether the reader may consume the PIN.
+  };
+
+  /**
+   * @brief Restore the process input stream after a console-PIN test.
+   */
+  class cin_buffer_guard {
+  public:
+    /**
+     * @brief Redirect standard input to a test buffer.
+     *
+     * @param replacement Stream buffer to read during the test.
+     */
+    explicit cin_buffer_guard(std::streambuf *replacement):
+        original_(std::cin.rdbuf(replacement)) {
+      std::cin.clear();
+    }
+
+    /**
+     * @brief Restore the original standard-input buffer and stream state.
+     */
+    ~cin_buffer_guard() noexcept {
+      try {
+        std::cin.rdbuf(original_);
+        std::cin.clear();
+      } catch (const std::ios_base::failure &stream_error) {
+        ADD_FAILURE() << "Failed to restore the standard-input buffer: " << stream_error.what();
+      }
+    }
+
+    cin_buffer_guard(const cin_buffer_guard &) = delete;
+    cin_buffer_guard &operator=(const cin_buffer_guard &) = delete;
+
+  private:
+    std::streambuf *original_;  ///< Process input buffer restored at scope exit.
+  };
+
+  /**
+   * @brief Build a pairing session that is awaiting operator approval.
+   *
+   * @param unique_id Client-controlled GameStream unique identifier.
+   * @param device_name Client-reported device name.
+   * @param address Network address associated with the request.
+   * @return Pairing session ready for insertion into pending storage.
+   */
+  pair_session_t pending_session(std::string unique_id, std::string device_name, std::string address) {
+    return {
+      .client = {
+        .uniqueID = std::move(unique_id),
+      },
+      .async_insert_pin = {
+        .salt = "ff5dc6eda99339a8a0793e216c4257c4",
+        .device_name = std::move(device_name),
+        .address = std::move(address),
+      },
+    };
+  }
+
+  /**
+   * @brief Fixture that isolates tests using global pending-pairing storage.
+   */
+  class PairingSessionRegistryTest: public testing::Test {
+  protected:
+    void SetUp() override {
+      expire_pair_sessions(std::chrono::steady_clock::time_point::max());
+    }
+
+    void TearDown() override {
+      expire_pair_sessions(std::chrono::steady_clock::time_point::max());
+    }
+  };
+
+  /**
+   * @brief Exercise the production pairing dispatcher through a local HTTP server.
+   */
+  class PairingHttpHandlerTest: public testing::Test {
+  protected:
+    /**
+     * @brief Start an isolated plain-HTTP pairing endpoint.
+     */
+    void SetUp() override {
+      setup(PRIVATE_KEY, PUBLIC_CERT);
+      expire_pair_sessions(std::chrono::steady_clock::time_point::max());
+      original_pin_stdin_ = config::sunshine.flags[config::flag::PIN_STDIN];
+      config::sunshine.flags[config::flag::PIN_STDIN] = false;
+
+      server_ = std::make_unique<SimpleWeb::Server<SimpleWeb::HTTP>>();
+      server_->config.address = "127.0.0.1";
+      server_->config.port = 0;
+      server_->config.reuse_address = true;
+      server_->config.timeout_request = 5;
+      server_->config.timeout_content = 5;
+      server_->resource["^/pair$"]["GET"] = nvhttp::pair_http_for_tests;
+      server_thread_ = std::jthread([this]() {
+        server_->start([this](const unsigned short assigned_port) {
+          port_ = assigned_port;
+        });
+      });
+
+      for (int attempt = 0; attempt < 100 && port_ == 0; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds {10});
+      }
+      ASSERT_NE(port_, 0) << "Pairing test server failed to start";
+
+      client_ = std::make_unique<SimpleWeb::Client<SimpleWeb::HTTP>>(std::format("localhost:{}", port_.load()));
+      client_->config.timeout = 5;
+    }
+
+    /**
+     * @brief Stop the endpoint and restore pairing configuration.
+     */
+    void TearDown() override {
+      expire_pair_sessions(std::chrono::steady_clock::time_point::max());
+      if (server_) {
+        server_->stop();
+      }
+      if (server_thread_.joinable()) {
+        server_thread_.join();
+      }
+      client_.reset();
+      server_.reset();
+      config::sunshine.flags[config::flag::PIN_STDIN] = original_pin_stdin_;
+
+    }
+
+    /**
+     * @brief Build the query for the initial certificate phase.
+     *
+     * @param unique_id Client pairing identifier.
+     * @param salt Hexadecimal PIN salt.
+     * @return Request target for the local pairing endpoint.
+     */
+    static std::string server_certificate_target(const std::string_view unique_id, const std::string_view salt = "ff5dc6eda99339a8a0793e216c4257c4") {
+      return std::format(
+        "/pair?uniqueid={}&phrase=getservercert&clientcert={}&salt={}&devicename=TestClient",
+        unique_id,
+        util::hex_vec(PUBLIC_CERT, true),
+        salt
+      );
+    }
+
+    /**
+     * @brief Read the response body from the local pairing endpoint.
+     *
+     * @param target Request target including query parameters.
+     * @return XML response body.
+     */
+    std::string request(const std::string_view target) {
+      return client_->request("GET", std::string {target})->content.string();
+    }
+
+    /**
+     * @brief Wait for a request to enter the pending pairing registry.
+     *
+     * @return The operator-facing pairing identifier, or an empty string on timeout.
+     */
+    static std::string wait_for_pending_pairing() {
+      for (int attempt = 0; attempt < 100; ++attempt) {
+        if (const auto pending = get_pending_pairings(); !pending.empty()) {
+          return pending.front().id;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds {10});
+      }
+      return {};
+    }
+
+  private:
+    std::unique_ptr<SimpleWeb::Server<SimpleWeb::HTTP>> server_;  ///< Local pairing HTTP server.
+    std::unique_ptr<SimpleWeb::Client<SimpleWeb::HTTP>> client_;  ///< Client connected to the local server.
+    std::jthread server_thread_;  ///< Thread running the local server event loop.
+    std::atomic<unsigned short> port_ {0};  ///< Ephemeral port assigned to the local server.
+    bool original_pin_stdin_;  ///< Console-PIN flag restored after each test.
+  };
+}  // namespace
+
+TEST_F(PairingHttpHandlerTest, ImmediateRequestsReturnExpectedStatus) {
+  EXPECT_NE(request("/pair"sv).find("status_code=\"400\""), std::string::npos);
+  EXPECT_NE(request("/pair?uniqueid=challenge&phrase=pairchallenge"sv).find("status_code=\"200\""), std::string::npos);
+  EXPECT_NE(request("/pair?uniqueid=missing"sv).find("Invalid uniqueid"), std::string::npos);
+
+  std::string pairing_id;
+  ASSERT_EQ(insert_pair_session(pending_session("out-of-order", "Client", "192.0.2.10"), pairing_id), pair_session_insert_e::ADDED);
+  EXPECT_NE(request("/pair?uniqueid=out-of-order&clientchallenge=00"sv).find("Out of order"), std::string::npos);
+}
+
+TEST_F(PairingHttpHandlerTest, WebApprovalRequestRemainsPendingUntilCancelled) {
+  std::packaged_task<std::string()> request_task {[this]() {
+    return request(server_certificate_target("pending"));
+  }};
+  auto response = request_task.get_future();
+  std::jthread request_thread {std::move(request_task)};
+
+  const auto pairing_id = wait_for_pending_pairing();
+  ASSERT_FALSE(pairing_id.empty());
+  EXPECT_TRUE(cancel_pairing(pairing_id));
+  EXPECT_NE(response.get().find("cancelled by operator"), std::string::npos);
+}
+
+TEST_F(PairingHttpHandlerTest, DuplicateAndCapacityErrorsReturnImmediately) {
+  std::string pairing_id;
+  ASSERT_EQ(insert_pair_session(pending_session("duplicate", "Original", "192.0.2.10"), pairing_id), pair_session_insert_e::ADDED);
+  EXPECT_NE(request(server_certificate_target("duplicate")).find("status_code=\"409\""), std::string::npos);
+
+  expire_pair_sessions(std::chrono::steady_clock::time_point::max());
+  for (std::size_t index = 0; index < MAX_PENDING_PAIRING_SESSIONS; ++index) {
+    ASSERT_EQ(
+      insert_pair_session(pending_session(std::format("full-{}", index), "Client", "192.0.2.10"), pairing_id),
+      pair_session_insert_e::ADDED
+    );
+  }
+  EXPECT_NE(request(server_certificate_target("overflow")).find("status_code=\"503\""), std::string::npos);
+}
+
+TEST_F(PairingHttpHandlerTest, ConsolePinCompletesOrRejectsTheCertificatePhase) {
+  setup(PRIVATE_KEY, PUBLIC_CERT);
+  config::sunshine.flags[config::flag::PIN_STDIN] = true;
+
+  std::istringstream input {"5338\n0000\n"};
+  const cin_buffer_guard input_guard {input.rdbuf()};
+  EXPECT_NE(request(server_certificate_target("console-success")).find("status_code=\"200\""), std::string::npos);
+  EXPECT_NE(request(server_certificate_target("console-failure", "00")).find("status_code=\"400\""), std::string::npos);
+}
+
+TEST_F(PairingHttpHandlerTest, ConsolePinReportsSessionExpiration) {
+  config::sunshine.flags[config::flag::PIN_STDIN] = true;
+  gated_input_buffer input;
+  const cin_buffer_guard input_guard {&input};
+  std::packaged_task<std::string()> request_task {[this]() {
+    return request(server_certificate_target("expired"));
+  }};
+  auto response = request_task.get_future();
+  std::jthread request_thread {std::move(request_task)};
+  auto release_input = util::fail_guard([&] { input.release(); });
+
+  ASSERT_FALSE(wait_for_pending_pairing().empty());
+  expire_pair_sessions(std::chrono::steady_clock::time_point::max());
+  input.release();
+  EXPECT_NE(response.get().find("status_code=\"408\""), std::string::npos);
+}
+
+TEST_F(PairingSessionRegistryTest, PinApprovalTargetsExplicitPairingId) {
+  std::string legitimate_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("legitimate", "Living Room", "192.0.2.10"), legitimate_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+
+  std::string attacker_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("attacker", "Living Room", "192.0.2.20"), attacker_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+  ASSERT_NE(legitimate_pairing_id, attacker_pairing_id);
+
+  // Unit-test sessions have no parked HTTP response, so pin() returns false after
+  // consuming the explicitly selected session. The competing request must remain untouched.
+  EXPECT_FALSE(pin(legitimate_pairing_id, "1234", "Approved client"));
+
+  const auto pending = get_pending_pairings();
+  ASSERT_EQ(pending.size(), 1);
+  EXPECT_EQ(pending.front().id, attacker_pairing_id);
+  EXPECT_EQ(pending.front().address, "192.0.2.20");
+}
+
+TEST_F(PairingSessionRegistryTest, InvalidApprovalCannotConsumePendingSession) {
+  std::string pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("legitimate", "Laptop", "192.0.2.10"), pairing_id),
+    pair_session_insert_e::ADDED
+  );
+
+  EXPECT_FALSE(pin("unknown-approval", "1234", "Laptop"));
+  EXPECT_FALSE(pin(pairing_id, "123", "Laptop"));
+  EXPECT_FALSE(pin(pairing_id, "12a4", "Laptop"));
+
+  const auto pending = get_pending_pairings();
+  ASSERT_EQ(pending.size(), 1);
+  EXPECT_EQ(pending.front().id, pairing_id);
+}
+
+TEST_F(PairingSessionRegistryTest, PairingIdsAreValidatedAndIdlessApprovalIsRejected) {
+  EXPECT_TRUE(is_valid_pairing_id("0123456789ABCDEF0123456789abcdef"));
+  EXPECT_FALSE(is_valid_pairing_id(std::string(31, 'a')));
+  EXPECT_FALSE(is_valid_pairing_id(std::string(33, 'a')));
+  EXPECT_FALSE(is_valid_pairing_id(std::string(32, 'g')));
+  std::string id;
+  ASSERT_EQ(insert_pair_session(pending_session("idless", "Client", "192.0.2.1"), id), pair_session_insert_e::ADDED);
+  EXPECT_FALSE(pin("", "1234", "Client"));
+  EXPECT_EQ(get_pending_pairings().size(), 1);
+}
+
+TEST_F(PairingSessionRegistryTest, DuplicateUniqueIdIsRejectedWithoutReplacingOriginal) {
+  std::string original_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("duplicate", "Original", "192.0.2.10"), original_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+
+  std::string rejected_pairing_id;
+  EXPECT_EQ(
+    insert_pair_session(pending_session("duplicate", "Replacement", "192.0.2.20"), rejected_pairing_id),
+    pair_session_insert_e::ALREADY_EXISTS
+  );
+  EXPECT_TRUE(rejected_pairing_id.empty());
+
+  const auto pending = get_pending_pairings();
+  ASSERT_EQ(pending.size(), 1);
+  EXPECT_EQ(pending.front().id, original_pairing_id);
+  EXPECT_EQ(pending.front().name, "Original");
+}
+
+TEST_F(PairingSessionRegistryTest, PendingSessionStorageIsBounded) {
+  for (std::size_t index = 0; index < MAX_PENDING_PAIRING_SESSIONS; ++index) {
+    std::string pairing_id;
+    ASSERT_EQ(
+      insert_pair_session(pending_session(std::format("client-{}", index), "Client", "192.0.2.10"), pairing_id),
+      pair_session_insert_e::ADDED
+    );
+    EXPECT_FALSE(pairing_id.empty());
+  }
+
+  std::string overflow_pairing_id;
+  EXPECT_EQ(
+    insert_pair_session(pending_session("overflow", "Overflow", "192.0.2.20"), overflow_pairing_id),
+    pair_session_insert_e::FULL
+  );
+  EXPECT_EQ(get_pending_pairings().size(), MAX_PENDING_PAIRING_SESSIONS);
+}
+
+TEST_F(PairingSessionRegistryTest, ExpiredApprovalCannotConsumeLaterSession) {
+  const auto expiration_check = std::chrono::steady_clock::now() + PAIRING_SESSION_TIMEOUT + std::chrono::seconds {1};
+  std::string expired_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("expired", "Old client", "192.0.2.10"), expired_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+  expire_pair_sessions(expiration_check);
+  EXPECT_TRUE(get_pending_pairings().empty());
+
+  std::string current_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("current", "Current client", "192.0.2.20"), current_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+  EXPECT_FALSE(pin(expired_pairing_id, "1234", "Old client"));
+
+  const auto pending = get_pending_pairings();
+  ASSERT_EQ(pending.size(), 1);
+  EXPECT_EQ(pending.front().id, current_pairing_id);
+}
+
+TEST_F(PairingSessionRegistryTest, CancellationRemovesOnlySelectedPendingSession) {
+  std::string first_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("first", "First", "192.0.2.10"), first_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+  std::string second_pairing_id;
+  ASSERT_EQ(
+    insert_pair_session(pending_session("second", "Second", "192.0.2.20"), second_pairing_id),
+    pair_session_insert_e::ADDED
+  );
+
+  EXPECT_TRUE(cancel_pairing(first_pairing_id));
+  EXPECT_FALSE(cancel_pairing(first_pairing_id));
+
+  const auto pending = get_pending_pairings();
+  ASSERT_EQ(pending.size(), 1);
+  EXPECT_EQ(pending.front().id, second_pairing_id);
+}
+
+TEST_F(PairingSessionRegistryTest, RemoveSessionErasesItsUniqueId) {
+  auto session = pending_session("removable", "Client", "192.0.2.10");
+  pair_session_t session_key;
+  session_key.client.uniqueID = session.client.uniqueID;
+  std::string pairing_id;
+  ASSERT_EQ(insert_pair_session(std::move(session), pairing_id), pair_session_insert_e::ADDED);
+
+  session_key.async_insert_pin.id = pairing_id;
+  remove_session(session_key);
+  EXPECT_TRUE(get_pending_pairings().empty());
+}
+
+TEST_F(PairingSessionRegistryTest, ConcurrentInsertionAndCancellationLeaveConsistentState) {
+  constexpr std::size_t session_count = 16;
+  std::atomic<std::size_t> successful_cancellations {0};
+  std::vector<std::jthread> workers;
+  workers.reserve(session_count);
+
+  for (std::size_t index = 0; index < session_count; ++index) {
+    workers.emplace_back([index, &successful_cancellations]() {
+      std::string pairing_id;
+      if (insert_pair_session(pending_session(std::format("concurrent-{}", index), "Client", "192.0.2.10"), pairing_id) == pair_session_insert_e::ADDED && cancel_pairing(pairing_id)) {
+        ++successful_cancellations;
+      }
+    });
+  }
+  workers.clear();
+
+  EXPECT_EQ(successful_cancellations, session_count);
+  EXPECT_TRUE(get_pending_pairings().empty());
+}
+
+TEST_F(PairingHttpHandlerTest, ManualApprovalPreservesAccessAndGuestOptions) {
+  std::packaged_task<std::string()> request_task {[this] {
+    return request(server_certificate_target("manual-access"));
+  }};
+  auto response = request_task.get_future();
+  std::jthread worker {std::move(request_task)};
+  const auto id = wait_for_pending_pairing();
+  ASSERT_FALSE(id.empty());
+  EXPECT_TRUE(pin(id, "5338", "Approved guest", crypto::PERM::_default, true));
+  EXPECT_NE(response.get().find("status_code=\"200\""), std::string::npos);
+  const auto options = pairing_options_for_tests(id);
+  EXPECT_EQ(options.at("name"), "Approved guest");
+  EXPECT_EQ(options.at("perm"), static_cast<std::uint32_t>(crypto::PERM::_default));
+  EXPECT_EQ(options.at("temporary_authorization"), true);
+  EXPECT_FALSE(cancel_pairing(id));
+  EXPECT_FALSE(pin(id, "5338", "Other", crypto::PERM::_all, false));
+}
+
+TEST_F(PairingSessionRegistryTest, ConcurrentApprovalAndCancellationConsumeExactlyOneRequest) {
+  std::string id;
+  ASSERT_EQ(insert_pair_session(pending_session("race", "Client", "192.0.2.1"), id), pair_session_insert_e::ADDED);
+  std::atomic<bool> start {false};
+  std::jthread approving([&] {
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    (void) pin(id, "5338", "Approved", crypto::PERM::_default, true);
+  });
+  std::jthread cancelling([&] {
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    (void) cancel_pairing(id);
+  });
+  start.store(true, std::memory_order_release);
+  approving.join();
+  cancelling.join();
+  EXPECT_TRUE(get_pending_pairings().empty());
+}
+
+TEST_F(PairingHttpHandlerTest, OtpHandlerPreservesAccessAndGuestOptions) {
+  const auto otp = request_otp("fixture passphrase", "OTP guest", crypto::PERM::_default, true);
+  const auto auth = util::hex(crypto::hash(otp + "ff5dc6eda99339a8a0793e216c4257c4" + "fixture passphrase"), true).to_string();
+  EXPECT_NE(request(server_certificate_target("otp-options") + "&otpauth=" + auth).find("status_code=\"200\""), std::string::npos);
+  EXPECT_TRUE(get_pending_pairings().empty());
+  const auto options = pairing_options_for_tests("otp-options");
+  EXPECT_EQ(options.at("name"), "OTP guest");
+  EXPECT_EQ(options.at("perm"), static_cast<std::uint32_t>(crypto::PERM::_default));
+  EXPECT_EQ(options.at("temporary_authorization"), true);
+}
+
+TEST_F(PairingHttpHandlerTest, TrustedNetworkHandlerStillRequiresClientOptIn) {
+  const auto old_enabled = config::nvhttp.trusted_subnet_auto_pairing;
+  auto old_subnets = config::nvhttp.trusted_subnets;
+  auto restore = util::fail_guard([&] {
+    config::nvhttp.trusted_subnet_auto_pairing = old_enabled;
+    config::nvhttp.trusted_subnets = std::move(old_subnets);
+  });
+  config::nvhttp.trusted_subnet_auto_pairing = true;
+  config::nvhttp.trusted_subnets = {"127.0.0.0/8"};
+  EXPECT_NE(request(server_certificate_target("trusted-options") + "&trustedpair=1").find("status_code=\"200\""), std::string::npos);
+  EXPECT_TRUE(get_pending_pairings().empty());
+  EXPECT_EQ(pairing_options_for_tests("trusted-options").at("family"), "nova");
+
+  std::packaged_task<std::string()> request_task {[this] { return request(server_certificate_target("manual-optin")); }};
+  auto response = request_task.get_future();
+  std::jthread worker {std::move(request_task)};
+  const auto id = wait_for_pending_pairing();
+  ASSERT_FALSE(id.empty());
+  EXPECT_TRUE(cancel_pairing(id));
+  EXPECT_NE(response.get().find("cancelled by operator"), std::string::npos);
 }

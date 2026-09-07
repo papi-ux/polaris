@@ -5283,6 +5283,34 @@ namespace confighttp {
     }
   }
 
+  /** @brief List manual pairing requests for an authenticated administrator. */
+  void getPendingPairings(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    nlohmann::json output;
+    output["pairings"] = nlohmann::json::array();
+    for (const auto &pairing : nvhttp::get_pending_pairings()) {
+      output["pairings"].push_back({{"id", pairing.id}, {"name", pairing.name}, {"address", pairing.address}});
+    }
+    send_response(response, output);
+  }
+
+  void cancelPairing(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      const auto pairing_id = body.value("pairing_id", "");
+      if (!nvhttp::is_valid_pairing_id(pairing_id)) {
+        bad_request(response, request, "pairing_id must contain exactly 32 hexadecimal characters");
+        return;
+      }
+      send_response(response, nlohmann::json {{"status", nvhttp::cancel_pairing(pairing_id)}});
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+    }
+  }
+
   /**
    * @brief Send a PIN code to the host.
    * @param response The HTTP response object.
@@ -5291,12 +5319,13 @@ namespace confighttp {
    * The body for the POST request should be JSON serialized in the following format:
    * @code{.json}
    * {
+   *   "pairing_id": "<pending request ID>",
    *   "pin": "<pin>",
    *   "name": "Friendly Client Name"
    * }
    * @endcode
    *
-   * @api_examples{/api/pin| POST| {"pin":"1234","name":"My PC"}}
+   * @api_examples{/api/pin| POST| {"pairing_id":"0123456789abcdef0123456789abcdef","pin":"1234","name":"My PC"}}
    */
   void savePin(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
@@ -5310,6 +5339,11 @@ namespace confighttp {
       ss << request->content.rdbuf();
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       nlohmann::json output_tree;
+      const auto pairing_id = input_tree.value("pairing_id", "");
+      if (!nvhttp::is_valid_pairing_id(pairing_id)) {
+        bad_request(response, request, "pairing_id must contain exactly 32 hexadecimal characters");
+        return;
+      }
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
       const bool temporary_authorization = input_tree.value("temporary_authorization", false);
@@ -5324,6 +5358,7 @@ namespace confighttp {
       }
 
       output_tree["status"] = nvhttp::pin(
+        pairing_id,
         pin,
         name,
         nvhttp::pairing_access_preset_perm(*access_preset),
@@ -7316,7 +7351,9 @@ namespace confighttp {
     // Login is exempt from CSRF (it's the entry point; rate limiting protects it instead)
     server.resource["^/api/login"]["POST"] = login;
     server.resource["^/api/logout$"]["POST"] = withCsrf(logout);
+    server.resource["^/api/pin$"]["GET"] = getPendingPairings;
     server.resource["^/api/pin$"]["POST"] = withCsrf(savePin);
+    server.resource["^/api/pin$"]["DELETE"] = withCsrf(cancelPairing);
     server.resource["^/api/otp$"]["POST"] = withCsrf(getOTP);
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/apps$"]["POST"] = withCsrf(saveApp);

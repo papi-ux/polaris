@@ -1633,7 +1633,18 @@
     "ai_no_suggestion": "No suggestion available, device not recognized",
     "ai_applied": "AI suggestion applied to profile",
     "stale_removed": "Removed stale client profile aliases",
-    "stale_remove_failed": "Failed to remove stale client profile aliases"
+    "stale_remove_failed": "Failed to remove stale client profile aliases",
+    "pending_request": "Pending request",
+    "pending_select": "Select the device you intend to pair",
+    "pending_identity_help": "Names are reported by clients. Check the source address before approving. Requests expire after five minutes.",
+    "pending_empty": "Start pairing on your client to create a request.",
+    "pending_unnamed": "Unnamed client",
+    "pending_refresh": "Refresh requests",
+    "pending_cancel": "Cancel request",
+    "pending_load_failed": "Could not load pending pairing requests.",
+    "pending_approval_failed": "Pairing request expired, was cancelled, or could not be approved. Refresh the requests and select the intended device.",
+    "pending_already_handled": "This request has already expired or been handled.",
+    "pending_cancelled": "Pairing request cancelled."
   },
   "resource_card": {
     "website": "Website",

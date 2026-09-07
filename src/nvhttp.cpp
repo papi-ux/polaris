@@ -4630,15 +4630,146 @@ namespace nvhttp {
     return launch_session;
   }
 
+  bool write_pairing_response(pair_session_t &sess, const pt::ptree &tree) {
+    std::ostringstream data;
+    pt::write_xml(data, tree);
+
+    auto &response = sess.async_insert_pin.response;
+    if (response.has_left() && response.left()) {
+      response.left()->close_connection_after_response = true;
+      response.left()->write(data.str());
+    } else if (response.has_right() && response.right()) {
+      response.right()->close_connection_after_response = true;
+      response.right()->write(data.str());
+    } else {
+      return false;
+    }
+
+    response = std::monostate {};
+    return true;
+  }
+
+  /**
+   * @brief Expire stale pairing sessions while the session mutex is held.
+   *
+   * @param now Monotonic time used to evaluate session deadlines.
+   */
+  void expire_pair_sessions_unlocked(const std::chrono::steady_clock::time_point now) {
+    for (auto it = map_id_sess.begin(); it != map_id_sess.end();) {
+      if (it->second.async_insert_pin.expires_at > now) {
+        ++it;
+        continue;
+      }
+
+      pt::ptree tree;
+      tree.put("root.paired", 0);
+      tree.put("root.<xmlattr>.status_code", 408);
+      tree.put("root.<xmlattr>.status_message", "Pairing session expired");
+      write_pairing_response(it->second, tree);
+      it = map_id_sess.erase(it);
+    }
+  }
+
+  pair_session_insert_e insert_pair_session(pair_session_t sess, std::string &pairing_id) {
+    std::scoped_lock lock {client_state_mutex};
+    const auto now = std::chrono::steady_clock::now();
+    expire_pair_sessions_unlocked(now);
+    pairing_id.clear();
+
+    if (map_id_sess.contains(sess.client.uniqueID)) {
+      return pair_session_insert_e::ALREADY_EXISTS;
+    }
+    if (map_id_sess.size() >= MAX_PENDING_PAIRING_SESSIONS) {
+      return pair_session_insert_e::FULL;
+    }
+
+    do {
+      pairing_id = crypto::rand_alphabet(PAIRING_ID_SIZE, "0123456789abcdef"sv);
+    } while (std::ranges::any_of(map_id_sess, [&](const auto &entry) {
+      return entry.second.async_insert_pin.id == pairing_id;
+    }));
+
+    sess.async_insert_pin.id = pairing_id;
+    sess.async_insert_pin.expires_at = now + PAIRING_SESSION_TIMEOUT;
+    map_id_sess.emplace(sess.client.uniqueID, std::move(sess));
+    return pair_session_insert_e::ADDED;
+  }
+
+  bool is_valid_pairing_id(const std::string_view pairing_id) {
+    return pairing_id.size() == PAIRING_ID_SIZE && std::ranges::all_of(pairing_id, [](const char character) {
+             return (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F');
+           });
+  }
+
+  void expire_pair_sessions(const std::chrono::steady_clock::time_point now) {
+    std::scoped_lock lock {client_state_mutex};
+    expire_pair_sessions_unlocked(now);
+  }
+
+  std::vector<pending_pairing_t> get_pending_pairings() {
+    std::scoped_lock lock {client_state_mutex};
+    expire_pair_sessions_unlocked(std::chrono::steady_clock::now());
+
+    std::vector<const pair_session_t *> pending_sessions;
+    pending_sessions.reserve(map_id_sess.size());
+    for (const auto &[_, sess] : map_id_sess) {
+      if (sess.last_phase == PAIR_PHASE::NONE) {
+        pending_sessions.push_back(&sess);
+      }
+    }
+    std::ranges::sort(pending_sessions, {}, [](const pair_session_t *sess) {
+      return sess->async_insert_pin.expires_at;
+    });
+
+    std::vector<pending_pairing_t> result;
+    result.reserve(pending_sessions.size());
+    for (const auto *sess : pending_sessions) {
+      result.push_back({
+        .id = sess->async_insert_pin.id,
+        .name = sess->async_insert_pin.device_name,
+        .address = sess->async_insert_pin.address,
+      });
+    }
+    return result;
+  }
+
+  bool cancel_pairing(const std::string_view pairing_id) {
+    if (!is_valid_pairing_id(pairing_id)) {
+      return false;
+    }
+
+    std::scoped_lock lock {client_state_mutex};
+    expire_pair_sessions_unlocked(std::chrono::steady_clock::now());
+
+    const auto sess_it = std::ranges::find_if(map_id_sess, [&](const auto &entry) {
+      return entry.second.last_phase == PAIR_PHASE::NONE && entry.second.async_insert_pin.id == pairing_id;
+    });
+    if (sess_it == map_id_sess.end()) {
+      return false;
+    }
+
+    pt::ptree tree;
+    tree.put("root.paired", 0);
+    tree.put("root.<xmlattr>.status_code", 400);
+    tree.put("root.<xmlattr>.status_message", "Pairing request cancelled by operator");
+    write_pairing_response(sess_it->second, tree);
+    map_id_sess.erase(sess_it);
+    return true;
+  }
+
   void remove_session(const pair_session_t &sess) {
-    map_id_sess.erase(sess.client.uniqueID);
+    std::lock_guard lock {client_state_mutex};
+    const auto it = map_id_sess.find(sess.client.uniqueID);
+    if (it != map_id_sess.end() && it->second.async_insert_pin.id == sess.async_insert_pin.id) {
+      map_id_sess.erase(it);
+    }
   }
 
   void fail_pair(pair_session_t &sess, pt::ptree &tree, const std::string status_msg) {
     tree.put("root.paired", 0);
     tree.put("root.<xmlattr>.status_code", 400);
     tree.put("root.<xmlattr>.status_message", status_msg);
-    remove_session(sess);  // Security measure, delete the session when something went wrong and force a re-pair
+    sess.failed = true;  // The owning handler removes it after its last access.
     BOOST_LOG(warning) << "Pair attempt failed due to " << status_msg;
   }
 
@@ -4807,7 +4938,7 @@ namespace nvhttp {
       BOOST_LOG(warning) << "Pair attempt failed due to same_hash: " << same_hash << ", verify: " << verify;
     }
 
-    remove_session(sess);
+    // The owning handler removes the completed session after its last access.
   }
 
   template<class T>
@@ -5039,7 +5170,11 @@ namespace nvhttp {
     }
 
     const auto unique_id = unique_id_it->second;
-    const bool removed_session = map_id_sess.erase(unique_id) > 0;
+    bool removed_session;
+    {
+      std::lock_guard lock {client_state_mutex};
+      removed_session = map_id_sess.erase(unique_id) > 0;
+    }
 
     bool removed_paired_client = false;
     bool revocation_failed = false;
@@ -5100,18 +5235,29 @@ namespace nvhttp {
       return;
     }
 
+    std::unique_lock session_lock {client_state_mutex};
+    expire_pair_sessions_unlocked(std::chrono::steady_clock::now());
+    const auto session_key = uniqID;
+    std::string handler_pairing_id;
+    auto cleanup_session = util::fail_guard([&] {
+      // Helpers never erase the session backing their reference. This guard
+      // runs after the handler's final use, including a failed PIN attempt.
+      if (!session_lock.owns_lock()) session_lock.lock();
+      const auto entry = map_id_sess.find(session_key);
+      if (entry != map_id_sess.end() && !handler_pairing_id.empty() &&
+          entry->second.async_insert_pin.id == handler_pairing_id &&
+          (entry->second.failed || entry->second.last_phase == PAIR_PHASE::CLIENTPAIRINGSECRET)) {
+        map_id_sess.erase(entry);
+      }
+    });
+
     args_t::const_iterator it;
     if (it = args.find("phrase"); it != std::end(args)) {
       if (it->second == "getservercert"sv) {
-        auto existing_session = map_id_sess.find(uniqID);
-        if (existing_session != std::end(map_id_sess)) {
-          BOOST_LOG(info) << "pair: restarting in-flight session for uniqueid "sv << uniqID;
-          map_id_sess.erase(existing_session);
-        }
-
         pair_session_t sess;
 
         auto deviceName { get_arg(args, "devicename") };
+        sess.async_insert_pin.device_name = deviceName;
         const bool trusted_pair_requested = util::from_view(get_arg(args, "trustedpair", "0"));
         const auto remote_addr = request->remote_endpoint().address();
         const auto remote_addr_str = net::addr_to_normalized_string(remote_addr);
@@ -5127,7 +5273,18 @@ namespace nvhttp {
         sess.client.cert = util::from_hex_vec(get_arg(args, "clientcert"), true);
 
         BOOST_LOG(debug) << sess.client.cert;
-        auto ptr = map_id_sess.emplace(sess.client.uniqueID, std::move(sess)).first;
+        sess.async_insert_pin.address = remote_addr_str;
+        std::string pairing_id;
+        const auto inserted = insert_pair_session(std::move(sess), pairing_id);
+        if (inserted != pair_session_insert_e::ADDED) {
+          tree.put("root.paired", 0);
+          tree.put("root.<xmlattr>.status_code", inserted == pair_session_insert_e::ALREADY_EXISTS ? 409 : 503);
+          tree.put("root.<xmlattr>.status_message", inserted == pair_session_insert_e::ALREADY_EXISTS
+            ? "A pairing session with this uniqueid already exists" : "Too many pending pairing sessions");
+          return;
+        }
+        handler_pairing_id = pairing_id;
+        auto ptr = map_id_sess.find(session_key);
 
         ptr->second.async_insert_pin.salt = std::move(get_arg(args, "salt"));
         BOOST_LOG(info) << "pair: getservercert uniqueid="sv << ptr->second.client.uniqueID
@@ -5158,9 +5315,19 @@ namespace nvhttp {
         if (config::sunshine.flags[config::flag::PIN_STDIN]) {
           std::string pin;
 
+          // Do not hold the authorization lock while waiting for terminal input.
+          session_lock.unlock();
           std::cout << "Please insert pin: "sv;
           std::getline(std::cin, pin);
-
+          session_lock.lock();
+          expire_pair_sessions_unlocked(std::chrono::steady_clock::now());
+          ptr = map_id_sess.find(session_key);
+          if (ptr == map_id_sess.end() || ptr->second.async_insert_pin.id != pairing_id) {
+            tree.put("root.paired", 0);
+            tree.put("root.<xmlattr>.status_code", 408);
+            tree.put("root.<xmlattr>.status_message", "Pairing session expired or cancelled");
+            return;
+          }
           getservercert(ptr->second, tree, pin);
           return;
         } else {
@@ -5209,6 +5376,7 @@ namespace nvhttp {
       return;
     }
 
+    handler_pairing_id = sess_it->second.async_insert_pin.id;
     if (it = args.find("clientchallenge"); it != std::end(args)) {
       auto challenge = util::from_hex_vec(it->second, true);
       clientchallenge(sess_it->second, tree, challenge);
@@ -5225,63 +5393,34 @@ namespace nvhttp {
   }
 
   bool pin(
+    std::string_view pairing_id,
     std::string pin,
     std::string name,
     std::optional<PERM> pairing_perm,
     bool temporary_authorization
   ) {
-    pt::ptree tree;
-    if (map_id_sess.empty()) {
+    if (!is_valid_pairing_id(pairing_id) || pin.size() != 4 ||
+        !std::ranges::all_of(pin, [](char c) { return c >= '0' && c <= '9'; })) {
       return false;
     }
+    std::lock_guard lock {client_state_mutex};
+    expire_pair_sessions_unlocked(std::chrono::steady_clock::now());
+    const auto it = std::ranges::find_if(map_id_sess, [&](const auto &entry) {
+      return entry.second.last_phase == PAIR_PHASE::NONE &&
+             entry.second.async_insert_pin.id == pairing_id;
+    });
+    if (it == map_id_sess.end()) return false;
 
-    // ensure pin is 4 digits
-    if (pin.size() != 4) {
-      tree.put("root.paired", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put(
-        "root.<xmlattr>.status_message",
-        std::format("Pin must be 4 digits, {} provided", pin.size())
-      );
-      return false;
-    }
-
-    // ensure all pin characters are numeric
-    if (!std::all_of(pin.begin(), pin.end(), ::isdigit)) {
-      tree.put("root.paired", 0);
-      tree.put("root.<xmlattr>.status_code", 400);
-      tree.put("root.<xmlattr>.status_message", "Pin must be numeric");
-      return false;
-    }
-
-    auto &sess = std::begin(map_id_sess)->second;
-    if (pairing_perm) {
-      sess.pairing_perm = *pairing_perm;
-    }
+    auto &sess = it->second;
+    if (pairing_perm) sess.pairing_perm = *pairing_perm;
     sess.temporary_authorization = temporary_authorization;
+    pt::ptree tree;
     getservercert(sess, tree, pin);
-
-    if (!name.empty()) {
-      sess.client.name = name;
-    }
-
-    // response to the request for pin
-    std::ostringstream data;
-    pt::write_xml(data, tree);
-
-    auto &async_response = sess.async_insert_pin.response;
-    if (async_response.has_left() && async_response.left()) {
-      async_response.left()->write(data.str());
-    } else if (async_response.has_right() && async_response.right()) {
-      async_response.right()->write(data.str());
-    } else {
-      return false;
-    }
-
-    // reset async_response
-    async_response = std::decay_t<decltype(async_response.left())>();
-    // response to the current request
-    return true;
+    if (!sess.failed && !name.empty()) sess.client.name = std::move(name);
+    const bool response_written = write_pairing_response(sess, tree);
+    const bool success = response_written && !sess.failed;
+    if (!success) map_id_sess.erase(it);
+    return success;
   }
 
   template<class T>
@@ -10093,8 +10232,8 @@ namespace nvhttp {
     ssl.join();
     tcp.join();
 
-    // Only once the server threads are joined: an in-flight pair() holds a
-    // reference into this map for the rest of its handler.
+    // Configuration API requests can still access pending sessions here.
+    std::lock_guard lock {client_state_mutex};
     map_id_sess.clear();
   }
 
@@ -10123,6 +10262,26 @@ namespace nvhttp {
   }
 
 #ifdef POLARIS_TESTS
+  nlohmann::json pairing_options_for_tests(std::string_view id) {
+    std::lock_guard lock {client_state_mutex};
+    for (const auto &[_, session] : map_id_sess) {
+      if (session.async_insert_pin.id == id || session.client.uniqueID == id) {
+        return {{"name", session.client.name},
+                {"family", session.client.family_hint},
+                {"perm", static_cast<std::uint32_t>(session.pairing_perm.value_or(PERM::_no))},
+                {"temporary_authorization", session.temporary_authorization}};
+      }
+    }
+    return nullptr;
+  }
+
+  void pair_http_for_tests(
+    std::shared_ptr<SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response> response,
+    std::shared_ptr<SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request> request
+  ) {
+    pair<SimpleWeb::HTTP>(std::move(response), std::move(request));
+  }
+
   bool is_in_trusted_subnet_for_tests(const boost::asio::ip::address &addr) {
     return is_in_trusted_subnet(addr);
   }

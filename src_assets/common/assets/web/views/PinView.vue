@@ -159,6 +159,19 @@
 
             <div class="mt-5 grid gap-4">
               <div>
+                <label for="pairing-request" class="mb-1 block text-sm font-medium text-storm">{{ $t('pin.pending_request') }}</label>
+                <select id="pairing-request" v-model="selectedPairingId" class="settings-input" required :disabled="pinSubmitting">
+                  <option value="" disabled>{{ $t('pin.pending_select') }}</option>
+                  <option v-for="pairing in pendingPairings" :key="pairing.id" :value="pairing.id">
+                    {{ pairing.name || $t('pin.pending_unnamed') }} — {{ pairing.address }}
+                  </option>
+                </select>
+                <p class="mt-2 text-sm text-storm">{{ $t('pin.pending_identity_help') }}</p>
+                <p v-if="!pendingPairings.length" class="mt-2 text-sm text-storm">{{ $t('pin.pending_empty') }}</p>
+                <p v-if="pairingListError" role="alert" class="mt-2 text-sm text-danger">{{ $t('pin.pending_load_failed') }}</p>
+                <button type="button" class="focus-ring mt-2 text-sm text-ice" @click="refreshPairings">{{ $t('pin.pending_refresh') }}</button>
+              </div>
+              <div>
                 <label for="pin-input" class="mb-1 block text-sm font-medium text-storm">{{ $t('pin.pin_code') }}</label>
                 <input
                   id="pin-input"
@@ -190,10 +203,12 @@
               <div class="flex flex-wrap items-center gap-3">
                 <button
                   type="submit"
+                  :disabled="!selectedPairingId || pinSubmitting"
                   class="focus-ring dashboard-action-button dashboard-action-button-primary"
                 >
                   {{ $t('pin.send') }}
                 </button>
+                <button type="button" class="focus-ring dashboard-action-button" :disabled="!selectedPairingId || pinSubmitting" @click="cancelSelectedPairing">{{ $t('pin.pending_cancel') }}</button>
               </div>
             </div>
 
@@ -951,6 +966,7 @@ import Checkbox from '../Checkbox.vue'
 import Skeleton from '../components/Skeleton.vue'
 import SelectableCard from '../components/SelectableCard.vue'
 import StatTile from '../components/StatTile.vue'
+import { usePendingPairings } from '../composables/usePendingPairings'
 import { useConfigProjection } from '../composables/useConfigProjection'
 import { buildClientHostSyncRows } from '../client-host-sync.js'
 import { useToast } from '../composables/useToast'
@@ -1350,37 +1366,70 @@ async function saveHost() {
   saveHostCacheFn(hostAddr.value, hostPort.value, true)
 }
 
-function registerDevice() {
+const { pendingPairings, selectedPairingId, pairingListError, refreshPairings } = usePendingPairings(
+  computed(() => currentTab.value === 'PIN')
+)
+const pinSubmitting = ref(false)
+
+async function registerDevice() {
+  const pairingId = selectedPairingId.value
+  if (!pairingId || pinSubmitting.value) return
   pinMessage.value = ''
-  fetch('./api/pin', {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    method: 'POST',
-    body: JSON.stringify({
-      pin: pinCode.value,
-      name: pinDeviceName.value,
-      access_preset: selectedAccessPreset.value,
-      temporary_authorization: temporaryAuthorization.value,
+  pinSubmitting.value = true
+  try {
+    const response = await fetch('./api/pin', {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify({
+        pairing_id: pairingId,
+        pin: pinCode.value,
+        name: pinDeviceName.value,
+        access_preset: selectedAccessPreset.value,
+        temporary_authorization: temporaryAuthorization.value,
+      })
     })
-  })
-    .then((response) => response.json())
-    .then((response) => {
-      if (response.status === true) {
-        pinStatus.value = 'success'
-        pinMessage.value = i18n.t('pin.pair_success_access_applied', { access: selectedPairingAccessLabel.value })
-        pinCode.value = ''
-        pinDeviceName.value = ''
-        setTimeout(() => refreshClients(), 1000)
-        showToast(i18n.t('pin.pair_success_access_applied', { access: selectedPairingAccessLabel.value }), 'success')
-      } else {
-        pinStatus.value = 'error'
-        pinMessage.value = i18n.t('pin.pair_failure')
-      }
+    const result = await response.json()
+    if (!response.ok || result.status !== true) throw new Error(i18n.t('pin.pending_approval_failed'))
+    pinStatus.value = 'success'
+    pinMessage.value = i18n.t('pin.pair_success_access_applied', { access: selectedPairingAccessLabel.value })
+    pinCode.value = ''
+    pinDeviceName.value = ''
+    if (selectedPairingId.value === pairingId) selectedPairingId.value = ''
+    setTimeout(() => refreshClients(), 1000)
+    showToast(pinMessage.value, 'success')
+  } catch (error) {
+    pinStatus.value = 'error'
+    pinMessage.value = error.message
+  } finally {
+    pinSubmitting.value = false
+    await refreshPairings()
+  }
+}
+
+async function cancelSelectedPairing() {
+  const pairingId = selectedPairingId.value
+  if (!pairingId || pinSubmitting.value) return
+  pinSubmitting.value = true
+  try {
+    const response = await fetch('./api/pin', {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'DELETE',
+      body: JSON.stringify({ pairing_id: pairingId }),
     })
-    .catch(() => {
-      pinStatus.value = 'error'
-      pinMessage.value = i18n.t('pin.pair_failure')
-    })
+    const result = await response.json()
+    if (!response.ok || result.status !== true) throw new Error(i18n.t('pin.pending_already_handled'))
+    pinStatus.value = 'success'
+    pinMessage.value = i18n.t('pin.pending_cancelled')
+    if (selectedPairingId.value === pairingId) selectedPairingId.value = ''
+  } catch (error) {
+    pinStatus.value = 'error'
+    pinMessage.value = error.message
+  } finally {
+    pinSubmitting.value = false
+    await refreshPairings()
+  }
 }
 
 async function requestOTP() {
