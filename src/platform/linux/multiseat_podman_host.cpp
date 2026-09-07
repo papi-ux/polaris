@@ -13,7 +13,10 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
+#include <array>
+#include <cerrno>
 #include <limits>
+#include <string>
 
 namespace multiseat::podman {
   namespace {
@@ -95,6 +98,52 @@ namespace multiseat::podman {
       .character_major = static_cast<std::uint32_t>(character_major),
       .character_minor = static_cast<std::uint32_t>(character_minor),
     };
+  }
+
+  std::optional<std::string> local_host_t::read_owned_regular_file(
+    const std::filesystem::path &path,
+    std::size_t max_bytes
+  ) const {
+    // O_NONBLOCK keeps a FIFO from blocking the open before the type check
+    // can refuse it; it has no effect on a regular file.
+    const auto descriptor = open(
+      path.c_str(),
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY | O_NONBLOCK
+    );
+    if (descriptor < 0) {
+      return std::nullopt;
+    }
+    std::optional<std::string> content;
+    struct stat metadata {};
+    if (fstat(descriptor, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
+        metadata.st_uid == geteuid() && metadata.st_size >= 0 &&
+        static_cast<std::uint64_t>(metadata.st_size) <= max_bytes) {
+      std::string buffer;
+      std::array<char, 65536> chunk {};
+      auto complete = false;
+      while (true) {
+        const auto count = read(descriptor, chunk.data(), chunk.size());
+        if (count < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          break;
+        }
+        if (count == 0) {
+          complete = true;
+          break;
+        }
+        if (buffer.size() + static_cast<std::size_t>(count) > max_bytes) {
+          break;
+        }
+        buffer.append(chunk.data(), static_cast<std::size_t>(count));
+      }
+      if (complete) {
+        content = std::move(buffer);
+      }
+    }
+    close(descriptor);
+    return content;
   }
 
   command_result_t local_host_t::run(

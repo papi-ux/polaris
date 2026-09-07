@@ -52,13 +52,19 @@ namespace multiseat::podman {
     constexpr auto label_display_hdr = "io.polaris.multiseat.display-hdr"sv;
     constexpr auto label_compositor = "io.polaris.multiseat.compositor"sv;
     constexpr auto label_encoders = "io.polaris.multiseat.encoders"sv;
+    constexpr auto label_volume = "io.polaris.multiseat.volume"sv;
     constexpr auto capability_file = worker_ipc::authority_capability_file_name;
     constexpr auto ipc_directory = worker_ipc::authority_ipc_directory_name;
     constexpr auto auth_directory = worker_ipc::authority_auth_directory_name;
     constexpr auto container_ipc_directory = "/run/polaris-ipc"sv;
     constexpr auto container_auth_directory = "/run/polaris-auth"sv;
+    constexpr auto podman_init_destination = "/run/podman-init"sv;
+    constexpr auto profile_volume_destination = "/var/lib/polaris-seat"sv;
+    constexpr auto shared_game_mount_root = "/mnt/games/"sv;
     constexpr std::size_t maximum_inspected_devices =
       input::maximum_input_allocations + 64;
+    constexpr std::size_t maximum_runtime_spec_mounts =
+      maximum_inspected_devices + 64;
 
     bool ascii_alphanumeric(char value) {
       return (value >= 'a' && value <= 'z') ||
@@ -107,6 +113,77 @@ namespace multiseat::podman {
 
     bool device_path(const std::filesystem::path &path) {
       return safe_path(path) && path.native().starts_with("/dev/");
+    }
+
+    bool normalized_absolute_path(const std::filesystem::path &path) {
+      return path.is_absolute() && path.lexically_normal() == path;
+    }
+
+    std::vector<std::string> path_components(const std::filesystem::path &path) {
+      std::vector<std::string> components;
+      for (const auto &component : path) {
+        components.push_back(component.native());
+      }
+      return components;
+    }
+
+    /**
+     * Podman stores every container's OCI runtime spec at
+     * `<storage>/<driver>-containers/<id>/userdata/config.json`. The path is
+     * accepted only in that shape, with the record's own immutable ID as the
+     * container directory, so the spec read is bound to the inspected record.
+     */
+    bool runtime_spec_path(
+      const std::filesystem::path &path,
+      std::string_view container_id_value
+    ) {
+      if (!normalized_absolute_path(path)) {
+        return false;
+      }
+      const auto components = path_components(path);
+      const auto count = components.size();
+      return count >= 5 &&
+             components[count - 1] == "config.json" &&
+             components[count - 2] == "userdata" &&
+             components[count - 3] == container_id_value &&
+             components[count - 4].ends_with("-containers");
+    }
+
+    /**
+     * Podman keeps a container's own files (resolv.conf, hosts, hostname,
+     * .containerenv, secrets, shm) under `<root>/<driver>-containers/<id>/
+     * userdata/`, below the storage root or the run root.
+     */
+    bool own_container_userdata_path(
+      const std::filesystem::path &path,
+      std::string_view container_id_value
+    ) {
+      if (!normalized_absolute_path(path)) {
+        return false;
+      }
+      const auto components = path_components(path);
+      for (std::size_t index = 1; index + 3 < components.size(); ++index) {
+        if (components[index].ends_with("-containers") &&
+            components[index + 1] == container_id_value &&
+            components[index + 2] == "userdata") {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** Where Podman lands its own per-container files inside the worker. */
+    bool podman_own_destination(std::string_view destination) {
+      return destination == "/etc/resolv.conf" || destination == "/etc/hosts" ||
+             destination == "/etc/hostname" || destination == "/dev/shm" ||
+             destination == "/run/.containerenv" || destination == "/run/secrets";
+    }
+
+    /** Destinations that shadow or expose the worker's device set. */
+    bool device_directory_destination(std::string_view destination) {
+      return destination == "/dev/dri" || destination == "/dev/input" ||
+             destination.starts_with("/dev/dri/") ||
+             destination.starts_with("/dev/input/");
     }
 
     bool lowercase_sha256(std::string_view value) {
@@ -457,6 +534,7 @@ namespace multiseat::podman {
         {std::string {label_display_topology}, std::string {display_topology_name}},
         {std::string {label_media_pipeline}, std::string {media_pipeline_name}},
         {std::string {label_runtime_image}, profile.image_reference},
+        {std::string {label_volume}, profile.opaque_volume_name},
         {std::string {label_display_width}, std::to_string(spec.display_mode.width)},
         {std::string {label_display_height}, std::to_string(spec.display_mode.height)},
         {std::string {label_display_refresh}, std::to_string(spec.display_mode.refresh_millihz)},
@@ -816,6 +894,139 @@ namespace multiseat::podman {
     });
   }
 
+  std::vector<backend_t::declared_device_binding_t>
+  backend_t::runtime_spec_device_bindings(
+    const std::filesystem::path &spec_path,
+    const runtime_spec_expectations_t &expectations
+  ) const {
+    if (!runtime_spec_path(spec_path, expectations.container_id)) {
+      throw std::runtime_error {"invalid Podman runtime spec path"};
+    }
+    const auto text = host_.read_owned_regular_file(
+      spec_path,
+      options_.max_command_output_bytes
+    );
+    if (!text) {
+      throw std::runtime_error {"Podman runtime spec is unreadable"};
+    }
+    json spec;
+    try {
+      spec = json::parse(*text);
+    } catch (const json::exception &) {
+      throw std::runtime_error {"invalid Podman runtime spec"};
+    }
+    const auto *mounts = object_member(spec, "mounts");
+    if (!mounts || !mounts->is_array() ||
+        mounts->size() > maximum_runtime_spec_mounts) {
+      throw std::runtime_error {"invalid Podman runtime spec"};
+    }
+    // The storage root is the spec path without its last four components
+    // (`<driver>-containers/<id>/userdata/config.json`), which anchors the
+    // profile volume to the same storage the record lives in.
+    const auto storage_root =
+      spec_path.parent_path().parent_path().parent_path().parent_path();
+    const auto volume_source =
+      (storage_root / "volumes" / expectations.volume_name / "_data").native();
+    std::vector<declared_device_binding_t> bindings;
+    auto device_seen = false;
+    for (const auto &mount : *mounts) {
+      const auto destination = string_member(mount, "destination");
+      const auto type = string_member(mount, "type");
+      const auto source = string_member(mount, "source");
+      if (!destination || !type || !normalized_absolute_path(*destination)) {
+        throw std::runtime_error {"invalid Podman runtime spec mount"};
+      }
+      const auto device_destination = device_directory_destination(*destination);
+      if (*type != "bind") {
+        // Podman's /proc, /dev tmpfs, sysfs, devpts, mqueue, and cgroup, and
+        // the controller's tmpfs mounts. None of them may sit on a device
+        // directory, and the runtime applies mounts in order, so none may
+        // cover /dev or the root after a device binding either.
+        if (device_destination ||
+            (device_seen && (*destination == "/dev" || *destination == "/"))) {
+          throw std::runtime_error {"Podman runtime spec shadows device bindings"};
+        }
+        continue;
+      }
+      if (!source || !normalized_absolute_path(*source)) {
+        throw std::runtime_error {"invalid Podman runtime spec mount"};
+      }
+      std::string permissions {"rw"};
+      if (const auto *options = object_member(mount, "options")) {
+        if (!options->is_array()) {
+          throw std::runtime_error {"invalid Podman runtime spec mount"};
+        }
+        for (const auto &option : *options) {
+          if (!option.is_string()) {
+            throw std::runtime_error {"invalid Podman runtime spec mount"};
+          }
+          const auto value = option.get<std::string>();
+          if (value == "ro" || value == "rw") {
+            permissions = value;
+          }
+        }
+      }
+      if (!device_destination) {
+        // Podman's own per-container files, the worker's profile volume, the
+        // authority directories, and the shared game mounts are the only host
+        // content a worker may see besides its devices and Podman's init
+        // binary, and each must land where the controller asked with the
+        // permission it asked for. Checked before the device rule so a
+        // storage root that itself lives under /dev/shm still passes.
+        if (own_container_userdata_path(*source, expectations.container_id)) {
+          if (!podman_own_destination(*destination)) {
+            throw std::runtime_error {"unexpected Podman runtime spec mount"};
+          }
+          continue;
+        }
+        if (*source == volume_source) {
+          if (*destination != profile_volume_destination || permissions != "rw") {
+            throw std::runtime_error {"unexpected Podman runtime spec mount"};
+          }
+          continue;
+        }
+        if (const auto bind = expectations.controller_binds.find(*source);
+            bind != expectations.controller_binds.end()) {
+          if (*destination != bind->second.destination ||
+              permissions != bind->second.permissions) {
+            throw std::runtime_error {"unexpected Podman runtime spec mount"};
+          }
+          continue;
+        }
+        if (*destination == podman_init_destination) {
+          // `--init` binds the configured init binary read-only; it must be
+          // an executable regular file on the host, never a device.
+          if (source->starts_with("/dev/") || permissions != "ro" ||
+              !host_.executable_file(*source)) {
+            throw std::runtime_error {"invalid Podman init binding"};
+          }
+          continue;
+        }
+        if (!source->starts_with("/dev/")) {
+          throw std::runtime_error {"unexpected Podman runtime spec mount"};
+        }
+      }
+      if (!device_path(*source) || !device_path(*destination)) {
+        throw std::runtime_error {"invalid Podman device binding"};
+      }
+      bindings.push_back({
+        .host_path = *source,
+        .worker_path = *destination,
+        .permissions = std::move(permissions),
+      });
+      device_seen = true;
+    }
+    // A rootless runtime creates no device nodes through the spec's device
+    // node list; a spec that does describes a mode this backend never runs
+    // in, so it is refused rather than reasoned about.
+    const auto *linux_object = object_member(spec, "linux");
+    const auto *devices = linux_object ? object_member(*linux_object, "devices") : nullptr;
+    if (devices && !devices->is_null() && !(devices->is_array() && devices->empty())) {
+      throw std::runtime_error {"Podman runtime spec grants device nodes"};
+    }
+    return bindings;
+  }
+
   bool backend_t::base_host_ready() const {
     return host_.effective_uid() != 0 && host_.executable_file(options_.executable);
   }
@@ -840,6 +1051,30 @@ namespace multiseat::podman {
       }
     }
     return true;
+  }
+
+  std::optional<bool> backend_t::profile_volume_exists(const profile_t &profile) {
+    const auto result = host_.run(
+      {
+        options_.executable.native(),
+        "--remote=false",
+        "volume",
+        "exists",
+        profile.opaque_volume_name,
+      },
+      options_.command_timeout,
+      options_.max_command_output_bytes
+    );
+    if (result.timed_out || result.output_truncated) {
+      return std::nullopt;
+    }
+    if (result.exit_status == 0) {
+      return true;
+    }
+    if (result.exit_status == 1) {
+      return false;
+    }
+    return std::nullopt;
   }
 
   bool backend_t::launch_host_ready(
@@ -956,7 +1191,8 @@ namespace multiseat::podman {
       "--health-max-log-count=" + std::to_string(options_.health_log_count),
       "--health-max-log-size=" + std::to_string(options_.health_log_size),
       "--stop-signal=TERM",
-      "--volume=" + profile.opaque_volume_name + ":/var/lib/polaris-seat:rw,nosuid,nodev,nocreate",
+      "--volume=" + profile.opaque_volume_name + ":" +
+        std::string {profile_volume_destination} + ":rw,nosuid,nodev",
       "--mount=type=bind,src=" +
         (options_.ipc_root / spec.resources.runtime_namespace / ipc_directory).native() +
         ",dst=" + std::string {container_ipc_directory} +
@@ -1027,7 +1263,7 @@ namespace multiseat::podman {
     for (const auto &mount : options_.shared_game_mounts) {
       argv.push_back(
         "--mount=type=bind,src=" + mount.host_path.native() +
-        ",dst=/mnt/games/" + mount.mount_name + ",ro=true"
+        ",dst=" + std::string {shared_game_mount_root} + mount.mount_name + ",ro=true"
       );
     }
 
@@ -1070,6 +1306,21 @@ namespace multiseat::podman {
       }
     } catch (...) {
       return worker_command_result_e::indeterminate;
+    }
+    // podman run silently creates a missing named volume and offers no option
+    // to refuse, so the pre-created-volume contract is checked explicitly here,
+    // before the final identity recheck that stays adjacent to the run.
+    std::optional<bool> volume_present;
+    try {
+      volume_present = profile_volume_exists(*profile);
+    } catch (...) {
+      return worker_command_result_e::indeterminate;
+    }
+    if (!volume_present) {
+      return worker_command_result_e::indeterminate;
+    }
+    if (!*volume_present) {
+      return worker_command_result_e::rejected;
     }
 
     command_result_t result;
@@ -1261,7 +1512,6 @@ namespace multiseat::podman {
       "--remote=false",
       "container",
       "inspect",
-      "--type=container",
     };
     inspect_argv.insert(inspect_argv.end(), ids.begin(), ids.end());
     const auto inspected = host_.run(
@@ -1333,6 +1583,7 @@ namespace multiseat::podman {
         const auto display_hdr = label_value(labels, label_display_hdr);
         const auto compositor = label_value(labels, label_compositor);
         const auto encoders_text = label_value(labels, label_encoders);
+        const auto volume = label_value(labels, label_volume);
         const auto slot = slot_text ? parse_decimal<std::uint32_t>(*slot_text) : std::nullopt;
         const auto generation = generation_text ?
                                   parse_decimal<std::uint64_t>(*generation_text) :
@@ -1388,8 +1639,18 @@ namespace multiseat::podman {
             !display_hdr || (*display_hdr != "0" && *display_hdr != "1") ||
             !valid_display_mode(display_mode) ||
             !compositor || !valid_compositor_name(*compositor) ||
+            !volume || !opaque_name_token(*volume) ||
             !encoders || *encoders == 0) {
           throw std::runtime_error {"incomplete Podman worker identity labels"};
+        }
+        if (std::none_of(
+              options_.profiles.begin(),
+              options_.profiles.end(),
+              [&volume](const auto &profile) {
+                return profile.opaque_volume_name == *volume;
+              }
+            )) {
+          throw std::runtime_error {"unknown Podman worker volume"};
         }
 
         const seat_handle_t seat_handle {
@@ -1409,10 +1670,18 @@ namespace multiseat::podman {
         // release its seat and the container can be reaped instead of failing
         // every inventory until Podman removes it. A stopped worker whose
         // allocation still resolves keeps the full check.
+        // A container Podman created but never initialized has no runtime
+        // spec yet and can never start under this controller, so it takes
+        // the same path once its allocation is gone: visible as stopped, so
+        // it gets reaped instead of blinding the inventory.
+        const auto lowercase_state = lowercase_ascii(*runtime_state);
+        const bool never_started =
+          lowercase_state == "created" || lowercase_state == "configured";
         const bool released_stopped_worker =
           require_input_authority && !allocation &&
-          observed_state(*runtime_state, std::string {}) ==
-            worker_observed_state_e::stopped;
+          (observed_state(*runtime_state, std::string {}) ==
+             worker_observed_state_e::stopped ||
+           never_started);
         if (require_input_authority && !released_stopped_worker) {
           if (!device_array || !device_array->is_array() ||
               device_array->size() > maximum_inspected_devices) {
@@ -1436,26 +1705,100 @@ namespace multiseat::podman {
             throw std::runtime_error {"Podman input manifest label changed"};
           }
 
-          std::vector<runtime_device_binding_t> bindings;
-          bindings.reserve(device_array->size());
-          std::set<std::filesystem::path> worker_paths;
+          std::vector<declared_device_binding_t> inspected;
+          inspected.reserve(device_array->size());
           for (const auto &device : *device_array) {
             const auto host_path = string_member(device, "PathOnHost");
             const auto worker_path = string_member(device, "PathInContainer");
             const auto permissions = string_member(device, "CgroupPermissions");
-            if (!host_path || !worker_path ||
-                !device_path(*host_path) || !device_path(*worker_path) ||
-                (permissions && !permissions->empty() && *permissions != "rw") ||
-                !worker_paths.emplace(*worker_path).second) {
+            if (!host_path || !worker_path) {
               throw std::runtime_error {"invalid Podman device binding"};
             }
-            const auto identity = host_.read_write_character_device(*host_path);
+            inspected.push_back({
+              .host_path = *host_path,
+              .worker_path = *worker_path,
+              .permissions = permissions.value_or(std::string {}),
+            });
+          }
+          // The OCI runtime spec is what the runtime applied, so it is the
+          // device set when Podman points at it; rootless Podman reports its
+          // device bind mounts nowhere else. An inspected device list, when
+          // Podman fills one in, must then agree with the spec entry for
+          // entry rather than add to it. Without a spec the inspected list
+          // is the device set.
+          std::vector<declared_device_binding_t> declared;
+          if (const auto *spec_path = object_member(container, "OCIConfigPath")) {
+            if (!spec_path->is_string()) {
+              throw std::runtime_error {"invalid Podman runtime spec path"};
+            }
+            runtime_spec_expectations_t expectations {
+              .container_id = *id,
+              .volume_name = *volume,
+            };
+            const auto authority = options_.ipc_root / *runtime;
+            expectations.controller_binds.emplace(
+              (authority / ipc_directory).native(),
+              expected_bind_t {std::string {container_ipc_directory}, "rw"}
+            );
+            expectations.controller_binds.emplace(
+              (authority / auth_directory).native(),
+              expected_bind_t {std::string {container_auth_directory}, "ro"}
+            );
+            for (const auto &mount : options_.shared_game_mounts) {
+              expectations.controller_binds.emplace(
+                mount.host_path.native(),
+                expected_bind_t {
+                  std::string {shared_game_mount_root} + mount.mount_name,
+                  "ro",
+                }
+              );
+            }
+            declared = runtime_spec_device_bindings(
+              spec_path->get<std::string>(),
+              expectations
+            );
+            for (const auto &binding : inspected) {
+              const auto agrees = std::any_of(
+                declared.begin(),
+                declared.end(),
+                [&binding](const auto &candidate) {
+                  return candidate.host_path == binding.host_path &&
+                         candidate.worker_path == binding.worker_path &&
+                         (binding.permissions.empty() ||
+                          binding.permissions == candidate.permissions);
+                }
+              );
+              if (!agrees) {
+                throw std::runtime_error {
+                  "Podman device inventory contradicts the runtime spec"
+                };
+              }
+            }
+          } else {
+            declared = std::move(inspected);
+          }
+          if (declared.size() > maximum_inspected_devices) {
+            throw std::runtime_error {"invalid Podman device inventory"};
+          }
+
+          std::vector<runtime_device_binding_t> bindings;
+          bindings.reserve(declared.size());
+          std::set<std::filesystem::path> worker_paths;
+          for (const auto &binding : declared) {
+            const std::filesystem::path host_path {binding.host_path};
+            const std::filesystem::path worker_path {binding.worker_path};
+            if (!device_path(host_path) || !device_path(worker_path) ||
+                (!binding.permissions.empty() && binding.permissions != "rw") ||
+                !worker_paths.emplace(worker_path).second) {
+              throw std::runtime_error {"invalid Podman device binding"};
+            }
+            const auto identity = host_.read_write_character_device(host_path);
             if (!identity) {
               throw std::runtime_error {"Podman device binding is unavailable"};
             }
             bindings.push_back({
-              .host_path = *host_path,
-              .worker_path = *worker_path,
+              .host_path = host_path,
+              .worker_path = worker_path,
               .identity = *identity,
             });
           }
@@ -1483,7 +1826,9 @@ namespace multiseat::podman {
               },
               .worker_name = *worker,
             },
-            .state = observed_state(*runtime_state, health_state),
+            .state = released_stopped_worker && never_started ?
+                       worker_observed_state_e::stopped :
+                       observed_state(*runtime_state, health_state),
           },
           .runtime_state = lowercase_ascii(*runtime_state),
           .labels = std::move(labels),
@@ -1492,6 +1837,11 @@ namespace multiseat::podman {
       }
       require_current_gpu_catalog();
       return records;
+    } catch (const std::exception &error) {
+      throw std::runtime_error {
+        std::string {"rootless Podman returned invalid worker inventory: "} +
+        error.what()
+      };
     } catch (...) {
       throw std::runtime_error {"rootless Podman returned invalid worker inventory"};
     }

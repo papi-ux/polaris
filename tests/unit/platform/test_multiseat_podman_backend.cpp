@@ -17,6 +17,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -78,7 +79,7 @@ namespace {
     }
 
     bool executable_file(const std::filesystem::path &path) const override {
-      return executable_ready && path == "/usr/bin/podman";
+      return executable_ready && executable_files.contains(path.native());
     }
 
     bool readable_directory(const std::filesystem::path &path) const override {
@@ -108,6 +109,19 @@ namespace {
                std::nullopt : std::optional {device->second};
     }
 
+    std::optional<std::string> read_owned_regular_file(
+      const std::filesystem::path &path,
+      std::size_t max_bytes
+    ) const override {
+      ++owned_file_reads;
+      last_owned_file_limit = max_bytes;
+      const auto file = owned_files.find(path.native());
+      if (file == owned_files.end() || file->second.size() > max_bytes) {
+        return std::nullopt;
+      }
+      return file->second;
+    }
+
     command_result_t run(
       const std::vector<std::string> &argv,
       std::chrono::milliseconds,
@@ -128,6 +142,10 @@ namespace {
 
     std::uint64_t uid = 1000;
     bool executable_ready = true;
+    std::set<std::string> executable_files {
+      "/usr/bin/podman",
+      "/usr/libexec/podman/catatonit",
+    };
     std::set<std::string> readable_directories {
       "/srv/Games Library",
     };
@@ -157,6 +175,9 @@ namespace {
       {"/dev/input/event23", device_identity(13, 87)},
     };
     mutable std::size_t character_device_calls = 0;
+    std::map<std::string, std::string> owned_files;
+    mutable std::size_t owned_file_reads = 0;
+    mutable std::size_t last_owned_file_limit = 0;
     std::size_t replacement_after_character_device_call = 0;
     std::filesystem::path replacement_character_device_path;
     std::optional<character_device_identity_t>
@@ -538,6 +559,7 @@ namespace {
       {"io.polaris.multiseat.display-height", std::to_string(spec.display_mode.height)},
       {"io.polaris.multiseat.display-refresh-millihz", std::to_string(spec.display_mode.refresh_millihz)},
       {"io.polaris.multiseat.display-hdr", spec.display_mode.hdr ? "1" : "0"},
+      {"io.polaris.multiseat.volume", spec.profile_key == "profile beta" ? "pv-b8e1" : "pv-a9f0"},
       {"io.polaris.multiseat.compositor", "gamescope"},
       {"io.polaris.multiseat.encoders", std::to_string(spec.encoder_sessions)},
     };
@@ -765,11 +787,14 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
     changed_authority,
     options_for_tests(),
   };
+  changed_authority_host.push({.exit_status = 0});
   EXPECT_EQ(
     changed_authority_backend.launch(spec),
     worker_command_result_e::rejected
   );
-  EXPECT_TRUE(changed_authority_host.calls.empty());
+  // The authority changed at the recheck that follows the volume check.
+  ASSERT_EQ(changed_authority_host.calls.size(), std::size_t {1});
+  EXPECT_EQ(changed_authority_host.calls.front().at(2), "volume");
 
   fake_host_t changed_kernel_host;
   fake_input_manifest_source_t changed_kernel;
@@ -784,8 +809,10 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
     changed_kernel,
     options_for_tests(),
   };
+  changed_kernel_host.push({.exit_status = 0});
   EXPECT_EQ(changed_kernel_backend.launch(spec), worker_command_result_e::rejected);
-  EXPECT_TRUE(changed_kernel_host.calls.empty());
+  ASSERT_EQ(changed_kernel_host.calls.size(), std::size_t {1});
+  EXPECT_EQ(changed_kernel_host.calls.front().at(2), "volume");
   EXPECT_EQ(changed_kernel.observation_calls, std::size_t {5});
 
   fake_host_t changed_gpu_at_run_host;
@@ -800,11 +827,14 @@ TEST(MultiseatPodmanBackend, LaunchRevalidatesIdentityAtInvocationBoundary) {
     changed_gpu_at_run_inputs,
     options_for_tests(),
   };
+  changed_gpu_at_run_host.push({.exit_status = 0});
   EXPECT_EQ(
     changed_gpu_at_run_backend.launch(spec),
     worker_command_result_e::rejected
   );
-  EXPECT_TRUE(changed_gpu_at_run_host.calls.empty());
+  // Only the volume existence check ran; the run itself never did.
+  ASSERT_EQ(changed_gpu_at_run_host.calls.size(), std::size_t {1});
+  EXPECT_EQ(changed_gpu_at_run_host.calls.front().at(2), "volume");
   EXPECT_GE(changed_gpu_at_run_host.character_device_calls, 7U);
 }
 
@@ -812,15 +842,25 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
   const auto spec = valid_spec();
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 0,
     .output = std::string {first_id} + "\n",
   });
 
   ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
-  ASSERT_EQ(host.calls.size(), std::size_t {1});
-  const auto &argv = host.calls.front();
+  ASSERT_EQ(host.calls.size(), std::size_t {2});
+  const std::vector<std::string> expected_volume_check {
+    "/usr/bin/podman", "--remote=false", "volume", "exists", "pv-a9f0",
+  };
+  EXPECT_EQ(host.calls.front(), expected_volume_check);
+  const auto &argv = host.calls.at(1);
   ASSERT_GE(argv.size(), std::size_t {3});
+  EXPECT_TRUE(has_argument(
+    argv,
+    "--volume=pv-a9f0:/var/lib/polaris-seat:rw,nosuid,nodev"
+  ));
+  EXPECT_FALSE(any_argument_contains(argv, "nocreate"));
   EXPECT_EQ(argv.at(0), "/usr/bin/podman");
   EXPECT_EQ(argv.at(1), "--remote=false");
   EXPECT_EQ(argv.at(2), "run");
@@ -850,10 +890,6 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_FALSE(has_argument(argv, "--read-only-tmpfs=false"));
   EXPECT_TRUE(has_argument(argv, "--pull=never"));
   EXPECT_TRUE(has_argument(argv, "--rm"));
-  EXPECT_TRUE(has_argument(
-    argv,
-    "--volume=pv-a9f0:/var/lib/polaris-seat:rw,nosuid,nodev,nocreate"
-  ));
   EXPECT_TRUE(has_argument(argv, "--workdir=/var/lib/polaris-seat"));
   EXPECT_TRUE(has_argument(argv, "--env=HOME=/var/lib/polaris-seat"));
   EXPECT_TRUE(has_argument(
@@ -944,14 +980,16 @@ TEST(MultiseatPodmanBackend, ProfileSelectsOneExactRuntimeImageAndTypedWorkerPro
     "profile beta",
     "heroic-game"
   );
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 0,
     .output = std::string {second_id} + "\n",
   });
 
   ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
-  ASSERT_EQ(host.calls.size(), std::size_t {1});
-  const auto &argv = host.calls.front();
+  ASSERT_EQ(host.calls.size(), std::size_t {2});
+  EXPECT_EQ(host.calls.front().at(4), "pv-b8e1");
+  const auto &argv = host.calls.at(1);
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_RUNTIME_PROFILE=heroic"));
   EXPECT_TRUE(has_argument(
     argv,
@@ -1029,43 +1067,73 @@ TEST(MultiseatPodmanBackend, LaunchRejectsUnknownOrNonConcreteAllocation) {
   EXPECT_TRUE(host.calls.empty());
 }
 
+TEST(MultiseatPodmanBackend, LaunchRequiresPreexistingProfileVolume) {
+  const auto spec = valid_spec();
+
+  fake_host_t absent_host;
+  backend_t absent_backend {absent_host, input_manifests_for_tests(), options_for_tests()};
+  absent_host.push({.exit_status = 1});
+  EXPECT_EQ(absent_backend.launch(spec), worker_command_result_e::rejected);
+  ASSERT_EQ(absent_host.calls.size(), std::size_t {1});
+  const std::vector<std::string> expected_volume_check {
+    "/usr/bin/podman", "--remote=false", "volume", "exists", "pv-a9f0",
+  };
+  EXPECT_EQ(absent_host.calls.front(), expected_volume_check);
+
+  fake_host_t error_host;
+  backend_t error_backend {error_host, input_manifests_for_tests(), options_for_tests()};
+  error_host.push({.exit_status = 125});
+  EXPECT_EQ(error_backend.launch(spec), worker_command_result_e::indeterminate);
+  EXPECT_EQ(error_host.calls.size(), std::size_t {1});
+
+  fake_host_t timeout_host;
+  backend_t timeout_backend {timeout_host, input_manifests_for_tests(), options_for_tests()};
+  timeout_host.push({.exit_status = 124, .timed_out = true});
+  EXPECT_EQ(timeout_backend.launch(spec), worker_command_result_e::indeterminate);
+  EXPECT_EQ(timeout_host.calls.size(), std::size_t {1});
+}
+
 TEST(MultiseatPodmanBackend, TimedOutLaunchIsIndeterminate) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 124,
     .timed_out = true,
   });
 
   EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::indeterminate);
-  EXPECT_EQ(host.calls.size(), std::size_t {1});
+  EXPECT_EQ(host.calls.size(), std::size_t {2});
 }
 
 TEST(MultiseatPodmanBackend, AmbiguousSuccessfulLaunchOutputIsIndeterminate) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 0,
     .output = std::string {first_id} + "\nunexpected output\n",
   });
 
   EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::indeterminate);
-  EXPECT_EQ(host.calls.size(), std::size_t {1});
+  EXPECT_EQ(host.calls.size(), std::size_t {2});
 }
 
 TEST(MultiseatPodmanBackend, NonzeroLaunchReconcilesAnExactExistingWorker) {
   fake_host_t host;
   backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
   const auto spec = valid_spec();
+  host.push({.exit_status = 0});
   host.push({
     .exit_status = 125,
   });
   queue_inventory(host, {container_for(spec, first_id, "running", "healthy")});
 
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::already_applied);
-  ASSERT_EQ(host.calls.size(), std::size_t {3});
-  EXPECT_EQ(host.calls.at(1).at(2), "ps");
-  EXPECT_EQ(host.calls.at(2).at(2), "container");
+  ASSERT_EQ(host.calls.size(), std::size_t {4});
+  EXPECT_EQ(host.calls.at(0).at(2), "volume");
+  EXPECT_EQ(host.calls.at(2).at(2), "ps");
+  EXPECT_EQ(host.calls.at(3).at(2), "container");
 }
 
 TEST(MultiseatPodmanBackend, NonzeroLaunchRejectsMissingAndQuarantinesUnsafeWorkers) {
@@ -1073,29 +1141,33 @@ TEST(MultiseatPodmanBackend, NonzeroLaunchRejectsMissingAndQuarantinesUnsafeWork
 
   fake_host_t missing_host;
   backend_t missing_backend {missing_host, input_manifests_for_tests(), options_for_tests()};
+  missing_host.push({.exit_status = 0});
   missing_host.push({.exit_status = 125});
   queue_inventory(missing_host, {});
   EXPECT_EQ(missing_backend.launch(spec), worker_command_result_e::rejected);
-  EXPECT_EQ(missing_host.calls.size(), std::size_t {2});
+  EXPECT_EQ(missing_host.calls.size(), std::size_t {3});
 
   fake_host_t mismatch_host;
   backend_t mismatch_backend {mismatch_host, input_manifests_for_tests(), options_for_tests()};
   auto mismatched = container_for(spec, first_id, "running", "healthy");
   mismatched["Config"]["Labels"]["io.polaris.multiseat.runtime"] =
     "polaris-runtime-controller-a1b2-wrong";
+  mismatch_host.push({.exit_status = 0});
   mismatch_host.push({.exit_status = 125});
   queue_inventory(mismatch_host, {std::move(mismatched)});
   EXPECT_EQ(mismatch_backend.launch(spec), worker_command_result_e::indeterminate);
-  EXPECT_EQ(mismatch_host.calls.size(), std::size_t {3});
+  EXPECT_EQ(mismatch_host.calls.size(), std::size_t {4});
 
   fake_host_t failed_host;
   backend_t failed_backend {failed_host, input_manifests_for_tests(), options_for_tests()};
+  failed_host.push({.exit_status = 0});
   failed_host.push({.exit_status = 125});
   queue_inventory(failed_host, {container_for(spec, first_id, "running", "unhealthy")});
   EXPECT_EQ(failed_backend.launch(spec), worker_command_result_e::indeterminate);
 
   fake_host_t stopped_host;
   backend_t stopped_backend {stopped_host, input_manifests_for_tests(), options_for_tests()};
+  stopped_host.push({.exit_status = 0});
   stopped_host.push({.exit_status = 125});
   queue_inventory(stopped_host, {container_for(spec, first_id, "exited", "")});
   EXPECT_EQ(stopped_backend.launch(spec), worker_command_result_e::rejected);
@@ -1130,11 +1202,12 @@ TEST(MultiseatPodmanBackend, NonzeroLaunchQuarantinesChangedRuntimeBindings) {
     const auto spec = valid_spec();
     auto existing = container_for(spec, first_id, "running", "healthy");
     existing["Config"]["Labels"][mismatch.label] = mismatch.value;
+    host.push({.exit_status = 0});
     host.push({.exit_status = 125});
     queue_inventory(host, {std::move(existing)});
 
     EXPECT_EQ(backend.launch(spec), worker_command_result_e::indeterminate);
-    EXPECT_EQ(host.calls.size(), std::size_t {3});
+    EXPECT_EQ(host.calls.size(), std::size_t {4});
   }
 }
 
@@ -1562,6 +1635,820 @@ TEST(MultiseatPodmanBackend, InventoryRefusesPrivilegedExecutionWithoutCommands)
 
   EXPECT_THROW(backend.inventory(), std::runtime_error);
   EXPECT_TRUE(host.calls.empty());
+}
+
+namespace {
+  constexpr auto storage_root = "/srv/seat-operator/containers/storage";
+  constexpr auto run_root = "/run/user/1000/containers";
+
+  std::string containers_directory_for(std::string_view root, std::string_view id) {
+    return std::string {root} + "/overlay-containers/" + std::string {id};
+  }
+
+  std::string runtime_userdata_for(std::string_view id) {
+    return containers_directory_for(storage_root, id) + "/userdata";
+  }
+
+  std::string run_userdata_for(std::string_view id) {
+    return containers_directory_for(run_root, id) + "/userdata";
+  }
+
+  std::string runtime_spec_path_for(std::string_view id) {
+    return runtime_userdata_for(id) + "/config.json";
+  }
+
+  std::string volume_data_for(std::string_view volume_name) {
+    return std::string {storage_root} + "/volumes/" + std::string {volume_name} + "/_data";
+  }
+
+  json runtime_mount(
+    std::string destination,
+    std::string type,
+    std::string source,
+    std::vector<std::string> options
+  ) {
+    return {
+      {"destination", std::move(destination)},
+      {"type", std::move(type)},
+      {"source", std::move(source)},
+      {"options", std::move(options)},
+    };
+  }
+
+  json podman_bind(std::string destination, std::string source) {
+    return runtime_mount(std::move(destination), "bind", std::move(source), {"bind", "rprivate"});
+  }
+
+  json device_mount(
+    std::string source,
+    std::string destination,
+    std::string access = "rw"
+  ) {
+    return runtime_mount(
+      std::move(destination),
+      "bind",
+      std::move(source),
+      {"slave", "nosuid", "noexec", std::move(access), "rbind"}
+    );
+  }
+
+  /**
+   * The OCI runtime spec rootless Podman 5.8 writes for a worker: its own
+   * pseudo-filesystems and per-container files, the controller's tmpfs,
+   * volume, authority, and game mounts, the init binary, and one bind mount
+   * per `--device`, which is the only place those bindings appear.
+   */
+  json runtime_spec_for(const worker_launch_spec_t &spec, std::string_view id) {
+    const auto userdata = runtime_userdata_for(id);
+    const auto run_userdata = run_userdata_for(id);
+    const auto authority = std::string {"/run/user/1000/polaris-workers/"} +
+                           spec.resources.runtime_namespace;
+    const auto volume = spec.profile_key == "profile beta" ? "pv-b8e1" : "pv-a9f0";
+    json mounts = json::array({
+      runtime_mount("/run", "tmpfs", "tmpfs", {"rw", "rprivate", "nosuid", "nodev", "tmpcopyup"}),
+      runtime_mount("/tmp", "tmpfs", "tmpfs", {"rw", "rprivate", "nosuid", "nodev"}),
+      runtime_mount("/proc", "proc", "proc", {"nosuid", "noexec", "nodev"}),
+      runtime_mount(
+        "/dev",
+        "tmpfs",
+        "tmpfs",
+        {"nosuid", "strictatime", "mode=755", "size=65536k"}
+      ),
+      runtime_mount("/sys", "sysfs", "sysfs", {"nosuid", "noexec", "nodev", "ro"}),
+      runtime_mount(
+        "/run/polaris-auth",
+        "bind",
+        authority + "/auth",
+        {"ro", "bind", "private", "nosuid", "nodev"}
+      ),
+      runtime_mount(
+        "/run/podman-init",
+        "bind",
+        "/usr/libexec/podman/catatonit",
+        {"bind", "ro", "private"}
+      ),
+      runtime_mount("/var/tmp", "tmpfs", "tmpfs", {"rw", "rprivate", "nosuid", "nodev", "tmpcopyup"}),
+      runtime_mount("/run/polaris", "tmpfs", "tmpfs", {"rw", "rprivate", "nosuid", "nodev"}),
+      runtime_mount(
+        "/run/polaris-ipc",
+        "bind",
+        authority + "/ipc",
+        {"rw", "bind", "private", "nosuid", "nodev"}
+      ),
+      runtime_mount(
+        "/dev/pts",
+        "devpts",
+        "devpts",
+        {"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}
+      ),
+      runtime_mount("/dev/mqueue", "mqueue", "mqueue", {"nosuid", "noexec", "nodev"}),
+      podman_bind("/etc/resolv.conf", run_userdata + "/resolv.conf"),
+      podman_bind("/etc/hosts", run_userdata + "/hosts"),
+      runtime_mount(
+        "/dev/shm",
+        "bind",
+        userdata + "/shm",
+        {"bind", "rprivate", "nosuid", "noexec", "nodev"}
+      ),
+      podman_bind("/run/.containerenv", run_userdata + "/.containerenv"),
+      podman_bind("/run/secrets", run_userdata + "/run/secrets"),
+      podman_bind("/etc/hostname", run_userdata + "/hostname"),
+      runtime_mount(
+        "/sys/fs/cgroup",
+        "cgroup",
+        "cgroup",
+        {"rprivate", "nosuid", "noexec", "nodev", "relatime", "ro"}
+      ),
+      runtime_mount(
+        "/mnt/games/library-a",
+        "bind",
+        "/srv/Games Library",
+        {"ro", "bind", "private", "nosuid", "nodev"}
+      ),
+      device_mount("/dev/dri/renderD128", "/dev/dri/renderD128"),
+      device_mount("/dev/dri/card0", "/dev/dri/card0"),
+    });
+    for (const auto &node : input_allocation_for(spec.identity.seat).nodes) {
+      mounts.push_back(device_mount(node.host_path.native(), node.worker_path.native()));
+    }
+    mounts.push_back(runtime_mount(
+      "/var/lib/polaris-seat",
+      "bind",
+      volume_data_for(volume),
+      {"rw", "nosuid", "nodev", "rprivate", "rbind"}
+    ));
+    return {
+      {"ociVersion", "1.2.0"},
+      {"mounts", std::move(mounts)},
+      {"linux", json::object()},
+    };
+  }
+
+  json rootless_container_for(
+    const worker_launch_spec_t &spec,
+    std::string id,
+    std::string runtime_state,
+    std::string health_state = "healthy"
+  ) {
+    auto container = container_for(
+      spec,
+      id,
+      std::move(runtime_state),
+      std::move(health_state)
+    );
+    container["HostConfig"]["Devices"] = json::array();
+    container["OCIConfigPath"] = runtime_spec_path_for(id);
+    return container;
+  }
+
+  json &runtime_mount_for(json &runtime_spec, std::string_view destination) {
+    for (auto &mount : runtime_spec.at("mounts")) {
+      if (mount.at("destination").get<std::string>() == destination) {
+        return mount;
+      }
+    }
+    throw std::logic_error {"runtime spec mount missing"};
+  }
+
+  void erase_runtime_mount(json &runtime_spec, std::string_view destination) {
+    auto &mounts = runtime_spec.at("mounts");
+    mounts.erase(
+      std::remove_if(
+        mounts.begin(),
+        mounts.end(),
+        [destination](const json &mount) {
+          return mount.at("destination").get<std::string>() == destination;
+        }
+      ),
+      mounts.end()
+    );
+  }
+
+  /** The same spec as stored under another storage root or driver. */
+  json relocated_runtime_spec(
+    const json &runtime_spec,
+    std::string_view from,
+    std::string_view to
+  ) {
+    auto dump = runtime_spec.dump();
+    for (auto at = dump.find(from); at != std::string::npos; at = dump.find(from, at + to.size())) {
+      dump.replace(at, from.size(), to);
+    }
+    return json::parse(dump);
+  }
+
+  std::string relocated(std::string value, std::string_view from, std::string_view to) {
+    for (auto at = value.find(from); at != std::string::npos; at = value.find(from, at + to.size())) {
+      value.replace(at, from.size(), to);
+    }
+    return value;
+  }
+
+  /** Runs one rootless inventory expecting a throw; returns the spec reads. */
+  std::size_t rootless_inventory_rejected(
+    const worker_launch_spec_t &spec,
+    const json &runtime_spec,
+    std::function<void(json &)> mutate_container = {},
+    std::function<void(fake_host_t &)> configure_host = {}
+  ) {
+    auto container = rootless_container_for(spec, first_id, "running", "healthy");
+    if (mutate_container) {
+      mutate_container(container);
+    }
+    fake_host_t host;
+    host.owned_files[runtime_spec_path_for(first_id)] = runtime_spec.dump();
+    if (configure_host) {
+      configure_host(host);
+    }
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options_for_tests()};
+    queue_inventory(host, {std::move(container)});
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+    return host.owned_file_reads;
+  }
+
+  void expect_rootless_inventory_rejected(
+    const worker_launch_spec_t &spec,
+    const json &runtime_spec,
+    std::size_t expected_spec_reads = 1,
+    std::function<void(json &)> mutate_container = {},
+    std::function<void(fake_host_t &)> configure_host = {}
+  ) {
+    EXPECT_EQ(
+      rootless_inventory_rejected(spec, runtime_spec, mutate_container, configure_host),
+      expected_spec_reads
+    );
+  }
+
+  void expect_rootless_inventory_ready(
+    const worker_launch_spec_t &spec,
+    const json &runtime_spec,
+    std::function<void(json &)> mutate_container = {},
+    std::string spec_path = runtime_spec_path_for(first_id)
+  ) {
+    auto container = rootless_container_for(spec, first_id, "running", "healthy");
+    container["OCIConfigPath"] = spec_path;
+    if (mutate_container) {
+      mutate_container(container);
+    }
+    fake_host_t host;
+    host.owned_files[spec_path] = runtime_spec.dump();
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options_for_tests()};
+    queue_inventory(host, {std::move(container)});
+    const auto observations = backend.inventory();
+    ASSERT_EQ(observations.size(), 1U);
+    EXPECT_EQ(observations.front().identity, spec.identity);
+    EXPECT_EQ(observations.front().state, worker_observed_state_e::ready);
+    EXPECT_EQ(host.owned_file_reads, 1U);
+  }
+}  // namespace
+
+TEST(MultiseatPodmanBackend, InventoryReadsRootlessDeviceBindingsFromTheRuntimeSpec) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options_for_tests()};
+  const auto spec = valid_spec();
+  host.owned_files[runtime_spec_path_for(first_id)] = runtime_spec_for(spec, first_id).dump();
+  queue_inventory(host, {rootless_container_for(spec, first_id, "running", "healthy")});
+
+  const auto observations = backend.inventory();
+
+  ASSERT_EQ(observations.size(), 1U);
+  EXPECT_EQ(observations.front().identity, spec.identity);
+  EXPECT_EQ(observations.front().state, worker_observed_state_e::ready);
+  EXPECT_EQ(host.owned_file_reads, 1U);
+  EXPECT_EQ(host.last_owned_file_limit, options_for_tests().max_command_output_bytes);
+  EXPECT_EQ(host.calls.size(), 2U);
+}
+
+TEST(MultiseatPodmanBackend, InventoryAcceptsRuntimeSpecShapesPodmanMayEmit) {
+  const auto spec = valid_spec();
+  const auto keyboard = "/dev/input/polaris-keyboard";
+
+  {
+    SCOPED_TRACE("device mount without options");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, keyboard).erase("options");
+    expect_rootless_inventory_ready(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("no linux object");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec.erase("linux");
+    expect_rootless_inventory_ready(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("null device node list");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["linux"]["devices"] = nullptr;
+    expect_rootless_inventory_ready(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("no network files");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    erase_runtime_mount(runtime_spec, "/etc/resolv.conf");
+    erase_runtime_mount(runtime_spec, "/etc/hosts");
+    expect_rootless_inventory_ready(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("inspected device list that agrees with the spec");
+    expect_rootless_inventory_ready(
+      spec,
+      runtime_spec_for(spec, first_id),
+      [&spec](json &container) {
+        container["HostConfig"]["Devices"] = inspected_devices_for(spec);
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("vfs storage driver");
+    expect_rootless_inventory_ready(
+      spec,
+      relocated_runtime_spec(runtime_spec_for(spec, first_id), "overlay-containers", "vfs-containers"),
+      {},
+      relocated(runtime_spec_path_for(first_id), "overlay-containers", "vfs-containers")
+    );
+  }
+  {
+    SCOPED_TRACE("storage root under /dev/shm");
+    const auto shm_root = "/dev/shm/containers/storage";
+    expect_rootless_inventory_ready(
+      spec,
+      relocated_runtime_spec(runtime_spec_for(spec, first_id), storage_root, shm_root),
+      {},
+      relocated(runtime_spec_path_for(first_id), storage_root, shm_root)
+    );
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryRejectsRuntimeSpecDeviceDrift) {
+  const auto spec = valid_spec();
+  const auto keyboard = "/dev/input/polaris-keyboard";
+
+  {
+    SCOPED_TRACE("missing device mount");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    erase_runtime_mount(runtime_spec, keyboard);
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("renamed worker path");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, keyboard)["destination"] =
+      "/dev/input/polaris-keyboard-other";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("trailing slash on the worker path");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, keyboard)["destination"] =
+      "/dev/input/polaris-keyboard/";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("changed host device");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, keyboard)["source"] = "/dev/input/event20";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("non-normalized host device");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, keyboard)["source"] = "//dev/input/event10";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("read-only binding");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, keyboard)["options"] =
+      json::array({"slave", "nosuid", "noexec", "ro", "rbind"});
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("same device twice");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(runtime_mount_for(runtime_spec, keyboard));
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("device bound outside /dev");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(device_mount("/dev/input/event20", "/opt/probe"));
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("/dev bound whole");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(device_mount("/dev", "/host-dev"));
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("root bound whole");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(device_mount("/", "/host"));
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("unexpected host file");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(podman_bind("/opt/x", "/srv/seat-operator/x"));
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("another container's files");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/dev/shm")["source"] =
+      runtime_userdata_for(second_id) + "/shm";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("own file at an unexpected destination");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/dev/shm")["destination"] = "/opt/shm";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("another volume");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/var/lib/polaris-seat")["source"] =
+      volume_data_for("pv-other");
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("another profile's volume");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/var/lib/polaris-seat")["source"] =
+      volume_data_for("pv-b8e1");
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("volume from another storage root");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/var/lib/polaris-seat")["source"] =
+      "/srv/other/volumes/pv-a9f0/_data";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("volume landing outside its mount point");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/var/lib/polaris-seat")["destination"] = "/usr";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("authority directory bound read-write");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/run/polaris-auth")["options"] =
+      json::array({"rw", "bind", "private", "nosuid", "nodev"});
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("authority directory at an unexpected destination");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/run/polaris-ipc")["destination"] = "/run/polaris-auth-other";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("game library bound read-write");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/mnt/games/library-a")["options"] =
+      json::array({"rw", "bind", "private", "nosuid", "nodev"});
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("storage file presented as an input device");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(
+      podman_bind("/dev/input/polaris-extra", runtime_userdata_for(first_id) + "/probe")
+    );
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("storage directory over the input directory");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(
+      podman_bind("/dev/input", runtime_userdata_for(first_id) + "/input")
+    );
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("tmpfs over a GPU path");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(
+      runtime_mount("/dev/dri", "tmpfs", "tmpfs", {"nosuid"})
+    );
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("tmpfs over /dev after the devices");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(
+      runtime_mount("/dev", "tmpfs", "tmpfs", {"nosuid", "mode=755"})
+    );
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("raw creation endpoint");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["mounts"].push_back(device_mount("/dev/uinput", "/dev/uinput"));
+    expect_rootless_inventory_rejected(
+      spec,
+      runtime_spec,
+      1,
+      {},
+      [](fake_host_t &host) {
+        host.accessible_devices["/dev/uinput"] = device_identity(10, 223);
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("init binary bound read-write");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/run/podman-init")["options"] =
+      json::array({"bind", "rw", "private"});
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("init binary that is not an executable file");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/run/podman-init")["source"] = "/srv/seat-operator/x";
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("device presented as the init binary");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_mount_for(runtime_spec, "/run/podman-init")["source"] = "/dev/input/event20";
+    expect_rootless_inventory_rejected(
+      spec,
+      runtime_spec,
+      1,
+      {},
+      [](fake_host_t &host) {
+        host.executable_files.insert("/dev/input/event20");
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("device granted as a cgroup node");
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    runtime_spec["linux"]["devices"] = json::array({
+      {{"path", "/dev/input/event20"}, {"type", "c"}, {"major", 13}, {"minor", 84}},
+    });
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("inspected device list that contradicts the spec");
+    expect_rootless_inventory_rejected(
+      spec,
+      runtime_spec_for(spec, first_id),
+      1,
+      [&spec, keyboard](json &container) {
+        auto devices = inspected_devices_for(spec);
+        for (auto &device : devices) {
+          if (device.at("PathInContainer") == keyboard) {
+            device["PathOnHost"] = "/dev/input/event20";
+          }
+        }
+        container["HostConfig"]["Devices"] = std::move(devices);
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("inspected device the spec never mounted");
+    expect_rootless_inventory_rejected(
+      spec,
+      runtime_spec_for(spec, first_id),
+      1,
+      [](json &container) {
+        container["HostConfig"]["Devices"] = json::array({
+          {{"PathOnHost", "/dev/input/event20"}, {"PathInContainer", "/dev/input/polaris-extra"}},
+        });
+      }
+    );
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryRequiresTheWorkerVolumeLabel) {
+  const auto spec = valid_spec();
+  const auto valid = runtime_spec_for(spec, first_id);
+  {
+    SCOPED_TRACE("volume label missing");
+    expect_rootless_inventory_rejected(spec, valid, 0, [](json &container) {
+      container["Config"]["Labels"].erase("io.polaris.multiseat.volume");
+    });
+  }
+  {
+    SCOPED_TRACE("volume label naming an unconfigured volume");
+    expect_rootless_inventory_rejected(spec, valid, 0, [](json &container) {
+      container["Config"]["Labels"]["io.polaris.multiseat.volume"] = "pv-other";
+    });
+  }
+  {
+    SCOPED_TRACE("volume label with an unsafe value");
+    expect_rootless_inventory_rejected(spec, valid, 0, [](json &container) {
+      container["Config"]["Labels"]["io.polaris.multiseat.volume"] = "../pv-a9f0";
+    });
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryRejectsUnusableRuntimeSpecFiles) {
+  const auto spec = valid_spec();
+  const auto valid = runtime_spec_for(spec, first_id);
+
+  {
+    SCOPED_TRACE("spec missing");
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options_for_tests()};
+    queue_inventory(host, {rootless_container_for(spec, first_id, "running", "healthy")});
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+    EXPECT_EQ(host.owned_file_reads, 1U);
+  }
+  {
+    SCOPED_TRACE("spec of another container");
+    expect_rootless_inventory_rejected(
+      spec,
+      valid,
+      0,
+      [](json &container) {
+        container["OCIConfigPath"] = runtime_spec_path_for(second_id);
+      },
+      [&valid](fake_host_t &host) {
+        host.owned_files[runtime_spec_path_for(second_id)] = valid.dump();
+      }
+    );
+  }
+  const std::vector<std::string> bad_paths {
+    "overlay-containers/" + std::string {first_id} + "/userdata/config.json",
+    containers_directory_for(storage_root, first_id) + "/../" +
+      std::string {first_id} + "/userdata/config.json",
+    runtime_userdata_for(first_id) + "/spec.json",
+    containers_directory_for(storage_root, first_id) + "/config.json",
+    "/" + std::string {first_id} + "/userdata/config.json",
+    "/tmp/" + std::string {first_id} + "/userdata/config.json",
+    runtime_spec_path_for(first_id) + "/",
+  };
+  for (const auto &bad_path : bad_paths) {
+    SCOPED_TRACE(bad_path);
+    expect_rootless_inventory_rejected(
+      spec,
+      valid,
+      0,
+      [&bad_path](json &container) {
+        container["OCIConfigPath"] = bad_path;
+      },
+      [&bad_path, &valid](fake_host_t &host) {
+        host.owned_files[bad_path] = valid.dump();
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("non-string path");
+    expect_rootless_inventory_rejected(spec, valid, 0, [](json &container) {
+      container["OCIConfigPath"] = 7;
+    });
+  }
+  {
+    SCOPED_TRACE("oversized spec");
+    expect_rootless_inventory_rejected(
+      spec,
+      valid,
+      1,
+      {},
+      [&valid](fake_host_t &host) {
+        host.owned_files[runtime_spec_path_for(first_id)] =
+          valid.dump() + std::string(options_for_tests().max_command_output_bytes, ' ');
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("malformed spec");
+    expect_rootless_inventory_rejected(
+      spec,
+      valid,
+      1,
+      {},
+      [](fake_host_t &host) {
+        host.owned_files[runtime_spec_path_for(first_id)] = "{";
+      }
+    );
+  }
+  {
+    SCOPED_TRACE("mounts missing");
+    expect_rootless_inventory_rejected(spec, json {{"ociVersion", "1.2.0"}});
+  }
+  {
+    SCOPED_TRACE("mount without a destination");
+    auto runtime_spec = valid;
+    runtime_mount_for(runtime_spec, "/proc").erase("destination");
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+  {
+    SCOPED_TRACE("bind without a source");
+    auto runtime_spec = valid;
+    runtime_mount_for(runtime_spec, "/etc/hosts").erase("source");
+    expect_rootless_inventory_rejected(spec, runtime_spec);
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryFailureCarriesTheReason) {
+  const auto spec = valid_spec();
+  auto runtime_spec = runtime_spec_for(spec, first_id);
+  runtime_spec["mounts"].push_back(device_mount("/dev", "/host-dev"));
+  fake_host_t host;
+  host.owned_files[runtime_spec_path_for(first_id)] = runtime_spec.dump();
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options_for_tests()};
+  queue_inventory(host, {rootless_container_for(spec, first_id, "running", "healthy")});
+
+  std::string reason;
+  try {
+    (void) backend.inventory();
+  } catch (const std::runtime_error &error) {
+    reason = error.what();
+  }
+
+  EXPECT_NE(reason.find("rootless Podman returned invalid worker inventory"), std::string::npos);
+  EXPECT_NE(reason.find("unexpected Podman runtime spec mount"), std::string::npos);
+}
+
+TEST(MultiseatPodmanBackend, ReleasedStoppedRootlessWorkerNeedsNoRuntimeSpec) {
+  const auto spec = valid_spec();
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  inputs.missing = true;
+  backend_t backend {host, inputs, options_for_tests()};
+  queue_inventory(host, {rootless_container_for(spec, first_id, "exited", "")});
+
+  const auto observations = backend.inventory();
+
+  ASSERT_EQ(observations.size(), 1U);
+  EXPECT_EQ(observations.front().identity, spec.identity);
+  EXPECT_EQ(observations.front().state, worker_observed_state_e::stopped);
+  EXPECT_EQ(host.owned_file_reads, 0U);
+}
+
+TEST(MultiseatPodmanBackend, NeverStartedRootlessWorkerIsStoppedOnceItsAllocationIsGone) {
+  const auto spec = valid_spec();
+  for (const auto *state : {"created", "configured"}) {
+    SCOPED_TRACE(state);
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    inputs.missing = true;
+    backend_t backend {host, inputs, options_for_tests()};
+    queue_inventory(host, {rootless_container_for(spec, first_id, state, "")});
+
+    const auto observations = backend.inventory();
+
+    ASSERT_EQ(observations.size(), 1U);
+    EXPECT_EQ(observations.front().identity, spec.identity);
+    EXPECT_EQ(observations.front().state, worker_observed_state_e::stopped);
+    EXPECT_EQ(host.owned_file_reads, 0U);
+  }
+
+  // With its allocation still resolving it is a launch in flight: the missing
+  // spec makes the inventory indeterminate rather than releasing the seat.
+  fake_host_t launching_host;
+  fake_input_manifest_source_t launching_inputs;
+  backend_t launching_backend {launching_host, launching_inputs, options_for_tests()};
+  queue_inventory(launching_host, {rootless_container_for(spec, first_id, "created", "")});
+  EXPECT_THROW(launching_backend.inventory(), std::runtime_error);
+  EXPECT_EQ(launching_host.owned_file_reads, 1U);
+
+  // Without input authority the state stays what Podman reported.
+  fake_host_t stop_host;
+  fake_input_manifest_source_t stop_inputs;
+  stop_inputs.missing = true;
+  backend_t stop_backend {stop_host, stop_inputs, options_for_tests()};
+  queue_inventory(stop_host, {rootless_container_for(spec, first_id, "created", "")});
+  stop_host.push({.exit_status = 0});
+  EXPECT_EQ(
+    stop_backend.stop(spec.identity, worker_stop_mode_e::force),
+    worker_command_result_e::applied
+  );
+  EXPECT_EQ(stop_host.owned_file_reads, 0U);
+}
+
+TEST(MultiseatPodmanBackend, StopNeverReadsTheRuntimeSpec) {
+  const auto spec = valid_spec();
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options_for_tests()};
+  queue_inventory(host, {rootless_container_for(spec, first_id, "running", "healthy")});
+  host.push({.exit_status = 0});
+
+  EXPECT_EQ(
+    backend.stop(spec.identity, worker_stop_mode_e::graceful),
+    worker_command_result_e::applied
+  );
+  EXPECT_EQ(host.owned_file_reads, 0U);
+  ASSERT_EQ(host.calls.size(), 3U);
+  EXPECT_EQ(
+    host.calls.back(),
+    (std::vector<std::string> {
+      "/usr/bin/podman", "--remote=false", "kill", "--signal=TERM", first_id,
+    })
+  );
 }
 
 #endif

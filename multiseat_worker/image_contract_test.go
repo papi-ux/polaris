@@ -98,6 +98,8 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 		"test -r /usr/share/pipewire/pipewire-pulse.conf",
 		"COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile",
 		"COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json",
+		"COPY multiseat_worker/main.go /multiseat_worker/main.go",
+		"COPY multiseat_worker/server.go /multiseat_worker/server.go",
 		"ENTRYPOINT [\"/usr/bin/polaris-seat-worker\"]",
 	} {
 		if !strings.Contains(containerfile, required) {
