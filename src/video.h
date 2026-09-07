@@ -6,6 +6,8 @@
 
 // local includes
 #include "capture_generation.h"
+#include "encoder_probe_reuse.h"
+#include <functional>
 #include "input.h"
 #include "nvenc/nvenc_config.h"
 #include "platform/common.h"
@@ -24,6 +26,7 @@ extern "C" {
 }
 
 struct AVPacket;
+namespace config { struct video_t; }
 
 namespace video {
 
@@ -668,6 +671,11 @@ namespace video {
     std::string_view current_topology
   );
 
+  int probe_encoders_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate
+  );
+  std::string encoder_probe_settings_for_tests(const config::video_t &settings);
   std::string current_encoder_topology_key_for_tests();
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);

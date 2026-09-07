@@ -21,9 +21,11 @@
 #include "../../utility.h"
 #include "labwc_startup_diagnostics.h"
 #include "misc.h"
+#include "encoder_probe_identity.h"
 #include "private_session_input.h"
 #include "wlgrab_capture_policy.h"
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -57,6 +59,34 @@ using namespace std::literals;
 namespace cage_display_router {
 
   static pid_t cage_pid = 0;
+
+  // Probe readers never borrow the mutable router strings or descriptor. Each
+  // successful launch publishes immutable ownership of this process generation.
+  struct probe_topology_t {
+    int pidfd = -1;
+    int socketfd = -1;
+    std::string socket_path;
+    std::string socket_identity;
+    std::string generation;
+    ~probe_topology_t() {
+      if (pidfd >= 0) close(pidfd);
+      if (socketfd >= 0) close(socketfd);
+    }
+  };
+  static std::atomic<std::shared_ptr<const probe_topology_t>> probe_topology;
+  static std::atomic_uint probe_topology_writers {0};
+  static std::atomic_uint64_t probe_topology_revision {0};
+
+  struct probe_topology_mutation_t {
+    probe_topology_mutation_t() {
+      probe_topology_writers.fetch_add(1);
+      probe_topology_revision.fetch_add(1);
+    }
+    ~probe_topology_mutation_t() {
+      probe_topology_revision.fetch_add(1);
+      probe_topology_writers.fetch_sub(1);
+    }
+  };
 
   /**
    * A pidfd for the owned labwc supervisor, opened at spawn.
@@ -1129,6 +1159,9 @@ namespace cage_display_router {
       return true;
     }
 
+    const probe_topology_mutation_t probe_mutation;
+    probe_topology.store(nullptr);
+
     // Reset stale state. The pidfd of a supervisor that died without going
     // through stop() is still open here; every session would otherwise leak one.
     close_cage_pidfd();
@@ -1483,6 +1516,26 @@ namespace cage_display_router {
                          std::chrono::steady_clock::now() - startup_begin
                        ).count();
     cage_session_instance_id = session_instance_id;
+    if (!session_instance_id.empty() && cage_pidfd >= 0) {
+      auto topology = std::make_shared<probe_topology_t>();
+      topology->pidfd = fcntl(cage_pidfd, F_DUPFD_CLOEXEC, 0);
+      topology->socket_path = socket_path(cage_wayland_socket);
+      topology->socketfd = open(topology->socket_path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
+      const auto identity = platf::encoder_probe_identity::file_identity(topology->socket_path, S_IFSOCK);
+      struct stat pinned {}, named {};
+      if (topology->pidfd >= 0 && topology->socketfd >= 0 && identity &&
+          fstat(topology->socketfd, &pinned) == 0 &&
+          lstat(topology->socket_path.c_str(), &named) == 0 &&
+          (pinned.st_mode & S_IFMT) == S_IFSOCK &&
+          pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino) {
+        topology->socket_identity = *identity;
+        std::ostringstream generation;
+        generation << std::quoted(session_instance_id) << ':' << cage_pid << ':'
+                   << width << ':' << height << ':' << headless << ':' << force_windowed;
+        topology->generation = generation.str();
+        probe_topology.store(std::move(topology));
+      }
+    }
     return true;
   }
 
@@ -1554,6 +1607,10 @@ namespace cage_display_router {
                          << "Hz but wlr-randr no longer reports that mode; re-applying"sv;
     }
 
+    // An unchanged live read-back does not mutate capture topology. Retire
+    // reuse only when an output operation is actually attempted (even if it
+    // fails or returns to the prior mode).
+    const probe_topology_mutation_t probe_mutation;
     // The cage outlives the launch that started it, and the mode is otherwise
     // only ever set from the startup command — a resume carrying a different
     // refresh must re-apply it or the output stays at the old rate for the
@@ -1600,6 +1657,8 @@ namespace cage_display_router {
   }
 
   void stop() {
+    const probe_topology_mutation_t probe_mutation;
+    probe_topology.store(nullptr);
     if (cage_pid <= 0) {
       clear_startup_diagnostics();
       return;
@@ -1674,6 +1733,8 @@ namespace cage_display_router {
   }
 
   void reset_after_external_stop() {
+    const probe_topology_mutation_t probe_mutation;
+    probe_topology.store(nullptr);
     if (cage_pid > 0) {
       (void) waitpid(cage_pid, nullptr, WNOHANG);
     }
@@ -1733,6 +1794,77 @@ namespace cage_display_router {
     }
     return collector ? collector->snapshot(expected_session_instance_id) : std::nullopt;
   }
+
+  static std::optional<std::string> encoder_probe_topology_with_query(
+    const std::function<std::optional<std::string>(const std::string &)> &query
+  ) {
+    const auto revision = probe_topology_revision.load();
+    const auto snapshot = probe_topology.load();
+    if (!snapshot || probe_topology_writers.load() != 0) return std::nullopt;
+    struct pollfd process {snapshot->pidfd, POLLIN, 0};
+    if (poll(&process, 1, 0) != 0) return std::nullopt;
+    const auto socket_identity = platf::encoder_probe_identity::file_identity(snapshot->socket_path, S_IFSOCK);
+    if (!socket_identity || *socket_identity != snapshot->socket_identity) return std::nullopt;
+
+    const auto outputs = query(snapshot->socket_path);
+    if (!outputs || outputs->empty() || outputs->size() > 65536) return std::nullopt;
+    // An empty/disabled/ambiguous output report cannot establish capture.
+    nlohmann::json parsed;
+    try {
+      parsed = nlohmann::json::parse(*outputs);
+      if (!parsed.is_array() || parsed.empty() || parsed.size() > 16) return std::nullopt;
+      unsigned enabled = 0;
+      std::set<std::string> names;
+      for (const auto &output : parsed) {
+        const auto name = output.at("name").get<std::string>();
+        if (name.empty() || !names.insert(name).second) return std::nullopt;
+        if (!output.at("enabled").get<bool>()) continue;
+        ++enabled;
+        unsigned current = 0;
+        const auto &modes = output.at("modes");
+        if (!modes.is_array()) return std::nullopt;
+        for (const auto &mode : modes) {
+          if (!mode.at("current").get<bool>()) continue;
+          ++current;
+          const auto refresh = mode.at("refresh").get<double>();
+          if (mode.at("width").get<int>() <= 0 || mode.at("height").get<int>() <= 0 ||
+              !std::isfinite(refresh) || refresh <= 0) return std::nullopt;
+        }
+        if (current != 1) return std::nullopt;
+      }
+      if (enabled != 1) return std::nullopt;
+    } catch (...) { return std::nullopt; }
+    std::ostringstream key;
+    key << std::quoted(snapshot->generation) << std::quoted(snapshot->socket_identity)
+        << std::quoted(parsed.dump()) << ':' << revision << ':' << windowed_gpu_native_probe.value.load()
+        << ':' << headless_extcopy_dmabuf_probe.value.load();
+    const auto final_socket_identity = platf::encoder_probe_identity::file_identity(snapshot->socket_path, S_IFSOCK);
+    if (!final_socket_identity || *final_socket_identity != snapshot->socket_identity) return std::nullopt;
+    process.revents = 0;
+    if (poll(&process, 1, 0) != 0 || probe_topology.load() != snapshot ||
+        probe_topology_writers.load() != 0 || probe_topology_revision.load() != revision) return std::nullopt;
+    return key.str();
+  }
+
+  std::optional<std::string> encoder_probe_topology() {
+    return encoder_probe_topology_with_query([](const std::string &socket) -> std::optional<std::string> {
+      // Query the actual mode, including changes made outside the router.
+      const auto output = platf::run_process_argv_capture(
+        {"/usr/bin/env", "WAYLAND_DISPLAY=" + socket, "/usr/bin/wlr-randr", "--json"},
+        500ms, 65536
+      );
+      if (output.exit_status != 0 || output.timed_out || output.truncated) return std::nullopt;
+      return output.output;
+    });
+  }
+
+#ifdef POLARIS_TESTS
+  std::optional<std::string> encoder_probe_topology_for_tests(
+    const std::function<std::optional<std::string>(const std::string &)> &query
+  ) {
+    return encoder_probe_topology_with_query(query);
+  }
+#endif
 
   std::string get_x11_display() {
     return cage_x11_display;

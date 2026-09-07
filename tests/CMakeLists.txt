@@ -612,6 +612,12 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_video
         ${TEST_VIDEO_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_library(encoder_probe_provider_fixture SHARED fixtures/encoder_probe_provider.cpp)
+        add_dependencies(test_polaris_video encoder_probe_provider_fixture)
+        target_compile_definitions(test_polaris_video PRIVATE
+            POLARIS_PROBE_PROVIDER_FIXTURE="$<TARGET_FILE:encoder_probe_provider_fixture>")
+    endif()
 
     # Keep the historical target name as a build aggregate while the runtime coverage
     # lives in smaller executables that are easier to run and debug independently.

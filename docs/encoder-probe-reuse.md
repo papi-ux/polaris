@@ -1,0 +1,11 @@
+# In-process encoder probe reuse
+
+A successful encoder probe can be reused only while live GPU, driver, capture topology, and capability settings still match. An encoder name from the existing persistent cache only changes probe order; it does not establish current capabilities.
+
+The initial Linux implementation admits NVENC on an actually connected private WLR capture route. It requires an owned live compositor generation and socket, a valid current output report, fresh DRM/sysfs GPU and kernel-driver identity, and the actual NVIDIA CUDA, NVENC, EGL, and GLX provider objects retained during successful validation. Other backends and uncertain identities continue probing. Vulkan and encoders requiring a live probe retain that requirement, and explicit encoder selection remains strict.
+
+The driver proof retains the loaded ELF objects, their load addresses, and independent mapped device/inode/offset evidence. Named-file metadata is an additional invalidation signal. It does not assume that filesystem `stat` and Btrfs VMA device numbers are equal. Loader changes, provider file or discovery configuration changes, unsupported loader overrides, output mutations, configuration changes, capture failures, and state resets retire reuse. Confirming an unchanged output mode does not retire it. Retained descriptors and loader references are bounded and released under exclusive encoder-state ownership when the proof is replaced or reset.
+
+The first successful probe may establish provider evidence, and another stable successful probe may establish reuse. Probe readers never replace mandatory live Vulkan validation or the existing synchronization with active captures. Failed resets invalidate reuse even when they cannot obtain the writer lock immediately.
+
+Native regressions exercise incomplete/changed identities, strict selection, concurrent invalidation, a real reset timeout during the probe entry point, actual ELF lifetime and replacement, concurrent loader activity, provider search precedence, nonregular manifests, and owned compositor topology changes. These checks establish cache correctness boundaries; hardware reconnect hit counts, probe time, RSS/descriptor cost, and encode/capture performance must be measured separately before reporting an optimization gain.
