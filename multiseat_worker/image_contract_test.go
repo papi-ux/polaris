@@ -10,10 +10,13 @@ import (
 )
 
 type lockedImage struct {
-	ID        string `json:"id"`
-	Launcher  string `json:"launcher"`
-	Reference string `json:"reference"`
-	Source    string `json:"source"`
+	ID                     string `json:"id"`
+	Launcher               string `json:"launcher"`
+	Reference              string `json:"reference"`
+	Source                 string `json:"source"`
+	Role                   string `json:"role"`
+	DependencyLock         string `json:"dependency_lock"`
+	ProducedWorkerManifest string `json:"produced_worker_manifest"`
 }
 
 type imageLock struct {
@@ -41,7 +44,7 @@ func TestImageInputsAreDigestPinnedAndComplete(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if lock.Schema != 1 || lock.Platform != "linux/amd64" {
+	if lock.Schema != 2 || lock.Platform != "linux/amd64" {
 		t.Fatalf("unsupported image lock: %+v", lock)
 	}
 	digestReference := regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[a-z0-9._-]+)?@sha256:[0-9a-f]{64}$`)
@@ -55,6 +58,35 @@ func TestImageInputsAreDigestPinnedAndComplete(t *testing.T) {
 		}
 		seenIDs[image.ID] = true
 		seenReferences[image.Reference] = true
+	}
+	for _, profile := range lock.RuntimeProfiles {
+		if profile.Role != "source_root" || profile.DependencyLock != "locks/"+profile.ID+".packages.json" ||
+			profile.ProducedWorkerManifest != profile.ID+"/<variant>/artifact.json" {
+			t.Fatalf("source inputs and produced worker artifact are not distinguished: %+v", profile)
+		}
+		var packages struct {
+			SourceRoot string              `json:"source_root"`
+			Platform   string              `json:"platform"`
+			Runtime    []map[string]string `json:"runtime"`
+			Build      []map[string]string `json:"build"`
+		}
+		if err := json.Unmarshal(repositoryFile(t, "containers", "multiseat", profile.DependencyLock), &packages); err != nil {
+			t.Fatal(err)
+		}
+		if packages.SourceRoot != profile.Reference || packages.Platform != lock.Platform || len(packages.Runtime) == 0 || len(packages.Build) == 0 {
+			t.Fatal("package closure is not bound to its source root and architecture")
+		}
+		for _, role := range [][]map[string]string{packages.Runtime, packages.Build} {
+			seen := map[string]bool{}
+			for _, pkg := range role {
+				if pkg["name"] == "" || pkg["version"] == "" || !strings.HasPrefix(pkg["url"], "https://") ||
+					!regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(pkg["sha256"]) ||
+					filepath.Base(pkg["filename"]) != pkg["filename"] || seen[pkg["filename"]] {
+					t.Fatal("dependency input is incomplete or duplicated")
+				}
+				seen[pkg["filename"]] = true
+			}
+		}
 	}
 	for _, required := range []string{"go", "gamescope", "steam", "heroic", "lutris"} {
 		if !seenIDs[required] {

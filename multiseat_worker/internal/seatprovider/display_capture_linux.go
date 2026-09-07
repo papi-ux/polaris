@@ -70,7 +70,7 @@ func displayFrameRate(refreshMillihertz uint32) string {
 func displayCaps(request seatruntime.Request, software bool) string {
 	prefix := "video/x-raw(memory:DMABuf)"
 	if software {
-		prefix = "video/x-raw,format=RGBx"
+		prefix = "video/x-raw,format=BGRx"
 	}
 	return prefix +
 		",width=" + strconv.FormatUint(uint64(request.DisplayWidth), 10) +
@@ -102,20 +102,21 @@ func displayProducerArguments(
 	if software {
 		renderTarget = "software"
 	}
-	return []string{
-		"-q",
-		"waylanddisplaysrc",
-		"render-node=" + renderTarget,
-		"!",
-		displayCaps(request, software),
-		"!",
-		"unixfdsink",
-		"socket-path=" + mediaSocket,
-		"sync=false",
-		"async=false",
-		"enable-last-sample=false",
-		"wait-for-connection=false",
+	arguments := []string{"-q", "waylanddisplaysrc", "render-node=" + renderTarget, "!"}
+	if software {
+		// The plugin's CPU buffers do not carry FDs. A real format conversion
+		// honors unixfdsink's shared-memory allocation proposal on GStreamer
+		// 1.26. The hardware path retains its original DMA-BUF caps unchanged.
+		arguments = append(arguments,
+			strings.Replace(displayCaps(request, true), "format=BGRx", "format=RGBx", 1),
+			"!", "videoconvert", "!",
+		)
 	}
+	return append(arguments,
+		displayCaps(request, software), "!", "unixfdsink",
+		"socket-path=" + mediaSocket,
+		"sync=false", "async=false", "enable-last-sample=false", "wait-for-connection=false",
+	)
 }
 
 func displayProbeArguments(

@@ -1,9 +1,41 @@
-# syntax=docker/dockerfile:1.7
-
 # Both defaults are immutable OCI index digests mirrored in images.lock.json.
 # The runtime can be replaced only with another digest from that lock file.
 ARG GO_BUILDER_IMAGE=docker.io/library/golang@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514
 ARG RUNTIME_IMAGE=ghcr.io/games-on-whales/base-app@sha256:1d7b61da242e767bc5c80c5fe897392b6a9e6854345d3dea6d2f799e7ea98a14
+
+# Each profile compiles its Wayland plugin against its own locked source root.
+# All inputs below have already been fetched and are checked against repo locks.
+FROM ${RUNTIME_IMAGE} AS runtime-root-build
+ARG RUNTIME_PROFILE=gamescope
+USER 0
+COPY containers/multiseat/locks/${RUNTIME_PROFILE}.packages.json /locks/packages.json
+COPY containers/multiseat/locks/rust.json /locks/rust.json
+COPY containers/multiseat/locks/plugin.json /locks/plugin.json
+COPY containers/multiseat/locks/gamescope.json /locks/gamescope.json
+COPY containers/multiseat/verify-inputs.py /verify-inputs.py
+COPY containers/multiseat/install-packages.sh /install-packages.sh
+COPY build/runtime-inputs/${RUNTIME_PROFILE}/build /inputs/packages
+COPY build/runtime-inputs/toolchains/rust-1.89.0-x86_64-unknown-linux-gnu.tar.xz /inputs/rust.tar.xz
+COPY build/runtime-inputs/plugin.tar /inputs/plugin.tar
+COPY build/runtime-inputs/gamescope.tar /inputs/gamescope.tar
+RUN sh /install-packages.sh build && \
+    mkdir -p /toolchain /src && \
+    tar -xf /inputs/rust.tar.xz -C /toolchain --strip-components=1 && \
+    /toolchain/install.sh --prefix=/opt/rust --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig && \
+    tar -xf /inputs/plugin.tar -C /src
+ENV PATH=/opt/rust/bin:$PATH \
+    CARGO_NET_OFFLINE=true \
+    SOURCE_DATE_EPOCH=1754524800
+WORKDIR /src
+RUN cargo build --frozen --release -p gst-plugin-wayland-display && \
+    test -f target/release/libgstwaylanddisplaysrc.so
+RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
+    meson setup /gamescope-src/build /gamescope-src --prefix=/usr --buildtype=release --wrap-mode=nodownload \
+      -Ddefault_library=static -Denable_openvr_support=false -Denable_gamescope_wsi_layer=false \
+      -Dpipewire=enabled -Ddrm_backend=enabled -Dsdl2_backend=disabled -Davif_screenshots=disabled \
+      -Dinput_emulation=disabled -Dbenchmark=disabled -Drt_cap=disabled && \
+    meson compile -C /gamescope-src/build -j 8 && \
+    DESTDIR=/gamescope-root meson install -C /gamescope-src/build --no-rebuild
 
 FROM ${GO_BUILDER_IMAGE} AS worker-build
 WORKDIR /src
@@ -19,6 +51,7 @@ COPY multiseat_worker/internal ./internal
 COPY multiseat_worker/cmd ./cmd
 COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile
 COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json
+COPY containers/multiseat/locks /containers/multiseat/locks
 # The image contract tests read these two production sources through the same
 # repository-relative path they use for the Containerfile and lock above.
 COPY multiseat_worker/main.go /multiseat_worker/main.go
@@ -42,15 +75,42 @@ RUN go test -trimpath ./... && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-nested-compositor ./cmd/polaris-seat-nested-compositor && \
-    go build -trimpath -buildvcs=false \
-      -ldflags='-buildid= -s -w' \
-      -o /out/polaris-seat-input-probe ./cmd/polaris-seat-input-probe
+    go build -trimpath -buildvcs=false -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-input-probe ./cmd/polaris-seat-input-probe && \
+    go test -c -trimpath -o /out/provider-tests ./internal/seatprovider
 
-FROM ${RUNTIME_IMAGE}
+FROM ${RUNTIME_IMAGE} AS runtime-root
+ARG RUNTIME_PROFILE=gamescope
+ARG POLARIS_REVISION=unknown
+USER 0
+COPY containers/multiseat/locks/${RUNTIME_PROFILE}.packages.json /locks/packages.json
+COPY containers/multiseat/verify-inputs.py /verify-inputs.py
+COPY containers/multiseat/install-packages.sh /install-packages.sh
+COPY build/runtime-inputs/${RUNTIME_PROFILE}/runtime /inputs/packages
+RUN sh /install-packages.sh runtime && \
+    mkdir -p /usr/share/polaris/build && \
+    cp /locks/packages.json /usr/share/polaris/build/packages.lock.json && \
+    dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /usr/share/polaris/build/packages.tsv && \
+    cp -L /usr/bin/Xwayland /tmp/polaris-Xwayland && \
+    rm /usr/bin/Xwayland && \
+    install -m 0755 /tmp/polaris-Xwayland /usr/bin/Xwayland && \
+    rm -rf /inputs /locks /verify-inputs.py /install-packages.sh /tmp/polaris-Xwayland
+COPY --from=runtime-root-build --chmod=0644 /src/target/release/libgstwaylanddisplaysrc.so /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
+COPY --from=runtime-root-build --chmod=0755 /gamescope-root/usr/bin/gamescope /usr/bin/gamescope
+COPY --from=runtime-root-build /gamescope-root/usr/share/gamescope /usr/share/gamescope
+COPY containers/multiseat/locks/gamescope.json /usr/share/polaris/build/gamescope.lock.json
+COPY containers/multiseat/locks/plugin.json /usr/share/polaris/build/plugin.lock.json
+COPY containers/multiseat/check-runtime.py /check-runtime.py
+RUN python3 /check-runtime.py && rm /check-runtime.py
+
+FROM runtime-root AS worker-base
+ARG RUNTIME_PROFILE=gamescope
 ARG POLARIS_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.revision="${POLARIS_REVISION}" \
-      org.opencontainers.image.description="Isolated Polaris multiseat worker"
+      org.opencontainers.image.description="Isolated Polaris multiseat worker" \
+      io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
+      io.polaris.multiseat.architecture="linux/amd64"
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-input-probe /usr/bin/polaris-seat-input-probe
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-worker /usr/bin/polaris-seat-worker
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime
@@ -76,3 +136,33 @@ HEALTHCHECK NONE
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/polaris-seat-worker"]
 CMD ["run"]
+
+# The test executable is not included in produced worker artifacts.
+FROM worker-base AS provider-test
+RUN install -d -m 1777 /tmp/.X11-unix
+COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
+ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1
+ENTRYPOINT ["/usr/bin/provider-tests"]
+CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
+
+# Optional physical-lane userspace, extracted only inside the build container.
+FROM runtime-root-build AS nvidia-userspace
+COPY containers/multiseat/locks/nvidia.json /nvidia.lock.json
+COPY containers/multiseat/package-nvidia.py /package-nvidia.py
+COPY build/runtime-inputs/NVIDIA-Linux-x86_64-610.57.04.run /nvidia.run
+RUN python3 /package-nvidia.py
+
+FROM worker-base AS worker-nvidia
+COPY --from=nvidia-userspace /nvidia-root/ /
+RUN ldconfig
+LABEL io.polaris.multiseat.nvidia.driver="610.57.04"
+
+FROM worker-nvidia AS provider-nvidia-test
+RUN install -d -m 1777 /tmp/.X11-unix
+COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
+ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1
+ENTRYPOINT ["/usr/bin/provider-tests"]
+CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
+
+# Default artifacts preserve the existing launcher roots and automatic drivers.
+FROM worker-base AS worker
