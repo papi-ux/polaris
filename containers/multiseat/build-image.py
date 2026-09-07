@@ -103,17 +103,31 @@ def main():
     # CI covers all device-free real providers and their independent teardown.
     # Gamescope hardware acceptance is a separate required physical receipt.
     provider_image = image + '-providers'
-    run(command + ['--target', 'provider-test', '-t', provider_image, '.'])
+    run(command + ['--target', 'provider-nvidia-test' if args.nvidia else 'provider-test', '-t', provider_image, '.'])
+    provider_inspected = json.loads(output(['podman', 'image', 'inspect', provider_image]))[0]
+    worker_layers = inspected['RootFS']['Layers']
+    if provider_inspected['RootFS']['Layers'][:len(worker_layers)] != worker_layers:
+        raise ValueError('provider test image does not extend the produced worker filesystem')
     test_command = ['podman', 'run', '--rm', '--network=none', '--cap-drop=all',
                     '--security-opt=no-new-privileges', provider_image, '-test.v',
                     '-test.run=^TestReal(SessionBus|PrivateAudio|AudioReadiness|Display)', '-test.timeout=2m']
     with (artifact / 'providers.log').open('w') as log:
         run(test_command, stdout=log, stderr=subprocess.STDOUT)
     results = (artifact / 'providers.log').read_text()
-    if '--- SKIP:' in results or results.count('--- PASS:') < 6:
-        raise ValueError('real provider tests skipped or did not all execute')
     names = re.findall(r'^--- PASS: ([A-Za-z0-9_]+)', results, re.MULTILINE)
+    required = {
+        'TestRealSessionBusAuthenticatesAndCleansUp',
+        'TestRealPrivateAudioGraphRoutesExactlyAndCleansUp',
+        'TestRealAudioReadinessFailureCleansPartialArtifacts',
+        'TestRealPrivateAudioGraphsRemainIndependent',
+        'TestRealDisplayCaptureProducesFrameAndCleansUp',
+        'TestRealDisplayCapturesRemainIndependent',
+    }
+    if '--- SKIP:' in results or set(names) != required or len(names) != len(required):
+        raise ValueError('real provider tests skipped or did not all execute')
     write_json(artifact / 'providers.json', {'schema': 1, 'result': 'passed', 'tests': names,
+                                            'variant': variant, 'worker_config_digest': config_digest,
+                                            'provider_config_digest': 'sha256:' + provider_inspected['Id'].removeprefix('sha256:'),
                                             'scope': 'isolated session bus, audio and software display; no game stream'})
     package_manifest = output(['podman', 'run', '--rm', '--network=none', '--read-only',
                                '--cap-drop=all', '--security-opt=no-new-privileges',

@@ -11,6 +11,7 @@ gen_require(`
 container_domain_template(polaris_nvidia_worker, container)
 
 # Device admission still comes exclusively from the exact GPU catalog. This
-# domain does not create, mount, relabel, or discover additional host devices.
+# standard container template retains file-management permissions; dropped Linux
+# capabilities and the mount classifier must constrain those permissions.
 allow polaris_nvidia_worker_t xserver_misc_device_t:chr_file { getattr open read write ioctl map };
 allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read };
