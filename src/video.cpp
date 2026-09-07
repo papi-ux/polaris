@@ -988,7 +988,12 @@ namespace video {
       auto add = [&](const auto &... values) {
         ((key << std::quoted(probe_setting(values))), ...);
       };
+      const auto published_vaapi = config::vaapi::snapshot();
       add(
+        published_vaapi.strict_rc_buffer,
+        static_cast<int>(published_vaapi.quality),
+        static_cast<int>(published_vaapi.rc),
+        published_vaapi.blbrc,
         settings.limit_framerate,
         settings.double_refreshrate,
         settings.qp,

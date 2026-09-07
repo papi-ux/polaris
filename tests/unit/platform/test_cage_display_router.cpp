@@ -94,6 +94,11 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
   if (const auto drop = getenv("POLARIS_TEST_DROP_PARENT_CAPABILITIES"); drop && std::string_view(drop) == "1") {
     __user_cap_header_struct header {_LINUX_CAPABILITY_VERSION_3, 0};
     __user_cap_data_struct capabilities[2] {};
+    ASSERT_EQ(syscall(SYS_capget, &header, capabilities), 0);
+    ASSERT_NE(capabilities[CAP_SYS_ADMIN / 32].permitted & (1u << (CAP_SYS_ADMIN % 32)), 0u)
+      << "File capability test must run from a filesystem that permits file capabilities";
+    capabilities[0] = {};
+    capabilities[1] = {};
     ASSERT_EQ(syscall(SYS_capset, &header, capabilities), 0);
     ASSERT_EQ(prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), 0);
   }
