@@ -233,6 +233,19 @@ namespace {
     std::array<std::atomic<bool>, 2> game_done {};
     const std::array game_tokens {nonce(), nonce()};
     constexpr auto game_probe = "/usr/bin/polaris-seat-worker";
+    const auto remove_retained_game_worker = [&](int index) {
+      if (!game || !container_id_valid(seats[index].container_id)) return;
+      const auto &id = seats[index].container_id;
+      const auto state = command({"inspect", "--format={{.State.Status}}", id});
+      if (state.exit_status == 0) {
+        EXPECT_NE(state.output, "running\n") << "running worker required outer fallback";
+        observed_host_t diagnostic_host {command_failure, worker_diagnostics, true};
+        const auto removed = diagnostic_host.run({executable, "--remote=false", "rm", "--force", "--", id}, 5s, 65536);
+        EXPECT_EQ(removed.exit_status, 0);
+      }
+      const auto remaining = command({"ps", "--all", "--filter=id="+id, "--format={{.ID}}"});
+      EXPECT_EQ(remaining.exit_status, 0); EXPECT_TRUE(remaining.output.empty());
+    };
     // Scoped failure recovery never scans another deployment or recursively
     // removes authority. A fallback is test failure, followed by exact-ID reap.
     auto cleanup = util::fail_guard([&] {
@@ -248,17 +261,7 @@ namespace {
         (void) controller->shutdown();
       }
       if (game) {
-        // This diagnostic mode deliberately retains exited containers. They
-        // belong to this fixture even after the controller retires their seats.
-        observed_host_t diagnostic_host {command_failure, worker_diagnostics, true};
-        for (const auto &seat : seats) if (container_id_valid(seat.container_id)) {
-          const auto state = command({"inspect", "--format={{.State.Status}}", seat.container_id});
-          if (state.exit_status == 0) {
-            EXPECT_NE(state.output, "running\n") << "running worker required outer fallback";
-            const auto removed = diagnostic_host.run({executable, "--remote=false", "rm", "--force", "--", seat.container_id}, 5s, 65536);
-            EXPECT_EQ(removed.exit_status, 0);
-          }
-        }
+        for (int index = 0; index < 2; ++index) remove_retained_game_worker(index);
         const auto remaining = command({"ps", "--all", "--no-trunc", "--filter=label=io.polaris.multiseat.deployment="+deployment, "--format={{.ID}}"});
         EXPECT_EQ(remaining.exit_status, 0); EXPECT_TRUE(remaining.output.empty());
       }
@@ -432,6 +435,7 @@ namespace {
       (void) controller->reconcile(); std::this_thread::sleep_for(100ms);
     }
     ASSERT_EQ(controller->seats(),1U);
+    remove_retained_game_worker(0);
     observe(1,false);
     if (game) finish_game(1);
     stream::session::stop(*seats[1].stream); seats[1].stream.reset();
@@ -439,6 +443,7 @@ namespace {
     for (int attempt=0;attempt<300 && controller->seats()!=0;++attempt) {
       (void) controller->reconcile(); std::this_thread::sleep_for(100ms);
     }
+    remove_retained_game_worker(1);
     EXPECT_EQ(controller->seats(),0U); EXPECT_EQ(controller->managed_workers(),0U);
     EXPECT_TRUE(controller->shutdown().closed()); EXPECT_EQ(controller->input_allocations(),0U);
     const auto listed=command({"ps","--all","--no-trunc","--filter=label=io.polaris.multiseat.deployment="+deployment,"--format={{.ID}}"});
