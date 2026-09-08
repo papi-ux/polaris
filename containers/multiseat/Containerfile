@@ -58,7 +58,14 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
     done && \
     cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
       /providers/capture-input.c /providers/seat-input.c -o /out/capture-input \
-      $(pkg-config --cflags --libs gstreamer-1.0)
+      $(pkg-config --cflags --libs gstreamer-1.0) && \
+    cc -std=c11 -O2 -Wall -Wextra -Werror /providers/test-idle-capture.c \
+      /providers/capture-input.c /providers/seat-input.c -o /out/test-idle-capture \
+      -Wl,--wrap=fstat -Wl,--wrap=gst_pad_add_probe -Wl,--wrap=gst_pad_remove_probe -Wl,--wrap=gst_element_set_state \
+      $(pkg-config --cflags --libs gstreamer-1.0) && \
+    (result=0; timeout 4s /out/test-idle-capture 1280 720 -- \
+      fakesrc is-live=true datarate=1 sizetype=fixed sizemax=1 ! identity name=display ! fakesink sync=true || result=$?; \
+    test "$result" = 1)
 
 FROM ${GO_BUILDER_IMAGE} AS worker-build
 WORKDIR /src
