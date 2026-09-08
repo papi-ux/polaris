@@ -6,12 +6,12 @@
 
 #ifdef __linux__
 
-#include "multiseat_worker_authority.h"
+  #include "multiseat_worker_authority.h"
 
-#include <chrono>
-#include <memory>
-#include <span>
-#include <vector>
+  #include <chrono>
+  #include <memory>
+  #include <span>
+  #include <vector>
 
 namespace multiseat::worker_ipc {
 
@@ -49,6 +49,20 @@ namespace multiseat::worker_ipc {
    * is separate so health probes cannot consume media. Once both channels are
    * attached, input travels only controller-to-worker while feedback and
    * already encoded media travel only worker-to-controller.
+   *
+   * Concurrent control and media operations use independent readers. Each
+   * channel admits one request awaiting its ACK; async packets share a bounded
+   * 64-frame / 32 MiB queue. Idle channels have no deadline, while an incomplete
+   * frame, request, or empty consumer wait retains the configured I/O deadline.
+   * Any timeout or protocol failure retires both channels. close() cancels
+   * readers, writers, authentication, and pending request admission without
+   * waiting for their deadlines. Operations retain their original connection
+   * through completion; reconnect never redirects an old operation.
+   *
+   * The caller must retain this client and the connect() authority for the
+   * duration of their operations, and synchronize access to supplied buffers.
+   * Returned packet values belong to the connection that delivered them;
+   * downstream stream ownership must prevent their reuse after retirement.
    */
   class controller_client_t {
   public:

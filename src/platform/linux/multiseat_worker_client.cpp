@@ -6,26 +6,30 @@
 
 #ifdef __linux__
 
-#include <openssl/crypto.h>
-
-#include <algorithm>
-#include <array>
-#include <cerrno>
-#include <chrono>
-#include <cstddef>
-#include <cstring>
-#include <deque>
-#include <fcntl.h>
-#include <limits>
-#include <mutex>
-#include <poll.h>
-#include <span>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+  #include <algorithm>
+  #include <array>
+  #include <atomic>
+  #include <cerrno>
+  #include <chrono>
+  #include <condition_variable>
+  #include <cstddef>
+  #include <cstring>
+  #include <deque>
+  #include <fcntl.h>
+  #include <limits>
+  #include <mutex>
+  #include <openssl/crypto.h>
+  #include <optional>
+  #include <poll.h>
+  #include <span>
+  #include <sys/eventfd.h>
+  #include <sys/socket.h>
+  #include <sys/stat.h>
+  #include <sys/un.h>
+  #include <thread>
+  #include <unistd.h>
+  #include <utility>
+  #include <vector>
 
 namespace multiseat::worker_ipc {
   namespace {
@@ -103,26 +107,24 @@ namespace multiseat::worker_ipc {
       ));
     }
 
-    transport_status_e wait_for(int descriptor, short events, deadline_t deadline) {
+    transport_status_e wait_for(int descriptor, short events, deadline_t deadline, int cancellation = -1) {
       while (true) {
         const auto remaining = remaining_milliseconds(deadline);
         if (remaining <= 0) {
           return transport_status_e::timeout;
         }
-        pollfd request {
-          .fd = descriptor,
-          .events = events,
-          .revents = 0,
-        };
-        const auto result = ::poll(&request, 1, remaining);
+        pollfd requests[] {{.fd = descriptor, .events = events, .revents = 0}, {.fd = cancellation, .events = POLLIN, .revents = 0}};
+        const auto result = ::poll(requests, 2, remaining);
         if (result > 0) {
-          if ((request.revents & POLLNVAL) != 0) {
+          if (requests[1].revents != 0 || (requests[0].revents & POLLNVAL) != 0) {
             return transport_status_e::closed;
           }
           return transport_status_e::applied;
         }
         if (result == 0) {
-          return transport_status_e::timeout;
+          // Long idle waits are split at poll's signed-int millisecond limit.
+          // Only the actual deadline may retire the connection.
+          continue;
         }
         if (errno != EINTR) {
           return transport_status_e::io_error;
@@ -214,9 +216,9 @@ namespace multiseat::worker_ipc {
           header_result.required < header_size ||
           header_result.required - header_size > maximum_payload ||
           header_result.required > header_size +
-                                   (state.channel == channel_e::control ?
-                                      max_control_payload :
-                                      max_media_payload)) {
+                                     (state.channel == channel_e::control ?
+                                        max_control_payload :
+                                        max_media_payload)) {
         return transport_status_e::protocol_rejected;
       }
       std::vector<std::uint8_t> encoded(header_result.required);
@@ -231,7 +233,7 @@ namespace multiseat::worker_ipc {
           return status;
         }
       }
-      const auto parsed = parse_frame(
+      auto parsed = parse_frame(
         encoded,
         state.channel,
         identity.slot,
@@ -243,7 +245,7 @@ namespace multiseat::worker_ipc {
           !state.incoming.accept(parsed.frame->sequence)) {
         return transport_status_e::protocol_rejected;
       }
-      frame = *parsed.frame;
+      frame = std::move(*parsed.frame);
       return transport_status_e::applied;
     }
 
@@ -278,7 +280,8 @@ namespace multiseat::worker_ipc {
       const std::filesystem::path &path,
       std::uint32_t owner_uid,
       std::chrono::milliseconds timeout,
-      int &descriptor
+      int &descriptor,
+      int cancellation
     ) {
       descriptor = -1;
       if (!socket_path_fits(path)) {
@@ -320,7 +323,7 @@ namespace multiseat::worker_ipc {
                    transport_status_e::unavailable :
                    transport_status_e::io_error;
         }
-        const auto ready = wait_for(connected, POLLOUT, deadline);
+        const auto ready = wait_for(connected, POLLOUT, deadline, cancellation);
         if (ready != transport_status_e::applied) {
           (void) ::close(connected);
           return ready;
@@ -333,7 +336,8 @@ namespace multiseat::worker_ipc {
               SO_ERROR,
               &socket_error,
               &error_size
-            ) != 0 || socket_error != 0) {
+            ) != 0 ||
+            socket_error != 0) {
           (void) ::close(connected);
           return socket_error == ENOENT || socket_error == ECONNREFUSED ?
                    transport_status_e::unavailable :
@@ -457,403 +461,482 @@ namespace multiseat::worker_ipc {
   }  // namespace
 
   struct controller_client_t::implementation_t {
-    mutable std::mutex mutex;
-    endpoint_identity_t identity;
-    capability_t capability {};
-    channel_state_t control;
-    channel_state_t media {.channel = channel_e::media};
-    controller_client_options_t options;
-    std::deque<frame_t> pending_control;
-    std::deque<frame_t> pending_media;
-    std::size_t pending_payload = 0;
-    bool has_capability = false;
-    bool control_attached = false;
-    bool media_attached = false;
+    struct connection_t {
+      struct channel_t {
+        channel_state_t wire;
+        std::thread reader;
+        std::deque<frame_t> pending;
+        bool attached = false;
+        bool request_busy = false;
+        std::optional<message_e> expected_ack;
+        bool acknowledged = false;
+      };
 
-    transport_status_e queue_async(frame_t frame) {
-      if (!asynchronous_message(frame.channel, frame.message) ||
-          pending_control.size() + pending_media.size() >= maximum_pending_frames ||
-          frame.payload.size() > maximum_pending_payload - pending_payload) {
-        return transport_status_e::protocol_rejected;
+      const endpoint_identity_t identity;
+      const controller_client_options_t options;
+      const int cancellation = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+      channel_t control;
+      channel_t media;
+      mutable std::mutex mutex;
+      std::condition_variable changed;
+      // Publication and shutdown of descriptors use only this short lock.
+      // Neither socket I/O nor a reader join holds it.
+      std::mutex descriptor_mutex;
+      std::atomic<bool> terminal {false};
+      transport_status_e failure = transport_status_e::closed;
+      std::size_t pending_payload = 0;
+      bool authenticated = false;
+      bool attaching = false;
+      bool stopping = false;
+
+      connection_t(endpoint_identity_t identity, controller_client_options_t options):
+          identity(std::move(identity)),
+          options(options) {
+        media.wire.channel = channel_e::media;
       }
-      pending_payload += frame.payload.size();
-      auto &queue = frame.channel == channel_e::control ? pending_control : pending_media;
-      queue.push_back(std::move(frame));
-      return transport_status_e::applied;
-    }
 
-    transport_status_e receive_until(
-      channel_state_t &state,
-      message_e expected,
-      deadline_t deadline,
-      frame_t &result
-    ) {
-      for (std::size_t count = 0; count <= maximum_pending_frames; ++count) {
-        frame_t candidate;
-        const auto status = receive_frame(
-          state,
-          identity,
-          deadline,
-          state.channel == channel_e::control ?
-            max_control_payload : max_media_payload,
-          candidate
-        );
+      ~connection_t() {
+        cancel(transport_status_e::closed);
+        if (control.reader.joinable()) {
+          control.reader.join();
+        }
+        if (media.reader.joinable()) {
+          media.reader.join();
+        }
+        // Public operations retain this owner until their writers and waits
+        // retire. No descriptor can be recycled while an old operation uses it.
+        close_channel(control.wire);
+        close_channel(media.wire);
+        if (cancellation >= 0) {
+          (void) ::close(cancellation);
+        }
+      }
+
+      // The state lock linearizes failure with request admission and delivery.
+      // Never release a timed-out request's gate before retiring its owner.
+      void retire_locked(transport_status_e reason) noexcept {
+        if (terminal.exchange(true)) {
+          return;
+        }
+        failure = reason;
+        control.pending.clear();
+        media.pending.clear();
+        pending_payload = 0;
+        // Keep a dispatched ACK: it completed before this terminal event.
+        changed.notify_all();
+      }
+
+      void interrupt_io() noexcept {
+        std::scoped_lock descriptors {descriptor_mutex};
+        const std::uint64_t signal = 1;
+        if (cancellation >= 0) {
+          while (::write(cancellation, &signal, sizeof(signal)) < 0 && errno == EINTR) {}
+        }
+        for (const auto *channel : {&control, &media}) {
+          if (channel->wire.descriptor >= 0) {
+            (void) ::shutdown(channel->wire.descriptor, SHUT_RDWR);
+          }
+        }
+      }
+
+      void cancel(transport_status_e reason) noexcept {
+        {
+          std::scoped_lock lock {mutex};
+          retire_locked(reason);
+        }
+        interrupt_io();
+      }
+
+      transport_status_e install_socket(channel_t &channel, const std::filesystem::path &path, std::uint32_t uid) {
+        int descriptor = -1;
+        // A private cancellation descriptor also interrupts an unpublished
+        // connecting socket. Retirement prevents later publication.
+        auto status = connect_socket(path, uid, options.connect_timeout, descriptor, cancellation);
+        std::scoped_lock lock {descriptor_mutex};
+        if (terminal.load()) {
+          if (descriptor >= 0) {
+            (void) ::close(descriptor);
+          }
+          return transport_status_e::closed;
+        }
+        if (status == transport_status_e::applied) {
+          channel.wire.descriptor = descriptor;
+        }
+        return status;
+      }
+
+      transport_status_e initialize(const authority_handle_t &authority) {
+        if (cancellation < 0) {
+          cancel(transport_status_e::unavailable);
+          return transport_status_e::unavailable;
+        }
+        capability_t capability {};
+        std::copy(authority.capability().begin(), authority.capability().end(), capability.begin());
+        auto status = install_socket(control, authority.paths().control_socket, authority.owner_uid());
+        if (status == transport_status_e::applied) {
+          status = authenticate_channel(control.wire, identity, capability, options.handshake_timeout);
+        }
+        if (status == transport_status_e::applied) {
+          status = install_socket(media, authority.paths().media_socket, authority.owner_uid());
+        }
+        if (status == transport_status_e::applied) {
+          status = authenticate_channel(media.wire, identity, capability, options.handshake_timeout);
+        }
+        OPENSSL_cleanse(capability.data(), capability.size());
         if (status != transport_status_e::applied) {
+          cancel(status);
           return status;
         }
-        if (candidate.message == expected) {
-          result = std::move(candidate);
-          return transport_status_e::applied;
+        {
+          std::scoped_lock lock {mutex};
+          if (terminal.load()) {
+            return transport_status_e::closed;
+          }
+          authenticated = true;
         }
-        const bool channel_attached = state.channel == channel_e::control ?
-                                        control_attached : media_attached;
-        if (!channel_attached) {
-          return transport_status_e::protocol_rejected;
+        try {
+          // Readers borrow this owner. Its destructor cancels and joins them;
+          // readers never hold a shared_ptr that could destroy/join itself.
+          control.reader = std::thread([this] {
+            read_channel(control);
+          });
+          media.reader = std::thread([this] {
+            read_channel(media);
+          });
+        } catch (...) {
+          cancel(transport_status_e::unavailable);
+          return transport_status_e::unavailable;
         }
-        const auto queued = queue_async(std::move(candidate));
-        if (queued != transport_status_e::applied) {
-          return queued;
-        }
-      }
-      return transport_status_e::protocol_rejected;
-    }
-
-    transport_status_e pop_or_receive(
-      channel_state_t &state,
-      std::deque<frame_t> &queue,
-      frame_t &result
-    ) {
-      if (!queue.empty()) {
-        result = std::move(queue.front());
-        pending_payload -= result.payload.size();
-        queue.pop_front();
         return transport_status_e::applied;
       }
-      const auto deadline = monotonic_clock_t::now() + options.io_timeout;
-      return receive_frame(
-        state,
-        identity,
-        deadline,
-        state.channel == channel_e::control ?
-          max_control_payload : max_media_payload,
-        result
-      );
+
+      bool connected() const {
+        std::scoped_lock lock {mutex};
+        return authenticated && !terminal.load();
+      }
+
+      bool attached() const {
+        std::scoped_lock lock {mutex};
+        return authenticated && !terminal.load() && !stopping && control.attached && media.attached;
+      }
+
+      void read_channel(channel_t &channel) noexcept {
+        try {
+          while (!terminal.load()) {
+            // Silence is normal, especially for feedback. Once any byte is
+            // available, the complete frame has the existing bounded deadline.
+            auto status = wait_for(channel.wire.descriptor, POLLIN, deadline_t::max());
+            frame_t frame;
+            if (status == transport_status_e::applied) {
+              status = receive_frame(channel.wire, identity, monotonic_clock_t::now() + options.io_timeout, channel.wire.channel == channel_e::control ? max_control_payload : max_media_payload, frame);
+            }
+            if (status != transport_status_e::applied) {
+              {
+                std::scoped_lock lock {mutex};
+                // The worker closes media just after sending the control
+                // shutdown ACK. Let the control reader consume that ACK.
+                if (status == transport_status_e::closed && stopping && &channel == &media && !terminal.load()) {
+                  return;
+                }
+              }
+              cancel(status);
+              return;
+            }
+            bool rejected = false;
+            {
+              std::scoped_lock lock {mutex};
+              if (terminal.load()) {
+                return;
+              }
+              if (asynchronous_message(channel.wire.channel, frame.message)) {
+                if (!channel.attached) {
+                  rejected = true;
+                } else if (!stopping) {
+                  if (control.pending.size() + media.pending.size() >= maximum_pending_frames ||
+                      frame.payload.size() > maximum_pending_payload - pending_payload) {
+                    rejected = true;
+                  } else {
+                    pending_payload += frame.payload.size();
+                    channel.pending.push_back(std::move(frame));
+                    changed.notify_all();
+                  }
+                }
+              } else if (!channel.request_busy || !channel.expected_ack ||
+                         *channel.expected_ack != frame.message || channel.acknowledged) {
+                rejected = true;
+              } else {
+                channel.acknowledged = true;
+                // The worker can send data immediately after this ACK. The
+                // reader, not the awakened caller, owns this phase transition.
+                if (frame.message == message_e::attached) {
+                  channel.attached = true;
+                }
+                changed.notify_all();
+              }
+              if (rejected) {
+                retire_locked(transport_status_e::protocol_rejected);
+              }
+            }
+            if (rejected) {
+              interrupt_io();
+              return;
+            }
+          }
+        } catch (...) {
+          cancel(transport_status_e::io_error);
+        }
+      }
+
+      transport_status_e request(channel_t &channel, message_e message, message_e expected, std::span<const std::uint8_t> payload = {}) {
+        const auto deadline = monotonic_clock_t::now() + options.io_timeout;
+        std::unique_lock lock {mutex};
+        if (!changed.wait_until(lock, deadline, [&] {
+              return terminal.load() || stopping || !channel.request_busy;
+            })) {
+          retire_locked(transport_status_e::timeout);
+          lock.unlock();
+          interrupt_io();
+          return transport_status_e::timeout;
+        }
+        if (!authenticated || terminal.load() || stopping) {
+          return transport_status_e::closed;
+        }
+        if (message == message_e::input && !(control.attached && media.attached)) {
+          return transport_status_e::closed;
+        }
+        channel.request_busy = true;
+        channel.expected_ack = expected;
+        channel.acknowledged = false;
+        if (message == message_e::shutdown) {
+          stopping = true;
+          control.pending.clear();
+          media.pending.clear();
+          pending_payload = 0;
+          changed.notify_all();
+        }
+        lock.unlock();
+        // Allocate only after admission: at most one outgoing frame per
+        // channel, irrespective of the number of callers waiting for its ACK.
+        auto status = transport_status_e::io_error;
+        try {
+          status = send_frame(channel.wire, {.channel = channel.wire.channel, .message = message, .slot = identity.slot, .generation = identity.generation, .payload = std::vector<std::uint8_t>(payload.begin(), payload.end())}, deadline);
+        } catch (...) {
+          status = transport_status_e::io_error;
+        }
+        if (status != transport_status_e::applied) {
+          cancel(status);
+        }
+        lock.lock();
+        if (status == transport_status_e::applied) {
+          if (!changed.wait_until(lock, deadline, [&] {
+                return channel.acknowledged || terminal.load();
+              })) {
+            status = transport_status_e::timeout;
+          } else {
+            status = channel.acknowledged ? transport_status_e::applied : failure;
+          }
+        }
+        if (status != transport_status_e::applied) {
+          retire_locked(status);
+        }
+        channel.request_busy = false;
+        channel.expected_ack.reset();
+        channel.acknowledged = false;
+        changed.notify_all();
+        lock.unlock();
+        if (status != transport_status_e::applied) {
+          interrupt_io();
+        }
+        return status;
+      }
+
+      transport_status_e attach() {
+        {
+          std::scoped_lock lock {mutex};
+          if (!authenticated || terminal.load() || stopping) {
+            return transport_status_e::closed;
+          }
+          if (attaching || control.attached || media.attached) {
+            return transport_status_e::invalid_argument;
+          }
+          attaching = true;
+        }
+        auto status = request(control, message_e::attach, message_e::attached);
+        if (status == transport_status_e::applied) {
+          status = request(media, message_e::attach, message_e::attached);
+        }
+        if (status != transport_status_e::applied) {
+          cancel(status);
+        }
+        return status;
+      }
+
+      transport_status_e receive(channel_t &channel, frame_t &frame) {
+        const auto deadline = monotonic_clock_t::now() + options.io_timeout;
+        std::unique_lock lock {mutex};
+        if (terminal.load()) {
+          return failure;
+        }
+        if (!authenticated || !(control.attached && media.attached) || stopping) {
+          return transport_status_e::closed;
+        }
+        if (!changed.wait_until(lock, deadline, [&] {
+              return terminal.load() || stopping || !channel.pending.empty();
+            })) {
+          retire_locked(transport_status_e::timeout);
+          lock.unlock();
+          interrupt_io();
+          return transport_status_e::timeout;
+        }
+        if (terminal.load()) {
+          return failure;
+        }
+        if (stopping) {
+          return transport_status_e::closed;
+        }
+        frame = std::move(channel.pending.front());
+        pending_payload -= frame.payload.size();
+        channel.pending.pop_front();
+        return transport_status_e::applied;
+      }
+    };
+
+    mutable std::mutex mutex;
+    std::shared_ptr<connection_t> current;
+
+    std::shared_ptr<connection_t> snapshot() const {
+      std::scoped_lock lock {mutex};
+      return current;
     }
 
-    void close_locked() noexcept {
-      close_channel(media);
-      close_channel(control);
-      pending_control.clear();
-      pending_media.clear();
-      pending_payload = 0;
-      control_attached = false;
-      media_attached = false;
-      OPENSSL_cleanse(capability.data(), capability.size());
-      has_capability = false;
-    }
-
-    [[nodiscard]] bool connected_locked() const {
-      return control.descriptor >= 0 && media.descriptor >= 0 && has_capability;
-    }
-
-    [[nodiscard]] bool attached_locked() const {
-      return connected_locked() && control_attached && media_attached;
+    std::shared_ptr<connection_t> exchange(std::shared_ptr<connection_t> replacement) {
+      std::scoped_lock lock {mutex};
+      return std::exchange(current, std::move(replacement));
     }
   };
 
-  controller_client_t::controller_client_t() :
-      implementation_(std::make_unique<implementation_t>()) {
-  }
+  controller_client_t::controller_client_t():
+      implementation_(std::make_unique<implementation_t>()) {}
 
   controller_client_t::~controller_client_t() {
     close();
   }
 
-  transport_status_e controller_client_t::connect(
-    const authority_handle_t &authority,
-    controller_client_options_t options
-  ) {
-    std::scoped_lock lock {implementation_->mutex};
-    implementation_->close_locked();
-    if (!authority.active() ||
-        !valid_identity(authority.identity()) ||
-        authority.owner_uid() != static_cast<std::uint32_t>(::geteuid()) ||
-        !valid_timeout(options.connect_timeout) ||
-        !valid_timeout(options.handshake_timeout) ||
-        !valid_timeout(options.io_timeout)) {
+  transport_status_e controller_client_t::connect(const authority_handle_t &authority, controller_client_options_t options) {
+    std::shared_ptr<implementation_t::connection_t> candidate;
+    std::shared_ptr<implementation_t::connection_t> previous;
+    {
+      std::scoped_lock lock {implementation_->mutex};
+      previous = std::move(implementation_->current);
+      if (authority.active() && valid_identity(authority.identity()) &&
+          authority.owner_uid() == static_cast<std::uint32_t>(::geteuid()) &&
+          valid_timeout(options.connect_timeout) && valid_timeout(options.handshake_timeout) && valid_timeout(options.io_timeout)) {
+        candidate = std::make_shared<implementation_t::connection_t>(authority.identity(), options);
+        implementation_->current = candidate;
+      }
+    }
+    if (previous) {
+      previous->cancel(transport_status_e::closed);
+    }
+    if (!candidate) {
       return transport_status_e::invalid_argument;
     }
-
-    implementation_->identity = authority.identity();
-    std::copy(
-      authority.capability().begin(),
-      authority.capability().end(),
-      implementation_->capability.begin()
-    );
-    implementation_->has_capability = true;
-    implementation_->options = options;
-    implementation_->control = channel_state_t {};
-    implementation_->media = channel_state_t {.channel = channel_e::media};
-
-    auto status = connect_socket(
-      authority.paths().control_socket,
-      authority.owner_uid(),
-      options.connect_timeout,
-      implementation_->control.descriptor
-    );
-    if (status == transport_status_e::applied) {
-      status = authenticate_channel(
-        implementation_->control,
-        implementation_->identity,
-        implementation_->capability,
-        options.handshake_timeout
-      );
-    }
-    if (status == transport_status_e::applied) {
-      status = connect_socket(
-        authority.paths().media_socket,
-        authority.owner_uid(),
-        options.connect_timeout,
-        implementation_->media.descriptor
-      );
-    }
-    if (status == transport_status_e::applied) {
-      status = authenticate_channel(
-        implementation_->media,
-        implementation_->identity,
-        implementation_->capability,
-        options.handshake_timeout
-      );
-    }
-    if (status != transport_status_e::applied) {
-      implementation_->close_locked();
+    const auto status = candidate->initialize(authority);
+    if (status == transport_status_e::applied && implementation_->snapshot() != candidate) {
+      return transport_status_e::closed;
     }
     return status;
   }
 
   transport_status_e controller_client_t::attach_data_plane() {
-    std::scoped_lock lock {implementation_->mutex};
-    if (!implementation_->connected_locked()) {
-      return transport_status_e::closed;
-    }
-    if (implementation_->control_attached || implementation_->media_attached) {
-      return transport_status_e::invalid_argument;
-    }
-
-    const auto attach = [this](channel_state_t &state, bool &attached) {
-      const auto deadline = monotonic_clock_t::now() + implementation_->options.io_timeout;
-      auto status = send_frame(
-        state,
-        {
-          .channel = state.channel,
-          .message = message_e::attach,
-          .slot = implementation_->identity.slot,
-          .generation = implementation_->identity.generation,
-        },
-        deadline
-      );
-      frame_t response;
-      if (status == transport_status_e::applied) {
-        status = implementation_->receive_until(
-          state,
-          message_e::attached,
-          deadline,
-          response
-        );
-      }
-      if (status == transport_status_e::applied) {
-        attached = true;
-      }
-      return status;
-    };
-
-    auto status = attach(
-      implementation_->control,
-      implementation_->control_attached
-    );
-    if (status == transport_status_e::applied) {
-      status = attach(
-        implementation_->media,
-        implementation_->media_attached
-      );
-    }
-    if (status != transport_status_e::applied) {
-      implementation_->close_locked();
-    }
-    return status;
+    const auto connection = implementation_->snapshot();
+    return connection ? connection->attach() : transport_status_e::closed;
   }
 
-  transport_status_e controller_client_t::send_input(
-    std::span<const std::uint8_t> payload
-  ) {
-    std::scoped_lock lock {implementation_->mutex};
+  transport_status_e controller_client_t::send_input(std::span<const std::uint8_t> payload) {
     if (payload.empty() || payload.size() > max_control_payload) {
       return transport_status_e::invalid_argument;
     }
-    if (!implementation_->attached_locked()) {
-      return transport_status_e::closed;
-    }
-    const auto deadline = monotonic_clock_t::now() + implementation_->options.io_timeout;
-    auto status = send_frame(
-      implementation_->control,
-      {
-        .channel = channel_e::control,
-        .message = message_e::input,
-        .slot = implementation_->identity.slot,
-        .generation = implementation_->identity.generation,
-        .payload = std::vector<std::uint8_t>(payload.begin(), payload.end()),
-      },
-      deadline
-    );
-    frame_t response;
-    if (status == transport_status_e::applied) {
-      status = implementation_->receive_until(
-        implementation_->control,
-        message_e::input_ack,
-        deadline,
-        response
-      );
-    }
-    if (status != transport_status_e::applied) {
-      implementation_->close_locked();
-    }
-    return status;
+    const auto connection = implementation_->snapshot();
+    return connection ? connection->request(connection->control, message_e::input, message_e::input_ack, payload) : transport_status_e::closed;
   }
 
-  transport_status_e controller_client_t::receive_feedback(
-    std::vector<std::uint8_t> &payload
-  ) {
-    std::scoped_lock lock {implementation_->mutex};
+  transport_status_e controller_client_t::receive_feedback(std::vector<std::uint8_t> &payload) {
     payload.clear();
-    if (!implementation_->attached_locked()) {
+    const auto connection = implementation_->snapshot();
+    if (!connection) {
       return transport_status_e::closed;
     }
-    frame_t received;
-    auto status = implementation_->pop_or_receive(
-      implementation_->control,
-      implementation_->pending_control,
-      received
-    );
-    if (status == transport_status_e::applied &&
-        received.message != message_e::feedback) {
-      status = transport_status_e::protocol_rejected;
+    frame_t frame;
+    const auto status = connection->receive(connection->control, frame);
+    if (status != transport_status_e::applied) {
+      return status;
     }
-    if (status == transport_status_e::applied) {
-      payload = std::move(received.payload);
-    } else {
-      implementation_->close_locked();
+    std::scoped_lock owner {implementation_->mutex};
+    std::scoped_lock delivery {connection->mutex};
+    if (implementation_->current != connection || connection->terminal.load() || connection->stopping) {
+      return transport_status_e::closed;
     }
-    return status;
+    payload = std::move(frame.payload);
+    return transport_status_e::applied;
   }
 
-  transport_status_e controller_client_t::receive_media(
-    encoded_media_packet_t &packet
-  ) {
-    std::scoped_lock lock {implementation_->mutex};
+  transport_status_e controller_client_t::receive_media(encoded_media_packet_t &packet) {
     packet = {};
-    if (!implementation_->attached_locked()) {
+    const auto connection = implementation_->snapshot();
+    if (!connection) {
       return transport_status_e::closed;
     }
-    frame_t received;
-    auto status = implementation_->pop_or_receive(
-      implementation_->media,
-      implementation_->pending_media,
-      received
-    );
-    if (status == transport_status_e::applied &&
-        !asynchronous_message(channel_e::media, received.message)) {
-      status = transport_status_e::protocol_rejected;
+    frame_t frame;
+    const auto status = connection->receive(connection->media, frame);
+    if (status != transport_status_e::applied) {
+      return status;
     }
-    if (status == transport_status_e::applied) {
-      packet = {
-        .message = received.message,
-        .payload = std::move(received.payload),
-      };
-    } else {
-      implementation_->close_locked();
+    std::scoped_lock owner {implementation_->mutex};
+    std::scoped_lock delivery {connection->mutex};
+    if (implementation_->current != connection || connection->terminal.load() || connection->stopping) {
+      return transport_status_e::closed;
     }
-    return status;
+    packet = {.message = frame.message, .payload = std::move(frame.payload)};
+    return transport_status_e::applied;
   }
 
   transport_status_e controller_client_t::heartbeat(channel_e channel) {
-    std::scoped_lock lock {implementation_->mutex};
     if (channel != channel_e::control && channel != channel_e::media) {
       return transport_status_e::invalid_argument;
     }
-    if (!implementation_->connected_locked()) {
+    const auto connection = implementation_->snapshot();
+    if (!connection) {
       return transport_status_e::closed;
     }
-    auto &state = channel == channel_e::control ?
-                    implementation_->control :
-                    implementation_->media;
-    const auto deadline = monotonic_clock_t::now() + implementation_->options.io_timeout;
-    auto status = send_frame(
-      state,
-      {
-        .channel = channel,
-        .message = message_e::heartbeat,
-        .slot = implementation_->identity.slot,
-        .generation = implementation_->identity.generation,
-      },
-      deadline
-    );
-    frame_t response;
-    if (status == transport_status_e::applied) {
-      status = implementation_->receive_until(
-        state,
-        message_e::heartbeat_ack,
-        deadline,
-        response
-      );
-    }
-    if (status != transport_status_e::applied) {
-      implementation_->close_locked();
-    }
-    return status;
+    return connection->request(channel == channel_e::control ? connection->control : connection->media, message_e::heartbeat, message_e::heartbeat_ack);
   }
 
   transport_status_e controller_client_t::shutdown() {
-    std::scoped_lock lock {implementation_->mutex};
-    if (!implementation_->connected_locked()) {
+    const auto connection = implementation_->snapshot();
+    if (!connection) {
       return transport_status_e::closed;
     }
-    const auto deadline = monotonic_clock_t::now() + implementation_->options.io_timeout;
-    auto status = send_frame(
-      implementation_->control,
-      {
-        .channel = channel_e::control,
-        .message = message_e::shutdown,
-        .slot = implementation_->identity.slot,
-        .generation = implementation_->identity.generation,
-      },
-      deadline
-    );
-    frame_t response;
-    if (status == transport_status_e::applied) {
-      status = implementation_->receive_until(
-        implementation_->control,
-        message_e::shutdown_ack,
-        deadline,
-        response
-      );
-    }
-    implementation_->close_locked();
+    const auto status = connection->request(connection->control, message_e::shutdown, message_e::shutdown_ack);
+    connection->cancel(transport_status_e::closed);
     return status;
   }
 
   void controller_client_t::close() noexcept {
-    std::scoped_lock lock {implementation_->mutex};
-    implementation_->close_locked();
+    auto connection = implementation_->exchange({});
+    if (connection) {
+      connection->cancel(transport_status_e::closed);
+    }
   }
 
   bool controller_client_t::connected() const noexcept {
-    std::scoped_lock lock {implementation_->mutex};
-    return implementation_->connected_locked();
+    const auto connection = implementation_->snapshot();
+    return connection && connection->connected();
   }
 
   bool controller_client_t::data_plane_attached() const noexcept {
-    std::scoped_lock lock {implementation_->mutex};
-    return implementation_->attached_locked();
+    const auto connection = implementation_->snapshot();
+    return connection && connection->attached();
   }
 
 }  // namespace multiseat::worker_ipc
