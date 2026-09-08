@@ -11,6 +11,7 @@
   #include <chrono>
   #include <cstddef>
   #include <cstdlib>
+  #include <cstring>
   #include <fcntl.h>
   #include <filesystem>
   #include <functional>
@@ -1014,9 +1015,9 @@ TEST_F(MultiseatWorkerClientConcurrency, UnexpectedAckDoesNotCompleteRequest) {
 }
 
 TEST_F(MultiseatWorkerClientConcurrency, UnsolicitedAckRetiresConnection) {
-  std::promise<void> release;
-  auto permitted = release.get_future();
-  start([&](int fd, channel_e channel) {
+  auto release = std::make_shared<std::promise<void>>();
+  auto permitted = release->get_future().share();
+  start([&, permitted](int fd, channel_e channel) {
     if (channel != channel_e::control) {
       return false;
     }
@@ -1027,7 +1028,7 @@ TEST_F(MultiseatWorkerClientConcurrency, UnsolicitedAckRetiresConnection) {
     peer.await_close();
     return true;
   });
-  release.set_value();
+  release->set_value();
   expect_retired();
 }
 
@@ -1052,11 +1053,11 @@ TEST_F(MultiseatWorkerClientConcurrency, DuplicateAckRetiresConnection) {
 }
 
 TEST_F(MultiseatWorkerClientConcurrency, TimeoutClosesBeforeAnotherRequestCanAcceptLateAck) {
-  std::promise<void> received;
-  auto request_received = received.get_future();
+  auto received = std::make_shared<std::promise<void>>();
+  auto request_received = received->get_future().share();
   auto options = short_options();
   options.io_timeout = 100ms;
-  start([&](int fd, channel_e channel) {
+  start([&, received](int fd, channel_e channel) {
     if (channel != channel_e::control) {
       return false;
     }
@@ -1064,7 +1065,7 @@ TEST_F(MultiseatWorkerClientConcurrency, TimeoutClosesBeforeAnotherRequestCanAcc
     if (!peer.expect(message_e::heartbeat)) {
       return true;
     }
-    received.set_value();
+    received->set_value();
     // Waiting for EOF is deterministic: the late ACK is attempted only after
     // the first caller's timeout has retired the connection.
     peer.await_close();
@@ -1085,9 +1086,9 @@ TEST_F(MultiseatWorkerClientConcurrency, TimeoutClosesBeforeAnotherRequestCanAcc
 }
 
 TEST_F(MultiseatWorkerClientConcurrency, CloseCancelsPartialReadAndAllRequestWaiters) {
-  std::promise<void> received;
-  auto request_received = received.get_future();
-  start([&](int fd, channel_e channel) {
+  auto received = std::make_shared<std::promise<void>>();
+  auto request_received = received->get_future().share();
+  start([&, received](int fd, channel_e channel) {
     if (channel != channel_e::control) {
       return false;
     }
@@ -1097,7 +1098,7 @@ TEST_F(MultiseatWorkerClientConcurrency, CloseCancelsPartialReadAndAllRequestWai
     }
     const auto partial = encode_frame({.channel = channel, .message = message_e::heartbeat_ack, .slot = peer.identity.slot, .generation = peer.identity.generation, .sequence = peer.outgoing++});
     EXPECT_TRUE(write_all(fd, std::span {partial}.first(1)));
-    received.set_value();
+    received->set_value();
     peer.await_close();
     return true;
   });
@@ -1137,23 +1138,23 @@ TEST_F(MultiseatWorkerClientConcurrency, PartialFrameDeadlineRetiresSilentPeer) 
 }
 
 TEST_F(MultiseatWorkerClientConcurrency, ShutdownAckSurvivesEarlierMediaEof) {
-  std::promise<void> shutdown;
-  auto shutdown_requested = shutdown.get_future();
-  std::promise<void> media_closed;
-  auto closed = media_closed.get_future();
-  start([&](int fd, channel_e channel) {
+  auto shutdown = std::make_shared<std::promise<void>>();
+  auto shutdown_requested = shutdown->get_future().share();
+  auto media_closed = std::make_shared<std::promise<void>>();
+  auto closed = media_closed->get_future().share();
+  start([&, shutdown, shutdown_requested, media_closed, closed](int fd, channel_e channel) {
     scripted_channel_t peer {fd, channel, authority.identity()};
     if (channel == channel_e::media) {
       if (shutdown_requested.wait_for(1s) == std::future_status::ready) {
         (void) ::shutdown(fd, SHUT_RDWR);
       }
-      media_closed.set_value();
+      media_closed->set_value();
       return true;
     }
     if (!peer.expect(message_e::shutdown)) {
       return true;
     }
-    shutdown.set_value();
+    shutdown->set_value();
     if (closed.wait_for(1s) == std::future_status::ready) {
       // Ensure EOF dispatch has an opportunity before the control ACK.
       std::this_thread::sleep_for(50ms);
@@ -1166,9 +1167,9 @@ TEST_F(MultiseatWorkerClientConcurrency, ShutdownAckSurvivesEarlierMediaEof) {
 }
 
 TEST_F(MultiseatWorkerClientConcurrency, ZeroPayloadMarkersStillConsumeFrameBudget) {
-  std::promise<void> overflow;
-  auto overflow_allowed = overflow.get_future();
-  start([&](int fd, channel_e channel) {
+  auto overflow = std::make_shared<std::promise<void>>();
+  auto overflow_allowed = overflow->get_future().share();
+  start([&, overflow_allowed](int fd, channel_e channel) {
     if (channel != channel_e::media) {
       return false;
     }
@@ -1194,7 +1195,7 @@ TEST_F(MultiseatWorkerClientConcurrency, ZeroPayloadMarkersStillConsumeFrameBudg
   // The heartbeat ACK is after all 64 markers on the same ordered channel.
   EXPECT_EQ(client.heartbeat(channel_e::media), transport_status_e::applied);
   EXPECT_TRUE(client.connected());
-  overflow.set_value();
+  overflow->set_value();
   expect_retired();
   encoded_media_packet_t packet {.payload = {1}};
   EXPECT_EQ(client.receive_media(packet), transport_status_e::protocol_rejected);
@@ -1279,6 +1280,135 @@ TEST(MultiseatWorkerClient, CloseCancelsAuthenticationWithoutWaitingForItsDeadli
   EXPECT_NE(connecting.get(), transport_status_e::applied);
   EXPECT_LT(std::chrono::steady_clock::now() - began, 75ms);
   EXPECT_FALSE(client.connected());
+}
+
+namespace {
+  int client_socket_for(const std::filesystem::path &path) {
+    for (const auto &entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+      const int fd = std::stoi(entry.path().filename().string());
+      sockaddr_un peer {};
+      socklen_t size = sizeof(peer);
+      if (::getpeername(fd, reinterpret_cast<sockaddr *>(&peer), &size) == 0 &&
+          peer.sun_family == AF_UNIX && size > offsetof(sockaddr_un, sun_path) &&
+          std::string(peer.sun_path, strnlen(peer.sun_path, sizeof(peer.sun_path))) == path.native()) {
+        return fd;
+      }
+    }
+    return -1;
+  }
+
+  void check_backpressured_writer(bool reconnect) {
+    temporary_root_t root;
+    authority_store_t store {root.path(), deterministic_capability(0x71)};
+    auto authority = create_authority(store, identity_for(), "blocked-writer");
+    auto release = std::make_shared<std::promise<void>>();
+    auto released = release->get_future().share();
+    fake_worker_t worker {authority, fake_behavior_e::healthy, true, [&, released](int fd, channel_e channel) {
+                            if (channel != channel_e::control) {
+                              return false;
+                            }
+                            scripted_channel_t peer {fd, channel, authority.identity()};
+                            if (!peer.expect(message_e::attach) || !peer.send(message_e::attached)) {
+                              return true;
+                            }
+                            // Read no input bytes until after cancellation, so a frame larger than
+                            // the client's constrained send buffer necessarily blocks write_exact.
+                            (void) released.wait_for(2s);
+                            return true;
+                          }};
+    controller_client_t client;
+    ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+    ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+    const int old_socket = client_socket_for(authority.paths().control_socket);
+    ASSERT_GE(old_socket, 0);
+    const int requested_buffer = 4096;
+    ASSERT_EQ(::setsockopt(old_socket, SOL_SOCKET, SO_SNDBUF, &requested_buffer, sizeof(requested_buffer)), 0);
+    int actual_buffer = 0;
+    socklen_t size = sizeof(actual_buffer);
+    ASSERT_EQ(::getsockopt(old_socket, SOL_SOCKET, SO_SNDBUF, &actual_buffer, &size), 0);
+    ASSERT_LT(static_cast<std::size_t>(actual_buffer), max_control_payload);
+    const std::vector<std::uint8_t> payload(max_control_payload, 0x71);
+    auto writing = std::async(std::launch::async, [&] {
+      return client.send_input(payload);
+    });
+    ASSERT_EQ(writing.wait_for(50ms), std::future_status::timeout);
+    // An independently authenticated channel still makes progress.
+    EXPECT_EQ(client.heartbeat(channel_e::media), transport_status_e::applied);
+    auto second_identity = identity_for(12);
+    second_identity.worker_name = "polaris-worker-controller-c3d4-12";
+    auto second = create_authority(store, second_identity, "after-blocked-writer");
+    fake_worker_t replacement {second};
+    const auto began = std::chrono::steady_clock::now();
+    if (reconnect) {
+      EXPECT_EQ(client.connect(second, short_options()), transport_status_e::applied);
+    } else {
+      client.close();
+    }
+    EXPECT_EQ(writing.wait_for(250ms), std::future_status::ready);
+    EXPECT_NE(writing.get(), transport_status_e::applied);
+    EXPECT_LT(std::chrono::steady_clock::now() - began, 250ms);
+    release->set_value();
+    worker.stop();
+    // Reserve the exact retired socket number for an unrelated socket. Late
+    // cleanup must not shutdown/close it, even when the new worker stops.
+    std::array<int, 2> unrelated {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, unrelated.data()), 0);
+    int receiver = old_socket;
+    int sender = unrelated[1];
+    if (unrelated[1] == old_socket) {
+      sender = unrelated[0];
+    } else if (unrelated[0] != old_socket) {
+      receiver = ::fcntl(unrelated[0], F_DUPFD_CLOEXEC, old_socket);
+      EXPECT_EQ(receiver, old_socket);
+      EXPECT_EQ(::close(unrelated[0]), 0);
+    }
+    if (!reconnect) {
+      EXPECT_EQ(client.connect(second, short_options()), transport_status_e::applied);
+    }
+    EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::applied);
+    client.close();
+    replacement.stop();
+    const std::array<std::uint8_t, 1> marker {0x55};
+    EXPECT_TRUE(write_all(sender, marker));
+    std::array<std::uint8_t, 1> observed {};
+    EXPECT_EQ(::recv(receiver, observed.data(), observed.size(), MSG_DONTWAIT), 1);
+    EXPECT_EQ(observed, marker);
+    EXPECT_EQ(::close(sender), 0);
+    EXPECT_EQ(::close(receiver), 0);
+  }
+}  // namespace
+
+TEST(MultiseatWorkerClient, CloseCancelsBackpressuredWriterWithoutTouchingReusedDescriptor) {
+  check_backpressured_writer(false);
+}
+
+TEST(MultiseatWorkerClient, ReconnectCancelsBackpressuredWriterWithoutTouchingReusedDescriptor) {
+  check_backpressured_writer(true);
+}
+
+TEST(MultiseatWorkerClient, NewConnectionRetiresAnOverlappingStalledHandshake) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x72)};
+  auto first = create_authority(store, identity_for(), "stalled-handshake");
+  fake_worker_t stalled {first, fake_behavior_e::stall, false};
+  auto second_identity = identity_for(12);
+  second_identity.worker_name = "polaris-worker-controller-c3d4-12";
+  auto second = create_authority(store, second_identity, "new-handshake");
+  fake_worker_t replacement {second};
+  controller_client_t client;
+  auto options = short_options();
+  options.handshake_timeout = 5s;
+  auto older = std::async(std::launch::async, [&] {
+    return client.connect(first, options);
+  });
+  ASSERT_EQ(older.wait_for(20ms), std::future_status::timeout);
+  ASSERT_EQ(client.connect(second, options), transport_status_e::applied);
+  EXPECT_EQ(older.wait_for(50ms), std::future_status::ready);
+  EXPECT_NE(older.get(), transport_status_e::applied);
+  EXPECT_TRUE(client.connected());
+  EXPECT_EQ(client.attach_data_plane(), transport_status_e::applied);
+  EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::applied);
+  EXPECT_EQ(client.shutdown(), transport_status_e::applied);
 }
 
 #endif
