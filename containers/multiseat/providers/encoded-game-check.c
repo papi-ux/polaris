@@ -49,7 +49,7 @@ struct encoded_stats {
   size_t maximum;
   gboolean failed;
 };
-struct synthetic_source { unsigned width, height, frame; gboolean empty, frozen; };
+struct synthetic_source { unsigned width, height, frame; gboolean empty, frozen, cursor, moving_cursor, ambiguous; };
 
 struct gl_error_sample { gboolean checked; guint error; };
 struct import_observation {
@@ -174,6 +174,13 @@ static void synthetic_frame(GstAppSrc *source, guint requested, gpointer opaque)
       unsigned ball = state->width / 3 + (state->frozen ? 0 : state->frame * 2);
       if (x >= ball && x < ball + 12 && y >= state->height / 2 && y < state->height / 2 + 12) colour = 0xf1f4f8;
     }
+    const unsigned cursor_x = state->width / 2 + (state->moving_cursor ? state->frame * 2 : 0);
+    if (state->cursor && x >= cursor_x && y >= state->height / 3 &&
+        y < state->height / 3 + 26 && x - cursor_x <= (y - state->height / 3) / 2)
+      colour = 0xffffff;
+    if (state->ambiguous && x >= state->width / 4 && x < state->width / 4 + 12 &&
+        y >= state->height / 3 && y < state->height / 3 + 12)
+      colour = 0xffffff;
     size_t offset = ((size_t)y * state->width + x) * 3;
     mapped.data[offset] = colour >> 16; mapped.data[offset + 1] = colour >> 8; mapped.data[offset + 2] = colour;
   }
@@ -188,6 +195,7 @@ struct scene_observation {
   gboolean found;
   double ball_x, ball_y;
   unsigned teal, orange, dark, white, total;
+  unsigned components, candidates;
   char preview[8 * 8 * 6 + 1];
 };
 /* FALSE means malformed decoded video and is fatal, even if earlier frames
@@ -196,6 +204,7 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
   GstVideoInfo info;
   GstVideoFrame frame;
   *scene = (struct scene_observation){0};
+  if (width < 320 || width > 3840 || height < 320 || height > 3840 || width % 2 || height % 2) return FALSE;
   if (!gst_video_info_from_caps(&info, gst_sample_get_caps(sample)) ||
       GST_VIDEO_INFO_FORMAT(&info) != GST_VIDEO_FORMAT_RGB ||
       GST_VIDEO_INFO_WIDTH(&info) != (int)width || GST_VIDEO_INFO_HEIGHT(&info) != (int)height ||
@@ -204,8 +213,10 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
   if (stride < (int)width * 3) { gst_video_frame_unmap(&frame); return FALSE; }
   const unsigned char *pixels = GST_VIDEO_FRAME_PLANE_DATA(&frame, 0);
   unsigned teal = 0, orange = 0, dark = 0, total = 0, white = 0;
-  unsigned min_x = width, min_y = height, max_x = 0, max_y = 0;
-  uint64_t sum_x = 0, sum_y = 0;
+  const unsigned columns = width / 2, rows = height / 2, cells = columns * rows;
+  guint8 *mask = g_try_new0(guint8, cells);
+  guint32 *queue = g_try_new(guint32, cells);
+  if (!mask || !queue) { g_free(mask); g_free(queue); gst_video_frame_unmap(&frame); return FALSE; }
   for (unsigned y = 0; y < height; y += 2) for (unsigned x = 0; x < width; x += 2) {
     const unsigned char *p = pixels + (size_t)y * stride + (size_t)x * 3;
     ++total;
@@ -218,13 +229,40 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
      * variation in a stationary scene must not count as game motion. */
     if (x > width * .02 && x < width * .98 && y > height * .08 && y < height * .99 &&
         p[0] > 195 && p[1] > 195 && p[2] > 195) {
-      ++white; sum_x += x; sum_y += y;
+      ++white;
+      mask[(y / 2) * columns + x / 2] = 1;
+    }
+  }
+  /* The cursor is also white. Find separate connected shapes instead of
+   * merging every white pixel into one bounding box. A unique compact, dense,
+   * nearly square shape identifies the ball; ambiguous shapes cannot pass. */
+  for (unsigned cell = 0; cell < cells; ++cell) if (mask[cell]) {
+    unsigned read = 0, count = 1, min_x = width, min_y = height, max_x = 0, max_y = 0;
+    uint64_t sum_x = 0, sum_y = 0;
+    queue[0] = cell; mask[cell] = 0; ++scene->components;
+    while (read < count) {
+      const unsigned current = queue[read++], column = current % columns, row = current / columns;
+      const unsigned x = column * 2, y = row * 2;
+      sum_x += x; sum_y += y;
       if (x < min_x) min_x = x;
       if (x > max_x) max_x = x;
       if (y < min_y) min_y = y;
       if (y > max_y) max_y = y;
+      for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+        int nx = (int)column + dx, ny = (int)row + dy;
+        if (nx < 0 || nx >= (int)columns || ny < 0 || ny >= (int)rows) continue;
+        const unsigned neighbour = (unsigned)ny * columns + (unsigned)nx;
+        if (mask[neighbour]) { mask[neighbour] = 0; queue[count++] = neighbour; }
+      }
+    }
+    const unsigned span_x = max_x - min_x + 2, span_y = max_y - min_y + 2;
+    if (count >= 6 && count <= 100 && span_x >= 8 && span_x <= 16 && span_y >= 8 && span_y <= 16 &&
+        span_x * 3 <= span_y * 4 && span_y * 3 <= span_x * 4 && count * 20 >= span_x * span_y * 3) {
+      ++scene->candidates;
+      scene->ball_x = (double)sum_x / count; scene->ball_y = (double)sum_y / count;
     }
   }
+  g_free(mask); g_free(queue);
   /* Bounded diagnostic of already-decoded CPU RGB. This never maps the
    * captured DMA-BUF and does not contribute to scene acceptance. */
   for (unsigned row = 0; row < 8; ++row) for (unsigned column = 0; column < 8; ++column) {
@@ -235,8 +273,7 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
   scene->teal = teal; scene->orange = orange; scene->dark = dark; scene->white = white; scene->total = total;
   gst_video_frame_unmap(&frame);
   scene->found = teal >= total / 1000 && orange >= total / 1000 && dark >= total / 2 &&
-    white >= 6 && white <= 100 && max_x - min_x <= 20 && max_y - min_y <= 20;
-  if (scene->found) { scene->ball_x = (double)sum_x / white; scene->ball_y = (double)sum_y / white; }
+    scene->candidates == 1;
   return TRUE;
 }
 
@@ -294,7 +331,9 @@ static gboolean open_gpu(const char *path, struct capture_gpu *gpu) {
 }
 
 int main(int argc, char **argv) {
-  const gboolean synthetic = argc == 2 && (!strcmp(argv[1], "--self-test") || !strcmp(argv[1], "--self-test-empty") || !strcmp(argv[1], "--self-test-frozen"));
+  const gboolean synthetic = argc == 2 && (!strcmp(argv[1], "--self-test") || !strcmp(argv[1], "--self-test-empty") ||
+    !strcmp(argv[1], "--self-test-frozen") || !strcmp(argv[1], "--self-test-cursor") || !strcmp(argv[1], "--self-test-frozen-cursor") ||
+    !strcmp(argv[1], "--self-test-frozen-moving-cursor") || !strcmp(argv[1], "--self-test-ambiguous"));
   unsigned width = synthetic ? 640 : argc == 5 ? dimension(argv[2]) : 0;
   unsigned height = synthetic ? 480 : argc == 5 ? dimension(argv[3]) : 0;
   if (!width || !height) { fprintf(stderr, "encoded probe dimensions or invocation invalid\n"); return 1; }
@@ -353,7 +392,10 @@ int main(int argc, char **argv) {
   }
   GstElement *source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
   struct synthetic_source synthetic_state = {width, height, 0,
-    synthetic && !strcmp(argv[1], "--self-test-empty"), synthetic && !strcmp(argv[1], "--self-test-frozen")};
+    synthetic && !strcmp(argv[1], "--self-test-empty"),
+    synthetic && (!strcmp(argv[1], "--self-test-frozen") || !strcmp(argv[1], "--self-test-frozen-cursor") || !strcmp(argv[1], "--self-test-frozen-moving-cursor")),
+    synthetic && (!strcmp(argv[1], "--self-test-cursor") || !strcmp(argv[1], "--self-test-frozen-cursor") || !strcmp(argv[1], "--self-test-frozen-moving-cursor")),
+    synthetic && !strcmp(argv[1], "--self-test-frozen-moving-cursor"), synthetic && !strcmp(argv[1], "--self-test-ambiguous")};
   if (synthetic) {
     GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGB", "width", G_TYPE_INT, (int)width,
       "height", G_TYPE_INT, (int)height, "framerate", GST_TYPE_FRACTION, 60, 1, NULL);
@@ -446,8 +488,9 @@ int main(int argc, char **argv) {
       imports[i].first_gl.checked, imports[i].first_gl.error, imports[i].final_gl.checked, imports[i].final_gl.error);
   }
   if (!synthetic && frames && (scene_frames < 30 || motion_frames < 10)) fprintf(stderr,
-    "decoded scene teal=%u orange=%u dark=%u white=%u total=%u preview8x8=%s\n",
-    last_scene.teal, last_scene.orange, last_scene.dark, last_scene.white, last_scene.total, last_scene.preview);
+    "decoded scene teal=%u orange=%u dark=%u white=%u total=%u components=%u candidates=%u preview8x8=%s\n",
+    last_scene.teal, last_scene.orange, last_scene.dark, last_scene.white, last_scene.total,
+    last_scene.components, last_scene.candidates, last_scene.preview);
   if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
     struct import_observation *observation = &imports[i];
     if (failed || frames != FRAME_COUNT) fprintf(stderr,
