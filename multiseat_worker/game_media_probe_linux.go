@@ -29,7 +29,7 @@ type encodedGameObservation struct {
 	EncodedFrames uint32 `json:"encoded_frames"`
 	DecodedFrames uint32 `json:"decoded_frames"`
 	SceneFrames   uint32 `json:"scene_frames"`
-	ChangedFrames uint32 `json:"changed_frames"`
+	MotionFrames  uint32 `json:"motion_frames"`
 	Keyframes     uint32 `json:"keyframes"`
 	EncodedBytes  uint64 `json:"encoded_bytes"`
 	MaxFrameBytes uint64 `json:"max_frame_bytes"`
@@ -54,7 +54,7 @@ func parseEncodedGameObservation(content []byte, width, height uint32) (encodedG
 		observation.Width != width || observation.Height != height ||
 		observation.EncodedFrames != 60 || observation.DecodedFrames != 60 ||
 		observation.SceneFrames < 30 || observation.SceneFrames > 60 ||
-		observation.ChangedFrames < 10 || observation.ChangedFrames > 59 ||
+		observation.MotionFrames < 10 || observation.MotionFrames > 59 ||
 		observation.Keyframes == 0 || observation.Keyframes > 60 ||
 		observation.MaxFrameBytes == 0 || observation.MaxFrameBytes > 16*1024*1024 ||
 		observation.EncodedBytes < observation.MaxFrameBytes || observation.EncodedBytes > 60*observation.MaxFrameBytes || !observation.Passed {
@@ -64,6 +64,10 @@ func parseEncodedGameObservation(content []byte, width, height uint32) (encodedG
 }
 
 func physicalEncodedGameProbe(path string) (result error) {
+	parent, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	defer cancel()
 	ready, identity, err := openGameProbeSignal(path)
 	if err != nil {
 		return err
@@ -78,7 +82,7 @@ func physicalEncodedGameProbe(path string) (result error) {
 		config.DisplayHeight < 320 || config.DisplayHeight > 3840 || config.DisplayHeight%2 != 0 {
 		return errors.New("encoded probe allocation unsupported")
 	}
-	if err := checkHealth(config, productionPaths(), uint32(os.Geteuid())); err != nil {
+	if err := checkHealthContext(ctx, config, productionPaths(), uint32(os.Geteuid())); err != nil {
 		return err
 	}
 	claimPath := filepath.Join(containerStatePath, "physical-game.encoding")
@@ -91,10 +95,7 @@ func physicalEncodedGameProbe(path string) (result error) {
 	if err != nil {
 		return err
 	}
-	parent, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
-	defer cancel()
+
 	command := exec.CommandContext(ctx, "/usr/libexec/polaris-seat/encoded-game-check", filepath.Join("/run/polaris", name),
 		strconv.FormatUint(uint64(config.DisplayWidth), 10), strconv.FormatUint(uint64(config.DisplayHeight), 10), config.RenderNode)
 	command.Env = []string{"HOME=/nonexistent", "LC_ALL=C", "XDG_RUNTIME_DIR=/run/polaris", "GST_REGISTRY=/dev/null", "GST_REGISTRY_1_0=/dev/null", "GST_PLUGIN_PATH=", "GST_PLUGIN_PATH_1_0="}
@@ -114,7 +115,7 @@ func physicalEncodedGameProbe(path string) (result error) {
 	if after, err := identityOf(path); err != nil || after != identity {
 		return errors.New("physical game retired during encoded observation")
 	}
-	if err := checkHealth(config, productionPaths(), uint32(os.Geteuid())); err != nil {
+	if err := checkHealthContext(ctx, config, productionPaths(), uint32(os.Geteuid())); err != nil {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(observation)

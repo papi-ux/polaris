@@ -360,7 +360,7 @@ namespace {
       ASSERT_TRUE(ready) << "two private games did not become observable";
       std::this_thread::sleep_for(200ms);
     }
-    const auto observe_encoded_game = [&](int index) {
+    const auto observe_encoded_game = [&](int index, bool peer_stopped = false) {
       auto result = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "media", game_tokens[index]}, 15s);
       ASSERT_FALSE(result.timed_out);
       ASSERT_EQ(result.exit_status, 0) << result.output;
@@ -372,8 +372,8 @@ namespace {
       ASSERT_EQ(observation.value("encoded_frames", 0), 60);
       ASSERT_EQ(observation.value("decoded_frames", 0), 60);
       ASSERT_GE(observation.value("scene_frames", 0), 30);
-      ASSERT_GE(observation.value("changed_frames", 0), 10);
-      RecordProperty("encoded_game_seat_" + std::to_string(index), observation.dump());
+      ASSERT_GE(observation.value("motion_frames", 0), 10);
+      RecordProperty("encoded_game_seat_" + std::to_string(index) + (peer_stopped ? "_after_peer_stop" : ""), observation.dump());
     };
     if (encoded_game) { observe_encoded_game(0); observe_encoded_game(1); }
     int observation_round = 0;
@@ -461,6 +461,7 @@ namespace {
     ASSERT_EQ(controller->seats(),1U);
     remove_retained_game_worker(0);
     observe(1,false);
+    if (encoded_game) observe_encoded_game(1, true);
     if (game) finish_game(1);
     stream::session::stop(*seats[1].stream); seats[1].stream.reset();
     (void) controller->stop_seat(seats[1].snapshot.handle);
