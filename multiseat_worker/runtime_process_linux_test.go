@@ -122,7 +122,7 @@ func runtimeProcessTestHelper(mode string) int {
 		signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	}
 	switch mode {
-	case "ready", "ignore-term", "leave-helper":
+	case "ready", "ignore-term", "leave-helper", "cleanup-error":
 		if err := appendRuntimeProcessTestEvent(eventFile, "start:"+stage); err != nil {
 			return 101
 		}
@@ -159,6 +159,9 @@ func runtimeProcessTestHelper(mode string) int {
 	}
 	if child != nil {
 		_ = child.Wait()
+	}
+	if mode == "cleanup-error" {
+		return 106
 	}
 	return 0
 }
@@ -340,9 +343,15 @@ func TestOSRuntimeProcessHostReturnsCleanableLeaseForReadinessFailures(t *testin
 			}
 			stopContext, cancelStop := context.WithTimeout(context.Background(), time.Second)
 			defer cancelStop()
-			if err := lease.Stop(stopContext); err != nil {
+			err = lease.Stop(stopContext)
+			if test.mode == "exit-before-ready" {
+				if err == nil {
+					t.Fatal("nonzero provider failure was discarded")
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
+			waitForProcessAbsent(t, lease.(*osRuntimeProcessLease).process.Pid)
 		})
 	}
 }
@@ -489,4 +498,15 @@ func TestOSRuntimeProcessHostRejectsInvalidSpecificationsBeforeStart(t *testing.
 			}
 		})
 	}
+}
+
+func TestOSRuntimeProcessRetainsProviderCleanupFailure(t *testing.T) {
+	lease, err := (osRuntimeProcessHost{}).Start(context.Background(), runtimeProcessTestSpec(t, "cleanup-error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Stop(context.Background()); err == nil || !strings.Contains(err.Error(), "provider reported failure") {
+		t.Fatalf("cleanup failure discarded: %v", err)
+	}
+	waitForProcessAbsent(t, lease.(*osRuntimeProcessLease).process.Pid)
 }

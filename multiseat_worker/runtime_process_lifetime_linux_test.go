@@ -135,3 +135,33 @@ func TestOSRuntimeProcessCanceledStopStillReapsOwnedLeader(t *testing.T) {
 	}
 	waitForProcessAbsent(t, lease.process.Pid)
 }
+
+func TestOSRuntimeProcessMissingPidFDReturnsCleanablePartialLease(t *testing.T) {
+	host := osRuntimeProcessHost{startCommand: func(command *exec.Cmd) error {
+		if err := command.Start(); err != nil {
+			return err
+		}
+		if descriptor := *command.SysProcAttr.PidFD; descriptor >= 0 {
+			_ = syscall.Close(descriptor)
+		}
+		*command.SysProcAttr.PidFD = -1
+		return nil
+	}}
+	result, err := host.Start(context.Background(), runtimeProcessTestSpec(t, "ignore-term"))
+	if err == nil || result == nil {
+		t.Fatalf("missing partial-start lease: %v %v", result, err)
+	}
+	lease := result.(*osRuntimeProcessLease)
+	if lease.pidFD != nil {
+		t.Fatal("fixture did not remove pidfd support")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_ = lease.Stop(ctx)
+	select {
+	case <-lease.stopComplete:
+	case <-time.After(3 * time.Second):
+		t.Fatal("partial-start cleanup was abandoned")
+	}
+	waitForProcessAbsent(t, lease.process.Pid)
+}

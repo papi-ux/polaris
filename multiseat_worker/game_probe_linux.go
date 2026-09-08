@@ -126,9 +126,9 @@ func createGameProbeSignal(path string) (*os.File, fileIdentity, error) {
 	}
 	identity := fileIdentity{device: uint64(status.Dev), inode: status.Ino}
 	if count, err := file.WriteString(gameProbeRecord); err != nil || count != len(gameProbeRecord) {
-		removeExact(path, identity)
+		cleanup := removeGameProbeSignal(path, identity)
 		file.Close()
-		return nil, fileIdentity{}, errors.New("physical probe signal write failed")
+		return nil, fileIdentity{}, errors.Join(errors.New("physical probe signal write failed"), cleanup)
 	}
 	return file, identity, nil
 }
@@ -192,7 +192,10 @@ func physicalGameProbe(arguments []string) (result error) {
 	if err != nil {
 		return errors.New("physical game resources already claimed")
 	}
-	defer func() { removeExact(activePath, activeIdentity); active.Close() }()
+	defer func() {
+		result = errors.Join(result, removeGameProbeSignal(activePath, activeIdentity))
+		active.Close()
+	}()
 	parent, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	lifetime, cancel := context.WithTimeout(parent, 150*time.Second)
@@ -253,7 +256,7 @@ func physicalGameProbe(arguments []string) (result error) {
 	if err != nil {
 		return err
 	}
-	defer func() { removeExact(path, identity); ready.Close() }()
+	defer func() { result = errors.Join(result, removeGameProbeSignal(path, identity)); ready.Close() }()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -268,11 +271,27 @@ func physicalGameProbe(arguments []string) (result error) {
 		case <-ticker.C:
 			if finish, finishIdentity, err := openGameProbeSignal(path + ".finish"); err == nil {
 				defer finish.Close()
-				removeExact(path+".finish", finishIdentity)
-				return nil
+				return removeGameProbeSignal(path+".finish", finishIdentity)
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 		}
 	}
+}
+
+func removeGameProbeSignal(path string, identity fileIdentity) error {
+	return removeGameProbeSignalWith(path, identity, os.Remove)
+}
+func removeGameProbeSignalWith(path string, identity fileIdentity, remove func(string) error) error {
+	current, err := identityOf(path)
+	if err != nil || current != identity {
+		return errors.New("physical probe marker ownership changed; cleanup unproven")
+	}
+	if err := remove(path); err != nil {
+		return errors.New("physical probe marker removal failed; cleanup unproven")
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("physical probe marker remains; cleanup unproven")
+	}
+	return nil
 }
