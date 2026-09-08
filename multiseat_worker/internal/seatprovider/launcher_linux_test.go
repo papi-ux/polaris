@@ -19,7 +19,7 @@ import (
 
 func TestLauncherSessionRejectsWrongAllocationAndMalformedMetadata(t *testing.T) {
 	request := nestedRequestFromDisplay(displayRequest("launcher-record", "polaris-capture-launcher"), "polaris-wayland-launcher")
-	record := gamescopeLauncherRecord(gamescopeReadyInfo{displayName: ":0"}, request, 123)
+	record := gamescopeLauncherRecord(gamescopeReadyInfo{displayName: ":0"}, request, 123, processCookie{1, 2})
 	session, err := parseLauncherSession(record, request.WaylandSocket)
 	if err != nil || session.pid != 123 || session.width != request.DisplayWidth || session.refresh != request.DisplayRefreshMillihertz {
 		t.Fatal(session, err)
@@ -31,7 +31,7 @@ func TestLauncherSessionRejectsWrongAllocationAndMalformedMetadata(t *testing.T)
 		strings.Replace(string(record), "PID=123", "PID=0123", 1),
 		strings.Replace(string(record), "PID=123", "PID=0", 1),
 		strings.Replace(string(record), "DISPLAY=:0", "DISPLAY=:1", 1),
-		strings.Replace(string(record), "SESSION/2", "SESSION/1", 1),
+		strings.Replace(string(record), "SESSION/3", "SESSION/2", 1),
 		string(record) + "LD_PRELOAD=/profile/plugin.so\n",
 		strings.Replace(string(record), "PID=123", "PID=123\nPID=456", 1),
 	} {
@@ -55,9 +55,11 @@ func TestLauncherRechecksNestedProtocolsBeforeApplicationStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.close()
-	if _, err := readLauncherSession(context.Background(), request, runtime, options); err != nil {
+	accepted, err := readLauncherSession(context.Background(), request, runtime, options)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer accepted.lifetime.close()
 	other := request
 	other.WaylandSocket = "polaris-wayland-other"
 	if _, err := readLauncherSession(context.Background(), other, runtime, options); err == nil {
@@ -74,6 +76,14 @@ func TestLauncherRechecksNestedProtocolsBeforeApplicationStart(t *testing.T) {
 	session, err := parseLauncherSession(content, request.WaylandSocket)
 	if err != nil {
 		t.Fatal(err)
+	}
+	staleCookie := strings.Replace(string(content), "PROCESS_INODE="+strconv.FormatUint(session.cookie.inode, 10), "PROCESS_INODE="+strconv.FormatUint(session.cookie.inode+1, 10), 1)
+	if err := os.WriteFile(path, []byte(staleCookie), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if acquired, err := readLauncherSession(context.Background(), request, runtime, options); err == nil {
+		acquired.lifetime.close()
+		t.Fatal("launcher accepted stale lifetime cookie with valid live protocol peers")
 	}
 	forged := strings.Replace(string(content), "PID="+strconv.Itoa(session.pid), "PID="+strconv.Itoa(os.Getpid()), 1)
 	if err := os.WriteFile(path, []byte(forged), 0600); err != nil {

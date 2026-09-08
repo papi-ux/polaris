@@ -40,10 +40,25 @@ RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
 # Native acceptance workload uses the same pinned compiler and ABI closure.
 FROM runtime-root-build AS workload-build
 COPY containers/multiseat/workloads/input-pong.c /workloads/input-pong.c
+COPY containers/multiseat/providers /providers
 RUN mkdir -p /out && cc -std=c11 -O2 -Wall -Wextra -Werror \
       -ffile-prefix-map=/workloads=. -Wl,--build-id=none \
       /workloads/input-pong.c -o /out/input-pong-v1 \
       $(pkg-config --cflags --libs x11 gstreamer-1.0) -lm
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+      /providers/test-seat-input.c /providers/seat-input.c -o /out/test-seat-input && /out/test-seat-input && \
+    cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+      /providers/test-pong-startup.c /workloads/input-pong.c -o /out/test-pong-startup \
+      -Wl,--wrap=open -Wl,--wrap=XOpenDisplay $(pkg-config --cflags --libs x11 gstreamer-1.0) -lm && \
+    POLARIS_DISPLAY_WIDTH=1280 POLARIS_DISPLAY_HEIGHT=720 PULSE_SINK=test PULSE_SERVER=test \
+      POLARIS_PONG_TEST=absent /out/test-pong-startup && \
+    for scenario in denied retired; do \
+      result=0; POLARIS_DISPLAY_WIDTH=1280 POLARIS_DISPLAY_HEIGHT=720 PULSE_SINK=test PULSE_SERVER=test \
+        POLARIS_PONG_TEST=$scenario /out/test-pong-startup || result=$?; test "$result" = 1 || exit 1; \
+    done && \
+    cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+      /providers/capture-input.c /providers/seat-input.c -o /out/capture-input \
+      $(pkg-config --cflags --libs gstreamer-1.0)
 
 FROM ${GO_BUILDER_IMAGE} AS worker-build
 WORKDIR /src
@@ -125,6 +140,7 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.description="Isolated Polaris multiseat worker" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
       io.polaris.multiseat.architecture="linux/amd64"
+COPY --from=workload-build --chmod=0555 /out/capture-input /usr/libexec/polaris-seat/capture-input
 COPY --from=workload-build --chmod=0555 /out/input-pong-v1 /usr/libexec/polaris-seat/workloads/input-pong-v1
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-launcher /usr/libexec/polaris-seat/launcher
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-virtual-input /usr/libexec/polaris-seat/virtual-input

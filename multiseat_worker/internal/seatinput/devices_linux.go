@@ -245,24 +245,67 @@ func (s *Set) Verify() error {
 	return nil
 }
 
-// CompositorArguments uses the pinned plugin's append-only mouse/keyboard
-// properties. Gamepads are opened directly by the workload, never by libinput.
-func (s *Set) CompositorArguments() []string {
-	var args []string
-	for _, d := range s.devices {
-		if d.role.compositor {
-			property := "mouse="
-			if d.role.name == "polaris-keyboard" {
-				property = "keyboard="
+func (s *Set) compositorDevices() ([]Device, error) {
+	order := []string{"polaris-keyboard", "polaris-mouse-relative", "polaris-mouse-absolute"}
+	selected := make([]Device, 3)
+	seen := 0
+	for _, device := range s.devices {
+		if !device.role.compositor {
+			continue
+		} // Workload reads gamepads directly.
+		index := -1
+		for i, name := range order {
+			if device.role.name == name {
+				index = i
+				break
 			}
-			args = append(args, property+filepath.Join(s.path, d.role.name))
 		}
+		if index < 0 || selected[index].role.name != "" {
+			return nil, errors.New("compositor input role is unsupported")
+		}
+		selected[index] = device
+		seen++
 	}
-	return args
+	if seen != 3 {
+		return nil, errors.New("compositor input is incomplete")
+	}
+	return selected, nil
+}
+
+// CompositorFiles duplicates the verified descriptors in a fixed role order.
+// The caller closes these copies after spawning its image-owned producer.
+// Touch/pen need explicit mappings before this experiment may admit them.
+func (s *Set) CompositorFiles() (_ []*os.File, result error) {
+	if err := s.Verify(); err != nil {
+		return nil, err
+	}
+	selected, err := s.compositorDevices()
+	if err != nil {
+		return nil, err
+	}
+	files := make([]*os.File, 0, len(selected))
+	defer func() {
+		if result != nil {
+			for _, file := range files {
+				_ = file.Close()
+			}
+		}
+	}()
+	for _, device := range selected {
+		fd, _, errno := syscall.Syscall(syscall.SYS_FCNTL, device.file.Fd(), syscall.F_DUPFD_CLOEXEC, 0)
+		if errno != 0 {
+			return nil, errors.New("compositor input descriptor cannot be retained")
+		}
+		files = append(files, os.NewFile(fd, "compositor-input"))
+	}
+	if err := s.Verify(); err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // VerifyConsumer requires the actual compositor process to retain all admitted
-// libinput devices. A Wayland socket alone cannot prove input readiness.
+// input descriptors. Actual event delivery is a separate acceptance test.
 func (s *Set) VerifyConsumer(pid int, pidFD int) error {
 	if err := s.Verify(); err != nil {
 		return err

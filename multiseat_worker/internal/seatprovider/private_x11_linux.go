@@ -12,6 +12,13 @@ import (
 // Only the worker's pre-admitted private /tmp (0700, owned by its UID) may be
 // initialized here. Shared system /tmp retains the existing probe-only path.
 func preparePrivateX11(options providerOptions) (providerOptions, func() error, error) {
+	return preparePrivateX11WithFilesystem(options, syscall.Openat, syscall.Fstat)
+}
+
+func preparePrivateX11WithFilesystem(options providerOptions,
+	openat func(int, string, int, uint32) (int, error),
+	fstat func(int, *syscall.Stat_t) error,
+) (providerOptions, func() error, error) {
 	var parentStatus syscall.Stat_t
 	if err := syscall.Lstat(options.x11LockDirectory, &parentStatus); err != nil {
 		return options, nil, err
@@ -33,17 +40,17 @@ func preparePrivateX11(options providerOptions) (providerOptions, func() error, 
 		parent.close()
 		return options, nil, errors.New("private X11 namespace already exists or cannot be created")
 	}
-	fd, err := syscall.Openat(int(parent.file.Fd()), filepath.Base(options.x11SocketDirectory), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	fd, err := openat(int(parent.file.Fd()), filepath.Base(options.x11SocketDirectory), syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		parent.close()
-		return options, nil, errors.New("created X11 namespace cannot be opened")
+		return options, nil, errors.New("private X11 cleanup unproven; destroy worker private tmpfs")
 	}
 	file := os.NewFile(uintptr(fd), "private-X11-namespace")
 	var status syscall.Stat_t
-	if err := syscall.Fstat(fd, &status); err != nil {
+	if err := fstat(fd, &status); err != nil {
 		file.Close()
 		parent.close()
-		return options, nil, err
+		return options, nil, errors.New("private X11 cleanup unproven; destroy worker private tmpfs")
 	}
 	cleanup := func() error {
 		defer file.Close()

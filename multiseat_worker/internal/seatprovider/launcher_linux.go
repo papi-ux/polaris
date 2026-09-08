@@ -96,6 +96,7 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	if err != nil {
 		return err
 	}
+	defer session.lifetime.close()
 	environment, err := launcherEnvironment(request, session)
 	if err != nil {
 		return err
@@ -111,11 +112,17 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	if current, err := os.Getwd(); err != nil || filepath.Clean(current) != launcherHome {
 		return errors.New("launcher working directory is invalid")
 	}
+	if err := session.lifetime.verify(); err != nil {
+		return err
+	}
 	child, err := startManagedChildWithUmask(executable, options.executableOwnerUID, nil, environment, nil, 0o077)
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, stopWorkload(child, 4*time.Second)) }()
+	if err := session.lifetime.verify(); err != nil {
+		return err
+	}
 	if child.exited() {
 		return errors.New("workload exited during startup")
 	}
@@ -133,6 +140,9 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 		case <-child.done:
 			return nil
 		case <-ticker.C:
+			if err := session.lifetime.verify(); err != nil {
+				return err
+			}
 			if err := inputs.Verify(); err != nil {
 				return err
 			}

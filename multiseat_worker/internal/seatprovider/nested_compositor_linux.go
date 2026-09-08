@@ -962,9 +962,11 @@ func runNestedCompositor(
 		cleanupError := cleanupGamescopeRuntimeArtifacts(runtime, paths, knownRuntime, false)
 		return errors.Join(err, cleanupError)
 	}
+	var lifetime *processLifetime
 	readyPublished := false
 	knownX11 := make(map[string]artifactIdentity)
 	defer func() {
+		defer func() { lifetime.close() }()
 		_ = readyFIFO.Close()
 		stopError := child.stop(options.stopTimeout)
 		if !readyPublished && len(knownX11) == 0 {
@@ -1069,10 +1071,17 @@ func runNestedCompositor(
 	if child.exited() {
 		return errors.New("runtime Gamescope exited before readiness")
 	}
+	if child.pidFD == nil {
+		return errors.New("compositor lifetime unavailable")
+	}
+	lifetime, err = retainProcessLifetime(child.command.Process.Pid, int(child.pidFD.Fd()), processCookie{})
+	if err != nil {
+		return err
+	}
 	sessionIdentity, err := createGamescopeRegularArtifact(
 		runtime,
 		paths.sessionRecord,
-		gamescopeLauncherRecord(info, request, child.command.Process.Pid),
+		gamescopeLauncherRecord(info, request, child.command.Process.Pid, lifetime.cookie),
 	)
 	if sessionIdentity != (artifactIdentity{}) {
 		knownRuntime[paths.sessionRecord] = sessionIdentity
