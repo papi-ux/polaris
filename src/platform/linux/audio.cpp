@@ -39,6 +39,7 @@
 #endif
 
 // local includes
+#include "audio_process_id.h"
 #include "src/audio.h"
 #include "src/config.h"
 #include "src/logging.h"
@@ -1256,6 +1257,28 @@ namespace platf {
         return sink_index;
       }
 
+      std::optional<pid_t> client_process_id(std::uint32_t client_index) {
+        if (client_index == PA_INVALID_INDEX) return std::nullopt;
+        std::optional<pid_t> result;
+        bool failed = false;
+        cb_t<pa_client_info *> client_f = [&](ctx_t::pointer, const pa_client_info *info, int eol) {
+          if (eol < 0) {
+            failed = true;
+            return;
+          }
+          if (!info) return;
+          if (info->index != client_index || !info->proplist) {
+            failed = true;
+            return;
+          }
+          result = audio_process_id::client(info->proplist);
+        };
+        mainloop_lock_t lock {loop.get()};
+        op_t operation {pa_context_get_client_info(ctx.get(), client_index, cb<pa_client_info *>, &client_f)};
+        if (!operation || !wait_for_operation(operation) || failed) return std::nullopt;
+        return result;
+      }
+
       void route_process_audio_to_sink(const std::string &sink) override {
         auto target_sink = sink_index_by_name(sink);
         if (!target_sink) {
@@ -1270,7 +1293,8 @@ namespace platf {
         struct sink_input_route_t {
           std::uint32_t index;
           std::uint32_t current_sink;
-          pid_t pid;
+          std::uint32_t client;
+          audio_process_id::property_t stream_pid;
           std::string app_name;
         };
 
@@ -1278,10 +1302,16 @@ namespace platf {
         auto alarm = safe::make_alarm<int>();
 
         cb_t<pa_sink_input_info *> input_f = [&](ctx_t::pointer ctx, const pa_sink_input_info *input_info, int eol) {
+          if (eol < 0) {
+            BOOST_LOG(error) << "Couldn't complete pulseaudio sink input list: "sv << pa_strerror(pa_context_errno(ctx));
+            alarm->ring(-1);
+            return;
+          }
           if (!input_info) {
             if (!eol) {
               BOOST_LOG(error) << "Couldn't get pulseaudio sink input info: "sv << pa_strerror(pa_context_errno(ctx));
               alarm->ring(-1);
+              return;
             }
 
             alarm->ring(0);
@@ -1292,33 +1322,12 @@ namespace platf {
           if (input_info->sink == *target_sink) {
             return;
           }
-          const char *pid_text = pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
-          if (!pid_text || !*pid_text) {
-            return;
-          }
-
-          char *end = nullptr;
-          const auto pid_long = std::strtol(pid_text, &end, 10);
-          if (end == pid_text || pid_long <= 1 || pid_long > std::numeric_limits<pid_t>::max()) {
-            return;
-          }
-
-          const auto pid = static_cast<pid_t>(pid_long);
-          // PulseAudio recycles sink-input indices. Apply the EasyEffects
-          // cooldown only when the index still belongs to the same process.
-          if (const auto it = routed_sink_inputs.find(input_info->index);
-              it != routed_sink_inputs.end() && it->second.pid == pid) {
-            return;
-          }
-          if (!process_env_has_session_audio_sink(pid, sink)) {
-            return;
-          }
-
-          const char *app_name = pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_NAME);
+          const auto *app_name = input_info->proplist ? pa_proplist_gets(input_info->proplist, PA_PROP_APPLICATION_NAME) : nullptr;
           routes.push_back(sink_input_route_t {
             input_info->index,
             input_info->sink,
-            pid,
+            input_info->client,
+            audio_process_id::property(input_info->proplist, PA_PROP_APPLICATION_PROCESS_ID),
             app_name ? app_name : "unknown"
           });
         };
@@ -1338,11 +1347,26 @@ namespace platf {
           return;
         }
 
+        // Resolve clients only after the sink-input list callback has retired.
+        // Nesting a blocking Pulse operation inside that callback can deadlock
+        // its mainloop. Cache only this pass: client indices can be recycled.
+        std::unordered_map<std::uint32_t, std::optional<pid_t>> clients;
+        const audio_process_id::client_lookup_t lookup = [&](std::uint32_t index) {
+          auto [it, inserted] = clients.try_emplace(index);
+          if (inserted) it->second = client_process_id(index);
+          return it->second;
+        };
         for (const auto &route : routes) {
-          routed_sink_inputs[route.index] = routed_sink_input_t {route.pid, std::chrono::steady_clock::now()};
+          const auto pid = audio_process_id::sink_input(route.stream_pid, route.client, lookup);
+          if (!pid) continue;
+          // Keep the existing session markers and ancestor checks authoritative
+          // for every PID source; a client association alone grants no route.
+          if (const auto it = routed_sink_inputs.find(route.index);
+              it != routed_sink_inputs.end() && it->second.pid == *pid) continue;
+          if (!process_env_has_session_audio_sink(*pid, sink)) continue;
 
           BOOST_LOG(info) << "Linux audio isolation: moving session audio stream ["sv
-                          << route.app_name << "] pid="sv << route.pid
+                          << route.app_name << "] pid="sv << *pid
                           << " sink_input="sv << route.index
                           << " from sink #"sv << route.current_sink
                           << " to ["sv << sink << "] (10s re-pin cooldown)"sv;
@@ -1368,8 +1392,10 @@ namespace platf {
           const bool move_completed = wait_for_operation(move_op);
           if (!move_completed || !move_alarm->status() || *move_alarm->status()) {
             BOOST_LOG(warning) << "Linux audio isolation: failed to move session audio stream ["sv
-                               << route.app_name << "] pid="sv << route.pid
+                               << route.app_name << "] pid="sv << *pid
                                << " to ["sv << sink << "]: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          } else {
+            routed_sink_inputs[route.index] = routed_sink_input_t {*pid, std::chrono::steady_clock::now()};
           }
         }
       }
