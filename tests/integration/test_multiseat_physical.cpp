@@ -196,6 +196,8 @@ namespace {
     const bool game = env_or("POLARIS_PHYSICAL_GAME") == "1";
     const bool encoded_game = env_or("POLARIS_PHYSICAL_ENCODED_GAME") == "1";
     ASSERT_FALSE(encoded_game && !game) << "encoded game probe requires the game lifecycle fixture";
+    const bool encoded_audio = env_or("POLARIS_PHYSICAL_ENCODED_AUDIO") == "1";
+    ASSERT_FALSE(encoded_audio && !game) << "encoded audio probe requires the game lifecycle fixture";
     ASSERT_TRUE(!game || profile_name == "gamescope");
     const std::string workload = game ? "input-pong-v1" : "physical-input-proof";
     RecordProperty("game_streaming", "false");
@@ -342,7 +344,7 @@ namespace {
     const auto finish_game = [&](int index) {
       EXPECT_EQ(command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "finish", game_tokens[index]}, 2s).exit_status, 0);
       if (games[index].joinable()) games[index].join();
-      if (encoded_game) RecordProperty("game_runtime_" + std::to_string(index), game_results[index].output);
+      if (encoded_game || encoded_audio) RecordProperty("game_runtime_" + std::to_string(index), game_results[index].output);
       EXPECT_FALSE(game_results[index].timed_out);
       EXPECT_EQ(game_results[index].exit_status, 0) << game_results[index].output;
     };
@@ -377,6 +379,24 @@ namespace {
       RecordProperty("encoded_game_seat_" + std::to_string(index) + (peer_stopped ? "_after_peer_stop" : ""), observation.dump());
     };
     if (encoded_game) { observe_encoded_game(0); observe_encoded_game(1); }
+    const auto observe_encoded_audio = [&](int index, bool peer_stopped = false) {
+      auto result = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "audio", game_tokens[index]}, 15s);
+      ASSERT_FALSE(result.timed_out);
+      ASSERT_EQ(result.exit_status, 0) << result.output;
+      auto observation = json::parse(result.output, nullptr, false);
+      ASSERT_TRUE(observation.is_object()) << result.output;
+      ASSERT_EQ(observation.value("source", ""), "worker-pulse-monitor");
+      ASSERT_EQ(observation.value("codec", ""), "opus");
+      ASSERT_TRUE(observation.value("passed", false));
+      ASSERT_EQ(observation.value("rate", 0), 48000);
+      ASSERT_EQ(observation.value("channels", 0), 2);
+      ASSERT_EQ(observation.value("packet_ms", 0), 5);
+      ASSERT_GE(observation.value("decoded_samples", 0), 48000);
+      ASSERT_LT(observation.value("decoded_samples", 0), 48240);
+      ASSERT_LE(observation.value("max_packet_bytes", 0), 1400);
+      RecordProperty("encoded_audio_seat_" + std::to_string(index) + (peer_stopped ? "_after_peer_stop" : ""), observation.dump());
+    };
+    if (encoded_audio) { observe_encoded_audio(0); observe_encoded_audio(1); }
     int observation_round = 0;
     const auto observe = [&](int target, bool both) {
       std::array<json, 2> game_before;
@@ -463,6 +483,7 @@ namespace {
     remove_retained_game_worker(0);
     observe(1,false);
     if (encoded_game) observe_encoded_game(1, true);
+    if (encoded_audio) observe_encoded_audio(1, true);
     if (game) finish_game(1);
     stream::session::stop(*seats[1].stream); seats[1].stream.reset();
     (void) controller->stop_seat(seats[1].snapshot.handle);

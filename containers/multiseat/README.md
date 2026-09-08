@@ -53,6 +53,17 @@ The launcher validates the allocated display protocols, retained compositor proc
 retains the private profile, and owns its entire descendant process tree,
 including helpers that detach into another session.
 
+The isolated physical game harness can also run bounded codec observations.
+`POLARIS_PHYSICAL_ENCODED_GAME=1` checks captured game motion through OpenH264;
+`POLARIS_PHYSICAL_ENCODED_AUDIO=1` checks the allocated sink monitor through
+Opus at 48 kHz stereo with 5 ms packets capped at 1400 bytes. Both require
+`POLARIS_PHYSICAL_GAME=1`. The audio check pins the private Pulse socket, checks
+the selected monitor, and measures the fixed game's quiet 440 Hz tone after
+decoding. Each enabled observation runs for both seats and again for the
+surviving seat after its peer's container is removed. These observations prove
+worker-local codec roundtrips; continuous media transport and client playback
+remain separate acceptance gates.
+
 The production `run` command still injects no adapters. Worker-local encoding
 and host media routing are incomplete, and the Steam, Heroic, and Lutris launcher
 implementations remain outstanding. Provider readiness proves a resource or
