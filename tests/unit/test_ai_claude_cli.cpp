@@ -1,4 +1,8 @@
 #include "src/ai_claude_cli.h"
+#include "src/posix_child_reaper.h"
+#ifdef POLARIS_TESTS
+#include "src/ai_optimizer.h"
+#endif
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -8,8 +12,12 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <atomic>
+#include <thread>
 
 #ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -27,6 +35,15 @@ namespace {
 import json, os, pathlib, signal, sys, time
 root = pathlib.Path(__file__).parent
 mode = (root / 'mode').read_text()
+auth_request = sys.argv[1:] == ['--safe-mode', 'auth', 'status']
+if (root / 'sentinel-fd').exists():
+    sentinel = json.loads((root / 'sentinel-fd').read_text())
+    try:
+        info = os.fstat(sentinel['fd'])
+        inherited = (info.st_dev, info.st_ino) == (sentinel['dev'], sentinel['ino'])
+    except OSError:
+        inherited = False
+    (root / ('auth-fd' if auth_request else 'inference-fd')).write_text(json.dumps(inherited))
 if sys.argv[1:] == ['--safe-mode', 'auth', 'status']:
     if mode == 'bad_auth':
         print('not JSON with private account information')
@@ -53,6 +70,8 @@ if mode == 'malformed':
 output = {'type': 'result', 'subtype': 'success', 'is_error': False, 'structured_output': {'likely_cause': 'Synthetic evidence', 'evidence': ['Test only'], 'try_first': ['Review Doctor'], 'advanced_detail': 'No settings changed', 'confidence': 'low', 'destructive_action_allowed': False}}
 if mode == 'error': output['is_error'] = True
 if mode == 'text_only': output['result'] = json.dumps(output.pop('structured_output'))
+if mode == 'destructive': output['structured_output']['destructive_action_allowed'] = True
+if mode in ('settings', 'tool_calls', 'actions'): output['structured_output'][mode] = {'execute': 'untrusted'}
 print(json.dumps(output))
 )PY";
       script.close();
@@ -160,4 +179,74 @@ TEST_F(ClaudeCli, BoundsHungCliAndDescendantsHoldingTheOutputPipe) {
     EXPECT_FALSE(std::filesystem::exists(receipt()["cwd"].get<std::string>()));
   }
 }
+
+TEST_F(ClaudeCli, ClosesUnrelatedDescriptorsForAuthenticationAndInference) {
+  struct sentinel_t {
+    int fd = -1;
+    ~sentinel_t() { if (fd >= 0) close(fd); }
+  } sentinel;
+  const auto original = open((root / "sentinel").c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  ASSERT_GE(original, 0);
+  sentinel.fd = fcntl(original, F_DUPFD, 256);  // Deliberately not CLOEXEC.
+  close(original);
+  ASSERT_GE(sentinel.fd, 256);
+  struct stat info {};
+  ASSERT_EQ(fstat(sentinel.fd, &info), 0);
+  std::ofstream(root / "sentinel-fd") << nlohmann::json {
+    {"fd", sentinel.fd}, {"dev", info.st_dev}, {"ino", info.st_ino}
+  }.dump();
+  ASSERT_TRUE(explain().response.has_value());
+  for (const auto name : {"auth-fd", "inference-fd"}) {
+    std::ifstream input(root / name);
+    ASSERT_TRUE(input.good());
+    EXPECT_EQ(nlohmann::json::parse(input), false) << name;
+  }
+  EXPECT_EQ(fstat(sentinel.fd, &info), 0);  // Parent descriptor remains usable.
+}
+
+TEST_F(ClaudeCli, RetainsExitStatusDuringConcurrentHostReaping) {
+  std::atomic<int> drains = 0;
+  std::jthread reaper([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      util::posix_children::reap_unowned_children();
+      ++drains;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+  for (int attempt = 0; attempt < 12; ++attempt) {
+    const auto result = explain();
+    ASSERT_TRUE(result.response.has_value()) << result.code;
+  }
+  set_mode("descendant");
+  const auto before = drains.load();
+  EXPECT_EQ(explain(1000).code, "inference_timeout");
+  EXPECT_GT(drains.load() - before, 10);  // Streaming lifecycle remains responsive.
+}
+
+#ifdef POLARIS_TESTS
+TEST_F(ClaudeCli, RejectsProviderControlFieldsThroughDoctorWithoutChangingConfiguration) {
+  ai_optimizer::config_t config;
+  config.enabled = true;
+  config.provider = "anthropic";
+  config.auth_mode = "subscription";
+  config.model = "haiku";
+  config.timeout_ms = 5000;
+  const auto original_model = config.model;
+  for (const auto *mode : {"success", "destructive", "settings", "tool_calls", "actions"}) {
+    set_mode(mode);
+    const auto result = nlohmann::json::parse(ai_optimizer::explain_doctor_json_with_config(
+      config, R"({"doctor":{"primary_issue":"frame_pacing"}})", cli.string()));
+    EXPECT_EQ(result.at("status"), std::string(mode) == "success");
+    EXPECT_EQ(result.at("authority"), "explanation_only");
+    EXPECT_EQ(result.at("may_define_settings"), false);
+    EXPECT_EQ(result.at("explanation").at("destructive_action_allowed"), false);
+    for (const auto *field : {"settings", "tool_calls", "actions"}) {
+      EXPECT_FALSE(result.at("explanation").contains(field));
+    }
+    EXPECT_EQ(config.model, original_model);
+    EXPECT_EQ(config.provider, "anthropic");
+    EXPECT_EQ(config.auth_mode, "subscription");
+  }
+}
+#endif
 #endif

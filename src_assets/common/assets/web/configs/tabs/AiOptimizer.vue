@@ -906,6 +906,9 @@ onBeforeUnmount(() => {
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
                 {{ $t('config.ai_subscription_login_copy', { command: currentSubscriptionLoginCommand }) }}
               </div>
+              <p v-if="config.ai_provider === 'anthropic'" class="text-xs text-storm mt-2">
+                {{ $t('config.ai_claude_host_policy_copy') }}
+              </p>
             </div>
             <div v-if="config.ai_provider === 'openai'">
               <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_codex_home_label') }}</label>

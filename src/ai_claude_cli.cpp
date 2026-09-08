@@ -1,4 +1,5 @@
 #include "ai_claude_cli.h"
+#include "posix_child_reaper.h"
 
 #include <algorithm>
 #include <array>
@@ -85,7 +86,8 @@ namespace ai_optimizer::claude_cli {
     };
 
     // No shell, global chdir, or environment mutation. Keep the child unreaped
-    // until its process group has been stopped, including inherited-pipe holders.
+    // until its process group has been stopped, including pipe holders that
+    // remain in that group. Administrator hooks are trusted host software.
     process_result_t run(const std::vector<std::string> &args,
                          const std::filesystem::path &cwd,
                          const std::filesystem::path &input,
@@ -142,6 +144,10 @@ namespace ai_optimizer::claude_cli {
           posix_spawn_file_actions_addopen(&actions.value, STDERR_FILENO, "/dev/null", O_WRONLY, 0) != 0 ||
           posix_spawn_file_actions_addclose(&actions.value, read_end.value) != 0 ||
           posix_spawn_file_actions_addclose(&actions.value, write_end.value) != 0) return result;
+#ifdef __linux__
+      // Do not pass unrelated host sockets/devices to auth status or inference.
+      if (posix_spawn_file_actions_addclosefrom_np(&actions.value, STDERR_FILENO + 1) != 0) return result;
+#endif
       std::vector<char *> argv;
       for (const auto &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
       argv.push_back(nullptr);
@@ -151,11 +157,13 @@ namespace ai_optimizer::claude_cli {
 #else
       auto environment = environ;
 #endif
+      util::posix_children::protected_child_t ownership;
       const int error = posix_spawnp(&child, argv.front(), &actions.value, &attributes.value, argv.data(), environment);
       if (error != 0) {
         result.exit_code = error == ENOENT ? 127 : 126;
         return result;
       }
+      ownership.publish(child);
       close(write_end.value);
       write_end.value = -1;
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -189,13 +197,7 @@ namespace ai_optimizer::claude_cli {
           poll(eof ? nullptr : &descriptor, eof ? 0 : 1, static_cast<int>(std::min<std::int64_t>(remaining, 20)));
         }
       }
-      kill(-child, SIGKILL);
-      int wait_status = 0;
-      pid_t waited;
-      do { waited = waitpid(child, &wait_status, 0); } while (waited < 0 && errno == EINTR);
-      if (waited == child) {
-        result.exit_code = WIFEXITED(wait_status) ? WEXITSTATUS(wait_status) : 128 + WTERMSIG(wait_status);
-      }
+      result.exit_code = ownership.finish();
       return result;
     }
 #endif
@@ -246,8 +248,10 @@ namespace ai_optimizer::claude_cli {
         return failure("cli_request_failed", "Could not prepare the Claude explanation request", "Retry with a smaller support report and check temporary-directory access.");
       }
       // --bare intentionally ignores subscription OAuth. Safe mode preserves
-      // authentication while disabling discovered customizations. Tools and MCP
-      // are disabled separately; never relax these flags for an older CLI.
+      // authentication while disabling ordinary discovered customizations.
+      // Administrator-managed hooks/policy remain part of the trusted installed
+      // CLI. Polaris never interprets its response as a host-control command.
+      // Tools and MCP are disabled separately; never relax flags for an older CLI.
       const auto result = run({cli, "--safe-mode", "--print",
         "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
         "--disable-slash-commands", "--setting-sources", "",
