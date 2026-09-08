@@ -24,6 +24,13 @@
 
 #define FRAME_COUNT 60
 #define MAX_FRAME_BYTES (16u * 1024u * 1024u)
+/* 1.26 EGL-wrapped memory can lack NEED_DOWNLOAD. A real shader conversion
+ * produces GL-written memory with valid CPU readback; identical RGBA caps
+ * would pass the imported memory through with an unused CPU shadow instead. */
+#define CAPTURE_DOWNLOAD_CHAIN \
+  "glupload name=upload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! " \
+  "glcolorconvert name=convert ! video/x-raw(memory:GLMemory),format=BGRA,texture-target=2D ! " \
+  "gldownload name=download ! videoconvert ! "
 static volatile sig_atomic_t stopping;
 static void stop(int number) { (void)number; stopping = 1; }
 static gint driver_error_reported;
@@ -321,8 +328,7 @@ int main(int argc, char **argv) {
   /* 1.26 can retain its 2D uploader after forced-OES renegotiation. Negotiate
    * 2D explicitly and verify each emitted memory target before conversion. */
   const char *head = synthetic ? "appsrc name=source format=time ! videoconvert ! " :
-    "unixfdsrc name=source num-buffers=60 ! glupload name=upload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! "
-    "glcolorconvert name=convert ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! gldownload name=download ! videoconvert ! ";
+    "unixfdsrc name=source num-buffers=60 ! " CAPTURE_DOWNLOAD_CHAIN;
   char *description = g_strconcat(head,
     "video/x-raw,format=I420 ! openh264enc name=encoder bitrate=8000000 gop-size=30 ! "
     "h264parse ! video/x-h264,stream-format=byte-stream,alignment=au ! identity name=encoded ! "
