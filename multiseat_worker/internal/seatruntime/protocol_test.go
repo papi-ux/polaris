@@ -30,6 +30,34 @@ func TestCaptureMediaSocketNameIsBoundedDeterministicAndNamespaced(t *testing.T)
 	}
 }
 
+func TestDisplayInputSelectionIsExplicitAndCanonical(t *testing.T) {
+	request := protocolTestRequests()[2]
+	legacy, environment := invocationForTest(t, request)
+	request.InputSeat = "polaris-input-7"
+	arguments, _ := invocationForTest(t, request)
+	if len(arguments) != len(legacy)+1 || arguments[len(legacy)] != "--input-seat=polaris-input-7" {
+		t.Fatal(arguments)
+	}
+	parsed, err := ParseInvocation(arguments, environment)
+	if err != nil || parsed != request {
+		t.Fatalf("explicit input selection failed: %v", err)
+	}
+	for _, suffix := range []string{"--input-seat=../other", "--input-seat=", "--device=/dev/input/event0"} {
+		bad := append(append([]string{}, legacy...), suffix)
+		if _, err := ParseInvocation(bad, environment); err == nil {
+			t.Fatal("accepted unexpected input authority")
+		}
+	}
+	duplicate := append(append([]string{}, arguments...), "--input-seat=polaris-input-7")
+	if _, err := ParseInvocation(duplicate, environment); err == nil {
+		t.Fatal("accepted duplicate input selection")
+	}
+	parsed, err = ParseInvocation(legacy, environment)
+	if err != nil || parsed.InputSeat != "" {
+		t.Fatal("legacy display implicitly selected input")
+	}
+}
+
 func protocolTestRequests() []Request {
 	const namespace = "seat-7-generation-19"
 	return []Request{

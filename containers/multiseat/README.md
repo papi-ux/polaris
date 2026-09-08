@@ -343,6 +343,22 @@ and blocks admission rather than being deleted by name or recursively.
 
 ## Isolated input acceptance with crun
 
+The experimental input provider verifies every fixed alias using read-only
+evdev descriptors, generation-specific kernel names and physical identities.
+It rejects unexpected aliases, duplicate devices, missing core devices and
+noncontiguous gamepad slots. Descriptors remain owned until shutdown; periodic
+checks fail on namespace replacement or source-device removal. The display
+request can explicitly select an input seat. That path supplies only verified
+keyboard/pointer aliases to the pinned compositor plugin and requires that the
+actual producer retain them before reporting ready. Requests without an input
+seat preserve the existing capture-only behavior. The production entrypoint
+still supplies no runtime adapters.
+
+The opt-in SELinux policies permit only the three evdev identity queries
+(`EVIOCGVERSION`, `EVIOCGNAME`, `EVIOCGPHYS`) in addition to event reads. Broader
+compositor capability queries and real game input delivery need separate
+physical verification; the new provider does not yet establish that acceptance.
+
 The Linux worker backend explicitly selects `/usr/bin/crun` and combines
 `--group-add=keep-groups` with `--userns=keep-id`. The runtime must be a
 root-owned regular executable below root-owned directories that are not
