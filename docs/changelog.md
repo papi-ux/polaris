@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Protects unused encoder capability probes from a null-frame flush, adds actual submission/teardown regressions for the first-launch Vulkan crash, and keeps Doctor from telling a stable AMD VA-API/SHM user to switch to Auto with a promised fallback (#628)
+
 ## v1.4.4 - 2026-09-06
 
 A packaging and setup update matched with Nova v1.4.4. The application menu entry starts the same Polaris service that autostart and headless boot use, and a privileged setup run no longer mistakes root's own device access for a ready desktop account. Existing configurations and paired devices remain valid.

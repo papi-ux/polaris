@@ -641,6 +641,12 @@ if (BUILD_FULL_TESTS)
         add_dependencies(test_polaris_video encoder_probe_provider_fixture)
         target_compile_definitions(test_polaris_video PRIVATE
             POLARIS_PROBE_PROVIDER_FIXTURE="$<TARGET_FILE:encoder_probe_provider_fixture>")
+        target_sources(test_polaris_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_avcodec_session_lifecycle.cpp)
+        target_link_options(test_polaris_video PRIVATE
+            -Wl,--wrap=avcodec_send_frame
+            -Wl,--wrap=avcodec_receive_packet
+            -Wl,--wrap=avcodec_free_context)
     endif()
 
     # Keep the historical target name as a build aggregate while the runtime coverage

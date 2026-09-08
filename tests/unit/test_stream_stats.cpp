@@ -230,7 +230,7 @@ TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNati
 }
 
 #if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
-TEST(StreamStatsLinuxGpuProfileTests, RecommendsAutoVulkanForExplicitAmdVaapiShmPrivateStream) {
+TEST(StreamStatsLinuxGpuProfileTests, PreservesExplicitAmdVaapiCompatibilityChoice) {
   LinuxDisplayConfigGuard guard;
   config::video.encoder = "vaapi";
   config::video.linux_display.use_cage_compositor = true;
@@ -251,9 +251,13 @@ TEST(StreamStatsLinuxGpuProfileTests, RecommendsAutoVulkanForExplicitAmdVaapiShm
   });
 
   ASSERT_NE(recommendation, warnings.end());
-  EXPECT_NE(recommendation->at("action").get<std::string>().find("Autodetect"), std::string::npos);
-  EXPECT_NE(recommendation->at("action").get<std::string>().find("Vulkan Video"), std::string::npos);
-  EXPECT_NE(recommendation->at("action").get<std::string>().find("fall back to VA-API"), std::string::npos);
+  EXPECT_EQ(recommendation->at("severity"), "info");
+  const auto action = recommendation->at("action").get<std::string>();
+  EXPECT_NE(action.find("Keep VA-API selected"), std::string::npos);
+  EXPECT_NE(action.find("reduce resolution, frame rate, or bitrate"), std::string::npos);
+  EXPECT_EQ(action.find("Autodetect"), std::string::npos);
+  EXPECT_EQ(action.find("will live-probe"), std::string::npos);
+  EXPECT_EQ(config::video.encoder, "vaapi");
 }
 #endif
 
