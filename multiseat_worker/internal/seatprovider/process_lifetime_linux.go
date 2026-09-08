@@ -27,16 +27,40 @@ func (life *processLifetime) verify() error {
 	if life == nil || life.pidFD == nil {
 		return errors.New("process lifetime is unavailable")
 	}
+	return verifyProcessDescriptor(life.pidFD.Fd(), pollProcessDescriptor)
+}
+
+func pollProcessDescriptor(fd int32) (uintptr, int16, syscall.Errno) {
 	request := struct {
 		fd              int32
 		events, revents int16
-	}{fd: int32(life.pidFD.Fd()), events: 1}
+	}{fd: fd, events: 1}
 	timeout := syscall.Timespec{}
 	count, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&request)), 1, uintptr(unsafe.Pointer(&timeout)), 0, 0, 0)
-	if errno != 0 || count != 0 || request.revents != 0 {
-		return errors.New("process lifetime has retired")
+	return count, request.revents, errno
+}
+
+func verifyProcessDescriptor(fd uintptr, poll func(int32) (uintptr, int16, syscall.Errno)) error {
+	// os.File.Fd returns an invalid sentinel after Close. A negative pollfd is
+	// ignored by poll, so truncating that sentinel could falsely report life.
+	if fd > 0x7fffffff {
+		return errors.New("process lifetime descriptor is unavailable")
 	}
-	return nil
+	for {
+		// Even a zero-time ppoll can be interrupted by a signal (including Go
+		// async preemption). Retry the same retained identity with a fresh request.
+		count, revents, errno := poll(int32(fd))
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return fmt.Errorf("process lifetime query failed: %w", errno)
+		}
+		if count != 0 || revents != 0 {
+			return errors.New("process lifetime has retired")
+		}
+		return nil
+	}
 }
 
 // The producer retains the original /proc inode until its published metadata
