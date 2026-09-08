@@ -79,7 +79,8 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       /providers/encoded-game-check.c -o /out/encoded-game-check \
       $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
     /out/encoded-game-check --self-test && \
-    for scenario in empty frozen; do \
+    /out/encoded-game-check --self-test-cursor && \
+    for scenario in empty frozen frozen-cursor frozen-moving-cursor ambiguous; do \
       result=0; /out/encoded-game-check --self-test-$scenario || result=$?; test "$result" = 1 || exit 1; \
     done && \
     cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
