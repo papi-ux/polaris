@@ -32,13 +32,18 @@ type gameObservation struct {
 	PID      uint32 `json:"pid"`
 }
 
-type gameProbeOutput struct{ bytes.Buffer }
+// Do not embed bytes.Buffer: its promoted ReadFrom lets io.Copy bypass Write.
+type gameProbeOutput struct{ buffer bytes.Buffer }
+
+func (output *gameProbeOutput) Bytes() []byte  { return output.buffer.Bytes() }
+func (output *gameProbeOutput) String() string { return output.buffer.String() }
 
 func (output *gameProbeOutput) Write(data []byte) (int, error) {
-	if len(data) > 1024-output.Len() {
-		return 0, errors.New("game observation exceeds bound")
+	if len(data) > 1024-output.buffer.Len() {
+		count, _ := output.buffer.Write(data[:1024-output.buffer.Len()])
+		return count, errors.New("game observation exceeds bound")
 	}
-	return output.Buffer.Write(data)
+	return output.buffer.Write(data)
 }
 func readGameObservation(parent context.Context) (gameObservation, error) {
 	var observation gameObservation
