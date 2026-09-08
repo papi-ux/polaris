@@ -68,8 +68,10 @@ func trustedCommand(
 	command.ExtraFiles = append(command.ExtraFiles, executable)
 	command.ExtraFiles = append(command.ExtraFiles, extraFiles...)
 	command.Stdin = nil
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
+	// Explicit files avoid Cmd.Wait copier pipes being held by descendants.
+	// The outer supervisor chooses a private diagnostic sink or /dev/null.
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	return command, executable, nil
 }

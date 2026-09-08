@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -22,10 +23,12 @@ const (
 	maximumRuntimeReadyRecordBytes   = 64
 )
 
-type osRuntimeProcessHost struct{}
+type osRuntimeProcessHost struct{ diagnostics *os.File }
 
 type osRuntimeProcessLease struct {
 	process      *os.Process
+	command      *exec.Cmd
+	pidFD        *os.File
 	done         chan error
 	stopOnce     sync.Once
 	stopComplete chan struct{}
@@ -103,7 +106,7 @@ func readRuntimeReadyRecord(reader io.Reader) error {
 	return nil
 }
 
-func (osRuntimeProcessHost) Start(
+func (host osRuntimeProcessHost) Start(
 	parent context.Context,
 	spec runtimeProcessSpec,
 ) (runtimeLease, error) {
@@ -127,27 +130,48 @@ func (osRuntimeProcessHost) Start(
 	)
 	command.ExtraFiles = []*os.File{readyWriter}
 	command.Stdin = nil
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
+	null, err := os.OpenFile("/dev/null", os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		readyReader.Close()
+		readyWriter.Close()
+		return nil, err
+	}
+	defer null.Close()
+	command.Stdout = null
+	command.Stderr = null
+	if host.diagnostics != nil {
+		command.Stdout = host.diagnostics
+		command.Stderr = host.diagnostics
+	}
+	pidFD := -1
 	command.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid:   true,
+		PidFD:     &pidFD,
 		Pdeathsig: syscall.SIGKILL,
 	}
 	if err := command.Start(); err != nil {
+		if pidFD >= 0 {
+			syscall.Close(pidFD)
+		}
 		_ = readyReader.Close()
 		_ = readyWriter.Close()
 		return nil, errors.New("worker runtime helper could not be started")
 	}
 	_ = readyWriter.Close()
+	defer readyReader.Close()
+	if pidFD < 0 {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+		return nil, errors.New("runtime process lifetime unavailable")
+	}
 	lease := &osRuntimeProcessLease{
 		process:      command.Process,
+		command:      command,
+		pidFD:        os.NewFile(uintptr(pidFD), "runtime-process-lifetime"),
 		done:         make(chan error),
 		stopComplete: make(chan struct{}),
 	}
-	go func() {
-		_ = command.Wait()
-		close(lease.done)
-	}()
+	go observeRuntimeProcessExit(pidFD, lease.done)
 	readiness := make(chan error, 1)
 	go func() {
 		defer readyReader.Close()
@@ -185,25 +209,50 @@ func signalRuntimeProcessGroup(process *os.Process, signal syscall.Signal) error
 }
 
 func (lease *osRuntimeProcessLease) stop(parent context.Context) error {
-	select {
-	case <-lease.done:
-		return nil
-	default:
-	}
+	// Caller cancellation does not abandon cleanup. No code reaps this leader
+	// before this owner's final group signal, so a recycled PGID is impossible.
+	var result error
 	if err := signalRuntimeProcessGroup(lease.process, syscall.SIGTERM); err != nil {
-		return errors.New("worker runtime helper termination failed")
+		result = errors.New("worker runtime helper termination failed")
 	}
-	select {
-	case <-lease.done:
-		return nil
-	case <-parent.Done():
-		_ = signalRuntimeProcessGroup(lease.process, syscall.SIGKILL)
-		return errors.New("worker runtime helper stop deadline exceeded")
+	grace := time.Now().Add(2 * time.Second)
+	if deadline, ok := parent.Deadline(); ok && deadline.Before(grace) {
+		grace = deadline
 	}
+	for parent.Err() == nil && time.Now().Before(grace) {
+		stopped, err := runtimeProcessGroupStopped(lease.process.Pid)
+		if err != nil {
+			result = errors.Join(result, err)
+			break
+		}
+		if stopped && runtimeExitObserved(lease.done) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if parent.Err() != nil {
+		result = errors.Join(result, errors.New("worker runtime helper stop deadline exceeded"))
+	}
+	if err := signalRuntimeProcessGroup(lease.process, syscall.SIGKILL); err != nil {
+		return errors.Join(result, errors.New("runtime group kill failed; outer worker teardown required"))
+	}
+	stopped, err := waitRuntimeGroup(lease, time.Now().Add(2*time.Second))
+	if err != nil || !stopped {
+		return errors.Join(result, err, errors.New("runtime group cleanup unproven; outer worker teardown required"))
+	}
+	// No numeric signal may occur after this point. Cmd owns only explicit
+	// /dev/null output, so descendants cannot hold copier pipes across Wait.
+	waitError := lease.command.Wait()
+	_ = lease.pidFD.Close()
+	var exitError *exec.ExitError
+	if waitError != nil && !errors.As(waitError, &exitError) {
+		result = errors.Join(result, errors.New("runtime leader could not be reaped"))
+	}
+	return result
 }
 
 func (lease *osRuntimeProcessLease) Stop(parent context.Context) error {
-	if lease == nil || lease.process == nil || lease.done == nil ||
+	if lease == nil || lease.process == nil || lease.command == nil || lease.pidFD == nil || lease.done == nil ||
 		lease.stopComplete == nil {
 		return errors.New("worker runtime helper lease is invalid")
 	}
