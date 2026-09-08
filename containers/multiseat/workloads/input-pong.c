@@ -75,7 +75,10 @@ int main(int argc, char **argv) {
   XMapRaised(display, window); XFlush(display);
   GError *error = NULL;
   if (!gst_init_check(&argc, &argv, &error)) { if (error) g_error_free(error); XCloseDisplay(display); return 1; }
-  GstElement *audio = gst_parse_launch("audiotestsrc name=tone is-live=true wave=sine freq=440 volume=0.015 ! audioconvert ! audioresample ! pulsesink name=output sync=true", &error);
+  /* Preroll lets the Pulse sink supply the clock for this synthetic tone.
+   * Live-source startup can select the system clock before Pulse is ready,
+   * causing later skew corrections to insert gaps. The sink still paces data. */
+  GstElement *audio = gst_parse_launch("audiotestsrc name=tone is-live=false wave=sine freq=440 volume=0.015 ! audioconvert ! audioresample ! pulsesink name=output sync=true", &error);
   if (!audio || error) { if (error) g_error_free(error); if (audio) gst_object_unref(audio); XCloseDisplay(display); return 1; }
   GstElement *output = gst_bin_get_by_name(GST_BIN(audio), "output");
   g_object_set(output, "device", getenv("PULSE_SINK"), "server", getenv("PULSE_SERVER"), NULL);
