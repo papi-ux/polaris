@@ -65,11 +65,30 @@ void __wrap_g_mutex_clear(GMutex *lock) {
 GstSample *__real_gst_app_sink_try_pull_sample(GstAppSink *, GstClockTime);
 GstSample *__wrap_gst_app_sink_try_pull_sample(GstAppSink *sink, GstClockTime timeout) {
   GstSample *sample = __real_gst_app_sink_try_pull_sample(sink, timeout);
-  if (sample && scenario == 3 && ++samples_seen == 50) {
+  if (sample) ++samples_seen;
+  if (sample && scenario == 3 && samples_seen == 50) {
     GstCaps *caps = gst_caps_copy(gst_sample_get_caps(sample));
     gst_caps_set_simple(caps, "channels", G_TYPE_INT, 1, NULL);
     GstSample *changed = gst_sample_new(gst_sample_get_buffer(sample), caps, gst_sample_get_segment(sample), NULL);
     gst_caps_unref(caps); gst_sample_unref(sample);
+    injected(); return changed;
+  }
+  if (sample && scenario == 6 && samples_seen == 1) {
+    /* Observed Opus startup transients oscillate around zero before the
+     * 440 Hz tone settles. These valid, quiet samples must not be counted
+     * as dozens of full-amplitude cycles. Keep the actual decoded geometry. */
+    GstBuffer *buffer = gst_buffer_copy_deep(gst_sample_get_buffer(sample));
+    GstMapInfo mapped;
+    g_assert_true(gst_buffer_map(buffer, &mapped, GST_MAP_WRITE));
+    for (size_t i = 0; i < mapped.size / 8; ++i) {
+      const float value = (i / 2) % 2 ? 0.0004f : -0.0004f;
+      guint32 bits; memcpy(&bits, &value, sizeof(bits));
+      GST_WRITE_UINT32_LE(mapped.data + i * 8, bits);
+      GST_WRITE_UINT32_LE(mapped.data + i * 8 + 4, bits);
+    }
+    gst_buffer_unmap(buffer, &mapped);
+    GstSample *changed = gst_sample_new(buffer, gst_sample_get_caps(sample), gst_sample_get_segment(sample), NULL);
+    gst_buffer_unref(buffer); gst_sample_unref(sample);
     injected(); return changed;
   }
   return sample;
@@ -139,7 +158,7 @@ static void retained_pulse_socket(void) {
 int main(void) {
   /* Fork before this parent initializes GStreamer or creates any GL/audio
    * threads. Each negative exercises the actual codec/main in isolation. */
-  for (scenario = 1; scenario <= 5; ++scenario) {
+  for (scenario = 1; scenario <= 6; ++scenario) {
     int witness[2]; g_assert_cmpint(pipe2(witness, O_CLOEXEC), ==, 0);
     pid_t child = fork(); g_assert_cmpint(child, >=, 0);
     if (!child) {
@@ -150,7 +169,7 @@ int main(void) {
     close(witness[1]);
     int status;
     g_assert_cmpint(waitpid(child, &status, 0), ==, child);
-    g_assert_true(WIFEXITED(status)); g_assert_cmpint(WEXITSTATUS(status), ==, 1);
+    g_assert_true(WIFEXITED(status)); g_assert_cmpint(WEXITSTATUS(status), ==, scenario == 6 ? 0 : 1);
     char marker = 0;
     g_assert_cmpint(read(witness[0], &marker, 1), ==, 1);
     g_assert_cmpint(marker, ==, 'I');
