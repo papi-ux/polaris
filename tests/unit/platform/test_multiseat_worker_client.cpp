@@ -1275,12 +1275,14 @@ TEST(MultiseatWorkerClient, CloseCancelsAuthenticationWithoutWaitingForItsDeadli
     return client.connect(authority, options);
   });
   ASSERT_EQ(connecting.wait_for(20ms), std::future_status::timeout);
+  EXPECT_EQ(client.lease_connection(), controller_connection_t {});
   const auto began = std::chrono::steady_clock::now();
   client.close();
   EXPECT_EQ(connecting.wait_for(50ms), std::future_status::ready);
   EXPECT_NE(connecting.get(), transport_status_e::applied);
   EXPECT_LT(std::chrono::steady_clock::now() - began, 75ms);
   EXPECT_FALSE(client.connected());
+  EXPECT_EQ(client.lease_connection(), controller_connection_t {});
 }
 
 namespace {
@@ -1423,6 +1425,184 @@ TEST(MultiseatWorkerClient, NewConnectionRetiresAnOverlappingStalledHandshake) {
   EXPECT_EQ(client.attach_data_plane(), transport_status_e::applied);
   EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::applied);
   EXPECT_EQ(client.shutdown(), transport_status_e::applied);
+}
+
+TEST(MultiseatWorkerConnection, EmptyLeaseRejectsOperationsAndClearsOutput) {
+  controller_client_t client;
+  const auto lease = client.lease_connection();
+  EXPECT_EQ(lease, controller_connection_t {});
+  EXPECT_FALSE(lease.identity());
+  EXPECT_FALSE(lease.connected());
+  EXPECT_FALSE(lease.data_plane_attached());
+  EXPECT_EQ(lease.attach_data_plane(), transport_status_e::closed);
+  EXPECT_EQ(lease.send_input(std::array<std::uint8_t, 1> {1}), transport_status_e::closed);
+  EXPECT_EQ(lease.heartbeat(channel_e::control), transport_status_e::closed);
+  EXPECT_EQ(lease.shutdown(), transport_status_e::closed);
+  std::vector<std::uint8_t> feedback {1};
+  encoded_media_packet_t packet {.message = message_e::audio, .payload = {2}};
+  EXPECT_EQ(lease.receive_feedback(feedback), transport_status_e::closed);
+  EXPECT_EQ(lease.receive_media(packet), transport_status_e::closed);
+  EXPECT_TRUE(feedback.empty());
+  EXPECT_EQ(packet, encoded_media_packet_t {});
+  lease.close();
+}
+
+TEST_F(MultiseatWorkerClientConcurrency, LeaseUsesExistingAuthenticationAndDroppingCopyKeepsItAlive) {
+  start();
+  const auto lease = client.lease_connection();
+  EXPECT_EQ(lease.identity(), authority.identity());
+  {
+    const auto copy = client.lease_connection();
+    EXPECT_EQ(copy, lease);
+    ASSERT_EQ(copy.attach_data_plane(), transport_status_e::applied);
+    EXPECT_EQ(copy.send_input(std::array<std::uint8_t, 1> {9}), transport_status_e::applied);
+  }
+  EXPECT_TRUE(client.data_plane_attached());
+  EXPECT_TRUE(lease.data_plane_attached());
+  std::vector<std::uint8_t> feedback;
+  encoded_media_packet_t packet;
+  EXPECT_EQ(lease.receive_feedback(feedback), transport_status_e::applied);
+  EXPECT_EQ(feedback, (std::vector<std::uint8_t> {'r', 'u', 'm', 'b', 'l', 'e'}));
+  ASSERT_EQ(lease.receive_media(packet), transport_status_e::applied);
+  EXPECT_EQ(packet.message, message_e::video);
+  EXPECT_EQ(lease.heartbeat(channel_e::control), transport_status_e::applied);
+  EXPECT_EQ(lease.shutdown(), transport_status_e::applied);
+  EXPECT_FALSE(client.connected());
+  EXPECT_FALSE(lease.connected());
+  EXPECT_EQ(client.lease_connection(), controller_connection_t {});
+  EXPECT_EQ(lease.identity(), authority.identity());
+}
+
+TEST_F(MultiseatWorkerClientConcurrency, OldLeaseCannotReadOrCloseSameIdentityReplacement) {
+  start();
+  const auto old = client.lease_connection();
+  ASSERT_EQ(old.attach_data_plane(), transport_status_e::applied);
+  // Both old packets stay queued. Recreate only this fixture's listening
+  // sockets while the old accepted connection remains alive. The authenticated
+  // identity is intentionally identical, but these are different connections.
+  ASSERT_TRUE(std::filesystem::remove(authority.paths().control_socket));
+  ASSERT_TRUE(std::filesystem::remove(authority.paths().media_socket));
+  fake_worker_t replacement {authority};
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  const auto current = client.lease_connection();
+  EXPECT_EQ(current.identity(), old.identity());
+  EXPECT_NE(current, old);
+  EXPECT_FALSE(old.connected());
+  EXPECT_EQ(old.attach_data_plane(), transport_status_e::closed);
+  EXPECT_EQ(old.send_input(std::array<std::uint8_t, 1> {1}), transport_status_e::closed);
+  EXPECT_EQ(old.heartbeat(channel_e::media), transport_status_e::closed);
+  EXPECT_EQ(old.shutdown(), transport_status_e::closed);
+  old.close();
+  worker->stop();
+  ASSERT_EQ(current.attach_data_plane(), transport_status_e::applied);
+  encoded_media_packet_t stale {.message = message_e::video, .payload = {1}};
+  EXPECT_EQ(old.receive_media(stale), transport_status_e::closed);
+  EXPECT_TRUE(stale.payload.empty());
+  std::vector<std::uint8_t> feedback {1};
+  EXPECT_EQ(old.receive_feedback(feedback), transport_status_e::closed);
+  EXPECT_TRUE(feedback.empty());
+  encoded_media_packet_t packet;
+  ASSERT_EQ(current.receive_media(packet), transport_status_e::applied);
+  EXPECT_EQ(packet.payload, (std::vector<std::uint8_t> {'v', 'i', 'd', 'e', 'o'}));
+  ASSERT_EQ(current.receive_media(packet), transport_status_e::applied);
+  EXPECT_EQ(packet.payload, (std::vector<std::uint8_t> {'a', 'u', 'd', 'i', 'o'}));
+  EXPECT_EQ(current.heartbeat(channel_e::control), transport_status_e::applied);
+  EXPECT_EQ(current.shutdown(), transport_status_e::applied);
+}
+
+TEST_F(MultiseatWorkerClientConcurrency, ReconnectCancelsBothLeaseWaitsAndRetainedCopiesStayOld) {
+  auto options = short_options();
+  options.io_timeout = 5s;
+  start({}, options);
+  const auto old = client.lease_connection();
+  ASSERT_EQ(old.attach_data_plane(), transport_status_e::applied);
+  encoded_media_packet_t packet;
+  ASSERT_EQ(old.receive_media(packet), transport_status_e::applied);
+  ASSERT_EQ(old.receive_media(packet), transport_status_e::applied);
+  auto media = std::async(std::launch::async, [old, &packet] {
+    return old.receive_media(packet);
+  });
+  std::vector<std::uint8_t> feedback;
+  auto control = std::async(std::launch::async, [old, &feedback] {
+    return old.receive_feedback(feedback);
+  });
+  ASSERT_EQ(media.wait_for(20ms), std::future_status::timeout);
+  ASSERT_EQ(control.wait_for(20ms), std::future_status::timeout);
+  auto next_identity = identity_for(12);
+  next_identity.worker_name = "polaris-worker-controller-c3d4-12";
+  auto next_authority = create_authority(store, next_identity, "lease-replacement");
+  fake_worker_t replacement {next_authority};
+  ASSERT_EQ(client.connect(next_authority, options), transport_status_e::applied);
+  EXPECT_EQ(media.wait_for(100ms), std::future_status::ready);
+  EXPECT_EQ(control.wait_for(100ms), std::future_status::ready);
+  EXPECT_EQ(media.get(), transport_status_e::closed);
+  EXPECT_EQ(control.get(), transport_status_e::closed);
+  EXPECT_TRUE(packet.payload.empty());
+  EXPECT_TRUE(feedback.empty());
+  const auto current = client.lease_connection();
+  EXPECT_EQ(current.identity(), next_identity);
+  EXPECT_EQ(old.identity(), authority.identity());
+  old.close();
+  EXPECT_EQ(current.heartbeat(channel_e::control), transport_status_e::applied);
+  EXPECT_EQ(current.shutdown(), transport_status_e::applied);
+}
+
+TEST(MultiseatWorkerConnection, LeaseOutlivesClientButClientDestructionRetiresDelivery) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x73)};
+  auto authority = create_authority(store, identity_for(), "lease-destruction");
+  fake_worker_t worker {authority};
+  auto client = std::make_unique<controller_client_t>();
+  auto options = short_options();
+  options.io_timeout = 5s;
+  ASSERT_EQ(client->connect(authority, options), transport_status_e::applied);
+  const auto lease = client->lease_connection();
+  ASSERT_EQ(lease.attach_data_plane(), transport_status_e::applied);
+  std::vector<std::uint8_t> feedback;
+  auto pending = std::async(std::launch::async, [lease, &feedback] {
+    return lease.receive_feedback(feedback);
+  });
+  ASSERT_EQ(pending.wait_for(20ms), std::future_status::timeout);
+  client.reset();
+  EXPECT_EQ(pending.wait_for(100ms), std::future_status::ready);
+  EXPECT_EQ(pending.get(), transport_status_e::closed);
+  EXPECT_FALSE(lease.connected());
+  EXPECT_EQ(lease.identity(), authority.identity());
+  encoded_media_packet_t packet;
+  EXPECT_EQ(lease.receive_media(packet), transport_status_e::closed);
+  EXPECT_TRUE(packet.payload.empty());
+  lease.close();
+}
+
+TEST_F(MultiseatWorkerClientConcurrency, ShutdownAdmissionPreventsNewLeasesBeforeAcknowledgement) {
+  auto arrived = std::make_shared<std::promise<void>>();
+  auto shutdown_arrived = arrived->get_future();
+  std::promise<void> released;
+  auto release = released.get_future().share();
+  start([identity = authority.identity(), arrived, release](int fd, channel_e channel) {
+    if (channel != channel_e::control) {
+      return false;
+    }
+    scripted_channel_t peer {fd, channel, identity};
+    if (!peer.expect(message_e::shutdown)) {
+      return true;
+    }
+    arrived->set_value();
+    release.wait();
+    EXPECT_TRUE(peer.send(message_e::shutdown_ack));
+    peer.await_close();
+    return true;
+  });
+  const auto lease = client.lease_connection();
+  auto shutting_down = std::async(std::launch::async, [lease] {
+    return lease.shutdown();
+  });
+  const auto status = shutdown_arrived.wait_for(1s);
+  EXPECT_EQ(status, std::future_status::ready);
+  EXPECT_EQ(client.lease_connection(), controller_connection_t {});
+  released.set_value();
+  EXPECT_EQ(shutting_down.get(), transport_status_e::applied);
+  EXPECT_FALSE(lease.connected());
 }
 
 #endif

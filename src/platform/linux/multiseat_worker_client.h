@@ -10,6 +10,7 @@
 
   #include <chrono>
   #include <memory>
+  #include <optional>
   #include <span>
   #include <vector>
 
@@ -41,6 +42,41 @@ namespace multiseat::worker_ipc {
   };
 
   /**
+   * Copyable lease on one mutually authenticated connection, never a client
+   * lookup. Reconnect and client destruction retire every old lease; operations
+   * through an old lease cannot attach, read from, or close the replacement.
+   * Dropping a lease does not close the client's connection. Explicit close()
+   * retires this connection and all its copies without waiting for consumers.
+   *
+   * Identity and equality describe the original connection even after close;
+   * equal endpoint identities do not imply equal connections. They do not grant
+   * a launch or stream authorization. Returned bytes still require downstream
+   * stream lifetime fencing before delivery to a network client.
+   */
+  class controller_connection_t {
+  public:
+    controller_connection_t() = default;
+
+    [[nodiscard]] std::optional<endpoint_identity_t> identity() const;
+    [[nodiscard]] bool operator==(const controller_connection_t &) const = default;
+    [[nodiscard]] transport_status_e attach_data_plane() const;
+    [[nodiscard]] transport_status_e send_input(std::span<const std::uint8_t> payload) const;
+    [[nodiscard]] transport_status_e receive_feedback(std::vector<std::uint8_t> &payload) const;
+    [[nodiscard]] transport_status_e receive_media(encoded_media_packet_t &packet) const;
+    [[nodiscard]] transport_status_e heartbeat(channel_e channel) const;
+    [[nodiscard]] transport_status_e shutdown() const;
+    void close() const noexcept;
+    [[nodiscard]] bool connected() const noexcept;
+    [[nodiscard]] bool data_plane_attached() const noexcept;
+
+  private:
+    friend class controller_client_t;
+    struct implementation_t;
+    explicit controller_connection_t(std::shared_ptr<implementation_t> connection);
+    std::shared_ptr<implementation_t> connection_;
+  };
+
+  /**
    * Owns authenticated control and media connections to one exact worker.
    *
    * `connect()` is all-or-nothing: both same-UID sockets must complete mutual
@@ -59,8 +95,10 @@ namespace multiseat::worker_ipc {
    * waiting for their deadlines. Operations retain their original connection
    * through completion; reconnect never redirects an old operation.
    *
-   * The caller must retain this client and the connect() authority for the
-   * duration of their operations, and synchronize access to supplied buffers.
+   * The caller must retain this client during its member calls and the
+   * connect() authority through connection establishment. Connection leases
+   * can outlive this client but retire when it closes. Callers synchronize
+   * access to supplied buffers and retain coordinator authority separately.
    * Returned packet values belong to the connection that delivered them;
    * downstream stream ownership must prevent their reuse after retirement.
    */
@@ -78,6 +116,8 @@ namespace multiseat::worker_ipc {
       const authority_handle_t &authority,
       controller_client_options_t options = {}
     );
+    /** Empty until both channels authenticate, and after shutdown or close. */
+    [[nodiscard]] controller_connection_t lease_connection() const;
     [[nodiscard]] transport_status_e attach_data_plane();
     [[nodiscard]] transport_status_e send_input(std::span<const std::uint8_t> payload);
     [[nodiscard]] transport_status_e receive_feedback(std::vector<std::uint8_t> &payload);
