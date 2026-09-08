@@ -74,12 +74,16 @@ int main(int argc, char **argv) {
   struct seat_input state[3] = {{.role=SEAT_KEYBOARD,.width=width,.height=height},
                                {.role=SEAT_RELATIVE,.width=width,.height=height},
                                {.role=SEAT_ABSOLUTE,.width=width,.height=height}};
-  atomic_store(&last_frame,g_get_monotonic_time());
+  atomic_store(&last_frame,0);
+  const gint64 started = g_get_monotonic_time();
   int failed = gst_element_set_state(pipeline,GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE;
   gint64 window = g_get_monotonic_time(); unsigned events = 0;
   while (!stopping && !failed) {
     int result = poll(polls,4,100);
     if (result < 0) { if (errno == EINTR) continue; failed=1; break; }
+    const gint64 captured = atomic_load(&last_frame), checked = g_get_monotonic_time();
+    if ((captured && checked-captured > G_USEC_PER_SEC) ||
+        (!captured && checked-started > 15*G_USEC_PER_SEC)) { failed=1; break; }
     if (polls[3].revents) {
       GstMessage *message;
       while ((message=gst_bus_pop(bus))) {
@@ -97,7 +101,7 @@ int main(int argc, char **argv) {
       if (now-window >= G_USEC_PER_SEC) { window=now; events=0; }
       events += count/sizeof(batch[0]);
       /* Bound work and the plugin command backlog if compositor delivery stops. */
-      if (events > 16384 || now-atomic_load(&last_frame) > G_USEC_PER_SEC) { failed=1; break; }
+      if (events > 16384 || !captured || now-captured > G_USEC_PER_SEC) { failed=1; break; }
       for (size_t j=0;j<(size_t)count/sizeof(batch[0]);++j) {
         if (!seat_input_event(&state[i],&batch[j],send_input,display)) { failed=1; break; }
       }
