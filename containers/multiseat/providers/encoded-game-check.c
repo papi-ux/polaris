@@ -6,6 +6,7 @@
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
 #include <gst/gl/gl.h>
+#include <gst/gl/gstglfuncs.h>
 #include <gst/gl/egl/gstgldisplay_egl.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -34,6 +35,7 @@ struct encoded_stats {
 };
 struct synthetic_source { unsigned width, height, frame; gboolean empty, frozen; };
 
+struct gl_error_sample { gboolean checked; guint error; };
 struct import_observation {
   GMutex lock;
   GstPad *pad;
@@ -41,7 +43,17 @@ struct import_observation {
   unsigned buffers, first_memories, first_planes, first_flags;
   size_t first_bytes;
   char memory_type[25];
+  GstGLContext *context;
+  struct gl_error_sample first_gl, final_gl;
 };
+
+static void inspect_gl_error(GstGLContext *context, gpointer opaque) {
+  struct gl_error_sample *sample = opaque;
+  if (context->gl_vtable->GetError) {
+    sample->error = context->gl_vtable->GetError();
+    sample->checked = TRUE;
+  }
+}
 
 /* Observe metadata only. Never CPU-map a non-linear DMA-BUF for diagnosis. */
 static GstPadProbeReturn import_buffer(GstPad *pad, GstPadProbeInfo *info, gpointer opaque) {
@@ -60,6 +72,12 @@ static GstPadProbeReturn import_buffer(GstPad *pad, GstPadProbeInfo *info, gpoin
       GstMemory *memory = gst_buffer_peek_memory(buffer, 0);
       const char *type = memory && memory->allocator ? memory->allocator->mem_type : NULL;
       snprintf(observation->memory_type, sizeof(observation->memory_type), "%.24s", type ? type : "unknown");
+      /* thread_add is synchronous. Retain the actual memory's context through
+       * a final check after delayed CPU readback and proven pipeline quiescence. */
+      if (memory && gst_is_gl_memory(memory)) {
+        observation->context = gst_object_ref(GST_GL_BASE_MEMORY_CAST(memory)->context);
+        gst_gl_context_thread_add(observation->context, inspect_gl_error, &observation->first_gl);
+      }
     }
   }
   g_mutex_unlock(&observation->lock);
@@ -364,6 +382,15 @@ int main(int argc, char **argv) {
     _exit(1);
   }
   gst_pad_remove_probe(pad, probe);
+  if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
+    if (imports[i].context)
+      gst_gl_context_thread_add(imports[i].context, inspect_gl_error, &imports[i].final_gl);
+    if ((imports[i].first_gl.checked && imports[i].first_gl.error) ||
+        (imports[i].final_gl.checked && imports[i].final_gl.error)) failed = TRUE;
+    if (failed || frames != FRAME_COUNT || scene_frames < 30 || motion_frames < 10) fprintf(stderr,
+      "import %s gl_first=%d:%x gl_final=%d:%x\n", import_stages[i],
+      imports[i].first_gl.checked, imports[i].first_gl.error, imports[i].final_gl.checked, imports[i].final_gl.error);
+  }
   if (!synthetic && frames && (scene_frames < 30 || motion_frames < 10)) fprintf(stderr,
     "decoded scene teal=%u orange=%u dark=%u white=%u total=%u preview8x8=%s\n",
     last_scene.teal, last_scene.orange, last_scene.dark, last_scene.white, last_scene.total, last_scene.preview);
@@ -375,6 +402,7 @@ int main(int argc, char **argv) {
       observation->memory_type, observation->first_planes, observation->first_flags);
     gst_pad_remove_probe(observation->pad, observation->probe);
     gst_object_unref(observation->pad);
+    if (observation->context) gst_object_unref(observation->context);
     g_mutex_clear(&observation->lock);
   }
   if (!synthetic) {
