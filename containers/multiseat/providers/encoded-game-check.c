@@ -125,7 +125,12 @@ static void synthetic_frame(GstAppSrc *source, guint requested, gpointer opaque)
   (void)gst_app_src_push_buffer(source, buffer);
 }
 
-struct scene_observation { gboolean found; double ball_x, ball_y; };
+struct scene_observation {
+  gboolean found;
+  double ball_x, ball_y;
+  unsigned teal, orange, dark, white, total;
+  char preview[8 * 8 * 6 + 1];
+};
 /* FALSE means malformed decoded video and is fatal, even if earlier frames
  * matched. A valid frame without the expected scene is a separate result. */
 static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height, struct scene_observation *scene) {
@@ -161,6 +166,14 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
       if (y > max_y) max_y = y;
     }
   }
+  /* Bounded diagnostic of already-decoded CPU RGB. This never maps the
+   * captured DMA-BUF and does not contribute to scene acceptance. */
+  for (unsigned row = 0; row < 8; ++row) for (unsigned column = 0; column < 8; ++column) {
+    const unsigned char *p = pixels + (size_t)((2 * row + 1) * height / 16) * stride +
+      (size_t)((2 * column + 1) * width / 16) * 3;
+    snprintf(scene->preview + (row * 8 + column) * 6, 7, "%02x%02x%02x", p[0], p[1], p[2]);
+  }
+  scene->teal = teal; scene->orange = orange; scene->dark = dark; scene->white = white; scene->total = total;
   gst_video_frame_unmap(&frame);
   scene->found = teal >= total / 1000 && orange >= total / 1000 && dark >= total / 2 &&
     white >= 6 && white <= 100 && max_x - min_x <= 20 && max_y - min_y <= 20;
@@ -303,6 +316,7 @@ int main(int argc, char **argv) {
   }
   unsigned frames = 0, scene_frames = 0, motion_frames = 0;
   struct scene_observation anchor = {0};
+  struct scene_observation last_scene = {0};
   const gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
   gboolean failed = gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE;
   while (!failed && !stopping && g_get_monotonic_time() < deadline && frames < FRAME_COUNT) {
@@ -314,6 +328,7 @@ int main(int argc, char **argv) {
     struct scene_observation scene;
     if (!inspect_scene(sample, width, height, &scene)) failed = TRUE;
     else {
+      last_scene = scene;
       ++frames;
       if (scene.found) {
         ++scene_frames;
@@ -349,6 +364,9 @@ int main(int argc, char **argv) {
     _exit(1);
   }
   gst_pad_remove_probe(pad, probe);
+  if (!synthetic && frames && (scene_frames < 30 || motion_frames < 10)) fprintf(stderr,
+    "decoded scene teal=%u orange=%u dark=%u white=%u total=%u preview8x8=%s\n",
+    last_scene.teal, last_scene.orange, last_scene.dark, last_scene.white, last_scene.total, last_scene.preview);
   if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
     struct import_observation *observation = &imports[i];
     if (failed || frames != FRAME_COUNT) fprintf(stderr,
