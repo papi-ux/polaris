@@ -353,24 +353,48 @@ making more changes so recovery can be matched to the exact boot symptom.
 
 ## Update
 
-Layer the newer Fedora 44 RPM and reboot. `rpm-ostree` will stage the
-newer local RPM over the existing layered Polaris package:
+Replace the existing local Polaris RPM with the newer Fedora 44 RPM in one
+transaction, then reboot. A plain `rpm-ostree install` can retain the old local
+package request and fail with `cannot install both polaris-...` and
+`conflicting requests`. Use `--uninstall=polaris` with the new RPM to replace
+that request:
 
 ```bash
 rpm_name="Polaris-fedora44-x86_64.rpm"
 wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
-sudo rpm-ostree install -r "./${rpm_name}"
+sudo rpm-ostree install --uninstall=polaris "./${rpm_name}"
 ```
 
-If you installed without `-r`, or rolled back a deployment and installed again, the
-new package is only staged: the running deployment, and the version the dashboard
-reports, do not change until you reboot. `rpm-ostree status` lists the staged
-deployment above the booted one. `rpm-ostree install` answering "already installed"
-while the dashboard still shows the old version means exactly this.
+This is for an existing layered Polaris installation; use [Install](#install)
+for a fresh installation. Removing the old request and adding the new RPM in
+the same transaction preserves your settings and paired devices under
+`~/.config/polaris`. See Fedora's explanation of
+[replacing overlaid packages](https://fedoramagazine.org/how-to-achieve-dnf-swap-equivalent-functionality-with-rpm-ostree/).
 
-After the reboot, refresh `/usr/local/bin/polaris-kms` and its capability using
-the copy and `setcap` steps from [Install](#install), restart the service, and
-return to `https://127.0.0.1:47990/#/login` with the existing credentials. Do not
+After the transaction succeeds, reboot into the staged deployment:
+
+```bash
+systemctl reboot
+```
+
+Then check the installed package version:
+
+```bash
+rpm -q polaris
+```
+
+Until you reboot, the running deployment still contains the previous package.
+`rpm-ostree status` lists the staged deployment above the booted one. If the
+dashboard still reports an older version after reboot, compare `rpm -q polaris`
+with the service's executable before assuming the RPM update failed:
+
+```bash
+systemctl --user show polaris -p ExecStart
+```
+
+If the service uses `/usr/local/bin/polaris-kms`, refresh that copy and its
+capability using the copy and `setcap` steps from [Install](#install). Restart
+the service and return to `https://127.0.0.1:47990/#/login` with the existing credentials. Do not
 use the first-run Welcome page merely because the package layer was replaced.
 
 ## Roll Back
