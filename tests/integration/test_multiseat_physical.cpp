@@ -89,7 +89,7 @@ namespace {
   // command failure output in private test evidence (never argv or auth files).
   class observed_host_t final : public podman::host_t {
   public:
-    explicit observed_host_t(std::string &failure, bool game): failure_(failure), game_(game) {}
+    explicit observed_host_t(std::string &failure, std::string &diagnostics, bool game): failure_(failure), diagnostics_(diagnostics), game_(game) {}
     std::uint64_t effective_uid() const override { return host_.effective_uid(); }
     bool executable_file(const std::filesystem::path &path) const override { const auto result = host_.executable_file(path); if (!result) failure_ = "executable_file: " + path.filename().string(); return result; }
     bool trusted_runtime_file(const std::filesystem::path &path) const override { const auto result = host_.trusted_runtime_file(path); if (!result) failure_ = "trusted_runtime_file: " + path.filename().string(); return result; }
@@ -105,7 +105,23 @@ namespace {
       // has classified every mount/device. No CDI or arbitrary security options.
       if (game_) {
         const auto run = std::find(admitted.begin(), admitted.end(), "run");
-        if (run != admitted.end()) admitted.insert(run + 1, "--security-opt=label=type:polaris_nvidia_worker_t");
+        if (run != admitted.end()) {
+          admitted.insert(run + 1, "--security-opt=label=type:polaris_nvidia_worker_t");
+          // Keep a failed worker's bounded log until exact-ID controller removal.
+          // The harness still requires absence of running AND stopped workers.
+          std::erase(admitted, "--rm");
+        }
+        if (std::find(admitted.begin(), admitted.end(), "rm") != admitted.end() && !admitted.empty()) {
+          const auto inspected = host_.run({admitted.front(), "--remote=false", "inspect", "--format={{.LogPath}}", admitted.back()}, 2s, 4096);
+          if (inspected.exit_status == 0) {
+            auto path = inspected.output;
+            while (!path.empty() && std::isspace(static_cast<unsigned char>(path.back()))) path.pop_back();
+            if (std::filesystem::path {path}.is_absolute() && path.find('\n') == std::string::npos) {
+              const auto log = host_.read_owned_regular_file(path, 65536);
+              if (log && diagnostics_.size() + log->size() <= 65536) diagnostics_ += *log;
+            }
+          }
+        }
       }
       auto result = host_.run(admitted, timeout, maximum);
       if (result.exit_status != 0 || result.timed_out) failure_ = result.output.substr(0,4096);
@@ -114,6 +130,7 @@ namespace {
   private:
     podman::local_host_t host_;
     std::string &failure_;
+    std::string &diagnostics_;
     bool game_;
   };
 
@@ -203,9 +220,9 @@ namespace {
       .profile_key="physical-profile-"+std::to_string(index), .opaque_volume_name=volumes[index], .runtime_profile=profile, .image_reference=image});
     options.podman.workloads = {{.kind=kind, .target_id=workload}};
     ASSERT_TRUE(host.trusted_runtime_file(options.podman.runtime_executable));
-    std::string command_failure;
+    std::string command_failure, worker_diagnostics;
     production_controller_factories_t factories;
-    factories.podman_host = [&] { return std::make_unique<observed_host_t>(command_failure, game); };
+    factories.podman_host = [&] { return std::make_unique<observed_host_t>(command_failure, worker_diagnostics, game); };
     auto created = create_production_controller_runtime(std::move(options), std::move(factories));
     ASSERT_EQ(created.status, controller_runtime_create_status_e::ready_enabled);
     auto controller = std::move(created.runtime);
@@ -230,6 +247,7 @@ namespace {
         (void) controller->reconcile();
         (void) controller->shutdown();
       }
+      if (!worker_diagnostics.empty()) RecordProperty("worker_diagnostics", worker_diagnostics);
       // Destroying these exact workers interrupts failed probe execs. Join only
       // after that boundary, including on every assertion/exception path.
       for (int index = 0; index < 2; ++index) if (games[index].joinable()) {
