@@ -9,7 +9,7 @@ import (
 
 func TestEncodedGameObservationRequiresCapturedDecodedMovingGame(t *testing.T) {
 	valid := encodedGameObservation{Source: "worker-capture", Encoder: "openh264", Width: 1920, Height: 1080,
-		EncodedFrames: 60, DecodedFrames: 60, SceneFrames: 60, ChangedFrames: 59, Keyframes: 2, EncodedBytes: 100000, MaxFrameBytes: 10000, Passed: true}
+		EncodedFrames: 60, DecodedFrames: 60, SceneFrames: 60, MotionFrames: 59, Keyframes: 2, EncodedBytes: 100000, MaxFrameBytes: 10000, Passed: true}
 	content, _ := json.Marshal(valid)
 	if got, err := parseEncodedGameObservation(content, 1920, 1080); err != nil || got != valid {
 		t.Fatalf("valid observation: %+v %v", got, err)
@@ -25,7 +25,7 @@ func TestEncodedGameObservationRequiresCapturedDecodedMovingGame(t *testing.T) {
 		{"missing encoded frames", func(v *encodedGameObservation) { v.EncodedFrames = 59 }},
 		{"missing decoded frames", func(v *encodedGameObservation) { v.DecodedFrames = 59 }},
 		{"empty scene", func(v *encodedGameObservation) { v.SceneFrames = 0 }},
-		{"frozen scene", func(v *encodedGameObservation) { v.ChangedFrames = 0 }},
+		{"frozen scene", func(v *encodedGameObservation) { v.MotionFrames = 0 }},
 		{"no keyframe", func(v *encodedGameObservation) { v.Keyframes = 0 }},
 		{"oversized frame", func(v *encodedGameObservation) { v.MaxFrameBytes = 16*1024*1024 + 1 }},
 		{"impossible byte total", func(v *encodedGameObservation) { v.EncodedBytes = 1 }},

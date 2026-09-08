@@ -32,7 +32,7 @@ struct encoded_stats {
   size_t maximum;
   gboolean failed;
 };
-struct synthetic_source { unsigned width, height, frame; gboolean empty; };
+struct synthetic_source { unsigned width, height, frame; gboolean empty, frozen; };
 
 static GstPadProbeReturn encoded_buffer(GstPad *pad, GstPadProbeInfo *info, gpointer opaque) {
   (void)pad;
@@ -69,7 +69,7 @@ static void synthetic_frame(GstAppSrc *source, guint requested, gpointer opaque)
     if (!state->empty) {
       if (x >= state->width * .035 && x < state->width * .047 && y >= state->height * .4 && y < state->height * .6) colour = 0x36dbc3;
       if (x >= state->width * .95 && x < state->width * .962 && y >= state->height * .4 && y < state->height * .6) colour = 0xef8c6b;
-      unsigned ball = state->width / 3 + state->frame * 2;
+      unsigned ball = state->width / 3 + (state->frozen ? 0 : state->frame * 2);
       if (x >= ball && x < ball + 12 && y >= state->height / 2 && y < state->height / 2 + 12) colour = 0xf1f4f8;
     }
     size_t offset = ((size_t)y * state->width + x) * 3;
@@ -82,9 +82,13 @@ static void synthetic_frame(GstAppSrc *source, guint requested, gpointer opaque)
   (void)gst_app_src_push_buffer(source, buffer);
 }
 
-static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height, uint64_t *hash) {
+struct scene_observation { gboolean found; double ball_x, ball_y; };
+/* FALSE means malformed decoded video and is fatal, even if earlier frames
+ * matched. A valid frame without the expected scene is a separate result. */
+static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height, struct scene_observation *scene) {
   GstVideoInfo info;
   GstVideoFrame frame;
+  *scene = (struct scene_observation){0};
   if (!gst_video_info_from_caps(&info, gst_sample_get_caps(sample)) ||
       GST_VIDEO_INFO_FORMAT(&info) != GST_VIDEO_FORMAT_RGB ||
       GST_VIDEO_INFO_WIDTH(&info) != (int)width || GST_VIDEO_INFO_HEIGHT(&info) != (int)height ||
@@ -92,8 +96,9 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
   const int stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
   if (stride < (int)width * 3) { gst_video_frame_unmap(&frame); return FALSE; }
   const unsigned char *pixels = GST_VIDEO_FRAME_PLANE_DATA(&frame, 0);
-  unsigned teal = 0, orange = 0, dark = 0, total = 0;
-  uint64_t digest = UINT64_C(14695981039346656037);
+  unsigned teal = 0, orange = 0, dark = 0, total = 0, white = 0;
+  unsigned min_x = width, min_y = height, max_x = 0, max_y = 0;
+  uint64_t sum_x = 0, sum_y = 0;
   for (unsigned y = 0; y < height; y += 2) for (unsigned x = 0; x < width; x += 2) {
     const unsigned char *p = pixels + (size_t)y * stride + (size_t)x * 3;
     ++total;
@@ -102,11 +107,22 @@ static gboolean inspect_scene(GstSample *sample, unsigned width, unsigned height
         p[0] > 20 && p[0] < 95 && p[1] > 175 && p[1] < 250 && p[2] > 150 && p[2] < 235) ++teal;
     if (x > width * .92 && x < width * .99 && y > height * .05 &&
         p[0] > 195 && p[1] > 100 && p[1] < 185 && p[2] > 55 && p[2] < 155) ++orange;
-    digest ^= ((unsigned)p[0] << 16) | ((unsigned)p[1] << 8) | p[2]; digest *= UINT64_C(1099511628211);
+    /* Exclude the HUD and recognize the compact white ball. Lossy codec
+     * variation in a stationary scene must not count as game motion. */
+    if (x > width * .02 && x < width * .98 && y > height * .08 && y < height * .99 &&
+        p[0] > 195 && p[1] > 195 && p[2] > 195) {
+      ++white; sum_x += x; sum_y += y;
+      if (x < min_x) min_x = x;
+      if (x > max_x) max_x = x;
+      if (y < min_y) min_y = y;
+      if (y > max_y) max_y = y;
+    }
   }
   gst_video_frame_unmap(&frame);
-  *hash = digest;
-  return teal >= total / 1000 && orange >= total / 1000 && dark >= total / 2;
+  scene->found = teal >= total / 1000 && orange >= total / 1000 && dark >= total / 2 &&
+    white >= 6 && white <= 100 && max_x - min_x <= 20 && max_y - min_y <= 20;
+  if (scene->found) { scene->ball_x = (double)sum_x / white; scene->ball_y = (double)sum_y / white; }
+  return TRUE;
 }
 
 static unsigned dimension(const char *text) {
@@ -157,7 +173,7 @@ static gboolean open_gpu(const char *path, struct capture_gpu *gpu) {
 }
 
 int main(int argc, char **argv) {
-  const gboolean synthetic = argc == 2 && (!strcmp(argv[1], "--self-test") || !strcmp(argv[1], "--self-test-empty"));
+  const gboolean synthetic = argc == 2 && (!strcmp(argv[1], "--self-test") || !strcmp(argv[1], "--self-test-empty") || !strcmp(argv[1], "--self-test-frozen"));
   unsigned width = synthetic ? 640 : argc == 5 ? dimension(argv[2]) : 0;
   unsigned height = synthetic ? 480 : argc == 5 ? dimension(argv[3]) : 0;
   if (!width || !height) return 1;
@@ -197,22 +213,29 @@ int main(int argc, char **argv) {
     gst_element_set_context(pipeline, context); gst_context_unref(context);
   }
   GstElement *source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
-  struct synthetic_source synthetic_state = {width, height, 0, synthetic && !strcmp(argv[1], "--self-test-empty")};
+  struct synthetic_source synthetic_state = {width, height, 0,
+    synthetic && !strcmp(argv[1], "--self-test-empty"), synthetic && !strcmp(argv[1], "--self-test-frozen")};
   if (synthetic) {
     GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGB", "width", G_TYPE_INT, (int)width,
       "height", G_TYPE_INT, (int)height, "framerate", GST_TYPE_FRACTION, 60, 1, NULL);
     gst_app_src_set_caps(GST_APP_SRC(source), caps); gst_caps_unref(caps);
     GstAppSrcCallbacks callbacks = {.need_data = synthetic_frame};
     gst_app_src_set_callbacks(GST_APP_SRC(source), &callbacks, &synthetic_state, NULL);
-  } else g_object_set(source, "socket-path", argv[1], NULL);
+  } else {
+    /* Connect through the retained dentry, not a pathname that can be replaced
+     * and restored between identity checks. The FD lives through teardown. */
+    char socket_path[64];
+    snprintf(socket_path, sizeof(socket_path), "/proc/self/fd/%d", pinned);
+    g_object_set(source, "socket-path", socket_path, NULL);
+  }
   GstElement *encoded = gst_bin_get_by_name(GST_BIN(pipeline), "encoded");
   GstPad *pad = gst_element_get_static_pad(encoded, "src");
   struct encoded_stats stats = {0}; g_mutex_init(&stats.lock);
   gulong probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, encoded_buffer, &stats, NULL);
   GstElement *decoded = gst_bin_get_by_name(GST_BIN(pipeline), "decoded");
   GstBus *bus = gst_element_get_bus(pipeline);
-  unsigned frames = 0, scene_frames = 0, changes = 0;
-  uint64_t previous = 0;
+  unsigned frames = 0, scene_frames = 0, motion_frames = 0;
+  struct scene_observation anchor = {0};
   const gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
   gboolean failed = gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE;
   while (!failed && !stopping && g_get_monotonic_time() < deadline && frames < FRAME_COUNT) {
@@ -226,13 +249,28 @@ int main(int argc, char **argv) {
     if (failed) break;
     GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(decoded), 100 * GST_MSECOND);
     if (!sample) { if (gst_app_sink_is_eos(GST_APP_SINK(decoded))) break; continue; }
-    uint64_t hash = 0;
-    if (inspect_scene(sample, width, height, &hash)) ++scene_frames;
-    if (frames && hash && hash != previous) ++changes;
-    previous = hash; ++frames;
+    struct scene_observation scene;
+    if (!inspect_scene(sample, width, height, &scene)) failed = TRUE;
+    else {
+      ++frames;
+      if (scene.found) {
+        ++scene_frames;
+        const double dx = scene.ball_x - anchor.ball_x, dy = scene.ball_y - anchor.ball_y;
+        if (!anchor.found) anchor = scene;
+        else if (dx * dx + dy * dy >= 16) { ++motion_frames; anchor = scene; }
+      }
+    }
     gst_sample_unref(sample);
   }
-  if (gst_element_set_state(pipeline, GST_STATE_NULL) == GST_STATE_CHANGE_FAILURE) failed = TRUE;
+  if (gst_element_set_state(pipeline, GST_STATE_NULL) != GST_STATE_CHANGE_SUCCESS) {
+    /* This isolated process cannot prove streaming threads have stopped. Keep
+     * their probes, stack data, GL display and device alive until process exit;
+     * ordinary object cleanup here could race their remaining GPU access. */
+    const char message[] = "encoded pipeline teardown did not quiesce\n";
+    const ssize_t reported = write(STDERR_FILENO, message, sizeof(message) - 1);
+    (void)reported;
+    _exit(1);
+  }
   gst_pad_remove_probe(pad, probe);
   if (!synthetic) {
     struct stat after;
@@ -241,9 +279,9 @@ int main(int argc, char **argv) {
     if (close(pinned)) failed = TRUE;
   }
   if (!failed && !stopping && !stats.failed && frames == FRAME_COUNT && stats.frames == FRAME_COUNT &&
-      scene_frames >= 30 && changes >= 10 && stats.keyframes >= 1 && stats.bytes > 0) result = 0;
-  printf("{\"source\":\"%s\",\"encoder\":\"openh264\",\"width\":%u,\"height\":%u,\"encoded_frames\":%u,\"decoded_frames\":%u,\"scene_frames\":%u,\"changed_frames\":%u,\"keyframes\":%u,\"encoded_bytes\":%" PRIu64 ",\"max_frame_bytes\":%zu,\"passed\":%s}\n",
-    synthetic ? "synthetic" : "worker-capture", width, height, stats.frames, frames, scene_frames, changes,
+      scene_frames >= 30 && motion_frames >= 10 && stats.keyframes >= 1 && stats.bytes > 0) result = 0;
+  printf("{\"source\":\"%s\",\"encoder\":\"openh264\",\"width\":%u,\"height\":%u,\"encoded_frames\":%u,\"decoded_frames\":%u,\"scene_frames\":%u,\"motion_frames\":%u,\"keyframes\":%u,\"encoded_bytes\":%" PRIu64 ",\"max_frame_bytes\":%zu,\"passed\":%s}\n",
+    synthetic ? "synthetic" : "worker-capture", width, height, stats.frames, frames, scene_frames, motion_frames,
     stats.keyframes, stats.bytes, stats.maximum, result ? "false" : "true");
   gst_object_unref(bus); gst_object_unref(decoded); gst_object_unref(pad); gst_object_unref(encoded); gst_object_unref(source);
   gst_object_unref(pipeline); g_mutex_clear(&stats.lock);

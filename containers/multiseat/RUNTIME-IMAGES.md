@@ -185,10 +185,14 @@ Its fixed `physical-game-probe media <token>` operation imports the allocated
 raw-frame socket through a GBM/EGL context created from the allocated render
 node, explicitly encodes 60 frames with software OpenH264, and decodes them
 inside the worker. The bounded probe checks both Pong paddles, background and
-changing decoded pixels. It rejects an empty or frozen scene, incorrect frame
+visible ball displacement, including another observation after the other worker
+stops. It rejects an empty or frozen scene, invalid geometry in any frame, incorrect frame
 counts, missing keyframes and oversized output. Build-time synthetic codec
 checks are labeled separately and cannot satisfy the physical observation.
-The probe preserves GPU ownership until its pipeline and frames retire.
+The probe connects through a retained socket identity. Its health checks and
+codec process share one deadline. It preserves GPU ownership until its pipeline
+and frames retire; unproven teardown terminates the isolated probe process
+without releasing resources that remaining streaming threads could still use.
 
 This operation neither attaches media IPC nor delivers packets to a client.
 It does not advertise NVENC support, measure input-to-photon latency or enable
