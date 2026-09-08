@@ -237,6 +237,14 @@ int main(int argc, char **argv) {
   g_setenv("GST_GL_API", "gles2", TRUE);
   GError *error = NULL;
   gst_init(NULL, NULL);
+  /* unixfdsrc 1.26 deserializes only registered meta implementations. Register
+   * before receiving any frame so the producer's DMA-BUF offsets and strides
+   * survive the process boundary; caps cannot describe a non-linear layout. */
+  if (!gst_video_meta_get_info()) {
+    if (pinned >= 0) close(pinned);
+    gst_deinit();
+    fprintf(stderr, "capture video metadata registration unavailable\n"); return 1;
+  }
   const char *head = synthetic ? "appsrc name=source format=time ! videoconvert ! " :
     "unixfdsrc name=source num-buffers=60 ! glupload name=upload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=external-oes ! "
     "glcolorconvert name=convert ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! gldownload name=download ! videoconvert ! ";
