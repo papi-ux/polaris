@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <atomic>
 #include <bitset>
 #include <filesystem>
 #include <functional>
@@ -853,6 +854,12 @@ namespace platf {
     uint16_t target_port;
     boost::asio::ip::address &source_address;
 
+    // Per-session cancellation; the UDP socket is shared by other streams.
+    std::shared_ptr<const std::atomic_bool> cancellation;
+    bool cancelled() const noexcept {
+      return cancellation && cancellation->load(std::memory_order_acquire);
+    }
+
     /**
      * @brief Returns a payload buffer descriptor for the given payload offset.
      * @param offset The offset in the total payload data (bytes).
@@ -885,6 +892,10 @@ namespace platf {
     boost::asio::ip::address &target_address;
     uint16_t target_port;
     boost::asio::ip::address &source_address;
+    std::shared_ptr<const std::atomic_bool> cancellation;
+    bool cancelled() const noexcept {
+      return cancellation && cancellation->load(std::memory_order_acquire);
+    }
   };
 
   bool send(send_info_t &send_info);

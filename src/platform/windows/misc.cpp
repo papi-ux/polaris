@@ -51,6 +51,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/send_wait.h"
 #include "src/utility.h"
 
 // UDP_SEND_MSG_SIZE was added in the Windows 10 20H1 SDK
@@ -1406,6 +1407,7 @@ namespace platf {
   // Use UDP segmentation offload if it is supported by the OS. If the NIC is capable, this will use
   // hardware acceleration to reduce CPU usage. Support for USO was introduced in Windows 10 20H1.
   bool send_batch(batched_send_info_t &send_info) {
+    if (send_info.cancelled()) return false;
     WSAMSG msg;
 
     // Convert the target address into a SOCKADDR
@@ -1504,11 +1506,22 @@ namespace platf {
     msg.Control.len = cmbuflen;
 
     // If USO is not supported, this will fail and the caller will fall back to unbatched sends.
-    DWORD bytes_sent;
-    return WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR;
+    for (;;) {
+      if (send_info.cancelled()) return false;
+      DWORD bytes_sent;
+      if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR) {
+        return true;
+      }
+      const auto error = WSAGetLastError();
+      if ((error != WSAEWOULDBLOCK && error != WSAEINTR) ||
+          !send_wait::writable((SOCKET) send_info.native_socket, send_info.cancellation)) {
+        return false;
+      }
+    }
   }
 
   bool send(send_info_t &send_info) {
+    if (send_info.cancelled()) return false;
     WSAMSG msg;
 
     // Convert the target address into a SOCKADDR
@@ -1578,14 +1591,18 @@ namespace platf {
 
     msg.Control.len = cmbuflen;
 
-    DWORD bytes_sent;
-    if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) == SOCKET_ERROR) {
-      auto winerr = WSAGetLastError();
-      BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr;
-      return false;
+    for (;;) {
+      if (send_info.cancelled()) return false;
+      DWORD bytes_sent;
+      if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR) {
+        return true;
+      }
+      const auto error = WSAGetLastError();
+      if ((error != WSAEWOULDBLOCK && error != WSAEINTR) ||
+          !send_wait::writable((SOCKET) send_info.native_socket, send_info.cancellation)) {
+        return false;
+      }
     }
-
-    return true;
   }
 
   class qos_t: public deinit_t {

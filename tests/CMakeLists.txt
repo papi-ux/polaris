@@ -269,6 +269,7 @@ set(TEST_STREAM_SOURCES
 
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_STREAM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_stream_send_cancellation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_activation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_runtime.cpp
@@ -627,6 +628,10 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(test_polaris_stream PRIVATE
+            "-Wl,--wrap=sendmsg" "-Wl,--wrap=sendmmsg" "-Wl,--wrap=poll")
+    endif()
 
     configure_polaris_full_test_target(test_polaris_video
         ${TEST_VIDEO_SOURCES}
