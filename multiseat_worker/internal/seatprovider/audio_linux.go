@@ -326,6 +326,21 @@ func probeAudioGraph(
 	return nil
 }
 
+func stopAudioChildren(children []*managedChild, deadline time.Time) error {
+	var result error
+	for index, child := range children {
+		if child != nil {
+			budget := time.Until(deadline) / time.Duration(2*(len(children)-index))
+			if budget <= 0 {
+				result = errors.Join(result, child.killWithoutWaiting())
+			} else {
+				result = errors.Join(result, child.stop(budget))
+			}
+		}
+	}
+	return result
+}
+
 func runAudio(
 	parent context.Context,
 	request seatruntime.Request,
@@ -383,14 +398,7 @@ func runAudio(
 		// Share the termination budget as the number of supervised children
 		// grows. Preserve artifacts whenever any dependent lifetime is unproven.
 		deadline := time.Now().Add(2 * options.stopTimeout)
-		children := []*managedChild{pulse, policy, pipeWire}
-		var stopError error
-		for index, child := range children {
-			if child != nil {
-				budget := time.Until(deadline) / time.Duration(2*(len(children)-index))
-				stopError = errors.Join(stopError, child.stop(budget))
-			}
-		}
+		stopError := stopAudioChildren([]*managedChild{pulse, policy, pipeWire}, deadline)
 		if stopError != nil {
 			result = errors.Join(result, stopError)
 			return

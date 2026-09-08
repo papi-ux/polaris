@@ -215,6 +215,30 @@ func (child *managedChild) stop(timeout time.Duration) error {
 	}
 }
 
+// Exhausting a shared wait budget must never skip the termination request for
+// a later owned child. Process.Kill retains exec's process identity; the caller
+// must preserve artifacts unless the wait goroutine has also proved exit.
+func (child *managedChild) killWithoutWaiting() error {
+	if child == nil || child.command == nil || child.command.Process == nil || child.done == nil {
+		return errors.New("runtime provider child is invalid")
+	}
+	defer child.closePIDOnce.Do(func() {
+		if child.pidFD != nil {
+			_ = child.pidFD.Close()
+		}
+	})
+	if child.exited() {
+		return nil
+	}
+	if err := child.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+		return errors.New("runtime provider child kill failed")
+	}
+	if child.exited() {
+		return nil
+	}
+	return errors.New("runtime provider child exit is unproven after its wait budget expired")
+}
+
 type boundedOutput struct {
 	buffer  bytes.Buffer
 	maximum int

@@ -6,9 +6,39 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestAudioPolicyExpiredStopBudgetStillTerminatesEveryChild(t *testing.T) {
+	var children []*managedChild
+	for range 3 {
+		child, reader := startProviderChildForTest(t, "ignore-term")
+		defer reader.Close()
+		defer child.stop(time.Second)
+		children = append(children, child)
+	}
+	started := time.Now()
+	_ = stopAudioChildren(children, time.Now().Add(-time.Second))
+	if time.Since(started) > time.Second {
+		t.Fatal("expired budget performed blocking waits")
+	}
+	for index, child := range children {
+		select {
+		case <-child.done:
+			status, ok := child.command.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("child %d was not killed: %v", index, status)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("expired budget skipped termination of child %d", index)
+		}
+		if _, err := child.pidFD.Stat(); err == nil {
+			t.Fatalf("child %d retained its pidfd", index)
+		}
+	}
+}
 
 func TestAudioPolicySuccessfulProbeCannotOutliveCancellation(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
