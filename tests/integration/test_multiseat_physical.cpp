@@ -112,7 +112,7 @@ namespace {
           std::erase(admitted, "--rm");
         }
         if (std::find(admitted.begin(), admitted.end(), "rm") != admitted.end() && !admitted.empty()) {
-          const auto inspected = host_.run({admitted.front(), "--remote=false", "inspect", "--format={{.LogPath}}", admitted.back()}, 2s, 4096);
+          const auto inspected = host_.run({admitted.front(), "--remote=false", "inspect", "--format={{.HostConfig.LogConfig.Path}}", admitted.back()}, 2s, 4096);
           if (inspected.exit_status == 0) {
             auto path = inspected.output;
             while (!path.empty() && std::isspace(static_cast<unsigned char>(path.back()))) path.pop_back();
@@ -247,6 +247,21 @@ namespace {
         (void) controller->reconcile();
         (void) controller->shutdown();
       }
+      if (game) {
+        // This diagnostic mode deliberately retains exited containers. They
+        // belong to this fixture even after the controller retires their seats.
+        observed_host_t diagnostic_host {command_failure, worker_diagnostics, true};
+        for (const auto &seat : seats) if (container_id_valid(seat.container_id)) {
+          const auto state = command({"inspect", "--format={{.State.Status}}", seat.container_id});
+          if (state.exit_status == 0) {
+            EXPECT_NE(state.output, "running\n") << "running worker required outer fallback";
+            const auto removed = diagnostic_host.run({executable, "--remote=false", "rm", "--force", "--", seat.container_id}, 5s, 65536);
+            EXPECT_EQ(removed.exit_status, 0);
+          }
+        }
+        const auto remaining = command({"ps", "--all", "--no-trunc", "--filter=label=io.polaris.multiseat.deployment="+deployment, "--format={{.ID}}"});
+        EXPECT_EQ(remaining.exit_status, 0); EXPECT_TRUE(remaining.output.empty());
+      }
       if (!worker_diagnostics.empty()) RecordProperty("worker_diagnostics", worker_diagnostics);
       // Destroying these exact workers interrupts failed probe execs. Join only
       // after that boundary, including on every assertion/exception path.
@@ -277,6 +292,11 @@ namespace {
       while (!candidate_id.empty() && std::isspace(static_cast<unsigned char>(candidate_id.back()))) candidate_id.pop_back();
       ASSERT_TRUE(container_id_valid(candidate_id));
       seat.container_id = std::move(candidate_id);
+      if (game) {
+        const auto state = command({"inspect", "--format={{.State.Status}}", seat.container_id});
+        ASSERT_EQ(state.exit_status, 0);
+        ASSERT_EQ(state.output, "running\n") << "worker exited before authenticated readiness";
+      }
     }
     ASSERT_NE(seats[0].container_id, seats[1].container_id);
     ASSERT_NE(seats[0].snapshot.resources.runtime_namespace, seats[1].snapshot.resources.runtime_namespace);
