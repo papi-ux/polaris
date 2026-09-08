@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <X11/Xatom.h>
 #include <gst/gst.h>
 #include <linux/input.h>
 #include <errno.h>
@@ -39,6 +40,8 @@ int main(int argc, char **argv) {
   Window window = XCreateSimpleWindow(display, RootWindow(display, screen), 0, 0, width, height, 0, 0, 0x101827);
   XStoreName(display, window, "Polaris Input Pong");
   XSelectInput(display, window, KeyPressMask | KeyReleaseMask | PointerMotionMask | StructureNotifyMask);
+  Atom input_state = XInternAtom(display, "_POLARIS_INPUT_STATE_V1", False);
+  unsigned long counters[6] = {1,0,0,0,0,(unsigned long)getpid()};
   Atom close_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
   XSetWMProtocols(display, window, &close_window, 1);
   GC gc = XCreateGC(display, window, 0, NULL);
@@ -62,16 +65,18 @@ int main(int argc, char **argv) {
       if (event.type == ClientMessage && (Atom)event.xclient.data.l[0] == close_window) stopping = 1;
       if (event.type == KeyPress || event.type == KeyRelease) {
         KeySym key = XLookupKeysym(&event.xkey, 0); int pressed = event.type == KeyPress;
+        if (pressed) ++counters[1];
         if (key == XK_Escape && pressed) stopping = 1;
         if (key == XK_Up || key == XK_w) up = pressed;
         if (key == XK_Down || key == XK_s) down = pressed;
       }
-      if (event.type == MotionNotify) paddle = (double)event.xmotion.y / height;
+      if (event.type == MotionNotify) { paddle = (double)event.xmotion.y / height; ++counters[2]; }
     }
     if (gamepad >= 0) {
       struct input_event events[64]; ssize_t bytes = read(gamepad, events, sizeof(events));
       if (bytes == 0 || (bytes < 0 && errno != EAGAIN && errno != EINTR) || (bytes > 0 && bytes % sizeof(events[0]))) { failed = 1; break; }
       for (size_t i = 0; bytes > 0 && i < (size_t)bytes / sizeof(events[0]); ++i) {
+        if (events[i].type == EV_KEY && events[i].code == BTN_SOUTH && events[i].value == 1) ++counters[3];
         if (events[i].type == EV_ABS && events[i].code == ABS_Y) axis = events[i].value;
         if (events[i].type == EV_SYN && events[i].code == SYN_DROPPED) { failed = 1; stopping = 1; }
       }
@@ -95,6 +100,8 @@ int main(int argc, char **argv) {
     XSetForeground(display, gc, 0xf1f4f8); XFillArc(display, window, gc, width*ball_x-6, height*ball_y-6, 12, 12, 0, 360*64);
     char text[128]; int length = snprintf(text, sizeof(text), "Returns: %d    Misses: %d    Move: arrows / W S / mouse / gamepad    Esc: quit", score, missed);
     if (length > 0 && length < (int)sizeof(text)) XDrawString(display, window, gc, 20, 25, text, length);
+    ++counters[4];
+    XChangeProperty(display,window,input_state,XA_CARDINAL,32,PropModeReplace,(unsigned char *)counters,6);
     XFlush(display);
     struct pollfd wait = {ConnectionNumber(display), POLLIN, 0}; poll(&wait, 1, 8);
   }
