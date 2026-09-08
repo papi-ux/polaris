@@ -80,7 +80,7 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
     cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
       /providers/test-encoded-game-check.c -o /out/test-encoded-game-check \
       -Wl,--wrap=gst_element_set_state -Wl,--wrap=gst_object_unref -Wl,--wrap=gst_pad_remove_probe \
-      -Wl,--wrap=g_mutex_clear -Wl,--wrap=eglTerminate -Wl,--wrap=gbm_device_destroy -Wl,--wrap=gst_app_sink_try_pull_sample \
+      -Wl,--wrap=g_mutex_clear -Wl,--wrap=eglTerminate -Wl,--wrap=gbm_device_destroy -Wl,--wrap=gst_app_sink_try_pull_sample -Wl,--wrap=gst_parse_launch \
       $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
     timeout 40s /out/test-encoded-game-check
 

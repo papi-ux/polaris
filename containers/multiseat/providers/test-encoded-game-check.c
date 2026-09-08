@@ -11,6 +11,78 @@ static int witness = -1;
 static GstStateChangeReturn forced_stop = GST_STATE_CHANGE_SUCCESS;
 static gboolean forbidden_cleanup, wrong_geometry;
 static unsigned pulled;
+static unsigned char serialized_layout[1024];
+static size_t serialized_layout_size;
+
+GstElement *__real_gst_parse_launch(const gchar *, GError **);
+GstElement *__wrap_gst_parse_launch(const gchar *description, GError **error) {
+  if (serialized_layout_size) {
+    /* Run at the actual receiver's startup boundary, before any pipeline
+     * element can accidentally register the missing implementation. */
+    GstBuffer *buffer = gst_buffer_new();
+    guint32 consumed = 0;
+    GstMeta *restored = gst_meta_deserialize(buffer, serialized_layout, serialized_layout_size, &consumed);
+    assert(restored && consumed == serialized_layout_size);
+    GstVideoMeta *layout = gst_buffer_get_video_meta(buffer);
+    assert(layout && layout->format == GST_VIDEO_FORMAT_NV12 && layout->width == 640 && layout->height == 480);
+    assert(layout->n_planes == 2 && layout->offset[0] == 64 && layout->offset[1] == 64 + 768 * 480);
+    assert(layout->stride[0] == 768 && layout->stride[1] == 768);
+    gst_buffer_unref(buffer);
+    serialized_layout_size = 0;
+    assert(write(witness, "M", 1) == 1);
+  }
+  return __real_gst_parse_launch(description, error);
+}
+
+/* Fork both peers before the parent initializes GStreamer. A sender in the
+ * receiver process would register GstVideoMeta and hide this regression. */
+static void serialized_video_layout(void) {
+  int wire[2]; assert(pipe2(wire, O_CLOEXEC) == 0);
+  pid_t sender = fork(); assert(sender >= 0);
+  if (sender == 0) {
+    close(wire[0]);
+    gst_init(NULL, NULL);
+    GstBuffer *buffer = gst_buffer_new();
+    gsize offsets[GST_VIDEO_MAX_PLANES] = {64, 64 + 768 * 480};
+    gint strides[GST_VIDEO_MAX_PLANES] = {768, 768};
+    GstVideoMeta *meta = gst_buffer_add_video_meta_full(buffer, GST_VIDEO_FRAME_FLAG_NONE,
+      GST_VIDEO_FORMAT_NV12, 640, 480, 2, offsets, strides);
+    assert(meta);
+    GByteArray *bytes = g_byte_array_new();
+    assert(gst_meta_serialize_simple(&meta->meta, bytes));
+    assert(bytes->len > 0 && bytes->len <= sizeof(serialized_layout));
+    assert(write(wire[1], bytes->data, bytes->len) == (ssize_t)bytes->len);
+    g_byte_array_unref(bytes); gst_buffer_unref(buffer); gst_deinit();
+    close(wire[1]); _exit(0);
+  }
+  close(wire[1]);
+  for (;;) {
+    unsigned char chunk[1024];
+    ssize_t count = read(wire[0], chunk, sizeof(chunk));
+    assert(count >= 0);
+    if (!count) break;
+    assert((size_t)count <= sizeof(serialized_layout) - serialized_layout_size);
+    memcpy(serialized_layout + serialized_layout_size, chunk, (size_t)count);
+    serialized_layout_size += (size_t)count;
+  }
+  close(wire[0]); int status = 0;
+  assert(waitpid(sender, &status, 0) == sender && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  assert(serialized_layout_size);
+  int observed[2]; assert(pipe2(observed, O_CLOEXEC) == 0);
+  pid_t receiver = fork(); assert(receiver >= 0);
+  if (receiver == 0) {
+    close(observed[0]); witness = observed[1];
+    char *arguments[] = {"test-encoded-game-check", "--self-test", NULL};
+    _exit(encoded_game_main(2, arguments));
+  }
+  close(observed[1]);
+  assert(waitpid(receiver, &status, 0) == receiver);
+  char marker = 0;
+  assert(read(observed[0], &marker, 1) == 1 && marker == 'M');
+  assert(read(observed[0], &marker, 1) == 0); close(observed[0]);
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  serialized_layout_size = 0;
+}
 
 GstStateChangeReturn __real_gst_element_set_state(GstElement *, GstState);
 GstStateChangeReturn __wrap_gst_element_set_state(GstElement *element, GstState state) {
@@ -115,6 +187,7 @@ static void pinned_socket_replacement(void) {
 }
 
 int main(void) {
+  serialized_video_layout();
   pinned_socket_replacement();
   codec_failure(GST_STATE_CHANGE_FAILURE, FALSE);
   codec_failure(GST_STATE_CHANGE_ASYNC, FALSE);
