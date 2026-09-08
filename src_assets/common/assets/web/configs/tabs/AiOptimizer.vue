@@ -123,6 +123,31 @@ const providerOptions = [
     ]
   },
   {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    eyebrowKey: 'config.ai_provider_deepseek_eyebrow',
+    summaryKey: 'config.ai_provider_deepseek_summary',
+    defaultModel: 'deepseek-v4-flash',
+    defaultBaseUrl: 'https://api.deepseek.com',
+    defaultAuth: 'api_key',
+    defaultTimeout: 30000,
+    authModes: ['api_key'],
+    accent: 'border-info/30 bg-info/8 text-info-bright',
+    pill: 'text-info-bright border-info/30',
+    keyPlaceholder: 'sk-...',
+    keyHintKey: 'config.ai_provider_deepseek_key_hint',
+    profiles: [
+      {
+        id: 'deepseek-default',
+        name: 'DeepSeek API',
+        descriptionKey: 'config.ai_profile_deepseek_default_desc',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com',
+        authMode: 'api_key'
+      }
+    ]
+  },
+  {
     id: 'local',
     name: 'Local',
     eyebrowKey: 'config.ai_provider_local_eyebrow',
@@ -486,7 +511,7 @@ function applyProviderProfile(profile) {
   config.value.ai_model = profile.model || currentProvider.value.defaultModel
   config.value.ai_base_url = profile.baseUrl || currentProvider.value.defaultBaseUrl
   config.value.ai_auth_mode = profile.authMode || currentProvider.value.defaultAuth
-  config.value.ai_timeout_ms = profile.timeoutMs || (currentProvider.value.id === 'local' ? 60000 : 5000)
+  config.value.ai_timeout_ms = profile.timeoutMs || providerDefaultTimeout(currentProvider.value)
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
   if (config.value.ai_auth_mode === 'none') {
@@ -534,11 +559,11 @@ function syncProviderDefaults(previousProviderId) {
     }
   }
 
-  const previousDefaultTimeout = previousProvider?.id === 'local' ? 60000 : 5000
+  const previousDefaultTimeout = providerDefaultTimeout(previousProvider)
   const configuredTimeout = Number(config.value.ai_timeout_ms)
   const legacyLocalDefault = provider.id === 'local' && configuredTimeout === 5000
   if (!configuredTimeout || legacyLocalDefault || (previousProvider && configuredTimeout === previousDefaultTimeout)) {
-    config.value.ai_timeout_ms = provider.id === 'local' ? 60000 : 5000
+    config.value.ai_timeout_ms = providerDefaultTimeout(provider)
   }
 
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
@@ -546,6 +571,10 @@ function syncProviderDefaults(previousProviderId) {
   if (config.value.ai_auth_mode === 'none') {
     config.value.ai_api_key = ''
   }
+}
+
+function providerDefaultTimeout(provider) {
+  return provider?.defaultTimeout || (provider?.id === 'local' ? 60000 : 5000)
 }
 
 async function refreshModelCatalog({ silent = false } = {}) {
@@ -566,6 +595,12 @@ function scheduleModelRefresh() {
 }
 
 watch(() => config.value.ai_provider, (nextProvider, previousProvider) => {
+  // Never auto-discover models at a newly selected provider using a key that
+  // was entered or saved for the previous provider.
+  if (previousProvider && nextProvider !== previousProvider) {
+    config.value.ai_api_key = ''
+    config.value.clear_ai_api_key = true
+  }
   syncProviderDefaults(previousProvider)
 }, { immediate: true })
 
@@ -577,6 +612,7 @@ watch(() => config.value.ai_auth_mode, (nextMode) => {
 })
 
 watch(() => config.value.ai_api_key, (nextKey, previousKey) => {
+  if (nextKey) config.value.clear_ai_api_key = false
   if (!!nextKey !== !!previousKey) {
     scheduleModelRefresh()
   }
