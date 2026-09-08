@@ -17,10 +17,12 @@ type launcherSession struct {
 	display                string
 	pid                    int
 	width, height, refresh uint32
+	cookie                 processCookie
+	lifetime               *processLifetime
 }
 
-func gamescopeLauncherRecord(info gamescopeReadyInfo, request seatruntime.Request, pid int) []byte {
-	return []byte("POLARIS-GAMESCOPE-SESSION/2\n" +
+func gamescopeLauncherRecord(info gamescopeReadyInfo, request seatruntime.Request, pid int, cookie processCookie) []byte {
+	return []byte("POLARIS-GAMESCOPE-SESSION/3\n" +
 		"DISPLAY=" + info.displayName + "\n" +
 		"STEAM_GAME_DISPLAY_0=" + info.displayName + "\n" +
 		"WAYLAND_DISPLAY=" + request.WaylandSocket + "\n" +
@@ -28,15 +30,17 @@ func gamescopeLauncherRecord(info gamescopeReadyInfo, request seatruntime.Reques
 		"PID=" + strconv.Itoa(pid) + "\n" +
 		"WIDTH=" + strconv.FormatUint(uint64(request.DisplayWidth), 10) + "\n" +
 		"HEIGHT=" + strconv.FormatUint(uint64(request.DisplayHeight), 10) + "\n" +
-		"REFRESH_MILLIHZ=" + strconv.FormatUint(uint64(request.DisplayRefreshMillihertz), 10) + "\n")
+		"REFRESH_MILLIHZ=" + strconv.FormatUint(uint64(request.DisplayRefreshMillihertz), 10) + "\n" +
+		"PROCESS_DEVICE=" + strconv.FormatUint(cookie.device, 10) + "\n" +
+		"PROCESS_INODE=" + strconv.FormatUint(cookie.inode, 10) + "\n")
 }
 
 func parseLauncherSession(content []byte, wayland string) (launcherSession, error) {
 	var result launcherSession
 	lines := strings.Split(string(content), "\n")
-	if len(lines) != 10 || lines[0] != "POLARIS-GAMESCOPE-SESSION/2" ||
+	if len(lines) != 12 || lines[0] != "POLARIS-GAMESCOPE-SESSION/3" ||
 		lines[1] != "DISPLAY=:0" || lines[2] != "STEAM_GAME_DISPLAY_0=:0" ||
-		lines[3] != "WAYLAND_DISPLAY="+wayland || lines[4] != "GAMESCOPE_WAYLAND_DISPLAY="+wayland || lines[9] != "" {
+		lines[3] != "WAYLAND_DISPLAY="+wayland || lines[4] != "GAMESCOPE_WAYLAND_DISPLAY="+wayland || lines[11] != "" {
 		return result, errors.New("launcher session record is invalid")
 	}
 	values := make([]uint32, 4)
@@ -53,7 +57,16 @@ func parseLauncherSession(content []byte, wayland string) (launcherSession, erro
 	if values[0] <= 1 || values[1] > 16384 || values[2] > 16384 || values[3] < 1000 || values[3] > 1000000 {
 		return result, errors.New("launcher display allocation is invalid")
 	}
-	return launcherSession{display: ":0", pid: int(values[0]), width: values[1], height: values[2], refresh: values[3]}, nil
+	var cookie [2]uint64
+	for i, prefix := range []string{"PROCESS_DEVICE=", "PROCESS_INODE="} {
+		text := strings.TrimPrefix(lines[9+i], prefix)
+		value, err := strconv.ParseUint(text, 10, 64)
+		if err != nil || value == 0 || strconv.FormatUint(value, 10) != text || !strings.HasPrefix(lines[9+i], prefix) {
+			return result, errors.New("launcher process cookie is invalid")
+		}
+		cookie[i] = value
+	}
+	return launcherSession{display: ":0", pid: int(values[0]), width: values[1], height: values[2], refresh: values[3], cookie: processCookie{cookie[0], cookie[1]}}, nil
 }
 
 func readLauncherSession(parent context.Context, request seatruntime.Request, runtime *runtimeDirectory, options providerOptions) (launcherSession, error) {
@@ -72,6 +85,16 @@ func readLauncherSession(parent context.Context, request seatruntime.Request, ru
 	if err != nil {
 		return result, err
 	}
+	lifetime, err := retainProcessLifetime(result.pid, -1, result.cookie)
+	if err != nil {
+		return result, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			lifetime.close()
+		}
+	}()
 	if err := probeWaylandDisplay(parent, filepath.Join(runtime.path, request.WaylandSocket), waylandProbeExpectation{
 		width: result.width, height: result.height, refresh: result.refresh, peerPID: result.pid, peerUID: options.runtimeOwnerUID,
 	}, options.probeTimeout); err != nil {
@@ -97,5 +120,13 @@ func readLauncherSession(parent context.Context, request seatruntime.Request, ru
 	if err != nil || !sameIdentity(current, identity) {
 		return result, errors.New("launcher session was replaced")
 	}
-	return result, runtime.verify()
+	if err := runtime.verify(); err != nil {
+		return result, err
+	}
+	if err := lifetime.verify(); err != nil {
+		return result, err
+	}
+	result.lifetime = lifetime
+	success = true
+	return result, nil
 }

@@ -49,7 +49,7 @@ with the Gamescope profile. This small offline X11 game exercises keyboard,
 pointer, optional gamepad, and private Pulse audio without launcher accounts.
 Its executable is compiled against each profile's locked X11/GStreamer ABI;
 image checks resolve its ELF dependencies and the SBOM records its source hash.
-The launcher validates the allocated display protocols and input identities,
+The launcher validates the allocated display protocols, retained compositor process lifetime, and input identities,
 retains the private profile, and owns its entire descendant process tree,
 including helpers that detach into another session.
 
@@ -405,3 +405,18 @@ The worker UID is passed explicitly, because an image `USER` can override
 Podman's implicit `keep-id` choice. Live inventory requires matching Config.User
 and OCI process.user.uid evidence. Use a short private IPC parent for the
 physical harness so both generated Unix socket paths fit Linux's 108-byte limit.
+
+Experimental compositor input uses the fixed native `capture-input` producer.
+The Go provider verifies and passes already-open, read-only keyboard and mouse
+descriptors in a fixed order. A bounded native decoder sends the pinned plugin's
+existing input events. It performs no device discovery, device writes, or input
+ioctls and needs no host udev metadata. The initial mapping covers keyboard,
+relative/absolute pointer, buttons, and wheel; gamepads remain direct workload
+readers. Touch and pen allocations fail this experimental admission until their
+mappings are implemented. Source retirement, dropped kernel events, excessive
+input backlog, or stalled capture fails the provider and tears down its stream.
+
+A post-creation X11 directory failure without a retained inode leaves cleanup
+unproven. Startup fails and the worker's private tmpfs must be destroyed before
+reuse. There is no same-worker retry path; unidentified or replacement paths
+must never be removed by provider cleanup.

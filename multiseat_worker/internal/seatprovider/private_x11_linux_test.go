@@ -97,3 +97,37 @@ func TestIdentityReadRejectsFIFOReplacementWithoutBlocking(t *testing.T) {
 		t.Fatal("replacement FIFO blocked launcher admission")
 	}
 }
+
+func TestPrivateX11PostCreateFailureRetainsUnprovenIdentity(t *testing.T) {
+	for _, failOpen := range []bool{true, false} {
+		options := privateX11Options(t)
+		openat := func(fd int, name string, flags int, mode uint32) (int, error) {
+			if !failOpen {
+				return syscall.Openat(fd, name, flags, mode)
+			}
+			if err := os.Rename(options.x11SocketDirectory, options.x11SocketDirectory+"-original"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(options.x11SocketDirectory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			return -1, syscall.EACCES
+		}
+		fstat := func(fd int, status *syscall.Stat_t) error { return syscall.EIO }
+		_, cleanup, err := preparePrivateX11WithFilesystem(options, openat, fstat)
+		if err == nil || cleanup != nil {
+			t.Fatal("unproven post-create cleanup accepted")
+		}
+		if _, err := os.Stat(options.x11SocketDirectory); err != nil {
+			t.Fatal("unidentified namespace removed", err)
+		}
+		if failOpen {
+			if _, err := os.Stat(options.x11SocketDirectory + "-original"); err != nil {
+				t.Fatal("original namespace removed", err)
+			}
+		}
+		if _, _, err := preparePrivateX11(options); err == nil {
+			t.Fatal("unsafe same-worker reuse allowed")
+		}
+	}
+}

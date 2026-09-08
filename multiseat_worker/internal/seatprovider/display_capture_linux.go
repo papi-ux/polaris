@@ -699,6 +699,8 @@ func runDisplayCapture(
 		}
 	}
 	var inputs *seatinput.Set
+	var inputFiles []*os.File
+	executable := options.gstLaunchPath
 	arguments := displayProducerArguments(request, mediaSocket, options.softwareDisplay)
 	if request.InputSeat != "" {
 		inputs, err = seatinput.Open(seatinput.Directory, request.InputSeat)
@@ -706,17 +708,28 @@ func runDisplayCapture(
 			return err
 		}
 		defer inputs.Close()
-		// Insert properties before the first pipeline separator. Every value
-		// comes from verified fixed aliases, never from provider catalog argv.
-		arguments = append(append(append([]string{}, arguments[:3]...), inputs.CompositorArguments()...), arguments[3:]...)
+		inputFiles, err = inputs.CompositorFiles()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			for _, file := range inputFiles {
+				_ = file.Close()
+			}
+		}()
+		executable = "/usr/libexec/polaris-seat/capture-input"
+		// The native producer receives keyboard/relative/absolute FDs 4/5/6.
+		// It uses existing plugin events; libinput device discovery is absent.
+		arguments = append([]string{strconv.FormatUint(uint64(request.DisplayWidth), 10),
+			strconv.FormatUint(uint64(request.DisplayHeight), 10), "--", "waylanddisplaysrc", "name=display"}, arguments[2:]...)
 	}
 	environment := displayEnvironment(options)
 	child, err := startManagedChildWithUmask(
-		options.gstLaunchPath,
+		executable,
 		options.executableOwnerUID,
 		arguments,
 		environment,
-		nil,
+		inputFiles,
 		0o077,
 	)
 	if err != nil {

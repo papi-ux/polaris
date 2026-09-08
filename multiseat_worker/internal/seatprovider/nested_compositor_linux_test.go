@@ -526,7 +526,7 @@ func TestNestedCompositorPublishesOnlyAfterWaylandX11AndGeometry(t *testing.T) {
 	}
 	wantSession := gamescopeLauncherRecord(
 		gamescopeReadyInfo{displayNumber: 0, displayName: ":0", waylandName: gamescopeWaylandSocket},
-		request, parsedSession.pid,
+		request, parsedSession.pid, parsedSession.cookie,
 	)
 	if err != nil || !slices.Equal(sessionContent, wantSession) {
 		stopRealProvider(t, nested)

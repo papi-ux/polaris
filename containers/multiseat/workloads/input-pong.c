@@ -31,6 +31,8 @@ int main(int argc, char **argv) {
   if (!width || !height || !getenv("PULSE_SINK") || !getenv("PULSE_SERVER")) return 1;
   struct sigaction action = {0}; action.sa_handler = stop;
   sigaction(SIGTERM, &action, NULL); sigaction(SIGINT, &action, NULL);
+  int gamepad = open("/dev/input/polaris-gamepad-0", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+  if (gamepad < 0 && errno != ENOENT) return 1;
   Display *display = XOpenDisplay(NULL);
   if (!display) return 1;
   const int screen = DefaultScreen(display);
@@ -50,8 +52,6 @@ int main(int argc, char **argv) {
   gst_object_unref(output);
   if (gst_element_set_state(audio, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) { gst_object_unref(audio); XCloseDisplay(display); return 1; }
   GstBus *bus = gst_element_get_bus(audio);
-  int gamepad = open("/dev/input/polaris-gamepad-0", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
-  if (gamepad < 0 && errno != ENOENT) stopping = 1;
   double paddle = .5, opponent = .5, ball_x = .5, ball_y = .5, vx = .36, vy = .23, last = now();
   int up = 0, down = 0, axis = 0, score = 0, missed = 0, failed = 0;
   while (!stopping) {

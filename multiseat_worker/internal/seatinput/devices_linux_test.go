@@ -142,14 +142,22 @@ func TestOpenRejectsUnsafeNamespaceAndNonDevicesWithoutLeaking(t *testing.T) {
 	}
 }
 
-func TestInputPropertiesAreLiteralAndExcludeGamepads(t *testing.T) {
+func TestCompositorDescriptorRolesAreOrderedAndUnsupportedRolesRejected(t *testing.T) {
 	s := &Set{path: Directory}
-	for _, name := range []string{"polaris-keyboard", "polaris-mouse-relative", "polaris-mouse-absolute", "polaris-gamepad-0"} {
+	for _, name := range []string{"polaris-mouse-absolute", "polaris-gamepad-0", "polaris-keyboard", "polaris-mouse-relative"} {
 		r, _ := deviceRole(name)
 		s.devices = append(s.devices, Device{role: r})
 	}
-	args := s.CompositorArguments()
-	if len(args) != 3 || args[0] != "keyboard=/dev/input/polaris-keyboard" || args[1] != "mouse=/dev/input/polaris-mouse-relative" || args[2] != "mouse=/dev/input/polaris-mouse-absolute" {
-		t.Fatal(args)
+	devices, err := s.compositorDevices()
+	if err != nil || len(devices) != 3 || devices[0].role.name != "polaris-keyboard" || devices[1].role.name != "polaris-mouse-relative" || devices[2].role.name != "polaris-mouse-absolute" {
+		t.Fatal(devices, err)
+	}
+	for _, name := range []string{"polaris-touch", "polaris-pen"} {
+		r, _ := deviceRole(name)
+		s.devices = append(s.devices, Device{role: r})
+		if _, err := s.compositorDevices(); err == nil {
+			t.Fatal("unsupported role accepted")
+		}
+		s.devices = s.devices[:len(s.devices)-1]
 	}
 }
