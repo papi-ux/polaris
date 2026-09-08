@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/papi-ux/polaris/multiseat_worker/internal/seatinput"
 )
 
 type device struct {
@@ -27,8 +29,9 @@ type request struct {
 	Absent  []string `json:"absent"`
 }
 type observation struct {
-	Markers [4]int `json:"markers"`
-	Events  [4]int `json:"events"`
+	Markers          [4]int `json:"markers"`
+	Events           [4]int `json:"events"`
+	IdentityVerified bool   `json:"identity_verified"`
 }
 
 var aliases = [4]string{"/dev/input/polaris-keyboard", "/dev/input/polaris-mouse-relative", "/dev/input/polaris-mouse-absolute", "/dev/input/polaris-gamepad-0"}
@@ -96,6 +99,14 @@ func observe(req request) (observation, error) {
 	if len(req.Devices) != len(aliases) || len(req.Absent) > 32 {
 		return result, errors.New("invalid device manifest")
 	}
+	// This setting is installed by the same host authority that mounts the
+	// fixed aliases. Exercise the production identity reader before injecting.
+	inputs, err := seatinput.Open(seatinput.Directory, os.Getenv("POLARIS_INPUT_SEAT"))
+	if err != nil {
+		return result, err
+	}
+	defer inputs.Close()
+	result.IdentityVerified = true
 	for _, path := range append(req.Absent, "/dev/uinput", "/dev/uhid") {
 		if path != "/dev/uinput" && path != "/dev/uhid" && !eventPattern.MatchString(path) {
 			return result, errors.New("invalid excluded node")
@@ -182,6 +193,9 @@ func observe(req request) (observation, error) {
 			return result, err
 		}
 		if completed {
+			if err := inputs.Verify(); err != nil {
+				return result, err
+			}
 			return result, nil
 		}
 		time.Sleep(5 * time.Millisecond)

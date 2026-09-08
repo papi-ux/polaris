@@ -14,4 +14,5 @@ container_domain_template(polaris_nvidia_worker, container)
 # standard container template retains file-management permissions; dropped Linux
 # capabilities and the mount classifier must constrain those permissions.
 allow polaris_nvidia_worker_t xserver_misc_device_t:chr_file { getattr open read write ioctl map };
-allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read };
+allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read ioctl };
+allowxperm polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file ioctl { 0x4501 0x4506 0x4507 };

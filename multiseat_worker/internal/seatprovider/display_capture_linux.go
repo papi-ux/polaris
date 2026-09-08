@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/papi-ux/polaris/multiseat_worker/internal/seatinput"
 	"github.com/papi-ux/polaris/multiseat_worker/internal/seatruntime"
 )
 
@@ -697,11 +698,23 @@ func runDisplayCapture(
 			return err
 		}
 	}
+	var inputs *seatinput.Set
+	arguments := displayProducerArguments(request, mediaSocket, options.softwareDisplay)
+	if request.InputSeat != "" {
+		inputs, err = seatinput.Open(seatinput.Directory, request.InputSeat)
+		if err != nil {
+			return err
+		}
+		defer inputs.Close()
+		// Insert properties before the first pipeline separator. Every value
+		// comes from verified fixed aliases, never from provider catalog argv.
+		arguments = append(append(append([]string{}, arguments[:3]...), inputs.CompositorArguments()...), arguments[3:]...)
+	}
 	environment := displayEnvironment(options)
 	child, err := startManagedChildWithUmask(
 		options.gstLaunchPath,
 		options.executableOwnerUID,
-		displayProducerArguments(request, mediaSocket, options.softwareDisplay),
+		arguments,
 		environment,
 		nil,
 		0o077,
@@ -774,15 +787,30 @@ func runDisplayCapture(
 	if err := verifyDisplayArtifacts(runtime, artifacts, targetSocket, mediaSocket); err != nil {
 		return err
 	}
+	if inputs != nil {
+		if err := inputs.VerifyConsumer(child.command.Process.Pid); err != nil {
+			return err
+		}
+	}
 	if err := publishReadiness(ready); err != nil {
 		return err
 	}
 	readyPublished = true
 	ready = nil
-	select {
-	case <-parent.Done():
-		return nil
-	case <-child.done:
-		return errors.New("runtime display exited unexpectedly")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-parent.Done():
+			return nil
+		case <-child.done:
+			return errors.New("runtime display exited unexpectedly")
+		case <-ticker.C:
+			if inputs != nil {
+				if err := inputs.VerifyConsumer(child.command.Process.Pid); err != nil {
+					return err
+				}
+			}
+		}
 	}
 }
