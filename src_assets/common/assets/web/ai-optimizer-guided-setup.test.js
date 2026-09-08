@@ -93,7 +93,7 @@ describe('AI optimizer guided setup', () => {
       base_url: 'https://api.anthropic.com',
       cli_available: true,
       cli_authenticated: false,
-      cli_login_command: 'claude login',
+      cli_login_command: 'claude auth login',
       subscription_cli: 'Claude CLI',
       cache_count: 0,
       in_flight_requests: 0,
@@ -121,7 +121,34 @@ describe('AI optimizer guided setup', () => {
     expect(text).not.toContain('Build first stream profile')
     expect(text).toContain('Auth: Subscription, API Key')
     expect(text).toContain('Saved runtime')
-    expect(text).toContain('Run claude login')
+    expect(text).toContain('Run claude auth login')
+  })
+
+  it('shows Claude sign-in instructions even before runtime status is available', async () => {
+    mockState.status.value = null
+    const config = defaultConfig()
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    expect(wrapper.text()).toContain('claude auth login')
+    expect(wrapper.text()).toContain('same user running Polaris')
+    expect(wrapper.text()).toContain('no separate subscription sign-in')
+    const profile = wrapper.findAll('button').find(button => button.text().includes('Use the local Claude subscription session.'))
+    await profile.trigger('click')
+    expect(config.ai_timeout_ms).toBe(30000)
+    wrapper.unmount()
+  })
+
+  it('distinguishes an unverified Claude login from a signed-in CLI', async () => {
+    mockState.status.value.cli_auth_verified = false
+    const wrapper = mountOptimizer()
+    await flushMounted()
+    expect(wrapper.text()).toContain('sign-in could not be verified')
+    mockState.status.value.cli_auth_verified = true
+    mockState.status.value.cli_authenticated = true
+    await nextTick()
+    expect(wrapper.text()).not.toContain('sign-in could not be verified')
+    expect(wrapper.text()).toContain('Signed in')
+    wrapper.unmount()
   })
 
   it('applies provider-card selection as the first guided setup step', async () => {

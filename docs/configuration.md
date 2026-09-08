@@ -435,7 +435,28 @@ ai_enabled = enabled
 ai_provider = anthropic
 ai_model = claude-haiku-4-5-20251001
 ai_auth_mode = subscription
+ai_timeout_ms = 30000
 ```
+
+For Claude subscription explanations, install a current [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)
+with `--safe-mode` support on the Polaris host. Sign in as the same OS user running Polaris:
+
+```bash
+claude auth login
+claude auth status
+```
+
+Polaris reuses that CLI subscription login. There is no separate Claude login in the web UI,
+and a login on another computer or under `root` does not authorize the Polaris service account.
+Choose **Claude → Claude CLI**, run **Test provider**, then save and enable explanations.
+The saved-runtime status distinguishes CLI discovery from verified subscription authentication.
+
+Doctor sends redacted evidence through a private, temporary request directory, with CLI tools,
+MCP servers, discovered customizations, and session persistence disabled. Responses retain the
+existing explanation-only schema and cannot define stream settings or execute recovery actions.
+Requests use the configured timeout, bounded to 1–120 seconds, and a 64 KiB output limit.
+Older CLIs that do not support the required isolation flags fail rather than retrying without them.
+This Doctor transport uses Claude subscriptions; Anthropic API-key Doctor explanations remain unsupported.
 
 ### OpenAI
 
