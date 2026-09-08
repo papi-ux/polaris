@@ -278,6 +278,7 @@ if (NOT WIN32 AND NOT APPLE)
 endif()
 
 set(TEST_VIDEO_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_lifecycle_hardware.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
 )
 

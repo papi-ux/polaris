@@ -852,7 +852,8 @@ TEST(VideoProbeDriverTests, EveryMappedSegmentMustKeepItsDeviceInodeAndFileOffse
 
 TEST_F(ProbeProviderFixture, ProviderSearchPrecedenceAndOverridesRetireReuse) {
   const std::vector<std::string> variables {"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CONFIG_DIRS",
-    "XDG_DATA_DIRS", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS"};
+    "XDG_DATA_DIRS", "LD_LIBRARY_PATH", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS",
+    "__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"};
   std::vector<std::optional<std::string>> previous;
   for (const auto &name : variables) {
     const auto value = getenv(name.c_str());
@@ -876,8 +877,27 @@ TEST_F(ProbeProviderFixture, ProviderSearchPrecedenceAndOverridesRetireReuse) {
   const auto second = platf::encoder_probe_identity::provider_selection_key();
   ASSERT_TRUE(second);
   EXPECT_NE(first, second);
-  for (const auto variable : {"VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS"}) {
+  const auto external = directory / "first/egl/egl_external_platform.d";
+  auto remove_external = util::fail_guard([&] {
+    std::error_code ec;
+    std::filesystem::remove_all(directory / "first", ec);
+  });
+  std::filesystem::create_directories(external);
+  const auto manifest = external / "15_gbm.json";
+  { std::ofstream output(manifest); output << R"({"library_path":"provider-one.so"})"; }
+  const auto external_before = platf::encoder_probe_identity::provider_selection_key();
+  ASSERT_TRUE(external_before);
+  EXPECT_NE(external_before, second);
+  { std::ofstream output(manifest); output << R"({"library_path":"provider-two.so"})"; }
+  EXPECT_NE(platf::encoder_probe_identity::provider_selection_key(), external_before);
+  for (const auto variable : {"LD_LIBRARY_PATH", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS",
+         "__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"}) {
     setenv(variable, "/unobserved/provider", 1);
+    EXPECT_FALSE(platf::encoder_probe_identity::provider_selection_key()) << variable;
+    unsetenv(variable);
+  }
+  for (const auto variable : {"__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"}) {
+    setenv(variable, "", 1);
     EXPECT_FALSE(platf::encoder_probe_identity::provider_selection_key()) << variable;
     unsetenv(variable);
   }

@@ -103,6 +103,11 @@ namespace platf::encoder_probe_identity {
     };
     // Nonstandard loader/provider overrides need an explicit observer; their
     // unchanged text does not prove the files they select remain unchanged.
+    // The external-platform loader distinguishes an unset override from an
+    // explicitly empty one when choosing its discovery fallback.
+    for (const char *name : {"__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"}) {
+      if (lookup(name)) return std::nullopt;
+    }
     for (const char *name : {"LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LIBVA_DRIVERS_PATH",
          "LIBVA_DRIVER_NAME", "VK_ICD_FILENAMES", "VK_DRIVER_FILES", "VK_ADD_DRIVER_FILES",
          "VK_LOADER_DRIVERS_SELECT", "VK_LOADER_DRIVERS_DISABLE", "__EGL_VENDOR_LIBRARY_FILENAMES",
@@ -139,7 +144,7 @@ namespace platf::encoder_probe_identity {
       key << std::quoted(*loader) << std::quoted(environment.str());
       std::size_t total_bytes = 0;
       for (const auto &root : roots) {
-        for (const auto suffix : {"vulkan/icd.d", "vulkan/implicit_layer.d", "vulkan/explicit_layer.d", "glvnd/egl_vendor.d"}) {
+        for (const auto suffix : {"vulkan/icd.d", "vulkan/implicit_layer.d", "vulkan/explicit_layer.d", "glvnd/egl_vendor.d", "egl/egl_external_platform.d"}) {
           const auto directory = root / suffix;
           key << std::quoted(directory.string());
           if (!fs::exists(directory)) { key << "missing"; continue; }
