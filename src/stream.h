@@ -6,6 +6,7 @@
 
 // standard includes
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -21,6 +22,7 @@
 #include "video.h"
 
 #ifdef __linux__
+  #include "platform/linux/multiseat_worker_launch_connection.h"
 namespace multiseat {
   struct seat_handle_t;
 
@@ -93,6 +95,7 @@ namespace stream {
     std::string session_token(const session_t& session);
     std::uint32_t launch_session_id(const session_t& session);
     std::uint64_t launch_lifecycle_generation(const session_t& session);
+    std::uint64_t generation(const session_t &session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm);
@@ -102,6 +105,7 @@ namespace stream {
       invalid_session_state,
       already_bound,
       open_failed,
+      worker_connection_rejected,
     };
 
     /**
@@ -117,9 +121,11 @@ namespace stream {
       std::shared_ptr<
         multiseat::input::moonlight_controller_feedback_hub_t
       > feedback_hub,
-      bool controller_feedback
+      bool controller_feedback,
+      multiseat::input::worker_connection_selection_t worker_connection = {}
     );
     bool multiseat_input_bound(const session_t &session);
+    bool multiseat_input_bound_to(const session_t &session, std::uint64_t generation);
 #endif
     int start(session_t &session, const std::string &addr_string);
     void stop(session_t &session);
@@ -128,9 +134,14 @@ namespace stream {
     void cancel_disconnect_resume_timeout();
     state_e state(session_t &session);
 #ifdef POLARIS_TESTS
+    /** Observe and abort before any singleton host transport/capture starts. */
+    void set_host_start_abort_hook_for_tests(std::function<void()> hook);
+    unsigned exchange_active_count_for_tests(unsigned count);
     void set_state_for_tests(session_t &session, state_e state);
     stream_packets::destination_t packet_destination_for_tests(session_t &session);
 #ifdef __linux__
+    std::shared_ptr<multiseat::input::worker_launch_connection_t>
+    worker_connection_for_tests(const session_t &session);
     /** Exercise the bound bridge without entering the network control loop. */
     bool route_multiseat_input_for_tests(
       session_t &session,

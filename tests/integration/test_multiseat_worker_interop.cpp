@@ -4,6 +4,14 @@
 #include "src/platform/linux/multiseat_worker_client.h"
 #include "src/platform/linux/multiseat_worker_coordinator.h"
 
+#ifdef POLARIS_WORKER_STREAM_INTEROP
+  #include "src/config.h"
+  #include "src/platform/linux/multiseat_moonlight_worker_adapter.h"
+  #include "src/rtsp.h"
+  #include "src/stream.h"
+  #include "src/utility.h"
+#endif
+
 #if defined(__linux__) && defined(POLARIS_MULTISEAT_GO_INTEROP_BINARY)
 
 #include <algorithm>
@@ -318,6 +326,8 @@ namespace {
 
     transport_status_e connect(const authority_handle_t &authority,
       controller_client_options_t options) override {
+      authority_ = &authority;
+      options_ = options;
       const auto state = tree_.state() / authority.identity().worker_name;
       if (::mkdir(state.c_str(), 0700) != 0) return transport_status_e::io_error;
       log_ = tree_.root() / (authority.identity().worker_name + ".log");
@@ -346,6 +356,18 @@ namespace {
       return override_connection_.value_or(client_.lease_connection());
     }
 
+    transport_status_e reconnect_same_identity() {
+      if (shutdown() != transport_status_e::applied) return transport_status_e::io_error;
+      client_.close();
+      child_.reset(new child_process_t(launch_go_worker(*authority_,
+        tree_.state() / authority_->identity().worker_name, log_)));
+      if (child_->pid() <= 0 || !wait_for_worker(*authority_, child_->pid())) {
+        ADD_FAILURE() << read_log(log_);
+        return transport_status_e::unavailable;
+      }
+      return client_.connect(*authority_, options_);
+    }
+
   private:
     temporary_tree_t &tree_;
     // Only the serialized test thread mutates this override; it deliberately
@@ -354,6 +376,10 @@ namespace {
     std::unique_ptr<child_process_t> child_;
     std::filesystem::path log_;
     controller_client_t client_;
+    // reconnect_same_identity is used only with one seat and no intervening
+    // coordinator inventory mutation (which could move its authority storage).
+    const authority_handle_t *authority_ = nullptr;
+    controller_client_options_t options_;
   };
 
   class WorkerConnectionAuthority: public testing::Test {
@@ -366,8 +392,11 @@ namespace {
     }}};
     interop_backend_t backend;
     std::optional<controller_connection_t> override_connection;
+    std::vector<interop_control_session_t *> sessions;
     worker_coordinator_t coordinator {registry, backend, store, {}, {}, [&] {
-      return std::make_unique<interop_control_session_t>(tree, override_connection);
+      auto session = std::make_unique<interop_control_session_t>(tree, override_connection);
+      sessions.push_back(session.get());
+      return session;
     }};
 
     void SetUp() override { ASSERT_TRUE(coordinator.reconcile().admission_ready); }
@@ -593,5 +622,365 @@ TEST_F(WorkerConnectionAuthority, ClosedTransportCannotBeExportedFromRunningInve
   EXPECT_EQ(calls, 0);
   // The owned fixture destructor closes/reaps this disconnected Go worker.
 }
+
+#ifdef POLARIS_WORKER_STREAM_INTEROP
+namespace {
+  using namespace multiseat::input;
+
+  // Input inventory is synthetic; worker authentication and transport are real.
+  class launch_input_backend_t final: public backend_t {
+  public:
+    backend_create_result_t create(const expectation_t &expected) override {
+      allocation_t allocation {.handle = expected.handle, .input_seat = expected.input_seat,
+        .plan = expected.plan};
+      const device_kind_e kinds[] {device_kind_e::keyboard, device_kind_e::mouse_relative,
+        device_kind_e::mouse_absolute};
+      for (std::size_t index = 0; index < std::size(kinds); ++index) {
+        const auto minor = 512 + expected.handle.slot * 32 + index;
+        allocation.nodes.push_back({
+          .kind = kinds[index], .slot = 0,
+          .host_path = "/dev/input/event" + std::to_string(minor),
+          .worker_path = expected_worker_path(kinds[index], 0),
+          .filesystem_device = 53, .inode = 12000 + minor,
+          .character_major = 13, .character_minor = static_cast<std::uint32_t>(minor),
+          .kernel_name = expected_kernel_name(expected.input_seat, kinds[index], 0),
+          .host_seat = std::string {isolated_host_seat},
+        });
+      }
+      allocations.push_back(allocation);
+      return {.result = backend_result_e::applied, .allocation = std::move(allocation)};
+    }
+    backend_result_e destroy(const seat_handle_t &handle, std::string_view seat) override {
+      std::erase_if(allocations, [&](const auto &a) { return a.handle == handle && a.input_seat == seat; });
+      return backend_result_e::applied;
+    }
+    backend_result_e route(const seat_handle_t &, std::string_view, std::uint64_t,
+      const input_event_t &) override { return backend_result_e::applied; }
+    std::vector<allocation_t> inventory() override { return allocations; }
+    std::vector<allocation_t> allocations;
+  };
+
+  class WorkerLaunchConnection: public WorkerConnectionAuthority {
+  protected:
+    std::unique_ptr<moonlight_session_runtime_t> runtime;
+    std::vector<seat_handle_t> seats;
+
+    void SetUp() override {
+      WorkerConnectionAuthority::SetUp();
+      auto created = moonlight_session_runtime_t::create({.enabled = true},
+        [](moonlight_controller_feedback_sink_t) { return std::make_unique<launch_input_backend_t>(); });
+      ASSERT_TRUE(created.runtime);
+      runtime = std::move(created.runtime);
+      ASSERT_TRUE(runtime->reconcile_inputs({}).report.admission_ready);
+    }
+    void TearDown() override {
+      set_moonlight_activation_before_bind_hook_for_tests({});
+      stream::session::set_host_start_abort_hook_for_tests({});
+      if (runtime) {
+        EXPECT_EQ(runtime->shutdown().status, moonlight_coordinator_shutdown_status_e::closed);
+      }
+      for (const auto &seat : seats) {
+        controller_connection_t connection;
+        (void) coordinator.with_authenticated_worker_connection(seat,
+          [&](const auto &, const auto &value) { connection = value; });
+        if (connection.connected()) {
+          send_fixture_input(connection);
+          EXPECT_EQ(coordinator.stop_seat(seat).transport, transport_status_e::applied);
+        }
+      }
+    }
+    seat_handle_t prepare(std::string client) {
+      const auto seat = start(std::move(client));
+      seats.push_back(seat);
+      const auto snapshot = registry.snapshot(seat);
+      EXPECT_TRUE(snapshot);
+      if (snapshot) {
+        EXPECT_TRUE(runtime->prepare_input({.handle = seat,
+          .input_seat = snapshot->resources.input_seat, .plan = {.gamepad_slots = 0}}).input.prepared());
+      }
+      return seat;
+    }
+    std::shared_ptr<rtsp_stream::launch_session_t> launch(std::uint32_t id,
+      std::uint64_t lifecycle, std::string client = "client-a") {
+      auto value = std::make_shared<rtsp_stream::launch_session_t>();
+      value->id = id;
+      value->lifecycle_generation = lifecycle;
+      value->unique_id = std::move(client);
+      value->device_name = "worker-launch-test";
+      value->perm = static_cast<crypto::PERM>(static_cast<std::uint32_t>(crypto::PERM::view) |
+        static_cast<std::uint32_t>(crypto::PERM::input_kbd));
+      value->gcm_key.resize(16);
+      value->iv.resize(16);
+      return value;
+    }
+    std::shared_ptr<stream::session_t> allocate(rtsp_stream::launch_session_t &value) {
+      stream::config_t config {};
+      return stream::session::alloc(config, value);
+    }
+    void select(const std::shared_ptr<rtsp_stream::launch_session_t> &value,
+      const seat_handle_t &seat) {
+      moonlight_worker_launch_adapter_t adapter {coordinator};
+      ASSERT_TRUE(adapter.select_with_connection(value, seat).selected());
+    }
+  };
+}
+
+TEST_F(WorkerLaunchConnection, StartedLaunchBindsOriginalConnectionAndIndependentStreams) {
+  const auto a = prepare("client-a");
+  const auto b = prepare("client-b");
+  const auto first_connection = lease(a);
+  const auto second_connection = lease(b);
+  auto first_launch = launch(401, 501);
+  auto second_launch = launch(402, 502, "client-b");
+  select(first_launch, a);
+  select(second_launch, b);
+  auto first = allocate(*first_launch);
+  auto second = allocate(*second_launch);
+  ASSERT_TRUE(first_launch->try_begin_setup_handoff());
+  ASSERT_TRUE(first_launch->commit_setup_start());
+  ASSERT_EQ(activate_registered_moonlight_session(*first), moonlight_session_activation_status_e::bound);
+  ASSERT_EQ(activate_registered_moonlight_session(*second), moonlight_session_activation_status_e::bound);
+  const auto owner = stream::session::worker_connection_for_tests(*first);
+  const auto other = stream::session::worker_connection_for_tests(*second);
+  ASSERT_TRUE(owner);
+  ASSERT_TRUE(other);
+  EXPECT_EQ(owner->connection_for_tests(), first_connection);
+  EXPECT_EQ(other->connection_for_tests(), second_connection);
+  EXPECT_TRUE(owner->bound_to(stream::session::generation(*first)));
+  EXPECT_FALSE(owner->bound_to(stream::session::generation(*second)));
+  EXPECT_FALSE(first_connection.data_plane_attached());
+  stream::session::stop(*first);
+  EXPECT_FALSE(owner->bound_to(stream::session::generation(*first)));
+  EXPECT_FALSE(stream::session::worker_connection_for_tests(*first));
+  EXPECT_TRUE(other->bound_to(stream::session::generation(*second)));
+  EXPECT_EQ(first_connection.heartbeat(channel_e::control), transport_status_e::applied);
+  EXPECT_EQ(second_connection.heartbeat(channel_e::control), transport_status_e::applied);
+  stream::session::graceful_stop(*second);
+  EXPECT_FALSE(other->bound_to(stream::session::generation(*second)));
+}
+
+TEST_F(WorkerLaunchConnection, RetiredConnectionCannotBeReplacedAtActivation) {
+  const auto a = prepare("client-a");
+  auto value = launch(403, 503);
+  const auto original = lease(a);
+  select(value, a);
+  send_fixture_input(original);
+  ASSERT_EQ(sessions.size(), 1U);
+  ASSERT_EQ(sessions.front()->reconnect_same_identity(), transport_status_e::applied);
+  const auto replacement = lease(a);
+  ASSERT_EQ(original.identity(), replacement.identity());
+  ASSERT_NE(original, replacement);
+  ASSERT_FALSE(original.connected());
+  ASSERT_TRUE(replacement.connected());
+  auto session = allocate(*value);
+  EXPECT_EQ(activate_registered_moonlight_session(*session),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_FALSE(stream::session::multiseat_input_bound(*session));
+  EXPECT_FALSE(stream::session::worker_connection_for_tests(*session));
+  EXPECT_TRUE(replacement.connected());
+}
+
+TEST_F(WorkerLaunchConnection, CancelledLaunchAndWrongClientFailWithoutInputPublication) {
+  const auto seat = prepare("client-a");
+  auto cancelled = launch(404, 504);
+  select(cancelled, seat);
+  cancelled->cancel();
+  auto first = allocate(*cancelled);
+  EXPECT_EQ(activate_registered_moonlight_session(*first),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_FALSE(stream::session::multiseat_input_bound(*first));
+  EXPECT_EQ(runtime->cancel_launch(cancelled), moonlight_runtime_lifecycle_status_e::retired);
+
+  auto correct = launch(405, 505);
+  select(correct, seat);
+  auto wrong = launch(405, 505, "client-b");
+  auto second = allocate(*wrong);
+  EXPECT_EQ(activate_registered_moonlight_session(*second),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_FALSE(stream::session::multiseat_input_bound(*second));
+  auto retry = allocate(*correct);
+  EXPECT_EQ(activate_registered_moonlight_session(*retry),
+    moonlight_session_activation_status_e::selected_binding_failed);
+}
+
+TEST_F(WorkerLaunchConnection, CancellationAtBindingBoundaryAndEarlyStopCloseAdmission) {
+  const auto seat = prepare("client-a");
+  auto value = launch(406, 506);
+  select(value, seat);
+  auto session = allocate(*value);
+  set_moonlight_activation_before_bind_hook_for_tests([value] { value->cancel(); });
+  EXPECT_EQ(activate_registered_moonlight_session(*session),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_FALSE(stream::session::multiseat_input_bound(*session));
+  set_moonlight_activation_before_bind_hook_for_tests({});
+  EXPECT_EQ(runtime->cancel_launch(value), moonlight_runtime_lifecycle_status_e::retired);
+
+  auto late = launch(407, 507);
+  select(late, seat);
+  auto stopped = allocate(*late);
+  stream::session::stop(*stopped);
+  EXPECT_EQ(activate_registered_moonlight_session(*stopped),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_FALSE(stream::session::worker_connection_for_tests(*stopped));
+}
+
+TEST_F(WorkerLaunchConnection, EquivalentLaunchObjectCannotConsumeReservation) {
+  const auto seat = prepare("client-a");
+  auto value = launch(412, 512);
+  select(value, seat);
+  auto equivalent = launch(412, 512);
+  equivalent->require_worker_connection();
+  auto session = allocate(*equivalent);
+  EXPECT_EQ(activate_registered_moonlight_session(*session),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_FALSE(stream::session::multiseat_input_bound(*session));
+  EXPECT_FALSE(stream::session::worker_connection_for_tests(*session));
+}
+
+TEST_F(WorkerLaunchConnection, CancellationWaitsForActivationWithoutPublishingAClaim) {
+  const auto seat = prepare("client-a");
+  auto value = launch(413, 513);
+  select(value, seat);
+  auto session = allocate(*value);
+  const auto entered = std::make_shared<std::promise<void>>();
+  const auto release = std::make_shared<std::promise<void>>();
+  const auto released = release->get_future().share();
+  set_moonlight_activation_before_bind_hook_for_tests([entered, released] {
+    entered->set_value();
+    EXPECT_EQ(released.wait_for(3s), std::future_status::ready);
+  });
+  auto activation = std::async(std::launch::async, [session] {
+    return activate_registered_moonlight_session(*session);
+  });
+  ASSERT_EQ(entered->get_future().wait_for(3s), std::future_status::ready);
+  auto cancellation = std::async(std::launch::async, [&] { return runtime->cancel_launch(value); });
+  // Wait for the atomic cancellation, not just for the new thread to exist.
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (!value->is_cancelled() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_TRUE(value->is_cancelled());
+  EXPECT_EQ(cancellation.wait_for(20ms), std::future_status::timeout);
+  release->set_value();
+  EXPECT_EQ(activation.get(), moonlight_session_activation_status_e::selected_binding_failed);
+  EXPECT_EQ(cancellation.get(), moonlight_runtime_lifecycle_status_e::retired);
+  EXPECT_FALSE(stream::session::multiseat_input_bound(*session));
+  EXPECT_FALSE(stream::session::worker_connection_for_tests(*session));
+  EXPECT_EQ(lease(seat).heartbeat(channel_e::control), transport_status_e::applied);
+}
+
+TEST_F(WorkerLaunchConnection, LifecycleAndStreamGenerationsFenceCompetingAllocations) {
+  const auto seat = prepare("client-a");
+  auto value = launch(408, 508);
+  select(value, seat);
+  auto stale_launch = launch(408, 507);
+  auto stale = allocate(*stale_launch);
+  EXPECT_EQ(activate_registered_moonlight_session(*stale), moonlight_session_activation_status_e::unselected);
+  auto first = allocate(*value);
+  auto second = allocate(*value);
+  ASSERT_EQ(activate_registered_moonlight_session(*first), moonlight_session_activation_status_e::bound);
+  EXPECT_EQ(activate_registered_moonlight_session(*second),
+    moonlight_session_activation_status_e::selected_binding_failed);
+  const auto owner = stream::session::worker_connection_for_tests(*first);
+  ASSERT_TRUE(owner);
+  EXPECT_FALSE(owner->try_claim(stream::session::generation(*second)));
+  EXPECT_TRUE(owner->bound_to(stream::session::generation(*first)));
+
+  launch_input_backend_t backend;
+  authority_t authority {backend};
+  ASSERT_TRUE(authority.reconcile({}).admission_ready);
+  const auto input_seat = registry.snapshot(seat)->resources.input_seat;
+  ASSERT_TRUE(authority.prepare({.handle = seat, .input_seat = input_seat, .plan = {.gamepad_slots = 0}}).prepared());
+  moonlight_session_binding_registry_t bindings;
+  moonlight_session_activation_gate_t duplicate_gate {true, authority, bindings, {}};
+  EXPECT_EQ(duplicate_gate.register_selection({408, 508}, seat, input_seat, false,
+    {.required = true, .connection = owner}).status, moonlight_launch_selection_status_e::invalid_selection);
+  EXPECT_EQ(stream::session::bind_multiseat_input(*second, authority, bindings, seat, {}, false,
+    {.required = true, .connection = owner}), stream::session::multiseat_input_bind_status_e::worker_connection_rejected);
+  EXPECT_EQ(bindings.registered_sessions(), 0U);
+  EXPECT_EQ(bindings.claimed_sessions(), 0U);
+  EXPECT_TRUE(owner->bound_to(stream::session::generation(*first)));
+  stream::session::stop(*first);
+  EXPECT_FALSE(owner->try_claim(stream::session::generation(*second)));
+}
+
+TEST_F(WorkerLaunchConnection, DestroyedAllocationRetiresReservationAndPacketDestination) {
+  const auto seat = prepare("client-a");
+  auto value = launch(409, 509);
+  select(value, seat);
+  auto session = allocate(*value);
+  ASSERT_EQ(activate_registered_moonlight_session(*session), moonlight_session_activation_status_e::bound);
+  const auto owner = stream::session::worker_connection_for_tests(*session);
+  ASSERT_TRUE(owner);
+  const auto generation = stream::session::generation(*session);
+  const auto destination = stream::session::packet_destination_for_tests(*session);
+  session.reset();
+  EXPECT_FALSE(owner->bound_to(generation));
+  EXPECT_FALSE(destination.acquire());
+  EXPECT_EQ(owner->connection_for_tests().heartbeat(channel_e::control), transport_status_e::applied);
+}
+
+TEST_F(WorkerLaunchConnection, ReservedWorkerCannotStartHostMedia) {
+  const auto seat = prepare("client-a");
+  auto value = launch(410, 510);
+  select(value, seat);
+  auto session = allocate(*value);
+  ASSERT_EQ(activate_registered_moonlight_session(*session), moonlight_session_activation_status_e::bound);
+  const auto owner = stream::session::worker_connection_for_tests(*session);
+  ASSERT_TRUE(owner);
+  const auto before = stream::session::active_count();
+  const auto host_starts = std::make_shared<std::atomic_uint>(0);
+  stream::session::set_host_start_abort_hook_for_tests([host_starts] { ++*host_starts; });
+  EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
+  EXPECT_EQ(host_starts->load(), 0U);
+  EXPECT_EQ(stream::session::active_count(), before);
+  EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPED);
+  EXPECT_FALSE(owner->bound_to(stream::session::generation(*session)));
+  EXPECT_FALSE(stream::session::packet_destination_for_tests(*session).acquire());
+  EXPECT_TRUE(owner->connection_for_tests().connected());
+  EXPECT_FALSE(owner->connection_for_tests().data_plane_attached());
+}
+
+TEST_F(WorkerLaunchConnection, MissingGateAndRetiredSelectionNeverStartHostMedia) {
+  const auto seat = prepare("client-a");
+  auto value = launch(411, 511);
+  auto allocated_before_selection = allocate(*value);
+  select(value, seat);
+  auto allocated_after_selection = allocate(*value);
+  EXPECT_EQ(runtime->shutdown().status, moonlight_coordinator_shutdown_status_e::closed);
+  runtime.reset();
+  ASSERT_FALSE(moonlight_session_activation_gate_installed());
+  auto allocated_after_retirement = allocate(*value);
+  const auto host_starts = std::make_shared<std::atomic_uint>(0);
+  stream::session::set_host_start_abort_hook_for_tests([host_starts] { ++*host_starts; });
+  for (const auto &session : {allocated_before_selection, allocated_after_selection, allocated_after_retirement}) {
+    EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
+    EXPECT_FALSE(stream::session::packet_destination_for_tests(*session).acquire());
+  }
+  EXPECT_EQ(host_starts->load(), 0U);
+}
+
+TEST_F(WorkerLaunchConnection, SessionLimitRejectionImmediatelyRetiresBoundReservation) {
+  const auto seat = prepare("client-a");
+  auto value = launch(414, 514);
+  select(value, seat);
+  auto session = allocate(*value);
+  ASSERT_EQ(activate_registered_moonlight_session(*session), moonlight_session_activation_status_e::bound);
+  const auto owner = stream::session::worker_connection_for_tests(*session);
+  ASSERT_TRUE(owner);
+  const auto old_limit = config::stream.max_sessions;
+  const auto old_count = stream::session::exchange_active_count_for_tests(1);
+  auto restore = util::fail_guard([old_limit, old_count] {
+    config::stream.max_sessions = old_limit;
+    (void) stream::session::exchange_active_count_for_tests(old_count);
+  });
+  config::stream.max_sessions = 1;
+  EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
+  EXPECT_FALSE(owner->bound_to(stream::session::generation(*session)));
+  EXPECT_FALSE(stream::session::worker_connection_for_tests(*session));
+  EXPECT_FALSE(stream::session::packet_destination_for_tests(*session).acquire());
+  EXPECT_TRUE(owner->connection_for_tests().connected());
+}
+#endif
 
 #endif

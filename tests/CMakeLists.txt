@@ -635,6 +635,14 @@ if (BUILD_FULL_TESTS)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_options(test_polaris_stream PRIVATE
             "-Wl,--wrap=sendmsg" "-Wl,--wrap=sendmmsg" "-Wl,--wrap=poll")
+        if(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED)
+            add_dependencies(test_polaris_stream polaris-multiseat-go-interop-fixture)
+            target_sources(test_polaris_stream PRIVATE
+                ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_worker_interop.cpp)
+            target_compile_definitions(test_polaris_stream PRIVATE
+                POLARIS_WORKER_STREAM_INTEROP
+                POLARIS_MULTISEAT_GO_INTEROP_BINARY="${POLARIS_MULTISEAT_GO_INTEROP_BINARY}")
+        endif()
     endif()
 
     configure_polaris_full_test_target(test_polaris_video

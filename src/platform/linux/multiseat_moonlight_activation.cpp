@@ -37,17 +37,25 @@ namespace multiseat::input {
     moonlight_launch_selection_entry_t(
       moonlight_launch_selection_key_t key_value,
       seat_handle_t handle_value,
-      bool controller_feedback_value
+      bool controller_feedback_value,
+      worker_connection_selection_t worker_connection_value
     ):
         key(std::move(key_value)),
         handle(std::move(handle_value)),
-        controller_feedback(controller_feedback_value) {
+        controller_feedback(controller_feedback_value),
+        worker_connection(std::move(worker_connection_value)) {
     }
 
     const moonlight_launch_selection_key_t key;
     const seat_handle_t handle;
     const bool controller_feedback;
+    const worker_connection_selection_t worker_connection;
+    std::uint64_t bound_stream_generation = 0;
     selection_phase_e phase = selection_phase_e::pending;
+
+    void retire_connection() const noexcept {
+      if (worker_connection.connection) worker_connection.connection->retire();
+    }
   };
 
   struct moonlight_session_activation_gate_state_t {
@@ -142,6 +150,7 @@ namespace multiseat::input {
       return;
     }
     entry_->phase = selection_phase_e::cancelled;
+    entry_->retire_connection();
     state_->changed.notify_all();
   }
 
@@ -151,6 +160,7 @@ namespace multiseat::input {
       return entry_->phase != selection_phase_e::activating;
     });
     entry_->phase = selection_phase_e::cancelled;
+    entry_->retire_connection();
     erase_selection(*state_, entry_);
   }
 
@@ -189,7 +199,8 @@ namespace multiseat::input {
       moonlight_launch_selection_key_t key,
       seat_handle_t handle,
       std::string_view expected_input_seat,
-      bool controller_feedback
+      bool controller_feedback,
+      worker_connection_selection_t worker_connection
     ) {
     if (!state_->enabled) {
       return {
@@ -200,6 +211,11 @@ namespace multiseat::input {
       return {
         .status = moonlight_launch_selection_status_e::invalid_selection,
       };
+    }
+    if (worker_connection.required != static_cast<bool>(worker_connection.connection) ||
+        (worker_connection.required && !worker_connection.connection->matches_selection(
+          key.launch_session_id, key.lifecycle_generation, handle))) {
+      return {.status = moonlight_launch_selection_status_e::invalid_selection};
     }
     if (controller_feedback && !state_->feedback_hub) {
       return {
@@ -230,7 +246,8 @@ namespace multiseat::input {
     auto entry = std::make_shared<moonlight_launch_selection_entry_t>(
       std::move(key),
       std::move(handle),
-      controller_feedback
+      controller_feedback,
+      std::move(worker_connection)
     );
     std::unique_lock lock {state_->mutex};
     if (state_->closed) {
@@ -267,8 +284,11 @@ namespace multiseat::input {
       };
     }
 
-    state_->entries.push_back(entry);
+    if (entry->worker_connection.required && !entry->worker_connection.connection->try_register()) {
+      return {.status = moonlight_launch_selection_status_e::invalid_selection};
+    }
     try {
+      state_->entries.push_back(entry);
       return {
         .status = moonlight_launch_selection_status_e::registered,
         .selection = std::unique_ptr<moonlight_launch_selection_t> {
@@ -276,6 +296,7 @@ namespace multiseat::input {
         },
       };
     } catch (...) {
+      entry->retire_connection();
       erase_selection(*state_, entry);
       throw;
     }
@@ -323,7 +344,7 @@ namespace multiseat::input {
           return moonlight_session_activation_status_e::selection_in_progress;
         case selection_phase_e::bound:
           lock.unlock();
-          return stream::session::multiseat_input_bound(session) ?
+          return stream::session::multiseat_input_bound_to(session, entry->bound_stream_generation) ?
                    moonlight_session_activation_status_e::bound :
                    moonlight_session_activation_status_e::selected_binding_failed;
         case selection_phase_e::failed:
@@ -344,7 +365,8 @@ namespace multiseat::input {
                 state_->binding_registry,
                 entry->handle,
                 state_->feedback_hub,
-                entry->controller_feedback
+                entry->controller_feedback,
+                entry->worker_connection
               ) == stream::session::multiseat_input_bind_status_e::bound;
     } catch (...) {
       bound = false;
@@ -352,7 +374,9 @@ namespace multiseat::input {
 
     {
       std::scoped_lock lock {state_->mutex};
+      if (bound) entry->bound_stream_generation = stream::session::generation(session);
       entry->phase = bound ? selection_phase_e::bound : selection_phase_e::failed;
+      if (!bound || state_->closed) entry->retire_connection();
       state_->changed.notify_all();
     }
     return bound ? moonlight_session_activation_status_e::bound :
@@ -368,6 +392,7 @@ namespace multiseat::input {
         ++activations_in_flight;
       } else {
         entry->phase = selection_phase_e::cancelled;
+        entry->retire_connection();
       }
     }
     state_->changed.notify_all();
@@ -388,6 +413,7 @@ namespace multiseat::input {
     }
     for (const auto &entry : state_->entries) {
       entry->phase = selection_phase_e::cancelled;
+      entry->retire_connection();
     }
     state_->entries.clear();
     state_->changed.notify_all();
@@ -408,6 +434,7 @@ namespace multiseat::input {
     });
     for (const auto &entry : state_->entries) {
       entry->phase = selection_phase_e::cancelled;
+      entry->retire_connection();
     }
     state_->entries.clear();
     state_->changed.notify_all();
