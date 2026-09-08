@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Protects unused encoder capability probes from a null-frame flush, adds actual submission/teardown regressions for the first-launch Vulkan crash, and keeps Doctor from telling a stable AMD VA-API/SHM user to switch to Auto with a promised fallback (#628)
+
 - Recognises hosts with a Steam Game Mode session (SteamOS, Bazzite deck images, CachyOS handheld edition, other gamescope-session hosts). `--setup-host` says why Polaris goes offline when the host leaves Desktop Mode and prints the headless-boot command, `/api/stats/system` reports `game_mode_host` with Game Mode-aware boot readiness and display-session guidance, and the console names a running Game Mode session instead of asking for a desktop restart. New handhelds guide with the Game Mode validation recipe (#626)
 
 ## v1.4.4 - 2026-09-06
