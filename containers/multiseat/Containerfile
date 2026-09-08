@@ -71,6 +71,19 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       /providers/game-status.c -o /out/game-status $(pkg-config --cflags --libs x11)
 
 RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+      /providers/encoded-audio-check.c -o /out/encoded-audio-check \
+      $(pkg-config --cflags --libs gstreamer-app-1.0 gstreamer-audio-1.0) -lm && \
+    /out/encoded-audio-check --self-test && \
+    for scenario in silence wrong-tone; do \
+      result=0; /out/encoded-audio-check --self-test-$scenario || result=$?; test "$result" = 1 || exit 1; \
+    done && \
+    cc -std=c11 -O2 -Wall -Wextra -Werror /providers/test-encoded-audio-check.c -o /out/test-encoded-audio-check \
+      -Wl,--wrap=gst_element_set_state -Wl,--wrap=gst_object_unref -Wl,--wrap=gst_pad_remove_probe \
+      -Wl,--wrap=g_mutex_clear -Wl,--wrap=gst_app_sink_try_pull_sample -Wl,--wrap=gst_pad_add_probe \
+      $(pkg-config --cflags --libs gstreamer-app-1.0 gstreamer-audio-1.0) -lm && \
+    timeout 40s /out/test-encoded-audio-check
+
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
       /providers/test-encoded-gl-download.c -o /out/test-encoded-gl-download \
       $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
     timeout 15s /out/test-encoded-gl-download
@@ -171,6 +184,7 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
       io.polaris.multiseat.architecture="linux/amd64"
 COPY --from=workload-build --chmod=0555 /out/encoded-game-check /usr/libexec/polaris-seat/encoded-game-check
+COPY --from=workload-build --chmod=0555 /out/encoded-audio-check /usr/libexec/polaris-seat/encoded-audio-check
 COPY --from=workload-build --chmod=0555 /out/game-status /usr/libexec/polaris-seat/game-status
 COPY --from=workload-build --chmod=0555 /out/capture-input /usr/libexec/polaris-seat/capture-input
 COPY --from=workload-build --chmod=0555 /out/input-pong-v1 /usr/libexec/polaris-seat/workloads/input-pong-v1

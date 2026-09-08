@@ -152,6 +152,8 @@ func physicalGameProbe(arguments []string) (result error) {
 	switch arguments[0] {
 	case "media":
 		return physicalEncodedGameProbe(path)
+	case "audio":
+		return physicalEncodedAudioProbe(path)
 	case "state":
 		if err := gameProbeSignal(path); err != nil {
 			return err
