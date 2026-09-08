@@ -456,16 +456,11 @@ func readRealGamescopeSession(
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(string(content), "\n")
-	if len(lines) != 6 || lines[0] != strings.TrimSuffix(gamescopeSessionRecordHeader, "\n") ||
-		!strings.HasPrefix(lines[1], "DISPLAY=:") ||
-		lines[2] != "STEAM_GAME_DISPLAY_0="+strings.TrimPrefix(lines[1], "DISPLAY=") ||
-		lines[3] != "WAYLAND_DISPLAY="+request.WaylandSocket ||
-		lines[4] != "GAMESCOPE_WAYLAND_DISPLAY="+request.WaylandSocket ||
-		lines[5] != "" {
+	session, err := parseLauncherSession(content, request.WaylandSocket)
+	if err != nil || session.width != request.DisplayWidth || session.height != request.DisplayHeight || session.refresh != request.DisplayRefreshMillihertz {
 		t.Fatalf("real Gamescope session record is malformed: %q", content)
 	}
-	display := strings.TrimPrefix(lines[1], "DISPLAY=")
+	display := session.display
 	info, err := parseGamescopeReadyRecord(display+" "+gamescopeWaylandSocket+"\n", true)
 	if err != nil {
 		t.Fatalf("real Gamescope display record is invalid: %q, %v", display, err)

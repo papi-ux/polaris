@@ -115,7 +115,7 @@ func readIdentityBounded(
 	}
 	descriptor, err := syscall.Open(
 		path,
-		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
+		syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
 		0,
 	)
 	if err != nil {

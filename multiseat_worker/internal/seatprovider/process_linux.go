@@ -75,8 +75,10 @@ func trustedCommand(
 }
 
 type managedChild struct {
-	command *exec.Cmd
-	done    chan struct{}
+	command      *exec.Cmd
+	done         chan struct{}
+	pidFD        *os.File
+	closePIDOnce sync.Once
 }
 
 func startManagedChild(
@@ -96,12 +98,17 @@ func startManagedChild(
 	if err != nil {
 		return nil, err
 	}
+	pidFD := -1
+	command.SysProcAttr.PidFD = &pidFD
 	if err := command.Start(); err != nil {
 		_ = executable.Close()
+		if pidFD >= 0 {
+			_ = syscall.Close(pidFD)
+		}
 		return nil, errors.New("runtime provider child could not be started")
 	}
 	_ = executable.Close()
-	child := &managedChild{command: command, done: make(chan struct{})}
+	child := &managedChild{command: command, done: make(chan struct{}), pidFD: os.NewFile(uintptr(pidFD), "provider-child-lifetime")}
 	go func() {
 		_ = command.Wait()
 		close(child.done)
@@ -133,6 +140,8 @@ func startManagedChildWithUmask(
 	// The display provider is a dedicated process, but tests can exercise two
 	// providers concurrently. Serialize the process-global umask only across
 	// the fork so every socket the child later creates is owner-only.
+	pidFD := -1
+	command.SysProcAttr.PidFD = &pidFD
 	childUmaskLock.Lock()
 	previousUmask := syscall.Umask(umask)
 	startError := command.Start()
@@ -140,10 +149,13 @@ func startManagedChildWithUmask(
 	childUmaskLock.Unlock()
 	if startError != nil {
 		_ = executable.Close()
+		if pidFD >= 0 {
+			_ = syscall.Close(pidFD)
+		}
 		return nil, errors.New("runtime provider child could not be started")
 	}
 	_ = executable.Close()
-	child := &managedChild{command: command, done: make(chan struct{})}
+	child := &managedChild{command: command, done: make(chan struct{}), pidFD: os.NewFile(uintptr(pidFD), "provider-child-lifetime")}
 	go func() {
 		_ = command.Wait()
 		close(child.done)
@@ -168,6 +180,11 @@ func (child *managedChild) stop(timeout time.Duration) error {
 		child.done == nil || timeout <= 0 {
 		return errors.New("runtime provider child is invalid")
 	}
+	defer child.closePIDOnce.Do(func() {
+		if child.pidFD != nil {
+			_ = child.pidFD.Close()
+		}
+	})
 	select {
 	case <-child.done:
 		return nil
