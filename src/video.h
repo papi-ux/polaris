@@ -633,6 +633,13 @@ namespace video {
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config);
 
 #ifdef POLARIS_TESTS
+  /** Own the supplied codec/converter through real frame submission and teardown. */
+  std::vector<int> encode_and_destroy_avcodec_session_for_tests(
+    avcodec_ctx_t context,
+    std::unique_ptr<platf::avcodec_encode_device_t> device,
+    std::size_t frame_count
+  );
+
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type);
 
   struct encoder_probe_cache_snapshot_t {

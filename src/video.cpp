@@ -1429,7 +1429,9 @@ namespace video {
       const bool vulkan_codec = avcodec_ctx->codec && avcodec_ctx->codec->name &&
                                 std::string_view {avcodec_ctx->codec->name}.ends_with("_vulkan"sv);
       if (vulkan_codec) {
-        BOOST_LOG(info) << "Vulkan encoder teardown: draining codec"sv;
+        BOOST_LOG(info) << (frame_submitted ?
+          "Vulkan encoder teardown: draining codec"sv :
+          "Vulkan encoder teardown: skipping drain; no frame was accepted"sv);
       }
 
       // Some hardware encoders cannot flush an initialized session that never
@@ -5747,6 +5749,26 @@ namespace video {
   }
 
 #ifdef POLARIS_TESTS
+  std::vector<int> encode_and_destroy_avcodec_session_for_tests(
+    avcodec_ctx_t context,
+    std::unique_ptr<platf::avcodec_encode_device_t> device,
+    std::size_t frame_count
+  ) {
+    // Exercise the real submission path and destructor without creating a
+    // display or opening a hardware device. Tests own the codec-call boundary.
+    auto converter = std::make_unique<encode_device_frame_converter_t<platf::avcodec_encode_device_t>>(
+      "lifecycle-test", std::move(device), conversion_request_t {}
+    );
+    avcodec_encode_session_t session {std::move(context), std::move(converter), {}, 0, false};
+    auto mailbox = std::make_shared<safe::mail_raw_t>();
+    auto packets = mailbox->queue<packet_t>(mail::video_packets);
+    std::vector<int> results;
+    for (std::size_t index = 0; index < frame_count; ++index) {
+      results.push_back(encode_avcodec(index, session, packets, nullptr, std::nullopt));
+    }
+    return results;
+  }
+
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type) {
     return hevc_profile_for_input(bit_depth, chroma_sampling_type);
   }
