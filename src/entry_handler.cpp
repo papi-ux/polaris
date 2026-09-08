@@ -23,6 +23,7 @@
 #include "network.h"
 #include "platform/common.h"
 #ifdef __linux__
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/input/input_group_access.h"
 #endif
 
@@ -474,13 +475,43 @@ namespace args {
     // rather than from a controller that silently never appears.
     const auto input_group_advice = platf::input_access::setup_host_input_group_advice();
 
+    // A host that can boot into a Steam Game Mode session loses Polaris the
+    // moment it leaves Desktop Mode unless the service starts at boot. Say so
+    // here, where the person preparing the host is reading, instead of
+    // leaving it to a client that reports the host offline. The advice is
+    // about the account that streams, so like headless boot itself it stays
+    // silent when a bare root login cannot name one.
+    std::string game_mode_advice;
+    if (const auto *target_pw = setup_target_user.empty() || setup_target_user == "root" ? nullptr : getpwnam(setup_target_user.c_str());
+        target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
+      const auto game_mode = platf::game_mode_host::detect(platf::game_mode_host::default_probe(target_pw->pw_uid));
+      const auto boot_before = platf::game_mode_host::boot_readiness(
+        platf::game_mode_host::default_boot_paths(setup_target_user, target_pw->pw_dir)
+      );
+      using state_t = platf::game_mode_host::setup_host_state_t;
+      const auto state = enable_headless_boot ? state_t::headless_boot_enabled_now :
+                         disable_headless_boot ? state_t::headless_boot_disabled_now :
+                         boot_before.independent() ? state_t::already_independent :
+                                                     state_t::needs_headless_boot;
+      game_mode_advice = platf::game_mode_host::setup_host_advice(game_mode, state, exe_path->string());
+    }
+
     const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
     if (!enable_kms && !headless_boot_requested && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
-      std::cout
-        << "Linux host setup: nothing to do."sv << std::endl
-        << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
-        << "and /dev/uhid are already usable by ["sv << setup_target_user << "]. Re-run with --enable-kms only if you"sv << std::endl
-        << "need DRM/KMS capture."sv << std::endl;
+      if (game_mode_advice.empty()) {
+        std::cout
+          << "Linux host setup: nothing to do."sv << std::endl
+          << "The package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
+          << "and /dev/uhid are already usable by ["sv << setup_target_user << "]. Re-run with --enable-kms only if you"sv << std::endl
+          << "need DRM/KMS capture."sv << std::endl;
+      } else {
+        // "Nothing to do" would contradict the command that follows.
+        std::cout
+          << "Linux host setup: the package provides the udev rules and modules-load configuration, and /dev/uinput"sv << std::endl
+          << "and /dev/uhid are already usable by ["sv << setup_target_user << "]."sv << std::endl
+          << std::endl
+          << game_mode_advice;
+      }
       if (!input_group_advice.empty()) {
         std::cout << std::endl
                   << input_group_advice << std::endl;
@@ -555,8 +586,14 @@ namespace args {
     }
     std::cout
       << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl
-      << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl
-      << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
+      << "Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`."sv << std::endl;
+    if (!game_mode_advice.empty()) {
+      std::cout << std::endl
+                << game_mode_advice;
+    } else {
+      std::cout
+        << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
+    }
     if (!input_group_advice.empty()) {
       std::cout << std::endl
                 << input_group_advice << std::endl;

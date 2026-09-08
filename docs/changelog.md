@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Recognises hosts with a Steam Game Mode session (SteamOS, Bazzite deck images, CachyOS handheld edition, other gamescope-session hosts). `--setup-host` says why Polaris goes offline when the host leaves Desktop Mode and prints the headless-boot command, `/api/stats/system` reports `game_mode_host` with Game Mode-aware boot readiness and display-session guidance, and the console names a running Game Mode session instead of asking for a desktop restart. New handhelds guide with the Game Mode validation recipe (#626)
+
 ## v1.4.4 - 2026-09-06
 
 A packaging and setup update matched with Nova v1.4.4. The application menu entry starts the same Polaris service that autostart and headless boot use, and a privileged setup run no longer mistakes root's own device access for a ready desktop account. Existing configurations and paired devices remain valid.

@@ -97,6 +97,7 @@
   #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/display_topology.h"
@@ -6715,52 +6716,42 @@ namespace confighttp {
     // Boot readiness: whether this account's Polaris survives a reboot with no
     // monitor or desktop login. Lingering plus a default.target want is what
     // `--setup-host --enable-headless-boot` arranges; either alone is not
-    // enough, so both are reported.
-    bool linger_enabled = false;
-    bool boot_start_linked = false;
-    {
-      std::error_code boot_ec;
-      const auto *pw = getpwuid(geteuid());
-      if (pw && pw->pw_name && pw->pw_name[0] != '\0') {
-        linger_enabled = fs::exists(fs::path("/var/lib/systemd/linger") / pw->pw_name, boot_ec);
-      }
-      fs::path config_home;
-      if (const char *xdg_config = std::getenv("XDG_CONFIG_HOME"); xdg_config && *xdg_config) {
-        config_home = xdg_config;
-      } else if (const char *home = std::getenv("HOME"); home && *home) {
-        config_home = fs::path(home) / ".config";
-      } else if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
-        config_home = fs::path(pw->pw_dir) / ".config";
-      }
-      boot_start_linked = (!config_home.empty() && fs::exists(config_home / "systemd/user/default.target.wants/polaris.service", boot_ec)) ||
-                          fs::exists("/etc/systemd/user/default.target.wants/polaris.service", boot_ec);
+    // enough, so both are reported. A host with a Steam Game Mode session is
+    // named as such, because there the missing boot start is the whole reason
+    // clients lose the host after Desktop Mode.
+    // Read the want link where --enable-headless-boot writes it: under the
+    // account's passwd home, not wherever XDG_CONFIG_HOME points in this
+    // process.
+    const auto *pw = getpwuid(geteuid());
+    const std::string account_name = pw && pw->pw_name && pw->pw_name[0] != '\0' ? pw->pw_name : std::string();
+    fs::path account_home;
+    if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
+      account_home = pw->pw_dir;
+    } else if (const char *home = std::getenv("HOME"); home && *home) {
+      account_home = home;
     }
-    const bool boot_independent = linger_enabled && boot_start_linked;
-    output["boot_readiness"]["linger_enabled"] = linger_enabled;
-    output["boot_readiness"]["boot_start_linked"] = boot_start_linked;
-    output["boot_readiness"]["status"] = boot_independent ? "boot_independent" : "session_bound";
-    output["boot_readiness"]["summary"] = boot_independent ?
-      "Polaris starts at boot with no monitor or desktop login." :
-      "Polaris starts with the desktop session, so after a reboot it is unavailable until someone logs in.";
-    output["boot_readiness"]["action"] = boot_independent ?
-      "No action needed." :
-      "For a monitor-less or Game Mode host, run: sudo -H polaris --setup-host --enable-headless-boot";
+    const auto boot = platf::game_mode_host::boot_readiness(platf::game_mode_host::default_boot_paths(account_name, account_home));
+    const bool boot_independent = boot.independent();
+    const auto game_mode = platf::game_mode_host::detect_cached();
+    output["game_mode_host"]["installed"] = game_mode.installed;
+    output["game_mode_host"]["session_active"] = game_mode.session_active;
+    output["game_mode_host"]["evidence"] = game_mode.evidence;
 
-    output["display_session"]["status"] = has_wayland_display || has_x11_display ? "healthy" : "missing_display_environment";
-    if (has_wayland_display || has_x11_display) {
-      output["display_session"]["summary"] = has_wayland_display ?
-        "Wayland desktop environment is available to Polaris." :
-        "X11 desktop environment is available to Polaris.";
-      output["display_session"]["action"] = "No action needed.";
-    } else if (boot_independent) {
-      // A headless-boot host has no desktop on purpose; telling it to restart
-      // from the desktop session would be wrong advice.
-      output["display_session"]["summary"] = "No desktop environment is attached, which is expected on a headless-boot host. Private Stream is unaffected.";
-      output["display_session"]["action"] = "To stream the visible desktop instead, log into the desktop and restart Polaris so it inherits the graphical environment.";
-    } else {
-      output["display_session"]["summary"] = "Polaris could not find WAYLAND_DISPLAY or DISPLAY for desktop previews.";
-      output["display_session"]["action"] = "Restart Polaris from the desktop session or run the user service so it inherits the graphical environment.";
-    }
+    const auto boot_guidance = platf::game_mode_host::boot_readiness_guidance(game_mode, boot_independent);
+    output["boot_readiness"]["linger_enabled"] = boot.linger_enabled;
+    output["boot_readiness"]["boot_start_linked"] = boot.boot_start_linked;
+    output["boot_readiness"]["status"] = boot_guidance.status;
+    output["boot_readiness"]["summary"] = boot_guidance.summary;
+    output["boot_readiness"]["action"] = boot_guidance.action;
+
+    // A headless-boot host has no desktop on purpose, and a Game Mode host
+    // has gamescope instead of one; telling either to restart from the
+    // desktop session would be wrong advice. A running Game Mode session
+    // outranks a stale WAYLAND_DISPLAY left over from the desktop.
+    const auto display_guidance = platf::game_mode_host::display_session_guidance(game_mode, boot_independent, has_wayland_display, has_x11_display);
+    output["display_session"]["status"] = display_guidance.status;
+    output["display_session"]["summary"] = display_guidance.summary;
+    output["display_session"]["action"] = display_guidance.action;
     output["display_session"]["environment_repaired"] = display_environment_repaired;
     output["display_session"]["session_type"] = session_type && session_type[0] ? std::string(session_type) : "unknown";
     output["display_session"]["desktop"] = desktop_name && desktop_name[0] ? std::string(desktop_name) : "unknown";
