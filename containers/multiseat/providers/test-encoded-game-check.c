@@ -9,7 +9,7 @@
 
 static int witness = -1;
 static GstStateChangeReturn forced_stop = GST_STATE_CHANGE_SUCCESS;
-static gboolean forbidden_cleanup, wrong_geometry;
+static gboolean forbidden_cleanup, wrong_geometry, late_error;
 static unsigned pulled;
 static unsigned char serialized_layout[1024];
 static size_t serialized_layout_size;
@@ -86,6 +86,11 @@ static void serialized_video_layout(void) {
 
 GstStateChangeReturn __real_gst_element_set_state(GstElement *, GstState);
 GstStateChangeReturn __wrap_gst_element_set_state(GstElement *element, GstState state) {
+  if (state == GST_STATE_NULL && late_error) {
+    GError *error = g_error_new_literal(GST_STREAM_ERROR, GST_STREAM_ERROR_DECODE, "injected late video error");
+    assert(gst_element_post_message(element, gst_message_new_error(GST_OBJECT(element), error, NULL)));
+    g_error_free(error); assert(write(witness, "E", 1) == 1);
+  }
   if (state == GST_STATE_NULL && forced_stop != GST_STATE_CHANGE_SUCCESS) {
     assert(write(witness, "S", 1) == 1);
     forbidden_cleanup = TRUE;
@@ -131,18 +136,18 @@ GstSample *__wrap_gst_app_sink_try_pull_sample(GstAppSink *sink, GstClockTime ti
   return sample;
 }
 
-static void codec_failure(GstStateChangeReturn stop_result, gboolean geometry) {
+static void codec_failure(GstStateChangeReturn stop_result, gboolean geometry, gboolean late) {
   int observed[2]; assert(pipe2(observed, O_CLOEXEC) == 0);
   pid_t child = fork(); assert(child >= 0);
   if (child == 0) {
-    close(observed[0]); witness = observed[1]; forced_stop = stop_result; wrong_geometry = geometry;
+    close(observed[0]); witness = observed[1]; forced_stop = stop_result; wrong_geometry = geometry; late_error = late;
     char *arguments[] = {"test-encoded-game-check", "--self-test", NULL};
     _exit(encoded_game_main(2, arguments));
   }
   close(observed[1]); int status = 0;
   assert(waitpid(child, &status, 0) == child);
   char marker = 0;
-  assert(read(observed[0], &marker, 1) == 1 && marker == (geometry ? 'G' : 'S'));
+  assert(read(observed[0], &marker, 1) == 1 && marker == (late ? 'E' : geometry ? 'G' : 'S'));
   assert(read(observed[0], &marker, 1) == 0); close(observed[0]);
   assert(WIFEXITED(status) && WEXITSTATUS(status) == 1);
 }
@@ -189,8 +194,9 @@ static void pinned_socket_replacement(void) {
 int main(void) {
   serialized_video_layout();
   pinned_socket_replacement();
-  codec_failure(GST_STATE_CHANGE_FAILURE, FALSE);
-  codec_failure(GST_STATE_CHANGE_ASYNC, FALSE);
-  codec_failure(GST_STATE_CHANGE_SUCCESS, TRUE);
+  codec_failure(GST_STATE_CHANGE_FAILURE, FALSE, FALSE);
+  codec_failure(GST_STATE_CHANGE_ASYNC, FALSE, FALSE);
+  codec_failure(GST_STATE_CHANGE_SUCCESS, TRUE, FALSE);
+  codec_failure(GST_STATE_CHANGE_SUCCESS, FALSE, TRUE);
   return 0;
 }

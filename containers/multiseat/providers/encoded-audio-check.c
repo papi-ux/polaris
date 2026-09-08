@@ -133,6 +133,8 @@ int main(int argc, char **argv) {
   GstPad *pad = gst_element_get_static_pad(encoded, "src");
   GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "decoded");
   GstBus *bus = gst_element_get_bus(pipeline);
+  /* Keep errors posted at the final-sample/NULL boundary until inspection. */
+  gst_pipeline_set_auto_flush_bus(GST_PIPELINE(pipeline), FALSE);
   struct audio_stats stats = {0}; g_mutex_init(&stats.lock);
   gulong probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, encoded_packet, &stats, NULL);
   unsigned samples = 0, crossings[2] = {0};
@@ -177,6 +179,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "audio pipeline quiescence unproven\n"); _exit(1);
   }
   if (audio_bus_error(bus)) failed = TRUE;
+  gst_bus_set_flushing(bus, TRUE);
   unsigned rms[2] = {0}, frequency[2] = {0};
   for (unsigned channel = 0; channel < 2 && samples; ++channel) {
     rms[channel] = sqrt(energy[channel] / samples) * 1000000;

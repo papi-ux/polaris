@@ -35,6 +35,11 @@ gulong __wrap_gst_pad_add_probe(GstPad *pad, GstPadProbeType type, GstPadProbeCa
 }
 GstStateChangeReturn __real_gst_element_set_state(GstElement *, GstState);
 GstStateChangeReturn __wrap_gst_element_set_state(GstElement *element, GstState state) {
+  if (state == GST_STATE_NULL && scenario == 5) {
+    GError *error = g_error_new_literal(GST_STREAM_ERROR, GST_STREAM_ERROR_DECODE, "injected late audio error");
+    g_assert_true(gst_element_post_message(element, gst_message_new_error(GST_OBJECT(element), error, NULL)));
+    g_error_free(error); injected();
+  }
   if (state == GST_STATE_NULL && (scenario == 1 || scenario == 2)) {
     poisoned = 1;
     injected();
@@ -134,7 +139,7 @@ static void retained_pulse_socket(void) {
 int main(void) {
   /* Fork before this parent initializes GStreamer or creates any GL/audio
    * threads. Each negative exercises the actual codec/main in isolation. */
-  for (scenario = 1; scenario <= 4; ++scenario) {
+  for (scenario = 1; scenario <= 5; ++scenario) {
     int witness[2]; g_assert_cmpint(pipe2(witness, O_CLOEXEC), ==, 0);
     pid_t child = fork(); g_assert_cmpint(child, >=, 0);
     if (!child) {
