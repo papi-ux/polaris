@@ -1128,6 +1128,7 @@
     "session_live": "Live compositor mode reported by the host.",
     "session_repaired": "Desktop session environment was repaired automatically.",
     "session_missing_env": "Desktop preview environment is missing. Restart Polaris from the desktop session or run the user service so it inherits Wayland/X11.",
+    "session_game_mode": "Steam Game Mode is running. Streaming from inside Game Mode is not supported yet; switch to Desktop Mode to stream.",
     "recent_issues_review": "Host activity to review",
     "recent_issues_clear": "Nothing needs attention",
     "no_warnings_title": "No warnings or errors",

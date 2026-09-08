@@ -54,7 +54,9 @@ brings it back.
 
 ## Arch derivatives
 
-CachyOS is expected to work through this package path. If a derivative renames dependencies or ships
+CachyOS is expected to work through this package path. CachyOS handheld edition boots into a Steam
+Game Mode session; read [Handhelds and Game Mode](handhelds.md) before the first mode switch, or
+Polaris goes offline with the desktop. If a derivative renames dependencies or ships
 different runtime helpers, the package may refuse to install or Polaris may fail to find a helper at
 launch. In that case use the local package or source build in
 [Build from source](building.md), and please report the derivative-specific gap with your distro, GPU,
