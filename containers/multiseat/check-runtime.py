@@ -11,7 +11,8 @@ executables = ['dbus-daemon', 'pipewire', 'pw-cli', 'pactl', 'gst-launch-1.0',
 files = [pathlib.Path('/usr/bin') / name for name in executables]
 files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf', 'pipewire-pulse.conf']]
 plugin = pathlib.Path('/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so')
-files.append(plugin)
+gl_plugin = pathlib.Path('/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstopengl.so')
+files += [plugin, gl_plugin]
 game_status = pathlib.Path('/usr/libexec/polaris-seat/game-status')
 capture_input = pathlib.Path('/usr/libexec/polaris-seat/capture-input')
 workload = pathlib.Path('/usr/libexec/polaris-seat/workloads/input-pong-v1')
@@ -26,12 +27,14 @@ for path in files:
         raise ValueError('untrusted provider dependency: ' + str(path))
     if path.parent == pathlib.Path('/usr/bin') and not os.access(path, os.X_OK):
         raise ValueError('non-executable provider dependency: ' + str(path))
-for path in [pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin] + ([workload, capture_input, game_status] if '--worker' in sys.argv else []):
+for path in [pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status] if '--worker' in sys.argv else []):
     linked = subprocess.check_output(['ldd', str(path)], text=True, stderr=subprocess.STDOUT)
     if 'not found' in linked:
         raise ValueError('unresolved ELF dependency: ' + str(path))
 for element in ['waylanddisplaysrc', 'unixfdsink', 'unixfdsrc', 'fakesink', 'videoconvert',
-                'audiotestsrc', 'audioconvert', 'audioresample', 'pulsesink']:
+                'audiotestsrc', 'audioconvert', 'audioresample', 'pulsesink', 'pulsesrc',
+                'openh264enc', 'openh264dec', 'h264parse', 'opusenc', 'opusdec', 'appsink',
+                'glupload', 'glcolorconvert', 'gldownload']:
     subprocess.run(['/usr/bin/gst-inspect-1.0', element], check=True, stdout=subprocess.DEVNULL)
 help_text = subprocess.check_output(['/usr/bin/gamescope', '--help'], stderr=subprocess.STDOUT, text=True)
 if '--keep-alive' not in help_text or '--expose-wayland' not in help_text:

@@ -64,7 +64,13 @@ frozen/offline; Meson wraps cannot download.
 
 Each root compiles `waylanddisplaysrc` against its own GStreamer development ABI.
 The installed system plugin directory also supplies `unixfdsink`, `unixfdsrc`,
-`fakesink`, and `videoconvert`. Fixed provider executables, plugin files, and
+`fakesink`, and `videoconvert`. The encoder dependency gate additionally requires
+H.264/Opus encoders and decoders, Pulse capture, appsink, and the GL import,
+conversion, and download elements. Their presence does not establish that a
+particular GPU's DMA-BUF format can be imported or that game frames encode.
+The GL plugin and its dependencies use the same signed snapshot and each root's
+GStreamer ABI; Steam already includes that package in its pinned source root.
+Fixed provider executables, plugin files, and
 PipeWire configurations must be trusted regular files; dynamic library checks
 must resolve. The custom Gamescope executable is `/usr/bin/gamescope`; the
 source root's packaged `/usr/games/gamescope` remains recorded in the package
