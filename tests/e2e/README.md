@@ -21,6 +21,15 @@ npx playwright install chromium
 
 ## Fixtures
 
+The onboarding layout suite runs against locally built assets with mocked APIs;
+it does not need a running Polaris host or credentials. It checks all five steps
+at mobile, tablet, and desktop widths, and saves a First App screenshot per width.
+
+```
+npm run build
+npx playwright test --config playwright.welcome.config.js
+```
+
 `fixtures/auth.js` provides a `loggedInPage` fixture that POSTs `/api/login` once per worker and reuses the session cookie. Tests that need to be signed in should import from there.
 
 ## Scope
