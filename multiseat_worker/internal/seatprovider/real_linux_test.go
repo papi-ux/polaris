@@ -63,9 +63,15 @@ func realProviderOptions(t *testing.T, runtimePath string, audio bool) providerO
 			options.pipeWirePath,
 			options.pipeWirePulsePath,
 			options.pwCLIPath,
+			options.pwDumpPath,
+			options.wirePlumberPath,
 			options.pactlPath,
+			options.gstLaunchPath,
 		} {
 			requireTrustedBinary(t, path, options.executableOwnerUID)
+		}
+		if _, err := os.Stat("/usr/share/wireplumber/wireplumber.conf.d/99-polaris-seat.conf"); err != nil {
+			unavailableRealDependency(t, "real audio policy configuration is unavailable")
 		}
 	}
 	return options
@@ -193,6 +199,11 @@ func TestRealPrivateAudioGraphRoutesExactlyAndCleansUp(t *testing.T) {
 	options := realProviderOptions(t, runtimePath, true)
 	request := audioRequest("real-audio", "polaris-real-audio")
 	provider := startRealAudio(t, options, request)
+	tone := startRealAudioTone(t, options, request.AudioSink, 440, 660)
+	assertRealAudioSamples(t, options, request.AudioSink, 440, 660)
+	// Every receiver is a newly connected Pulse stream. Reconnecting must
+	// configure and link new ports after the previous receiver has retired.
+	assertRealAudioSamples(t, options, request.AudioSink, 440, 660)
 	if err := probeAudioGraph(
 		options,
 		audioEnvironment(runtimePath, request.AudioSink),
@@ -202,6 +213,7 @@ func TestRealPrivateAudioGraphRoutesExactlyAndCleansUp(t *testing.T) {
 		stopRealProvider(t, provider)
 		t.Fatal(err)
 	}
+	stopRealAudioTone(t, tone, options)
 	stopRealProvider(t, provider)
 	requireEmptyRuntime(t, runtimePath)
 }
@@ -249,6 +261,10 @@ func TestRealPrivateAudioGraphsRemainIndependent(t *testing.T) {
 	})
 	first := startRealAudio(t, firstOptions, firstRequest)
 	second := startRealAudio(t, secondOptions, secondRequest)
+	firstTone := startRealAudioTone(t, firstOptions, firstRequest.AudioSink, 440, 660)
+	secondTone := startRealAudioTone(t, secondOptions, secondRequest.AudioSink, 880, 1100)
+	assertRealAudioSamples(t, firstOptions, firstRequest.AudioSink, 440, 660)
+	assertRealAudioSamples(t, secondOptions, secondRequest.AudioSink, 880, 1100)
 	if err := probeAudioGraph(
 		firstOptions,
 		audioEnvironment(firstPath, firstRequest.AudioSink),
@@ -261,6 +277,7 @@ func TestRealPrivateAudioGraphsRemainIndependent(t *testing.T) {
 		stopRealProvider(t, secondBus)
 		t.Fatal("one private audio graph exposed the other seat sink")
 	}
+	stopRealAudioTone(t, firstTone, firstOptions)
 	stopRealProvider(t, first)
 	stopRealProvider(t, firstBus)
 	requireEmptyRuntime(t, firstPath)
@@ -279,6 +296,8 @@ func TestRealPrivateAudioGraphsRemainIndependent(t *testing.T) {
 		stopRealProvider(t, secondBus)
 		t.Fatalf("stopping one audio graph harmed the other: %v", err)
 	}
+	assertRealAudioSamples(t, secondOptions, secondRequest.AudioSink, 880, 1100)
+	stopRealAudioTone(t, secondTone, secondOptions)
 	stopRealProvider(t, second)
 	stopRealProvider(t, secondBus)
 	requireEmptyRuntime(t, secondPath)

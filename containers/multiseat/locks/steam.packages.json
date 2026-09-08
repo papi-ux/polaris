@@ -629,6 +629,14 @@
       "filename": "timgm6mb-soundfont_1.3-5_all.deb",
       "sha256": "b70bc29b8f27adef8f92a2d9c1e26cee977b84c68110f0dd4326d97730a7c3ed",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/universe/t/timgm6mb-soundfont/timgm6mb-soundfont_1.3-5_all.deb"
+    },
+    {
+      "name": "wireplumber",
+      "version": "0.5.8-1",
+      "architecture": "amd64",
+      "filename": "wireplumber_0.5.8-1_amd64.deb",
+      "sha256": "435b2206be4f6ededb7f3bd0230786371f8368a73ed044594e31dc537edf6944",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/wireplumber_0.5.8-1_amd64.deb"
     }
   ],
   "build": [
@@ -2591,6 +2599,14 @@
       "filename": "wayland-protocols_1.41-1_all.deb",
       "sha256": "3a0942c89ced71ebc809718c9d21910627d2a257b1277d6a9173a672cf53125f",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/w/wayland-protocols/wayland-protocols_1.41-1_all.deb"
+    },
+    {
+      "name": "wireplumber",
+      "version": "0.5.8-1",
+      "architecture": "amd64",
+      "filename": "wireplumber_0.5.8-1_amd64.deb",
+      "sha256": "435b2206be4f6ededb7f3bd0230786371f8368a73ed044594e31dc537edf6944",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/wireplumber_0.5.8-1_amd64.deb"
     },
     {
       "name": "x11proto-dev",

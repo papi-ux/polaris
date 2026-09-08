@@ -6,10 +6,14 @@ import stat
 import subprocess
 import sys
 
-executables = ['dbus-daemon', 'pipewire', 'pw-cli', 'pactl', 'gst-launch-1.0',
+executables = ['dbus-daemon', 'pipewire', 'pw-cli', 'pw-dump', 'wireplumber', 'pactl', 'gst-launch-1.0',
                'gst-inspect-1.0', 'gamescope', 'Xwayland']
 files = [pathlib.Path('/usr/bin') / name for name in executables]
 files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf', 'pipewire-pulse.conf']]
+files += [pathlib.Path(path) for path in [
+    '/usr/share/wireplumber/wireplumber.conf',
+    '/usr/share/wireplumber/wireplumber.conf.d/99-polaris-seat.conf',
+    '/usr/share/polaris/wireplumber/allocated-target.lua']]
 plugin = pathlib.Path('/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so')
 gl_plugin = pathlib.Path('/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstopengl.so')
 files += [plugin, gl_plugin]
@@ -29,7 +33,7 @@ for path in files:
         raise ValueError('untrusted provider dependency: ' + str(path))
     if (path.parent == pathlib.Path('/usr/bin') or path.is_relative_to('/usr/libexec/polaris-seat')) and not os.access(path, os.X_OK):
         raise ValueError('non-executable provider dependency: ' + str(path))
-for path in [pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio] if '--worker' in sys.argv else []):
+for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio] if '--worker' in sys.argv else []):
     linked = subprocess.check_output(['ldd', str(path)], text=True, stderr=subprocess.STDOUT)
     if 'not found' in linked:
         raise ValueError('unresolved ELF dependency: ' + str(path))

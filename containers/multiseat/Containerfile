@@ -172,6 +172,8 @@ COPY --from=runtime-root-build --chmod=0755 /gamescope-root/usr/bin/gamescope /u
 COPY --from=runtime-root-build /gamescope-root/usr/share/gamescope /usr/share/gamescope
 COPY containers/multiseat/locks/gamescope.json /usr/share/polaris/build/gamescope.lock.json
 COPY containers/multiseat/locks/plugin.json /usr/share/polaris/build/plugin.lock.json
+COPY --chmod=0644 containers/multiseat/providers/polaris-audio-policy.conf /usr/share/wireplumber/wireplumber.conf.d/99-polaris-seat.conf
+COPY --chmod=0644 containers/multiseat/providers/polaris-audio-target.lua /usr/share/polaris/wireplumber/allocated-target.lua
 COPY containers/multiseat/check-runtime.py /check-runtime.py
 RUN python3 /check-runtime.py && rm /check-runtime.py
 

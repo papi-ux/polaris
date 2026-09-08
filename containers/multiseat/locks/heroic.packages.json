@@ -85,6 +85,14 @@
       "filename": "pipewire-pulse_1.2.7-1ubuntu5.1_amd64.deb",
       "sha256": "611be8d6b8620f5d266e7a8a232bb7cb96f558fc8a73205af7aaec084c3ab8eb",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/p/pipewire/pipewire-pulse_1.2.7-1ubuntu5.1_amd64.deb"
+    },
+    {
+      "name": "wireplumber",
+      "version": "0.5.8-1",
+      "architecture": "amd64",
+      "filename": "wireplumber_0.5.8-1_amd64.deb",
+      "sha256": "435b2206be4f6ededb7f3bd0230786371f8368a73ed044594e31dc537edf6944",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/wireplumber_0.5.8-1_amd64.deb"
     }
   ],
   "build": [
@@ -1487,6 +1495,14 @@
       "filename": "wayland-protocols_1.41-1_all.deb",
       "sha256": "3a0942c89ced71ebc809718c9d21910627d2a257b1277d6a9173a672cf53125f",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/w/wayland-protocols/wayland-protocols_1.41-1_all.deb"
+    },
+    {
+      "name": "wireplumber",
+      "version": "0.5.8-1",
+      "architecture": "amd64",
+      "filename": "wireplumber_0.5.8-1_amd64.deb",
+      "sha256": "435b2206be4f6ededb7f3bd0230786371f8368a73ed044594e31dc537edf6944",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/wireplumber_0.5.8-1_amd64.deb"
     },
     {
       "name": "x11proto-dev",
