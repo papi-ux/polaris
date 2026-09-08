@@ -195,7 +195,8 @@ int main(int argc, char **argv) {
   GError *error = NULL;
   gst_init(NULL, NULL);
   const char *head = synthetic ? "appsrc name=source format=time ! videoconvert ! " :
-    "unixfdsrc name=source num-buffers=60 ! glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=RGBA ! gldownload ! videoconvert ! ";
+    "unixfdsrc name=source num-buffers=60 ! glupload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=external-oes ! "
+    "glcolorconvert ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! gldownload ! videoconvert ! ";
   char *description = g_strconcat(head,
     "video/x-raw,format=I420 ! openh264enc name=encoder bitrate=8000000 gop-size=30 ! "
     "h264parse ! video/x-h264,stream-format=byte-stream,alignment=au ! identity name=encoded ! "
@@ -267,6 +268,18 @@ int main(int argc, char **argv) {
       }
     }
     gst_sample_unref(sample);
+  }
+  if (!synthetic && (failed || frames != FRAME_COUNT)) {
+    GstPad *source_pad = gst_element_get_static_pad(source, "src");
+    GstCaps *caps = source_pad ? gst_pad_get_current_caps(source_pad) : NULL;
+    if (caps && gst_caps_get_size(caps) == 1) {
+      const GstStructure *structure = gst_caps_get_structure(caps, 0);
+      const char *format = gst_structure_get_string(structure, "format");
+      const char *drm_format = gst_structure_get_string(structure, "drm-format");
+      fprintf(stderr, "capture import format=%.16s drm-format=%.64s\n", format ? format : "unknown", drm_format ? drm_format : "unknown");
+    }
+    if (caps) gst_caps_unref(caps);
+    if (source_pad) gst_object_unref(source_pad);
   }
   if (gst_element_set_state(pipeline, GST_STATE_NULL) != GST_STATE_CHANGE_SUCCESS) {
     /* This isolated process cannot prove streaming threads have stopped. Keep
