@@ -27,6 +27,8 @@ const (
 	// regular executable itself and never follow the packaging symlink.
 	defaultPipeWirePulsePath  = "/usr/bin/pipewire"
 	defaultPWCLIPath          = "/usr/bin/pw-cli"
+	defaultPWDumpPath         = "/usr/bin/pw-dump"
+	defaultWirePlumberPath    = "/usr/bin/wireplumber"
 	defaultPactlPath          = "/usr/bin/pactl"
 	defaultGSTLaunchPath      = "/usr/bin/gst-launch-1.0"
 	defaultGSTInspectPath     = "/usr/bin/gst-inspect-1.0"
@@ -46,6 +48,8 @@ type providerOptions struct {
 	pipeWirePath          string
 	pipeWirePulsePath     string
 	pwCLIPath             string
+	pwDumpPath            string
+	wirePlumberPath       string
 	pactlPath             string
 	gstLaunchPath         string
 	gstInspectPath        string
@@ -76,6 +80,8 @@ func defaultProviderOptions() providerOptions {
 		pipeWirePath:         defaultPipeWirePath,
 		pipeWirePulsePath:    defaultPipeWirePulsePath,
 		pwCLIPath:            defaultPWCLIPath,
+		pwDumpPath:           defaultPWDumpPath,
+		wirePlumberPath:      defaultWirePlumberPath,
 		pactlPath:            defaultPactlPath,
 		gstLaunchPath:        defaultGSTLaunchPath,
 		gstInspectPath:       defaultGSTInspectPath,
@@ -106,6 +112,8 @@ func normalizeProviderOptions(options providerOptions) (providerOptions, error) 
 		!validAbsolutePath(options.pipeWirePath) ||
 		!validAbsolutePath(options.pipeWirePulsePath) ||
 		!validAbsolutePath(options.pwCLIPath) ||
+		!validAbsolutePath(options.pwDumpPath) ||
+		!validAbsolutePath(options.wirePlumberPath) ||
 		!validAbsolutePath(options.pactlPath) ||
 		!validAbsolutePath(options.gstLaunchPath) ||
 		!validAbsolutePath(options.gstInspectPath) ||

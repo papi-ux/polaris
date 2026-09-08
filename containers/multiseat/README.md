@@ -16,7 +16,7 @@ Final build stages have no module or package download step. The worker, dispatch
 and six providers use only the Go standard library, disable CGO and
 module-network access, run their tests, then emit static Linux/amd64 binaries.
 The final stage fails its build unless the locked root supplies the fixed D-Bus,
-PipeWire, `pw-cli`, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
+PipeWire, `pw-cli`, `pw-dump`, WirePlumber, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
 `waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and `fakesink` elements; and both
 trusted PipeWire configuration files. The image job builds all four Linux/amd64
 profiles at an exact Polaris revision and exports downloadable OCI archives,
@@ -431,3 +431,19 @@ A post-creation X11 directory failure without a retained inode leaves cleanup
 unproven. Startup fails and the worker's private tmpfs must be destroyed before
 reuse. There is no same-worker retry path; unidentified or replacement paths
 must never be removed by provider cleanup.
+
+The private audio provider supervises WirePlumber 0.5.8 with a fixed `polaris`
+profile. Hardware discovery, D-Bus integration, saved routing, default-device
+fallback, and stream movement are disabled. Before launcher admission it captures
+the allocated null sink's object serial, proves that the policy process is
+attached to this private server, and verifies both stereo playback and monitor
+ports. Dynamic streams may link only to that original sink; a replacement with
+the same name does not inherit its authority. Policy exit retires the audio
+provider, which stops Pulse and policy before the PipeWire core.
+
+Each profile adds the hash-locked `wireplumber_0.5.8-1_amd64.deb` from Ubuntu's
+signed Plucky release archive. This supplemental package uses the explicit
+archive URL in its lock entry; the existing January 20 snapshot inputs retain
+their versions and hashes. Offline installation against all four locked source
+roots and runtime package sets adds only WirePlumber: its library, Lua, and
+PipeWire dependencies are already covered. Final builds remain network-free.
