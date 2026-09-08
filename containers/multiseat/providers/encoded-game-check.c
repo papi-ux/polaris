@@ -131,6 +131,13 @@ static unsigned dimension(const char *text) {
   return errno || !*text || *end || value < 320 || value > 3840 || value % 2 ? 0 : (unsigned)value;
 }
 
+static gboolean valid_capture_socket(const struct stat *identity) {
+  /* GSocket creates 0700 under the provider's 0077 umask; owner execute
+   * permission has no extra authority on an AF_UNIX socket. */
+  return S_ISSOCK(identity->st_mode) && identity->st_uid == geteuid() &&
+    ((identity->st_mode & 07777) == 0600 || (identity->st_mode & 07777) == 0700);
+}
+
 static int pin_capture_socket(const char *path, struct stat *identity) {
   const char prefix[] = "/run/polaris/polaris-frames-";
   if (strlen(path) != sizeof(prefix) - 1 + 64 || strncmp(path, prefix, sizeof(prefix) - 1)) return -1;
@@ -140,8 +147,7 @@ static int pin_capture_socket(const char *path, struct stat *identity) {
       (directory.st_mode & 07777) != 0700 || directory.st_uid != geteuid()) return -1;
   int fd = open(path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
   if (fd < 0) return -1;
-  if (fstat(fd, identity) || !S_ISSOCK(identity->st_mode) ||
-      (identity->st_mode & 07777) != 0600 || identity->st_uid != geteuid()) { close(fd); return -1; }
+  if (fstat(fd, identity) || !valid_capture_socket(identity)) { close(fd); return -1; }
   return fd;
 }
 
@@ -176,10 +182,10 @@ int main(int argc, char **argv) {
   const gboolean synthetic = argc == 2 && (!strcmp(argv[1], "--self-test") || !strcmp(argv[1], "--self-test-empty") || !strcmp(argv[1], "--self-test-frozen"));
   unsigned width = synthetic ? 640 : argc == 5 ? dimension(argv[2]) : 0;
   unsigned height = synthetic ? 480 : argc == 5 ? dimension(argv[3]) : 0;
-  if (!width || !height) return 1;
+  if (!width || !height) { fprintf(stderr, "encoded probe dimensions or invocation invalid\n"); return 1; }
   struct stat identity;
   int pinned = synthetic ? -1 : pin_capture_socket(argv[1], &identity);
-  if (!synthetic && pinned < 0) return 1;
+  if (!synthetic && pinned < 0) { fprintf(stderr, "allocated capture socket identity unavailable\n"); return 1; }
   struct sigaction action = {0}; action.sa_handler = stop;
   sigaction(SIGTERM, &action, NULL); sigaction(SIGINT, &action, NULL);
   /* The executable itself never forks a registry-scanner child. */
