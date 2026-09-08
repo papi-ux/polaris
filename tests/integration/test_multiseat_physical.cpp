@@ -342,6 +342,7 @@ namespace {
     const auto finish_game = [&](int index) {
       EXPECT_EQ(command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "finish", game_tokens[index]}, 2s).exit_status, 0);
       if (games[index].joinable()) games[index].join();
+      if (encoded_game) RecordProperty("game_runtime_" + std::to_string(index), game_results[index].output);
       EXPECT_FALSE(game_results[index].timed_out);
       EXPECT_EQ(game_results[index].exit_status, 0) << game_results[index].output;
     };
