@@ -1079,29 +1079,33 @@ namespace video {
       if (probe_test_hooks) return probe_test_hooks->identity;
 #endif
 #ifdef __linux__
+      auto decline = [](std::string_view reason) -> std::optional<probe_reuse::identity_t> {
+        BOOST_LOG(debug) << "Encoder probe requires live validation: " << reason;
+        return std::nullopt;
+      };
       // Only the owned private compositor currently provides a live,
       // generation-bound topology observation. Desktop/portal/unknown routes
       // keep probing until they implement an equally strong identity contract.
       if (!config::video.linux_display.use_cage_compositor || !probe_drivers ||
           (!config::video.capture.empty() && config::video.capture != "wlr") ||
-          !probe_drivers->has_capture_routes()) return std::nullopt;
+          !probe_drivers->has_capture_routes()) return decline("capture route or retained provider proof unavailable");
       // Require actual provider evidence, collected before probe owners died.
       if (backend != "nvenc" || !probe_drivers->contains_provider("libnvidia-encode.so") ||
-          !probe_drivers->contains_provider("libcuda.so")) return std::nullopt;
+          !probe_drivers->contains_provider("libcuda.so")) return decline("NVENC or CUDA provider unavailable");
       const auto providers = probe_drivers->current_key();
       const auto selection = platf::encoder_probe_identity::provider_selection_key();
-      if (!providers || !selection) return std::nullopt;
-      // Private WLR RAM capture also creates EGL, and headless DMA-BUF can use
-      // GL/CUDA independently of the windowed override. Require both vendor
-      // roots for all admitted routes; unsupported installations keep probing.
-      if (!probe_drivers->contains_provider("libEGL_nvidia.so") ||
-          !probe_drivers->contains_provider("libGLX_nvidia.so")) return std::nullopt;
+      if (!providers) return decline("retained provider identity or loader generation changed");
+      if (!selection) return decline("provider discovery identity unavailable");
+      // Both private WLR RAM capture and GL/CUDA DMA-BUF conversion use EGL.
+      // GLX is a separate frontend and need not be loaded on this route. The
+      // retained closure still includes every actual GL/GLX provider in use.
+      if (!probe_drivers->contains_provider("libEGL_nvidia.so")) return decline("NVIDIA EGL provider unavailable");
       const auto topology = stream_runtime::labwc::encoder_probe_topology();
-      if (!topology) return std::nullopt;
+      if (!topology) return decline("owned capture topology unavailable");
       const auto render = config::video.adapter_name.empty() ?
                             platf::default_render_device() : config::video.adapter_name;
       const auto hardware = platf::encoder_probe_identity::observe(render);
-      if (!hardware) return std::nullopt;
+      if (!hardware) return decline("live GPU or kernel driver identity unavailable");
       return probe_reuse::identity_t {hardware->gpu, hardware->driver + *providers + *selection, *topology,
                                       encoder_probe_settings(config::video)};
 #else
