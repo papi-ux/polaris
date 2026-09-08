@@ -17,6 +17,7 @@
   #include <functional>
   #include <future>
   #include <mutex>
+  #include <poll.h>
   #include <span>
   #include <stdexcept>
   #include <string>
@@ -1303,13 +1304,25 @@ namespace {
     auto authority = create_authority(store, identity_for(), "blocked-writer");
     auto release = std::make_shared<std::promise<void>>();
     auto released = release->get_future().share();
-    fake_worker_t worker {authority, fake_behavior_e::healthy, true, [&, released](int fd, channel_e channel) {
+    auto arrived = std::make_shared<std::promise<void>>();
+    auto input_arrived = arrived->get_future();
+    fake_worker_t worker {authority, fake_behavior_e::healthy, true, [&, released, arrived](int fd, channel_e channel) {
                             if (channel != channel_e::control) {
                               return false;
                             }
                             scripted_channel_t peer {fd, channel, authority.identity()};
                             if (!peer.expect(message_e::attach) || !peer.send(message_e::attached)) {
                               return true;
+                            }
+                            pollfd readable {.fd = fd, .events = POLLIN, .revents = 0};
+                            int result;
+                            do {
+                              result = ::poll(&readable, 1, 1000);
+                            } while (result < 0 && errno == EINTR);
+                            std::uint8_t prefix = 0;
+                            if (result > 0 && (readable.revents & POLLIN) &&
+                                ::recv(fd, &prefix, 1, MSG_PEEK | MSG_DONTWAIT) == 1) {
+                              arrived->set_value();
                             }
                             // Read no input bytes until after cancellation, so a frame larger than
                             // the client's constrained send buffer necessarily blocks write_exact.
@@ -1331,6 +1344,7 @@ namespace {
     auto writing = std::async(std::launch::async, [&] {
       return client.send_input(payload);
     });
+    ASSERT_EQ(input_arrived.wait_for(1s), std::future_status::ready);
     ASSERT_EQ(writing.wait_for(50ms), std::future_status::timeout);
     // An independently authenticated channel still makes progress.
     EXPECT_EQ(client.heartbeat(channel_e::media), transport_status_e::applied);
