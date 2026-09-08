@@ -788,9 +788,15 @@ func runDisplayCapture(
 		return err
 	}
 	if inputs != nil {
-		if err := inputs.VerifyConsumer(child.command.Process.Pid); err != nil {
+		if child.pidFD == nil {
+			return errors.New("runtime input consumer lifetime unavailable")
+		}
+		if err := inputs.VerifyConsumer(child.command.Process.Pid, int(child.pidFD.Fd())); err != nil {
 			return err
 		}
+	}
+	if child.exited() {
+		return errors.New("runtime display exited during input verification")
 	}
 	if err := publishReadiness(ready); err != nil {
 		return err
@@ -807,7 +813,7 @@ func runDisplayCapture(
 			return errors.New("runtime display exited unexpectedly")
 		case <-ticker.C:
 			if inputs != nil {
-				if err := inputs.VerifyConsumer(child.command.Process.Pid); err != nil {
+				if err := inputs.VerifyConsumer(child.command.Process.Pid, int(child.pidFD.Fd())); err != nil {
 					return err
 				}
 			}

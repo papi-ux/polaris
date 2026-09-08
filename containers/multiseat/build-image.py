@@ -93,6 +93,11 @@ def materialized_context(revision, profile_id, nvidia):
 def sbom(packages, profile, revision, context):
     here = context / 'containers/multiseat'
     components = []
+    components.append({'type': 'application', 'name': 'polaris-input-pong',
+                       'version': revision, 'bom-ref': 'polaris-input-pong',
+                       'properties': [{'name': 'polaris:workload-id', 'value': 'input-pong-v1'},
+                                      {'name': 'polaris:source-sha256', 'value': digest(here / 'workloads/input-pong.c')}],
+                       'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/papi-ux/polaris/blob/' + revision + '/containers/multiseat/workloads/input-pong.c'}]})
     for line in packages.splitlines():
         name, version, architecture = line.split('\t')
         purl = 'pkg:deb/ubuntu/' + urllib.parse.quote(name, safe='') + '@' + urllib.parse.quote(version, safe='') + '?arch=' + architecture

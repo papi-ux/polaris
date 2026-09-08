@@ -13,7 +13,7 @@ separate avoids multiplying package and credential state inside one large
 image.
 
 Final build stages have no module or package download step. The worker, dispatcher,
-and four providers use only the Go standard library, disable CGO and
+and six providers use only the Go standard library, disable CGO and
 module-network access, run their tests, then emit static Linux/amd64 binaries.
 The final stage fails its build unless the locked root supplies the fixed D-Bus,
 PipeWire, `pw-cli`, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
@@ -42,16 +42,23 @@ publish the exact `POLARIS-RUNTIME-READY/1` record on an inherited descriptor
 before the stage is ready. Shutdown targets the owned process group with TERM
 and escalates to KILL at the component deadline.
 
-That adapter set is a concrete supervision boundary, not the missing media
-implementation. The image now carries `polaris-seat-runtime` plus real private
-session-bus, audio, outer display/capture, and nested Gamescope providers, but
-the production `run` command still injects no adapters. The other three
-provider locations remain absent, so this image does not start Steam, Heroic,
-Lutris, encoding, or virtual input. Treating its healthy supervisor as a
-streaming-capable worker would still be a false gate. Tests exercise catalog
-creation, the synthetic process boundary, the real dispatcher, and isolated
-host D-Bus, PipeWire, Wayland, and raw-frame transports; they never invoke a
-launcher or physical device.
+The image carries the dispatcher and private session-bus, audio, outer capture,
+nested Gamescope, verified input-reader, and experimental launcher providers.
+The launcher currently accepts only the image-owned `input-pong-v1` workload
+with the Gamescope profile. This small offline X11 game exercises keyboard,
+pointer, optional gamepad, and private Pulse audio without launcher accounts.
+Its executable is compiled against each profile's locked X11/GStreamer ABI;
+image checks resolve its ELF dependencies and the SBOM records its source hash.
+The launcher validates the allocated display protocols and input identities,
+retains the private profile, and owns its entire descendant process tree,
+including helpers that detach into another session.
+
+The production `run` command still injects no adapters. Worker-local encoding
+and host media routing are incomplete, and the Steam, Heroic, and Lutris launcher
+implementations remain outstanding. Provider readiness proves a resource or
+supervised process is available; it does not prove game frames reached a client.
+Unit tests and isolated physical input receipts likewise do not establish
+compositor input delivery or successful game streaming.
 
 The controller now also has an injected host-brokered input authority and a
 Linux inputtino lifecycle backend, but neither is wired to this image or the

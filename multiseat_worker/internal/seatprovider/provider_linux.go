@@ -57,6 +57,7 @@ type providerOptions struct {
 	x11LockDirectory      string
 	x11DirectoryOwnerUID  uint32
 	x11DirectoryMode      uint32
+	x11LockDirectoryMode  uint32
 	softwareGamescope     bool
 	softwareVulkanICDPath string
 	allowSharedX11        bool
@@ -97,6 +98,9 @@ func validAbsolutePath(path string) bool {
 }
 
 func normalizeProviderOptions(options providerOptions) (providerOptions, error) {
+	if options.x11LockDirectoryMode == 0 {
+		options.x11LockDirectoryMode = options.x11DirectoryMode
+	}
 	if !validAbsolutePath(options.runtimeDirectory) ||
 		!validAbsolutePath(options.dbusDaemonPath) ||
 		!validAbsolutePath(options.pipeWirePath) ||
@@ -114,6 +118,7 @@ func normalizeProviderOptions(options providerOptions) (providerOptions, error) 
 		(options.softwareVulkanICDPath != "" &&
 			!validAbsolutePath(options.softwareVulkanICDPath)) ||
 		options.x11DirectoryMode == 0 || options.x11DirectoryMode > 0o7777 ||
+		options.x11LockDirectoryMode > 0o7777 ||
 		(options.softwareGamescope && options.softwareVulkanICDPath == "") ||
 		(!options.softwareGamescope && options.softwareVulkanICDPath != "") ||
 		options.startupTimeout <= 0 || options.probeTimeout <= 0 ||

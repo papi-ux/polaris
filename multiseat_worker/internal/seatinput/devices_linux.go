@@ -171,7 +171,7 @@ func Open(path, seat string) (_ *Set, result error) {
 		phys, err := kernelString(deviceFD, 0x07)
 		// inputtino's shared UHID path may omit phys. The authoritative host
 		// contract permits that case; the exact hashed kernel name is required.
-		if err != nil || (phys != "" && phys != wantPhys) {
+		if !validPhysicalIdentity(phys, err, wantPhys) {
 			return nil, errors.New("input physical identity changed")
 		}
 		seen[name], identities[device.status.Rdev] = true, true
@@ -193,6 +193,15 @@ func Open(path, seat string) (_ *Set, result error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func validPhysicalIdentity(phys string, err error, expected string) bool {
+	// evdev returns ENOENT when input_dev::phys is null. This is the same
+	// optional field accepted by the host sysfs authority, not a missing node.
+	if errors.Is(err, syscall.ENOENT) {
+		return phys == ""
+	}
+	return err == nil && (phys == "" || phys == expected)
 }
 
 func (s *Set) Close() {
@@ -254,11 +263,11 @@ func (s *Set) CompositorArguments() []string {
 
 // VerifyConsumer requires the actual compositor process to retain all admitted
 // libinput devices. A Wayland socket alone cannot prove input readiness.
-func (s *Set) VerifyConsumer(pid int) error {
+func (s *Set) VerifyConsumer(pid int, pidFD int) error {
 	if err := s.Verify(); err != nil {
 		return err
 	}
-	if pid <= 0 {
+	if pid <= 0 || !consumerAlive(pidFD) {
 		return errors.New("input consumer unavailable")
 	}
 	root := fmt.Sprintf("/proc/%d/fd", pid)
@@ -270,13 +279,22 @@ func (s *Set) VerifyConsumer(pid int) error {
 	for _, entry := range entries {
 		var status syscall.Stat_t
 		if syscall.Stat(filepath.Join(root, entry), &status) == nil && status.Mode&syscall.S_IFMT == syscall.S_IFCHR {
-			opened[status.Rdev] = true
+			if !readableConsumerFD(fmt.Sprintf("/proc/%d/fdinfo/%s", pid, entry)) {
+				continue
+			}
+			var after syscall.Stat_t
+			if syscall.Stat(filepath.Join(root, entry), &after) == nil && sameNode(status, after) {
+				opened[status.Rdev] = true
+			}
 		}
 	}
 	for _, d := range s.devices {
 		if d.role.compositor && !opened[d.status.Rdev] {
 			return errors.New("compositor did not accept allocated input")
 		}
+	}
+	if !consumerAlive(pidFD) {
+		return errors.New("input consumer exited during verification")
 	}
 	return nil
 }
@@ -293,4 +311,46 @@ func boundedNames(path string, limit int) ([]string, error) {
 		err = nil
 	}
 	return names, err
+}
+
+// A pidfd remains bound to the original child after wait/reap and PID reuse.
+func consumerAlive(pidFD int) bool {
+	if pidFD < 0 {
+		return false
+	}
+	poll := struct {
+		FD              int32
+		Events, Revents int16
+	}{FD: int32(pidFD), Events: 1}
+	timeout := syscall.Timespec{}
+	count, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&poll)), 1, uintptr(unsafe.Pointer(&timeout)), 0, 0, 0)
+	return errno == 0 && count == 0 && poll.Revents == 0
+}
+
+func readableConsumerFD(path string) bool {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	file := os.NewFile(uintptr(fd), "input-consumer-fdinfo")
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(content) > 4096 {
+		return false
+	}
+	found := false
+	for _, line := range strings.Split(string(content), "\n") {
+		if !strings.HasPrefix(line, "flags:") {
+			continue
+		}
+		if found {
+			return false
+		}
+		found = true
+		flags, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, "flags:")), 8, 32)
+		if err != nil || flags&0x200000 != 0 || flags&syscall.O_ACCMODE != syscall.O_RDONLY {
+			return false
+		}
+	}
+	return found
 }

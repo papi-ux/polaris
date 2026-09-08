@@ -10,15 +10,18 @@ The CIL module allows containers to open and read one dedicated device type.
 The companion udev rule labels only event nodes with the reserved
 `Polaris multiseat ` name and `seat-polaris` assignment from `60-polaris.rules`.
 The controller must still authenticate each allocation and mount only its
-exact devices. This policy does not grant ioctl or write access, generic input
-access, or access to uinput/uhid. It does not enable any multiseat adapter.
+exact devices. Three evdev ioctls query the version, kernel name and physical
+identity (`0x4501`, `0x4506`, `0x4507`). Device writes, grabs, revocation,
+generic input access and access to uinput/uhid remain unavailable. This policy
+does not enable any multiseat adapter.
 
 Administrators opt in explicitly, with all multiseat workers stopped. Confirm
 that the module and destination rule are absent first; preserve any existing
 local policy instead of overwriting it. Record the installed module checksum
 and rule hash so removal can verify ownership of both artifacts. After loading,
 inspect effective permissions, including those inherited through `device_node`.
-Only read/open/getattr should be granted to `container_t` for this type:
+Only read/open/getattr and ioctl with those three extended permissions should
+be granted to `container_t` for this type:
 
 ```sh
 sudo semodule -i containers/multiseat/selinux/polaris_multiseat_input.cil

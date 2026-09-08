@@ -3,10 +3,72 @@
 package seatinput
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
+
+func TestOnlyAbsentPhysicalFieldPreservesHostCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		value   string
+		err     error
+		allowed bool
+	}{
+		{"", nil, true}, {"expected", nil, true}, {"", syscall.ENOENT, true},
+		{"other-seat", nil, false}, {"other-seat", syscall.ENOENT, false},
+		{"", syscall.EACCES, false}, {"", syscall.EPERM, false}, {"", syscall.ENODEV, false},
+	} {
+		if validPhysicalIdentity(test.value, test.err, "expected") != test.allowed {
+			t.Fatalf("unexpected physical identity admission: %+v", test)
+		}
+	}
+}
+
+func TestConsumerRejectsPathAndWriteOnlyDescriptors(t *testing.T) {
+	for _, flags := range []int{syscall.O_RDONLY, syscall.O_WRONLY, syscall.O_RDWR, 0x200000} {
+		fd, err := syscall.Open("/dev/null", flags|syscall.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readable := readableConsumerFD(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+		_ = syscall.Close(fd)
+		if readable != (flags == syscall.O_RDONLY) {
+			t.Fatalf("incorrect read admission for flags %#x", flags)
+		}
+	}
+}
+
+func TestConsumerLifetimeRemainsRetiredAfterReap(t *testing.T) {
+	pidFD := -1
+	command := exec.Command("/bin/sleep", "30")
+	command.SysProcAttr = &syscall.SysProcAttr{PidFD: &pidFD}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = command.Process.Kill(); _ = command.Wait() }()
+	if pidFD < 0 {
+		t.Fatal("pidfd is required for input consumer proof")
+	}
+	defer syscall.Close(pidFD)
+	if !consumerAlive(pidFD) {
+		t.Fatal("running consumer was not alive")
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait()
+	for i := 0; i < 100; i++ {
+		if consumerAlive(pidFD) {
+			t.Fatal("reaped consumer became live")
+		}
+	}
+	if consumerAlive(-1) {
+		t.Fatal("accepted missing process lifetime")
+	}
+}
 
 func TestRolesRejectAmbientDevicesAndNoncanonicalSlots(t *testing.T) {
 	for _, name := range []string{"event0", "js0", "mouse0", "polaris-gamepad-00", "polaris-gamepad-16", "polaris-gamepad-+1", "../polaris-keyboard", "polaris-gamepad-0/child"} {

@@ -37,6 +37,14 @@ RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
     meson compile -C /gamescope-src/build -j 8 && \
     DESTDIR=/gamescope-root meson install -C /gamescope-src/build --no-rebuild
 
+# Native acceptance workload uses the same pinned compiler and ABI closure.
+FROM runtime-root-build AS workload-build
+COPY containers/multiseat/workloads/input-pong.c /workloads/input-pong.c
+RUN mkdir -p /out && cc -std=c11 -O2 -Wall -Wextra -Werror \
+      -ffile-prefix-map=/workloads=. -Wl,--build-id=none \
+      /workloads/input-pong.c -o /out/input-pong-v1 \
+      $(pkg-config --cflags --libs x11 gstreamer-1.0) -lm
+
 FROM ${GO_BUILDER_IMAGE} AS worker-build
 WORKDIR /src
 ENV CGO_ENABLED=0 \
@@ -63,6 +71,9 @@ RUN go test -trimpath ./... && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-virtual-input ./cmd/polaris-seat-virtual-input && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
+      -o /out/polaris-seat-launcher ./cmd/polaris-seat-launcher && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-runtime ./cmd/polaris-seat-runtime && \
@@ -114,6 +125,8 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.description="Isolated Polaris multiseat worker" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
       io.polaris.multiseat.architecture="linux/amd64"
+COPY --from=workload-build --chmod=0555 /out/input-pong-v1 /usr/libexec/polaris-seat/workloads/input-pong-v1
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-launcher /usr/libexec/polaris-seat/launcher
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-virtual-input /usr/libexec/polaris-seat/virtual-input
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-input-probe /usr/bin/polaris-seat-input-probe
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-worker /usr/bin/polaris-seat-worker
@@ -122,6 +135,8 @@ COPY --from=worker-build --chmod=0555 /out/polaris-seat-session-bus /usr/libexec
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-display-capture /usr/libexec/polaris-seat/display-capture
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-nested-compositor /usr/libexec/polaris-seat/nested-compositor
+COPY containers/multiseat/check-runtime.py /check-worker-runtime.py
+RUN python3 /check-worker-runtime.py --worker && rm /check-worker-runtime.py
 RUN test -x /usr/bin/dbus-daemon && \
     test -x /usr/bin/pipewire && \
     test -x /usr/bin/pw-cli && \
