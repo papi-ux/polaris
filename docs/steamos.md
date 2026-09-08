@@ -4,7 +4,7 @@ Polaris provides a dedicated x86_64 package for SteamOS 3.8, `Polaris-steamos3.8
 
 ## Validation Status
 
-Initial support covers package installation and Polaris startup in SteamOS Desktop Mode only. It does not certify physical Steam Deck gameplay, Game Mode, OLED 90 Hz behavior, suspend and resume, or persistence across SteamOS updates. Those claims require separate hardware evidence.
+Initial support covers package installation and Polaris startup in SteamOS Desktop Mode only. It does not certify physical Steam Deck gameplay, Game Mode, OLED 90 Hz behavior, suspend and resume, or persistence across SteamOS updates. Those claims require separate hardware evidence. [Handhelds and Game Mode](handhelds.md) explains what a Deck can and cannot do today and how to keep Polaris reachable when it returns to Game Mode.
 
 Continuous integration builds and validates this package inside a clean SteamOS 3.8 root bootstrapped from Valve's repositories. A clean root has none of the packages a shipped SteamOS image already carries, so that gate proves the package builds and its libraries resolve. It does not prove the install transaction is conflict-free on a device, and it did not catch the `libdisplay-info` conflict described under Stream Paths on SteamOS.
 

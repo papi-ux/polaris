@@ -210,7 +210,9 @@ stream.
 ## Headless Boot and Deck Images
 
 The packaged service enables into `xdg-desktop-autostart.target`, which only a
-full desktop session fires. Two common Bazzite setups never fire it:
+full desktop session fires. Two common Bazzite setups never fire it (for the
+handheld side of this, including what Game Mode itself supports, see
+[Handhelds and Game Mode](handhelds.md)):
 
 - Deck images that boot straight into the gamescope Steam session. The gamescope
   session does not run XDG autostart, so Polaris only starts once you visit

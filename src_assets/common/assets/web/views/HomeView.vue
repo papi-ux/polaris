@@ -122,7 +122,14 @@
               {{ sessionType ? sessionModeDescription : $t('index.session_mode_idle_desc') }}
             </div>
             <div
-              v-if="displaySession?.environment_repaired"
+              v-if="gameModeHost?.session_active"
+              data-display-session-health
+              class="system-session-health border-warning/30 bg-warning/10 text-warning-bright"
+            >
+              {{ $t('index.session_game_mode') }}
+            </div>
+            <div
+              v-else-if="displaySession?.environment_repaired"
               data-display-session-health
               class="system-session-health border-success/30 bg-success/10 text-success-bright"
             >
@@ -312,7 +319,7 @@ import { resources, legalDocs, sponsor } from '../resource-links.js'
 
 const i18n = inject('i18n')
 
-const { gpu, displays, audio, sessionType, displaySession, loading: systemLoading } = useSystemStats(3000)
+const { gpu, displays, audio, sessionType, displaySession, gameModeHost, loading: systemLoading } = useSystemStats(3000)
 
 const version = ref(null)
 const githubVersion = ref(null)
