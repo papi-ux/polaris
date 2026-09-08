@@ -92,6 +92,16 @@ static void pinned_socket_replacement(void) {
   snprintf(retired, sizeof(retired), "%s/retired", directory);
   int first = listener_at(original);
   int pinned = open(original, O_PATH | O_NOFOLLOW | O_CLOEXEC); assert(pinned >= 0);
+  /* Exercise actual AF_UNIX modes produced under the provider's umask,
+   * retaining the same descriptor while rejecting access by another user. */
+  struct stat identity;
+  for (unsigned mode = 0600; mode <= 0700; mode += 0100) {
+    assert(chmod(original, mode) == 0 && fstat(pinned, &identity) == 0);
+    assert(valid_capture_socket(&identity));
+  }
+  assert(chmod(original, 0750) == 0 && fstat(pinned, &identity) == 0);
+  assert(!valid_capture_socket(&identity));
+  assert(chmod(original, 0700) == 0);
   assert(rename(original, retired) == 0);
   int replacement = listener_at(original);
   snprintf(pinned_path, sizeof(pinned_path), "/proc/self/fd/%d", pinned);
