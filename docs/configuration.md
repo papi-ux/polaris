@@ -452,11 +452,21 @@ Choose **Claude → Claude CLI**, run **Test provider**, then save and enable ex
 The saved-runtime status distinguishes CLI discovery from verified subscription authentication.
 
 Doctor sends redacted evidence through a private, temporary request directory, with CLI tools,
-MCP servers, discovered customizations, and session persistence disabled. Responses retain the
-existing explanation-only schema and cannot define stream settings or execute recovery actions.
+MCP servers, ordinary discovered customizations, and session persistence disabled. The installed,
+unmodified Claude Code and its administrator configuration are trusted host software: managed
+hooks and policy can still run with the service user's permissions. This is not an OS sandbox.
+Polaris does not collect, copy, or intermediate subscription tokens; sign-in stays with Claude Code.
+Polaris validates the returned explanation and does not apply settings or run recovery actions
+from AI responses. This response boundary also applies to the other Doctor providers.
 Requests use the configured timeout, bounded to 1–120 seconds, and a 64 KiB output limit.
-Older CLIs that do not support the required isolation flags fail rather than retrying without them.
+Older CLIs that do not support the required restriction flags fail rather than retrying without them.
 This Doctor transport uses Claude subscriptions; Anthropic API-key Doctor explanations remain unsupported.
+
+Subscription availability is provider-specific. OpenAI uses the signed-in Codex CLI below.
+DeepSeek's documented integration uses an API key; signing into its chat website does not establish
+a supported Polaris subscription transport. Local endpoints can run without a provider account.
+See [Claude Code authentication and credential use](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+and [DeepSeek's API setup](https://api-docs.deepseek.com/).
 
 ### OpenAI
 

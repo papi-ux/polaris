@@ -2778,14 +2778,15 @@ namespace ai_optimizer {
   static std::optional<std::string> call_doctor_explanation_provider(
       const config_t &active_cfg,
       const std::string &redacted_evidence_json,
-      provider_test_result_t *test_result = nullptr) {
+      provider_test_result_t *test_result = nullptr,
+      const std::string &claude_executable = {}) {
     if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       return call_openai_codex_doctor_cli(active_cfg, redacted_evidence_json);
     }
     if (active_cfg.provider == PROVIDER_ANTHROPIC && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       const auto result = claude_cli::explain(active_cfg.model, doctor_explanation_system_prompt(),
         doctor_explanation_response_format().at("json_schema").at("schema").dump(),
-        redacted_evidence_json, active_cfg.timeout_ms);
+        redacted_evidence_json, active_cfg.timeout_ms, claude_executable);
       if (!result.response) {
         set_provider_test_failure(test_result, result.code, result.error,
           "Polaris could not obtain a bounded, structured Claude subscription explanation.", result.action);
@@ -2952,7 +2953,8 @@ namespace ai_optimizer {
   }
 
   std::string explain_doctor_json_with_config(const config_t &config,
-                                              const std::string &redacted_evidence_json) {
+                                              const std::string &redacted_evidence_json,
+                                              const std::string &claude_executable) {
     nlohmann::json evidence = nlohmann::json::object();
     try {
       if (!redacted_evidence_json.empty()) {
@@ -2967,7 +2969,7 @@ namespace ai_optimizer {
       return doctor_explanation_fallback("AI explanations are disabled or not fully configured.", evidence).dump();
     }
     try {
-      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump());
+      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump(), nullptr, claude_executable);
       if (!provider_text) {
         return doctor_explanation_fallback("Provider returned no explanation result", evidence).dump();
       }
