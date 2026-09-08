@@ -34,6 +34,49 @@ struct encoded_stats {
 };
 struct synthetic_source { unsigned width, height, frame; gboolean empty, frozen; };
 
+struct import_observation {
+  GMutex lock;
+  GstPad *pad;
+  gulong probe;
+  unsigned buffers, first_memories, first_planes, first_flags;
+  size_t first_bytes;
+  char memory_type[25];
+};
+
+/* Observe metadata only. Never CPU-map a non-linear DMA-BUF for diagnosis. */
+static GstPadProbeReturn import_buffer(GstPad *pad, GstPadProbeInfo *info, gpointer opaque) {
+  (void)pad;
+  struct import_observation *observation = opaque;
+  GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+  if (!buffer) return GST_PAD_PROBE_OK;
+  g_mutex_lock(&observation->lock);
+  if (observation->buffers++ == 0) {
+    observation->first_memories = gst_buffer_n_memory(buffer);
+    observation->first_bytes = gst_buffer_get_size(buffer);
+    observation->first_flags = GST_BUFFER_FLAGS(buffer);
+    GstVideoMeta *meta = gst_buffer_get_video_meta(buffer);
+    observation->first_planes = meta ? meta->n_planes : 0;
+    if (observation->first_memories) {
+      GstMemory *memory = gst_buffer_peek_memory(buffer, 0);
+      const char *type = memory && memory->allocator ? memory->allocator->mem_type : NULL;
+      snprintf(observation->memory_type, sizeof(observation->memory_type), "%.24s", type ? type : "unknown");
+    }
+  }
+  g_mutex_unlock(&observation->lock);
+  return GST_PAD_PROBE_OK;
+}
+
+static gboolean report_bus_error(GstBus *bus) {
+  GstMessage *message = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR);
+  if (!message) return FALSE;
+  GError *detail = NULL; gst_message_parse_error(message, &detail, NULL);
+  const char *name = GST_MESSAGE_SRC(message) ? GST_OBJECT_NAME(GST_MESSAGE_SRC(message)) : NULL;
+  fprintf(stderr, "encoded pipeline error at %.32s: %.256s\n", name ? name : "unknown", detail ? detail->message : "unknown");
+  if (detail) g_error_free(detail);
+  gst_message_unref(message);
+  return TRUE;
+}
+
 static GstPadProbeReturn encoded_buffer(GstPad *pad, GstPadProbeInfo *info, gpointer opaque) {
   (void)pad;
   struct encoded_stats *stats = opaque;
@@ -195,8 +238,8 @@ int main(int argc, char **argv) {
   GError *error = NULL;
   gst_init(NULL, NULL);
   const char *head = synthetic ? "appsrc name=source format=time ! videoconvert ! " :
-    "unixfdsrc name=source num-buffers=60 ! glupload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=external-oes ! "
-    "glcolorconvert ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! gldownload ! videoconvert ! ";
+    "unixfdsrc name=source num-buffers=60 ! glupload name=upload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=external-oes ! "
+    "glcolorconvert name=convert ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! gldownload name=download ! videoconvert ! ";
   char *description = g_strconcat(head,
     "video/x-raw,format=I420 ! openh264enc name=encoder bitrate=8000000 gop-size=30 ! "
     "h264parse ! video/x-h264,stream-format=byte-stream,alignment=au ! identity name=encoded ! "
@@ -241,17 +284,21 @@ int main(int argc, char **argv) {
   gulong probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, encoded_buffer, &stats, NULL);
   GstElement *decoded = gst_bin_get_by_name(GST_BIN(pipeline), "decoded");
   GstBus *bus = gst_element_get_bus(pipeline);
+  const char *import_stages[] = {"source", "upload", "convert", "download"};
+  struct import_observation imports[4] = {0};
+  if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
+    g_mutex_init(&imports[i].lock);
+    GstElement *element = gst_bin_get_by_name(GST_BIN(pipeline), import_stages[i]);
+    imports[i].pad = gst_element_get_static_pad(element, "src");
+    imports[i].probe = gst_pad_add_probe(imports[i].pad, GST_PAD_PROBE_TYPE_BUFFER, import_buffer, &imports[i], NULL);
+    gst_object_unref(element);
+  }
   unsigned frames = 0, scene_frames = 0, motion_frames = 0;
   struct scene_observation anchor = {0};
   const gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
   gboolean failed = gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE;
   while (!failed && !stopping && g_get_monotonic_time() < deadline && frames < FRAME_COUNT) {
-    GstMessage *message = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR);
-    if (message) {
-      GError *detail = NULL; gst_message_parse_error(message, &detail, NULL);
-      if (detail) { fprintf(stderr, "encoded pipeline error: %.512s\n", detail->message); g_error_free(detail); }
-      gst_message_unref(message); failed = TRUE; break;
-    }
+    if (report_bus_error(bus)) { failed = TRUE; break; }
     g_mutex_lock(&stats.lock); failed = stats.failed; g_mutex_unlock(&stats.lock);
     if (failed) break;
     GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(decoded), 100 * GST_MSECOND);
@@ -269,6 +316,9 @@ int main(int argc, char **argv) {
     }
     gst_sample_unref(sample);
   }
+  /* Pulling from appsink can observe terminal flow before the main loop's
+   * next bus check. Preserve that queued error and its element identity. */
+  if (frames != FRAME_COUNT && report_bus_error(bus)) failed = TRUE;
   if (!synthetic && (failed || frames != FRAME_COUNT)) {
     GstPad *source_pad = gst_element_get_static_pad(source, "src");
     GstCaps *caps = source_pad ? gst_pad_get_current_caps(source_pad) : NULL;
@@ -291,6 +341,16 @@ int main(int argc, char **argv) {
     _exit(1);
   }
   gst_pad_remove_probe(pad, probe);
+  if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
+    struct import_observation *observation = &imports[i];
+    if (failed || frames != FRAME_COUNT) fprintf(stderr,
+      "import %s buffers=%u memories=%u bytes=%zu type=%.24s planes=%u flags=%x\n",
+      import_stages[i], observation->buffers, observation->first_memories, observation->first_bytes,
+      observation->memory_type, observation->first_planes, observation->first_flags);
+    gst_pad_remove_probe(observation->pad, observation->probe);
+    gst_object_unref(observation->pad);
+    g_mutex_clear(&observation->lock);
+  }
   if (!synthetic) {
     struct stat after;
     if (lstat(argv[1], &after) || after.st_dev != identity.st_dev || after.st_ino != identity.st_ino ||
