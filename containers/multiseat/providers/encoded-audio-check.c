@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
   struct audio_stats stats = {0}; g_mutex_init(&stats.lock);
   gulong probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, encoded_packet, &stats, NULL);
   unsigned samples = 0, crossings[2] = {0};
-  double energy[2] = {0}; float previous[2] = {0};
+  double energy[2] = {0}; gboolean negative_half_cycle[2] = {FALSE};
   gboolean failed = gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE;
   const gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
   while (!failed && !stopping && g_get_monotonic_time() < deadline && samples < AUDIO_RATE) {
@@ -161,8 +161,13 @@ int main(int argc, char **argv) {
         float value; memcpy(&value, &bits, sizeof(value));
         if (!isfinite(value) || fabsf(value) > 1.0f) { valid = FALSE; break; }
         energy[channel] += (double)value * value;
-        if (previous[channel] < 0 && value >= 0) ++crossings[channel];
-        previous[channel] = value;
+        /* A small hysteresis rejects quiet Opus startup chatter around zero.
+         * Both thresholds remain below the accepted tone's minimum amplitude;
+         * RMS and the existing 430..450 Hz band are checked independently. */
+        if (value < -0.001f) negative_half_cycle[channel] = TRUE;
+        if (negative_half_cycle[channel] && value >= 0.001f) {
+          ++crossings[channel]; negative_half_cycle[channel] = FALSE;
+        }
       }
       if (valid) samples += mapped.size / 8;
       gst_buffer_unmap(buffer, &mapped);
