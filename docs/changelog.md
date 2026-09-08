@@ -8,6 +8,7 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Protects unused encoder capability probes from a null-frame flush, adds actual submission/teardown regressions for the first-launch Vulkan crash, and keeps Doctor from telling a stable AMD VA-API/SHM user to switch to Auto with a promised fallback (#628)
+- Repins native PipeWire session audio when the stream omits its PID by resolving its owning client, while preserving session markers, unrelated desktop audio, and the no-default-sink-claim setting (#629)
 
 ## v1.4.4 - 2026-09-06
 
