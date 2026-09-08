@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -19,7 +20,7 @@ namespace stream_packets {
       std::mutex mutex;
       std::condition_variable changed;
       std::size_t deliveries = 0;
-      bool closed = false;
+      std::atomic_bool closed = false;
     };
   }
 
@@ -47,6 +48,14 @@ namespace stream_packets {
       return state_ ? state_->session : nullptr;
     }
     explicit operator bool() const noexcept { return get() != nullptr; }
+
+    // An alias keeps only the cancellation state alive, never the session.
+    [[nodiscard]] std::shared_ptr<const std::atomic_bool> cancellation() const noexcept {
+      return state_ ? std::shared_ptr<const std::atomic_bool> {state_, &state_->closed} : nullptr;
+    }
+    [[nodiscard]] bool cancelled() const noexcept {
+      return !state_ || state_->closed.load(std::memory_order_acquire);
+    }
 
     void reset() noexcept {
       if (auto state = std::exchange(state_, {})) {

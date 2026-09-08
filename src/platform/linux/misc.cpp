@@ -62,6 +62,7 @@
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/send_wait.h"
 #include "src/video.h"
 #include "vaapi.h"
 #include "virtual_display.h"
@@ -972,6 +973,7 @@ std::string get_local_ip_for_gateway() {
   }
 
   bool send_batch(batched_send_info_t &send_info) {
+    if (send_info.cancelled()) return false;
     auto sockfd = (int) send_info.native_socket;
     struct msghdr msg = {};
 
@@ -1041,6 +1043,7 @@ std::string get_local_ip_for_gateway() {
       struct iovec iovs[(send_info.headers ? std::min(seg_max, send_info.block_count) : 1) * max_iovs_per_msg];
       auto msg_size = send_info.header_size + send_info.payload_size;
       while (seg_index < send_info.block_count) {
+        if (send_info.cancelled()) return false;
         int iovlen = 0;
         auto segs_in_batch = std::min(send_info.block_count - seg_index, seg_max);
         if (send_info.headers) {
@@ -1087,18 +1090,12 @@ std::string get_local_ip_for_gateway() {
         // This will fail if GSO is not available, so we will fall back to non-GSO if
         // it's the first sendmsg() call. On subsequent calls, we will treat errors as
         // actual failures and return to the caller.
-        auto bytes_sent = sendmsg(sockfd, &msg, 0);
+        auto bytes_sent = sendmsg(sockfd, &msg, MSG_DONTWAIT);
         if (bytes_sent < 0) {
           // If there's no send buffer space, wait for some to be available
-          if (errno == EAGAIN) {
-            struct pollfd pfd;
-
-            pfd.fd = sockfd;
-            pfd.events = POLLOUT;
-
-            if (poll(&pfd, 1, -1) != 1) {
-              BOOST_LOG(warning) << "poll() failed: "sv << errno;
-              break;
+          if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            if (!send_wait::writable(sockfd, send_info.cancellation)) {
+              return false;
             }
 
             // Try to send again
@@ -1149,18 +1146,13 @@ std::string get_local_ip_for_gateway() {
       // Call sendmmsg() until all messages are sent
       size_t blocks_sent = 0;
       while (blocks_sent < send_info.block_count) {
-        int msgs_sent = sendmmsg(sockfd, &msgs[blocks_sent], send_info.block_count - blocks_sent, 0);
+        if (send_info.cancelled()) return false;
+        int msgs_sent = sendmmsg(sockfd, &msgs[blocks_sent], send_info.block_count - blocks_sent, MSG_DONTWAIT);
         if (msgs_sent < 0) {
           // If there's no send buffer space, wait for some to be available
-          if (errno == EAGAIN) {
-            struct pollfd pfd;
-
-            pfd.fd = sockfd;
-            pfd.events = POLLOUT;
-
-            if (poll(&pfd, 1, -1) != 1) {
-              BOOST_LOG(warning) << "poll() failed: "sv << errno;
-              break;
+          if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            if (!send_wait::writable(sockfd, send_info.cancellation)) {
+              return false;
             }
 
             // Try to send again
@@ -1171,6 +1163,7 @@ std::string get_local_ip_for_gateway() {
           return false;
         }
 
+        if (msgs_sent == 0) return false;
         blocks_sent += msgs_sent;
       }
 
@@ -1179,6 +1172,7 @@ std::string get_local_ip_for_gateway() {
   }
 
   bool send(send_info_t &send_info) {
+    if (send_info.cancelled()) return false;
     auto sockfd = (int) send_info.native_socket;
     struct msghdr msg = {};
 
@@ -1252,22 +1246,16 @@ std::string get_local_ip_for_gateway() {
 
     msg.msg_controllen = cmbuflen;
 
-    auto bytes_sent = sendmsg(sockfd, &msg, 0);
+    auto bytes_sent = sendmsg(sockfd, &msg, MSG_DONTWAIT);
 
     // If there's no send buffer space, wait for some to be available
-    while (bytes_sent < 0 && errno == EAGAIN) {
-      struct pollfd pfd;
-
-      pfd.fd = sockfd;
-      pfd.events = POLLOUT;
-
-      if (poll(&pfd, 1, -1) != 1) {
-        BOOST_LOG(warning) << "poll() failed: "sv << errno;
-        break;
+    while (bytes_sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      if (!send_wait::writable(sockfd, send_info.cancellation)) {
+        return false;
       }
 
       // Try to send again
-      bytes_sent = sendmsg(sockfd, &msg, 0);
+      bytes_sent = sendmsg(sockfd, &msg, MSG_DONTWAIT);
     }
 
     if (bytes_sent < 0) {

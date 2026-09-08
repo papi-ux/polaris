@@ -30,6 +30,7 @@
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/send_wait.h"
 
 using namespace std::literals;
 namespace fs = std::filesystem;
@@ -302,11 +303,13 @@ namespace platf {
   }
 
   bool send_batch(batched_send_info_t &send_info) {
+    if (send_info.cancelled()) return false;
     // Fall back to unbatched send calls
     return false;
   }
 
   bool send(send_info_t &send_info) {
+    if (send_info.cancelled()) return false;
     auto sockfd = (int) send_info.native_socket;
     struct msghdr msg = {};
 
@@ -380,22 +383,16 @@ namespace platf {
 
     msg.msg_controllen = cmbuflen;
 
-    auto bytes_sent = sendmsg(sockfd, &msg, 0);
+    auto bytes_sent = sendmsg(sockfd, &msg, MSG_DONTWAIT);
 
     // If there's no send buffer space, wait for some to be available
-    while (bytes_sent < 0 && errno == EAGAIN) {
-      struct pollfd pfd;
-
-      pfd.fd = sockfd;
-      pfd.events = POLLOUT;
-
-      if (poll(&pfd, 1, -1) != 1) {
-        BOOST_LOG(warning) << "poll() failed: "sv << errno;
-        break;
+    while (bytes_sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      if (!send_wait::writable(sockfd, send_info.cancellation)) {
+        return false;
       }
 
       // Try to send again
-      bytes_sent = sendmsg(sockfd, &msg, 0);
+      bytes_sent = sendmsg(sockfd, &msg, MSG_DONTWAIT);
     }
 
     if (bytes_sent < 0) {

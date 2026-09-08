@@ -1909,6 +1909,7 @@ namespace stream {
 
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
+          if (delivery.cancelled()) return;
           auto packets = (current_payload.size() + (blocksize - 1)) / blocksize;
 
           for (int x = 0; x < packets; ++x) {
@@ -1947,6 +1948,7 @@ namespace stream {
             peer_address,
             session->video.peer.port(),
             session->localAddress,
+            delivery.cancellation(),
           };
 
           size_t next_shard_to_send = 0;
@@ -1963,6 +1965,7 @@ namespace stream {
 
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
+            if (delivery.cancelled()) return;
             auto *inspect = (video_packet_raw_t *) shards.data(x);
 
             inspect->packet.fecInfo =
@@ -2010,8 +2013,11 @@ namespace stream {
                              ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
 
                 auto now = std::chrono::steady_clock::now();
-                if (now < due) {
-                  timer->sleep_for(due - now);
+                while (now < due) {
+                  if (delivery.cancelled()) return;
+                  timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                  now = std::chrono::steady_clock::now();
                 }
 
                 ratecontrol_group_packets_sent = 0;
@@ -2024,9 +2030,11 @@ namespace stream {
               frame_send_batch_latency_logger.first_point_now();
               // Use a batched send if it's supported on this platform
               if (!platf::send_batch(batch_info)) {
+                if (delivery.cancelled()) return;
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
                 for (auto y = 0; y < current_batch_size; y++) {
+                  if (delivery.cancelled()) return;
                   auto send_info = platf::send_info_t {
                     shards.prefix(next_shard_to_send + y),
                     shards.prefixsize,
@@ -2036,6 +2044,7 @@ namespace stream {
                     peer_address,
                     session->video.peer.port(),
                     session->localAddress,
+                    delivery.cancellation(),
                   };
 
                   platf::send(send_info);
@@ -2143,8 +2152,10 @@ namespace stream {
           peer_address,
           session->audio.peer.port(),
           session->localAddress,
+          delivery.cancellation(),
         };
         platf::send(send_info);
+        if (delivery.cancelled()) continue;
 
         auto &fec_packet = session->audio.fec_packet;
         // initialize the FEC header at the beginning of the FEC block
@@ -2158,6 +2169,7 @@ namespace stream {
           reed_solomon_encode(rs.get(), shards_p.begin(), RTPA_TOTAL_SHARDS, bytes);
 
           for (auto x = 0; x < RTPA_FEC_SHARDS; ++x) {
+            if (delivery.cancelled()) break;
             fec_packet.rtp.sequenceNumber = util::endian::big<std::uint16_t>(sequenceNumber + x + 1);
             fec_packet.fecHeader.fecShardIndex = x;
 
@@ -2170,6 +2182,7 @@ namespace stream {
               peer_address,
               session->audio.peer.port(),
               session->localAddress,
+              delivery.cancellation(),
             };
             platf::send(send_info);
             BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
@@ -2205,6 +2218,13 @@ namespace stream {
       return -1;
     }
 
+    // Native send calls must never block before they can observe retirement.
+    ctx.video_sock.native_non_blocking(true, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Could not make the video socket nonblocking: " << ec.message();
+      return -1;
+    }
+
     // Set video socket send buffer size (SO_SENDBUF) to 1MB
     try {
       ctx.video_sock.set_option(boost::asio::socket_base::send_buffer_size(1024 * 1024));
@@ -2223,6 +2243,13 @@ namespace stream {
     if (ec) {
       BOOST_LOG(fatal) << "Couldn't open socket for Audio server: "sv << ec.message();
 
+      return -1;
+    }
+
+    // Native send calls must never block before they can observe retirement.
+    ctx.audio_sock.native_non_blocking(true, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Could not make the audio socket nonblocking: " << ec.message();
       return -1;
     }
 
