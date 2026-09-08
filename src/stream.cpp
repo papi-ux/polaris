@@ -578,6 +578,11 @@ namespace stream {
     safe::signal_t controlEnd;
 
     std::atomic<session::state_e> state;
+
+    // Declared last so destruction drains active sends before any session
+    // fields are destroyed, including on an aborted start. Queued packets
+    // retain only a permanently closed destination after this owner retires.
+    stream_packets::owner_t packet_owner {this};
   };
 
 #ifdef __linux__
@@ -1707,7 +1712,11 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto session = (session_t *) packet->channel_data;
+      auto delivery = packet->channel_data.acquire();
+      if (!delivery) {
+        continue;
+      }
+      auto session = static_cast<session_t *>(delivery.get());
       auto lowseq = session->video.lowseq;
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
@@ -2096,7 +2105,11 @@ namespace stream {
       }
 
       TUPLE_2D_REF(channel_data, packet_data, *packet);
-      auto session = (session_t *) channel_data;
+      auto delivery = channel_data.acquire();
+      if (!delivery) {
+        continue;
+      }
+      auto session = static_cast<session_t *>(delivery.get());
 
       auto sequenceNumber = session->audio.sequenceNumber;
       auto timestamp = session->audio.timestamp;
@@ -2343,7 +2356,7 @@ namespace stream {
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session);
+    video::capture(session->mail, session->config.monitor, session->packet_owner.destination());
   }
 
   void audioThread(session_t *session) {
@@ -2364,7 +2377,7 @@ namespace stream {
     session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session);
+    audio::capture(session->mail, session->config.audio, session->packet_owner.destination());
   }
 
   namespace session {
@@ -2401,6 +2414,10 @@ namespace stream {
     }
 
 #ifdef POLARIS_TESTS
+    stream_packets::destination_t packet_destination_for_tests(session_t &session) {
+      return session.packet_owner.destination();
+    }
+
     void set_state_for_tests(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
     }
@@ -2550,6 +2567,7 @@ namespace stream {
 
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
+      session.packet_owner.close();
 #ifdef __linux__
       close_multiseat_input(session);
 #endif
@@ -2564,6 +2582,7 @@ namespace stream {
 
     void graceful_stop(session_t& session) {
       while_starting_do_nothing(session.state);
+      session.packet_owner.close();
 #ifdef __linux__
       close_multiseat_input(session);
 #endif
@@ -2599,6 +2618,7 @@ namespace stream {
     }
 
     void join(session_t &session) {
+      session.packet_owner.close();
 #ifdef __linux__
       close_multiseat_input(session);
 #endif
@@ -2623,6 +2643,9 @@ namespace stream {
       session.videoThread.join();
       BOOST_LOG(debug) << "Waiting for audio to end..."sv;
       session.audioThread.join();
+      // Producers are quiescent; reject queued packets and wait for a send
+      // already admitted on either shared broadcaster before retiring state.
+      session.packet_owner.close_and_wait();
       BOOST_LOG(debug) << "Waiting for control to end..."sv;
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys

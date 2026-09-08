@@ -129,6 +129,7 @@ namespace stream {
     state_e state(session_t &session);
 #ifdef POLARIS_TESTS
     void set_state_for_tests(session_t &session, state_e state);
+    stream_packets::destination_t packet_destination_for_tests(session_t &session);
 #ifdef __linux__
     /** Exercise the bound bridge without entering the network control loop. */
     bool route_multiseat_input_for_tests(

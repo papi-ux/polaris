@@ -113,7 +113,7 @@ namespace audio {
     return incoming_samples - free_samples;
   }
 
-  void encodeThread(sample_queue_t samples, config_t config, void *channel_data, packet_queue_t packets) {
+  void encodeThread(sample_queue_t samples, config_t config, stream_packets::destination_t channel_data, packet_queue_t packets) {
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
     if (config.flags[config_t::CUSTOM_SURROUND_PARAMS]) {
       apply_surround_params(stream, config.customStreamParams);
@@ -169,7 +169,7 @@ namespace audio {
     }
   }
 
-  void capture(safe::mail_t mail, config_t config, void *channel_data, packet_queue_t packets) {
+  void capture(safe::mail_t mail, config_t config, stream_packets::destination_t channel_data, packet_queue_t packets) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     if (!config::audio.stream || config.input_only) {
       shutdown_event->view();
