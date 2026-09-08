@@ -51,6 +51,11 @@ wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/relea
 sudo rpm-ostree install -r "./${rpm_name}"
 ```
 
+The downloaded RPM appears under `LocalPackages` in `rpm-ostree status`. It is
+still layered onto the host; `LayeredPackages` lists packages requested from
+repositories by name. This is expected for this installation method. Follow
+[Update](#update) to replace the local RPM with a newer version.
+
 After the reboot:
 
 ```bash
