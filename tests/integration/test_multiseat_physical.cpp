@@ -4,7 +4,8 @@
  * Required: POLARIS_MULTISEAT_PHYSICAL=1, POLARIS_PHYSICAL_IMAGE (digest),
  * POLARIS_PHYSICAL_IPC_ROOT (private parent), POLARIS_PHYSICAL_VOLUME and
  * POLARIS_PHYSICAL_VOLUME_B (distinct pre-created volumes). PROFILE selects
- * gamescope/steam/heroic/lutris. No launcher or production adapter is activated.
+ * gamescope/steam/heroic/lutris. POLARIS_PHYSICAL_GAME=1 additionally starts
+ * the image-owned Gamescope input game. Production adapter selection stays off.
  */
 #include "src/platform/linux/multiseat_controller_production.h"
 #include "src/platform/linux/multiseat_podman_host.h"
@@ -18,6 +19,7 @@ extern "C" {
 }
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cctype>
 #include <fstream>
@@ -87,7 +89,7 @@ namespace {
   // command failure output in private test evidence (never argv or auth files).
   class observed_host_t final : public podman::host_t {
   public:
-    explicit observed_host_t(std::string &failure): failure_(failure) {}
+    explicit observed_host_t(std::string &failure, bool game): failure_(failure), game_(game) {}
     std::uint64_t effective_uid() const override { return host_.effective_uid(); }
     bool executable_file(const std::filesystem::path &path) const override { const auto result = host_.executable_file(path); if (!result) failure_ = "executable_file: " + path.filename().string(); return result; }
     bool trusted_runtime_file(const std::filesystem::path &path) const override { const auto result = host_.trusted_runtime_file(path); if (!result) failure_ = "trusted_runtime_file: " + path.filename().string(); return result; }
@@ -98,13 +100,21 @@ namespace {
     std::optional<podman::character_device_identity_t> read_write_character_device(const std::filesystem::path &path) const override { const auto result = host_.read_write_character_device(path); if (!result) failure_ = "device access: " + path.filename().string(); return result; }
     std::optional<std::string> read_owned_regular_file(const std::filesystem::path &path, std::size_t maximum) const override { return host_.read_owned_regular_file(path, maximum); }
     podman::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds timeout, std::size_t maximum) override {
-      auto result = host_.run(argv, timeout, maximum);
+      auto admitted = argv;
+      // Physical NVIDIA lane only: fixed reviewed domain, after the real backend
+      // has classified every mount/device. No CDI or arbitrary security options.
+      if (game_) {
+        const auto run = std::find(admitted.begin(), admitted.end(), "run");
+        if (run != admitted.end()) admitted.insert(run + 1, "--security-opt=label=type:polaris_nvidia_worker_t");
+      }
+      auto result = host_.run(admitted, timeout, maximum);
       if (result.exit_status != 0 || result.timed_out) failure_ = result.output.substr(0,4096);
       return result;
     }
   private:
     podman::local_host_t host_;
     std::string &failure_;
+    bool game_;
   };
 
   using bytes = std::vector<std::uint8_t>;
@@ -166,6 +176,11 @@ namespace {
     };
     ASSERT_TRUE(profiles.contains(profile_name));
     RecordProperty("runtime_profile", profile_name);
+    const bool game = env_or("POLARIS_PHYSICAL_GAME") == "1";
+    ASSERT_TRUE(!game || profile_name == "gamescope");
+    const std::string workload = game ? "input-pong-v1" : "physical-input-proof";
+    RecordProperty("game_streaming", "false");
+    RecordProperty("physical_game_requested", game ? "true" : "false");
     const auto [profile, kind] = profiles.at(profile_name);
     const auto render = env_or("POLARIS_PHYSICAL_RENDER_NODE", "/dev/dri/renderD128");
     const auto devices = split_paths(env_or("POLARIS_PHYSICAL_GPU_DEVICES", render));
@@ -186,16 +201,21 @@ namespace {
     options.podman.ipc_root = root.path;
     for (int index = 0; index < 2; ++index) options.podman.profiles.push_back({
       .profile_key="physical-profile-"+std::to_string(index), .opaque_volume_name=volumes[index], .runtime_profile=profile, .image_reference=image});
-    options.podman.workloads = {{.kind=kind, .target_id="physical-input-proof"}};
+    options.podman.workloads = {{.kind=kind, .target_id=workload}};
     ASSERT_TRUE(host.trusted_runtime_file(options.podman.runtime_executable));
     std::string command_failure;
     production_controller_factories_t factories;
-    factories.podman_host = [&] { return std::make_unique<observed_host_t>(command_failure); };
+    factories.podman_host = [&] { return std::make_unique<observed_host_t>(command_failure, game); };
     auto created = create_production_controller_runtime(std::move(options), std::move(factories));
     ASSERT_EQ(created.status, controller_runtime_create_status_e::ready_enabled);
     auto controller = std::move(created.runtime);
     ASSERT_TRUE(controller);
     std::array<seat_t, 2> seats;
+    std::array<std::jthread, 2> games;
+    std::array<podman::command_result_t, 2> game_results;
+    std::array<std::atomic<bool>, 2> game_done {};
+    const std::array game_tokens {nonce(), nonce()};
+    constexpr auto game_probe = "/usr/bin/polaris-seat-worker";
     // Scoped failure recovery never scans another deployment or recursively
     // removes authority. A fallback is test failure, followed by exact-ID reap.
     auto cleanup = util::fail_guard([&] {
@@ -210,12 +230,18 @@ namespace {
         (void) controller->reconcile();
         (void) controller->shutdown();
       }
+      // Destroying these exact workers interrupts failed probe execs. Join only
+      // after that boundary, including on every assertion/exception path.
+      for (int index = 0; index < 2; ++index) if (games[index].joinable()) {
+        games[index].join();
+        if (game_results[index].exit_status != 0) RecordProperty("game_failure_" + std::to_string(index), game_results[index].output);
+      }
     });
     ASSERT_TRUE(controller->reconcile().ready()) << command_failure;
     for (int index = 0; index < 2; ++index) {
       seat_request_t request {
         .client_key="physical-client-"+std::to_string(index), .profile_key="physical-profile-"+std::to_string(index),
-        .workload={.kind=kind, .target_id="physical-input-proof"}, .logical_gpu_id="physical-gpu", .runtime_profile=profile,
+        .workload={.kind=kind, .target_id=workload}, .logical_gpu_id="physical-gpu", .runtime_profile=profile,
         .data_plane={.display_topology=display_topology_e::capture_host_with_nested_compositor, .media_pipeline=media_pipeline_e::worker_local_capture_encode},
         .display_mode={1920,1080,60000,false}, .requested_compositor=compositor_e::gamescope, .encoder_sessions=1};
       const auto admission = controller->admit(request);
@@ -261,8 +287,42 @@ namespace {
       std::this_thread::sleep_for(100ms);
     }
     ASSERT_TRUE(selected) << "workers did not reach authenticated input readiness";
+    const auto game_state = [&](int index) -> std::optional<json> {
+      auto result = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "state", game_tokens[index]}, 2s);
+      if (result.exit_status != 0 || result.timed_out) return std::nullopt;
+      auto state = json::parse(result.output, nullptr, false);
+      if (!state.is_object() || state.size() != 5) return std::nullopt;
+      for (const auto *key : {"keyboard", "pointer", "gamepad", "frames", "pid"})
+        if (!state.contains(key) || !state[key].is_number_unsigned()) return std::nullopt;
+      return state;
+    };
+    const auto finish_game = [&](int index) {
+      EXPECT_EQ(command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "finish", game_tokens[index]}, 2s).exit_status, 0);
+      if (games[index].joinable()) games[index].join();
+      EXPECT_FALSE(game_results[index].timed_out);
+      EXPECT_EQ(game_results[index].exit_status, 0) << game_results[index].output;
+    };
+    if (game) {
+      for (int index = 0; index < 2; ++index) games[index] = std::jthread([&, index] {
+        game_results[index] = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "start", game_tokens[index]}, 190s);
+        game_done[index] = true;
+      });
+      bool ready = false;
+      const auto ready_deadline = std::chrono::steady_clock::now() + 95s;
+      while (std::chrono::steady_clock::now() < ready_deadline) {
+        if (game_state(0) && game_state(1)) { ready = true; break; }
+        if (game_done[0] || game_done[1]) break;
+        std::this_thread::sleep_for(100ms);
+      }
+      ASSERT_TRUE(ready) << "two private games did not become observable";
+      std::this_thread::sleep_for(200ms);
+    }
     int observation_round = 0;
     const auto observe = [&](int target, bool both) {
+      std::array<json, 2> game_before;
+      if (game) for (int index = 0; index < 2; ++index) if (both || index == target) {
+        auto state = game_state(index); ASSERT_TRUE(state); game_before[index] = *state;
+      }
       std::array<podman::command_result_t,2> results;
       std::array<std::string,2> tokens {nonce(),nonce()};
       std::vector<std::jthread> readers;
@@ -302,9 +362,31 @@ namespace {
           else EXPECT_EQ(observation["events"][device].get<int>(),0);
         }
       }
+      if (game) {
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        bool delivered = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+          auto state = game_state(target);
+          if (state && (*state)["keyboard"] > game_before[target]["keyboard"] &&
+              (*state)["pointer"] > game_before[target]["pointer"] && (*state)["gamepad"] > game_before[target]["gamepad"]) { delivered = true; break; }
+          std::this_thread::sleep_for(20ms);
+        }
+        EXPECT_TRUE(delivered) << "allocated events did not reach the private game";
+        for (int index = 0; index < 2; ++index) if (both || index == target) {
+          auto state = game_state(index); ASSERT_TRUE(state);
+          EXPECT_EQ((*state)["pid"], game_before[index]["pid"]);
+          EXPECT_GT((*state)["frames"], game_before[index]["frames"]);
+          if (index != target) {
+            for (const auto *key : {"keyboard", "pointer", "gamepad"}) { EXPECT_EQ((*state)[key], game_before[index][key]); }
+          }
+          RecordProperty("game_" + std::to_string(observation_round) + "_seat_" + std::to_string(index),
+            json {{"before", game_before[index]}, {"after", *state}, {"target", index == target}}.dump());
+        }
+      }
     };
     observe(0,true);
     observe(1,true);
+    if (game) finish_game(0);
     stream::session::stop(*seats[0].stream); seats[0].stream.reset();
     (void) controller->stop_seat(seats[0].snapshot.handle);
     const auto stop_deadline=std::chrono::steady_clock::now()+30s;
@@ -313,6 +395,7 @@ namespace {
     }
     ASSERT_EQ(controller->seats(),1U);
     observe(1,false);
+    if (game) finish_game(1);
     stream::session::stop(*seats[1].stream); seats[1].stream.reset();
     (void) controller->stop_seat(seats[1].snapshot.handle);
     for (int attempt=0;attempt<300 && controller->seats()!=0;++attempt) {

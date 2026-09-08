@@ -67,6 +67,9 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       fakesrc is-live=true datarate=1 sizetype=fixed sizemax=1 ! identity name=display ! fakesink sync=true || result=$?; \
     test "$result" = 1)
 
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+      /providers/game-status.c -o /out/game-status $(pkg-config --cflags --libs x11)
+
 FROM ${GO_BUILDER_IMAGE} AS worker-build
 WORKDIR /src
 ENV CGO_ENABLED=0 \
@@ -147,6 +150,7 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.description="Isolated Polaris multiseat worker" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
       io.polaris.multiseat.architecture="linux/amd64"
+COPY --from=workload-build --chmod=0555 /out/game-status /usr/libexec/polaris-seat/game-status
 COPY --from=workload-build --chmod=0555 /out/capture-input /usr/libexec/polaris-seat/capture-input
 COPY --from=workload-build --chmod=0555 /out/input-pong-v1 /usr/libexec/polaris-seat/workloads/input-pong-v1
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-launcher /usr/libexec/polaris-seat/launcher

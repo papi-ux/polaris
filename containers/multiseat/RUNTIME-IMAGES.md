@@ -146,3 +146,27 @@ encoding, launcher process management, production media routing, seat-aware
 status, and real concurrent game streams remain the next milestone. Runtime
 startup must also establish the private X11 directory ownership expected by the
 provider before production wiring; the isolated tests provide their own fixture.
+
+### Isolated physical game probe
+
+The experimental Gamescope image contains `input-pong-v1`, a small offline game
+with keyboard, pointer and controller counters plus a private audio tone. The
+opt-in native physical harness can select it with `POLARIS_PHYSICAL_GAME=1`.
+This requires the Gamescope profile, newly initialized private profile volumes,
+the exact GPU/input catalog, and the separately reviewed NVIDIA SELinux domain
+on the matching physical validation lane. The harness applies that fixed domain
+only after the normal backend has admitted the worker's mounts and devices.
+
+The worker's `physical-game-probe start|state|finish TOKEN` command accepts a
+32-character lowercase hexadecimal token. It requires the existing validated
+allocation and authenticated worker health, claims one private probe, and starts
+six real providers. Only this explicit probe enables retained-FD compositor
+input. Startup is bounded to 90 seconds, total lifetime to 150 seconds, and
+providers stop in reverse order. Errors remain errors even when outer worker
+destruction subsequently removes the remaining resources.
+
+The harness compares each game's counters before and after host-authority input,
+checks the other game's counters stay unchanged, and verifies that the surviving
+game keeps advancing after the first stops. These are game/process/input checks.
+The probe excludes the encoder, publishes no media readiness, and does not claim
+an encoded stream or client playback. Production adapter selection stays off.

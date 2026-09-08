@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/papi-ux/polaris/multiseat_worker/internal/seatruntime"
@@ -16,6 +17,7 @@ func main() {
 		uint32(os.Geteuid()),
 		0,
 	); err != nil {
+		fmt.Fprintln(os.Stderr, "runtime provider failed:", err)
 		os.Exit(1)
 	}
 }

@@ -98,7 +98,7 @@ def sbom(packages, profile, revision, context):
                        'properties': [{'name': 'polaris:workload-id', 'value': 'input-pong-v1'},
                                       {'name': 'polaris:source-sha256', 'value': digest(here / 'workloads/input-pong.c')}],
                        'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/papi-ux/polaris/blob/' + revision + '/containers/multiseat/workloads/input-pong.c'}]})
-    for name in ['capture-input.c', 'seat-input.c', 'seat-input.h']:
+    for name in ['capture-input.c', 'seat-input.c', 'seat-input.h', 'game-status.c']:
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
