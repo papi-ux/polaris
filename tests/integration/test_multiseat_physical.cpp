@@ -304,7 +304,7 @@ namespace {
     };
     if (game) {
       for (int index = 0; index < 2; ++index) games[index] = std::jthread([&, index] {
-        game_results[index] = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "start", game_tokens[index]}, 190s);
+        game_results[index] = command({"exec", "--tty", seats[index].container_id, game_probe, "physical-game-probe", "start", game_tokens[index]}, 190s);
         game_done[index] = true;
       });
       bool ready = false;

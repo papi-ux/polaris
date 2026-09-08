@@ -5,7 +5,6 @@ package seatprovider
 import (
 	"bytes"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"runtime"

@@ -104,3 +104,17 @@ func waitRuntimeGroup(lease *osRuntimeProcessLease, deadline time.Time) (bool, e
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// An exceptional partial start must still retain an owner. WNOWAIT leaves the
+// original child waitable; this goroutine cannot recycle its PID or steal Wait.
+func observeRuntimeChildWithoutReaping(pid int, done chan error) {
+	defer close(done)
+	var information [128]byte
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, 1, uintptr(pid), uintptr(unsafe.Pointer(&information[0])), 4|0x01000000, 0, 0) // P_PID, WEXITED|WNOWAIT
+		if errno == syscall.EINTR {
+			continue
+		}
+		return
+	}
+}

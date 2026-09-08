@@ -23,7 +23,10 @@ const (
 	maximumRuntimeReadyRecordBytes   = 64
 )
 
-type osRuntimeProcessHost struct{ diagnostics *os.File }
+type osRuntimeProcessHost struct {
+	diagnostics  *os.File
+	startCommand func(*exec.Cmd) error // nil uses exec.Cmd.Start; internal fault-injection seam.
+}
 
 type osRuntimeProcessLease struct {
 	process      *os.Process
@@ -149,7 +152,11 @@ func (host osRuntimeProcessHost) Start(
 		PidFD:     &pidFD,
 		Pdeathsig: syscall.SIGKILL,
 	}
-	if err := command.Start(); err != nil {
+	startCommand := command.Start
+	if host.startCommand != nil {
+		startCommand = func() error { return host.startCommand(command) }
+	}
+	if err := startCommand(); err != nil {
 		if pidFD >= 0 {
 			syscall.Close(pidFD)
 		}
@@ -159,18 +166,19 @@ func (host osRuntimeProcessHost) Start(
 	}
 	_ = readyWriter.Close()
 	defer readyReader.Close()
-	if pidFD < 0 {
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		_ = command.Wait()
-		return nil, errors.New("runtime process lifetime unavailable")
-	}
 	lease := &osRuntimeProcessLease{
 		process:      command.Process,
 		command:      command,
-		pidFD:        os.NewFile(uintptr(pidFD), "runtime-process-lifetime"),
 		done:         make(chan error),
 		stopComplete: make(chan struct{}),
 	}
+	if pidFD < 0 {
+		// Preserve a partial-start owner even on kernels that lack pidfd support.
+		// waitid observes this still-unreaped child without releasing its PID/PGID.
+		go observeRuntimeChildWithoutReaping(command.Process.Pid, lease.done)
+		return lease, errors.New("runtime process lifetime unavailable")
+	}
+	lease.pidFD = os.NewFile(uintptr(pidFD), "runtime-process-lifetime")
 	go observeRuntimeProcessExit(pidFD, lease.done)
 	readiness := make(chan error, 1)
 	go func() {
@@ -243,16 +251,24 @@ func (lease *osRuntimeProcessLease) stop(parent context.Context) error {
 	// No numeric signal may occur after this point. Cmd owns only explicit
 	// /dev/null output, so descendants cannot hold copier pipes across Wait.
 	waitError := lease.command.Wait()
-	_ = lease.pidFD.Close()
+	if lease.pidFD != nil {
+		_ = lease.pidFD.Close()
+	}
 	var exitError *exec.ExitError
-	if waitError != nil && !errors.As(waitError, &exitError) {
-		result = errors.Join(result, errors.New("runtime leader could not be reaped"))
+	if waitError != nil {
+		if !errors.As(waitError, &exitError) {
+			result = errors.Join(result, errors.New("runtime leader could not be reaped"))
+		} else if status, ok := exitError.Sys().(syscall.WaitStatus); !ok || !status.Signaled() {
+			result = errors.Join(result, errors.New("runtime provider reported failure during cleanup"))
+		} else if status.Signal() != syscall.SIGTERM && status.Signal() != syscall.SIGKILL {
+			result = errors.Join(result, errors.New("runtime provider exited with an unexpected signal"))
+		}
 	}
 	return result
 }
 
 func (lease *osRuntimeProcessLease) Stop(parent context.Context) error {
-	if lease == nil || lease.process == nil || lease.command == nil || lease.pidFD == nil || lease.done == nil ||
+	if lease == nil || lease.process == nil || lease.command == nil || lease.done == nil ||
 		lease.stopComplete == nil {
 		return errors.New("worker runtime helper lease is invalid")
 	}

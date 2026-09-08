@@ -56,7 +56,9 @@ func TestPhysicalProbeSignalsAreExclusiveBoundedAndInodeOwned(t *testing.T) {
 	if err := os.WriteFile(path, []byte(gameProbeRecord), 0600); err != nil {
 		t.Fatal(err)
 	}
-	removeExact(path, identity)
+	if err := removeGameProbeSignal(path, identity); err == nil {
+		t.Fatal("replaced marker cleanup reported success")
+	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("removed replacement: %v", err)
 	}
@@ -85,5 +87,23 @@ func TestPhysicalProbeSignalsAreExclusiveBoundedAndInodeOwned(t *testing.T) {
 	os.Remove(path)
 	if err := gameProbeSignal(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("absence result: %v", err)
+	}
+}
+
+func TestPhysicalProbeReportsMarkerRemovalFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready")
+	file, identity, err := createGameProbeSignal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := removeGameProbeSignalWith(path, identity, func(string) error { return syscall.EACCES }); err == nil {
+		t.Fatal("removal failure discarded")
+	}
+	if err := gameProbeSignal(path); err != nil {
+		t.Fatalf("failed removal did not retain original: %v", err)
+	}
+	if err := removeGameProbeSignal(path, identity); err != nil {
+		t.Fatal(err)
 	}
 }
