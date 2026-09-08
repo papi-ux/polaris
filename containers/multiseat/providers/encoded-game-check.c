@@ -26,6 +26,15 @@
 #define MAX_FRAME_BYTES (16u * 1024u * 1024u)
 static volatile sig_atomic_t stopping;
 static void stop(int number) { (void)number; stopping = 1; }
+static gint driver_error_reported;
+static void first_driver_error(GstDebugCategory *category, GstDebugLevel level, const gchar *file,
+    const gchar *function, gint line, GObject *object, GstDebugMessage *message, gpointer unused) {
+  (void)file; (void)function; (void)line; (void)object; (void)unused;
+  if (level > GST_LEVEL_WARNING || strcmp(gst_debug_category_get_name(category), "gldebug") ||
+      !g_atomic_int_compare_and_exchange(&driver_error_reported, 0, 1)) return;
+  const gchar *detail = gst_debug_message_get(message);
+  fprintf(stderr, "GL driver: %.240s\n", detail ? detail : "unspecified error");
+}
 struct encoded_stats {
   GMutex lock;
   unsigned frames, keyframes;
@@ -268,6 +277,14 @@ int main(int argc, char **argv) {
   g_setenv("GST_GL_API", "gles2", TRUE);
   GError *error = NULL;
   gst_init(NULL, NULL);
+  if (!synthetic) {
+    /* GStreamer enables the driver's GL debug callback at WARNING or above.
+     * Keep only its first bounded message; repeated driver errors must not
+     * flood the worker's diagnostic pipe. This isolated executable owns logging. */
+    gst_debug_remove_log_function(gst_debug_log_default);
+    gst_debug_add_log_function(first_driver_error, NULL, NULL);
+    gst_debug_set_threshold_for_name("gldebug", GST_LEVEL_WARNING);
+  }
   /* unixfdsrc 1.26 deserializes only registered meta implementations. Register
    * before receiving any frame so the producer's DMA-BUF offsets and strides
    * survive the process boundary; caps cannot describe a non-linear layout. */
