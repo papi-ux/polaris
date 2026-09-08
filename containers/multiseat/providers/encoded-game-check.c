@@ -54,7 +54,25 @@ struct import_observation {
   char memory_type[25];
   GstGLContext *context;
   struct gl_error_sample first_gl, final_gl;
+  gboolean validate_target;
+  gint invalid_target;
 };
+
+static gboolean matching_texture_target(GstPad *pad, GstBuffer *buffer) {
+  if (gst_buffer_n_memory(buffer) != 1) return FALSE;
+  GstMemory *memory = gst_buffer_peek_memory(buffer, 0);
+  if (!gst_is_gl_memory(memory)) return FALSE;
+  GstCaps *caps = gst_pad_get_current_caps(pad);
+  gboolean valid = FALSE;
+  if (caps && gst_caps_get_size(caps) == 1 && gst_caps_is_fixed(caps)) {
+    const char *name = gst_structure_get_string(gst_caps_get_structure(caps, 0), "texture-target");
+    GstGLTextureTarget expected = name ? gst_gl_texture_target_from_string(name) : GST_GL_TEXTURE_TARGET_NONE;
+    valid = expected != GST_GL_TEXTURE_TARGET_NONE &&
+      expected == gst_gl_memory_get_texture_target(GST_GL_MEMORY_CAST(memory));
+  }
+  if (caps) gst_caps_unref(caps);
+  return valid;
+}
 
 static void inspect_gl_error(GstGLContext *context, gpointer opaque) {
   struct gl_error_sample *sample = opaque;
@@ -70,6 +88,13 @@ static GstPadProbeReturn import_buffer(GstPad *pad, GstPadProbeInfo *info, gpoin
   struct import_observation *observation = opaque;
   GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
   if (!buffer) return GST_PAD_PROBE_OK;
+  /* A renegotiated uploader must not deliver a texture with a different GL
+   * target. Reject every mismatched buffer before a downstream texture bind. */
+  if (observation->validate_target && !matching_texture_target(pad, buffer)) {
+    if (g_atomic_int_compare_and_exchange(&observation->invalid_target, 0, 1))
+      fprintf(stderr, "import texture target does not match negotiated caps\n");
+    return GST_PAD_PROBE_DROP;
+  }
   g_mutex_lock(&observation->lock);
   if (observation->buffers++ == 0) {
     observation->first_memories = gst_buffer_n_memory(buffer);
@@ -293,8 +318,10 @@ int main(int argc, char **argv) {
     gst_deinit();
     fprintf(stderr, "capture video metadata registration unavailable\n"); return 1;
   }
+  /* 1.26 can retain its 2D uploader after forced-OES renegotiation. Negotiate
+   * 2D explicitly and verify each emitted memory target before conversion. */
   const char *head = synthetic ? "appsrc name=source format=time ! videoconvert ! " :
-    "unixfdsrc name=source num-buffers=60 ! glupload name=upload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=external-oes ! "
+    "unixfdsrc name=source num-buffers=60 ! glupload name=upload ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! "
     "glcolorconvert name=convert ! video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D ! gldownload name=download ! videoconvert ! ";
   char *description = g_strconcat(head,
     "video/x-raw,format=I420 ! openh264enc name=encoder bitrate=8000000 gop-size=30 ! "
@@ -344,6 +371,7 @@ int main(int argc, char **argv) {
   struct import_observation imports[4] = {0};
   if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
     g_mutex_init(&imports[i].lock);
+    imports[i].validate_target = i == 1 || i == 2;
     GstElement *element = gst_bin_get_by_name(GST_BIN(pipeline), import_stages[i]);
     imports[i].pad = gst_element_get_static_pad(element, "src");
     imports[i].probe = gst_pad_add_probe(imports[i].pad, GST_PAD_PROBE_TYPE_BUFFER, import_buffer, &imports[i], NULL);
@@ -357,6 +385,8 @@ int main(int argc, char **argv) {
   while (!failed && !stopping && g_get_monotonic_time() < deadline && frames < FRAME_COUNT) {
     if (report_bus_error(bus)) { failed = TRUE; break; }
     g_mutex_lock(&stats.lock); failed = stats.failed; g_mutex_unlock(&stats.lock);
+    if (!synthetic) for (unsigned i = 0; i < 4; ++i)
+      failed |= g_atomic_int_get(&imports[i].invalid_target) != 0;
     if (failed) break;
     GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(decoded), 100 * GST_MSECOND);
     if (!sample) { if (gst_app_sink_is_eos(GST_APP_SINK(decoded))) break; continue; }
@@ -400,6 +430,7 @@ int main(int argc, char **argv) {
   }
   gst_pad_remove_probe(pad, probe);
   if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
+    failed |= g_atomic_int_get(&imports[i].invalid_target) != 0;
     if (imports[i].context)
       gst_gl_context_thread_add(imports[i].context, inspect_gl_error, &imports[i].final_gl);
     if ((imports[i].first_gl.checked && imports[i].first_gl.error) ||
