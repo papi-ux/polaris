@@ -62,7 +62,7 @@ TEST(LabwcRenderDeviceSource, PinsWlrootsRenderDeviceToConfiguredAdapter) {
 
   // WLR_RENDER_DRM_DEVICE must be in the set of keys actually pushed into the
   // labwc process environment, not merely referenced.
-  const auto set_env_pos = source.find("set_labwc_process_environment");
+  const auto set_env_pos = source.find("labwc_process_environment(bool headless");
   ASSERT_NE(set_env_pos, std::string::npos);
   const auto set_env_body = source.substr(set_env_pos, 1200);
   EXPECT_NE(set_env_body.find("\"WLR_RENDER_DRM_DEVICE\"sv"), std::string::npos)

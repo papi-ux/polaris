@@ -4100,11 +4100,7 @@ namespace confighttp {
   nlohmann::json client_settings_restart_config_fields_json() {
     return nlohmann::json::array({
       "linux_stream_mode",
-      "fallback_mode",
-      "vaapi_quality",
-      "vaapi_rc",
-      "vaapi_blbrc",
-      "vaapi_strict_rc_buffer"
+      "fallback_mode"
     });
   }
 
