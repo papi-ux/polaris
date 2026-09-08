@@ -42,6 +42,7 @@ const providerOptions = [
     pill: 'text-warning-bright border-warning/30',
     subscriptionLabel: 'Claude CLI',
     subscriptionBinary: 'claude',
+    subscriptionLoginCommand: 'claude auth login',
     keyPlaceholder: 'sk-ant-api03-...',
     keyHintKey: 'config.ai_provider_anthropic_key_hint',
     profiles: [
@@ -51,7 +52,8 @@ const providerOptions = [
         descriptionKey: 'config.ai_profile_claude_cli_desc',
         model: 'claude-haiku-4-5-20251001',
         baseUrl: 'https://api.anthropic.com',
-        authMode: 'subscription'
+        authMode: 'subscription',
+        timeoutMs: 30000
       },
       {
         id: 'anthropic-api',
@@ -477,6 +479,7 @@ function subscriptionRuntimeTone(status) {
 
 function subscriptionRuntimeSummary(status) {
   if (!status) return $t('config.ai_not_loaded')
+  if (status.cli_available && status.cli_auth_verified === false) return $t('config.ai_cli_auth_unverified')
   if (status.cli_authenticated === true) return $t('config.ai_cli_signed_in')
   if (status.cli_authenticated === false && status.cli_login_command) return $t('config.ai_auth_run_command', { command: status.cli_login_command })
   return status.cli_available ? $t('config.ai_cli_detected') : $t('config.ai_cli_missing')
@@ -486,7 +489,8 @@ function applyProviderProfile(profile) {
   config.value.ai_model = profile.model || currentProvider.value.defaultModel
   config.value.ai_base_url = profile.baseUrl || currentProvider.value.defaultBaseUrl
   config.value.ai_auth_mode = profile.authMode || currentProvider.value.defaultAuth
-  config.value.ai_timeout_ms = profile.timeoutMs || (currentProvider.value.id === 'local' ? 60000 : 5000)
+  config.value.ai_timeout_ms = profile.timeoutMs || (currentProvider.value.id === 'local' ? 60000 :
+    currentProvider.value.id === 'anthropic' && config.value.ai_auth_mode === 'subscription' ? 30000 : 5000)
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
   if (config.value.ai_auth_mode === 'none') {

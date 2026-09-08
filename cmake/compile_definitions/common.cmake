@@ -116,6 +116,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/multiseat_worker_protocol.cpp"
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.h"
         "${CMAKE_SOURCE_DIR}/src/ai_optimizer.cpp"
+        "${CMAKE_SOURCE_DIR}/src/ai_claude_cli.h"
+        "${CMAKE_SOURCE_DIR}/src/ai_claude_cli.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_classifier.h"
         "${CMAKE_SOURCE_DIR}/src/game_classifier.cpp"
         "${CMAKE_SOURCE_DIR}/src/beat_times.h"
