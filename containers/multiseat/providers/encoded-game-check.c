@@ -415,6 +415,8 @@ int main(int argc, char **argv) {
   gulong probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, encoded_buffer, &stats, NULL);
   GstElement *decoded = gst_bin_get_by_name(GST_BIN(pipeline), "decoded");
   GstBus *bus = gst_element_get_bus(pipeline);
+  /* Keep errors posted at the final-frame/NULL boundary until inspection. */
+  gst_pipeline_set_auto_flush_bus(GST_PIPELINE(pipeline), FALSE);
   const char *import_stages[] = {"source", "upload", "convert", "download"};
   struct import_observation imports[4] = {0};
   if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
@@ -476,6 +478,8 @@ int main(int argc, char **argv) {
     (void)reported;
     _exit(1);
   }
+  if (report_bus_error(bus)) failed = TRUE;
+  gst_bus_set_flushing(bus, TRUE);
   gst_pad_remove_probe(pad, probe);
   if (!synthetic) for (unsigned i = 0; i < 4; ++i) {
     failed |= g_atomic_int_get(&imports[i].invalid_target) != 0;
