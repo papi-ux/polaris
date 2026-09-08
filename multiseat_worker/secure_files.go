@@ -67,7 +67,9 @@ func privateDirectory(path string, expectedUID uint32) error {
 }
 
 func openPrivateRegular(path string, expectedUID uint32, maxBytes int64) (*os.File, error) {
-	descriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	// Validate the opened descriptor without first waiting for an attacker-
+	// supplied FIFO's writer. Regular files retain the same read semantics.
+	descriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, errors.New("private file is inaccessible")
 	}
