@@ -4,6 +4,7 @@
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
+#include <X11/Xutil.h>
 #include <gst/gst.h>
 #include <linux/input.h>
 #include <errno.h>
@@ -24,6 +25,32 @@ static int dimension(const char *name) {
   if (!text || !*text) return 0;
   long value = strtol(text, &end, 10);
   return *end || value < 64 || value > 16384 ? 0 : (int)value;
+}
+
+/* One bounded read of this game's own X11 drawable distinguishes drawing from
+ * later compositor presentation. These pixels are diagnostic, never acceptance. */
+static void report_drawn_pixels(Display *display, Window window, int width, int height,
+    double paddle, double opponent, double ball_x, double ball_y) {
+  XWindowAttributes attributes;
+  if (!XGetWindowAttributes(display, window, &attributes) || attributes.map_state != IsViewable ||
+      attributes.width < width || attributes.height < height) {
+    fprintf(stderr, "Pong drawable unavailable for diagnostic\n");
+    return;
+  }
+  const int points[4][2] = {{10, height / 2}, {width * .04, height * paddle},
+    {width * .955, height * opponent}, {width * ball_x, height * ball_y}};
+  unsigned long pixels[4] = {0};
+  for (unsigned i = 0; i < 4; ++i) {
+    if (points[i][0] < 0 || points[i][0] >= width || points[i][1] < 0 || points[i][1] >= height) return;
+    XImage *image = XGetImage(display, window, points[i][0], points[i][1], 1, 1, AllPlanes, ZPixmap);
+    if (!image) { fprintf(stderr, "Pong drawable read unavailable\n"); return; }
+    pixels[i] = XGetPixel(image, 0, 0);
+    XDestroyImage(image);
+  }
+  Window focus; int revert;
+  XGetInputFocus(display, &focus, &revert);
+  fprintf(stderr, "Pong drawable %dx%d focused=%d pixels=%08lx,%08lx,%08lx,%08lx\n",
+    attributes.width, attributes.height, focus == window, pixels[0], pixels[1], pixels[2], pixels[3]);
 }
 
 int main(int argc, char **argv) {
@@ -103,6 +130,7 @@ int main(int argc, char **argv) {
     ++counters[4];
     XChangeProperty(display,window,input_state,XA_CARDINAL,32,PropModeReplace,(unsigned char *)counters,6);
     XFlush(display);
+    if (counters[4] == 60) report_drawn_pixels(display, window, width, height, paddle, opponent, ball_x, ball_y);
     struct pollfd wait = {ConnectionNumber(display), POLLIN, 0}; poll(&wait, 1, 8);
   }
   if (gamepad >= 0) close(gamepad);
