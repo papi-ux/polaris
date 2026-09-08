@@ -404,6 +404,54 @@ namespace {
     installed.installation->close();
   }
 
+  TEST(MultiseatMoonlightActivation, ClaimDoesNotAcceptAnotherAlreadyBoundAllocation) {
+    prepared_activation_authority_t prepared;
+    const auto first_handle = prepared.prepare(31, 0);
+    const auto other_handle = prepared.prepare(32, 1);
+    moonlight_session_binding_registry_t registry;
+    auto hub = std::make_shared<moonlight_controller_feedback_hub_t>();
+    moonlight_session_activation_gate_t gate {true, prepared.authority, registry, hub};
+    const auto key = key_for(231, 331);
+    auto selected = gate.register_selection(key, first_handle, expectation_for(31).input_seat, false);
+    ASSERT_TRUE(selected.selection);
+    auto first = stream_for(key);
+    auto other = stream_for(key);
+    ASSERT_EQ(gate.activate(*first), moonlight_session_activation_status_e::bound);
+    ASSERT_EQ(stream::session::bind_multiseat_input(*other, prepared.authority, registry,
+      other_handle, hub, false), stream::session::multiseat_input_bind_status_e::bound);
+    EXPECT_NE(stream::session::generation(*first), stream::session::generation(*other));
+    EXPECT_EQ(gate.activate(*other), moonlight_session_activation_status_e::selected_binding_failed);
+    EXPECT_EQ(gate.activate(*first), moonlight_session_activation_status_e::bound);
+    stream::session::stop(*first);
+    EXPECT_EQ(gate.activate(*first), moonlight_session_activation_status_e::selected_binding_failed);
+    stream::session::stop(*other);
+  }
+
+  TEST(MultiseatMoonlightActivation, StopBeforeBindingClosesAdmission) {
+    prepared_activation_authority_t prepared;
+    const auto handle = prepared.prepare(33);
+    moonlight_session_binding_registry_t registry;
+    auto session = stream_for(key_for(233, 333));
+    stream::session::stop(*session);
+    EXPECT_EQ(stream::session::bind_multiseat_input(*session, prepared.authority, registry,
+      handle, {}, false), stream::session::multiseat_input_bind_status_e::invalid_session_state);
+    EXPECT_EQ(registry.registered_sessions(), 0U);
+  }
+
+  TEST(MultiseatMoonlightActivation, MissingRequiredConnectionNeverDowngradesToInputOnly) {
+    prepared_activation_authority_t prepared;
+    const auto handle = prepared.prepare(34);
+    moonlight_session_binding_registry_t registry;
+    moonlight_session_activation_gate_t gate {true, prepared.authority, registry, {}};
+    const auto key = key_for(234, 334);
+    EXPECT_EQ(gate.register_selection(key, handle, expectation_for(34).input_seat, false,
+      {.required = true}).status, moonlight_launch_selection_status_e::invalid_selection);
+    auto session = stream_for(key);
+    EXPECT_EQ(stream::session::bind_multiseat_input(*session, prepared.authority, registry,
+      handle, {}, false, {.required = true}), stream::session::multiseat_input_bind_status_e::worker_connection_rejected);
+    EXPECT_FALSE(stream::session::multiseat_input_bound(*session));
+  }
+
   TEST(MultiseatMoonlightActivation, SelectedBindFailureRemainsFailClosed) {
     prepared_activation_authority_t prepared;
     const auto handle = prepared.prepare(12);

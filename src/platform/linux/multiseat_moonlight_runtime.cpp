@@ -346,7 +346,8 @@ namespace multiseat::input {
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
     seat_handle_t handle,
     std::string_view expected_input_seat,
-    bool controller_feedback
+    bool controller_feedback,
+    worker_connection_selection_t worker_connection
   ) {
     std::scoped_lock lock {impl_->state_mutex};
     if (impl_->shutting_down || impl_->closed) {
@@ -360,7 +361,8 @@ namespace multiseat::input {
       launch,
       std::move(handle),
       expected_input_seat,
-      controller_feedback
+      controller_feedback,
+      std::move(worker_connection)
     );
     if (selected == moonlight_launch_selection_status_e::registered) {
       impl_->launches.push_back({
@@ -551,7 +553,8 @@ namespace multiseat::input {
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
     seat_handle_t handle,
     std::string_view expected_input_seat,
-    bool controller_feedback
+    bool controller_feedback,
+    worker_connection_selection_t worker_connection
   ) {
     runtime_call_t call;
     if (!call.get()) {
@@ -561,7 +564,8 @@ namespace multiseat::input {
       launch,
       std::move(handle),
       expected_input_seat,
-      controller_feedback
+      controller_feedback,
+      std::move(worker_connection)
     );
   }
 

@@ -464,6 +464,16 @@ namespace stream {
     control_server_t control_server;
   };
 
+#ifdef __linux__
+  struct worker_connection_owner_t {
+    explicit worker_connection_owner_t(
+      std::shared_ptr<multiseat::input::worker_launch_connection_t> connection
+    ): connection(std::move(connection)) {}
+    ~worker_connection_owner_t() { connection->retire(); }
+    const std::shared_ptr<multiseat::input::worker_launch_connection_t> connection;
+  };
+#endif
+
   struct session_t {
     config_t config;
 
@@ -479,6 +489,10 @@ namespace stream {
     mutable std::mutex multiseat_input_binding_mutex;
     bool multiseat_input_selection_closed = false;
     bool multiseat_launch_finished = false;
+    std::unique_ptr<worker_connection_owner_t> worker_connection;
+    // Never downgraded to host capture, including after reservation retirement.
+    bool worker_connection_required = false;
+    std::shared_ptr<const std::atomic_bool> launch_worker_connection_required;
 #endif
 
     std::thread audioThread;
@@ -599,9 +613,12 @@ namespace stream {
     }
 
     void close_multiseat_input(session_t &session) noexcept {
+      session.packet_owner.close();
       bool finish_launch = false;
       {
         std::scoped_lock lock {session.multiseat_input_binding_mutex};
+        session.multiseat_input_selection_closed = true;
+        session.worker_connection.reset();
         if (!session.multiseat_input) {
           return;
         }
@@ -2441,6 +2458,29 @@ namespace stream {
     }
 
 #ifdef POLARIS_TESTS
+    std::mutex host_start_test_mutex;
+    std::function<void()> host_start_abort_hook;
+
+    void set_host_start_abort_hook_for_tests(std::function<void()> hook) {
+      std::scoped_lock lock {host_start_test_mutex};
+      host_start_abort_hook = std::move(hook);
+    }
+
+    unsigned exchange_active_count_for_tests(unsigned count) {
+      return running_sessions.exchange(count);
+    }
+
+    bool abort_host_start_for_tests() {
+      std::function<void()> hook;
+      {
+        std::scoped_lock lock {host_start_test_mutex};
+        hook = host_start_abort_hook;
+      }
+      if (!hook) return false;
+      hook();
+      return true;
+    }
+
     stream_packets::destination_t packet_destination_for_tests(session_t &session) {
       return session.packet_owner.destination();
     }
@@ -2450,6 +2490,12 @@ namespace stream {
     }
 
 #ifdef __linux__
+    std::shared_ptr<multiseat::input::worker_launch_connection_t>
+    worker_connection_for_tests(const session_t &session) {
+      std::scoped_lock lock {session.multiseat_input_binding_mutex};
+      return session.worker_connection ? session.worker_connection->connection : nullptr;
+    }
+
     bool route_multiseat_input_for_tests(
       session_t &session,
       std::span<const std::uint8_t> packet
@@ -2480,6 +2526,10 @@ namespace stream {
 
     std::uint64_t launch_lifecycle_generation(const session_t& session) {
       return session.launch_lifecycle_generation;
+    }
+
+    std::uint64_t generation(const session_t &session) {
+      return session.session_generation;
     }
 
     bool uuid_match(const session_t &session, const std::string_view& uuid) {
@@ -2537,15 +2587,26 @@ namespace stream {
       std::shared_ptr<
         multiseat::input::moonlight_controller_feedback_hub_t
       > feedback_hub,
-      bool controller_feedback
+      bool controller_feedback,
+      multiseat::input::worker_connection_selection_t worker_connection
     ) {
       std::scoped_lock lock {session.multiseat_input_binding_mutex};
       if (session.state.load(std::memory_order_acquire) != state_e::STOPPED ||
-          session.multiseat_input_selection_closed) {
+          session.multiseat_input_selection_closed || !session.packet_owner.destination().acquire()) {
         return multiseat_input_bind_status_e::invalid_session_state;
       }
       if (session.multiseat_input) {
         return multiseat_input_bind_status_e::already_bound;
+      }
+      if (worker_connection.required != static_cast<bool>(worker_connection.connection) ||
+          (!worker_connection.required && session.launch_worker_connection_required &&
+           session.launch_worker_connection_required->load()) ||
+          (worker_connection.required &&
+           (!(session.permission & crypto::PERM::_allow_view) ||
+            !worker_connection.connection->matches_stream(session.launch_session_id,
+              session.launch_lifecycle_generation, session.device_uuid, handle,
+              session.launch_worker_connection_required)))) {
+        return multiseat_input_bind_status_e::worker_connection_rejected;
       }
 
       auto feedback_queue = session.control.feedback_queue;
@@ -2580,7 +2641,19 @@ namespace stream {
         return multiseat_input_bind_status_e::open_failed;
       }
 
+      std::unique_ptr<worker_connection_owner_t> worker_owner;
+      if (worker_connection.required) {
+        if (!worker_connection.connection->try_claim(session.session_generation)) {
+          return multiseat_input_bind_status_e::worker_connection_rejected;
+        }
+        auto retire_failed_claim = util::fail_guard([&] { worker_connection.connection->retire(); });
+        worker_owner = std::make_unique<worker_connection_owner_t>(worker_connection.connection);
+        retire_failed_claim.disable();
+      }
+
       session.multiseat_input = std::move(opened.session);
+      session.worker_connection_required = worker_connection.required;
+      session.worker_connection = std::move(worker_owner);
       BOOST_LOG(info) << "Session: Bound authenticated multiseat input for ["sv
                       << session.device_name << "]"sv;
       return multiseat_input_bind_status_e::bound;
@@ -2589,6 +2662,15 @@ namespace stream {
     bool multiseat_input_bound(const session_t &session) {
       std::scoped_lock lock {session.multiseat_input_binding_mutex};
       return static_cast<bool>(session.multiseat_input);
+    }
+
+    bool multiseat_input_bound_to(const session_t &session, std::uint64_t generation) {
+      std::scoped_lock lock {session.multiseat_input_binding_mutex};
+      return generation != 0 && session.session_generation == generation &&
+             session.multiseat_input && session.multiseat_input->accepting() &&
+             !session.multiseat_input_selection_closed &&
+             (!session.worker_connection_required ||
+              (session.worker_connection && session.worker_connection->connection->bound_to(generation)));
     }
 #endif
 
@@ -2776,6 +2858,12 @@ namespace stream {
         stream_generation_boundary_mutex
       };
 
+#ifdef __linux__
+      auto abort_multiseat_start = util::fail_guard([&session]() {
+        close_multiseat_input(session);
+      });
+#endif
+
       // Enforce max_sessions limit
       auto max_sessions = config::stream.max_sessions;
       if (max_sessions > 0) {
@@ -2788,6 +2876,12 @@ namespace stream {
       }
 
 #ifdef __linux__
+      // Remember an authenticated worker selection even if its gate has since
+      // been retired, or selection happened after this allocation was created.
+      if (session.launch_worker_connection_required && session.launch_worker_connection_required->load()) {
+        BOOST_LOG(warning) << "Worker media producers are not available"sv;
+        return -1;
+      }
       const auto multiseat_activation =
         multiseat::input::activate_registered_moonlight_session(session);
       switch (multiseat_activation) {
@@ -2806,17 +2900,26 @@ namespace stream {
             << static_cast<int>(multiseat_activation) << ')';
           return -1;
       }
-      auto abort_multiseat_start = util::fail_guard([&session]() {
-        close_multiseat_input(session);
-      });
       {
         std::scoped_lock lock {session.multiseat_input_binding_mutex};
+        // Reservation is implemented; worker producers are still a later slice.
+        // A selected worker must never fall through to singleton host capture.
+        if (session.worker_connection_required) {
+          BOOST_LOG(warning) << "Worker media producers are not available"sv;
+          return -1;
+        }
+#ifdef POLARIS_TESTS
+        if (abort_host_start_for_tests()) return -1;
+#endif
         session.multiseat_input_selection_closed = true;
         if (!session.multiseat_input) {
           session.input = input::alloc(session.mail);
         }
       }
 #else
+#ifdef POLARIS_TESTS
+      if (abort_host_start_for_tests()) return -1;
+#endif
       session.input = input::alloc(session.mail);
 #endif
 
@@ -2951,6 +3054,9 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
+#ifdef __linux__
+      session->launch_worker_connection_required = launch_session.worker_connection_requirement();
+#endif
       session->launch_lifecycle_generation =
         launch_session.lifecycle_generation.value_or(0);
       session->device_name = launch_session.device_name;

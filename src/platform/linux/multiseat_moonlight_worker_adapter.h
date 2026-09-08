@@ -62,7 +62,22 @@ namespace multiseat::input {
       const seat_handle_t &handle
     );
 
+    /**
+     * Reserve the exact connection for future worker media; no I/O starts.
+     * Selection must complete before start. This does not arbitrate concurrent
+     * host-versus-worker launch decisions.
+     */
+    [[nodiscard]] moonlight_worker_selection_result_t select_with_connection(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+      const seat_handle_t &handle
+    );
+
   private:
+    [[nodiscard]] moonlight_worker_selection_result_t select_impl(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+      const seat_handle_t &handle,
+      bool require_connection
+    );
     authenticated_worker_seat_authority_t &worker_authority_;
   };
 
