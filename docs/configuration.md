@@ -457,6 +457,33 @@ ai_auth_mode = api_key
 ai_api_key = YOUR_GEMINI_KEY
 ```
 
+### DeepSeek
+
+Select the **DeepSeek** provider and **DeepSeek API** profile in the web UI, enter a DeepSeek
+API key, refresh the model list, and run **Test Explanation** before saving. To configure it
+directly:
+
+```ini
+ai_enabled = enabled
+ai_provider = deepseek
+ai_model = deepseek-v4-flash
+ai_auth_mode = api_key
+ai_api_key = YOUR_DEEPSEEK_KEY
+ai_base_url = https://api.deepseek.com
+ai_timeout_ms = 30000
+```
+
+The profile uses DeepSeek's [OpenAI-compatible endpoint](https://api-docs.deepseek.com/) for
+model discovery and chat completions, with [JSON-object output](https://api-docs.deepseek.com/guides/json_mode/)
+and thinking disabled for bounded explanations. Polaris validates the returned explanation against
+the same six-field contract and keeps deterministic Doctor results as the source of truth.
+
+If you previously entered a DeepSeek URL under OpenAI or Anthropic, select the DeepSeek API profile
+and enter its key again. This sets the compatible output format and base URL; the Anthropic
+`/anthropic` endpoint is not used by Polaris's Doctor explanation path. Subscription login is not
+supported for DeepSeek. Model discovery reflects the API's current list; the configured default is
+only a fallback when discovery is unavailable.
+
 ### Local OpenAI-compatible server
 
 ```ini
