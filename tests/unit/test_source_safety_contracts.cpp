@@ -433,7 +433,7 @@ TEST(SourceSafetyContracts, ExactDisplayCaptureCannotFallBackDuringInitOrReinit)
   const auto wrapper = source.substr(generic_refresh, capture_thread - generic_refresh);
   EXPECT_NE(wrapper.find("if (!refresh_displays("), std::string::npos);
   EXPECT_NE(
-    wrapper.find("current_display_index = display_names.empty() ? -1 : 0"),
+    wrapper.find("current_display_index = -1"),
     std::string::npos
   );
 }
