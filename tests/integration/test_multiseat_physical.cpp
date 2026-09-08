@@ -391,7 +391,13 @@ namespace {
       // No observer can report success before this host signal, issued only
       // after every ready observer covered the injection boundary.
       for (int index=0; index<2; ++index) if (both || index==target) {
-        EXPECT_EQ(command({"exec",seats[index].container_id,probe,"finish",tokens[index]},1s).exit_status,0);
+        const auto began = std::chrono::steady_clock::now();
+        // Starting a Podman exec alongside two active compositor/game trees can
+        // exceed one second. The observer's ten-second deadline stays intact.
+        const auto finished = command({"exec",seats[index].container_id,probe,"finish",tokens[index]}, game ? 3s : 1s);
+        RecordProperty("input_finish_ms_"+std::to_string(observation_round)+"_seat_"+std::to_string(index),
+          std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-began).count()));
+        EXPECT_EQ(finished.exit_status,0);
       }
       readers.clear(); // join before parsing the completed bounded observation
       for (int index=0; index<2; ++index) if (both || index==target) {
