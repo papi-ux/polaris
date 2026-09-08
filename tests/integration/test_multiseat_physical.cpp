@@ -194,6 +194,8 @@ namespace {
     ASSERT_TRUE(profiles.contains(profile_name));
     RecordProperty("runtime_profile", profile_name);
     const bool game = env_or("POLARIS_PHYSICAL_GAME") == "1";
+    const bool encoded_game = env_or("POLARIS_PHYSICAL_ENCODED_GAME") == "1";
+    ASSERT_FALSE(encoded_game && !game) << "encoded game probe requires the game lifecycle fixture";
     ASSERT_TRUE(!game || profile_name == "gamescope");
     const std::string workload = game ? "input-pong-v1" : "physical-input-proof";
     RecordProperty("game_streaming", "false");
@@ -358,6 +360,22 @@ namespace {
       ASSERT_TRUE(ready) << "two private games did not become observable";
       std::this_thread::sleep_for(200ms);
     }
+    const auto observe_encoded_game = [&](int index) {
+      auto result = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "media", game_tokens[index]}, 15s);
+      ASSERT_FALSE(result.timed_out);
+      ASSERT_EQ(result.exit_status, 0) << result.output;
+      auto observation = json::parse(result.output, nullptr, false);
+      ASSERT_TRUE(observation.is_object()) << result.output;
+      ASSERT_EQ(observation.value("source", ""), "worker-capture");
+      ASSERT_EQ(observation.value("encoder", ""), "openh264");
+      ASSERT_TRUE(observation.value("passed", false));
+      ASSERT_EQ(observation.value("encoded_frames", 0), 60);
+      ASSERT_EQ(observation.value("decoded_frames", 0), 60);
+      ASSERT_GE(observation.value("scene_frames", 0), 30);
+      ASSERT_GE(observation.value("changed_frames", 0), 10);
+      RecordProperty("encoded_game_seat_" + std::to_string(index), observation.dump());
+    };
+    if (encoded_game) { observe_encoded_game(0); observe_encoded_game(1); }
     int observation_round = 0;
     const auto observe = [&](int target, bool both) {
       std::array<json, 2> game_before;
