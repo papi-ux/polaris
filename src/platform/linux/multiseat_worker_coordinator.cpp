@@ -39,6 +39,10 @@ namespace multiseat {
         return client_.connected();
       }
 
+      worker_ipc::controller_connection_t lease_connection() const override {
+        return client_.lease_connection();
+      }
+
     private:
       worker_ipc::controller_client_t client_;
     };
@@ -536,6 +540,39 @@ namespace multiseat {
     const seat_handle_t &handle,
     const authenticated_worker_seat_action_t &action
   ) {
+    if (!action) {
+      return worker_seat_authorization_status_e::invalid_request;
+    }
+    return with_authenticated_session(handle, [&](const auto &seat, auto &) {
+      action(seat);
+      return worker_seat_authorization_status_e::applied;
+    });
+  }
+
+  worker_seat_authorization_status_e
+  worker_coordinator_t::with_authenticated_worker_connection(
+    const seat_handle_t &handle,
+    const authenticated_worker_connection_action_t &action
+  ) {
+    if (!action) {
+      return worker_seat_authorization_status_e::invalid_request;
+    }
+    return with_authenticated_session(handle, [&](const auto &seat, auto &session) {
+      const auto connection = session.lease_connection();
+      const auto expected = endpoint_identity_for({seat.handle, seat.worker_name});
+      if (!connection.connected() || connection.identity() != expected) {
+        return worker_seat_authorization_status_e::endpoint_not_authenticated;
+      }
+      action(seat, connection);
+      return worker_seat_authorization_status_e::applied;
+    });
+  }
+
+  worker_seat_authorization_status_e
+  worker_coordinator_t::with_authenticated_session(
+    const seat_handle_t &handle,
+    const authenticated_session_action_t &action
+  ) {
     if (!handle.valid() || !action) {
       return worker_seat_authorization_status_e::invalid_request;
     }
@@ -573,11 +610,10 @@ namespace multiseat {
       .client_key = seat->client_key,
     };
     try {
-      action(authenticated);
+      return action(authenticated, *worker->session);
     } catch (...) {
       return worker_seat_authorization_status_e::action_failed;
     }
-    return worker_seat_authorization_status_e::applied;
   }
 
 }  // namespace multiseat
