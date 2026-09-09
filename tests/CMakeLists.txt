@@ -259,6 +259,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_claude_cli.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_provider_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp

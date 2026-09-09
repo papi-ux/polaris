@@ -242,6 +242,53 @@ describe('AI optimizer guided setup', () => {
     expect(wrapper.find('input[type="number"][max="120000"]').exists()).toBe(true)
   })
 
+  it('selects DeepSeek API settings without reusing another provider key', async () => {
+    vi.useFakeTimers()
+    const config = defaultConfig({ ai_api_key: 'previous-provider-key', has_ai_api_key: true })
+    const wrapper = mountOptimizer(config)
+    try {
+      await flushMounted()
+      const card = wrapper.findAll('button').find(button => button.text().includes('DeepSeek'))
+      await card.trigger('click')
+      await nextTick()
+      expect(config.ai_provider).toBe('deepseek')
+      expect(config.ai_model).toBe('deepseek-v4-flash')
+      expect(config.ai_base_url).toBe('https://api.deepseek.com')
+      expect(config.ai_auth_mode).toBe('api_key')
+      expect(config.ai_use_subscription).toBe('disabled')
+      expect(config.ai_timeout_ms).toBe(30000)
+      expect(config.ai_api_key).toBe('')
+      expect(config.clear_ai_api_key).toBe(true)
+      await vi.advanceTimersByTimeAsync(400)
+      expect(mockAiOptimizer.fetchModels).toHaveBeenLastCalledWith(expect.objectContaining({
+        ai_provider: 'deepseek', ai_api_key: '', clear_ai_api_key: true,
+      }))
+      await wrapper.find('input[placeholder="sk-..."]').setValue('new-deepseek-fixture-key')
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(400)
+      expect(mockAiOptimizer.fetchModels).toHaveBeenLastCalledWith(expect.objectContaining({
+        ai_provider: 'deepseek', ai_api_key: 'new-deepseek-fixture-key', clear_ai_api_key: false,
+      }))
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('preserves a saved DeepSeek configuration and custom timeout when opening the tab', async () => {
+    const config = defaultConfig({
+      ai_provider: 'deepseek', ai_model: 'deepseek-v4-pro', ai_auth_mode: 'api_key',
+      ai_base_url: 'https://api.deepseek.com/v1', ai_timeout_ms: 45000, has_ai_api_key: true,
+    })
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    expect(config.ai_model).toBe('deepseek-v4-pro')
+    expect(config.ai_base_url).toBe('https://api.deepseek.com/v1')
+    expect(config.ai_timeout_ms).toBe(45000)
+    expect(config.clear_ai_api_key).toBe(false)
+    wrapper.unmount()
+  })
+
   it('renders failed draft tests as structured actionable feedback', async () => {
     const config = defaultConfig({
       ai_provider: 'openai',

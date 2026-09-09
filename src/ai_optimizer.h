@@ -26,7 +26,7 @@ namespace ai_optimizer {
    */
   struct config_t {
     bool enabled = false;
-    std::string provider;            ///< anthropic, openai, gemini, local
+    std::string provider;            ///< anthropic, openai, gemini, deepseek, local
     std::string model;               ///< Provider-specific model id
     std::string auth_mode;           ///< api_key, subscription, none
     std::string api_key;             ///< Provider API key when auth_mode == api_key
