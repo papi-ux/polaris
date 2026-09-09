@@ -49,6 +49,7 @@
 // local includes
 #include "client_profiles.h"
 #include "config.h"
+#include "posix_child_reaper.h"
 #include "crypto.h"
 #include "display_device.h"
 #include "file_handler.h"
@@ -9336,7 +9337,7 @@ namespace proc {
     // calls to bp::wait() and platf::process_group_running() which both
     // invoke waitpid() under the hood.
     auto reaper = util::fail_guard([]() {
-      while (waitpid(-1, nullptr, WNOHANG) > 0);
+      util::posix_children::reap_unowned_children();
     });
 #endif
 

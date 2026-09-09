@@ -4,6 +4,7 @@
  */
 
 #include "ai_optimizer.h"
+#include "ai_claude_cli.h"
 #include "config.h"
 #include "game_classifier.h"
 #include "logging.h"
@@ -170,7 +171,7 @@ namespace ai_optimizer {
   }
 
   static std::string subscription_login_command(const std::string &provider) {
-    return provider == PROVIDER_OPENAI ? "codex login" : "";
+    return provider == PROVIDER_OPENAI ? "codex login" : "claude auth login";
   }
 
   static std::string default_model_for_provider(const std::string &provider) {
@@ -2777,9 +2778,20 @@ namespace ai_optimizer {
   static std::optional<std::string> call_doctor_explanation_provider(
       const config_t &active_cfg,
       const std::string &redacted_evidence_json,
-      provider_test_result_t *test_result = nullptr) {
+      provider_test_result_t *test_result = nullptr,
+      const std::string &claude_executable = {}) {
     if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       return call_openai_codex_doctor_cli(active_cfg, redacted_evidence_json);
+    }
+    if (active_cfg.provider == PROVIDER_ANTHROPIC && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      const auto result = claude_cli::explain(active_cfg.model, doctor_explanation_system_prompt(),
+        doctor_explanation_response_format().at("json_schema").at("schema").dump(),
+        redacted_evidence_json, active_cfg.timeout_ms, claude_executable);
+      if (!result.response) {
+        set_provider_test_failure(test_result, result.code, result.error,
+          "Polaris could not obtain a bounded, structured Claude subscription explanation.", result.action);
+      }
+      return result.response;
     }
     if (active_cfg.provider == PROVIDER_ANTHROPIC || active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       BOOST_LOG(warning) << "ai_optimizer: Doctor explanation currently uses OpenAI-compatible local/API endpoints; provider/auth mode not supported for this explanation path"sv;
@@ -2788,7 +2800,7 @@ namespace ai_optimizer {
         "explanation_transport_unsupported",
         "This provider mode cannot run Doctor explanations",
         "The selected provider or authentication mode does not expose the supported explanation transport.",
-        "Choose an OpenAI-compatible endpoint or signed-in OpenAI subscription mode.",
+        "Choose a signed-in Claude or OpenAI subscription, or an OpenAI-compatible endpoint.",
         false
       );
       return std::nullopt;
@@ -2941,7 +2953,8 @@ namespace ai_optimizer {
   }
 
   std::string explain_doctor_json_with_config(const config_t &config,
-                                              const std::string &redacted_evidence_json) {
+                                              const std::string &redacted_evidence_json,
+                                              const std::string &claude_executable) {
     nlohmann::json evidence = nlohmann::json::object();
     try {
       if (!redacted_evidence_json.empty()) {
@@ -2956,7 +2969,7 @@ namespace ai_optimizer {
       return doctor_explanation_fallback("AI explanations are disabled or not fully configured.", evidence).dump();
     }
     try {
-      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump());
+      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump(), nullptr, claude_executable);
       if (!provider_text) {
         return doctor_explanation_fallback("Provider returned no explanation result", evidence).dump();
       }
@@ -3638,6 +3651,12 @@ namespace ai_optimizer {
         if (authenticated.has_value()) {
           status["cli_authenticated"] = *authenticated;
         }
+      }
+      if (cfg.provider == PROVIDER_ANTHROPIC) {
+        const auto claude = claude_cli::status();
+        status["cli_available"] = claude.available;
+        status["cli_authenticated"] = claude.authenticated.value_or(false);
+        status["cli_auth_verified"] = claude.authenticated.has_value();
       }
     }
 

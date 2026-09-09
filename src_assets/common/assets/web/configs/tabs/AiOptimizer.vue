@@ -42,6 +42,7 @@ const providerOptions = [
     pill: 'text-warning-bright border-warning/30',
     subscriptionLabel: 'Claude CLI',
     subscriptionBinary: 'claude',
+    subscriptionLoginCommand: 'claude auth login',
     keyPlaceholder: 'sk-ant-api03-...',
     keyHintKey: 'config.ai_provider_anthropic_key_hint',
     profiles: [
@@ -266,7 +267,7 @@ const draftMatchesRuntime = computed(() => {
     && aiStatus.value.auth_mode === config.value.ai_auth_mode
     && aiStatus.value.base_url === config.value.ai_base_url
     && (aiStatus.value.codex_home || '') === (config.value.ai_codex_home || '')
-    && Number(aiStatus.value.timeout_ms || 0) === (Number(config.value.ai_timeout_ms) || 5000)
+    && Number(aiStatus.value.timeout_ms || 0) === (Number(config.value.ai_timeout_ms) || providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode))
     && Number(aiStatus.value.cache_ttl_hours || 0) === (Number(config.value.ai_cache_ttl_hours) || 168)
 })
 
@@ -477,16 +478,32 @@ function subscriptionRuntimeTone(status) {
 
 function subscriptionRuntimeSummary(status) {
   if (!status) return $t('config.ai_not_loaded')
+  if (status.cli_available && status.cli_auth_verified === false) return $t('config.ai_cli_auth_unverified')
   if (status.cli_authenticated === true) return $t('config.ai_cli_signed_in')
   if (status.cli_authenticated === false && status.cli_login_command) return $t('config.ai_auth_run_command', { command: status.cli_login_command })
   return status.cli_available ? $t('config.ai_cli_detected') : $t('config.ai_cli_missing')
+}
+
+function providerDefaultTimeout(provider, authMode = provider.defaultAuth) {
+  if (provider.id === 'local') return 60000
+  if (provider.id === 'anthropic' && authMode === 'subscription') return 30000
+  return 5000
+}
+
+function syncProviderTimeout(previousDefaultTimeout) {
+  const defaultTimeout = providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode)
+  const configuredTimeout = Number(config.value.ai_timeout_ms)
+  const inheritedFastDefault = configuredTimeout === 5000 && defaultTimeout > 5000
+  if (!configuredTimeout || inheritedFastDefault || configuredTimeout === previousDefaultTimeout) {
+    config.value.ai_timeout_ms = defaultTimeout
+  }
 }
 
 function applyProviderProfile(profile) {
   config.value.ai_model = profile.model || currentProvider.value.defaultModel
   config.value.ai_base_url = profile.baseUrl || currentProvider.value.defaultBaseUrl
   config.value.ai_auth_mode = profile.authMode || currentProvider.value.defaultAuth
-  config.value.ai_timeout_ms = profile.timeoutMs || (currentProvider.value.id === 'local' ? 60000 : 5000)
+  config.value.ai_timeout_ms = profile.timeoutMs || providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode)
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
   if (config.value.ai_auth_mode === 'none') {
@@ -534,12 +551,7 @@ function syncProviderDefaults(previousProviderId) {
     }
   }
 
-  const previousDefaultTimeout = previousProvider?.id === 'local' ? 60000 : 5000
-  const configuredTimeout = Number(config.value.ai_timeout_ms)
-  const legacyLocalDefault = provider.id === 'local' && configuredTimeout === 5000
-  if (!configuredTimeout || legacyLocalDefault || (previousProvider && configuredTimeout === previousDefaultTimeout)) {
-    config.value.ai_timeout_ms = provider.id === 'local' ? 60000 : 5000
-  }
+  syncProviderTimeout(previousProvider && providerDefaultTimeout(previousProvider))
 
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
@@ -569,7 +581,8 @@ watch(() => config.value.ai_provider, (nextProvider, previousProvider) => {
   syncProviderDefaults(previousProvider)
 }, { immediate: true })
 
-watch(() => config.value.ai_auth_mode, (nextMode) => {
+watch(() => config.value.ai_auth_mode, (nextMode, previousMode) => {
+  syncProviderTimeout(providerDefaultTimeout(currentProvider.value, previousMode))
   config.value.ai_use_subscription = nextMode === 'subscription' ? 'enabled' : 'disabled'
   if (nextMode === 'none') {
     config.value.ai_api_key = ''
@@ -600,7 +613,7 @@ function buildDraftPayload() {
     ai_base_url: config.value.ai_base_url,
     ai_use_subscription: config.value.ai_use_subscription,
     ai_codex_home: config.value.ai_codex_home || '',
-    ai_timeout_ms: Number(config.value.ai_timeout_ms) || 5000,
+    ai_timeout_ms: Number(config.value.ai_timeout_ms) || providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode),
     ai_cache_ttl_hours: Number(config.value.ai_cache_ttl_hours) || 168
   }
 }
@@ -902,6 +915,9 @@ onBeforeUnmount(() => {
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
                 {{ $t('config.ai_subscription_login_copy', { command: currentSubscriptionLoginCommand }) }}
               </div>
+              <p v-if="config.ai_provider === 'anthropic'" class="text-xs text-storm mt-2">
+                {{ $t('config.ai_claude_host_policy_copy') }}
+              </p>
             </div>
             <div v-if="config.ai_provider === 'openai'">
               <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_codex_home_label') }}</label>
