@@ -3710,6 +3710,11 @@ namespace video {
     void *channel_data,
     packet_queue_t packets
   ) {
+    // A disable/rollback may have superseded the target while a former
+    // FFmpeg encoder was being retired. Use the latest pending request.
+    if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+      config.bitrate = request->target_bitrate_kbps;
+    }
     auto session = make_encode_session(disp, encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
@@ -4007,13 +4012,14 @@ namespace video {
           int effective_bitrate = applied_adaptive_bitrate;
           if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
             if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
-              switch (session->update_bitrate(request->target_bitrate_kbps)) {
+              auto update = encode_session_t::bitrate_update_e::rejected;
+              const bool current = adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+                update = session->update_bitrate(request->target_bitrate_kbps);
+                return update == encode_session_t::bitrate_update_e::applied;
+              });
+              if (current) switch (update) {
                 case encode_session_t::bitrate_update_e::applied:
                   applied_adaptive_bitrate = request->target_bitrate_kbps;
-                  adaptive_bitrate::acknowledge_live_bitrate_applied(
-                    request->revision,
-                    applied_adaptive_bitrate
-                  );
                   effective_bitrate = applied_adaptive_bitrate;
                   break;
                 case encode_session_t::bitrate_update_e::recreate_session:

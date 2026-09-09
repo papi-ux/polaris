@@ -16,6 +16,8 @@
 #if defined(__linux__)
   #include <csignal>
   #include <sys/stat.h>
+  #include <sys/file.h>
+  #include <fcntl.h>
   #include <sys/wait.h>
   #include <thread>
   #include <unistd.h>
@@ -717,3 +719,38 @@ TEST_F(PrivateStateFileTest, DirectoryCloseFaultFailsClosedAfterVisibleReplaceme
   ASSERT_EQ(result.status, private_state_file::read_status_e::ok);
   EXPECT_EQ(result.payload, "new");
 }
+#ifdef __linux__
+TEST_F(PrivateStateFileTest, TransactionFailsPromptlyWhileAnotherProcessHoldsLock) {
+  ASSERT_TRUE(private_state_file::write_atomic(target, "before"));
+  int ready[2], release[2];
+  ASSERT_EQ(::pipe(ready), 0);
+  ASSERT_EQ(::pipe(release), 0);
+  const auto pid = ::fork();
+  ASSERT_GE(pid, 0);
+  if (pid == 0) {
+    ::close(ready[0]); ::close(release[1]);
+    int lock = ::open((target.string() + ".lock").c_str(), O_RDWR);
+    if (lock < 0 || ::flock(lock, LOCK_EX) != 0) _exit(1);
+    char byte = 'x';
+    if (::write(ready[1], &byte, 1) != 1) _exit(2);
+    if (::read(release[0], &byte, 1) != 1) _exit(3);
+    ::close(lock); _exit(0);
+  }
+  ::close(ready[1]); ::close(release[0]);
+  char byte;
+  ASSERT_EQ(::read(ready[0], &byte, 1), 1);
+  const auto began = std::chrono::steady_clock::now();
+  bool called = false;
+  const auto result = private_state_file::update_atomic(target, 4096, [&](const auto &) {
+    called = true; return std::optional<std::string>("after");
+  });
+  EXPECT_LT(std::chrono::steady_clock::now() - began, std::chrono::seconds(1));
+  EXPECT_FALSE(called);
+  EXPECT_EQ(result.status, private_state_file::write_status_e::not_committed);
+  EXPECT_EQ(::write(release[1], &byte, 1), 1);
+  ::close(ready[0]); ::close(release[1]);
+  int status; ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+  EXPECT_EQ(status, 0);
+  EXPECT_EQ(private_state_file::read_secure(target, 4096).payload, "before");
+}
+#endif

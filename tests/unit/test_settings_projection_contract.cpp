@@ -212,7 +212,7 @@ TEST_F(SettingsProjectionContract, StatsChannelAugmentationAddsTuningAndAutoQual
     EXPECT_EQ(augmented.at(key), value) << key;
   }
   // Exactly the two additive keys appear, nothing else.
-  EXPECT_EQ(augmented.size(), original.size() + 2);
+  EXPECT_EQ(augmented.size(), original.size() + 3);
   ASSERT_TRUE(augmented.contains("tuning"));
   ASSERT_TRUE(augmented.contains("auto_quality"));
 

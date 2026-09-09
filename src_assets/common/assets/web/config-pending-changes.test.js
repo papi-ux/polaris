@@ -186,7 +186,7 @@ describe('ConfigView pending changes review', () => {
     wrapper.vm.config.sunshine_name = 'Fixed Host'
     await nextTick()
 
-    global.fetch.mockResolvedValueOnce({ status: 200 })
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true, configuration_revision: 'a'.repeat(64) }) })
     const result = await wrapper.vm.save()
 
     expect(result).toBe(true)
@@ -275,7 +275,7 @@ describe('ConfigView pending changes review', () => {
     wrapper.vm.config.steamgriddb_api_key = ''
     await nextTick()
 
-    global.fetch.mockResolvedValueOnce({ status: 200 })
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true, configuration_revision: 'a'.repeat(64) }) })
 
     const result = await wrapper.vm.save()
 

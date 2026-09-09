@@ -295,7 +295,7 @@ namespace private_state_file {
 
     class state_file_lock_t {
     public:
-      explicit state_file_lock_t(const directory_handle_t &directory) {
+      explicit state_file_lock_t(const directory_handle_t &directory, bool wait = true) {
         int flags = O_CREAT | O_RDWR | O_NONBLOCK;
 #ifdef O_CLOEXEC
         flags |= O_CLOEXEC;
@@ -320,7 +320,7 @@ namespace private_state_file {
           descriptor_ = -1;
           return;
         }
-        while (::flock(descriptor_, LOCK_EX) != 0) {
+        while (::flock(descriptor_, LOCK_EX | (wait ? 0 : LOCK_NB)) != 0) {
           if (errno == EINTR) {
             continue;
           }
@@ -400,18 +400,8 @@ namespace private_state_file {
     }
   }  // namespace
 
-  read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes) {
-    directory_handle_t directory {target};
-    if (!directory) {
-      BOOST_LOG(error) << "Rejected insecure or inaccessible private state directory for " << target;
-      return {.status = read_status_e::io_error};
-    }
-    state_file_lock_t lock {directory};
-    if (!lock) {
-      BOOST_LOG(error) << "Couldn't acquire private state lock for " << target;
-      return {.status = read_status_e::io_error};
-    }
-
+  static read_result_t read_locked(const directory_handle_t &directory, std::size_t max_bytes,
+                                   bool permit_public_read) {
     int flags = O_RDONLY | O_NONBLOCK;
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
@@ -445,7 +435,7 @@ namespace private_state_file {
       return {.status = read_status_e::io_error};
     }
     if (!S_ISREG(metadata.st_mode) || metadata.st_uid != ::geteuid() || metadata.st_nlink != 1 ||
-        (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0 || metadata.st_size < 0 ||
+        (metadata.st_mode & (permit_public_read ? (S_IWGRP | S_IWOTH) : (S_IRWXG | S_IRWXO))) != 0 || metadata.st_size < 0 ||
         static_cast<std::uintmax_t>(metadata.st_size) > max_bytes) {
       (void) close_descriptor();
       return {.status = read_status_e::rejected};
@@ -483,18 +473,7 @@ namespace private_state_file {
     return {.status = read_status_e::ok, .payload = std::move(payload)};
   }
 
-  write_result_t write_atomic(const std::filesystem::path &target, std::string_view payload) {
-    directory_handle_t directory {target, true};
-    if (!directory) {
-      BOOST_LOG(error) << "Rejected insecure or inaccessible private state directory for " << target;
-      return {write_status_e::not_committed};
-    }
-    state_file_lock_t lock {directory};
-    if (!lock) {
-      BOOST_LOG(error) << "Couldn't acquire private state lock for " << target;
-      return {write_status_e::not_committed};
-    }
-
+  static write_result_t write_locked(directory_handle_t &directory, std::string_view payload) {
 #ifdef POLARIS_TESTS
     const auto injected_fault = write_fault.load(std::memory_order_relaxed);
     if (injected_fault == write_fault_e::open) {
@@ -611,6 +590,38 @@ namespace private_state_file {
       return {write_status_e::durability_uncertain};
     }
     return {write_status_e::committed};
+  }
+
+  read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes,
+                            bool permit_public_read, bool wait_for_lock) {
+    directory_handle_t directory {target};
+    if (!directory) return {.status = read_status_e::io_error};
+    state_file_lock_t lock {directory, wait_for_lock};
+    if (!lock) return {.status = read_status_e::io_error};
+    return read_locked(directory, max_bytes, permit_public_read);
+  }
+
+  write_result_t write_atomic(const std::filesystem::path &target, std::string_view payload) {
+    directory_handle_t directory {target, true};
+    if (!directory) return {write_status_e::not_committed};
+    state_file_lock_t lock {directory};
+    if (!lock) return {write_status_e::not_committed};
+    return write_locked(directory, payload);
+  }
+
+  write_result_t update_atomic(const std::filesystem::path &target, std::size_t max_bytes,
+      const std::function<std::optional<std::string>(const read_result_t &)> &update,
+      bool permit_public_read) {
+    directory_handle_t directory {target, true};
+    if (!directory) return {write_status_e::not_committed};
+    state_file_lock_t lock {directory, false};
+    if (!lock) return {write_status_e::not_committed};
+    const auto current = read_locked(directory, max_bytes, permit_public_read);
+    if (!current && current.status != read_status_e::missing) return {write_status_e::not_committed};
+    const auto next = update(current);
+    if (!next || next->size() > max_bytes) return {write_status_e::not_committed};
+    if (current && *next == current.payload) return {write_status_e::committed};
+    return write_locked(directory, *next);
   }
 
 #ifdef POLARIS_TESTS

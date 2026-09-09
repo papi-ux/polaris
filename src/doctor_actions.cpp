@@ -19,6 +19,8 @@
 #include <nlohmann/json.hpp>
 
 #include "adaptive_bitrate.h"
+#include "config.h"
+#include "configuration_store.h"
 #include "globals.h"
 #include "logging.h"
 #include "recovery_profile.h"
@@ -277,7 +279,10 @@ namespace doctor_actions {
     }
 
     void set_adaptive_enabled_locked(bool enable) {
-      if (action_run.active) {
+      if (action_run.active && !enable) {
+        remember_terminal_locked(action_run, superseded_result(action_run.run_id));
+        action_run = action_run_t {};
+      } else if (action_run.active) {
         const auto run_snapshot = action_run;
         const auto outcome = restore_bitrate_run_locked(action_run);
         if (outcome.status == restore_status_e::encoder_unconfirmed) {
@@ -790,6 +795,10 @@ namespace doctor_actions {
     return true;
   }
 
+  paired_global_control_guard_t acquire_admin_global_control() {
+    return {std::unique_lock<std::mutex>(action_mutex), true};
+  }
+
   bool set_owner_live_bitrate(std::string_view owner_uuid,
                               std::uint64_t session_generation,
                               std::string_view launch_instance_id,
@@ -802,7 +811,11 @@ namespace doctor_actions {
         controller_sessions.front().launch_instance_id != launch_instance_id) {
       return false;
     }
+    std::lock_guard configuration_guard(configuration_store::mutex());
+    if (configuration_store::patch(config::sunshine.config_file,
+          {{"adaptive_bitrate_enabled", "disabled"}}) != configuration_store::result::committed) return false;
     const auto superseded_run = action_run;
+    adaptive_bitrate::set_enabled(false);
     adaptive_bitrate::set_live_bitrate(bitrate_kbps);
     if (superseded_run.active) {
       remember_terminal_locked(
@@ -1669,6 +1682,7 @@ namespace doctor_actions {
     adaptive_bitrate::load_config();
     adaptive_bitrate::reset();
     adaptive_bitrate::set_base_bitrate(base_bitrate_kbps);
+    adaptive_bitrate::set_session_scope(session_generation, std::string {launch_instance_id}, unshared_at_start);
     stream_stats::set_doctor_live_action_scope_available(
       controller_sessions.size() == 1 && controller_sessions.front().auto_fix_eligible
     );
@@ -1703,6 +1717,8 @@ namespace doctor_actions {
       terminal_action = terminal_action_t {};
       terminal_action_history.clear();
     }
+
+    adaptive_bitrate::set_session_scope(0, {}, false);
 
     // Encoder teardown already publishes runtime support loss. Do not change
     // the configured adaptive policy here; the next stream start reloads it,
