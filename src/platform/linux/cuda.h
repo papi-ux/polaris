@@ -56,6 +56,11 @@ typedef __location__(device_builtin) unsigned long long cudaTextureObject_t;
 
 namespace cuda {
 
+#ifdef POLARIS_TESTS
+  using ram_conversion_stream_hook_t = void (*)(cudaStream_t);
+  ram_conversion_stream_hook_t set_ram_conversion_stream_hook_for_tests(ram_conversion_stream_hook_t hook);
+#endif
+
   class freeCudaPtr_t {
   public:
     void operator()(void *ptr);

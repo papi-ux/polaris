@@ -12,6 +12,7 @@ extern "C" {
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <thread>
 
 TEST(CudaRamEncodeDeviceTests, ExactArrayDimensionsAndPaddedRowsRoundTrip) {
   if (!getenv("POLARIS_TEST_CUDA_RAM")) GTEST_SKIP() << "Requires isolated physical CUDA validation";
@@ -99,9 +100,16 @@ TEST(CudaRamEncodeDeviceTests, CompletesConversionBeforeIndependentStreamReadsTh
     for (int iteration = 0; iteration < 24; ++iteration) {
       const bool white = iteration % 2 == 0;
       for (int row = 0; row < height; ++row) std::fill_n(pixels.data() + static_cast<std::size_t>(row) * image.row_pitch, width * 4, white ? 255 : 0);
+      const bool delayed = iteration < 4;
+      const auto previous_hook = cuda::set_ram_conversion_stream_hook_for_tests(delayed ? +[](cudaStream_t stream) {
+        ASSERT_EQ(cudaLaunchHostFunc(stream, [](void *) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); }, nullptr), cudaSuccess);
+      } : nullptr);
+      auto restore_hook = util::fail_guard([previous_hook] { cuda::set_ram_conversion_stream_hook_for_tests(previous_hook); });
       const auto start = std::chrono::steady_clock::now();
       ASSERT_EQ(converter->convert(image), 0);
-      conversion_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      const double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      if (delayed) EXPECT_GE(elapsed_ms, 25) << "Conversion returned while its bounded producer delay was still pending";
+      else conversion_ms += elapsed_ms;
       // A separate nonblocking stream has no implicit ordering with conversion.
       // Synchronizing this observer cannot complete another stream's kernels.
       ASSERT_EQ(cudaMemcpy2DAsync(observer.pixels, output_width, frame->data[0], frame->linesize[0], output_width, output_height, cudaMemcpyDeviceToHost, observer.stream), cudaSuccess);
@@ -111,7 +119,7 @@ TEST(CudaRamEncodeDeviceTests, CompletesConversionBeforeIndependentStreamReadsTh
       else EXPECT_LT(center, 24) << iteration;
       if (width == 7680) EXPECT_LT(observer.pixels[output_width / 2], 24) << "Letterbox padding must remain black";
     }
-    RecordProperty("conversion_mean_ms_" + std::to_string(width), conversion_ms / 24);
+    RecordProperty("conversion_mean_ms_" + std::to_string(width), conversion_ms / 20);
   }
 }
 #endif

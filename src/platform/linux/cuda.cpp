@@ -66,6 +66,12 @@ namespace cuda {
   using cdf_t = util::safe_ptr<CudaFunctions, cff>;
 
   static cdf_t cdf;
+#ifdef POLARIS_TESTS
+  static thread_local ram_conversion_stream_hook_t ram_conversion_stream_hook;
+  ram_conversion_stream_hook_t set_ram_conversion_stream_hook_for_tests(ram_conversion_stream_hook_t hook) {
+    return std::exchange(ram_conversion_stream_hook, hook);
+  }
+#endif
 
   inline static int check(CUresult result, const std::string_view &sv) {
     if (result != CUDA_SUCCESS) {
@@ -217,6 +223,9 @@ namespace cuda {
   public:
     int convert(platf::img_t &img) override {
       if (sws.load_ram(img, tex.array)) return -1;
+#ifdef POLARIS_TESTS
+      if (ram_conversion_stream_hook) ram_conversion_stream_hook(stream.get());
+#endif
       return complete_conversion(sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(tex), stream.get()));
     }
 
