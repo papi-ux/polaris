@@ -6681,6 +6681,11 @@ namespace proc {
       launch_session->encoder_backend_explicit = _launch_session->encoder_backend_explicit;
       launch_session->effective_encoder_backend = _launch_session->effective_encoder_backend;
     }
+#ifdef __linux__
+    // Resume receives a fresh request. Apply the same app display semantics as
+    // execute_impl before comparing it with the normalized active launch.
+    apply_app_display_semantics(_app, *launch_session);
+#endif
     if (launch_session->encoder_backend_explicit &&
         (!_launch_session->encoder_backend_explicit ||
          launch_session->encoder_backend != _launch_session->encoder_backend)) {
@@ -10238,6 +10243,16 @@ namespace proc {
   }
 
 #if defined(POLARIS_TESTS)
+  void proc_t::set_active_launch_for_tests(
+      const ctx_t &app,
+      std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _app = app;
+    _app_id = 1;
+    _launch_session = std::move(launch_session);
+  }
+
   std::pair<const void *, const void *> proc_t::session_lifecycle_identity_for_tests() const {
     return {_session_lifecycle_gate.get(), _session_lifecycle_sync.get()};
   }

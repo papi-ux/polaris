@@ -858,6 +858,10 @@ namespace proc {
     );
 #endif
 #if defined(POLARIS_TESTS)
+    void set_active_launch_for_tests(
+      const ctx_t &app,
+      std::shared_ptr<rtsp_stream::launch_session_t> launch_session
+    );
     std::pair<const void *, const void *> session_lifecycle_identity_for_tests() const;
     void with_session_lifecycle_lock_for_tests(const std::function<void()> &callback);
     bool begin_session_stop_for_tests();
