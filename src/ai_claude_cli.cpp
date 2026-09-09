@@ -9,11 +9,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #ifndef _WIN32
+#ifdef __linux__
+#include "platform/linux/process_environment.h"
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -35,6 +39,9 @@ namespace ai_optimizer::claude_cli {
     struct workspace_t {
       std::filesystem::path path;
       workspace_t() {
+#ifdef __linux__
+        std::lock_guard lock(process_environment::mutex);
+#endif
         auto name = (std::filesystem::temp_directory_path() / "polaris-claude-XXXXXX").string();
         if (mkdtemp(name.data())) path = name;
       }
@@ -65,10 +72,26 @@ namespace ai_optimizer::claude_cli {
       return true;
     }
 
-    std::string binary() {
-      const auto home = std::getenv("HOME");
+    using environment_t = std::map<std::string, std::string>;
+
+    environment_t snapshot_environment() {
+#ifdef __linux__
+      return process_environment::snapshot();
+#else
+      environment_t result;
+      for (auto entry = *_NSGetEnviron(); entry && *entry; ++entry) {
+        const std::string value {*entry};
+        const auto separator = value.find('=');
+        if (separator != std::string::npos) result[value.substr(0, separator)] = value.substr(separator + 1);
+      }
+      return result;
+#endif
+    }
+
+    std::string binary(const environment_t &environment) {
+      const auto home = environment.find("HOME");
       const std::array<std::string, 3> candidates {
-        home ? std::string(home) + "/.local/bin/claude" : "",
+        home != environment.end() ? home->second + "/.local/bin/claude" : "",
         "/usr/local/bin/claude", "/usr/bin/claude"
       };
       for (const auto &candidate : candidates) {
@@ -76,6 +99,33 @@ namespace ai_optimizer::claude_cli {
         if (std::filesystem::is_regular_file(candidate, ec) && access(candidate.c_str(), X_OK) == 0) return candidate;
       }
       return "claude";
+    }
+
+    // Resolve PATH from the same owned snapshot passed to the child. spawnp
+    // consults the live parent PATH even when given an independent envp.
+    std::string resolve_binary(const std::string &name, const environment_t &environment) {
+      if (name.find('/') != std::string::npos) return std::filesystem::absolute(name).string();
+      const auto found = environment.find("PATH");
+      std::string path;
+      if (found != environment.end()) path = found->second;
+      else {
+        path.resize(confstr(_CS_PATH, nullptr, 0));
+        if (!path.empty()) {
+          confstr(_CS_PATH, path.data(), path.size());
+          path.pop_back();
+        }
+      }
+      std::size_t start = 0;
+      do {
+        const auto end = path.find(':', start);
+        const auto directory = path.substr(start, end == std::string::npos ? end : end - start);
+        const auto candidate = std::filesystem::absolute(std::filesystem::path(directory) / name);
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec) && access(candidate.c_str(), X_OK) == 0) return candidate.string();
+        if (end == std::string::npos) break;
+        start = end + 1;
+      } while (true);
+      return {};
     }
 
     struct process_result_t {
@@ -91,8 +141,13 @@ namespace ai_optimizer::claude_cli {
     process_result_t run(const std::vector<std::string> &args,
                          const std::filesystem::path &cwd,
                          const std::filesystem::path &input,
-                         int timeout_ms) {
+                         int timeout_ms, const environment_t &environment) {
       process_result_t result;
+      const auto executable = resolve_binary(args.front(), environment);
+      if (executable.empty()) {
+        result.exit_code = 127;
+        return result;
+      }
       int pipe_fds[2];
 #ifdef __linux__
       if (pipe2(pipe_fds, O_CLOEXEC) != 0) return result;
@@ -152,13 +207,14 @@ namespace ai_optimizer::claude_cli {
       for (const auto &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
       argv.push_back(nullptr);
       pid_t child = -1;
-#ifdef __APPLE__
-      auto environment = *_NSGetEnviron();
-#else
-      auto environment = environ;
-#endif
+      std::vector<std::string> environment_storage;
+      environment_storage.reserve(environment.size());
+      for (const auto &[key, value] : environment) environment_storage.push_back(key + "=" + value);
+      std::vector<char *> envp;
+      for (auto &entry : environment_storage) envp.push_back(entry.data());
+      envp.push_back(nullptr);
       util::posix_children::protected_child_t ownership;
-      const int error = posix_spawnp(&child, argv.front(), &actions.value, &attributes.value, argv.data(), environment);
+      const int error = posix_spawn(&child, executable.c_str(), &actions.value, &attributes.value, argv.data(), envp.data());
       if (error != 0) {
         result.exit_code = error == ENOENT ? 127 : 126;
         return result;
@@ -207,12 +263,12 @@ namespace ai_optimizer::claude_cli {
     }
   }
 
-  status_t status(const std::string &executable) {
 #ifndef _WIN32
+  static status_t status_with_environment(const std::string &executable, const environment_t &environment) {
     try {
       workspace_t workspace;
       if (workspace.path.empty()) return {};
-      const auto result = run({executable.empty() ? binary() : executable, "--safe-mode", "auth", "status"}, workspace.path, "/dev/null", 5000);
+      const auto result = run({executable.empty() ? binary(environment) : executable, "--safe-mode", "auth", "status"}, workspace.path, "/dev/null", 5000, environment);
       status_t status {result.exit_code != 127 && result.exit_code != 126 && result.exit_code != -1, std::nullopt};
       if (!result.timed_out && !result.truncated && (result.exit_code == 0 || result.exit_code == 1)) {
         const auto parsed = nlohmann::json::parse(result.output, nullptr, false);
@@ -226,6 +282,13 @@ namespace ai_optimizer::claude_cli {
       }
       return status;
     } catch (...) { return {}; }
+  }
+#endif
+
+  status_t status(const std::string &executable) {
+#ifndef _WIN32
+    try { return status_with_environment(executable, snapshot_environment()); }
+    catch (...) { return {}; }
 #else
     return {};
 #endif
@@ -236,8 +299,10 @@ namespace ai_optimizer::claude_cli {
                    const std::string &executable) {
 #ifndef _WIN32
     try {
-      const auto cli = executable.empty() ? binary() : executable;
-      const auto auth = status(cli);
+      const auto environment = snapshot_environment();
+      const auto cli = resolve_binary(executable.empty() ? binary(environment) : executable, environment);
+      if (cli.empty()) return failure("cli_unavailable", "Claude CLI is unavailable to Polaris", "Install Claude Code for the user running Polaris, then retry.");
+      const auto auth = status_with_environment(cli, environment);
       if (!auth.available) return failure("cli_unavailable", "Claude CLI is unavailable to Polaris", "Install Claude Code for the user running Polaris, then retry.");
       if (auth.authenticated == false) return failure("authentication_failed", "Claude subscription is not signed in", "Run claude auth login on the Polaris host as the user running Polaris, then retry.");
       if (!auth.authenticated.has_value()) return failure("cli_auth_unverified", "Claude sign-in could not be verified", "Update Claude Code and run claude auth status as the user running Polaris, then retry.");
@@ -259,7 +324,7 @@ namespace ai_optimizer::claude_cli {
         "--no-session-persistence", "--no-chrome", "--max-turns", "3",
         "--system-prompt-file", (workspace.path / "system.txt").string(),
         "--model", model, "--output-format", "json", "--json-schema", schema},
-        workspace.path, workspace.path / "prompt.txt", std::clamp(timeout_ms, 1000, 120000));
+        workspace.path, workspace.path / "prompt.txt", std::clamp(timeout_ms, 1000, 120000), environment);
       if (result.timed_out) return failure("inference_timeout", "Claude explanation timed out", "Increase Provider timeout (up to 120000 ms), then retry.");
       if (result.truncated) return failure("invalid_response", "Claude returned an oversized response", "Use a concise explanation model, then retry.");
       const auto parsed = nlohmann::json::parse(result.output, nullptr, false);

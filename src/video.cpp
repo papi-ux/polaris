@@ -90,6 +90,7 @@ namespace video {
       std::function<bool(encoder_t &, bool)> validate;
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
+    thread_local const std::function<bool(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
 #endif
 
 #ifdef __linux__
@@ -4652,6 +4653,9 @@ namespace video {
   }
 
   bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
+#ifdef POLARIS_TESTS
+    if (capture_prepare_test_hook) return (*capture_prepare_test_hook)(config, preparation);
+#endif
 #ifdef __linux__
     const auto &generation = config.capture_generation;
     if (config.input_only || generation.stream_mode != "desktop_display" ||
@@ -4670,6 +4674,17 @@ namespace video {
     return true;
 #endif
   }
+
+#ifdef POLARIS_TESTS
+  void with_capture_preparation_for_tests(
+      const std::function<bool(const config_t &, std::shared_ptr<void> &)> &prepare,
+      const std::function<void()> &body) {
+    const auto previous = capture_prepare_test_hook;
+    capture_prepare_test_hook = &prepare;
+    auto restore = util::fail_guard([previous] { capture_prepare_test_hook = previous; });
+    body();
+  }
+#endif
 
   void capture(
     safe::mail_t mail,

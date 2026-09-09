@@ -1616,15 +1616,13 @@ namespace rtsp_stream {
 
       config.monitor.height = util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
       config.monitor.width = util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
-      config.monitor.framerate = util::from_view(args.at("x-nv-video[0].maxFPS"sv));
-      config.monitor.stream_rate = video::rate::from_wire(config.monitor.framerate,
-        util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv)));
-      if (!video::rate::valid(config.monitor.stream_rate) || session.fps <= 0) {
+      if (!video::configure_announced_rates(config.monitor,
+            util::from_view(args.at("x-nv-video[0].maxFPS"sv)),
+            util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv)),
+            session.fps, config::video.limit_framerate)) {
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;
       }
-      config.monitor.encode_rate = config::video.limit_framerate ?
-        video::rate::from_millihertz(session.fps) : config.monitor.stream_rate;
       config.monitor.bitrate = util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
       config.monitor.slicesPerFrame = util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
       config.monitor.numRefFrames = util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
@@ -1642,22 +1640,6 @@ namespace rtsp_stream {
                           << "]; honoring client request for this RTSP session"sv;
           session.preferred_codec.reset();
         }
-      }
-
-      if (config::video.limit_framerate) {
-        config.monitor.encodingFramerate = session.fps;
-      } else {
-        if (config.monitor.framerate > 1000) {
-          config.monitor.encodingFramerate = config.monitor.framerate;
-        } else {
-          config.monitor.encodingFramerate = config.monitor.framerate * 1000;
-        }
-      }
-
-      // When fractional refresh rate requested from client side, it should be well above 1000fps
-      // 4000fps is when Warp2 Mode is enabled on the client, requested framerate can be actual * 4
-      if (config.monitor.framerate > 4000) {
-        config.monitor.framerate = std::round((float)config.monitor.framerate / 1000);
       }
 
       config.monitor.input_only = session.input_only;

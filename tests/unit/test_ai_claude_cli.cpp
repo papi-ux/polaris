@@ -1,5 +1,8 @@
 #include "src/ai_claude_cli.h"
 #include "src/posix_child_reaper.h"
+#ifdef __linux__
+#include "src/platform/linux/process_environment.h"
+#endif
 #ifdef POLARIS_TESTS
 #include "src/ai_optimizer.h"
 #endif
@@ -36,6 +39,8 @@ import json, os, pathlib, signal, sys, time
 root = pathlib.Path(__file__).parent
 mode = (root / 'mode').read_text()
 auth_request = sys.argv[1:] == ['--safe-mode', 'auth', 'status']
+if mode == 'environment':
+    (root / ('auth-env' if auth_request else 'inference-env')).write_text(json.dumps({key: os.environ.get(key) for key in ('PATH', 'POLARIS_CLAUDE_TEST_LEFT', 'POLARIS_CLAUDE_TEST_RIGHT')}))
 if (root / 'sentinel-fd').exists():
     sentinel = json.loads((root / 'sentinel-fd').read_text())
     try:
@@ -222,6 +227,52 @@ TEST_F(ClaudeCli, RetainsExitStatusDuringConcurrentHostReaping) {
   EXPECT_EQ(explain(1000).code, "inference_timeout");
   EXPECT_GT(drains.load() - before, 10);  // Streaming lifecycle remains responsive.
 }
+
+#ifdef __linux__
+TEST_F(ClaudeCli, OwnsCoherentEnvironmentAndPathDuringConcurrentHostUpdates) {
+  struct restore_t {
+    std::map<std::string, std::optional<std::string>> saved;
+    ~restore_t() {
+      std::lock_guard lock(process_environment::mutex);
+      for (const auto &[key, value] : saved) {
+        if (value) process_environment::set(key.c_str(), value->c_str());
+        else process_environment::unset(key.c_str());
+      }
+    }
+  } restore;
+  for (const auto key : {"PATH", "POLARIS_CLAUDE_TEST_LEFT", "POLARIS_CLAUDE_TEST_RIGHT"}) {
+    restore.saved[key] = process_environment::get(key);
+  }
+  const auto update = [&](int iteration) {
+    std::lock_guard lock(process_environment::mutex);
+    const auto marker = std::string(iteration % 2 ? 8192 : 32, iteration % 2 ? 'a' : 'b');
+    process_environment::set("POLARIS_CLAUDE_TEST_LEFT", marker.c_str());
+    process_environment::set("POLARIS_CLAUDE_TEST_RIGHT", marker.c_str());
+    process_environment::set("PATH", (root.string() + (iteration % 2 ? "/." : "")).c_str());
+  };
+  set_mode("environment");
+  update(0);
+  std::atomic<int> writes = 0;
+  std::jthread writer([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      update(++writes);
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  });
+  for (int attempt = 0; attempt < 12; ++attempt) {
+    // A bare filename exercises PATH resolution, including spaces in its name.
+    const auto result = ai_optimizer::claude_cli::explain("haiku", "Explanation only", "{}", "{}", 5000, cli.filename().string());
+    ASSERT_TRUE(result.response.has_value()) << result.code;
+    std::ifstream auth_input(root / "auth-env"), inference_input(root / "inference-env");
+    const auto auth = nlohmann::json::parse(auth_input);
+    const auto inference = nlohmann::json::parse(inference_input);
+    EXPECT_EQ(auth, inference);
+    EXPECT_FALSE(auth["POLARIS_CLAUDE_TEST_LEFT"].get<std::string>().empty());
+    EXPECT_EQ(auth["POLARIS_CLAUDE_TEST_LEFT"], auth["POLARIS_CLAUDE_TEST_RIGHT"]);
+  }
+  EXPECT_GT(writes.load(), 12);
+}
+#endif
 
 #ifdef POLARIS_TESTS
 TEST_F(ClaudeCli, RejectsProviderControlFieldsThroughDoctorWithoutChangingConfiguration) {

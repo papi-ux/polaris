@@ -6834,6 +6834,11 @@ namespace proc {
     capture_config.width = launch_session->width;
     capture_config.height = launch_session->height;
     capture_config.dynamicRange = launch_session->enable_hdr ? 1 : 0;
+    // HTTP admission knows the resolved launch/display rate in millihertz.
+    // Use it provisionally for portal negotiation; ANNOUNCE supplies its own
+    // stream rate later and may renegotiate capture independently of this rate.
+    capture_config.stream_rate = video::rate::from_millihertz(launch_session->fps);
+    capture_config.framerate = static_cast<int>(std::lround(launch_session->fps / 1000.0));
     std::shared_ptr<void> preparation;
     if (!video::prepare_capture_for_launch(capture_config, preparation)) {
       BOOST_LOG(warning) << "process: Desktop capture preparation failed or screen sharing was cancelled"sv;
