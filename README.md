@@ -113,7 +113,8 @@ Every capture above and across [papi-ux.com](https://papi-ux.com/polaris/) comes
 
 Use an official package from the [latest GitHub
 release](https://github.com/papi-ux/polaris/releases/latest), then perform the
-explicit host setup:
+explicit host setup. On Bazzite, follow the [RPM installation guide](docs/bazzite.md)
+and reboot into the staged deployment before setup:
 
 ```bash
 sudo -H polaris --setup-host
