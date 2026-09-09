@@ -183,6 +183,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_desktop_takeover.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_display_topology.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_ram_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_helper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
@@ -595,6 +596,9 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CUDA_FOUND)
+        target_include_directories(test_polaris_platform SYSTEM PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    endif()
 
     configure_polaris_full_test_target(test_polaris_input
         ${TEST_INPUT_SOURCES}
