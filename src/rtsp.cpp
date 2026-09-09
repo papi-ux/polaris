@@ -725,12 +725,31 @@ namespace rtsp_stream {
       return cancelled && static_cast<bool>(discarded);
     }
 
+    std::shared_ptr<launch_session_t> take_pending_client(std::string_view unique_id) {
+      std::shared_ptr<launch_session_t> discarded;
+      {
+        std::lock_guard timer_lock(_launch_timer_mutex);
+        const auto pending = launch_event.view(0s);
+        if (!pending || pending->unique_id != unique_id || !pending->is_pending_or_handoff()) {
+          return {};
+        }
+        pending->cancel();
+        ++_raised_timer_generation;
+        raised_timer.cancel();
+        discarded = launch_event.pop_if([&](const auto &candidate) { return candidate == pending; });
+      }
+      return discarded;
+    }
+
     std::uint64_t launch_timer_generation() const {
       return _raised_timer_generation.load();
     }
 
     bool session_raise(std::shared_ptr<launch_session_t> launch_session) {
       std::lock_guard timer_lock(_launch_timer_mutex);
+      if (launch_session->is_cancelled()) {
+        return false;
+      }
       const auto launch_session_id = launch_session->id;
       const auto launch_session_token = launch_session->session_token;
       if (!launch_event.raise_if_empty(std::move(launch_session))) {
@@ -1082,6 +1101,20 @@ namespace rtsp_stream {
 
   void launch_session_clear(uint32_t launch_session_id) {
     server.session_clear(launch_session_id);
+  }
+
+  void cancel_pending_launch_for_client(std::string_view unique_id) {
+    finish_cancelled_launch(take_pending_launch_for_client(unique_id));
+  }
+
+  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id) {
+    return server.take_pending_client(unique_id);
+  }
+
+  void finish_cancelled_launch(const std::shared_ptr<launch_session_t> &launch) {
+    if (launch) {
+      cancel_registered_multiseat_launch(launch);
+    }
   }
 
   void launch_session_finish(

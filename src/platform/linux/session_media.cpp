@@ -25,9 +25,13 @@ using namespace std::literals;
 namespace session_media {
   namespace {
     struct worker_state_t {
+      struct job_t {
+        std::function<void()> work;
+        bool coalescible;
+      };
       std::mutex mutex;
       std::condition_variable changed;
-      std::deque<std::function<void()>> queue;
+      std::deque<job_t> queue;
       std::thread worker;
       bool worker_started = false;
       bool prepare_inflight = false;
@@ -66,13 +70,20 @@ namespace session_media {
           state->changed.wait(lock, [state] {
             return !state->queue.empty();
           });
-          job = std::move(state->queue.front());
+          job = std::move(state->queue.front().work);
           state->queue.pop_front();
           // Coalesce stop storms while retaining the current and latest jobs.
           if (state->queue.size() > 2) {
-            auto last = std::move(state->queue.back());
-            state->queue.clear();
-            state->queue.push_back(std::move(last));
+            std::size_t last_stop = state->queue.size();
+            for (std::size_t i = 0; i < state->queue.size(); ++i) {
+              if (state->queue[i].coalescible) {
+                last_stop = i;
+              }
+            }
+            std::size_t index = 0;
+            std::erase_if(state->queue, [&](const auto &queued) {
+              return index++ != last_stop && queued.coalescible;
+            });
             BOOST_LOG(info) << "session_media: coalesced teardown queue to latest job"sv;
           }
         }
@@ -233,7 +244,7 @@ namespace session_media {
     return teardown;
   }
 
-  void schedule(std::function<void()> work) {
+  static void enqueue(std::function<void()> work, bool coalescible) {
     if (!work) {
       return;
     }
@@ -241,9 +252,17 @@ namespace session_media {
     auto &state = worker_state();
     {
       std::lock_guard lock(state.mutex);
-      state.queue.push_back(std::move(work));
+      state.queue.push_back({std::move(work), coalescible});
     }
     state.changed.notify_one();
+  }
+
+  void schedule(std::function<void()> work) {
+    enqueue(std::move(work), true);
+  }
+
+  void schedule_retirement(std::function<void()> work) {
+    enqueue(std::move(work), false);
   }
 
 }  // namespace session_media

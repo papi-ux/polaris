@@ -60,6 +60,9 @@ namespace video {
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
+
+  // Complete interactive Mirror Desktop capture setup before RTSP admission.
+  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);
 
   void free_ctx(AVCodecContext *ctx);

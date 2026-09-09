@@ -1677,7 +1677,7 @@ std::string get_local_ip_for_gateway() {
     return true;
   }
 
-  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+  static display_backend_e selected_display_backend(mem_type_e hwdevice_type, const video::config_t &config) {
     bool nvfbc_available = false;
     bool wayland_available = false;
     bool portal_available = false;
@@ -1701,7 +1701,7 @@ std::string get_local_ip_for_gateway() {
 
     const auto requested_backend = config.capture_generation.capture_backend;
     const bool exact_output_owned = !config.capture_generation.exact_display_name.empty();
-    const auto backend = choose_display_backend(
+    return choose_display_backend(
       requested_backend,
       exact_output_owned,
       nvfbc_available,
@@ -1711,6 +1711,21 @@ std::string get_local_ip_for_gateway() {
       x11_available,
       hwdevice_type == mem_type_e::cuda
     );
+  }
+
+  bool prepare_desktop_capture(mem_type_e hwdevice_type, const video::config_t &config,
+                               std::shared_ptr<void> &preparation) {
+#ifdef POLARIS_BUILD_PORTAL
+    if (selected_display_backend(hwdevice_type, config) == display_backend_e::portal) {
+      return portal::prepare_capture(hwdevice_type, config, preparation);
+    }
+#endif
+    return true;
+  }
+
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    const auto requested_backend = config.capture_generation.capture_backend;
+    const auto backend = selected_display_backend(hwdevice_type, config);
     switch (backend) {
       case display_backend_e::nvfbc:
 #ifdef POLARIS_BUILD_CUDA

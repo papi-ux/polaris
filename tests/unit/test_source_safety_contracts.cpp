@@ -720,9 +720,13 @@ TEST(SourceSafetyContracts, LinuxBackendDispatchUsesCaptureGenerationAuthority) 
   const auto source = contents.str();
 
   const auto planner = source.find("static display_backend_e choose_display_backend(");
-  const auto display = source.find("std::shared_ptr<display_t> display(", planner);
+  const auto selection = source.find("static display_backend_e selected_display_backend(", planner);
+  const auto prepare = source.find("bool prepare_desktop_capture(", selection);
+  const auto display = source.find("std::shared_ptr<display_t> display(", prepare);
   const auto display_end = source.find("class linux_deinit_t", display);
   ASSERT_NE(planner, std::string::npos);
+  ASSERT_NE(selection, std::string::npos);
+  ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(display, std::string::npos);
   ASSERT_NE(display_end, std::string::npos);
   const auto planner_body = source.substr(planner, display - planner);
@@ -730,17 +734,21 @@ TEST(SourceSafetyContracts, LinuxBackendDispatchUsesCaptureGenerationAuthority) 
   EXPECT_NE(planner_body.find("exact_output_owned && (requested.empty() || requested == \"auto\")"), std::string::npos);
   EXPECT_NE(planner_body.find("requested == \"wlr\""), std::string::npos);
   EXPECT_NE(planner_body.find("requested == \"portal\""), std::string::npos);
-  const auto requested = display_body.find("config.capture_generation.capture_backend");
-  const auto exact_owned = display_body.find("config.capture_generation.exact_display_name.empty()", requested);
-  const auto choose = display_body.find("choose_display_backend(", exact_owned);
-  const auto dispatch = display_body.find("switch (backend)", choose);
+  const auto selection_body = source.substr(selection, prepare - selection);
+  const auto requested = selection_body.find("config.capture_generation.capture_backend");
+  const auto exact_owned = selection_body.find("config.capture_generation.exact_display_name.empty()", requested);
+  const auto choose = selection_body.find("choose_display_backend(", exact_owned);
+  const auto dispatch_selection = display_body.find("selected_display_backend(hwdevice_type, config)");
+  const auto dispatch = display_body.find("switch (backend)", dispatch_selection);
   ASSERT_NE(requested, std::string::npos);
   ASSERT_NE(exact_owned, std::string::npos);
   ASSERT_NE(choose, std::string::npos);
+  ASSERT_NE(dispatch_selection, std::string::npos);
   ASSERT_NE(dispatch, std::string::npos);
   EXPECT_LT(requested, exact_owned);
   EXPECT_LT(exact_owned, choose);
-  EXPECT_LT(choose, dispatch);
+  EXPECT_LT(dispatch_selection, dispatch);
+  EXPECT_NE(source.substr(prepare, display - prepare).find("selected_display_backend(hwdevice_type, config)"), std::string::npos);
   EXPECT_EQ(display_body.find("if (sources[source::"), std::string::npos);
 }
 
@@ -887,11 +895,15 @@ TEST(SourceSafetyContracts, PortalSourceSelectionAndIdentityTransitionOwnOneGene
   EXPECT_EQ(portal.substr(capture_fallback, capture_owner - capture_fallback).find("ensure_global_session()"), std::string::npos);
 
   const auto transition = portal.find("capture configuration changed");
-  const auto retired_portal = portal.find("auto retired_portal = std::move(g_media.portal)", transition);
+  const auto retained = portal.find("const bool retain_prepared_portal = g_media.prepared_token &&", transition);
+  const auto same_source = portal.find("g_media.generation == generation", retained);
+  const auto retired_portal = portal.find("auto retired_portal = retain_prepared_portal ? nullptr : std::move(g_media.portal)", same_source);
   const auto unlock = portal.find("lock.unlock()", transition);
   const auto destroy_portal = portal.find("retired_portal.reset()", unlock);
   const auto relock = portal.find("lock.lock()", destroy_portal);
   ASSERT_NE(transition, std::string::npos);
+  ASSERT_NE(retained, std::string::npos);
+  ASSERT_NE(same_source, std::string::npos);
   ASSERT_NE(retired_portal, std::string::npos);
   ASSERT_NE(unlock, std::string::npos);
   ASSERT_NE(destroy_portal, std::string::npos);

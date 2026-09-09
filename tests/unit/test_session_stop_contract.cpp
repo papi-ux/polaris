@@ -1357,11 +1357,14 @@ TEST(RtspLaunchHandoffTests, CancellationAfterRealSlotInsertionRollsBackBeforeCo
   launch.id = 5101;
   launch.unique_id = "insert-cancel";
   launch.session_token = "insert-cancel-token";
+  launch.capture_preparation.store(std::make_shared<int>(1));
+  std::weak_ptr<void> prepared = launch.capture_preparation.load();
   launch.lifecycle_generation = proc::proc.capture_session_launch_generation();
   ASSERT_TRUE(launch.lifecycle_generation.has_value());
 
   const auto result = rtsp_stream::run_setup_insert_for_tests(launch, true, 0);
   EXPECT_EQ(result, rtsp_stream::setup_insert_result_e::cancelled);
+  EXPECT_TRUE(prepared.expired());
   EXPECT_TRUE(launch.is_cancelled());
   EXPECT_EQ(rtsp_stream::session_snapshot(launch.unique_id).active_sessions, 0);
   rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
@@ -1375,11 +1378,14 @@ TEST(RtspLaunchHandoffTests, StartFailureAfterCommitCancelsAndRollsBackRealSlot)
   launch.id = 5102;
   launch.unique_id = "insert-start-failure";
   launch.session_token = "insert-start-failure-token";
+  launch.capture_preparation.store(std::make_shared<int>(1));
+  std::weak_ptr<void> prepared = launch.capture_preparation.load();
   launch.lifecycle_generation = proc::proc.capture_session_launch_generation();
   ASSERT_TRUE(launch.lifecycle_generation.has_value());
 
   const auto result = rtsp_stream::run_setup_insert_for_tests(launch, false, 1);
   EXPECT_EQ(result, rtsp_stream::setup_insert_result_e::failed);
+  EXPECT_TRUE(prepared.expired());
   EXPECT_TRUE(launch.is_cancelled());
   EXPECT_EQ(rtsp_stream::session_snapshot(launch.unique_id).active_sessions, 0);
   rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
@@ -1621,6 +1627,114 @@ TEST(SessionLifecycleGateTests, CompletedStopInvalidatesLaunchGenerationCaptured
   EXPECT_NE(*fresh_generation, *stale_generation);
   EXPECT_TRUE(gate.try_begin_rtsp_launch(*fresh_generation));
   gate.finish_launch();
+}
+
+TEST(SessionLifecycleGateTests, StopCancelsThePublishedLaunchOwnerBeforeWaitingForIt) {
+  using namespace std::chrono_literals;
+  proc::session_lifecycle_gate_t gate;
+  auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation);
+  int owner = 0;
+  ASSERT_TRUE(gate.try_begin_rtsp_launch(*generation, [&]() { owner = 7; }));
+  std::promise<void> cancelled;
+  auto observed = cancelled.get_future();
+  auto stop = std::async(std::launch::async, [&]() {
+    return gate.begin_stop([&]() {
+      EXPECT_EQ(owner, 7);
+      EXPECT_TRUE(gate.stop_in_progress());
+      EXPECT_FALSE(gate.try_begin_rtsp_launch());
+      cancelled.set_value();
+    });
+  });
+  EXPECT_EQ(observed.wait_for(1s), std::future_status::ready);
+  gate.finish_launch();
+  EXPECT_TRUE(stop.get());
+  gate.finish_stop();
+  EXPECT_TRUE(gate.try_begin_rtsp_launch());
+  gate.finish_launch();
+}
+
+TEST(SessionLifecycleGateTests, RejectedStopAdmissionCannotCancelOrInvalidateLaunch) {
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_TRUE(gate.try_begin_rtsp_launch(*generation));
+  bool cancelled = false;
+  EXPECT_FALSE(gate.begin_stop([&]() { cancelled = true; }, []() { return false; }));
+  EXPECT_FALSE(cancelled);
+  EXPECT_FALSE(gate.stop_in_progress());
+  gate.finish_launch();
+  EXPECT_EQ(gate.capture_launch_generation(), generation);
+}
+
+TEST(SessionStopContractTests, WrongOwnerCannotInvalidateInteractiveLaunch) {
+  proc::proc_t subject;
+  const auto generation = subject.capture_session_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_TRUE(subject.try_begin_session_launch(*generation));
+  auto finish = util::fail_guard([&]() { subject.finish_session_launch(); });
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->unique_id = "interactive-owner";
+  launch->session_token = "interactive-token";
+  subject.set_active_launch_for_tests(proc::ctx_t {}, launch);
+  const auto result = subject.request_session_shutdown("other-owner", launch->session_token, true, true);
+  EXPECT_EQ(result.snapshot.outcome, session_stop_outcome_t::other_owner);
+  EXPECT_FALSE(result.stopped);
+  EXPECT_FALSE(subject.session_shutdown_requested());
+  EXPECT_FALSE(launch->is_cancelled());
+  subject.finish_session_launch();
+  finish.disable();
+  EXPECT_EQ(subject.capture_session_launch_generation(), generation);
+}
+
+TEST(SessionStopContractTests, PreviousOwnerCannotStopNewAdmissionBeforeMetadataReplacement) {
+  proc::proc_t subject;
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->unique_id = "previous-owner";
+  subject.set_active_launch_for_tests(proc::ctx_t {}, launch);
+  const auto original_owner = subject.capture_preparation_owner_for_tests();
+  const auto generation = subject.capture_session_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_TRUE(subject.try_begin_session_launch(*generation));
+  auto finish = util::fail_guard([&]() { subject.finish_session_launch(); });
+  const auto result = subject.request_session_shutdown(launch->unique_id, "", true, true);
+  EXPECT_EQ(result.snapshot.outcome, session_stop_outcome_t::session_changed);
+  EXPECT_FALSE(subject.session_shutdown_requested());
+  EXPECT_FALSE(result.stopped);
+  subject.finish_session_launch();
+  finish.disable();
+  EXPECT_EQ(subject.capture_session_launch_generation(), generation);
+  EXPECT_EQ(subject.capture_preparation_owner_for_tests(), original_owner);
+  EXPECT_TRUE(subject.cancel_capture_preparation_for_shutdown(launch->unique_id, "", true, true));
+}
+
+TEST(SessionStopContractTests, TerminateAppHandoffLeavesIdleStopIdempotent) {
+  proc::proc_t subject;
+  const auto generation = subject.capture_session_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_TRUE(subject.try_begin_session_launch(*generation));
+  subject.terminate_from_admitted_launch();
+  const auto stopped = subject.request_session_shutdown("previous-owner", "", true, true);
+  EXPECT_EQ(stopped.snapshot.outcome, session_stop_outcome_t::no_active_session);
+  EXPECT_FALSE(stopped.stopped);
+}
+
+TEST(SessionStopContractTests, PreparedLaunchCannotPublishAfterAppRetirement) {
+  rtsp_stream::terminate_sessions();
+  auto cleanup = util::fail_guard([]() { rtsp_stream::terminate_sessions(); });
+  ASSERT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+  proc::proc_t subject;
+  auto authoritative = std::make_shared<rtsp_stream::launch_session_t>();
+  authoritative->unique_id = "retiring-app-owner";
+  subject.set_active_launch_for_tests(proc::ctx_t {}, authoritative);
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->unique_id = "retiring-app-owner";
+  ASSERT_EQ(subject.prepare_capture_for_admitted_launch(launch), 0);
+  subject.terminate();
+  EXPECT_TRUE(launch->is_cancelled());
+  EXPECT_FALSE(subject.raise_session_for_admitted_launch(launch));
+  EXPECT_FALSE(rtsp_stream::launch_session_raise(launch));
+  EXPECT_EQ(subject.prepare_capture_for_admitted_launch(launch), 503);
 }
 
 TEST(SessionLifecycleGateTests, ConditionalStopYieldsToACommittedLaunchCancellation) {
