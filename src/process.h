@@ -583,22 +583,22 @@ namespace proc {
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
-    bool elevated;
-    bool auto_detach;
-    bool wait_all;
-    bool virtual_display;
-    bool virtual_display_primary;
+    bool elevated = false;
+    bool auto_detach = false;
+    bool wait_all = false;
+    bool virtual_display = false;
+    bool virtual_display_primary = false;
     bool desktop_mirror = false;
     // Per-app twin of the closeDesktopSteamForPrivate launch parameter: when
     // desktop Steam blocks a private launch of this app, shut it down and
     // proceed instead of refusing.
     bool close_desktop_steam_for_private = false;
-    bool use_app_identity;
-    bool per_client_app_identity;
-    bool allow_client_commands;
-    bool terminate_on_pause;
-    int  scale_factor;
-    std::chrono::seconds exit_timeout;
+    bool use_app_identity = false;
+    bool per_client_app_identity = false;
+    bool allow_client_commands = false;
+    bool terminate_on_pause = false;
+    int  scale_factor = 0;
+    std::chrono::seconds exit_timeout {};
   };
 
   /**
