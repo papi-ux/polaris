@@ -4159,6 +4159,145 @@ TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPre
   EXPECT_TRUE(launch_session.user_locked_virtual_display)
     << "the semantic overrides this launch without mutating paired settings";
 }
+
+class ProcessResumeDisplayTests: public testing::Test {
+protected:
+  void SetUp() override {
+    config::video.linux_display.stream_mode = "headless_stream";
+    desktop.name = "Desktop";
+    desktop.uuid = "resume-display-test";
+    desktop.desktop_mirror = true;
+  }
+
+  void TearDown() override {
+    config::video.linux_display = saved_display;
+  }
+
+  std::shared_ptr<rtsp_stream::launch_session_t> request() {
+    auto session = std::make_shared<rtsp_stream::launch_session_t>();
+    session->resolved_profile_from_client = true;
+    session->expected_stream_mode = "desktop_display";
+    session->requested_fps = session->fps = 60000;
+    return session;
+  }
+
+  void activate(const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
+    // Match execute_impl's normalization of a successfully launched app.
+    proc::apply_app_display_semantics(desktop, *session);
+    process.set_active_launch_for_tests(desktop, session);
+  }
+
+  decltype(config::video.linux_display) saved_display = config::video.linux_display;
+  proc::ctx_t desktop {};
+  proc::proc_t process {boost::process::v1::environment {}, {}};
+};
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeAppliesAppSemanticsToFreshRequest) {
+  activate(request());
+  for (const bool paired_virtual : {false, true}) {
+    for (const std::string mode : {"", "headless_stream"}) {
+      SCOPED_TRACE(mode + (paired_virtual ? " paired virtual" : " default"));
+      auto resume = request();
+      resume->stream_mode = mode;
+      resume->virtual_display = paired_virtual;
+      resume->user_locked_virtual_display = paired_virtual;
+      ASSERT_FALSE(resume->mirror_desktop);
+
+      EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 0);
+      EXPECT_TRUE(resume->mirror_desktop);
+      EXPECT_FALSE(resume->virtual_display);
+      EXPECT_EQ(resume->user_locked_virtual_display, paired_virtual);
+      EXPECT_EQ(resume->stream_mode, mode);
+    }
+  }
+}
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsWrongExpectedTopology) {
+  activate(request());
+  auto resume = request();
+  resume->expected_stream_mode = "headless_stream";
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+}
+
+TEST_F(ProcessResumeDisplayTests, TakeoverResumePreservesExplicitAndConfiguredSelection) {
+  for (const bool explicit_selection : {false, true}) {
+    SCOPED_TRACE(explicit_selection);
+    config::video.linux_display.stream_mode =
+      explicit_selection ? "headless_stream" : "desktop_takeover";
+    auto active = request();
+    active->stream_mode = explicit_selection ? "desktop_takeover" : "";
+    active->expected_stream_mode = "desktop_takeover";
+    activate(active);
+    // execute_impl creates a virtual output after resolving takeover mode.
+    active->virtual_display = true;
+    ASSERT_FALSE(active->mirror_desktop);
+
+    auto resume = request();
+    resume->stream_mode = active->stream_mode;
+    resume->expected_stream_mode = "desktop_takeover";
+    resume->virtual_display = explicit_selection;
+    EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 0);
+    EXPECT_FALSE(resume->mirror_desktop);
+    EXPECT_EQ(resume->virtual_display, explicit_selection);
+    EXPECT_TRUE(active->virtual_display);
+
+    resume->mirror_desktop = true;
+    EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+  }
+}
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsChangeToTakeover) {
+  activate(request());
+  auto resume = request();
+  resume->stream_mode = "desktop_takeover";
+  resume->expected_stream_mode = "desktop_takeover";
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+  EXPECT_FALSE(resume->mirror_desktop);
+}
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsForcePrivateChangesInBothDirections) {
+  for (const bool active_force_private : {false, true}) {
+    SCOPED_TRACE(active_force_private);
+    auto active = request();
+    active->force_private_after_desktop_steam_shutdown = active_force_private;
+    activate(active);
+    auto resume = request();
+    resume->force_private_after_desktop_steam_shutdown = !active_force_private;
+    EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+    EXPECT_EQ(resume->force_private_after_desktop_steam_shutdown, !active_force_private);
+  }
+}
+
+TEST_F(ProcessResumeDisplayTests, NonDesktopResumeStillRequiresMatchingMirrorFlag) {
+  desktop.desktop_mirror = false;
+  auto active = request();
+  active->mirror_desktop = true;
+  activate(active);
+  auto resume = request();
+  resume->stream_mode = "desktop_display";
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+  EXPECT_FALSE(resume->mirror_desktop);
+}
+
+TEST_F(ProcessResumeDisplayTests, ViewerKeepsActiveTakeoverSemantics) {
+  auto active = request();
+  active->stream_mode = "desktop_takeover";
+  active->expected_stream_mode = "desktop_takeover";
+  activate(active);
+  active->virtual_display = true;
+  auto viewer = request();
+  viewer->watch_only = true;
+  viewer->mirror_desktop = true;
+  viewer->virtual_display = true;
+  viewer->force_private_after_desktop_steam_shutdown = true;
+  viewer->expected_stream_mode = "desktop_takeover";
+
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->stream_mode, "desktop_takeover");
+  EXPECT_FALSE(viewer->mirror_desktop);
+  EXPECT_TRUE(viewer->virtual_display);
+  EXPECT_FALSE(viewer->force_private_after_desktop_steam_shutdown);
+}
 #endif
 
 TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
