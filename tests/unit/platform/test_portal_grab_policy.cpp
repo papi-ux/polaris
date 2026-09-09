@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -32,6 +33,9 @@
 #include "src/platform/linux/portal_session.h"
 #include "src/platform/linux/session_media.h"
 #include "src/platform/linux/virtual_display.h"
+#include "src/process.h"
+#include "src/rtsp.h"
+#include "src/video.h"
 
 #ifdef POLARIS_BUILD_WAYLAND
   #include "src/platform/linux/kwingrab.h"
@@ -312,6 +316,115 @@ TEST(PortalGrabPolicyTests, PendingStartCancellationScopeIsOwnerBounded) {
     EXPECT_FALSE(session_media::pending_start_cancelled(&owner_b));
   }
   EXPECT_FALSE(session_media::pending_start_cancelled(&owner_a));
+}
+
+TEST(PortalGrabPolicyTests, AbandonedPreparationCannotCancelReplacementOrAdoptedCapture) {
+  using namespace std::chrono_literals;
+  const auto old_token = portal::install_prepared_cache_for_tests();
+  const auto replacement = portal::install_prepared_cache_for_tests();
+  std::optional<session_media::start_owner_t> start {session_media::begin_start()};
+  auto stale_cleanup = std::async(std::launch::async, [&]() {
+    portal::release_prepared_cache_for_tests(old_token);
+  });
+  // Entering teardown before rejecting a stale token would block on this
+  // admitted start and cancel its portal request, even without releasing it.
+  EXPECT_EQ(stale_cleanup.wait_for(1s), std::future_status::ready);
+  start.reset();
+  stale_cleanup.get();
+  EXPECT_TRUE(portal::prepared_cache_present_for_tests());
+  portal::adopt_prepared_cache_for_tests();
+  portal::release_prepared_cache_for_tests(replacement);
+  EXPECT_TRUE(portal::prepared_cache_present_for_tests());
+  portal::release_global_capture();
+  const auto abandoned = portal::install_prepared_cache_for_tests();
+  portal::release_prepared_cache_for_tests(abandoned);
+  EXPECT_FALSE(portal::prepared_cache_present_for_tests());
+}
+
+TEST(PortalGrabPolicyTests, OnlyAuthorizedOwnerCanCancelBeforePortalRegistration) {
+  proc::proc_t process;
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->unique_id = "portal-owner";
+  launch->session_token = "portal-token";
+  process.set_active_launch_for_tests(proc::ctx_t {}, launch);
+  const auto owner_tag = process.capture_preparation_owner_for_tests();
+  EXPECT_FALSE(process.cancel_capture_preparation_for_shutdown("other-owner", "portal-token", true, true));
+  EXPECT_TRUE(process.cancel_capture_preparation_for_shutdown("PORTAL-OWNER", "stale-token", true, true));
+  EXPECT_FALSE(process.cancel_capture_preparation_for_shutdown("portal-owner", "portal-token", false, true));
+  EXPECT_FALSE(session_media::pending_start_cancelled(owner_tag));
+  {
+    auto cancel = process.cancel_capture_preparation_for_shutdown("portal-owner", "portal-token", true, true);
+    ASSERT_TRUE(cancel);
+    EXPECT_TRUE(session_media::pending_start_cancelled(owner_tag));
+    session_media::pending_start_owner_scope_t owner {owner_tag};
+    video::config_t config {};
+    config.width = 1280;
+    config.height = 720;
+    config.capture_generation.capture_backend = "portal";
+    config.capture_generation.stream_mode = "desktop_display";
+    std::shared_ptr<void> preparation;
+    EXPECT_FALSE(portal::prepare_capture(platf::mem_type_e::system, config, preparation));
+    EXPECT_FALSE(preparation);
+  }
+  EXPECT_FALSE(session_media::pending_start_cancelled(owner_tag));
+  // The legacy cancel protocol permits the owning certificate's stale token.
+  EXPECT_TRUE(process.cancel_capture_preparation_for_shutdown("portal-owner", "stale-token", true, false));
+  auto old_fence = process.cancel_capture_preparation_for_shutdown("portal-owner", "portal-token", true, true);
+  const auto generation = process.capture_session_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_TRUE(process.try_begin_session_launch(*generation));
+  const auto next_owner = process.capture_preparation_owner_for_tests();
+  EXPECT_NE(next_owner, owner_tag);
+  EXPECT_FALSE(session_media::pending_start_cancelled(next_owner));
+  // The new admission has not installed its launch metadata yet. An old owner
+  // cannot use that gap to cancel the replacement's pending capture.
+  EXPECT_FALSE(process.cancel_capture_preparation_for_shutdown("portal-owner", "portal-token", true, true));
+  process.finish_session_launch();
+}
+
+TEST(PortalGrabPolicyTests, StopQueueNeverDropsOutOfOrderPreparedRetirements) {
+  using namespace std::chrono_literals;
+  const auto stale_first = portal::install_prepared_cache_for_tests();
+  const auto stale_second = portal::install_prepared_cache_for_tests();
+  const auto current = portal::install_prepared_cache_for_tests();
+  auto blocked = std::make_shared<std::promise<void>>();
+  auto release = std::make_shared<std::promise<void>>();
+  auto finished = std::make_shared<std::promise<void>>();
+  auto resume = release->get_future().share();
+  auto unblock = util::fail_guard([release]() { release->set_value(); });
+  session_media::schedule_retirement([blocked, resume]() {
+    blocked->set_value();
+    resume.wait();
+  });
+  ASSERT_EQ(blocked->get_future().wait_for(5s), std::future_status::ready);
+  session_media::schedule([]() {});
+  session_media::schedule_retirement([stale_first]() { portal::release_prepared_cache_for_tests(stale_first); });
+  session_media::schedule_retirement([current]() { portal::release_prepared_cache_for_tests(current); });
+  session_media::schedule_retirement([stale_second]() { portal::release_prepared_cache_for_tests(stale_second); });
+  session_media::schedule([]() {});
+  session_media::schedule_retirement([finished]() { finished->set_value(); });
+  release->set_value();
+  unblock.disable();
+  auto done = finished->get_future();
+  ASSERT_EQ(done.wait_for(5s), std::future_status::ready);
+  EXPECT_FALSE(portal::prepared_cache_present_for_tests());
+}
+
+TEST(PortalGrabPolicyTests, LaunchPreparationSkipsPrivateExactAndInputOnlyCapture) {
+  std::shared_ptr<void> preparation;
+  video::config_t config {};
+  for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream", "host_virtual_display", "desktop_takeover"}) {
+    config.capture_generation.stream_mode = mode;
+    EXPECT_TRUE(video::prepare_capture_for_launch(config, preparation));
+    EXPECT_FALSE(preparation);
+  }
+  config.capture_generation.stream_mode = "desktop_display";
+  config.input_only = true;
+  EXPECT_TRUE(video::prepare_capture_for_launch(config, preparation));
+  config.input_only = false;
+  config.capture_generation.exact_display_name = "generation-owned-output";
+  EXPECT_TRUE(video::prepare_capture_for_launch(config, preparation));
+  EXPECT_FALSE(preparation);
 }
 
 TEST(PortalGrabPolicyTests, TeardownCancelsPortalWaitBeforeWaitingForStartFence) {

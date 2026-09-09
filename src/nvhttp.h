@@ -113,6 +113,11 @@ namespace nvhttp {
     std::string_view request_path = {}
   );
 
+  // Linearize publication with authorization mutation after an interactive wait.
+  int publish_authorized_launch(const crypto::p_named_cert_t &candidate,
+                                crypto::PERM required_permission,
+                                const std::function<bool()> &publish);
+
   /**
    * @brief Atomically mutate the shared authorization/credentials state file.
    *

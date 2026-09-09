@@ -4443,6 +4443,26 @@ namespace video {
     }
   }
 
+  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
+#ifdef __linux__
+    const auto &generation = config.capture_generation;
+    if (config.input_only || generation.stream_mode != "desktop_display" ||
+        generation.use_cage_compositor || generation.headless_mode ||
+        !generation.exact_display_name.empty()) {
+      return true;
+    }
+    // Match capture's encoder lease and backend dispatch. Do not run a probe or
+    // select a different source to obtain screen-sharing permission.
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    if (!chosen_encoder) {
+      return false;
+    }
+    return platf::prepare_desktop_capture(chosen_encoder->platform_formats->dev_type, config, preparation);
+#else
+    return true;
+#endif
+  }
+
   void capture(
     safe::mail_t mail,
     config_t config,

@@ -407,6 +407,15 @@ hosts at the same time.
 
 ## Known Bazzite Log Messages
 
+When starting **Mirror Desktop**, approve the screen-sharing prompt on the
+Bazzite desktop if it appears. Polaris prepares the selected desktop capture
+before completing launch, so the client waits at launch while you select a
+screen. Cancelling the prompt rejects that launch. The desktop portal controls
+whether the selection can be remembered for later connections.
+
+This preparation applies to Mirror Desktop using the portal capture backend;
+Private Session and Game Mode keep their existing startup paths.
+
 `labwc: No new Wayland socket appeared within 10s` means the isolated `labwc`
 runtime failed to start or exited before creating its Wayland socket. Confirm the
 matching Fedora RPM was installed, rebooted into the new deployment, and retry

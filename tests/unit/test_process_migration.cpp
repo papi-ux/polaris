@@ -559,7 +559,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   };
   const auto begin_stop_body = function_source_between(
     source,
-    "bool session_lifecycle_gate_t::begin_stop()",
+    "bool session_lifecycle_gate_t::begin_stop(",
     "void session_lifecycle_gate_t::finish_stop(bool"
   );
   const auto snapshot_wait = begin_stop_body.find("_state != state_e::snapshotting");
@@ -693,13 +693,16 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   ASSERT_NE(stop_start, std::string::npos);
   ASSERT_NE(stop_end, std::string::npos);
   const auto stop_impl = source.substr(stop_start, stop_end - stop_start);
-  const auto claim = stop_impl.find("begin_stop()");
-  const auto rtsp_snapshot = stop_impl.find("rtsp_stream::session_snapshot(unique_id)");
+  const auto claim = stop_impl.find("begin_stop(");
+  const auto authorization = stop_impl.find("get_session_stop_snapshot_locked(");
+  const auto rtsp_snapshot = stop_impl.find("rtsp_stream::session_snapshot(unique_id)", claim);
   const auto rtsp_terminate = stop_impl.find("rtsp_stream::terminate_sessions()");
   const auto process_terminate = stop_impl.find("terminate_impl(");
   const auto stop_commit = stop_impl.find("stop_committed = true");
   const auto release = stop_impl.rfind("finish_stop(stop_committed)");
   ASSERT_NE(claim, std::string::npos);
+  ASSERT_NE(authorization, std::string::npos);
+  EXPECT_LT(authorization, claim);
   ASSERT_NE(rtsp_snapshot, std::string::npos);
   ASSERT_NE(rtsp_terminate, std::string::npos);
   ASSERT_NE(process_terminate, std::string::npos);
@@ -726,14 +729,14 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(lifecycle_handoff.find("return true"), std::string::npos);
 
   for (const auto &body : {
-         function_source_between(source, "void session_lifecycle_gate_t::begin_launch()", "std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation"),
+         function_source_between(source, "void session_lifecycle_gate_t::begin_launch(", "std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation"),
          function_source_between(source, "std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation", "bool session_lifecycle_gate_t::try_begin_rtsp_launch()"),
-         function_source_between(source, "bool session_lifecycle_gate_t::try_begin_rtsp_launch()", "bool session_lifecycle_gate_t::try_begin_rtsp_launch(std::uint64_t"),
+         function_source_between(source, "bool session_lifecycle_gate_t::try_begin_rtsp_launch()", "bool session_lifecycle_gate_t::try_begin_rtsp_launch(\n"),
          function_source_between(source, "void session_lifecycle_gate_t::begin_snapshot()", "void session_lifecycle_gate_t::finish_snapshot()")
        }) {
     EXPECT_NE(body.find("_launch_to_stop_handoff"), std::string::npos);
   }
-  EXPECT_NE(stop_impl.find("[this, &stop_committed]"), std::string::npos);
+  EXPECT_NE(stop_impl.find("[this, &stop_committed, &pending_cancel]"), std::string::npos);
 
   const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
@@ -793,7 +796,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   EXPECT_NE(
-    launch_handler.find("execute_and_raise(*app_iter, launch_session)"),
+    launch_handler.find("execute_and_raise(*app_iter, launch_session, [&]()"),
     std::string::npos
   );
   EXPECT_NE(
@@ -801,10 +804,10 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   const auto launch_gate = launch_handler.find("raise_session_for_admitted_launch(");
-  const auto launch_raise_guard = launch_handler.find("if (!launch_session_raised && !proc::proc.raise_session_for_admitted_launch(launch_session))");
+  const auto launch_raise_guard = launch_handler.find("if (publish_error)");
   const auto launch_success = launch_handler.rfind("tree.put(\"root.<xmlattr>.status_code\", 200)");
   ASSERT_NE(launch_raise_guard, std::string::npos);
-  EXPECT_NE(launch_handler.substr(launch_raise_guard, launch_success - launch_raise_guard).find("status_code\", 409"), std::string::npos);
+  EXPECT_NE(launch_handler.substr(launch_raise_guard, launch_success - launch_raise_guard).find("status_code\", publish_error"), std::string::npos);
   EXPECT_LT(launch_gate, launch_success);
 
   EXPECT_EQ(resume_handler.find("rtsp_stream::launch_session_raise("), std::string::npos);
@@ -813,10 +816,10 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   const auto resume_gate = resume_handler.find("raise_session_for_admitted_launch(");
-  const auto resume_raise_guard = resume_handler.find("if (!proc::proc.raise_session_for_admitted_launch(launch_session))");
+  const auto resume_raise_guard = resume_handler.find("if (const auto publish_error = publish_authorized_launch(");
   const auto resume_success = resume_handler.find("tree.put(\"root.<xmlattr>.status_code\", 200)");
   ASSERT_NE(resume_raise_guard, std::string::npos);
-  EXPECT_NE(resume_handler.substr(resume_raise_guard, resume_success - resume_raise_guard).find("status_code\", 409"), std::string::npos);
+  EXPECT_NE(resume_handler.substr(resume_raise_guard, resume_success - resume_raise_guard).find("status_code\", publish_error"), std::string::npos);
   EXPECT_LT(resume_gate, resume_success);
 
   const auto rtsp = read_source_file_for_contract("src/rtsp.cpp");
