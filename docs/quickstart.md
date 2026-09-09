@@ -36,6 +36,7 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 |---|---|
 | SteamOS 3.8 | [SteamOS guide](steamos.md) — Desktop Mode validation only |
 | Bazzite 44 | [Bazzite guide](bazzite.md) — layer the Fedora 44 RPM with `rpm-ostree` |
+| Steam Deck, ROG Ally, other handhelds | [Handhelds and Game Mode](handhelds.md), keeps Polaris reachable across mode switches |
 | Ubuntu 24.04 | [Ubuntu guide](ubuntu.md) — experimental tester DEB |
 | openSUSE Tumbleweed | [openSUSE guide](openSUSE.md) — source build |
 | Anything else | [Build from source](building.md) |
