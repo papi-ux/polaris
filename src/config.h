@@ -426,7 +426,8 @@ namespace config {
    */
   std::optional<bool> parse_bool(std::string_view value);
 
-  int write_config_with_vaapi_settings(const std::string &path, const std::string &contents);
+  int write_config_with_vaapi_settings(const std::string &path, const std::string &contents,
+                                     const std::optional<std::string> &expected = std::nullopt);
 
   vaapi::settings_t parse_vaapi_settings(const std::unordered_map<std::string, std::string> &vars,
                                        vaapi::settings_t initial = {});

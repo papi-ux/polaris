@@ -19,6 +19,7 @@
 #include "beat_times.h"
 #include "client_profiles.h"
 #include "confighttp.h"
+#include "adaptive_bitrate.h"
 #include "crash_report.h"
 #include "display_device.h"
 #include "entry_handler.h"
@@ -235,6 +236,8 @@ int main(int argc, char *argv[]) {
   if (config::parse(argc, argv)) {
     return 0;
   }
+
+  adaptive_bitrate::load_config();
 
   cursor::set_visible(config::input.mouse_cursor_visible);
 

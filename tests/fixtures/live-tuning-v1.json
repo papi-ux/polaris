@@ -1,0 +1,156 @@
+[
+  {
+    "name": "off",
+    "streaming": true,
+    "live_tuning": {
+      "version": 1,
+      "enabled": false,
+      "scope": "host",
+      "state": "off",
+      "supported": true,
+      "reason": "supported",
+      "runtime_enabled": false,
+      "pending": false,
+      "quality_limit_kbps": 20000,
+      "requested_bitrate_kbps": 0,
+      "applied_bitrate_kbps": 20000,
+      "session_generation": 41,
+      "app_session_id": "fixture-session",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 1
+    }
+  },
+  {
+    "name": "waiting",
+    "streaming": false,
+    "live_tuning": {
+      "version": 1,
+      "enabled": true,
+      "scope": "host",
+      "state": "waiting",
+      "supported": false,
+      "reason": "no_stream",
+      "runtime_enabled": true,
+      "pending": false,
+      "quality_limit_kbps": 0,
+      "requested_bitrate_kbps": 0,
+      "applied_bitrate_kbps": 0,
+      "session_generation": 0,
+      "app_session_id": "",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 2
+    }
+  },
+  {
+    "name": "unavailable",
+    "streaming": true,
+    "live_tuning": {
+      "version": 1,
+      "enabled": true,
+      "scope": "host",
+      "state": "unavailable",
+      "supported": false,
+      "reason": "encoder_runtime_update_unsupported",
+      "runtime_enabled": true,
+      "pending": false,
+      "quality_limit_kbps": 20000,
+      "requested_bitrate_kbps": 0,
+      "applied_bitrate_kbps": 0,
+      "session_generation": 41,
+      "app_session_id": "fixture-session",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 3
+    }
+  },
+  {
+    "name": "applying",
+    "streaming": true,
+    "live_tuning": {
+      "version": 1,
+      "enabled": true,
+      "scope": "host",
+      "state": "applying",
+      "supported": true,
+      "reason": "supported",
+      "runtime_enabled": true,
+      "pending": true,
+      "quality_limit_kbps": 20000,
+      "requested_bitrate_kbps": 14000,
+      "applied_bitrate_kbps": 20000,
+      "session_generation": 41,
+      "app_session_id": "fixture-session",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 4
+    }
+  },
+  {
+    "name": "measuring",
+    "streaming": true,
+    "live_tuning": {
+      "version": 1,
+      "enabled": true,
+      "scope": "host",
+      "state": "measuring",
+      "supported": true,
+      "reason": "supported",
+      "runtime_enabled": true,
+      "pending": false,
+      "quality_limit_kbps": 20000,
+      "requested_bitrate_kbps": 20000,
+      "applied_bitrate_kbps": 20000,
+      "session_generation": 41,
+      "app_session_id": "fixture-session",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 5
+    }
+  },
+  {
+    "name": "adjusting",
+    "streaming": true,
+    "live_tuning": {
+      "version": 1,
+      "enabled": true,
+      "scope": "host",
+      "state": "adjusting",
+      "supported": true,
+      "reason": "supported",
+      "runtime_enabled": true,
+      "pending": false,
+      "quality_limit_kbps": 20000,
+      "requested_bitrate_kbps": 14000,
+      "applied_bitrate_kbps": 14000,
+      "session_generation": 41,
+      "app_session_id": "fixture-session",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 6
+    }
+  },
+  {
+    "name": "stable",
+    "streaming": true,
+    "live_tuning": {
+      "version": 1,
+      "enabled": true,
+      "scope": "host",
+      "state": "stable",
+      "supported": true,
+      "reason": "supported",
+      "runtime_enabled": true,
+      "pending": false,
+      "quality_limit_kbps": 20000,
+      "requested_bitrate_kbps": 20000,
+      "applied_bitrate_kbps": 20000,
+      "session_generation": 41,
+      "app_session_id": "fixture-session",
+      "configuration_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_instance": "fixture-host",
+      "sequence": 7
+    }
+  }
+]

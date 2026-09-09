@@ -19,7 +19,7 @@ describe('Dashboard Doctor layout', () => {
     expect(confidence).toBeGreaterThan(metadata)
     expect(optimizer).toBeGreaterThan(confidence)
     expect(dashboard).toContain('data-dashboard-doctor-meta')
-    expect(dashboard).toContain('role="list" aria-label="Doctor confidence and Auto Quality status"')
+    expect(dashboard).toContain('role="list" aria-label="Doctor confidence and Live Tuning status"')
     expect(dashboard.match(/role="listitem"/g)).toHaveLength(3)
     expect(dashboard).toContain('class="mt-3 flex flex-wrap items-center gap-2"')
   })

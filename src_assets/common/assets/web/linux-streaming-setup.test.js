@@ -93,7 +93,6 @@ describe('Linux Streaming Setup checklist', () => {
     for (const key of [
       'av_mode_headless_stream_copy',
       'av_checklist_path_title',
-      'av_auto_quality_badge_manual',
       'av_planned_family_mode_copy',
       'av_planner_moonlight_title',
     ]) {
@@ -111,7 +110,7 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Linux Streaming Setup')
     expect(checklist.text()).toContain('Pick a stream path')
     expect(checklist.text()).toContain('Encoder and quality')
-    expect(checklist.text()).toContain('Manual')
+    expect(checklist.text()).toContain('Live Tuning: Unknown')
     expect(checklist.text()).toContain('labwc GPU-native capture')
     expect(checklist.text()).toContain('Safe default')
   })
@@ -188,7 +187,7 @@ describe('Linux Streaming Setup checklist', () => {
 
     expect(text).toContain('Private Stream (GPU-native)')
     expect(text).toContain('GPU-native requested')
-    expect(text).toContain('Auto Quality: On')
+    expect(text).toContain('Live Tuning: Unknown')
     expect(text).toContain('DMA-BUF capture GPU-resident')
     expect(text).not.toContain('CUDA')
     expect(text).not.toContain('NVIDIA')
