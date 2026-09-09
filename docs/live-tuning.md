@@ -20,8 +20,9 @@ apply at the next explicit launch.
 `GET /api/live-tuning` requires web administrator authentication. Its response
 contains `status` and `live_tuning`. `POST /api/live-tuning` accepts exactly one
 boolean field, `enabled`, and requires the quoted `configuration_revision` in
-`If-Match`. Cookie-authenticated mutations require the normal CSRF token. Only a
-valid configured bearer credential bypasses cookie CSRF validation.
+`If-Match`. Cookie-authenticated mutations require the normal CSRF token. A valid
+configured bearer credential or an authorized verified client certificate bypasses
+cookie CSRF validation; the endpoint still enforces its authentication checks.
 
 A stale or absent revision returns HTTP 412 without changing the controller.
 A failed durable commit returns an error without changing the preference. Refresh
