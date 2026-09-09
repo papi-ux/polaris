@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "url": "https://github.com/games-on-whales/gst-wayland-display",
+  "revision": "081feb5ab8057937b78104668bb1f507ce42e18d",
+  "cargo_lock_sha256": "90b40461f6b9943c0af26262d711852c0ba7c693c4ad9e187a8adfe1760a227d",
+  "sha256": "96da8c6b366147351f86547ddb40b559cf70402535c9797ca17024f6af5b8ffc",
+  "archive_epoch": 1754524800,
+  "rust_version": "1.89.0",
+  "vendor_mode": "cargo vendor --locked --versioned-dirs vendor"
+}

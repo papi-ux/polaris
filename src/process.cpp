@@ -36,6 +36,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #ifdef __linux__
+  #include "platform/linux/process_environment.h"
   #include <boost/process/v1/env.hpp>
   #include <boost/process/v1/handles.hpp>
   #include <boost/process/v1/io.hpp>
@@ -10842,7 +10843,8 @@ namespace proc {
     throw std::out_of_range("Missing closing bracket \')\'");
   }
 
-  std::string parse_env_val(boost::process::v1::native_environment &env, const std::string_view &val_raw) {
+  template<class Environment>
+  std::string parse_env_val(Environment &env, const std::string_view &val_raw) {
     auto pos = std::begin(val_raw);
     auto dollar = std::find(pos, std::end(val_raw), '$');
 
@@ -11721,8 +11723,17 @@ namespace proc {
 
   std::optional<proc::proc_t> parse(const std::string &file_name) {
 
-    // Prepare environment variables.
-    auto this_env = boost::this_process::environment();
+    // Linux's native Boost environment writes to the host. Copy it while
+    // serialized with platform writers; app expansion then uses owned strings.
+    auto current_environment = [] {
+#ifdef __linux__
+      std::lock_guard lock(process_environment::mutex);
+      return boost::process::v1::environment {boost::this_process::environment()};
+#else
+      return boost::this_process::environment();
+#endif
+    };
+    auto this_env = current_environment();
 
     std::set<std::string> ids;
     std::vector<proc::ctx_t> apps;
@@ -11744,9 +11755,19 @@ namespace proc {
         migrate(tree, file_name);
 
         if (tree.contains("env") && tree["env"].is_object()) {
+#ifdef __linux__
+          std::lock_guard lock(process_environment::mutex);
+          auto native_environment = boost::this_process::environment();
+#else
+          auto &native_environment = this_env;
+#endif
+          // Preserve apps.json's host environment updates and ordered expansion.
           for (auto &item : tree["env"].items()) {
-            this_env[item.key()] = parse_env_val(this_env, item.value().get<std::string>());
+            native_environment[item.key()] = parse_env_val(native_environment, item.value().get<std::string>());
           }
+#ifdef __linux__
+          this_env = boost::process::v1::environment {native_environment};
+#endif
         }
 
         // Ensure the "apps" array exists.
@@ -11915,7 +11936,7 @@ namespace proc {
           break;
         }
 
-        this_env = boost::this_process::environment();
+        this_env = current_environment();
         ids.clear();
         apps.clear();
         i = 0;

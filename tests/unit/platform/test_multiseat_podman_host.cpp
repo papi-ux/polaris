@@ -93,4 +93,35 @@ TEST(MultiseatPodmanHost, RefusesAnythingButAnOwnedRegularFile) {
   }
 }
 
+TEST(MultiseatPodmanHost, ReadsRunningProcessGroupsInsteadOfAccountMembership) {
+  multiseat::podman::local_host_t host;
+  const auto actual = host.supplementary_groups();
+  ASSERT_TRUE(actual);
+  const auto count = getgroups(0, nullptr);
+  ASSERT_GE(count, 0);
+  std::vector<gid_t> groups(std::max(count, 1));
+  const auto received = getgroups(static_cast<int>(groups.size()), groups.data());
+  ASSERT_GE(received, 0);
+  std::vector<std::uint64_t> expected(groups.begin(), groups.begin() + received);
+  std::sort(expected.begin(), expected.end());
+  expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+  EXPECT_EQ(*actual, expected);
+}
+
+TEST(MultiseatPodmanHost, RefusesUserControlledOrIndirectRuntime) {
+  temporary_directory_t root;
+  multiseat::podman::local_host_t host;
+  write_file(root.path() / "crun", "executable");
+  ASSERT_EQ(chmod((root.path() / "crun").c_str(), 0755), 0);
+  std::filesystem::create_directory(root.path() / "links");
+  std::filesystem::create_symlink(root.path() / "crun", root.path() / "links/crun");
+  std::filesystem::create_directory_symlink("/usr/bin", root.path() / "bin-link");
+  EXPECT_FALSE(host.trusted_runtime_file(root.path() / "crun"));
+  EXPECT_FALSE(host.trusted_runtime_file(root.path() / "links/crun"));
+  EXPECT_FALSE(host.trusted_runtime_file(root.path() / "bin-link/crun"));
+  EXPECT_FALSE(host.trusted_runtime_file("crun"));
+  EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/runc"));
+  EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/../bin/crun"));
+}
+
 #endif

@@ -54,6 +54,9 @@ namespace portal {
   };
 
   bool is_portal_available();
+  // Complete bus acquisition and version query share one bounded, owner-scoped
+  // cancellable. Unknown or unavailable KWin versions use variable capture.
+  bool running_kwin_uses_fixed_rate();
 
   // Acquire the normal session media cache before the launch response. Capture
   // later reuses it; session_media remains its sole teardown owner.

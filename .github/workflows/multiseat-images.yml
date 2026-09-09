@@ -1,0 +1,74 @@
+name: Multiseat runtime images
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'containers/multiseat/**'
+      - 'multiseat_worker/**'
+      - '.github/workflows/multiseat-images.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'containers/multiseat/**'
+      - 'multiseat_worker/**'
+      - '.github/workflows/multiseat-images.yml'
+  workflow_dispatch:
+    inputs:
+      nvidia:
+        type: boolean
+        default: false
+        description: Build the locked NVIDIA userspace variant for the physical lane
+
+permissions:
+  contents: read
+
+concurrency:
+  group: multiseat-images-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    name: Image and provider dependencies (${{ matrix.profile }}, linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [gamescope, steam, heroic, lutris]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Fetch and verify locked inputs
+        env:
+          PROFILE: ${{ matrix.profile }}
+          NVIDIA: ${{ inputs.nvidia || 'false' }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
+          arguments=("$PROFILE")
+          if [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
+          python3 containers/multiseat/prepare-inputs.py "${arguments[@]}"
+      - name: Build offline and validate real providers
+        env:
+          PROFILE: ${{ matrix.profile }}
+          NVIDIA: ${{ inputs.nvidia || 'false' }}
+        run: |
+          set -euo pipefail
+          arguments=("$PROFILE")
+          if [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
+          python3 containers/multiseat/build-image.py "${arguments[@]}"
+      - name: Downloadable OCI and provenance
+        uses: actions/upload-artifact@v6
+        with:
+          name: polaris-worker-${{ matrix.profile }}-${{ github.event.pull_request.head.sha || github.sha }}
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/worker-artifacts/**/worker.oci.tar
+            build/worker-artifacts/**/artifact.json
+            build/worker-artifacts/**/packages.tsv
+            build/worker-artifacts/**/sbom.cdx.json
+            build/worker-artifacts/**/providers.json

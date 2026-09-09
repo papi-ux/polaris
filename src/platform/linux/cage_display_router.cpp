@@ -16,14 +16,18 @@
 
 #ifdef __linux__
 
+#include "process_environment.h"
+
 #include "cage_display_router.h"
 #include "../../logging.h"
 #include "../../utility.h"
 #include "labwc_startup_diagnostics.h"
 #include "misc.h"
+#include "encoder_probe_identity.h"
 #include "private_session_input.h"
 #include "wlgrab_capture_policy.h"
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -36,6 +40,8 @@
 #include <functional>
 #include <fstream>
 #include <memory>
+#include <map>
+#include <spawn.h>
 #include <mutex>
 #include <cstdlib>
 #include <cstring>
@@ -58,6 +64,34 @@ namespace cage_display_router {
 
   static pid_t cage_pid = 0;
 
+  // Probe readers never borrow the mutable router strings or descriptor. Each
+  // successful launch publishes immutable ownership of this process generation.
+  struct probe_topology_t {
+    int pidfd = -1;
+    int socketfd = -1;
+    std::string socket_path;
+    std::string socket_identity;
+    std::string generation;
+    ~probe_topology_t() {
+      if (pidfd >= 0) close(pidfd);
+      if (socketfd >= 0) close(socketfd);
+    }
+  };
+  static std::atomic<std::shared_ptr<const probe_topology_t>> probe_topology;
+  static std::atomic_uint probe_topology_writers {0};
+  static std::atomic_uint64_t probe_topology_revision {0};
+
+  struct probe_topology_mutation_t {
+    probe_topology_mutation_t() {
+      probe_topology_writers.fetch_add(1);
+      probe_topology_revision.fetch_add(1);
+    }
+    ~probe_topology_mutation_t() {
+      probe_topology_revision.fetch_add(1);
+      probe_topology_writers.fetch_sub(1);
+    }
+  };
+
   /**
    * A pidfd for the owned labwc supervisor, opened at spawn.
    *
@@ -77,8 +111,6 @@ namespace cage_display_router {
   // inside that anchored group. The supervisor is also a child subreaper so a
   // startup client that creates its own session is adopted and drained without
   // any global process scan or recycled-PID guesswork.
-  static volatile sig_atomic_t supervised_runtime_pid = 0;
-  static volatile sig_atomic_t supervisor_stop_requested = 0;
 
   static std::string cage_wayland_socket;  // e.g., "wayland-5"
   static std::string cage_x11_display;  // e.g., ":1"
@@ -148,11 +180,6 @@ namespace cage_display_router {
     }
   }
 
-  static bool make_inheritable(int fd) {
-    const auto flags = fcntl(fd, F_GETFD);
-    return flags >= 0 && fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) == 0;
-  }
-
   static void publish_startup_diagnostics(
     std::shared_ptr<labwc_startup_diagnostics::collector_t> collector
   ) {
@@ -189,197 +216,6 @@ namespace cage_display_router {
       close(cage_pidfd);
       cage_pidfd = -1;
     }
-  }
-
-  static void forward_supervisor_signal(int signal_number) {
-    supervisor_stop_requested = 1;
-    const auto runtime_pid = static_cast<pid_t>(supervised_runtime_pid);
-    if (runtime_pid > 0) {
-      (void) kill(runtime_pid, signal_number);
-    }
-  }
-
-  static void install_signal_handler(int signal_number, void (*handler)(int)) {
-    struct sigaction action {};
-    sigemptyset(&action.sa_mask);
-    action.sa_handler = handler;
-    action.sa_flags = 0;
-    (void) sigaction(signal_number, &action, nullptr);
-  }
-
-  static void restore_default_signal_handler(int signal_number) {
-    struct sigaction action {};
-    sigemptyset(&action.sa_mask);
-    action.sa_handler = SIG_DFL;
-    action.sa_flags = 0;
-    (void) sigaction(signal_number, &action, nullptr);
-  }
-
-  static void sleep_without_losing_interrupt_time(std::chrono::milliseconds duration) {
-    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
-    auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(duration - seconds);
-    timespec remaining {
-      .tv_sec = static_cast<time_t>(seconds.count()),
-      .tv_nsec = static_cast<long>(nanoseconds.count()),
-    };
-    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
-    }
-  }
-
-  /**
-   * Keep a stable direct child alive as the private session/process-group anchor.
-   *
-   * labwc is free to exit from its own menu while its startup client remains
-   * alive. The supervisor subreaps that runtime tree, drains the anchored group
-   * plus any adopted direct children that escaped it, and exits cleanly once no
-   * private descendants remain. If a descendant ignores graceful teardown, the
-   * final SIGKILL path covers both ownership classes before the group includes
-   * the supervisor itself.
-   */
-  [[noreturn]] static void supervise_labwc(
-    const std::string &labwc_path,
-    const std::string &config_dir,
-    const std::string &startup_shell
-  ) {
-    supervised_runtime_pid = 0;
-    supervisor_stop_requested = 0;
-
-    if (setsid() < 0 || prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
-      _exit(126);
-    }
-
-    sigset_t forwarded_signals {};
-    sigset_t previous_mask {};
-    sigemptyset(&forwarded_signals);
-    sigaddset(&forwarded_signals, SIGTERM);
-    sigaddset(&forwarded_signals, SIGINT);
-    sigaddset(&forwarded_signals, SIGHUP);
-    (void) sigprocmask(SIG_BLOCK, &forwarded_signals, &previous_mask);
-
-    install_signal_handler(SIGTERM, forward_supervisor_signal);
-    install_signal_handler(SIGINT, forward_supervisor_signal);
-    install_signal_handler(SIGHUP, forward_supervisor_signal);
-    restore_default_signal_handler(SIGCHLD);
-
-    const pid_t runtime_pid = fork();
-    if (runtime_pid == 0) {
-      supervised_runtime_pid = 0;
-      restore_default_signal_handler(SIGTERM);
-      restore_default_signal_handler(SIGINT);
-      restore_default_signal_handler(SIGHUP);
-      restore_default_signal_handler(SIGCHLD);
-      (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
-
-      execl(labwc_path.c_str(), "labwc",
-        "-C", config_dir.c_str(),
-        "-s", startup_shell.c_str(),
-        nullptr);
-      _exit(errno == ENOENT ? 127 : 126);
-    }
-
-    if (runtime_pid < 0) {
-      (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
-      _exit(127);
-    }
-
-    supervised_runtime_pid = static_cast<sig_atomic_t>(runtime_pid);
-    (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
-
-    // A labwc startup client may call setsid() and leave the supervisor's
-    // process group. PR_SET_CHILD_SUBREAPER makes that exact runtime descendant
-    // a direct child when labwc exits. `/proc/.../children` is therefore a
-    // generation-scoped ownership source: unlike a global process scan, it
-    // cannot select an unrelated process that merely resembles the workload.
-    auto signal_direct_children = [](int signal_number) {
-      std::ifstream input {
-        "/proc/self/task/" + std::to_string(getpid()) + "/children"
-      };
-      pid_t child = 0;
-      while (input >> child) {
-        if (child > 1 && child != getpid()) {
-          (void) kill(child, signal_number);
-        }
-      }
-    };
-
-    siginfo_t exit_info {};
-    bool observed_exit = false;
-    if (!supervisor_stop_requested) {
-      while (true) {
-        if (waitid(P_PID, static_cast<id_t>(runtime_pid), &exit_info, WEXITED | WNOWAIT) == 0) {
-          observed_exit = true;
-          break;
-        }
-        if (errno != EINTR || supervisor_stop_requested) {
-          break;
-        }
-      }
-    }
-
-    if (!observed_exit && !supervisor_stop_requested) {
-      supervised_runtime_pid = 0;
-      _exit(127);
-    }
-
-    // Ignore graceful signals while the supervisor broadcasts them to its own
-    // private group. Every labwc descendant inherits this anchored PGID.
-    install_signal_handler(SIGTERM, SIG_IGN);
-    install_signal_handler(SIGINT, SIG_IGN);
-    install_signal_handler(SIGHUP, SIG_IGN);
-    (void) kill(-getpgrp(), SIGTERM);
-    (void) kill(runtime_pid, SIGTERM);
-
-    int runtime_status = 0;
-    bool runtime_reaped = false;
-    const auto deadline = std::chrono::steady_clock::now() + 500ms;
-    while (std::chrono::steady_clock::now() < deadline) {
-      bool live_children = false;
-      while (true) {
-        int child_status = 0;
-        const auto child_pid = waitpid(-1, &child_status, WNOHANG);
-        if (child_pid > 0) {
-          if (child_pid == runtime_pid) {
-            runtime_status = child_status;
-            runtime_reaped = true;
-          }
-          continue;
-        }
-        if (child_pid == 0) {
-          live_children = true;
-        } else if (errno == EINTR) {
-          continue;
-        } else if (errno != ECHILD) {
-          live_children = true;
-        }
-        break;
-      }
-
-      if (live_children) {
-        // Catch descendants as soon as the subreaper adopts them. Repeating
-        // SIGTERM is harmless for the still-live compositor and closes the
-        // adoption race without widening ownership beyond direct children.
-        signal_direct_children(SIGTERM);
-      }
-
-      if (!live_children) {
-        supervised_runtime_pid = 0;
-        if (runtime_reaped && WIFEXITED(runtime_status)) {
-          _exit(WEXITSTATUS(runtime_status));
-        }
-        if (runtime_reaped && WIFSIGNALED(runtime_status)) {
-          _exit(128 + WTERMSIG(runtime_status));
-        }
-        _exit(127);
-      }
-      sleep_without_losing_interrupt_time(25ms);
-    }
-
-    // Separate-session descendants are outside the process group but remain
-    // exact adopted children. Kill those before killing the immutable group
-    // leader (which intentionally includes this supervisor).
-    signal_direct_children(SIGKILL);
-    (void) kill(-getpgrp(), SIGKILL);
-    _exit(127);
   }
 
   /**
@@ -586,7 +422,13 @@ namespace cage_display_router {
     return {};
   }
 
-  static void set_labwc_process_environment(bool headless) {
+  static std::vector<std::string> labwc_process_environment(bool headless, const std::string &session_instance_id) {
+    auto environment = process_environment::snapshot();
+    for (const auto key : {"MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG", "DISPLAY"}) environment.erase(key);
+    if (headless) environment.erase("WAYLAND_DISPLAY");
+    if (session_instance_id.empty()) environment.erase("POLARIS_SESSION_INSTANCE_ID");
+    else environment["POLARIS_SESSION_INSTANCE_ID"] = session_instance_id;
+    environment["POLARIS_PRIVATE_SESSION"] = "1";
     const auto adapter = trimmed(config::video.adapter_name);
     for (std::string_view key : {
            "WLR_NO_HARDWARE_CURSORS"sv,
@@ -597,7 +439,7 @@ namespace cage_display_router {
          }) {
       const auto value = labwc_process_environment_value(headless, key);
       if (!value.empty()) {
-        setenv(std::string {key}.c_str(), value.c_str(), 1);
+        environment[std::string {key}] = value;
         if (key == "WLR_RENDER_DRM_DEVICE") {
           BOOST_LOG(info) << "labwc: pinning wlroots render device to ["sv << value
                           << "] ("sv
@@ -622,6 +464,10 @@ namespace cage_display_router {
                                  "pinning the private compositor to the default render device ["s + pinned + "] instead"s);
       }
     }
+    std::vector<std::string> result;
+    result.reserve(environment.size());
+    for (const auto &[key, value] : environment) result.push_back(key + "=" + value);
+    return result;
   }
 
   static bool executable_accessible(const std::string &path) {
@@ -1129,6 +975,9 @@ namespace cage_display_router {
       return true;
     }
 
+    const probe_topology_mutation_t probe_mutation;
+    probe_topology.store(nullptr);
+
     // Reset stale state. The pidfd of a supervisor that died without going
     // through stop() is still open here; every session would otherwise leak one.
     close_cage_pidfd();
@@ -1309,117 +1158,80 @@ namespace cage_display_router {
     BOOST_LOG(info) << "labwc: Watching runtime directory ["sv << runtime_dir()
                     << "] for a new Wayland socket"sv;
 
-    // Save and clear MangoHud env vars before fork — MangoHud crashes labwc
-    // if injected into the compositor. Will be re-set for the game via startup cmd.
-    std::string saved_mangohud;
-    std::string saved_mangohud_dlsym;
-    std::string saved_mangohud_config;
-    const char *mh = getenv("MANGOHUD");
-    const char *mhd = getenv("MANGOHUD_DLSYM");
-    const char *mhc = getenv("MANGOHUD_CONFIG");
-    if (mh) { saved_mangohud = mh; unsetenv("MANGOHUD"); }
-    if (mhd) { saved_mangohud_dlsym = mhd; unsetenv("MANGOHUD_DLSYM"); }
-    if (mhc) { saved_mangohud_config = mhc; unsetenv("MANGOHUD_CONFIG"); }
+    // Prepare every allocation, GPU lookup, environment value and diagnostic
+    // command in the host. The spawned image enters the supervisor before any
+    // host logging, config parsing or worker threads are initialized.
+    auto environment_storage = labwc_process_environment(headless, session_instance_id);
+    std::vector<char *> environment;
+    for (auto &entry : environment_storage) environment.push_back(entry.data());
+    environment.push_back(nullptr);
 
-    pid_t pid = fork();
-    if (pid == 0) {
-      // Child: become the stable session/process-group supervisor for one
-      // private labwc generation. The compositor is forked beneath this anchor,
-      // so menu-driven exit cannot leave its clients unowned.
-      if (!session_instance_id.empty()) {
-        setenv("POLARIS_SESSION_INSTANCE_ID", session_instance_id.c_str(), 1);
-      } else {
-        unsetenv("POLARIS_SESSION_INSTANCE_ID");
-      }
-      setenv("POLARIS_PRIVATE_SESSION", "1", 1);
-      set_labwc_process_environment(headless);
-      if (headless) {
-        // Headless mode: no visible window on desktop, no parent display needed.
-        // labwc creates virtual outputs that still support wlr-screencopy.
-        //
-        // Renderer is vulkan (see WLR_RENDERER above), same as the windowed cage.
-        // Headless ran on gles2 until the wlroots-0.19 vulkan_instance_destroy SEGV
-        // was confirmed gone on 0.20.2 (retested 2026-08-10). vulkan's ext-image-copy
-        // DMA-BUF is GPU-native and CUDA/NVENC-importable, so headless no longer has
-        // to fall back to a visible windowed cage to reach a GPU-native capture path.
-        // Clear inherited display vars so children ONLY talk to labwc.
-        // labwc will set its own WAYLAND_DISPLAY and start XWayland (new DISPLAY).
-        // Without this, Steam connects to KDE's :0 instead of labwc's XWayland.
-        unsetenv("DISPLAY");
-        unsetenv("WAYLAND_DISPLAY");
-      } else {
-        // Windowed mode: labwc runs as a Wayland window on the desktop
-      }
-      // Clear DISPLAY in ALL modes so games connect to labwc's XWayland,
-      // not KDE's :0. labwc will set its own DISPLAY via XWayland.
-      unsetenv("DISPLAY");
+    std::array<int, 2> diagnostic_copies {-1, -1};
+    bool child_diagnostics_enabled = startup_diagnostics_enabled;
+    if (child_diagnostics_enabled) {
+      // Reserve sources above the fixed child destinations to avoid dup2 cycles.
+      diagnostic_copies[0] = fcntl(startup_stderr_pipe[1], F_DUPFD_CLOEXEC, 5);
+      diagnostic_copies[1] = fcntl(startup_status_pipe[1], F_DUPFD_CLOEXEC, 5);
+      child_diagnostics_enabled = diagnostic_copies[0] >= 0 && diagnostic_copies[1] >= 0;
+    }
+    auto close_copies = util::fail_guard([&] {
+      for (auto &fd : diagnostic_copies) close_descriptor(fd);
+    });
+    const auto plain_startup_shell = labwc_startup_diagnostics::make_labwc_startup_command(startup_cmd);
+    const auto diagnostic_startup_shell = startup_diagnostics_enabled ?
+      labwc_startup_diagnostics::make_labwc_startup_command(
+        labwc_startup_diagnostics::instrument_shell_command(startup_cmd, 3, 4)) : plain_startup_shell;
+    std::array<std::string, 5> arguments {
+      "polaris", "--internal-labwc-supervisor", std::filesystem::absolute(labwc_path).string(),
+      std::filesystem::absolute(config_dir).string(), child_diagnostics_enabled ? diagnostic_startup_shell : plain_startup_shell
+    };
+    std::array<char *, 6> argv {};
+    for (std::size_t i = 0; i < arguments.size(); ++i) argv[i] = arguments[i].data();
 
-      bool child_diagnostics_enabled = startup_diagnostics_enabled;
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int spawn_error = posix_spawn_file_actions_init(&actions);
+    bool actions_ready = spawn_error == 0;
+    if (!spawn_error) spawn_error = posix_spawnattr_init(&attributes);
+    bool attributes_ready = spawn_error == 0;
+    auto release_spawn = util::fail_guard([&] {
+      if (actions_ready) posix_spawn_file_actions_destroy(&actions);
+      if (attributes_ready) posix_spawnattr_destroy(&attributes);
+    });
+    auto record_error = [&](int result) { if (!spawn_error) spawn_error = result; };
+    if (!spawn_error) {
+      for (int fd = 0; fd < 3; ++fd) record_error(posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", O_RDWR, 0));
       if (child_diagnostics_enabled) {
-        close_descriptor(startup_stderr_pipe[0]);
-        close_descriptor(startup_status_pipe[0]);
-        if (!make_inheritable(startup_stderr_pipe[1]) ||
-            !make_inheritable(startup_status_pipe[1])) {
-          close_descriptor(startup_stderr_pipe[1]);
-          close_descriptor(startup_status_pipe[1]);
-          child_diagnostics_enabled = false;
-        }
+        record_error(posix_spawn_file_actions_adddup2(&actions, diagnostic_copies[0], 3));
+        record_error(posix_spawn_file_actions_adddup2(&actions, diagnostic_copies[1], 4));
       }
-
-      // Redirect stdout/stderr
-      int devnull = open("/dev/null", O_RDWR);
-      if (devnull >= 0) {
-        dup2(devnull, STDOUT_FILENO);
-        dup2(devnull, STDERR_FILENO);
-        close(devnull);
-      }
-
-      // Close inherited FDs (Polaris listening sockets, boost::asio, etc.)
-      // Keep stdin(0), stdout(1), stderr(2) and close everything else up to a reasonable limit.
-      int maxfd = (int)sysconf(_SC_OPEN_MAX);
-      if (maxfd < 0) maxfd = 1024;
-      for (int fd = 3; fd < maxfd; ++fd) {
-        if (child_diagnostics_enabled &&
-            (fd == startup_stderr_pipe[1] || fd == startup_status_pipe[1])) {
-          continue;
-        }
-        close(fd);
-      }
-
-      // labwc -C: config dir for rc.xml, -s: startup command (game)
-      const auto effective_startup_cmd = child_diagnostics_enabled ?
-        labwc_startup_diagnostics::instrument_shell_command(
-          startup_cmd,
-          startup_stderr_pipe[1],
-          startup_status_pipe[1]
-        ) :
-        startup_cmd;
-      const auto startup_shell =
-        labwc_startup_diagnostics::make_labwc_startup_command(effective_startup_cmd);
-      supervise_labwc(labwc_path, config_dir, startup_shell);
-    } else if (pid > 0) {
-      if (startup_diagnostics_enabled) {
-        close_descriptor(startup_stderr_pipe[1]);
-        close_descriptor(startup_status_pipe[1]);
-        startup_diagnostics_reader.detach();
-        publish_startup_diagnostics(std::move(startup_collector));
-      }
-      cage_pid = pid;
-      open_cage_pidfd(pid);
-      // Restore MangoHud in parent (was cleared to prevent labwc crash)
-      if (!saved_mangohud.empty()) setenv("MANGOHUD", saved_mangohud.c_str(), 1);
-      if (!saved_mangohud_dlsym.empty()) setenv("MANGOHUD_DLSYM", saved_mangohud_dlsym.c_str(), 1);
-      if (!saved_mangohud_config.empty()) setenv("MANGOHUD_CONFIG", saved_mangohud_config.c_str(), 1);
-      BOOST_LOG(info) << "labwc: Spawned (pid="sv << pid << ")"sv;
-    } else {
-      if (startup_diagnostics_enabled) {
-        close_descriptor(startup_stderr_pipe[1]);
-        close_descriptor(startup_status_pipe[1]);
-        startup_diagnostics_reader.detach();
-      }
-      BOOST_LOG(error) << "labwc: fork() failed"sv;
+      // closefrom runs inside spawn, so concurrent host opens cannot leak a
+      // descriptor between a parent-side /proc enumeration and process creation.
+      record_error(posix_spawn_file_actions_addclosefrom_np(&actions, child_diagnostics_enabled ? 5 : 3));
+      sigset_t empty, defaults;
+      sigemptyset(&empty);
+      sigemptyset(&defaults);
+      for (const auto signal_number : {SIGTERM, SIGINT, SIGHUP, SIGCHLD}) sigaddset(&defaults, signal_number);
+      record_error(posix_spawnattr_setsigmask(&attributes, &empty));
+      record_error(posix_spawnattr_setsigdefault(&attributes, &defaults));
+      record_error(posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF));
+    }
+    pid_t pid = -1;
+    if (!spawn_error) spawn_error = posix_spawn(&pid, "/proc/self/exe", &actions, &attributes, argv.data(), environment.data());
+    for (auto &fd : diagnostic_copies) close_descriptor(fd);
+    if (startup_diagnostics_enabled) {
+      close_descriptor(startup_stderr_pipe[1]);
+      close_descriptor(startup_status_pipe[1]);
+      startup_diagnostics_reader.detach();
+      if (!spawn_error) publish_startup_diagnostics(std::move(startup_collector));
+    }
+    if (spawn_error) {
+      BOOST_LOG(error) << "labwc: supervisor spawn failed: "sv << strerror(spawn_error);
       return false;
     }
+    cage_pid = pid;
+    open_cage_pidfd(pid);
+    BOOST_LOG(info) << "labwc: Spawned fresh supervisor (pid="sv << pid << ")"sv;
 
     // Discover which Wayland socket cage created (it auto-picks the next available)
     std::optional<int> labwc_exit_status;
@@ -1483,6 +1295,26 @@ namespace cage_display_router {
                          std::chrono::steady_clock::now() - startup_begin
                        ).count();
     cage_session_instance_id = session_instance_id;
+    if (!session_instance_id.empty() && cage_pidfd >= 0) {
+      auto topology = std::make_shared<probe_topology_t>();
+      topology->pidfd = fcntl(cage_pidfd, F_DUPFD_CLOEXEC, 0);
+      topology->socket_path = socket_path(cage_wayland_socket);
+      topology->socketfd = open(topology->socket_path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
+      const auto identity = platf::encoder_probe_identity::file_identity(topology->socket_path, S_IFSOCK);
+      struct stat pinned {}, named {};
+      if (topology->pidfd >= 0 && topology->socketfd >= 0 && identity &&
+          fstat(topology->socketfd, &pinned) == 0 &&
+          lstat(topology->socket_path.c_str(), &named) == 0 &&
+          (pinned.st_mode & S_IFMT) == S_IFSOCK &&
+          pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino) {
+        topology->socket_identity = *identity;
+        std::ostringstream generation;
+        generation << std::quoted(session_instance_id) << ':' << cage_pid << ':'
+                   << width << ':' << height << ':' << headless << ':' << force_windowed;
+        topology->generation = generation.str();
+        probe_topology.store(std::move(topology));
+      }
+    }
     return true;
   }
 
@@ -1554,6 +1386,10 @@ namespace cage_display_router {
                          << "Hz but wlr-randr no longer reports that mode; re-applying"sv;
     }
 
+    // An unchanged live read-back does not mutate capture topology. Retire
+    // reuse only when an output operation is actually attempted (even if it
+    // fails or returns to the prior mode).
+    const probe_topology_mutation_t probe_mutation;
     // The cage outlives the launch that started it, and the mode is otherwise
     // only ever set from the startup command — a resume carrying a different
     // refresh must re-apply it or the output stays at the old rate for the
@@ -1600,6 +1436,8 @@ namespace cage_display_router {
   }
 
   void stop() {
+    const probe_topology_mutation_t probe_mutation;
+    probe_topology.store(nullptr);
     if (cage_pid <= 0) {
       clear_startup_diagnostics();
       return;
@@ -1674,6 +1512,8 @@ namespace cage_display_router {
   }
 
   void reset_after_external_stop() {
+    const probe_topology_mutation_t probe_mutation;
+    probe_topology.store(nullptr);
     if (cage_pid > 0) {
       (void) waitpid(cage_pid, nullptr, WNOHANG);
     }
@@ -1733,6 +1573,77 @@ namespace cage_display_router {
     }
     return collector ? collector->snapshot(expected_session_instance_id) : std::nullopt;
   }
+
+  static std::optional<std::string> encoder_probe_topology_with_query(
+    const std::function<std::optional<std::string>(const std::string &)> &query
+  ) {
+    const auto revision = probe_topology_revision.load();
+    const auto snapshot = probe_topology.load();
+    if (!snapshot || probe_topology_writers.load() != 0) return std::nullopt;
+    struct pollfd process {snapshot->pidfd, POLLIN, 0};
+    if (poll(&process, 1, 0) != 0) return std::nullopt;
+    const auto socket_identity = platf::encoder_probe_identity::file_identity(snapshot->socket_path, S_IFSOCK);
+    if (!socket_identity || *socket_identity != snapshot->socket_identity) return std::nullopt;
+
+    const auto outputs = query(snapshot->socket_path);
+    if (!outputs || outputs->empty() || outputs->size() > 65536) return std::nullopt;
+    // An empty/disabled/ambiguous output report cannot establish capture.
+    nlohmann::json parsed;
+    try {
+      parsed = nlohmann::json::parse(*outputs);
+      if (!parsed.is_array() || parsed.empty() || parsed.size() > 16) return std::nullopt;
+      unsigned enabled = 0;
+      std::set<std::string> names;
+      for (const auto &output : parsed) {
+        const auto name = output.at("name").get<std::string>();
+        if (name.empty() || !names.insert(name).second) return std::nullopt;
+        if (!output.at("enabled").get<bool>()) continue;
+        ++enabled;
+        unsigned current = 0;
+        const auto &modes = output.at("modes");
+        if (!modes.is_array()) return std::nullopt;
+        for (const auto &mode : modes) {
+          if (!mode.at("current").get<bool>()) continue;
+          ++current;
+          const auto refresh = mode.at("refresh").get<double>();
+          if (mode.at("width").get<int>() <= 0 || mode.at("height").get<int>() <= 0 ||
+              !std::isfinite(refresh) || refresh <= 0) return std::nullopt;
+        }
+        if (current != 1) return std::nullopt;
+      }
+      if (enabled != 1) return std::nullopt;
+    } catch (...) { return std::nullopt; }
+    std::ostringstream key;
+    key << std::quoted(snapshot->generation) << std::quoted(snapshot->socket_identity)
+        << std::quoted(parsed.dump()) << ':' << revision << ':' << windowed_gpu_native_probe.value.load()
+        << ':' << headless_extcopy_dmabuf_probe.value.load();
+    const auto final_socket_identity = platf::encoder_probe_identity::file_identity(snapshot->socket_path, S_IFSOCK);
+    if (!final_socket_identity || *final_socket_identity != snapshot->socket_identity) return std::nullopt;
+    process.revents = 0;
+    if (poll(&process, 1, 0) != 0 || probe_topology.load() != snapshot ||
+        probe_topology_writers.load() != 0 || probe_topology_revision.load() != revision) return std::nullopt;
+    return key.str();
+  }
+
+  std::optional<std::string> encoder_probe_topology() {
+    return encoder_probe_topology_with_query([](const std::string &socket) -> std::optional<std::string> {
+      // Query the actual mode, including changes made outside the router.
+      const auto output = platf::run_process_argv_capture(
+        {"/usr/bin/env", "WAYLAND_DISPLAY=" + socket, "/usr/bin/wlr-randr", "--json"},
+        500ms, 65536
+      );
+      if (output.exit_status != 0 || output.timed_out || output.truncated) return std::nullopt;
+      return output.output;
+    });
+  }
+
+#ifdef POLARIS_TESTS
+  std::optional<std::string> encoder_probe_topology_for_tests(
+    const std::function<std::optional<std::string>(const std::string &)> &query
+  ) {
+    return encoder_probe_topology_with_query(query);
+  }
+#endif
 
   std::string get_x11_display() {
     return cage_x11_display;

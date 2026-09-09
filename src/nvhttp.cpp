@@ -6,6 +6,10 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#ifdef __linux__
+  #include "platform/linux/process_environment.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -2550,18 +2554,14 @@ namespace nvhttp {
     std::mutex deferred_cage_capability_probe_mutex;
 
     std::optional<std::string> copy_env_var(const char *key) {
-      if (const char *value = getenv(key)) {
-        return std::string {value};
-      }
-
-      return std::nullopt;
+      return process_environment::get(key);
     }
 
     void restore_env_var(const char *key, const std::optional<std::string> &value) {
       if (value) {
         platf::set_env(key, *value);
       } else {
-        unsetenv(key);
+        process_environment::unset(key);
       }
     }
 

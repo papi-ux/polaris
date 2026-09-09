@@ -535,8 +535,11 @@ const tabs = ref([
     name: "VA-API Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Linux VA-API strict rate-control behavior for AMD and Intel GPUs.",
+    summary: "Linux VA-API quality, rate control, and bitrate behavior for AMD and Intel GPUs.",
     options: {
+      "vaapi_quality": "auto",
+      "vaapi_rc": "auto",
+      "vaapi_blbrc": "auto",
       "vaapi_strict_rc_buffer": "disabled",
     },
   },

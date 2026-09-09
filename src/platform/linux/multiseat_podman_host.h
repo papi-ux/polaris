@@ -14,6 +14,8 @@ namespace multiseat::podman {
   public:
     [[nodiscard]] std::uint64_t effective_uid() const override;
     [[nodiscard]] bool executable_file(const std::filesystem::path &path) const override;
+    [[nodiscard]] bool trusted_runtime_file(const std::filesystem::path &path) const override;
+    [[nodiscard]] std::optional<std::vector<std::uint64_t>> supplementary_groups() const override;
     [[nodiscard]] bool readable_directory(const std::filesystem::path &path) const override;
     [[nodiscard]] bool private_read_write_directory(
       const std::filesystem::path &path

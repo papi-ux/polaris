@@ -3432,15 +3432,14 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_EQ(tracked_reaper.find("waitpid(-1"), std::string::npos);
 
   EXPECT_EQ(execute.find("terminate_isolated_session_processes(\"before launching"), std::string::npos);
-  const auto cage_child_start = cage_source.find("if (pid == 0)");
-  const auto cage_child_end = cage_source.find("set_labwc_process_environment(headless)", cage_child_start);
-  ASSERT_NE(cage_child_start, std::string::npos);
-  ASSERT_NE(cage_child_end, std::string::npos);
-  const auto cage_child = cage_source.substr(cage_child_start, cage_child_end - cage_child_start);
-  EXPECT_NE(
-    cage_child.find("\n        setenv(\"POLARIS_SESSION_INSTANCE_ID\""),
-    std::string::npos
-  );
+  const auto environment_start = cage_source.find("labwc_process_environment(bool headless");
+  const auto environment_end = cage_source.find("return result;", environment_start);
+  ASSERT_NE(environment_start, std::string::npos);
+  ASSERT_NE(environment_end, std::string::npos);
+  const auto child_environment = cage_source.substr(environment_start, environment_end - environment_start);
+  EXPECT_NE(child_environment.find("environment[\"POLARIS_SESSION_INSTANCE_ID\"] = session_instance_id"), std::string::npos);
+  EXPECT_NE(cage_source.find("posix_spawn(&pid, \"/proc/self/exe\", &actions, &attributes, argv.data(), environment.data())"), std::string::npos);
+  EXPECT_EQ(cage_source.find("setenv(\"POLARIS_SESSION_INSTANCE_ID\""), std::string::npos);
   const auto fail_guard_start = execute.find("auto fg = util::fail_guard(");
   const auto fail_guard_end = execute.find("if (!app.gamepad.empty()", fail_guard_start);
   ASSERT_NE(fail_guard_start, std::string::npos);
@@ -3833,7 +3832,7 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorDistinguishesPolarisPrivateS
     std::string::npos
   );
   EXPECT_NE(
-    cage_source.find("setenv(\"POLARIS_PRIVATE_SESSION\", \"1\", 1)"),
+    cage_source.find("environment[\"POLARIS_PRIVATE_SESSION\"] = \"1\""),
     std::string::npos
   );
   EXPECT_NE(process_source.find("key == \"POLARIS_PRIVATE_SESSION\"sv"), std::string::npos);

@@ -369,7 +369,7 @@ func TestDisplayCapturePipelineIsCanonicalAndPreservesFraction(t *testing.T) {
 	}
 	expectedProbe := []string{
 		"-q", "unixfdsrc", "socket-path=" + mediaSocket, "num-buffers=1", "!",
-		"video/x-raw,format=RGBx,width=1920,height=1080,framerate=2997/50", "!",
+		"video/x-raw,format=BGRx,width=1920,height=1080,framerate=2997/50", "!",
 		"fakesink", "sync=false", "async=false", "enable-last-sample=false",
 	}
 	if actual := displayProbeArguments(request, mediaSocket, true); !reflect.DeepEqual(actual, expectedProbe) {

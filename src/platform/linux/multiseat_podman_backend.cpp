@@ -915,6 +915,16 @@ namespace multiseat::podman {
     } catch (const json::exception &) {
       throw std::runtime_error {"invalid Podman runtime spec"};
     }
+    const auto *process = object_member(spec, "process");
+    const auto *user = process ? object_member(*process, "user") : nullptr;
+    if (!user || !user->contains("uid") || !(*user)["uid"].is_number_unsigned() ||
+        (*user)["uid"].get<std::uint64_t>() != host_.effective_uid()) {
+      throw std::runtime_error {"Podman runtime spec does not preserve the launching uid"};
+    }
+    const auto *annotations = object_member(spec, "annotations");
+    if (!annotations || string_member(*annotations, "run.oci.keep_original_groups") != "1") {
+      throw std::runtime_error {"Podman runtime spec does not preserve supplementary groups"};
+    }
     const auto *mounts = object_member(spec, "mounts");
     if (!mounts || !mounts->is_array() ||
         mounts->size() > maximum_runtime_spec_mounts) {
@@ -1081,7 +1091,7 @@ namespace multiseat::podman {
     const worker_launch_spec_t &spec,
     const input::allocation_t &input_allocation
   ) const {
-    if (!base_host_ready()) {
+    if (!base_host_ready() || !host_.trusted_runtime_file(options_.runtime_executable)) {
       return false;
     }
     const auto worker_authority_directory =
@@ -1151,6 +1161,7 @@ namespace multiseat::podman {
     std::vector<std::string> argv {
       options_.executable.native(),
       "--remote=false",
+      "--runtime=" + options_.runtime_executable.native(),
       "run",
       "--detach",
       "--rm",
@@ -1159,6 +1170,8 @@ namespace multiseat::podman {
       "--name=" + spec.identity.worker_name,
       "--hostname=" + spec.identity.worker_name,
       "--userns=keep-id",
+      "--user=" + std::to_string(host_.effective_uid()),
+      "--group-add=keep-groups",
       "--network=none",
       "--no-hosts",
       "--http-proxy=false",
@@ -1300,8 +1313,10 @@ namespace multiseat::podman {
     if (!input_fingerprint) {
       return worker_command_result_e::rejected;
     }
+    std::optional<std::vector<std::uint64_t>> launching_groups;
     try {
-      if (!launch_host_ready(spec, *input_allocation)) {
+      launching_groups = host_.supplementary_groups();
+      if (!launching_groups || !launch_host_ready(spec, *input_allocation)) {
         return worker_command_result_e::rejected;
       }
     } catch (...) {
@@ -1332,8 +1347,9 @@ namespace multiseat::podman {
         *input_allocation,
         *input_fingerprint
       );
-      if (!gpu_catalog_current() ||
-          !input_allocation_current(*input_allocation)) {
+      if (!host_.trusted_runtime_file(options_.runtime_executable) ||
+          host_.supplementary_groups() != launching_groups ||
+          !gpu_catalog_current() || !input_allocation_current(*input_allocation)) {
         return worker_command_result_e::rejected;
       }
       result = host_.run(
@@ -1477,6 +1493,9 @@ namespace multiseat::podman {
   ) {
     if (!base_host_ready()) {
       throw std::runtime_error {"rootless Podman is unavailable"};
+    }
+    if (require_input_authority && !host_.trusted_runtime_file(options_.runtime_executable)) {
+      throw std::runtime_error {"the admitted crun runtime is unavailable"};
     }
     const auto require_current_gpu_catalog = [this, require_input_authority]() {
       if (require_input_authority && !gpu_catalog_current()) {
@@ -1683,6 +1702,13 @@ namespace multiseat::podman {
              worker_observed_state_e::stopped ||
            never_started);
         if (require_input_authority && !released_stopped_worker) {
+          const auto oci_runtime = string_member(container, "OCIRuntime");
+          const auto *groups = host_config ? object_member(*host_config, "GroupAdd") : nullptr;
+          if (string_member(*config, "User") != std::to_string(host_.effective_uid()) ||
+              !oci_runtime || *oci_runtime != options_.runtime_executable.native() ||
+              !groups || !groups->is_array() || !groups->empty()) {
+            throw std::runtime_error {"Podman worker does not use the admitted input access policy"};
+          }
           if (!device_array || !device_array->is_array() ||
               device_array->size() > maximum_inspected_devices) {
             throw std::runtime_error {"invalid Podman device inventory"};
@@ -1724,8 +1750,8 @@ namespace multiseat::podman {
           // device set when Podman points at it; rootless Podman reports its
           // device bind mounts nowhere else. An inspected device list, when
           // Podman fills one in, must then agree with the spec entry for
-          // entry rather than add to it. Without a spec the inspected list
-          // is the device set.
+          // entry rather than add to it. A live worker also needs the OCI
+          // keep-groups annotation, so inspection alone is insufficient.
           std::vector<declared_device_binding_t> declared;
           if (const auto *spec_path = object_member(container, "OCIConfigPath")) {
             if (!spec_path->is_string()) {
@@ -1775,7 +1801,7 @@ namespace multiseat::podman {
               }
             }
           } else {
-            declared = std::move(inspected);
+            throw std::runtime_error {"Podman worker is missing its OCI input access evidence"};
           }
           if (declared.size() > maximum_inspected_devices) {
             throw std::runtime_error {"invalid Podman device inventory"};

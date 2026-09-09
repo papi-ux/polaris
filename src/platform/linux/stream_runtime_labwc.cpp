@@ -88,6 +88,10 @@ namespace stream_runtime {
       return cage_display_router::runtime_state();
     }
 
+    std::optional<std::string> encoder_probe_topology() {
+      return cage_display_router::encoder_probe_topology();
+    }
+
     int current_output_refresh_hz() {
       return cage_display_router::current_output_refresh_hz();
     }

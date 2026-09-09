@@ -24,6 +24,7 @@ type fixedDirectory struct {
 	ino  uint64
 	uid  uint32
 	mode uint32
+	pins artifactPins
 }
 
 func openFixedDirectory(
@@ -85,6 +86,7 @@ func (directory *fixedDirectory) verify() error {
 
 func (directory *fixedDirectory) close() {
 	if directory != nil && directory.file != nil {
+		directory.pins.close()
 		_ = directory.file.Close()
 	}
 }

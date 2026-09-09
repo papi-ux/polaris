@@ -211,8 +211,9 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stream_recorder.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream_stats.h"
         "${CMAKE_SOURCE_DIR}/src/stream_stats.cpp"
-        "${CMAKE_SOURCE_DIR}/src/rswrapper.h"
-        "${CMAKE_SOURCE_DIR}/src/rswrapper.c"
+        "${CMAKE_SOURCE_DIR}/third-party/nanors/rs.c"
+        "${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_common.c"
+        "${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_lite.c"
         ${PLATFORM_TARGET_FILES})
 
 if(NOT POLARIS_ASSETS_DIR_DEF)

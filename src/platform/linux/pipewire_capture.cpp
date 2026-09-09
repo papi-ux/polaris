@@ -43,6 +43,7 @@
 #endif
 
 #include "src/logging.h"
+#include "src/utility.h"
 
 using namespace std::literals;
 
@@ -505,6 +506,7 @@ namespace pipewire_capture {
     shutdown_complete_ = true;
     {
       std::unique_lock lk(frame_mtx_);
+      stop_requested_ = true;
       running_ = false;
       terminal_result_ = wait_result_e::reinit;
       front_dmabuf_buffer_ = nullptr;
@@ -624,6 +626,28 @@ namespace pipewire_capture {
       }
     }
 
+    if (!connect_stream(true)) return false;
+
+    {
+      std::lock_guard lk(frame_mtx_);
+      running_ = true;
+      terminal_result_ = wait_result_e::timeout;
+    }
+    if (pw_thread_loop_start(loop_) < 0) {
+      BOOST_LOG(warning) << "portal: Failed to start PipeWire loop"sv;
+      set_terminal(wait_result_e::error);
+      return false;
+    }
+
+    BOOST_LOG(info) << "portal: PipeWire capture started on node "sv << options_.node_id
+                    << " serial="sv << options_.node_serial;
+    return true;
+  }
+
+  bool capture_t::connect_stream(bool use_max_framerate) {
+    const bool has_node = options_.node_id != 0;
+    const bool has_serial = options_.node_serial != 0 &&
+                            (options_.node_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
 #ifndef PW_KEY_TARGET_OBJECT
   #define PW_KEY_TARGET_OBJECT "target.object"
 #endif
@@ -635,87 +659,96 @@ namespace pipewire_capture {
     };
     const spa_rectangle min_size {.width = 1, .height = 1};
     const spa_rectangle max_size {.width = 16384, .height = 16384};
-    std::vector<std::vector<std::uint8_t>> params_storage;
+    // SPA iterators require an eight-byte-aligned base, including in builds
+    // whose allocator or stack instrumentation changes incidental alignment.
+    std::vector<std::vector<std::uint64_t>> params_storage;
     std::vector<const spa_pod *> params;
-    params_storage.reserve(options_.dmabuf_formats.size() + 1);
-    params.reserve(options_.dmabuf_formats.size() + 1);
+    params_storage.reserve(2 * (options_.dmabuf_formats.size() + 4));
+    params.reserve(2 * (options_.dmabuf_formats.size() + 4));
 
-    // gamescope HDR pods carry MANDATORY BT.2020 + SMPTE ST.2084.
-    // Without matching props the intersection skips 10-bit and falls to BGRx
-    // (gamescope lists 8-bit first among producer formats).
-    auto push_format_pod = [&](std::uint32_t spa_format, std::optional<std::uint64_t> modifier) {
-      params_storage.emplace_back(1024);
-      spa_pod_builder pb = SPA_POD_BUILDER_INIT(
-        params_storage.back().data(),
-        static_cast<std::uint32_t>(params_storage.back().size())
-      );
-      spa_pod_frame frame {};
-      spa_pod_builder_push_object(&pb, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
-      spa_pod_builder_add(&pb,
-        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_Id(spa_format),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size),
-        0);
-      if (modifier) {
-        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
-        spa_pod_builder_long(&pb, static_cast<std::int64_t>(*modifier));
-      }
-      if (spa_format_is_hdr_rgb10(spa_format)) {
-        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_PROP_FLAG_MANDATORY);
-        spa_pod_builder_id(&pb, SPA_VIDEO_COLOR_PRIMARIES_BT2020);
-        spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_transferFunction, SPA_POD_PROP_FLAG_MANDATORY);
-        spa_pod_builder_id(&pb, SPA_VIDEO_TRANSFER_SMPTE2084);
-      }
-      params.push_back(reinterpret_cast<const spa_pod *>(spa_pod_builder_pop(&pb, &frame)));
-    };
-
-    if (options_.may_use_dmabuf) {
-      for (const auto &format : options_.dmabuf_formats) {
-        if (options_.prefer_hdr_formats && !spa_format_is_hdr_rgb10(format.spa_format)) {
-          continue;
+    // Offer every original format first, preserving variable capture preference.
+    // Only then offer the identical formats with a compatibility framerate
+    // range for fixed-only producers. Keep all modifier and HDR constraints.
+    for (const bool permit_fixed_rate : {false, true}) {
+      // gamescope HDR pods carry MANDATORY BT.2020 + SMPTE ST.2084.
+      // Without matching props the intersection skips 10-bit and falls to BGRx
+      // (gamescope lists 8-bit first among producer formats).
+      auto push_format_pod = [&](std::uint32_t spa_format, std::optional<std::uint64_t> modifier) {
+        params_storage.emplace_back(1024 / sizeof(std::uint64_t));
+        spa_pod_builder pb = SPA_POD_BUILDER_INIT(
+          params_storage.back().data(),
+          static_cast<std::uint32_t>(params_storage.back().size() * sizeof(std::uint64_t))
+        );
+        spa_pod_frame frame {};
+        spa_pod_builder_push_object(&pb, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+        spa_pod_builder_add(&pb,
+          SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+          SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+          SPA_FORMAT_VIDEO_format, SPA_POD_Id(spa_format),
+          SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size),
+          0);
+        append_rate_properties(&pb, options_.requested_rate, options_.request_fixed_rate, use_max_framerate, permit_fixed_rate);
+        if (modifier) {
+          spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+          spa_pod_builder_long(&pb, static_cast<std::int64_t>(*modifier));
         }
-        if (options_.prefer_sdr_formats && spa_format_is_hdr_rgb10(format.spa_format)) {
-          continue;
+        if (spa_format_is_hdr_rgb10(spa_format)) {
+          spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_PROP_FLAG_MANDATORY);
+          spa_pod_builder_id(&pb, SPA_VIDEO_COLOR_PRIMARIES_BT2020);
+          spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_transferFunction, SPA_POD_PROP_FLAG_MANDATORY);
+          spa_pod_builder_id(&pb, SPA_VIDEO_TRANSFER_SMPTE2084);
         }
-        push_format_pod(format.spa_format, format.modifier);
-      }
-    }
+        params.push_back(reinterpret_cast<const spa_pod *>(spa_pod_builder_pop(&pb, &frame)));
+      };
 
-    // MemPtr/MemFd fallback pods. Prefer exclusive sets so gamescope cannot fixate
-    // the wrong depth: HDR stream → 10-bit only; SDR stream → 8-bit only.
-    if (options_.prefer_hdr_formats) {
-      push_format_pod(SPA_VIDEO_FORMAT_xBGR_210LE, std::nullopt);
-      push_format_pod(SPA_VIDEO_FORMAT_xRGB_210LE, std::nullopt);
-      BOOST_LOG(info) << "portal: PipeWire EnumFormat prefer_hdr — only 10-bit PQ/BT.2020 pods (no BGRx)"sv;
-    }
-    else if (options_.prefer_sdr_formats) {
-      push_format_pod(SPA_VIDEO_FORMAT_BGRx, std::nullopt);
-      push_format_pod(SPA_VIDEO_FORMAT_BGRA, std::nullopt);
-      push_format_pod(SPA_VIDEO_FORMAT_RGBx, std::nullopt);
-      push_format_pod(SPA_VIDEO_FORMAT_RGBA, std::nullopt);
-      BOOST_LOG(info) << "portal: PipeWire EnumFormat prefer_sdr — only 8-bit pods (no xBGR_210LE)"sv;
-    }
-    else {
-      params_storage.emplace_back(1024);
-      spa_pod_builder mem_pb = SPA_POD_BUILDER_INIT(
-        params_storage.back().data(),
-        static_cast<std::uint32_t>(params_storage.back().size())
-      );
-      const auto *memptr_fmt_param = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
-        &mem_pb,
-        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
-          SPA_VIDEO_FORMAT_xBGR_210LE,
-          SPA_VIDEO_FORMAT_xBGR_210LE,
-          SPA_VIDEO_FORMAT_BGRx,
-          SPA_VIDEO_FORMAT_BGRA,
-          SPA_VIDEO_FORMAT_RGBx,
-          SPA_VIDEO_FORMAT_RGBA),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size)));
-      params.push_back(memptr_fmt_param);
+      if (options_.may_use_dmabuf) {
+        for (const auto &format : options_.dmabuf_formats) {
+          if (options_.prefer_hdr_formats && !spa_format_is_hdr_rgb10(format.spa_format)) {
+            continue;
+          }
+          if (options_.prefer_sdr_formats && spa_format_is_hdr_rgb10(format.spa_format)) {
+            continue;
+          }
+          push_format_pod(format.spa_format, format.modifier);
+        }
+      }
+
+      // MemPtr/MemFd fallback pods. Prefer exclusive sets so gamescope cannot fixate
+      // the wrong depth: HDR stream → 10-bit only; SDR stream → 8-bit only.
+      if (options_.prefer_hdr_formats) {
+        push_format_pod(SPA_VIDEO_FORMAT_xBGR_210LE, std::nullopt);
+        push_format_pod(SPA_VIDEO_FORMAT_xRGB_210LE, std::nullopt);
+        if (!permit_fixed_rate) BOOST_LOG(info) << "portal: PipeWire EnumFormat prefer_hdr — only 10-bit PQ/BT.2020 pods (no BGRx)"sv;
+      }
+      else if (options_.prefer_sdr_formats) {
+        push_format_pod(SPA_VIDEO_FORMAT_BGRx, std::nullopt);
+        push_format_pod(SPA_VIDEO_FORMAT_BGRA, std::nullopt);
+        push_format_pod(SPA_VIDEO_FORMAT_RGBx, std::nullopt);
+        push_format_pod(SPA_VIDEO_FORMAT_RGBA, std::nullopt);
+        if (!permit_fixed_rate) BOOST_LOG(info) << "portal: PipeWire EnumFormat prefer_sdr — only 8-bit pods (no xBGR_210LE)"sv;
+      }
+      else {
+        params_storage.emplace_back(1024 / sizeof(std::uint64_t));
+        spa_pod_builder mem_pb = SPA_POD_BUILDER_INIT(
+          params_storage.back().data(),
+          static_cast<std::uint32_t>(params_storage.back().size() * sizeof(std::uint64_t))
+        );
+        spa_pod_frame mem_frame {};
+        spa_pod_builder_push_object(&mem_pb, &mem_frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+        spa_pod_builder_add(&mem_pb,
+          SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+          SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+          SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
+            SPA_VIDEO_FORMAT_xBGR_210LE,
+            SPA_VIDEO_FORMAT_xBGR_210LE,
+            SPA_VIDEO_FORMAT_BGRx,
+            SPA_VIDEO_FORMAT_BGRA,
+            SPA_VIDEO_FORMAT_RGBx,
+            SPA_VIDEO_FORMAT_RGBA),
+          SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size), 0);
+        append_rate_properties(&mem_pb, options_.requested_rate, options_.request_fixed_rate, use_max_framerate, permit_fixed_rate);
+        params.push_back(reinterpret_cast<const spa_pod *>(spa_pod_builder_pop(&mem_pb, &mem_frame)));
+      }
     }
 
     static const pw_stream_events events = {
@@ -793,24 +826,50 @@ namespace pipewire_capture {
       }
     }
 
-    {
-      std::lock_guard lk(frame_mtx_);
-      running_ = true;
-      terminal_result_ = wait_result_e::timeout;
-    }
-    if (pw_thread_loop_start(loop_) < 0) {
-      BOOST_LOG(warning) << "portal: Failed to start PipeWire loop"sv;
-      set_terminal(wait_result_e::error);
-      return false;
-    }
-
-    BOOST_LOG(info) << "portal: PipeWire capture started on node "sv << options_.node_id
-                    << " serial="sv << options_.node_serial;
     return true;
   }
 
+  bool capture_t::retry_rate_negotiation(const std::function<bool()> &cancelled) {
+    std::lock_guard shutdown_lk(shutdown_mtx_);
+    if (shutdown_complete_ || !loop_ || !stream_ || (cancelled && cancelled())) return false;
+    // Do not exclude stop while waiting for the PipeWire loop. Once acquired,
+    // serialize the actual reconnect with stop and recheck both cancellation
+    // and negotiation under the callback lock before replacing anything.
+    pw_thread_loop_lock(loop_);
+    auto release_loop = util::fail_guard([&] { pw_thread_loop_unlock(loop_); });
+    std::lock_guard start_stop_lk(start_stop_mtx_);
+    {
+      std::lock_guard lk(frame_mtx_);
+      if (stop_requested_ || negotiated_ || rate_retry_attempted_ || (cancelled && cancelled()) ||
+          terminal_result_ != wait_result_e::error || stream_state_ != PW_STREAM_STATE_ERROR ||
+          !video::rate::valid(options_.requested_rate)) return false;
+      rate_retry_attempted_ = true;
+      running_ = false;
+    }
+    pw_stream_disconnect(stream_);
+    pw_stream_destroy(stream_);
+    stream_ = nullptr;
+    spa_zero(stream_listener_);
+    buffer_keys_.clear();
+    const bool connected = connect_stream(false);
+    bool resumed = false;
+    {
+      std::lock_guard lk(frame_mtx_);
+      if (connected && !stop_requested_) {
+        running_ = true;
+        terminal_result_ = wait_result_e::timeout;
+        resumed = true;
+      }
+    }
+    frame_cv_.notify_all();
+    if (resumed) BOOST_LOG(info) << "portal: Retry PipeWire rate negotiation without maxFramerate"sv;
+    return resumed;
+  }
+
   void capture_t::stop() {
+    std::lock_guard start_stop_lk(start_stop_mtx_);
     std::lock_guard lk(frame_mtx_);
+    stop_requested_ = true;
     running_ = false;
     terminal_result_ = wait_result_e::reinit;
     frame_cv_.notify_all();
@@ -838,17 +897,24 @@ namespace pipewire_capture {
 
   wait_result_e capture_t::wait_for_frame(std::chrono::milliseconds timeout) {
     std::unique_lock lk(frame_mtx_);
-    if (!frame_cv_.wait_for(lk, timeout, [&] {
-          return frame_available_ || terminal_result_ == wait_result_e::reinit || terminal_result_ == wait_result_e::error;
-        })) {
-      return wait_result_e::timeout;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+      if (terminal_result_ == wait_result_e::reinit || terminal_result_ == wait_result_e::error) return terminal_result_;
+      const auto now = std::chrono::steady_clock::now();
+      const auto paced = requires_host_pacing(options_.requested_rate, negotiated_rate_);
+      if (frame_available_ && (!paced || now >= next_delivery_)) {
+        if (paced) {
+          const auto interval = video::rate::interval(options_.requested_rate);
+          // Keep the fractional timeline, re-anchor after a missed interval.
+          next_delivery_ = std::max(next_delivery_ + interval, now);
+          if (next_delivery_ <= now) next_delivery_ = now + interval;
+        }
+        return wait_result_e::frame;
+      }
+      if (now >= deadline) return wait_result_e::timeout;
+      const auto wake = frame_available_ && paced ? std::min(deadline, next_delivery_) : deadline;
+      frame_cv_.wait_until(lk, wake);
     }
-
-    if (terminal_result_ == wait_result_e::reinit || terminal_result_ == wait_result_e::error) {
-      return terminal_result_;
-    }
-
-    return wait_result_e::frame;
   }
 
   bool capture_t::fill_frame(std::shared_ptr<platf::img_t> &image) {
@@ -1186,6 +1252,8 @@ namespace pipewire_capture {
       cap->frame_available_ = false;
       cap->negotiated_ = true;
       cap->negotiated_dmabuf_ = dmabuf_negotiated;
+      cap->negotiated_rate_ = negotiated_capture_rate(raw_info.framerate, raw_info.max_framerate);
+      cap->next_delivery_ = {};
     }
     if (replaced_buffer) {
       // Format callbacks run with PipeWire's thread-loop lock held. Queue
@@ -1193,6 +1261,16 @@ namespace pipewire_capture {
       pw_stream_queue_buffer(cap->stream_, replaced_buffer);
     }
     cap->frame_cv_.notify_all();
+
+    const auto effective_rate = negotiated_capture_rate(raw_info.framerate, raw_info.max_framerate);
+    const auto pacing = requires_host_pacing(cap->options_.requested_rate, effective_rate);
+    BOOST_LOG(info) << "portal: PipeWire rate requested="sv << cap->options_.requested_rate.num << '/' << cap->options_.requested_rate.den
+                    << " negotiated="sv << effective_rate.num << '/' << effective_rate.den
+                    << " delivery="sv << (pacing ? "host-paced"sv : "event-driven"sv);
+    if (video::rate::valid(effective_rate) && video::rate::valid(cap->options_.requested_rate) &&
+        av_cmp_q(effective_rate, cap->options_.requested_rate) < 0) {
+      BOOST_LOG(warning) << "portal: Producer frame rate is lower than the requested stream rate"sv;
+    }
 
     BOOST_LOG(info) << "portal: PipeWire format negotiated: "sv
                     << raw_info.size.width << "x"sv << raw_info.size.height
@@ -1205,7 +1283,7 @@ namespace pipewire_capture {
       return;
     }
 
-    uint8_t params_buffer[1024];
+    alignas(8) uint8_t params_buffer[1024];
     spa_pod_builder pb = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
     std::uint32_t data_type_mask = 0;
     for (const auto data_type : offered_buffer_data_types(dmabuf_negotiated)) {

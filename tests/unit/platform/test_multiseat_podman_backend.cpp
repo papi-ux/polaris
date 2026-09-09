@@ -74,12 +74,24 @@ namespace {
 
   class fake_host_t final : public host_t {
   public:
+    fake_host_t();
+
     std::uint64_t effective_uid() const override {
       return uid;
     }
 
     bool executable_file(const std::filesystem::path &path) const override {
       return executable_ready && executable_files.contains(path.native());
+    }
+
+    bool trusted_runtime_file(const std::filesystem::path &path) const override {
+      return runtime_ready && path == "/usr/bin/crun";
+    }
+
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override {
+      ++group_reads;
+      if (groups_change_on_recheck && group_reads > 1) return std::vector<std::uint64_t> {};
+      return groups;
     }
 
     bool readable_directory(const std::filesystem::path &path) const override {
@@ -142,6 +154,10 @@ namespace {
 
     std::uint64_t uid = 1000;
     bool executable_ready = true;
+    bool runtime_ready = true;
+    bool groups_change_on_recheck = false;
+    mutable int group_reads = 0;
+    std::optional<std::vector<std::uint64_t>> groups = std::vector<std::uint64_t> {39, 104, 105};
     std::set<std::string> executable_files {
       "/usr/bin/podman",
       "/usr/libexec/podman/catatonit",
@@ -585,6 +601,8 @@ namespace {
     return devices;
   }
 
+  std::string runtime_spec_path_for(std::string_view id);
+
   json container_for(
     const worker_launch_spec_t &spec,
     std::string id,
@@ -599,10 +617,12 @@ namespace {
       {"Status", std::move(health_state)},
     };
     return {
+      {"OCIConfigPath", runtime_spec_path_for(id)},
       {"Id", std::move(id)},
       {"Name", spec.identity.worker_name},
-      {"Config", {{"Labels", labels_for(spec)}}},
-      {"HostConfig", {{"Devices", inspected_devices_for(spec)}}},
+      {"Config", {{"Labels", labels_for(spec)}, {"User", "1000"}}},
+      {"OCIRuntime", "/usr/bin/crun"},
+      {"HostConfig", {{"Devices", inspected_devices_for(spec)}, {"GroupAdd", json::array()}}},
       {"State", std::move(state)},
     };
   }
@@ -863,8 +883,11 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_FALSE(any_argument_contains(argv, "nocreate"));
   EXPECT_EQ(argv.at(0), "/usr/bin/podman");
   EXPECT_EQ(argv.at(1), "--remote=false");
-  EXPECT_EQ(argv.at(2), "run");
+  EXPECT_EQ(argv.at(2), "--runtime=/usr/bin/crun");
+  EXPECT_EQ(argv.at(3), "run");
+  EXPECT_TRUE(has_argument(argv, "--group-add=keep-groups"));
   EXPECT_TRUE(has_argument(argv, "--userns=keep-id"));
+  EXPECT_TRUE(has_argument(argv, "--user=1000"));
   EXPECT_TRUE(has_argument(argv, "--network=none"));
   EXPECT_TRUE(has_argument(argv, "--no-hosts"));
   EXPECT_TRUE(has_argument(argv, "--http-proxy=false"));
@@ -965,7 +988,7 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_FALSE(any_argument_contains(argv, "/dev/uinput"));
   EXPECT_FALSE(any_argument_contains(argv, "/dev/uhid"));
   EXPECT_FALSE(has_argument(argv, "--device=/dev/input:/dev/input:rw"));
-  EXPECT_FALSE(any_argument_contains(argv, "keep-groups"));
+  EXPECT_TRUE(has_argument(argv, "--group-add=keep-groups"));
   EXPECT_FALSE(any_argument_contains(argv, "POLARIS_AUTH_TOKEN"));
   EXPECT_FALSE(any_argument_contains(argv, std::string(64, '0')));
 }
@@ -1223,7 +1246,15 @@ TEST(MultiseatPodmanBackend, InventoryRejectsChangedInputManifestAndBindings) {
   missing_binding["HostConfig"]["Devices"].erase(
     missing_binding["HostConfig"]["Devices"].end() - 1
   );
-  expect_inventory_rejected(std::move(missing_binding));
+  expect_inventory_rejected(std::move(missing_binding), [](fake_host_t &host) {
+    auto &text = host.owned_files.at(runtime_spec_path_for(first_id));
+    auto spec = json::parse(text);
+    auto &mounts = spec["mounts"];
+    mounts.erase(std::remove_if(mounts.begin(), mounts.end(), [](const json &mount) {
+      return mount["destination"] == "/dev/input/polaris-gamepad-0";
+    }), mounts.end());
+    text = spec.dump();
+  });
 
   auto changed_alias = container_for(spec, first_id, "running", "healthy");
   changed_alias["HostConfig"]["Devices"][2]["PathInContainer"] =
@@ -1294,6 +1325,11 @@ TEST(MultiseatPodmanBackend, InventoryAcceptsEquivalentReconstructedHostNode) {
   auto container = container_for(spec, first_id, "running", "healthy");
   container["HostConfig"]["Devices"][2]["PathOnHost"] =
     "/dev/input/reconstructed-event10";
+  auto oci_spec = json::parse(host.owned_files.at(runtime_spec_path_for(first_id)));
+  for (auto &mount : oci_spec["mounts"]) {
+    if (mount["destination"] == "/dev/input/polaris-keyboard") mount["source"] = "/dev/input/reconstructed-event10";
+  }
+  host.owned_files[runtime_spec_path_for(first_id)] = oci_spec.dump();
   queue_inventory(host, {std::move(container)});
 
   const auto observations = backend.inventory();
@@ -1779,9 +1815,17 @@ namespace {
     ));
     return {
       {"ociVersion", "1.2.0"},
+      {"annotations", {{"run.oci.keep_original_groups", "1"}}},
+      {"process", {{"user", {{"uid", 1000}}}}},
       {"mounts", std::move(mounts)},
       {"linux", json::object()},
     };
+  }
+
+  fake_host_t::fake_host_t() {
+    owned_files[runtime_spec_path_for(first_id)] = runtime_spec_for(valid_spec(), first_id).dump();
+    owned_files[runtime_spec_path_for(second_id)] = runtime_spec_for(
+      valid_spec(1, 2, "polaris-worker-controller-a1b2-2", "profile beta", "heroic-game"), second_id).dump();
   }
 
   json rootless_container_for(
@@ -2258,6 +2302,7 @@ TEST(MultiseatPodmanBackend, InventoryRejectsUnusableRuntimeSpecFiles) {
   {
     SCOPED_TRACE("spec missing");
     fake_host_t host;
+    host.owned_files.clear();
     fake_input_manifest_source_t inputs;
     backend_t backend {host, inputs, options_for_tests()};
     queue_inventory(host, {rootless_container_for(spec, first_id, "running", "healthy")});
@@ -2409,6 +2454,7 @@ TEST(MultiseatPodmanBackend, NeverStartedRootlessWorkerIsStoppedOnceItsAllocatio
   // With its allocation still resolving it is a launch in flight: the missing
   // spec makes the inventory indeterminate rather than releasing the seat.
   fake_host_t launching_host;
+  launching_host.owned_files.clear();
   fake_input_manifest_source_t launching_inputs;
   backend_t launching_backend {launching_host, launching_inputs, options_for_tests()};
   queue_inventory(launching_host, {rootless_container_for(spec, first_id, "created", "")});
@@ -2449,6 +2495,92 @@ TEST(MultiseatPodmanBackend, StopNeverReadsTheRuntimeSpec) {
       "/usr/bin/podman", "--remote=false", "kill", "--signal=TERM", first_id,
     })
   );
+}
+
+TEST(MultiseatPodmanBackend, LaunchRequiresTrustedCrunAndActualProcessGroupSnapshot) {
+  for (int failure = 0; failure < 4; ++failure) {
+    const auto spec = valid_spec();
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    auto options = options_for_tests();
+    if (failure == 0) host.runtime_ready = false;
+    if (failure == 1) options.runtime_executable = "/usr/bin/runc";
+    if (failure == 2) host.groups.reset();
+    if (failure == 3) {
+      host.groups_change_on_recheck = true;
+      host.push({.exit_status = 0}); // Existing profile volume.
+    }
+    backend_t backend {host, inputs, options};
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(host.calls.size(), failure == 3 ? 1U : 0U);
+  }
+}
+
+TEST(MultiseatPodmanBackend, CleanupSurvivesLostRuntimeAndGroups) {
+  const auto spec = valid_spec();
+  fake_host_t host;
+  host.runtime_ready = false;
+  host.groups.reset();
+  fake_input_manifest_source_t inputs;
+  inputs.missing = true;
+  auto options = options_for_tests();
+  options.runtime_executable = "/usr/bin/missing-crun";
+  backend_t backend {host, inputs, options};
+  auto container = rootless_container_for(spec, first_id, "running");
+  container["OCIRuntime"] = "runc";
+  container["HostConfig"]["GroupAdd"] = json::array();
+  queue_inventory(host, {container});
+  host.push({.exit_status = 0});
+  EXPECT_EQ(backend.stop(spec.identity, worker_stop_mode_e::force), worker_command_result_e::applied);
+  EXPECT_EQ(host.group_reads, 0);
+  EXPECT_EQ(host.owned_file_reads, 0U);
+}
+
+TEST(MultiseatPodmanBackend, InventoryRequiresCrunAndKeepGroupsEvidence) {
+  const auto spec = valid_spec();
+  const auto valid = runtime_spec_for(spec, first_id);
+  for (int failure = 0; failure < 5; ++failure) {
+    auto runtime_spec = valid;
+    if (failure == 0) runtime_spec.erase("annotations");
+    if (failure == 1) runtime_spec["annotations"]["run.oci.keep_original_groups"] = "0";
+    expect_rootless_inventory_rejected(spec, runtime_spec, failure < 2 ? 1U : 0U,
+      [failure](json &container) {
+        if (failure == 2) container["OCIRuntime"] = "runc";
+        if (failure == 3) container["HostConfig"].erase("GroupAdd");
+        if (failure == 4) container["HostConfig"]["GroupAdd"] = json::array({"keep-groups", "104"});
+      });
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryRejectsImageUserOverrideOrChangedOciUid) {
+  const auto spec = valid_spec();
+  for (int failure = 0; failure < 5; ++failure) {
+    auto runtime_spec = runtime_spec_for(spec, first_id);
+    if (failure == 0) runtime_spec.erase("process");
+    if (failure == 1) runtime_spec["process"]["user"]["uid"] = 0;
+    if (failure == 2) runtime_spec["process"]["user"]["uid"] = "1000";
+    expect_rootless_inventory_rejected(spec, runtime_spec, failure < 3 ? 1U : 0U,
+      [failure](json &container) {
+        if (failure == 3) container["Config"]["User"] = "0";
+        if (failure == 4) container["Config"].erase("User");
+      });
+  }
+}
+
+TEST(MultiseatPodmanBackend, RecoveryRejectsUnsupportedOrUntrustedRuntimeBeforeObservation) {
+  for (const auto path : {"/usr/bin/runc", "/tmp/crun", "/usr/bin/crun"}) {
+    fake_host_t host;
+    host.runtime_ready = false;
+    fake_input_manifest_source_t inputs;
+    auto options = options_for_tests();
+    options.runtime_executable = path;
+    backend_t backend {host, inputs, options};
+    auto container = container_for(valid_spec(), first_id, "running");
+    container["OCIRuntime"] = path;
+    queue_inventory(host, {container});
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+    EXPECT_TRUE(host.calls.empty());
+  }
 }
 
 #endif
