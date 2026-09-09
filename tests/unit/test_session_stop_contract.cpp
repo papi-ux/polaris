@@ -6,6 +6,7 @@
 #include <src/nvhttp.h>
 #include <src/process.h>
 #include <src/rtsp.h>
+#include <src/video.h>
 #include <src/platform/linux/stream_runtime.h>
 
 #include <gtest/gtest.h>
@@ -1735,6 +1736,61 @@ TEST(SessionStopContractTests, PreparedLaunchCannotPublishAfterAppRetirement) {
   EXPECT_FALSE(subject.raise_session_for_admitted_launch(launch));
   EXPECT_FALSE(rtsp_stream::launch_session_raise(launch));
   EXPECT_EQ(subject.prepare_capture_for_admitted_launch(launch), 503);
+}
+
+TEST(SessionStopContractTests, CapturePreparationUsesProvisionalLaunchRateUntilAnnounce) {
+  rtsp_stream::terminate_sessions();
+  auto cleanup = util::fail_guard([] { rtsp_stream::terminate_sessions(); });
+  ASSERT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 0);
+  for (const int launch_rate : {60000, 59940, 23976}) {
+    SCOPED_TRACE(launch_rate);
+    proc::proc_t subject;
+    auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+    launch->width = 1920;
+    launch->height = 1080;
+    launch->requested_fps = 120000;  // Resolution policy admitted a lower rate.
+    launch->fps = launch_rate;
+    subject.set_active_launch_for_tests(proc::ctx_t {}, launch);
+    video::config_t prepared {};
+    int calls = 0;
+    auto token = std::make_shared<int>(1);
+    video::with_capture_preparation_for_tests(
+      [&](const video::config_t &config, std::shared_ptr<void> &preparation) {
+        prepared = config;
+        preparation = token;
+        ++calls;
+        return true;
+      },
+      [&] { EXPECT_EQ(subject.prepare_capture_for_admitted_launch(launch), 0); });
+    ASSERT_EQ(calls, 1);
+    EXPECT_EQ(launch->capture_preparation.load(), token);
+    EXPECT_EQ(prepared.width, 1920);
+    EXPECT_EQ(prepared.height, 1080);
+    EXPECT_EQ(av_cmp_q(video::framerate_to_rational(prepared), {launch_rate, 1000}), 0);
+    EXPECT_GT(prepared.framerate, 0);
+    EXPECT_FALSE(video::rate::valid(prepared.encode_rate));
+
+    // This is the rate application used by ANNOUNCE, after HTTP preparation.
+    // A 120 Hz display cannot raise the requested 60 FPS stream, while a
+    // limiter still uses the separately admitted launch rate.
+    auto announced = prepared;
+    ASSERT_TRUE(video::configure_announced_rates(announced, 60, 12000, launch_rate, true));
+    EXPECT_EQ(av_cmp_q(announced.stream_rate, {60, 1}), 0);
+    EXPECT_EQ(av_cmp_q(announced.encode_rate, {launch_rate, 1000}), 0);
+    EXPECT_EQ(announced.encodingFramerate, launch_rate);
+    EXPECT_EQ(announced.framerate, 60);
+    if (launch_rate != 60000) EXPECT_NE(av_cmp_q(announced.stream_rate, prepared.stream_rate), 0);
+    ASSERT_TRUE(video::configure_announced_rates(announced, 60, 5994, launch_rate, false));
+    EXPECT_EQ(av_cmp_q(announced.stream_rate, {60000, 1001}), 0);
+    EXPECT_EQ(av_cmp_q(announced.encode_rate, announced.stream_rate), 0);
+    ASSERT_TRUE(video::configure_announced_rates(announced, 59940, 12000, launch_rate, false));
+    EXPECT_EQ(av_cmp_q(announced.stream_rate, {2997, 50}), 0);
+    EXPECT_EQ(announced.encodingFramerate, 59940);
+    ASSERT_TRUE(video::configure_announced_rates(announced, 240, 6000, launch_rate, false));
+    EXPECT_EQ(av_cmp_q(announced.stream_rate, {240, 1}), 0);
+    EXPECT_EQ(announced.framerate, 240);  // Warp budget remains intact.
+    EXPECT_FALSE(video::configure_announced_rates(announced, 0, 6000, launch_rate, false));
+  }
 }
 
 TEST(SessionLifecycleGateTests, ConditionalStopYieldsToACommittedLaunchCancellation) {

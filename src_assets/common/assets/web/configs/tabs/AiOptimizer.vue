@@ -509,10 +509,9 @@ function subscriptionRuntimeSummary(status) {
   return status.cli_available ? $t('config.ai_cli_detected') : $t('config.ai_cli_missing')
 }
 
-function providerDefaultTimeout(provider, authMode = provider.defaultAuth) {
-  if (provider.id === 'local') return 60000
-  if (provider.id === 'anthropic' && authMode === 'subscription') return 30000
-  return 5000
+function providerDefaultTimeout(provider, authMode = provider?.defaultAuth) {
+  if (provider?.id === 'anthropic' && authMode === 'subscription') return 30000
+  return provider?.defaultTimeout || (provider?.id === 'local' ? 60000 : 5000)
 }
 
 function syncProviderTimeout(previousDefaultTimeout) {
@@ -583,10 +582,6 @@ function syncProviderDefaults(previousProviderId) {
   if (config.value.ai_auth_mode === 'none') {
     config.value.ai_api_key = ''
   }
-}
-
-function providerDefaultTimeout(provider) {
-  return provider?.defaultTimeout || (provider?.id === 'local' ? 60000 : 5000)
 }
 
 async function refreshModelCatalog({ silent = false } = {}) {
