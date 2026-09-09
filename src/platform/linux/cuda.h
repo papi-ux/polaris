@@ -78,7 +78,8 @@ namespace cuda {
 
   class tex_t {
   public:
-    static std::optional<tex_t> make(int height, int pitch);
+    // Allocation width is an uchar4 element count; upload pitch is in bytes.
+    static std::optional<tex_t> make(int height, int width_pixels);
 
     tex_t();
     tex_t(tex_t &&);

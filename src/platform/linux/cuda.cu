@@ -334,11 +334,12 @@ namespace cuda {
     return 0;
   }
 
-  std::optional<tex_t> tex_t::make(int height, int pitch) {
+  std::optional<tex_t> tex_t::make(int height, int width_pixels) {
+    if (height <= 0 || width_pixels <= 0) return std::nullopt;
     tex_t tex;
 
     auto format = cudaCreateChannelDesc<uchar4>();
-    CU_CHECK_OPT(cudaMallocArray(&tex.array, &format, pitch, height, cudaArrayDefault), "Couldn't allocate cuda array");
+    CU_CHECK_OPT(cudaMallocArray(&tex.array, &format, width_pixels, height, cudaArrayDefault), "Couldn't allocate cuda array");
 
     cudaResourceDesc res {};
     res.resType = cudaResourceTypeArray;
