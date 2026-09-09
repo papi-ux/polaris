@@ -167,6 +167,7 @@ jobs:
         run: |
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
+          snapshot_preferences="$RUNNER_TEMP/polaris-ubuntu-snapshot.pref"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
           snapshot_archives="/var/tmp/polaris-ubuntu-archives"
           mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial" "$snapshot_archives/partial"
@@ -178,9 +179,19 @@ jobs:
           Components: main universe restricted multiverse
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
+          # A hosted runner may already carry libraries newer than this snapshot.
+          # Prefer the pinned dependency closure, including required downgrades,
+          # without changing the runner's persistent APT configuration.
+          cat > "$snapshot_preferences" <<EOF
+          Package: *
+          Pin: origin "snapshot.ubuntu.com"
+          Pin-Priority: 1001
+          EOF
           apt_options=(
             -o "Dir::Etc::sourcelist=$snapshot_sources"
             -o "Dir::Etc::sourceparts=$snapshot_source_parts"
+            -o "Dir::Etc::preferences=$snapshot_preferences"
+            -o "Dir::Etc::preferencesparts=$snapshot_source_parts"
             -o "Dir::State::Lists=$snapshot_lists"
             -o "Dir::Cache::archives=$snapshot_archives"
             -o APT::Update::Error-Mode=any
@@ -200,13 +211,14 @@ jobs:
             libpulse-dev libopus-dev \
             "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
             libdrm-dev libgbm-dev libcap-dev libwayland-dev \
-            libpipewire-0.3-dev libx11-dev libxrandr-dev \
+            libpipewire-0.3-dev pipewire-bin libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
             libappindicator3-dev libgtk-3-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             glslang-tools libvulkan-dev \
             wayland-protocols
+          test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
       - name: Configure sanitizer build
@@ -902,6 +914,7 @@ jobs:
         run: |
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
+          snapshot_preferences="$RUNNER_TEMP/polaris-ubuntu-snapshot.pref"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
           snapshot_archives="/var/tmp/polaris-ubuntu-archives"
           mkdir -p "$snapshot_source_parts" "$snapshot_lists/partial" "$snapshot_archives/partial"
@@ -913,9 +926,19 @@ jobs:
           Components: main universe restricted multiverse
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
+          # A hosted runner may already carry libraries newer than this snapshot.
+          # Prefer the pinned dependency closure, including required downgrades,
+          # without changing the runner's persistent APT configuration.
+          cat > "$snapshot_preferences" <<EOF
+          Package: *
+          Pin: origin "snapshot.ubuntu.com"
+          Pin-Priority: 1001
+          EOF
           apt_options=(
             -o "Dir::Etc::sourcelist=$snapshot_sources"
             -o "Dir::Etc::sourceparts=$snapshot_source_parts"
+            -o "Dir::Etc::preferences=$snapshot_preferences"
+            -o "Dir::Etc::preferencesparts=$snapshot_source_parts"
             -o "Dir::State::Lists=$snapshot_lists"
             -o "Dir::Cache::archives=$snapshot_archives"
             -o APT::Update::Error-Mode=any
@@ -935,7 +958,7 @@ jobs:
             libpulse-dev libopus-dev \
             "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
             libdrm-dev libgbm-dev libcap-dev libwayland-dev \
-            libpipewire-0.3-dev libx11-dev libxrandr-dev \
+            libpipewire-0.3-dev pipewire-bin libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
             libappindicator3-dev libgtk-3-dev \
@@ -943,6 +966,7 @@ jobs:
             glslang-tools libvulkan-dev \
             golang-go \
             wayland-protocols
+          test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
       - name: Configure
@@ -1010,6 +1034,7 @@ jobs:
 
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
+          snapshot_preferences="$RUNNER_TEMP/polaris-ubuntu-snapshot.pref"
           snapshot_lists="$RUNNER_TEMP/polaris-ubuntu-lists"
           test -s "$snapshot_sources"
           test -d "$snapshot_source_parts"
@@ -1017,6 +1042,8 @@ jobs:
           apt_options=(
             -o "Dir::Etc::sourcelist=$snapshot_sources"
             -o "Dir::Etc::sourceparts=$snapshot_source_parts"
+            -o "Dir::Etc::preferences=$snapshot_preferences"
+            -o "Dir::Etc::preferencesparts=$snapshot_source_parts"
             -o "Dir::State::Lists=$snapshot_lists"
             -o Acquire::Retries=3
             -o Acquire::http::Timeout=30
