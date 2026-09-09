@@ -2,10 +2,10 @@
   <div class="relative min-h-screen overflow-hidden bg-background">
     <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,color-mix(in_srgb,var(--color-accent)_18%,transparent),transparent_32%),radial-gradient(circle_at_bottom_right,color-mix(in_srgb,var(--color-ice)_8%,transparent),transparent_24%)]"></div>
     <div class="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center p-4 sm:p-6">
-      <div class="grid w-full max-w-5xl gap-6 xl:grid-cols-[minmax(0,1.15fr)_340px]">
-        <section class="glass rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
-          <div class="flex items-center gap-3">
-            <img :src="polarisWordmarkSrc" class="h-11 w-auto" alt="Polaris">
+      <div class="grid w-full max-w-5xl items-start gap-6 xl:grid-cols-[minmax(0,1.15fr)_340px]">
+        <section class="glass min-w-0 rounded-[28px] border border-storm/30 p-6 shadow-2xl sm:p-8">
+          <div class="flex flex-col items-start gap-4">
+            <img :src="polarisWordmarkSrc" class="h-auto w-52 max-w-full" alt="Polaris">
             <div>
               <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm/85">First-Time Setup</div>
               <h1 class="mt-1 text-3xl font-bold text-silver">{{ $t('welcome.greeting') }}</h1>
@@ -119,7 +119,7 @@
                     Add games manually, scan supported launchers, and tune per-app behavior once entries exist.
                   </p>
                 </div>
-                <a href="#/apps" target="_blank" class="inline-flex h-10 items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
+                <a href="#/apps" target="_blank" class="inline-flex min-h-10 max-w-full items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 py-2 text-center text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
                   Open Applications Page
                 </a>
               </div>
@@ -137,7 +137,7 @@
                     <li>Finish pairing from the Clients &amp; Pairing page, then launch an app.</li>
                   </ol>
                 </div>
-                <a href="#/pin" target="_blank" class="inline-flex h-10 items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
+                <a href="#/pin" target="_blank" class="inline-flex min-h-10 max-w-full items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 py-2 text-center text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
                   Open Clients &amp; Pairing
                 </a>
                 <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
@@ -174,7 +174,7 @@
           </div>
         </section>
 
-        <aside class="space-y-4">
+        <aside class="min-w-0 space-y-4">
           <section class="section-card">
             <div class="section-kicker">Setup Path</div>
             <h2 class="section-title">What this wizard is covering</h2>
