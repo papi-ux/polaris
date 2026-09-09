@@ -15,6 +15,8 @@
  * inside cage instead of on a separate physical display.
  */
 
+#include "process_environment.h"
+
 #include "session_manager.h"
 #include "../../config.h"
 #include "../../logging.h"
@@ -423,6 +425,7 @@ namespace session_manager {
       return false;
     }
 
+    std::lock_guard environment_lock(process_environment::mutex);
     std::vector<std::string> imported;
     std::istringstream lines {manager_environment};
     std::string line;
@@ -442,7 +445,7 @@ namespace session_manager {
         continue;
       }
 
-      if (setenv(key.c_str(), value.c_str(), 1) == 0) {
+      if (process_environment::set(key.c_str(), value.c_str(), 1) == 0) {
         imported.push_back(key);
       }
     }

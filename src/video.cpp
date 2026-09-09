@@ -45,6 +45,8 @@ extern "C" {
 #include "video.h"
 #include "verified_action.h"
 #include "video_frame_pacing.h"
+#include "encoder_probe_reuse.h"
+#include <iomanip>
 
 #ifdef __linux__
   #include "platform/linux/encoder_auto_policy.h"
@@ -53,7 +55,10 @@ extern "C" {
   #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
   #include "platform/linux/misc.h"
+  #include "platform/linux/encoder_probe_identity.h"
+  #include "platform/linux/encoder_probe_driver_proof.h"
   #include "platform/linux/vaapi.h"
+  #include "platform/linux/kms_connector_selection.h"
   #ifdef POLARIS_BUILD_VULKAN
     #include "platform/linux/vulkan_encode.h"
   #endif
@@ -71,6 +76,21 @@ using namespace std::literals;
 namespace video {
 
   namespace {
+
+    probe_reuse::cache_t successful_probe;
+#ifdef __linux__
+    // Access under encoder_state_mutex; only a full writer-owned probe collects
+    // provider evidence. Live validation under a reader lease cannot mutate it.
+    std::shared_ptr<platf::encoder_probe_identity::driver_proof_t> probe_drivers;
+    thread_local std::shared_ptr<platf::encoder_probe_identity::driver_proof_t> collecting_probe_drivers;
+#endif
+#ifdef POLARIS_TESTS
+    struct probe_test_hooks_t {
+      probe_reuse::identity_t identity;
+      std::function<bool(encoder_t &, bool)> validate;
+    };
+    thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
+#endif
 
 #ifdef __linux__
     /**
@@ -949,6 +969,148 @@ namespace video {
       }
 
       return topology.str();
+    }
+
+    template<class T>
+    std::string probe_setting(const T &value) {
+      if constexpr (requires { value.has_value(); }) {
+        return value ? "some:" + probe_setting(*value) : "none";
+      } else {
+        std::ostringstream text;
+        text << std::setprecision(17);
+        if constexpr (std::is_enum_v<T>) text << static_cast<int>(value);
+        else text << value;
+        return text.str();
+      }
+    }
+
+    std::string encoder_probe_settings(const config::video_t &settings) {
+      std::ostringstream key;
+      auto add = [&](const auto &... values) {
+        ((key << std::quoted(probe_setting(values))), ...);
+      };
+      const auto published_vaapi = config::vaapi::snapshot();
+      add(
+        published_vaapi.strict_rc_buffer,
+        static_cast<int>(published_vaapi.quality),
+        static_cast<int>(published_vaapi.rc),
+        published_vaapi.blbrc,
+        settings.limit_framerate,
+        settings.double_refreshrate,
+        settings.qp,
+        settings.hevc_mode,
+        settings.av1_mode,
+        settings.hdr_mode,
+        settings.nvenc_tune,
+        settings.min_threads,
+        settings.sw.sw_preset,
+        settings.sw.sw_tune,
+        settings.sw.svtav1_preset,
+        settings.nv.quality_preset,
+        settings.nv.two_pass,
+        settings.nv.split_encode_mode,
+        settings.nv.vbv_percentage_increase,
+        settings.nv.weighted_prediction,
+        settings.nv.adaptive_quantization,
+        settings.nv.enable_min_qp,
+        settings.nv.min_qp_h264,
+        settings.nv.min_qp_hevc,
+        settings.nv.min_qp_av1,
+        settings.nv.h264_cavlc,
+        settings.nv.insert_filler_data,
+        settings.nv.intra_refresh,
+        settings.nv_realtime_hags,
+        settings.nv_opengl_vulkan_on_dxgi,
+        settings.nv_sunshine_high_power_mode,
+        settings.nv_legacy.preset,
+        settings.nv_legacy.multipass,
+        settings.nv_legacy.h264_coder,
+        settings.nv_legacy.aq,
+        settings.nv_legacy.vbv_percentage_increase,
+        settings.qsv.qsv_preset,
+        settings.qsv.qsv_cavlc,
+        settings.qsv.qsv_slow_hevc,
+        settings.amd.amd_usage_h264,
+        settings.amd.amd_usage_hevc,
+        settings.amd.amd_usage_av1,
+        settings.amd.amd_rc_h264,
+        settings.amd.amd_rc_hevc,
+        settings.amd.amd_rc_av1,
+        settings.amd.amd_enforce_hrd,
+        settings.amd.amd_quality_h264,
+        settings.amd.amd_quality_hevc,
+        settings.amd.amd_quality_av1,
+        settings.amd.amd_preanalysis,
+        settings.amd.amd_vbaq,
+        settings.amd.amd_coder,
+        settings.vt.vt_allow_sw,
+        settings.vt.vt_require_sw,
+        settings.vt.vt_realtime,
+        settings.vt.vt_coder,
+        settings.vaapi.strict_rc_buffer,
+        settings.vk.tune,
+        settings.vk.rc_mode,
+        settings.capture,
+        settings.encoder,
+        settings.adapter_name,
+        settings.output_name,
+        settings.minimum_fps_target,
+        settings.color_range,
+        settings.max_bitrate,
+        settings.linux_display.streaming_output,
+        settings.linux_display.primary_output,
+        settings.linux_display.auto_manage_displays,
+        settings.linux_display.use_cage_compositor,
+        settings.linux_display.headless_mode,
+        settings.linux_display.prefer_gpu_native_capture,
+        settings.linux_display.stream_mode,
+        settings.linux_display.private_runtime,
+        settings.linux_display.headless_swap_mode,
+        settings.fallback_mode,
+        settings.display_plan,
+        settings.isolated_virtual_display_option,
+        settings.browser_streaming
+      );
+      return key.str();
+    }
+
+    std::optional<probe_reuse::identity_t> current_probe_identity(std::string_view backend) {
+#ifdef POLARIS_TESTS
+      if (probe_test_hooks) return probe_test_hooks->identity;
+#endif
+#ifdef __linux__
+      auto decline = [](std::string_view reason) -> std::optional<probe_reuse::identity_t> {
+        BOOST_LOG(debug) << "Encoder probe requires live validation: " << reason;
+        return std::nullopt;
+      };
+      // Only the owned private compositor currently provides a live,
+      // generation-bound topology observation. Desktop/portal/unknown routes
+      // keep probing until they implement an equally strong identity contract.
+      if (!config::video.linux_display.use_cage_compositor || !probe_drivers ||
+          (!config::video.capture.empty() && config::video.capture != "wlr") ||
+          !probe_drivers->has_capture_routes()) return decline("capture route or retained provider proof unavailable");
+      // Require actual provider evidence, collected before probe owners died.
+      if (backend != "nvenc" || !probe_drivers->contains_provider("libnvidia-encode.so") ||
+          !probe_drivers->contains_provider("libcuda.so")) return decline("NVENC or CUDA provider unavailable");
+      const auto providers = probe_drivers->current_key();
+      const auto selection = platf::encoder_probe_identity::provider_selection_key();
+      if (!providers) return decline("retained provider identity or loader generation changed");
+      if (!selection) return decline("provider discovery identity unavailable");
+      // Both private WLR RAM capture and GL/CUDA DMA-BUF conversion use EGL.
+      // GLX is a separate frontend and need not be loaded on this route. The
+      // retained closure still includes every actual GL/GLX provider in use.
+      if (!probe_drivers->contains_provider("libEGL_nvidia.so")) return decline("NVIDIA EGL provider unavailable");
+      const auto topology = stream_runtime::labwc::encoder_probe_topology();
+      if (!topology) return decline("owned capture topology unavailable");
+      const auto render = config::video.adapter_name.empty() ?
+                            platf::default_render_device() : config::video.adapter_name;
+      const auto hardware = platf::encoder_probe_identity::observe(render);
+      if (!hardware) return decline("live GPU or kernel driver identity unavailable");
+      return probe_reuse::identity_t {hardware->gpu, hardware->driver + *providers + *selection, *topology,
+                                      encoder_probe_settings(config::video)};
+#else
+      return std::nullopt;
+#endif
     }
 
     std::chrono::milliseconds reset_display_retry_delay(int attempt) {
@@ -2309,7 +2471,14 @@ namespace video {
   static std::shared_timed_mutex encoder_state_mutex;
   static thread_local bool encoder_probe_in_progress = false;
 
-  static void reset_encoder_probe_state_unlocked();
+  static void invalidate_live_probe_reuse() {
+    // Expected capability/fallback failures occur inside a full probe. Its
+    // token is already retired and must continue to span any external reset.
+    if (!encoder_probe_in_progress) successful_probe.invalidate();
+  }
+
+
+  static void reset_encoder_probe_state_unlocked(bool invalidate_reuse = true);
 
   bool encoder_probe_active() {
     return encoder_probe_in_progress;
@@ -2383,7 +2552,11 @@ namespace video {
         return index;
       }
     }
+#ifdef __linux__
+    return platf::kms_selection::find_alias(display_names, requested_display_name);
+#else
     return std::nullopt;
+#endif
   }
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
@@ -2412,6 +2585,10 @@ namespace video {
    * @param current_display_index The current display index or -1 if not yet known.
    * @return true when the current/preferred identity remains selectable.
    */
+#ifdef POLARIS_TESTS
+  thread_local const std::vector<std::string> *display_enumeration_override {};
+#endif
+
   bool refresh_displays(
     platf::mem_type_e dev_type,
     std::vector<std::string> &display_names,
@@ -2432,6 +2609,12 @@ namespace video {
 
     // Refresh the display names
     auto old_display_names = std::move(display_names);
+#ifdef POLARIS_TESTS
+    if (display_enumeration_override) {
+      display_names = *display_enumeration_override;
+    } else
+#endif
+    {
 #ifdef __linux__
     display_names = capture_config != nullptr ?
       platf::display_names(dev_type, *capture_config) :
@@ -2439,6 +2622,7 @@ namespace video {
 #else
     display_names = platf::display_names(dev_type);
 #endif
+    }
 
     // If we now have no displays, let's put the old display array back and fail
     if (display_names.empty() && !old_display_names.empty()) {
@@ -2484,7 +2668,7 @@ namespace video {
   ) {
     static std::string empty_str = "";
     if (!refresh_displays(dev_type, display_names, current_display_index, empty_str, capture_config)) {
-      current_display_index = display_names.empty() ? -1 : 0;
+      current_display_index = -1;
     }
   }
 
@@ -2530,6 +2714,7 @@ namespace video {
       return;
     }
     capture_ctxs.emplace_back(std::move(*initial_capture_ctx));
+    auto initial_capture_failure = util::fail_guard([] { invalidate_live_probe_reuse(); });
 
     std::vector<std::string> display_names;
     int display_p = -1;
@@ -2559,8 +2744,8 @@ namespace video {
         display_p,
         &capture_ctxs.front().config
       );
-      if (display_names.empty()) {
-        BOOST_LOG(error) << "No displays were found for initial capture setup"sv;
+      if (display_p < 0 || display_p >= display_names.size()) {
+        BOOST_LOG(error) << "Requested display is unavailable for initial capture setup"sv;
         return;
       }
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
@@ -2573,6 +2758,7 @@ namespace video {
     }
 
     display_wp = disp;
+    initial_capture_failure.disable();
 
     constexpr auto capture_buffer_size = 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
@@ -2747,6 +2933,7 @@ namespace video {
       switch (status) {
         case platf::capture_e::reinit:
           {
+            invalidate_live_probe_reuse();
             reinit_event.raise(true);
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
@@ -2833,8 +3020,8 @@ namespace video {
                 }
               }
 
-              if (display_names.empty()) {
-                BOOST_LOG(error) << "No displays were found after reenumeration"sv;
+              if (display_p < 0 || display_p >= display_names.size()) {
+                BOOST_LOG(error) << "Requested display is unavailable after reenumeration"sv;
                 return;
               }
 
@@ -2863,6 +3050,8 @@ namespace video {
             continue;
           }
         case platf::capture_e::error:
+          successful_probe.invalidate();
+          [[fallthrough]];
         case platf::capture_e::ok:
         case platf::capture_e::timeout:
         case platf::capture_e::interrupted:
@@ -2981,13 +3170,14 @@ namespace video {
   }
 
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    int result = -1;
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
-      return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
+      result = encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
-      return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
+      result = encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
     }
-
-    return -1;
+    if (result != 0) invalidate_live_probe_reuse();
+    return result;
   }
 
   std::unique_ptr<avcodec_encode_session_t> make_avcodec_encode_session(
@@ -3058,8 +3248,9 @@ namespace video {
       ctx.reset(avcodec_alloc_context3(codec));
       ctx->width = config.width;
       ctx->height = config.height;
-      ctx->time_base = AVRational {1, config.framerate};
-      ctx->framerate = AVRational {config.framerate, 1};
+      const auto fps = framerate_to_rational(config);
+      ctx->time_base = AVRational {fps.den, fps.num};
+      ctx->framerate = fps;
 
       switch (config.videoFormat) {
         case 0:
@@ -3301,6 +3492,10 @@ namespace video {
         }
       }
 
+      // Report codec read-back after FFmpeg has applied driver constraints.
+#ifdef POLARIS_BUILD_VAAPI
+      if (encoder.name == "vaapi") va::log_effective_tuning(ctx.get());
+#endif
       // Successfully opened the codec
       break;
     }
@@ -3495,6 +3690,7 @@ namespace video {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
       session = make_nvenc_encode_session(encoder, config, std::move(nvenc_encode_device));
     }
+    if (!session) invalidate_live_probe_reuse();
     return session;
   }
 
@@ -3552,7 +3748,7 @@ namespace video {
     // set max frame time based on client-requested target framerate.
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target * 1000 : std::max(config.encodingFramerate / 5, 10000);
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
-    auto encode_frame_threshold = std::chrono::nanoseconds(1000ms) * 1000 / config.encodingFramerate;
+    auto encode_frame_threshold = encoding_frame_interval(config);
     auto frame_variation_threshold = encode_frame_threshold / 4;
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
@@ -3582,11 +3778,13 @@ namespace video {
         dummy_img = disp->alloc_img();
       }
       if (!dummy_img || disp->dummy_img(dummy_img.get())) {
+        invalidate_live_probe_reuse();
         return;
       }
 
       auto dummy_frame = make_frame(dummy_img);
       if (session->convert(dummy_frame)) {
+        invalidate_live_probe_reuse();
         return;
       }
     }
@@ -3623,9 +3821,7 @@ namespace video {
     double accumulated_frame_age_ms = 0.0;
     double accumulated_jitter_ms = 0.0;
     std::optional<std::chrono::steady_clock::time_point> last_source_frame_timestamp;
-    const double encode_target_fps = config.encodingFramerate > 1000 ?
-      static_cast<double>(config.encodingFramerate) / 1000.0 :
-      static_cast<double>(config.encodingFramerate);
+    const double encode_target_fps = av_q2d(encoding_framerate_to_rational(config));
     const double target_frame_interval_ms = encode_target_fps > 0.0 ? 1000.0 / encode_target_fps : 0.0;
     int applied_adaptive_bitrate = config.bitrate;
 
@@ -3706,6 +3902,7 @@ namespace video {
 #endif
 
           if (session->convert(frame)) {
+            invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
             if (handle_linux_gpu_native_conversion_failure(frame)) {
@@ -3759,9 +3956,7 @@ namespace video {
           }
 
         if (frame_nr % 30 == 0) {
-          double target_fps = config.encodingFramerate > 1000
-            ? static_cast<double>(config.encodingFramerate) / 1000.0
-            : static_cast<double>(config.encodingFramerate);
+          double target_fps = av_q2d(encoding_framerate_to_rational(config));
           double current_fps = (measured_fps > 0) ? measured_fps : target_fps;
           // Clamp to reasonable range
           if (current_fps <= 0 || current_fps > target_fps * 1.5) {
@@ -4037,11 +4232,13 @@ namespace video {
 
     if (!frame.valid()) {
       BOOST_LOG(error) << "Could not create synced encode session without an initial frame"sv;
+      invalidate_live_probe_reuse();
       return std::nullopt;
     }
 
     auto encode_device = make_encode_device(*disp, encoder, ctx.config);
     if (!encode_device) {
+      invalidate_live_probe_reuse();
       return std::nullopt;
     }
 
@@ -4058,6 +4255,7 @@ namespace video {
 
     // Load the initial image to prepare for encoding
     if (session->convert(frame)) {
+      invalidate_live_probe_reuse();
       BOOST_LOG(error) << "Could not convert initial image"sv;
 #ifdef __linux__
       // A GPU-native route that cannot convert its first frame produces a
@@ -4124,6 +4322,7 @@ namespace video {
         if (!disp) {
           BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
                            << "] could not be opened; refusing another output"sv;
+          invalidate_live_probe_reuse();
           return encode_e::error;
         }
         break;
@@ -4148,8 +4347,9 @@ namespace video {
         }
       }
 
-      if (display_names.empty()) {
-        BOOST_LOG(error) << "No displays were found for synchronous capture setup"sv;
+      if (display_p < 0 || display_p >= display_names.size()) {
+        BOOST_LOG(error) << "Requested display is unavailable for synchronous capture setup"sv;
+        invalidate_live_probe_reuse();
         return encode_e::error;
       }
 
@@ -4168,11 +4368,13 @@ namespace video {
     }
 
     if (!disp) {
+      invalidate_live_probe_reuse();
       return encode_e::error;
     }
 
     auto img = disp->alloc_img();
     if (!img || disp->dummy_img(img.get())) {
+      invalidate_live_probe_reuse();
       return encode_e::error;
     }
 
@@ -4251,6 +4453,7 @@ namespace video {
           }
 
           if (frame_captured && frame.valid() && pos->session->convert(frame)) {
+            invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
             if (handle_linux_gpu_native_conversion_failure(frame)) {
@@ -4312,6 +4515,8 @@ namespace video {
       switch (status) {
         case platf::capture_e::reinit:
         case platf::capture_e::error:
+          invalidate_live_probe_reuse();
+          [[fallthrough]];
         case platf::capture_e::ok:
         case platf::capture_e::timeout:
         case platf::capture_e::interrupted:
@@ -4418,6 +4623,7 @@ namespace video {
 
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {
+        invalidate_live_probe_reuse();
         return;
       }
 
@@ -4529,6 +4735,7 @@ namespace video {
   int validate_config(std::shared_ptr<platf::display_t> disp, const encoder_t &encoder, const config_t &config) {
     auto encode_device = make_encode_device(*disp, encoder, config);
     if (!encode_device) {
+      invalidate_live_probe_reuse();
       return -1;
     }
 
@@ -4554,6 +4761,7 @@ namespace video {
 
       auto frame = make_frame(img);
       if (session->convert(frame)) {
+        invalidate_live_probe_reuse();
         return -1;
       }
     }
@@ -4588,6 +4796,12 @@ namespace video {
       }
     }
 
+#ifdef __linux__
+    if (collecting_probe_drivers) {
+      collecting_probe_drivers->include_capture_route(disp->encoder_probe_route());
+      (void) collecting_probe_drivers->include_live_objects();
+    }
+#endif
     return flag;
   }
 
@@ -4597,6 +4811,9 @@ namespace video {
     auto probe_state_guard = util::fail_guard([previous_probe_state]() {
       encoder_probe_in_progress = previous_probe_state;
     });
+#ifdef POLARIS_TESTS
+    if (probe_test_hooks) return probe_test_hooks->validate(encoder, expect_failure);
+#endif
 
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
@@ -5039,17 +5256,24 @@ namespace video {
     }
 #endif
 
-    // If we already have a good encoder, check to see if another probe is required
-    if (chosen_encoder && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
-      if (!require_configured_encoder ||
-          config::video.encoder.empty() ||
-          chosen_encoder->name == config::video.encoder) {
-        return 0;
-      }
-      BOOST_LOG(info) << "Configured encoder ["sv << config::video.encoder
-                      << "] does not match the active encoder ["sv << chosen_encoder->name
-                      << "]; forcing an exact runtime probe"sv;
+    const auto identity_before = current_probe_identity(chosen_encoder ? chosen_encoder->name : std::string_view(config::video.encoder));
+    if (chosen_encoder && successful_probe.reusable(
+          identity_before, chosen_encoder->name, config::video.encoder,
+          (chosen_encoder->flags & ALWAYS_REPROBE) || selection_plan.exact_live_probe_required ||
+            config::video.encoder == "vulkan"sv || chosen_encoder->name == "vulkan"sv)) {
+      BOOST_LOG(info) << "Encoder probe reused: unchanged live GPU, driver, capture generation and settings"sv;
+      return 0;
     }
+    // Every failed/partial probe retires the previous reuse authority, even if
+    // strict selection restores previous advertised state for compatibility.
+    const auto successful_epoch = successful_probe.begin_probe();
+#ifdef __linux__
+    if (!identity_before) probe_drivers.reset();
+    const auto previous_collection = collecting_probe_drivers;
+    collecting_probe_drivers = probe_drivers ? probe_drivers :
+      std::make_shared<platf::encoder_probe_identity::driver_proof_t>();
+    auto restore_collection = util::fail_guard([previous_collection] { collecting_probe_drivers = previous_collection; });
+#endif
 
     // Try to use cached encoder from previous successful probe (skip straight to it)
     auto cached_entry = load_encoder_cache();
@@ -5104,7 +5328,7 @@ namespace video {
       last_encoder_probe_supported_yuv444_for_codec = previous_yuv444_for_codec;
       encoder_selection_info = previous_encoder_selection_info;
     };
-    reset_encoder_probe_state_unlocked();
+    reset_encoder_probe_state_unlocked(false);
     encoder_selection_info = selection_plan;
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
@@ -5316,6 +5540,10 @@ namespace video {
       BOOST_LOG(info) << "Encoder cache not updated for temporary runtime probe"sv;
     }
 
+#ifdef __linux__
+    probe_drivers = collecting_probe_drivers;
+#endif
+    successful_probe.remember(identity_before, current_probe_identity(encoder.name), encoder.name, successful_epoch);
     return 0;
   }
 
@@ -5542,7 +5770,13 @@ namespace video {
     return false;
   }
 
-  static void reset_encoder_probe_state_unlocked() {
+  static void reset_encoder_probe_state_unlocked(bool invalidate_reuse) {
+    if (invalidate_reuse) {
+      successful_probe.invalidate();
+#ifdef __linux__
+      probe_drivers.reset();
+#endif
+    }
     chosen_encoder = nullptr;
     encoder_selection_info = {};
     active_hevc_mode = config::video.hevc_mode;
@@ -5552,6 +5786,7 @@ namespace video {
   }
 
   void reset_encoder_probe_state() {
+    successful_probe.invalidate();
     std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
     if (!encoder_state_lock.try_lock_for(2s)) {
       BOOST_LOG(warning) << "Encoder state reset deferred because active video capture did not quiesce within 2 seconds"sv;
@@ -5644,6 +5879,7 @@ namespace video {
 
   bool active_encoder_runtime_supports_config(const config_t &config) {
     std::shared_lock encoder_state_lock {encoder_state_mutex};
+    auto runtime_failure = util::fail_guard([] { successful_probe.invalidate(); });
 
     if (!chosen_encoder || !chosen_encoder->platform_formats) {
       return false;
@@ -5661,11 +5897,14 @@ namespace video {
       return false;
     }
 
-    return validate_config(disp, *chosen_encoder, config) >= 0;
+    const bool supported = validate_config(disp, *chosen_encoder, config) >= 0;
+    if (supported) runtime_failure.disable();
+    return supported;
   }
 
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config) {
     std::shared_lock encoder_state_lock {encoder_state_mutex};
+    auto runtime_failure = util::fail_guard([] { successful_probe.invalidate(); });
 
     if (!chosen_encoder || !chosen_encoder->platform_formats) {
       return false;
@@ -5724,6 +5963,7 @@ namespace video {
       auto frame = make_frame(std::move(captured_img));
       auto encode_device = make_encode_device(*disp, *chosen_encoder, config);
       if (!encode_device) {
+        successful_probe.invalidate();
         BOOST_LOG(debug) << "Live GPU capture probe could not create an encode device for conversion validation"sv;
         return false;
       }
@@ -5735,10 +5975,12 @@ namespace video {
       }
 
       if (session->convert(frame)) {
+        successful_probe.invalidate();
         BOOST_LOG(debug) << "Live GPU capture probe received a DMA-BUF frame but conversion failed"sv;
         return false;
       }
 
+      runtime_failure.disable();
       return true;
     }
 
@@ -5811,6 +6053,21 @@ namespace video {
     };
   }
 
+  int probe_encoders_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate
+  ) {
+    const probe_test_hooks_t hooks {identity, validate};
+    const auto previous = probe_test_hooks;
+    probe_test_hooks = &hooks;
+    auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
+    return probe_encoders(true, false);
+  }
+
+  std::string encoder_probe_settings_for_tests(const config::video_t &settings) {
+    return encoder_probe_settings(settings);
+  }
+
   std::string current_encoder_topology_key_for_tests() {
     return current_encoder_topology_key();
   }
@@ -5839,6 +6096,17 @@ namespace video {
     std::string_view requested_display_name
   ) {
     return find_display_index(display_names, requested_display_name);
+  }
+
+  int refresh_display_selection_for_tests(std::vector<std::string> previous, int previous_index,
+                                         std::string requested, const std::vector<std::string> &enumerated) {
+    const auto saved = display_enumeration_override;
+    auto restore = util::fail_guard([&] { display_enumeration_override = saved; });
+    display_enumeration_override = &enumerated;
+    config_t config {};
+    config.capture_generation.requested_output_name = std::move(requested);
+    refresh_displays(platf::mem_type_e::unknown, previous, previous_index, &config);
+    return previous_index;
   }
 
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count) {

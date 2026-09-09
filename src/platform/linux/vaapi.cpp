@@ -33,6 +33,7 @@ extern "C" {
 #include "graphics.h"
 #include "misc.h"
 #include "vaapi.h"
+#include "vaapi_tuning.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/stream_stats.h"
@@ -45,6 +46,24 @@ using namespace std::literals;
 extern "C" struct AVBufferRef;
 
 namespace va {
+
+  void log_effective_tuning(AVCodecContext *ctx) {
+    int64_t block = -1, explicit_rc = -1;
+    if (ctx->priv_data) {
+      if (av_opt_get_int(ctx->priv_data, "blbrc", 0, &block) < 0) block = -1;
+      if (av_opt_get_int(ctx->priv_data, "rc_mode", 0, &explicit_rc) < 0) explicit_rc = -1;
+    }
+    const char *mode_name = "codec selected (see session policy)";
+    for (const auto &mode : rc_modes) {
+      const auto option = ctx->priv_data ? av_opt_find(ctx->priv_data, mode.name, "rc_mode", 0, 0) : nullptr;
+      if (option && option->type == AV_OPT_TYPE_CONST && option->default_val.i64 == explicit_rc) mode_name = mode.name;
+    }
+    BOOST_LOG(info) << "VA-API opened encoder: rate_control="sv << mode_name
+      << " compression_level="sv << ctx->compression_level
+      << " blbrc="sv << (block < 0 ? "unavailable" : block ? "enabled" : "disabled")
+      << " configured_vbv_bits="sv << ctx->rc_buffer_size;
+  }
+
 
   /**
    * @brief The render node VAAPI should open, from adapter_name or the shared default.
@@ -278,14 +297,14 @@ namespace va {
       }
 
       VAConfigAttrib rc_attr = {VAConfigAttribRateControl};
-      auto status = vaGetConfigAttributes(va_display, va_profile, va_entrypoint, &rc_attr, 1);
-      if (status != VA_STATUS_SUCCESS) {
+      const auto rc_status = vaGetConfigAttributes(va_display, va_profile, va_entrypoint, &rc_attr, 1);
+      if (rc_status != VA_STATUS_SUCCESS) {
         // Stick to the default rate control (CQP)
         rc_attr.value = 0;
       }
 
       VAConfigAttrib slice_attr = {VAConfigAttribEncMaxSlices};
-      status = vaGetConfigAttributes(va_display, va_profile, va_entrypoint, &slice_attr, 1);
+      const auto status = vaGetConfigAttributes(va_display, va_profile, va_entrypoint, &slice_attr, 1);
       if (status != VA_STATUS_SUCCESS) {
         // Assume only a single slice is supported
         slice_attr.value = 1;
@@ -295,47 +314,24 @@ namespace va {
         ctx->slices = slice_attr.value;
       }
 
-      // Use VBR with a single frame VBV when the user forces it and for known good cases:
-      // - Intel GPUs
-      // - AV1
-      //
-      // VBR ensures the bitstream isn't full of filler data for bitrate undershoots and
-      // single frame VBV ensures that we don't have large bitrate overshoots (at least
-      // as much as they can be avoided without pre-analysis).
-      //
-      // When we have to resort to the default 1 second VBV for encoding quality reasons,
-      // we stick to CBR in order to avoid encoding huge frames after bitrate undershoots
-      // leave headroom available in the RC window.
-      if (config::video.vaapi.strict_rc_buffer ||
-          (vendor && strstr(vendor, "Intel")) ||
-          ctx->codec_id == AV_CODEC_ID_AV1) {
-        ctx->rc_buffer_size = ctx->bit_rate * ctx->framerate.den / ctx->framerate.num;
+      VAConfigAttrib quality_attr = {VAConfigAttribEncQualityRange};
+      const auto quality_status = vaGetConfigAttributes(va_display, va_profile, va_entrypoint, &quality_attr, 1);
+      const tuning_capabilities_t caps {
+        .rate_control = supported_attribute(rc_status, rc_attr.value),
+        .quality_range = supported_attribute(quality_status, quality_attr.value),
+      };
+      const auto requested = config::vaapi::snapshot();
+      const auto effective = apply_tuning(ctx, options, requested, caps, vendor ? vendor : "", config::video.qp);
+      if (effective.rate_control_fallback) BOOST_LOG(warning) << "VA-API: requested rate control is unsupported; using automatic policy"sv;
+      if (effective.quality_fallback) BOOST_LOG(warning) << "VA-API: requested quality control is unsupported; using driver default"sv;
+      if (effective.blbrc_fallback) BOOST_LOG(warning) << "VA-API: requested block bitrate control is unavailable for this codec/rate-control mode"sv;
+      BOOST_LOG(info) << "VA-API session settings: rate_control="sv << effective.rate_control
+        << " selection="sv << (effective.explicit_rate_control ? "explicit" : "automatic")
+        << " vbv="sv << (effective.single_frame_buffer ? "single frame" : "standard")
+        << " compression_level="sv << ctx->compression_level
+        << " quality_range="sv << caps.quality_range.value_or(0)
+        << " blbrc="sv << (effective.blbrc ? (*effective.blbrc ? "enabled" : "disabled") : "codec default");
 
-        if (rc_attr.value & VA_RC_VBR) {
-          BOOST_LOG(info) << "Using VBR with single frame VBV size"sv;
-          av_dict_set(options, "rc_mode", "VBR", 0);
-        } else if (rc_attr.value & VA_RC_CBR) {
-          BOOST_LOG(info) << "Using CBR with single frame VBV size"sv;
-          av_dict_set(options, "rc_mode", "CBR", 0);
-        } else {
-          BOOST_LOG(warning) << "Using CQP with single frame VBV size"sv;
-          av_dict_set_int(options, "qp", config::video.qp, 0);
-        }
-      } else if (!(rc_attr.value & (VA_RC_CBR | VA_RC_VBR))) {
-        BOOST_LOG(warning) << "Using CQP rate control"sv;
-        av_dict_set_int(options, "qp", config::video.qp, 0);
-      } else {
-        // For remaining VAAPI encoders (typically AMD H.264/HEVC), explicitly
-        // select a rate control mode. The VBV buffer size is already set by
-        // the common encoder code in video.cpp.
-        if (rc_attr.value & VA_RC_CBR) {
-          BOOST_LOG(info) << "Using CBR rate control"sv;
-          av_dict_set(options, "rc_mode", "CBR", 0);
-        } else if (rc_attr.value & VA_RC_VBR) {
-          BOOST_LOG(info) << "Using VBR rate control"sv;
-          av_dict_set(options, "rc_mode", "VBR", 0);
-        }
-      }
     }
 
     int set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx_buf) override {

@@ -49,6 +49,10 @@ namespace multiseat::podman {
 
     [[nodiscard]] virtual std::uint64_t effective_uid() const = 0;
     [[nodiscard]] virtual bool executable_file(const std::filesystem::path &path) const = 0;
+    /** Root-owned regular executable under root-owned, non-writable directories. */
+    [[nodiscard]] virtual bool trusted_runtime_file(const std::filesystem::path &path) const = 0;
+    /** Actual calling process groups; absence means the snapshot failed. */
+    [[nodiscard]] virtual std::optional<std::vector<std::uint64_t>> supplementary_groups() const = 0;
     [[nodiscard]] virtual bool readable_directory(const std::filesystem::path &path) const = 0;
     [[nodiscard]] virtual bool private_read_write_directory(
       const std::filesystem::path &path
@@ -149,6 +153,7 @@ namespace multiseat::podman {
 
   struct options_t {
     std::filesystem::path executable {"/usr/bin/podman"};
+    std::filesystem::path runtime_executable {"/usr/bin/crun"};
     std::string deployment_id;
     std::filesystem::path worker_entrypoint {"/usr/bin/polaris-seat-worker"};
     std::filesystem::path ipc_root;

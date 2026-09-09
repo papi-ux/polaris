@@ -6,11 +6,14 @@
 
 // local includes
 #include "capture_generation.h"
+#include "encoder_probe_reuse.h"
+#include <functional>
 #include "input.h"
 #include "nvenc/nvenc_config.h"
 #include "platform/common.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
+#include "video_rate.h"
 
 #include <cstddef>
 #include <optional>
@@ -24,6 +27,7 @@ extern "C" {
 }
 
 struct AVPacket;
+namespace config { struct video_t; }
 
 namespace video {
 
@@ -57,7 +61,28 @@ namespace video {
     int encodingFramerate; // Requested display framerate
     bool input_only;
     capture_generation::identity_t capture_generation;
+    // Appended fields preserve positional initializers used by existing clients.
+    AVRational stream_rate {0, 1};  // RTSP stream request, before integer budget rounding
+    AVRational encode_rate {0, 1};  // Host limiter: launch rate when enabled, stream rate otherwise
+
   };
+
+  inline AVRational framerate_to_rational(const config_t &config) {
+    return rate::valid(config.stream_rate) ? config.stream_rate : rate::fraction(config.framerate, 1);
+  }
+
+  inline AVRational encoding_framerate_to_rational(const config_t &config) {
+    if (rate::valid(config.encode_rate)) return config.encode_rate;
+    return config.encodingFramerate > 0 ? rate::from_millihertz(config.encodingFramerate) : framerate_to_rational(config);
+  }
+
+  inline std::chrono::nanoseconds capture_frame_interval(const config_t &config) {
+    return rate::interval(framerate_to_rational(config));
+  }
+
+  inline std::chrono::nanoseconds encoding_frame_interval(const config_t &config) {
+    return rate::interval(encoding_framerate_to_rational(config));
+  }
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
 
@@ -671,6 +696,11 @@ namespace video {
     std::string_view current_topology
   );
 
+  int probe_encoders_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate
+  );
+  std::string encoder_probe_settings_for_tests(const config::video_t &settings);
   std::string current_encoder_topology_key_for_tests();
 
   std::chrono::milliseconds reset_display_retry_delay_for_tests(int attempt);
@@ -688,6 +718,9 @@ namespace video {
     const std::vector<std::string> &display_names,
     std::string_view requested_display_name
   );
+
+  int refresh_display_selection_for_tests(std::vector<std::string> previous, int previous_index,
+                                         std::string requested, const std::vector<std::string> &enumerated);
 
   std::optional<int> clamp_display_index_for_tests(int requested_index, std::size_t display_count);
 

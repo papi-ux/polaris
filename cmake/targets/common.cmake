@@ -249,11 +249,6 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/src/upnp.cpp"
         DIRECTORY "${CMAKE_SOURCE_DIR}" "${TEST_DIR}"
         PROPERTIES COMPILE_FLAGS -Wno-pedantic)
 
-# third-party/nanors
-set_source_files_properties("${CMAKE_SOURCE_DIR}/src/rswrapper.c"
-        DIRECTORY "${CMAKE_SOURCE_DIR}" "${TEST_DIR}"
-        PROPERTIES COMPILE_FLAGS "-ftree-vectorize -funroll-loops")
-
 # src/process / src/ai_optimizer
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
         (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))

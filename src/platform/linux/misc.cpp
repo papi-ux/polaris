@@ -9,6 +9,8 @@
 #endif
 
 // standard includes
+#include "process_environment.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -90,9 +92,10 @@ namespace {
 
 #ifdef POLARIS_BUILD_VULKAN
   void append_environment_token(const char *name, std::string_view token) {
+    std::lock_guard environment_lock(process_environment::mutex);
     const char *existing = std::getenv(name);
     if (!existing || !*existing) {
-      setenv(name, std::string {token}.c_str(), 1);
+      process_environment::set(name, std::string {token}.c_str(), 1);
       return;
     }
 
@@ -112,7 +115,7 @@ namespace {
       start = end + 1;
     }
 
-    setenv(name, (current + ',' + std::string {token}).c_str(), 1);
+    process_environment::set(name, (current + ',' + std::string {token}).c_str(), 1);
   }
 #endif
 
@@ -922,11 +925,11 @@ std::string get_local_ip_for_gateway() {
   }
 
   int set_env(const std::string &name, const std::string &value) {
-    return setenv(name.c_str(), value.c_str(), 1);
+    return process_environment::set(name.c_str(), value.c_str(), 1);
   }
 
   int unset_env(const std::string &name) {
-    return unsetenv(name.c_str());
+    return process_environment::unset(name.c_str());
   }
 
   bool request_process_group_exit(std::uintptr_t native_handle) {

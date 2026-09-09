@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "url": "https://github.com/ValveSoftware/gamescope",
+  "revision": "c3cc9b8414d4afa8c53217112a71f17a95b939f8",
+  "version": "3.16.19",
+  "archive_epoch": 1754524800,
+  "sha256": "ee5959cd49d3e25e25b5a5e0226df891b0bdceb30e10fc3735f26446d2d030f4",
+  "submodules": [
+    " 696b14cd6006ae9ca174e6164450619ace043283 src/reshade (696b14c)",
+    " de28d93dfa9ebf3e473127c1c657e1920a5345ee src/reshade/deps/d3d12 (de28d93)",
+    " 6926f5a0a78f22d42b074a0ab8032e07736babd4 src/reshade/deps/fpng (6926f5a)",
+    " 3a33275633ce4be433332dc776e6a5b3bdea6506 src/reshade/deps/gl3w (3a33275)",
+    " c6aa051629753f0ef0d26bf775a8b6a92aa213b2 src/reshade/deps/imgui (c6aa051)",
+    " 8fda4f5481fed5797dc2651cd91e238e9b3928c6 src/reshade/deps/minhook (8fda4f5)",
+    " dc1e23937fe45eabcce80f6588cf47449edb29d1 src/reshade/deps/openxr (dc1e239)",
+    " c0df742ec0b8178ad58c68cff3437ad4b6a06e26 src/reshade/deps/spirv (c0df742)",
+    " ae721c50eaf761660b4f90cc590453cdb0c2acd0 src/reshade/deps/stb (ae721c5)",
+    " 6be08bbea14ffa0a5c594257fb6285a054395cd7 src/reshade/deps/utfcpp (6be08bb)",
+    " c4ad4af0946b73ce1a40cbc72205d15d196c7e06 src/reshade/deps/utfcpp/extern/ftest (c4ad4af)",
+    " a6bfc237255a6bac1513f7c1ebde6d8aed6b5191 src/reshade/deps/vma (a6bfc23)",
+    " 7b3466a1f47a9251ac1113efbe022ff016e2f95b src/reshade/deps/vulkan (7b3466a)",
+    " 47a5590e9c4eb35d67651b8c05a55f1a48259329 subprojects/libdisplay-info (47a5590)",
+    " 8b08dc1c14fd019cc90ddabe34ad16596b0691f4 subprojects/libliftoff (8b08dc1)",
+    " ff87f683f41fe26cc9353dd9d9d7028357fd8e1a subprojects/openvr (ff87f68)",
+    " 5106d8a0df95de66cc58dc1ea37e69c99afc9540 subprojects/vkroots (5106d8a)",
+    " 54e844748029d4874e14d0c086d50092c04c8899 subprojects/wlroots (54e8447)",
+    " d790ced752b5bfc06b6988baadef6eb2d16bdf96 thirdparty/SPIRV-Headers (d790ced)"
+  ],
+  "wraps": {
+    "glm": "0af55ccecd98d4e5a8d1fad7de25ba429d60e863",
+    "stb": "5736b15f7ea0ffb08dd38af21067c314d6a3aae9"
+  }
+}

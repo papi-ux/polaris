@@ -11,6 +11,8 @@
 #include <fstream>
 #include <future>
 #include <optional>
+#include <numeric>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -24,6 +26,8 @@
 
 #include <drm_fourcc.h>
 #include <spa/param/video/raw.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/pod/filter.h>
 
 #include "src/capture_generation.h"
 #include "src/config.h"
@@ -46,6 +50,8 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
+  bool wait_for_capture_negotiation_for_tests(const std::shared_ptr<pipewire_capture::capture_t> &capture);
+  bool kwin_rate_query_with_hook_for_tests(const std::function<void(GCancellable *)> &hook);
   bool portal_capture_backend_allowed_for_tests(std::string_view capture_backend);
   bool portal_capture_generation_matches_for_tests(
     const capture_generation::identity_t &cached,
@@ -1059,4 +1065,323 @@ TEST(PipeWireCapturePolicyTests, PickSoleRenderNodeResolvesOnlySingleGpuHosts) {
     pipewire_capture::pick_sole_render_node({"/dev/dri/renderD128", "/dev/dri/renderD129"}),
     std::nullopt);
   EXPECT_EQ(pipewire_capture::pick_sole_render_node({}), std::nullopt);
+}
+
+TEST(PipeWireRateTests, CompositorVersionUsesTheReleasedKwinBoundary) {
+  for (const auto version : {"", "KWin version: 5.27.12", "KWin version: 6.7.0", "KWin version: invalid", "KWin version: 6.8"}) {
+    EXPECT_FALSE(pipewire_capture::kwin_uses_fixed_rate(version)) << version;
+  }
+  for (const auto version : {"KWin version: 6.8.0", "KWin version: 6.9.1\n", "KWin version: 7.0.0"}) {
+    EXPECT_TRUE(pipewire_capture::kwin_uses_fixed_rate(version)) << version;
+  }
+}
+
+TEST(PipeWireRateTests, NegotiatedVariableAndFasterRatesNeedPacingWhileSlowerRatesStayEventDriven) {
+  const AVRational requested {60000, 1001};
+  EXPECT_TRUE(pipewire_capture::requires_host_pacing(requested, {0, 1}));
+  EXPECT_TRUE(pipewire_capture::requires_host_pacing(requested, {120, 1}));
+  EXPECT_FALSE(pipewire_capture::requires_host_pacing(requested, requested));
+  EXPECT_FALSE(pipewire_capture::requires_host_pacing(requested, {30, 1}));
+  EXPECT_FALSE(pipewire_capture::requires_host_pacing({0, 1}, {120, 1}));
+  EXPECT_EQ(av_cmp_q(pipewire_capture::negotiated_capture_rate({0, 1}, {60000, 1001}), requested), 0);
+  EXPECT_EQ(av_cmp_q(pipewire_capture::negotiated_capture_rate({30, 1}, {0, 0}), AVRational {30, 1}), 0);
+  EXPECT_EQ(av_cmp_q(pipewire_capture::negotiated_capture_rate({30, 1}, {0, 1}), AVRational {30, 1}), 0);
+  EXPECT_FALSE(video::rate::valid(pipewire_capture::negotiated_capture_rate({0, 0}, {UINT32_MAX, 1})));
+}
+
+namespace pipewire_capture {
+  struct capture_test_access {
+    static bool local_stream(capture_t &capture) {
+      pw_init(nullptr, nullptr);
+      capture.loop_ = pw_thread_loop_new("polaris-rate-retry-test", nullptr);
+      if (!capture.loop_) return false;
+      capture.context_ = pw_context_new(pw_thread_loop_get_loop(capture.loop_), nullptr, 0);
+      if (!capture.context_) return false;
+      // A real in-process core; no user daemon, portal or external producer.
+      capture.core_ = pw_context_connect_self(capture.context_, nullptr, 0);
+      if (!capture.core_) return false;
+      capture.stream_ = pw_stream_new(capture.core_, "polaris-rate-test", pw_properties_new(nullptr, nullptr));
+      capture.stream_state_ = PW_STREAM_STATE_ERROR;
+      capture.terminal_result_ = wait_result_e::error;
+      return capture.stream_ != nullptr;
+    }
+    static pw_thread_loop *loop(capture_t &capture) { return capture.loop_; }
+    static pw_stream *stream(capture_t &capture) { return capture.stream_; }
+    static bool retry_entered(capture_t &capture) {
+      if (!capture.shutdown_mtx_.try_lock()) return true;
+      capture.shutdown_mtx_.unlock();
+      return false;
+    }
+    static void running(capture_t &capture) {
+      std::lock_guard lock(capture.frame_mtx_);
+      capture.running_ = true;
+      capture.stream_state_ = PW_STREAM_STATE_STREAMING;
+      capture.terminal_result_ = wait_result_e::timeout;
+    }
+    static void ready(capture_t &capture, AVRational negotiated) {
+      std::lock_guard lock(capture.frame_mtx_);
+      capture.front_info_ = {.width = 1, .height = 1, .stride = 4, .spa_format = SPA_VIDEO_FORMAT_BGRx};
+      capture.front_frame_.assign(4, 0);
+      capture.frame_available_ = true;
+      capture.negotiated_ = true;
+      capture.negotiated_rate_ = negotiated;
+      capture.frame_cv_.notify_all();
+    }
+  };
+}
+
+TEST(PipeWireRateTests, ActualFrameWaitStaysEventDrivenWhenProducerMeetsTheRate) {
+  auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {.requested_rate = {2, 1}});
+  for (int frame = 0; frame < 3; ++frame) {
+    pipewire_capture::capture_test_access::ready(*capture, {1, 1});
+    EXPECT_EQ(capture->wait_for_frame(std::chrono::milliseconds(10)), pipewire_capture::wait_result_e::frame);
+  }
+}
+
+TEST(PipeWireRateTests, StopInterruptsActualPacedFrameWait) {
+  auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {.requested_rate = {1, 1}});
+  pipewire_capture::capture_test_access::ready(*capture, {0, 1});
+  ASSERT_EQ(capture->wait_for_frame(std::chrono::milliseconds(10)), pipewire_capture::wait_result_e::frame);
+  auto waiting = std::async(std::launch::async, [&] { return capture->wait_for_frame(std::chrono::seconds(2)); });
+  EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  capture->stop();
+  ASSERT_EQ(waiting.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_EQ(waiting.get(), pipewire_capture::wait_result_e::reinit);
+  EXPECT_FALSE(capture->retry_rate_negotiation());
+}
+
+TEST(PipeWireRateTests, KwinLookupCancellationUsesTheActualPendingStartOwner) {
+  int owner_a, owner_b;
+  std::promise<void> entered;
+  auto query = std::async(std::launch::async, [&] {
+    session_media::pending_start_owner_scope_t owner(&owner_a);
+    return portal::kwin_rate_query_with_hook_for_tests([&](GCancellable *cancellable) {
+      GPollFD fd {};
+      ASSERT_TRUE(g_cancellable_make_pollfd(cancellable, &fd));
+      auto release_fd = util::fail_guard([&] { g_cancellable_release_fd(cancellable); });
+      entered.set_value();
+      EXPECT_EQ(g_poll(&fd, 1, 1500), 1);
+      EXPECT_TRUE(g_cancellable_is_cancelled(cancellable));
+    });
+  });
+  entered.get_future().wait();
+  portal::cancel_pending_requests(&owner_b);
+  EXPECT_EQ(query.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  portal::cancel_pending_requests(&owner_a);
+  ASSERT_EQ(query.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_FALSE(query.get());
+}
+
+TEST(PipeWireRateTests, KwinLookupDeadlineAlsoCoversBusAcquisition) {
+  const auto started = std::chrono::steady_clock::now();
+  EXPECT_FALSE(portal::kwin_rate_query_with_hook_for_tests([&](GCancellable *cancellable) {
+    GPollFD fd {};
+    ASSERT_TRUE(g_cancellable_make_pollfd(cancellable, &fd));
+    auto release_fd = util::fail_guard([&] { g_cancellable_release_fd(cancellable); });
+    EXPECT_EQ(g_poll(&fd, 1, 1500), 1);
+    EXPECT_TRUE(g_cancellable_is_cancelled(cancellable));
+  }));
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2));
+}
+
+TEST(PipeWireRateTests, RetryRechecksStopAndNegotiationAfterWaitingForTheActualLoop) {
+  using access = pipewire_capture::capture_test_access;
+  for (const bool stop : {true, false}) {
+    auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {.requested_rate = {60, 1}});
+    ASSERT_TRUE(access::local_stream(*capture));
+    const auto original = access::stream(*capture);
+    auto loop = access::loop(*capture);
+    pw_thread_loop_lock(loop);
+    auto retry = std::async(std::launch::async, [&] { return capture->retry_rate_negotiation(); });
+    auto unlock = util::fail_guard([&] { pw_thread_loop_unlock(loop); });
+    for (int i = 0; i < 1000 && !access::retry_entered(*capture); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(access::retry_entered(*capture));
+    EXPECT_EQ(retry.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    if (stop) capture->stop();
+    else access::ready(*capture, {60, 1});
+    pw_thread_loop_unlock(loop);
+    unlock.disable();
+    ASSERT_EQ(retry.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_FALSE(retry.get());
+    EXPECT_EQ(access::stream(*capture), original);
+  }
+}
+
+TEST(PipeWireRateTests, OwnerCancellationPreventsRetryWhileWaitingForTheActualLoop) {
+  using access = pipewire_capture::capture_test_access;
+  int owner;
+  auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {.requested_rate = {60, 1}});
+  ASSERT_TRUE(access::local_stream(*capture));
+  const auto original = access::stream(*capture);
+  auto loop = access::loop(*capture);
+  pw_thread_loop_lock(loop);
+  auto waiting = std::async(std::launch::async, [&] {
+    session_media::pending_start_owner_scope_t scope(&owner);
+    auto start = session_media::begin_start();
+    return portal::wait_for_capture_negotiation_for_tests(capture);
+  });
+  auto unlock = util::fail_guard([&] { pw_thread_loop_unlock(loop); });
+  for (int i = 0; i < 1000 && !access::retry_entered(*capture); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(access::retry_entered(*capture));
+  auto cancellation = session_media::cancel_pending_starts(&owner);
+  pw_thread_loop_unlock(loop);
+  unlock.disable();
+  ASSERT_EQ(waiting.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_FALSE(waiting.get());
+  EXPECT_FALSE(capture->running());
+  EXPECT_EQ(access::stream(*capture), original);
+}
+
+TEST(PipeWireRateTests, TeardownCancelsNegotiationBeforeWaitingForTheStartOwner) {
+  auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {.requested_rate = {60, 1}});
+  pipewire_capture::capture_test_access::running(*capture);
+  std::promise<void> admitted;
+  auto waiting = std::async(std::launch::async, [&] {
+    auto start = session_media::begin_start();
+    admitted.set_value();
+    return portal::wait_for_capture_negotiation_for_tests(capture);
+  });
+  admitted.get_future().wait();
+  EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  auto teardown = std::async(std::launch::async, [] { return session_media::begin_teardown(); });
+  ASSERT_EQ(waiting.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_FALSE(waiting.get());
+  EXPECT_FALSE(capture->running());
+  ASSERT_EQ(teardown.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  auto fence = teardown.get();
+}
+
+TEST(PipeWireRateTests, ActualSpaOffersKeepVariableFixedAndLegacyNegotiationDistinct) {
+  for (const bool fixed : {true, false}) {
+    for (const bool use_maximum : {true, false}) {
+      alignas(8) std::array<uint8_t, 1024> bytes {};
+      spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
+      spa_pod_frame frame;
+      spa_pod_builder_push_object(&builder, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+      pipewire_capture::append_rate_properties(&builder, {60000, 1001}, fixed, use_maximum);
+      auto pod = static_cast<spa_pod *>(spa_pod_builder_pop(&builder, &frame));
+      auto fps = spa_pod_find_prop(pod, nullptr, SPA_FORMAT_VIDEO_framerate);
+      ASSERT_NE(fps, nullptr);
+      spa_fraction value {};
+      ASSERT_EQ(spa_pod_get_fraction(&fps->value, &value), 0);
+      EXPECT_EQ(value.num, fixed && !use_maximum ? 60000u : 0u);
+      EXPECT_EQ(value.denom, fixed && !use_maximum ? 1001u : 1u);
+      auto maximum = spa_pod_find_prop(pod, nullptr, SPA_FORMAT_VIDEO_maxFramerate);
+      if (!use_maximum) { EXPECT_EQ(maximum, nullptr); continue; }
+      ASSERT_NE(maximum, nullptr);
+      auto choice = reinterpret_cast<const spa_pod_choice *>(&maximum->value);
+      ASSERT_EQ(SPA_POD_CHOICE_TYPE(choice), SPA_CHOICE_Range);
+      ASSERT_EQ(SPA_POD_CHOICE_N_VALUES(choice), 3u);
+      auto values = static_cast<const spa_fraction *>(SPA_POD_CHOICE_VALUES(choice));
+      EXPECT_EQ(values[0].num, fixed ? 60000u : 0u);
+      EXPECT_EQ(values[0].denom, fixed ? 1001u : 1u);
+      EXPECT_EQ(values[1].num, 0u);
+      EXPECT_EQ(values[2].num, 1000u);
+    }
+  }
+}
+
+TEST(PipeWireRateTests, ActualSpaIntersectionPrefersVariableAndAcceptsFixedOnlyProducers) {
+  for (const bool reverse : {false, true}) {
+    for (const bool compatibility : {false, true}) {
+      for (const unsigned producer_rate : {0u, 60u, 120u}) {
+        for (const bool producer_has_variable : {false, true}) {
+          alignas(8) std::array<uint8_t, 1024> consumer_bytes {}, producer_bytes {}, result_bytes {};
+          spa_pod_builder consumer_builder = SPA_POD_BUILDER_INIT(consumer_bytes.data(), consumer_bytes.size());
+          spa_pod_frame frame {};
+          spa_pod_builder_push_object(&consumer_builder, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+          pipewire_capture::append_rate_properties(&consumer_builder, {60, 1}, false, true, compatibility);
+          auto consumer = static_cast<spa_pod *>(spa_pod_builder_pop(&consumer_builder, &frame));
+
+          spa_pod_builder producer_builder = SPA_POD_BUILDER_INIT(producer_bytes.data(), producer_bytes.size());
+          spa_pod_builder_push_object(&producer_builder, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+          const spa_fraction fixed {producer_rate, 1}, variable {0, 1};
+          if (producer_has_variable) {
+            // The producer prefers fixed capture, but also supports variable.
+            spa_pod_builder_add(&producer_builder, SPA_FORMAT_VIDEO_framerate,
+              SPA_POD_CHOICE_ENUM_Fraction(3, &fixed, &fixed, &variable), 0);
+          } else {
+            spa_pod_builder_add(&producer_builder, SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&fixed), 0);
+          }
+          auto producer = static_cast<spa_pod *>(spa_pod_builder_pop(&producer_builder, &frame));
+          spa_pod_builder result_builder = SPA_POD_BUILDER_INIT(result_bytes.data(), result_bytes.size());
+          spa_pod *result = nullptr;
+          const int filtered = spa_pod_filter(&result_builder, &result,
+            reverse ? producer : consumer, reverse ? consumer : producer);
+          if (!compatibility && producer_rate != 0 && !producer_has_variable) {
+            EXPECT_LT(filtered, 0);
+            continue;
+          }
+          ASSERT_EQ(filtered, 0);
+          ASSERT_NE(result, nullptr);
+          ASSERT_EQ(spa_pod_fixate(result), 0);
+          const auto property = spa_pod_find_prop(result, nullptr, SPA_FORMAT_VIDEO_framerate);
+          ASSERT_NE(property, nullptr);
+          spa_fraction rate {};
+          uint32_t values = 0, choice = 0;
+          const auto selected = spa_pod_get_values(&property->value, &values, &choice);
+          ASSERT_NE(selected, nullptr);
+          ASSERT_EQ(choice, SPA_CHOICE_None);
+          ASSERT_EQ(spa_pod_get_fraction(selected, &rate), 0);
+          if (!compatibility) { EXPECT_EQ(rate.num, 0u); }
+          if (!producer_has_variable) { EXPECT_EQ(rate.num, producer_rate); }
+          EXPECT_EQ(rate.denom, 1u);
+          if (compatibility) { EXPECT_EQ(spa_pod_find_prop(consumer, nullptr, SPA_FORMAT_VIDEO_maxFramerate), nullptr); }
+        }
+      }
+    }
+  }
+}
+
+TEST(PipeWireLiveProducerTests, NegotiatesAndPacesAnIsolatedSyntheticProducer) {
+  const auto test_case = std::getenv("POLARIS_TEST_PIPEWIRE_CASE");
+  if (!test_case) GTEST_SKIP() << "Run tools/tests/pipewire_rate_harness.py with this test binary";
+  const auto parameters = nlohmann::json::parse(test_case);
+  const AVRational requested {parameters.at("numerator").get<int>(), parameters.at("denominator").get<int>()};
+  ASSERT_TRUE(video::rate::valid(requested));
+  auto capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {
+    .node_id = parameters.at("node").get<uint32_t>(),
+    .requested_width = 64,
+    .requested_height = 64,
+    .requested_rate = requested,
+  });
+  ASSERT_TRUE(capture->start());
+  for (int i = 0; i < 100 && !capture->negotiated(); ++i) {
+    if (!capture->running() && !capture->retry_rate_negotiation()) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  ASSERT_TRUE(capture->negotiated());
+  ASSERT_FALSE(capture->negotiated_dmabuf());
+  const auto info = capture->frame_info();
+  ASSERT_EQ(info.width, 64);
+  ASSERT_EQ(info.height, 64);
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  auto image = std::make_shared<platf::img_t>();
+  image->width = image->height = 64;
+  image->row_pitch = 64 * 4;
+  image->pixel_pitch = 4;
+  image->data = pixels.data();
+  std::vector<double> intervals;
+  std::optional<std::chrono::steady_clock::time_point> previous;
+  for (int i = 0; i < 181; ++i) {
+    ASSERT_EQ(capture->wait_for_frame(std::chrono::seconds(2)), pipewire_capture::wait_result_e::frame);
+    ASSERT_TRUE(capture->fill_frame(image));
+    const auto now = std::chrono::steady_clock::now();
+    if (previous) intervals.push_back(std::chrono::duration<double>(now - *previous).count());
+    previous = now;
+  }
+  double total = std::accumulate(intervals.begin(), intervals.end(), 0.0);
+  const double measured = intervals.size() / total;
+  const double expected = av_q2d(requested);
+  EXPECT_GT(measured, expected * 0.8);
+  EXPECT_LT(measured, expected * 1.05);
+  std::sort(intervals.begin(), intervals.end());
+  std::cout << "PIPEWIRE_RATE_RESULT " << nlohmann::json {
+    {"requested_numerator", requested.num}, {"requested_denominator", requested.den},
+    {"measured_fps", measured}, {"median_interval_ms", intervals[intervals.size() / 2] * 1000},
+    {"p95_interval_ms", intervals[intervals.size() * 95 / 100] * 1000}, {"frames", 181}
+  }.dump() << '\n';
+  capture->stop();
+  EXPECT_EQ(capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::reinit);
+  capture->shutdown();
 }

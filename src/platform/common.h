@@ -626,6 +626,12 @@ namespace platf {
 
     virtual int dummy_img(img_t *img) = 0;
 
+    // An empty result declines in-process probe reuse. Implementations report
+    // the actual connected route; configuration alone cannot establish it.
+    virtual std::string encoder_probe_route() const {
+      return {};
+    }
+
     virtual std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) {
       return nullptr;
     }

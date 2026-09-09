@@ -1587,6 +1587,7 @@ namespace rtsp_stream {
     args.try_emplace("x-ss-general.encryptionEnabled"sv, "0"sv);
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
+    args.try_emplace("x-nv-video[0].clientRefreshRateX100"sv, "0"sv);
 
     stream::config_t config;
 
@@ -1616,6 +1617,14 @@ namespace rtsp_stream {
       config.monitor.height = util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
       config.monitor.width = util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
       config.monitor.framerate = util::from_view(args.at("x-nv-video[0].maxFPS"sv));
+      config.monitor.stream_rate = video::rate::from_wire(config.monitor.framerate,
+        util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv)));
+      if (!video::rate::valid(config.monitor.stream_rate) || session.fps <= 0) {
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      config.monitor.encode_rate = config::video.limit_framerate ?
+        video::rate::from_millihertz(session.fps) : config.monitor.stream_rate;
       config.monitor.bitrate = util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
       config.monitor.slicesPerFrame = util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
       config.monitor.numRefFrames = util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));

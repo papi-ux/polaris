@@ -326,3 +326,12 @@ TEST(ConfigValidationTests, PatchMergeClearsASecretOnlyThroughAnExplicitEmptyVal
   EXPECT_EQ(merged.value("ai_api_key", ""), "other-secret");
   EXPECT_FALSE(merged.contains("port"));
 }
+
+
+TEST(ConfigValidationTests, AcceptsVaapiSessionControlKeysForPersistence) {
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload({
+    {"vaapi_quality", "balanced"}, {"vaapi_rc", "vbr"},
+    {"vaapi_blbrc", "enabled"}, {"vaapi_strict_rc_buffer", "disabled"}
+  }, error)) << error;
+}
