@@ -16,6 +16,11 @@ extern "C" {
 
 TEST(CudaRamEncodeDeviceTests, ExactArrayDimensionsAndPaddedRowsRoundTrip) {
   if (!getenv("POLARIS_TEST_CUDA_RAM")) GTEST_SKIP() << "Requires isolated physical CUDA validation";
+  // Production initializes FFmpeg's primary context before using the runtime.
+  // Initializing CUDA first gives its primary context incompatible wait flags.
+  AVBufferRef *raw_device = nullptr;
+  ASSERT_GE(av_hwdevice_ctx_create(&raw_device, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT), 0);
+  video::avcodec_buffer_t device_context {raw_device};
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   EXPECT_FALSE(cuda::tex_t::make(0, 64));
   EXPECT_FALSE(cuda::tex_t::make(32, -1));
@@ -49,13 +54,13 @@ TEST(CudaRamEncodeDeviceTests, ExactArrayDimensionsAndPaddedRowsRoundTrip) {
 
 TEST(CudaRamEncodeDeviceTests, CompletesConversionBeforeIndependentStreamReadsTheFrame) {
   if (!getenv("POLARIS_TEST_CUDA_RAM")) GTEST_SKIP() << "Requires isolated physical CUDA validation";
-  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   for (const auto dimensions : {std::array {320, 180, 320, 180}, std::array {7680, 2160, 1920, 1080}}) {
     const auto [width, height, output_width, output_height] = dimensions;
     SCOPED_TRACE(width);
     AVBufferRef *raw_device = nullptr;
     ASSERT_GE(av_hwdevice_ctx_create(&raw_device, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT), 0);
     video::avcodec_buffer_t device_context {raw_device};
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
     auto *cuda_context = static_cast<AVCUDADeviceContext *>(reinterpret_cast<AVHWDeviceContext *>(raw_device->data)->hwctx);
     const auto encoder_stream = cuda_context->stream;
     video::avcodec_buffer_t frames {av_hwframe_ctx_alloc(raw_device)};
