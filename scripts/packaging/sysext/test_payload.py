@@ -121,6 +121,18 @@ class PayloadTests(unittest.TestCase):
                 materialize(packages[0], root)
             self.assertFalse(root.exists())
 
+    def test_combined_empty_files_and_implicit_parents_are_bounded(self):
+        entry = Entry(stat.S_IFREG | 0o644)
+        with patch('payload.MAX_ENTRIES', 2), self.assertRaises(PayloadError):
+            merge_payloads([{'usr/a': entry, 'usr/b': entry}, {'usr/c': entry}])
+        with patch('payload.MAX_ENTRIES', 3), self.assertRaises(PayloadError):
+            merge_payloads([{'usr/a': entry}, {'opt/a': entry}])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'tree'
+            with patch('payload.MAX_ENTRIES', 1), self.assertRaises(PayloadError):
+                materialize({'usr/a': entry, 'usr/b': entry}, root)
+            self.assertFalse(root.exists())
+
     def test_optimized_python_keeps_admission_checks(self):
         command = 'from payload import parse_cpio, PayloadError; from test_payload import archive, record\ntry: parse_cpio(archive(record("../escape")))\nexcept PayloadError: raise SystemExit(0)\nraise SystemExit(1)'
         result = subprocess.run([sys.executable, '-O', '-c', command], cwd=Path(__file__).parent, timeout=5)
