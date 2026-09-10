@@ -28,6 +28,7 @@ const props = defineProps([
   'config',
   'vdisplay',
   'min_fps_factor',
+  'hostGeneration',
 ])
 
 const sudovdaStatus = {
@@ -49,6 +50,7 @@ const projection = useConfigProjection()
 onMounted(() => {
   projection.load()
 })
+watch(() => props.hostGeneration, () => projection.load())
 const tuningControl = useLiveTuning()
 const projectionModes = computed(() => (
   projection.ok.value && Array.isArray(projection.modes.value) ? projection.modes.value : null
@@ -1091,6 +1093,7 @@ pactl info | grep Source</pre>
         <VirtualDisplayStatus
           :platform="platform"
           :config="config"
+          :host-generation="hostGeneration"
         />
       </div>
     </details>

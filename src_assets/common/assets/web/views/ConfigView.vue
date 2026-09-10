@@ -216,6 +216,7 @@
           :config="config"
           :platform="platform"
           :vdisplay="vdisplayStatus"
+          :host-generation="hostGeneration"
         >
         </audio-video>
 
@@ -284,6 +285,8 @@ const saved = ref(false)
 const restarted = ref(false)
 const saving = ref(false)
 const restarting = ref(false)
+const hostGeneration = ref(0)
+let disposed = false
 const config = ref(null)
 const responseOnlyConfig = ref({})
 const currentTab = ref("general")
@@ -974,6 +977,23 @@ function save() {
   })
 }
 
+async function refreshHostCapabilities(generation) {
+  // Own legacy capabilities beside the reset snapshot, even while A/V is closed.
+  // Refresh only response fields so edits made during restart remain intact.
+  try {
+    const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) return
+    const data = await response.json()
+    if (disposed || generation !== hostGeneration.value) return
+    if (Array.isArray(data.stream_display_mode_options)) {
+      config.value.stream_display_mode_options = data.stream_display_mode_options
+      responseOnlyConfig.value.stream_display_mode_options = data.stream_display_mode_options
+    }
+  } catch {
+    // Keep the last capability snapshot if the restarted host is unavailable.
+  }
+}
+
 function apply() {
   if (restarting.value) return
   saved.value = false
@@ -987,6 +1007,10 @@ function apply() {
       toast(i18n.t('config.restart_note') || 'Polaris is restarting...', 'info', 5000)
       requestHostRestart({
         onReady: () => {
+          // Capabilities depend on the newly loaded host configuration. Keep
+          // local form edits, but retire status fetched before this restart.
+          if (disposed) return
+          refreshHostCapabilities(++hostGeneration.value)
           saved.value = false
           restarted.value = false
           restarting.value = false
@@ -1201,6 +1225,7 @@ watch(currentTab, async (value) => {
 })
 
 onUnmounted(() => {
+  disposed = true
   window.removeEventListener('polaris:live-tuning-saved', acceptOwnLiveTuningSave)
   clearSearchHighlight()
   window.removeEventListener("hashchange", handleHash)
