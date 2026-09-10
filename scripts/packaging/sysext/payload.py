@@ -68,6 +68,7 @@ def validate_ancestors(entries):
 def validate_size(entries):
     # Hardlink members are materialized as separate regular files. Account for
     # every resulting copy, including groups whose archive stores the body once.
+    require(len(entries) <= MAX_ENTRIES, 'materialized payload exceeds entry bound')
     total = 0
     for entry in entries.values():
         if stat.S_ISREG(entry.mode):
@@ -146,6 +147,7 @@ def merge_payloads(payloads):
             if name in merged:
                 require(stat.S_ISDIR(entry.mode) and merged[name] == entry, 'cross-package collision: ' + name)
             else:
+                require(len(merged) < MAX_ENTRIES, 'combined payload exceeds entry bound')
                 merged[name] = entry
     validate_ancestors(merged)
     validate_size(merged)
@@ -154,7 +156,9 @@ def merge_payloads(payloads):
         for parent in PurePosixPath(name).parents:
             if str(parent) == '.':
                 break
-            merged.setdefault(str(parent), Entry(stat.S_IFDIR | 0o755))
+            if str(parent) not in merged:
+                require(len(merged) < MAX_ENTRIES, 'implicit directories exceed entry bound')
+                merged[str(parent)] = Entry(stat.S_IFDIR | 0o755)
     return merged
 
 
