@@ -76,14 +76,33 @@
      }
    }
  };
-@@ -157,7 +156,6 @@
+@@ -110,6 +109,12 @@
+   if (fd < 0) {
+     return inputtino::Error(strerror(errno));
+   }
++
++  // Preserve ownership even if allocation or thread construction throws.
++  struct PendingFd {
++    int fd;
++    ~PendingFd() { if (fd >= 0) close(fd); }
++  } pending{fd};
+ 
+   auto ev = uhid_event{};
+   ev.type = UHID_CREATE2, ev.u.create2.bus = definition.bus, ev.u.create2.vendor = definition.vendor,
+@@ -157,10 +162,10 @@
          }
        }
      });
 -    thread->detach();
-     return inputtino::Result<Device>({std::move(thread), std::move(state)});
+-    return inputtino::Result<Device>({std::move(thread), std::move(state)});
++    auto result = inputtino::Result<Device>({std::move(thread), std::move(state)});
++    pending.fd = -1; // Device now owns both the descriptor and reader.
++    return result;
    } else {
-     close(fd);
+-    close(fd);
+     return inputtino::Error(res.getErrorMessage());
+   }
+ }
 --- a/src/uhid/joypad_ps5.cpp
 +++ b/src/uhid/joypad_ps5.cpp
 @@ -8,6 +8,7 @@
@@ -177,7 +196,20 @@
        }
      }
    }
-@@ -294,7 +307,6 @@
+@@ -281,10 +294,11 @@
+     def.uniq = joypad.get_mac_address();
+   }
+ 
++  // The reader may request reports immediately inside Device::create.
++  joypad._state->is_bluetooth = use_bluetooth;
+   auto dev =
+       uhid::Device::create(def, [state = joypad._state](uhid_event ev, int fd) { on_uhid_event(state, ev, fd); });
+   if (dev) {
+-    joypad._state->is_bluetooth = use_bluetooth;
+     joypad._state->dev = std::make_shared<uhid::Device>(std::move(*dev));
+ 
+     // Readers will expect frequent events event if the state hasn't changed
+@@ -294,7 +308,6 @@
          std::this_thread::sleep_for(std::chrono::milliseconds(10));
        }
      });
@@ -185,7 +217,7 @@
  
      return joypad;
    }
-@@ -390,6 +402,7 @@
+@@ -390,6 +403,7 @@
  }
  
  void PS5Joypad::set_pressed_buttons(unsigned int pressed) {
@@ -193,7 +225,7 @@
    { // First reset everything to non-pressed
      this->_state->current_state.buttons[0] = 0;
      // Don't reset L2 and R2, these are handled in set_triggers
-@@ -463,9 +476,10 @@
+@@ -463,9 +477,10 @@
      if (MISC_FLAG & pressed)
        this->_state->current_state.buttons[2] |= uhid::MIC_MUTE;
    }
@@ -205,7 +237,7 @@
    this->_state->current_state.z = scale_value(left, 0, 255, uhid::PS5_AXIS_MIN, uhid::PS5_AXIS_MAX);
    this->_state->current_state.rz = scale_value(right, 0, 255, uhid::PS5_AXIS_MIN, uhid::PS5_AXIS_MAX);
  
-@@ -479,25 +493,27 @@
+@@ -479,25 +494,27 @@
    else
      this->_state->current_state.buttons[1] |= uhid::R2;
  
@@ -236,7 +268,7 @@
    this->_state->on_rumble = callback;
  }
  
-@@ -510,13 +526,14 @@
+@@ -510,13 +527,14 @@
  }
  
  void PS5Joypad::set_motion(PS5Joypad::MOTION_TYPE type, float x, float y, float z) {
@@ -252,7 +284,7 @@
      break;
    }
    case GYROSCOPE: {
-@@ -524,31 +541,35 @@
+@@ -524,31 +542,35 @@
      this->_state->current_state.gyro[1] = to_le_signed(y, y * uhid::gyro_resolution);
      this->_state->current_state.gyro[2] = to_le_signed(z, z * uhid::gyro_resolution);
  
@@ -290,7 +322,7 @@
    if (finger_nr <= 1) {
      // If this finger was previously unpressed, we should increase the touch id
      if (this->_state->current_state.points[finger_nr].contact == 1) {
-@@ -562,18 +583,19 @@
+@@ -562,18 +584,19 @@
      this->_state->current_state.points[finger_nr].y_lo = static_cast<uint8_t>(y & 0x000F);
      this->_state->current_state.points[finger_nr].y_hi = static_cast<uint8_t>((y & 0x0FF0) >> 4);
  

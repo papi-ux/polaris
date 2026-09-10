@@ -11,3 +11,6 @@ Dockerfile text eol=lf
 CLAUDE.md export-ignore
 docs/polaris-ecosystem-design.md export-ignore
 docs/screenshots export-ignore
+
+# Unified-diff context markers include intentional single-space blank lines.
+packaging/linux/patches/inputtino/*.patch whitespace=-blank-at-eol,-blank-at-eof
