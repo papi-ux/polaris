@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from assemble import verify_signers, verify_package_signature
+from assemble import extract_payload, verify_signers, verify_package_signature
 from bounded import BuildError, run
+from payload import parse_cpio
 from transaction import package_identity, simulate
 from tree import sha256
 
@@ -98,6 +99,17 @@ echo payload > %{{buildroot}}/usr/share/{name}/data
         with self.assertRaises(BuildError):
             package_identity(self.command, self.obsoletes)
         self.assertEqual(self.db_hashes(self.source_db), self.before)
+
+    @unittest.skipUnless(shutil.which('rpm2archive'), 'requires RPM archive tooling')
+    def test_regular_archive_tool_emits_bounded_newc_without_installing(self):
+        before = set(self.root.iterdir())
+        archive = extract_payload(self.command, self.consumer)
+        entries = parse_cpio(archive)
+        self.assertEqual(entries['usr/share/fixture-consumer/data'].data, b'payload\n')
+        self.assertEqual(set(self.root.iterdir()), before)
+        self.assertEqual(self.db_hashes(self.source_db), self.before)
+        self.assertFalse((self.private / 'fixture-script-ran').exists())
+        self.assertFalse((self.private / 'usr/share/fixture-consumer').exists())
 
     @unittest.skipUnless(shutil.which('rpmsign') and shutil.which('gpg') and shutil.which('gpgconf'), 'requires RPM signature fixtures')
     def test_locked_signers_exclude_wrong_unsigned_and_ambient_keys(self):

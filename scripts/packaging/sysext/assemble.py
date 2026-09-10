@@ -129,6 +129,13 @@ def verify_package_signature(command, keyring, path):
     require('signatures OK' in signature, 'dependency has no verified signature')
 
 
+def extract_payload(command, path):
+    # Modern RPM supplies rpm2cpio as a symlink. Pin the regular executable
+    # directly and explicitly request uncompressed newc on our bounded pipe.
+    return command('rpm2archive', '--nocompression', '--format=cpio', path,
+                   stdout_limit=MAX_PAYLOAD, timeout=90)['stdout']
+
+
 def assemble(args):
     require(sys.platform == 'linux' and os.geteuid() == 0, 'use a disposable Linux builder as root')
     require(args.output.is_absolute() and args.output.parent.resolve() == args.output.parent,
@@ -178,7 +185,7 @@ def assemble(args):
         verify_snapshot(args.target_root, target_files)
         payloads, total = [], 0
         for path in packages:
-            data = command('rpm2cpio', path, stdout_limit=MAX_PAYLOAD, timeout=90)['stdout']
+            data = extract_payload(command, path)
             total += len(data)
             require(total <= 256 * 1024 * 1024, 'combined RPM payload exceeds bound')
             payloads.append(parse_cpio(data))
