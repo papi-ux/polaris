@@ -124,6 +124,62 @@ describe('ConfigView pending changes review', () => {
     expect(Number(tab.attributes('host-generation'))).toBe(outcome === 'onReady' ? 1 : 0)
     wrapper.unmount()
   })
+  it('refreshes legacy capabilities with A/V closed and retains them through Reset Changes', async () => {
+    const oldOptions = [{ value: 'host_virtual_display', available: false }]
+    const readyOptions = [{ value: 'host_virtual_display', available: true }]
+    const wrapper = mountConfigView({ stream_display_mode_options: oldOptions })
+    await flushConfigLoad()
+    let callbacks
+    requestHostRestart.mockImplementationOnce((value) => { callbacks = value; return Promise.resolve() })
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+    wrapper.vm.apply()
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'AudioVideo' }).exists()).toBe(false)
+    wrapper.vm.config.max_bitrate = 42000
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ stream_display_mode_options: readyOptions, max_bitrate: 1 }) })
+    callbacks.onReady()
+    await flushPromises()
+    expect(wrapper.vm.config.max_bitrate).toBe(42000)
+    expect(wrapper.vm.config.stream_display_mode_options).toEqual(readyOptions)
+    wrapper.vm.resetLocalChanges()
+    await nextTick()
+    expect(wrapper.vm.config.max_bitrate).toBe(0)
+    expect(wrapper.vm.config.stream_display_mode_options).toEqual(readyOptions)
+    wrapper.vm.currentTab = 'av'
+    await nextTick()
+    expect(wrapper.findComponent({ name: 'AudioVideo' }).props('config').stream_display_mode_options).toEqual(readyOptions)
+    wrapper.unmount()
+  })
+
+  it.each(['newer restart', 'unmount'])('ignores a retired legacy response after %s', async (reason) => {
+    const wrapper = mountConfigView({ stream_display_mode_options: [] })
+    await flushConfigLoad()
+    const config = wrapper.vm.config
+    let callbacks
+    requestHostRestart.mockImplementation((value) => { callbacks = value; return Promise.resolve() })
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+    wrapper.vm.apply()
+    await flushPromises()
+    let resolveOld
+    global.fetch.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
+    callbacks.onReady()
+    const readyOptions = [{ value: 'host_virtual_display', available: true }]
+    if (reason === 'newer restart') {
+      global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+      wrapper.vm.apply()
+      await flushPromises()
+      global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ stream_display_mode_options: readyOptions }) })
+      callbacks.onReady()
+      await flushPromises()
+    } else {
+      wrapper.unmount()
+    }
+    resolveOld({ ok: true, json: async () => ({ stream_display_mode_options: [{ value: 'host_virtual_display', available: false }] }) })
+    await flushPromises()
+    expect(config.stream_display_mode_options).toEqual(reason === 'newer restart' ? readyOptions : [])
+    if (reason === 'newer restart') wrapper.unmount()
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
     mockToast.mockClear()

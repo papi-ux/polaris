@@ -114,24 +114,6 @@ describe('Linux Streaming Setup checklist', () => {
     wrapper.unmount()
   })
 
-  it('refreshes mode options for older hosts without settings metadata', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (url) => ({
-      ok: !String(url).includes('/settings/metadata'), status: 404,
-      json: async () => ({ stream_display_mode_options: [{ value: 'host_virtual_display', available: true }] }),
-    })))
-    const config = reactive(linuxConfig({
-      stream_display_mode_options: [{ value: 'host_virtual_display', available: false }],
-    }))
-    const wrapper = mountAudioVideo(config)
-    await flushPromises()
-    const virtualCard = () => wrapper.findAll('article').find((card) => card.text().includes('Host Virtual Display'))
-    expect(virtualCard().find('button').attributes('disabled')).toBeDefined()
-    await wrapper.setProps({ hostGeneration: 1 })
-    await flushPromises()
-    expect(virtualCard().find('button').attributes('disabled')).toBeUndefined()
-    wrapper.unmount()
-  })
-
   it('renders the en.json copy for strings routed through the locale system', () => {
     const wrapper = mountAudioVideo()
     const text = wrapper.text()
