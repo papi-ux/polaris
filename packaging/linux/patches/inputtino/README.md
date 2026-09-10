@@ -37,3 +37,20 @@ repeat loop, moves and teardown. The device test uses private sockets while
 exercising the real UHID poll/read/join owner, including a callback in flight and
 construction failures. Neither test opens an input node. Both run in the native
 ASan/UBSan CI lane. Use a separate build with `-fsanitize=thread` for TSan.
+
+## uinput physical identity (#494)
+
+The second patch adapts the creation-helper approach from inputtino PR #48 at
+`8da0031e73217706931b5a4f2902d7bec4e01f58` to the canonical pin. All nine uinput
+creation sites pass the existing `device_phys` value. A nonempty value uses one
+`O_CLOEXEC` descriptor for `UI_SET_PHYS` and device creation; any failure rejects
+the device instead of dropping its identity. The shared handle destroys the
+virtual device before closing that descriptor. Empty values retain libevdev's
+managed-descriptor behavior. Names, input reports, permissions, and the normal
+UHID PS5 path retain their existing contracts.
+
+The reserved udev markers and the multiseat inventory checks already exist;
+this patch supplies their requested kernel metadata. It does not change device
+mount admission or establish separation from other processes with the same UID
+or input-group authority. Actual Linux sysfs/udev and desktop input behavior
+remain physical acceptance gates.
