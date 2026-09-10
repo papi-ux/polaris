@@ -5,6 +5,12 @@
 #include "../tests_common.h"
 
 #include <src/video.h>
+#include <src/encoder_probe_reuse.h>
+#include <thread>
+#include <future>
+#ifdef __linux__
+#include <src/platform/linux/encoder_probe_driver_proof.h>
+#endif
 
 struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
   void SetUp() override {
@@ -553,4 +559,423 @@ TEST(CaptureEventLifecycle, CaptureReinitCanStopWhileConsumerRetainsDisplay) {
   EXPECT_FALSE(released);
   EXPECT_TRUE(order.empty());
   EXPECT_EQ(display.use_count(), 2);
+}
+
+#ifdef POLARIS_TESTS
+namespace {
+  video::probe_reuse::identity_t complete_probe_identity() {
+    return {"pci-gpu-device", "kernel-and-userspace-driver", "live-capture-generation", "capability-settings"};
+  }
+}
+
+TEST(VideoProbeReuseTests, OnlyCompleteUnchangedSuccessfulIdentityCanReuse) {
+  video::probe_reuse::cache_t cache;
+  const auto identity = complete_probe_identity();
+  EXPECT_FALSE(cache.reusable(identity, "nvenc", "", false));
+  cache.remember(identity, identity, "nvenc", cache.epoch());
+  EXPECT_TRUE(cache.reusable(identity, "nvenc", "", false));
+  EXPECT_TRUE(cache.reusable(identity, "nvenc", "nvenc", false));
+  EXPECT_FALSE(cache.reusable(identity, "vaapi", "", false));
+  EXPECT_FALSE(cache.reusable(identity, "nvenc", "vaapi", false));
+  EXPECT_FALSE(cache.reusable(identity, "nvenc", "", true));
+  EXPECT_FALSE(cache.reusable(std::nullopt, "nvenc", "", false));
+  for (auto member : {&video::probe_reuse::identity_t::gpu, &video::probe_reuse::identity_t::driver,
+                      &video::probe_reuse::identity_t::topology, &video::probe_reuse::identity_t::settings}) {
+    auto changed = identity;
+    changed.*member += "-changed";
+    EXPECT_FALSE(cache.reusable(changed, "nvenc", "", false));
+    changed.*member = "";
+    EXPECT_FALSE(cache.reusable(changed, "nvenc", "", false));
+    cache.remember(changed, changed, "nvenc", cache.epoch());
+    EXPECT_FALSE(cache.reusable(changed, "nvenc", "", false));
+    cache.remember(identity, identity, "nvenc", cache.epoch());
+  }
+}
+
+TEST(VideoProbeReuseTests, IdentityChangeDuringProbeAndFailureInvalidatePriorSuccess) {
+  video::probe_reuse::cache_t cache;
+  const auto before = complete_probe_identity();
+  auto after = before;
+  after.topology = "new-compositor-generation";
+  cache.remember(before, before, "nvenc", cache.epoch());
+  cache.remember(before, after, "nvenc", cache.epoch());
+  EXPECT_FALSE(cache.reusable(before, "nvenc", "", false));
+  EXPECT_FALSE(cache.reusable(after, "nvenc", "", false));
+  cache.remember(before, before, "nvenc", cache.epoch());
+  const auto epoch = cache.epoch();
+  cache.invalidate();
+  EXPECT_FALSE(cache.reusable(before, "nvenc", "", false));
+  cache.remember(before, before, "nvenc", epoch);
+  EXPECT_FALSE(cache.reusable(before, "nvenc", "", false));
+}
+
+TEST(VideoProbeReuseTests, CaptureFailureDoesNotNeedAnEncoderWriterLock) {
+  video::probe_reuse::cache_t cache;
+  const auto identity = complete_probe_identity();
+  cache.remember(identity, identity, "nvenc", cache.epoch());
+  std::thread capture([&] { for (int i = 0; i < 10000; ++i) cache.invalidate(); });
+  for (int i = 0; i < 10000; ++i) (void) cache.reusable(identity, "nvenc", "", false);
+  capture.join();
+  EXPECT_FALSE(cache.reusable(identity, "nvenc", "", false));
+}
+
+TEST(VideoProbeReuseTests, PublishedVaapiSettingsInvalidateIdentityWithoutMutatingStartupConfig) {
+  const auto saved = config::vaapi::snapshot();
+  auto restore = util::fail_guard([&] { config::vaapi::publish(saved); });
+  const config::video_t startup {};
+  config::vaapi::publish({});
+  const auto automatic = video::encoder_probe_settings_for_tests(startup);
+  auto check = [&](const config::vaapi::settings_t &settings) {
+    config::vaapi::publish(settings);
+    EXPECT_NE(video::encoder_probe_settings_for_tests(startup), automatic);
+    config::vaapi::publish({});
+    EXPECT_EQ(video::encoder_probe_settings_for_tests(startup), automatic);
+  };
+  check({.strict_rc_buffer = true});
+  check({.quality = config::vaapi::quality_e::speed});
+  check({.rc = config::vaapi::rc_e::cqp});
+  check({.blbrc = true});
+  check({.blbrc = false});
+}
+
+TEST(VideoProbeReuseTests, CapabilitySettingsRetireReuseAcrossEncoderFamilies) {
+  const config::video_t original {};
+  const auto key = video::encoder_probe_settings_for_tests(original);
+  auto changed = original;
+  auto check = [&] {
+    EXPECT_NE(video::encoder_probe_settings_for_tests(changed), key);
+    changed = original;
+  };
+  changed.encoder = "nvenc"; check();
+  changed.adapter_name = "/dev/dri/renderD129"; check();
+  changed.output_name = "second-output"; check();
+  changed.hevc_mode = 3; check();
+  changed.color_range = 2; check();
+  changed.sw.sw_preset = "medium"; check();
+  changed.nv.quality_preset = 7; check();
+  changed.nv_legacy.multipass = 2; check();
+  changed.qsv.qsv_preset = 4; check();
+  changed.amd.amd_quality_h264 = 2; check();
+  changed.vt.vt_allow_sw = 1; check();
+  changed.vaapi.strict_rc_buffer = true; check();
+  changed.vk.rc_mode = 1; check();
+  changed.linux_display.prefer_gpu_native_capture = true; check();
+  // Unrelated credentials never enter process or disk probe provenance.
+  changed.ai_optimizer.api_key = "unrelated-secret";
+  EXPECT_EQ(video::encoder_probe_settings_for_tests(changed), key);
+}
+#endif
+
+#if defined(POLARIS_TESTS) && !defined(__APPLE__)
+TEST(VideoProbeReuseTests, ResetTimeoutDuringRealProbeEntryCannotAuthorizeReuse) {
+  const auto old_config = config::video;
+  const auto old_h264 = video::nvenc.h264.capabilities;
+  const auto old_hevc = video::nvenc.hevc.capabilities;
+  const auto old_av1 = video::nvenc.av1.capabilities;
+  auto restore = util::fail_guard([&] {
+    video::reset_encoder_probe_state();
+    config::video = old_config;
+    video::nvenc.h264.capabilities = old_h264;
+    video::nvenc.hevc.capabilities = old_hevc;
+    video::nvenc.av1.capabilities = old_av1;
+  });
+  video::reset_encoder_probe_state();
+  config::video.encoder = "nvenc";
+  config::video.hevc_mode = 1;
+  config::video.av1_mode = 1;
+  const auto identity = complete_probe_identity();
+  std::promise<void> entered;
+  std::promise<void> resume;
+  auto resumed = resume.get_future();
+  auto validate = [](video::encoder_t &encoder, bool) {
+    encoder.h264.capabilities.set();
+    encoder.hevc.capabilities.set();
+    encoder.av1.capabilities.set();
+    return true;
+  };
+  auto probe = std::async(std::launch::async, [&] {
+    return video::probe_encoders_with_hooks_for_tests(identity, [&](video::encoder_t &encoder, bool expected) {
+      entered.set_value();
+      resumed.wait();
+      return validate(encoder, expected);
+    });
+  });
+  entered.get_future().wait();
+  // This is the actual reset API and actual encoder-state mutex: the writer
+  // remains in its probe while reset invalidates, waits two seconds, and defers.
+  video::reset_encoder_probe_state();
+  resume.set_value();
+  EXPECT_EQ(probe.get(), 0);
+  int validations = 0;
+  auto count = [&](video::encoder_t &encoder, bool expected) {
+    ++validations;
+    return validate(encoder, expected);
+  };
+  EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(identity, count), 0);
+  EXPECT_EQ(validations, 1) << "timed-out external reset must force another real validation";
+  EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(identity, count), 0);
+  EXPECT_EQ(validations, 1) << "unchanged successful validation may then reuse";
+}
+#endif
+
+#ifdef __linux__
+TEST(VideoProbeDriverTests, RetainsAndVerifiesActualLoadedFileMappings) {
+  platf::encoder_probe_identity::driver_proof_t proof;
+  ASSERT_TRUE(proof.include_live_objects());
+  const auto first = proof.current_key();
+  ASSERT_TRUE(first);
+  EXPECT_TRUE(proof.include_live_objects());
+  EXPECT_EQ(first, proof.current_key());
+}
+#endif
+
+#if defined(__linux__) && defined(POLARIS_PROBE_PROVIDER_FIXTURE)
+namespace {
+  class ProbeProviderFixture: public testing::Test {
+  protected:
+    void SetUp() override {
+      char pattern[] = "/tmp/polaris-probe-provider-XXXXXX";
+      const auto created = mkdtemp(pattern);
+      ASSERT_NE(created, nullptr);
+      directory = created;
+      path = directory / "provider.so";
+      std::filesystem::copy_file(POLARIS_PROBE_PROVIDER_FIXTURE, path);
+    }
+    void TearDown() override {
+      if (handle) dlclose(handle);
+      if (!directory.empty()) {
+        std::filesystem::remove(path);
+        std::filesystem::remove(directory / "replacement.so");
+        std::filesystem::remove(directory);
+      }
+    }
+    void load() {
+      handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+      ASSERT_NE(handle, nullptr) << dlerror();
+    }
+    void unload() {
+      ASSERT_NE(handle, nullptr);
+      ASSERT_EQ(dlclose(handle), 0);
+      handle = nullptr;
+    }
+    std::filesystem::path directory, path;
+    void *handle = nullptr;
+  };
+}
+
+TEST_F(ProbeProviderFixture, RetentionSurvivesCallerCloseAndReleasesAfterProof) {
+  load();
+  {
+    platf::encoder_probe_identity::driver_proof_t proof;
+    ASSERT_TRUE(proof.include_live_objects());
+    const auto identity = proof.current_key();
+    ASSERT_TRUE(identity);
+    unload();
+    EXPECT_EQ(proof.current_key(), identity);
+    auto retained = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+    ASSERT_NE(retained, nullptr);
+    const auto entry = reinterpret_cast<int (*)()>(dlsym(retained, "polaris_probe_provider_fixture"));
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry(), 42);
+    EXPECT_EQ(dlclose(retained), 0);
+    platf::encoder_probe_identity::driver_proof_t fresh;
+    ASSERT_TRUE(fresh.include_live_objects());
+    EXPECT_NE(fresh.current_key(), identity) << "new proofs never inherit old runtime authority";
+  }
+  auto released = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+  EXPECT_EQ(released, nullptr);
+  if (released) dlclose(released);
+}
+
+TEST_F(ProbeProviderFixture, PathReplacementInvalidatesRetainedOldMapping) {
+  load();
+  platf::encoder_probe_identity::driver_proof_t proof;
+  ASSERT_TRUE(proof.include_live_objects());
+  ASSERT_TRUE(proof.current_key());
+  const auto replacement = directory / "replacement.so";
+  std::filesystem::copy_file(POLARIS_PROBE_PROVIDER_FIXTURE, replacement);
+  std::filesystem::rename(replacement, path);
+  EXPECT_FALSE(proof.current_key());
+  EXPECT_FALSE(proof.include_live_objects());
+}
+
+TEST_F(ProbeProviderFixture, InPlaceFileMetadataChangeInvalidatesProof) {
+  load();
+  platf::encoder_probe_identity::driver_proof_t proof;
+  ASSERT_TRUE(proof.include_live_objects());
+  ASSERT_TRUE(proof.current_key());
+  // Do not corrupt a mapped ELF. An explicit timestamp change exercises the
+  // same invalidation signal as an in-place driver update.
+  std::filesystem::last_write_time(path, std::filesystem::last_write_time(path) + std::chrono::seconds(1));
+  EXPECT_FALSE(proof.current_key());
+}
+
+TEST_F(ProbeProviderFixture, ConcurrentLoaderChangeCannotBeAbsorbedAtCollectionEnd) {
+  platf::encoder_probe_identity::driver_proof_t proof;
+  EXPECT_FALSE(proof.include_live_objects([&] {
+    std::thread loader([&] { handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL); });
+    loader.join();
+    ASSERT_NE(handle, nullptr);
+  }));
+  EXPECT_FALSE(proof.current_key());
+}
+
+TEST_F(ProbeProviderFixture, LoaderChangeAfterCollectionInvalidatesKey) {
+  platf::encoder_probe_identity::driver_proof_t proof;
+  ASSERT_TRUE(proof.include_live_objects());
+  ASSERT_TRUE(proof.current_key());
+  load();
+  EXPECT_FALSE(proof.current_key());
+  unload();
+  EXPECT_FALSE(proof.current_key()) << "load then unload still retires an earlier proof";
+}
+
+TEST(VideoProbeDriverTests, EveryMappedSegmentMustKeepItsDeviceInodeAndFileOffset) {
+  using namespace platf::encoder_probe_identity;
+  const mapped_file_t identity {0x1000, 0x3000, 0, 55, 8, 2};
+  const std::vector<load_segment_t> segments {{0x1000, 0x2800, 0}};
+  const std::vector<mapped_file_t> original {{0x1000, 0x2000, 0, 55, 8, 2},
+                                           {0x2000, 0x3000, 0x1000, 55, 8, 2}};
+  ASSERT_TRUE(mapped_to_file(segments, identity, original));
+  for (int mutation = 0; mutation < 5; ++mutation) {
+    auto changed = original;
+    switch (mutation) {
+      case 0: ++changed[1].device_major; break;
+      case 1: ++changed[1].device_minor; break;
+      case 2: ++changed[1].inode; break;
+      case 3: ++changed[1].offset; break;
+      case 4: ++changed[1].start; break;
+    }
+    EXPECT_FALSE(mapped_to_file(segments, identity, changed));
+  }
+}
+
+TEST_F(ProbeProviderFixture, ProviderSearchPrecedenceAndOverridesRetireReuse) {
+  const std::vector<std::string> variables {"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CONFIG_DIRS",
+    "XDG_DATA_DIRS", "LD_LIBRARY_PATH", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS",
+    "__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"};
+  std::vector<std::optional<std::string>> previous;
+  for (const auto &name : variables) {
+    const auto value = getenv(name.c_str());
+    previous.emplace_back(value ? std::make_optional<std::string>(value) : std::nullopt);
+    unsetenv(name.c_str());
+  }
+  auto restore = util::fail_guard([&] {
+    for (size_t i = 0; i < variables.size(); ++i) {
+      if (previous[i]) setenv(variables[i].c_str(), previous[i]->c_str(), 1);
+      else unsetenv(variables[i].c_str());
+    }
+  });
+  setenv("HOME", directory.c_str(), 1);
+  const auto forward = (directory / "first").string() + ":" + (directory / "second").string();
+  const auto reverse = (directory / "second").string() + ":" + (directory / "first").string();
+  setenv("XDG_CONFIG_DIRS", forward.c_str(), 1);
+  const auto first = platf::encoder_probe_identity::provider_selection_key();
+  ASSERT_TRUE(first);
+  EXPECT_NE(first->find("/etc/xdg/vulkan/icd.d"), std::string::npos);
+  setenv("XDG_CONFIG_DIRS", reverse.c_str(), 1);
+  const auto second = platf::encoder_probe_identity::provider_selection_key();
+  ASSERT_TRUE(second);
+  EXPECT_NE(first, second);
+  const auto external = directory / "first/egl/egl_external_platform.d";
+  auto remove_external = util::fail_guard([&] {
+    std::error_code ec;
+    std::filesystem::remove_all(directory / "first", ec);
+  });
+  std::filesystem::create_directories(external);
+  const auto manifest = external / "15_gbm.json";
+  { std::ofstream output(manifest); output << R"({"library_path":"provider-one.so"})"; }
+  const auto external_before = platf::encoder_probe_identity::provider_selection_key();
+  ASSERT_TRUE(external_before);
+  EXPECT_NE(external_before, second);
+  { std::ofstream output(manifest); output << R"({"library_path":"provider-two.so"})"; }
+  EXPECT_NE(platf::encoder_probe_identity::provider_selection_key(), external_before);
+  for (const auto variable : {"LD_LIBRARY_PATH", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS",
+         "__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"}) {
+    setenv(variable, "/unobserved/provider", 1);
+    EXPECT_FALSE(platf::encoder_probe_identity::provider_selection_key()) << variable;
+    unsetenv(variable);
+  }
+  for (const auto variable : {"__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", "__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS"}) {
+    setenv(variable, "", 1);
+    EXPECT_FALSE(platf::encoder_probe_identity::provider_selection_key()) << variable;
+    unsetenv(variable);
+  }
+}
+#endif
+
+#if defined(__linux__) && defined(POLARIS_PROBE_PROVIDER_FIXTURE)
+TEST_F(ProbeProviderFixture, NonregularProviderManifestCannotBlockTheEncoderWriter) {
+  const auto manifest = directory / "replacement.so";
+  ASSERT_EQ(mkfifo(manifest.c_str(), 0600), 0);
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_FALSE(platf::encoder_probe_identity::bounded_file(manifest));
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(1));
+}
+#endif
+TEST(VideoRateTests, PreservesExplicitMillihertzAndNormalizesOnlyDisplayHints) {
+  const std::vector<std::tuple<int, int, AVRational>> cases {
+    {60, 0, {60, 1}}, {60, 5994, {60000, 1001}}, {120, 11988, {120000, 1001}},
+    {24, 2397, {24000, 1001}}, {24, 2398, {24000, 1001}}, {95, 9498, {4749, 50}},
+    {59940, 5994, {2997, 50}}, {23976, 2398, {2997, 125}}, {60000, 11988, {60, 1}},
+    {240, 6000, {240, 1}}, {4000, 6000, {4000, 1}}, {4001, 6000, {4001, 1000}}
+  };
+  for (const auto &[wire, hint, expected] : cases) {
+    const auto actual = video::rate::from_wire(wire, hint);
+    EXPECT_EQ(av_cmp_q(actual, expected), 0) << wire << '/' << hint;
+  }
+}
+
+TEST(VideoRateTests, DisplayRateCannotRaiseOrReplaceTheRequestedStreamRate) {
+  for (const auto hint : {0, -1, 12000, 11988, 3000, 6050, 5950, INT_MAX}) {
+    EXPECT_EQ(av_cmp_q(video::rate::from_wire(60, hint), AVRational {60, 1}), 0) << hint;
+  }
+  EXPECT_FALSE(video::rate::valid(video::rate::from_wire(0, 6000)));
+  EXPECT_FALSE(video::rate::valid(video::rate::from_wire(-60, 6000)));
+  EXPECT_EQ(video::rate::interval({0, 1}), std::chrono::nanoseconds::zero());
+  EXPECT_EQ(video::rate::interval({60, 0}), std::chrono::nanoseconds::zero());
+  EXPECT_TRUE(video::rate::valid(video::rate::from_wire(INT_MAX, INT_MAX)));
+  EXPECT_TRUE(video::rate::valid(video::rate::from_hundredths(INT_MAX)));
+}
+
+TEST(VideoRateTests, CaptureAndEncodingLimiterKeepSeparateWarpAndLaunchRates) {
+  video::config_t config {};
+  config.framerate = 240;  // Warp frame budget stays 240 FPS.
+  config.encodingFramerate = 59940;  // Original launch millihertz contract.
+  config.stream_rate = video::rate::from_wire(240, 5994);
+  config.encode_rate = video::rate::from_millihertz(59940);
+  EXPECT_EQ(video::capture_frame_interval(config), std::chrono::nanoseconds(4166666));
+  EXPECT_EQ(video::encoding_frame_interval(config), std::chrono::nanoseconds(16683350));
+  EXPECT_EQ(config.framerate, 240);
+  EXPECT_EQ(config.encodingFramerate, 59940);
+  config.stream_rate = video::rate::from_wire(60, 5994);
+  config.encode_rate = config.stream_rate;  // Limiter disabled follows stream.
+  EXPECT_EQ(video::capture_frame_interval(config), std::chrono::nanoseconds(16683333));
+  EXPECT_EQ(video::encoding_frame_interval(config), video::capture_frame_interval(config));
+}
+
+#ifdef __linux__
+TEST(VideoDisplaySelectionTests, KmsConnectorAliasesAreUniqueAndLegacyIndicesKeepTheirMapping) {
+  const std::vector<std::string> displays {"kms:pci-0000:01:00.0/DP-1", "kms:pci-0000:03:00.0/DP-1", "kms:pci-0000:01:00.0/HDMI-A-1"};
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "0"), 0);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "1"), 1);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "2"), 2);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "3"), std::nullopt);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "DP-1"), std::nullopt);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "HDMI-A-1"), 2);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "pci-0000:03:00.0/DP-1"), 1);
+  EXPECT_EQ(video::find_display_index_for_tests(displays, "kms:pci-0000:03:00.0/DP-1"), 1);
+}
+#endif
+
+TEST(VideoDisplaySelectionTests, ActualRefreshWrapperDoesNotTurnMissingOrAmbiguousNamesIntoDisplayZero) {
+  const std::vector<std::string> before {"kms:pci-0000:01:00.0/DP-1", "kms:pci-0000:03:00.0/DP-1"};
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "missing-output", before), -1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests(before, 0, "", {before[1]}), -1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "1", before), 1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "", before), 0);
+#ifdef __linux__
+  EXPECT_EQ(video::refresh_display_selection_for_tests({}, -1, "DP-1", before), -1);
+  EXPECT_EQ(video::refresh_display_selection_for_tests(before, 0, "", {before[1], before[0]}), 1);
+#endif
 }

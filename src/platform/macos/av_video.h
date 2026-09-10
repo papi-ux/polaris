@@ -33,7 +33,7 @@ typedef bool (^FrameCallbackBlock)(CMSampleBufferRef);
 + (NSArray<NSDictionary *> *)displayNames;
 + (NSString *)getDisplayName:(CGDirectDisplayID)displayID;
 
-- (id)initWithDisplay:(CGDirectDisplayID)displayID frameRate:(int)frameRate;
+- (id)initWithDisplay:(CGDirectDisplayID)displayID frameRateNumerator:(int)numerator denominator:(int)denominator;
 
 - (void)setFrameWidth:(int)frameWidth frameHeight:(int)frameHeight;
 - (dispatch_semaphore_t)capture:(FrameCallbackBlock)frameCallback;

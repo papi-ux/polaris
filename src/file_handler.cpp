@@ -104,7 +104,9 @@ namespace file_handler {
     }
 
     out << contents;
-
-    return 0;
+    out.flush();
+    if (!out) return -1;
+    out.close();
+    return out.fail() ? -1 : 0;
   }
 }  // namespace file_handler

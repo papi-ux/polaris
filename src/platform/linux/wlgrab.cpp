@@ -60,6 +60,10 @@ namespace wl {
 
   class wlr_t: public platf::display_t {
   public:
+    std::string encoder_probe_route() const override {
+      return private_compositor_capture ? std::string("private-wlr/") + typeid(*this).name() : std::string {};
+    }
+
     bool capture_profile_enabled() const {
       return config::video.linux_display.capture_profile;
     }
@@ -83,7 +87,7 @@ namespace wl {
     }
 
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-      delay = std::chrono::nanoseconds {1s} / config.framerate;
+      delay = ::video::capture_frame_interval(config);
       mem_type = hwdevice_type;
       const auto generation_policy = wlgrab_capture_policy::resolve_generation_policy(
         config.capture_generation,

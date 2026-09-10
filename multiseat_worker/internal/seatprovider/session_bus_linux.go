@@ -172,7 +172,7 @@ func captureSessionBusArtifacts(
 	}
 	captured := make(map[string]artifactIdentity, len(sessionBusArtifactSpecs))
 	for _, spec := range sessionBusArtifactSpecs {
-		identity, err := lstatIdentity(filepath.Join(runtime.path, spec.relative))
+		identity, err := runtime.pins.capture(filepath.Join(runtime.path, spec.relative))
 		if errors.Is(err, os.ErrNotExist) && !spec.required {
 			continue
 		}
@@ -197,7 +197,7 @@ func cleanupSessionBus(
 			return err
 		}
 		path := filepath.Join(runtime.path, spec.relative)
-		identity, err := lstatIdentity(path)
+		identity, err := runtime.pins.capture(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -224,7 +224,7 @@ func cleanupSessionBus(
 		if err := os.Remove(path); err != nil {
 			return errors.New("runtime session bus artifact could not be removed")
 		}
-		if _, err := lstatIdentity(path); !errors.Is(err, os.ErrNotExist) {
+		if _, err := runtime.pins.capture(path); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("runtime session bus artifact removal was not durable")
 		}
 	}

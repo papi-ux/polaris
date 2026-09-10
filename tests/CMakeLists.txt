@@ -76,6 +76,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/src/recovery_profile.cpp
     ${CMAKE_SOURCE_DIR}/src/stream_fec.cpp
+    ${CMAKE_SOURCE_DIR}/tests/fixtures/nanors_cpu_dispatch.c
     ${CMAKE_SOURCE_DIR}/src/web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/display_planner.cpp
@@ -84,7 +85,9 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
     ${CMAKE_SOURCE_DIR}/src/update_status.cpp
     ${CMAKE_SOURCE_DIR}/src/verified_action.cpp
-    ${CMAKE_SOURCE_DIR}/src/rswrapper.c
+    ${CMAKE_SOURCE_DIR}/third-party/nanors/rs.c
+    ${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_common.c
+    ${CMAKE_SOURCE_DIR}/third-party/nanors/deps/obl/oblas_lite.c
 )
 
 if(NOT WIN32 AND NOT APPLE AND NOT POLARIS_HAVE_LIBVA_MAP_BUFFER2)
@@ -138,7 +141,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_stream_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_prepared_ffmpeg.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pulse_mainloop_contract.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_rswrapper.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_reed_solomon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_source_safety_contracts.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_fec.cpp
@@ -198,6 +201,18 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamepad_isolation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_group_access.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_virtual_input.cpp
+    )
+endif()
+
+if(LIBVA_FOUND)
+    list(APPEND TEST_PLATFORM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_vaapi_tuning.cpp
+    )
+endif()
+
+if(LIBDRM_FOUND AND LIBCAP_FOUND)
+    list(APPEND TEST_PLATFORM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_named_binding.cpp
     )
 endif()
 
@@ -264,6 +279,7 @@ if (NOT WIN32 AND NOT APPLE)
 endif()
 
 set(TEST_VIDEO_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_lifecycle_hardware.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
 )
 
@@ -613,6 +629,12 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_video
         ${TEST_VIDEO_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_library(encoder_probe_provider_fixture SHARED fixtures/encoder_probe_provider.cpp)
+        add_dependencies(test_polaris_video encoder_probe_provider_fixture)
+        target_compile_definitions(test_polaris_video PRIVATE
+            POLARIS_PROBE_PROVIDER_FIXTURE="$<TARGET_FILE:encoder_probe_provider_fixture>")
+    endif()
 
     # Keep the historical target name as a build aggregate while the runtime coverage
     # lives in smaller executables that are easier to run and debug independently.

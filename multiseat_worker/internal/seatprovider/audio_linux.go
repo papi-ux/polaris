@@ -102,7 +102,7 @@ func captureAudioArtifacts(runtime *runtimeDirectory) (map[string]artifactIdenti
 	captured := make(map[string]artifactIdentity, len(audioArtifactSpecs))
 	for _, spec := range audioArtifactSpecs {
 		path := filepath.Join(runtime.path, spec.relative)
-		identity, err := lstatIdentity(path)
+		identity, err := runtime.pins.capture(path)
 		if errors.Is(err, os.ErrNotExist) && !spec.required {
 			continue
 		}
@@ -130,7 +130,7 @@ func cleanupAudioArtifacts(
 			return err
 		}
 		path := filepath.Join(runtime.path, spec.relative)
-		identity, err := lstatIdentity(path)
+		identity, err := runtime.pins.capture(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -154,7 +154,7 @@ func cleanupAudioArtifacts(
 		return err
 	}
 	pulsePath := filepath.Join(runtime.path, pulseSpec.relative)
-	identity, err := lstatIdentity(pulsePath)
+	identity, err := runtime.pins.capture(pulsePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
