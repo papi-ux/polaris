@@ -3331,6 +3331,10 @@ namespace stream_stats {
 
       result = current_stats;
     }
+    if (const auto identity = get_single_active_session_identity()) {
+      result.session_generation = identity->session_generation;
+      result.app_session_id = identity->session_token;
+    }
 
     // Doctor-policy video fields are read under the same narrow lock used to
     // publish a policy-class transition. Other hot fields remain independent

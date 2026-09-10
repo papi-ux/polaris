@@ -21,6 +21,9 @@ export const CLIENT_SETTINGS_RESPONSE_ONLY_KEYS = [
 ]
 
 export const CONFIG_RESPONSE_ONLY_KEYS = [
+  'configuration_revision',
+  'live_tuning',
+  'ai_explanations_ready',
   'status',
   'platform',
   'version',

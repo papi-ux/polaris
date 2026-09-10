@@ -3,9 +3,9 @@ import { computed, ref, onMounted, onUnmounted, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import {
   resolveClientSettingsSync,
-  stripConfigResponseOnly,
 } from '../client-settings-sync'
 import ConfirmActionDialog from './ConfirmActionDialog.vue'
+import LiveTuningControl from './LiveTuningControl.vue'
 
 const config = ref({})
 const pendingKey = ref(null)
@@ -64,24 +64,11 @@ async function toggle(key) {
   pendingKey.value = key
   const newVal = isEnabled(key) ? 'disabled' : 'enabled'
   try {
-    // Read existing config first, then merge the change
-    // The API overwrites the entire file, so we must send ALL settings
     const existingRes = await fetch('./api/config', { credentials: 'include' })
-    let existing = {}
-    if (existingRes.ok) {
-      existing = await existingRes.json()
-    }
-    const platform = existing.platform || config.value.platform
-
-    // Remove response-only keys injected by getConfig() that aren't real config settings.
-    // These come from the server's status probing, not the config file.
-    stripConfigResponseOnly(existing)
-
-    // Merge the toggle change
-    existing[key] = newVal
-    if (key === 'ai_enabled') {
-      existing.adaptive_bitrate_enabled = newVal
-    }
+    if (!existingRes.ok) throw new Error('refresh-failed')
+    const current = await existingRes.json()
+    const platform = current.platform || config.value.platform
+    const existing = { [key]: newVal }
     if (key === 'headless_mode' && platform === 'linux') {
       existing.linux_use_cage_compositor = newVal
       existing.linux_prefer_gpu_native_capture = 'disabled'
@@ -89,15 +76,13 @@ async function toggle(key) {
 
     const response = await fetch('./api/config', {
       credentials: 'include',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...(current.configuration_revision
+        ? { 'If-Match': `"${current.configuration_revision}"` } : {}) },
       body: JSON.stringify(existing)
     })
     if (!response.ok) throw new Error('save-failed')
     syncKey(key, newVal)
-    if (key === 'ai_enabled') {
-      syncKey('adaptive_bitrate_enabled', newVal)
-    }
     if (key === 'headless_mode' && platform === 'linux') {
       syncKey('linux_use_cage_compositor', newVal)
       syncKey('linux_prefer_gpu_native_capture', 'disabled')
@@ -157,13 +142,12 @@ onUnmounted(() => {
 
 const toggles = [
   { key: 'headless_mode', requiresRestart: true },
-  { key: 'ai_enabled', requiresRestart: false },
   { key: 'stream_audio', requiresRestart: true },
   { key: 'enable_discovery', requiresRestart: false },
   { key: 'enable_pairing', requiresRestart: false },
 ]
 
-const compactToggleKeys = ['headless_mode', 'ai_enabled', 'stream_audio']
+const compactToggleKeys = ['headless_mode', 'stream_audio']
 const visibleToggles = () => (
   props.compact
     ? toggles.filter((toggle) => compactToggleKeys.includes(toggle.key))
@@ -201,6 +185,7 @@ const syncBadgeTone = computed(() => {
     <div v-if="!props.compact" class="rounded-lg border border-storm/20 bg-void/25 px-3 py-2 text-[11px] leading-relaxed text-storm">
       {{ $t(syncCopyKey) }}
     </div>
+    <LiveTuningControl :compact="props.compact" />
     <button
       v-for="t in visibleToggles()"
       :key="t.key"

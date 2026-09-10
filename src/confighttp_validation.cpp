@@ -77,6 +77,7 @@ namespace confighttp::validation {
     // as config_response_only_keys.
     constexpr std::array response_only_config_keys_list {
       "ai_auto_quality_enabled"sv,
+      "ai_explanations_ready"sv,
       "client_settings_authority"sv,
       "client_settings_available"sv,
       "client_settings_effective_stream_display_mode"sv,
@@ -96,9 +97,11 @@ namespace confighttp::validation {
       "client_settings_sync_mode"sv,
       "client_settings_v1"sv,
       "config_response_only_keys"sv,
+      "configuration_revision"sv,
       "has_ai_api_key"sv,
       "has_api_key"sv,
       "has_steamgriddb_api_key"sv,
+      "live_tuning"sv,
       "platform"sv,
       "runtime_backend"sv,
       "runtime_effective_headless"sv,

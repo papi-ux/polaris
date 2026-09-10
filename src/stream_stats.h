@@ -127,6 +127,8 @@ namespace stream_stats {
   };
 
   struct stats_t {
+    std::uint64_t session_generation = 0;
+    std::string app_session_id;
     // Stream state
     bool streaming = false;
     std::string client_name;

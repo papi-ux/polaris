@@ -6,6 +6,8 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -40,7 +42,15 @@ namespace private_state_file {
     }
   };
 
-  read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes);
+  read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes,
+                            bool permit_public_read = false, bool wait_for_lock = true);
+  // One cross-process transaction. Contention fails immediately so callers can
+  // retain session authority without waiting on an unrelated file-lock holder.
+  // The callback must not call another persistence operation on this path.
+  write_result_t update_atomic(const std::filesystem::path &target, std::size_t max_bytes,
+    const std::function<std::optional<std::string>(const read_result_t &)> &update,
+    bool permit_public_read = false);
+
   write_result_t write_atomic(const std::filesystem::path &target, std::string_view payload);
 
 #ifdef POLARIS_TESTS

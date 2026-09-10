@@ -22,6 +22,7 @@
 
 // local includes
 #include "config.h"
+#include "configuration_store.h"
 #include "confighttp_validation.h"
 #include "entry_handler.h"
 #include "file_handler.h"
@@ -1251,8 +1252,9 @@ namespace config {
     return opts;
   }
 
-  int write_config_with_vaapi_settings(const std::string &path, const std::string &contents) {
-    if (const auto result = file_handler::write_file(path.c_str(), contents); result != 0) return result;
+  int write_config_with_vaapi_settings(const std::string &path, const std::string &contents,
+                                     const std::optional<std::string> &expected) {
+    if (configuration_store::replace(path, contents, expected) != configuration_store::result::committed) return -1;
     vaapi::publish(parse_vaapi_settings(parse_config(contents)));
     return 0;
   }
