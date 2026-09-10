@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { shallowMount } from '@vue/test-utils'
+import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, reactive, ref } from 'vue'
 
@@ -81,6 +81,55 @@ function mountAudioVideo(config = linuxConfig()) {
 describe('Linux Streaming Setup checklist', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('refreshes saved KScreen readiness after the host restarts without discarding local edits', async () => {
+    let ready = false
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/settings/metadata')
+        ? {
+            status: true, version: 1, fields: {},
+            modes: [{ value: 'host_virtual_display', available: ready,
+              unavailable_reason: ready ? '' : 'Set linux_streaming_output' }],
+          }
+        : { status: true },
+    })))
+    const config = reactive(linuxConfig({ linux_streaming_output: '' }))
+    const wrapper = mountAudioVideo(config)
+    await flushPromises()
+    const virtualCard = () => wrapper.findAll('article').find((card) => card.text().includes('Host Virtual Display'))
+    expect(virtualCard().find('button').attributes('disabled')).toBeDefined()
+    config.linux_streaming_output = 'DP-2'
+    await nextTick()
+    expect(virtualCard().find('button').attributes('disabled')).toBeDefined()
+    ready = true
+    config.max_bitrate = 42000
+    await wrapper.setProps({ hostGeneration: 1 })
+    await flushPromises()
+    expect(virtualCard().find('button').attributes('disabled')).toBeUndefined()
+    expect(config.max_bitrate).toBe(42000)
+    await virtualCard().find('button').trigger('click')
+    expect(config.linux_stream_mode).toBe('host_virtual_display')
+    wrapper.unmount()
+  })
+
+  it('refreshes mode options for older hosts without settings metadata', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: !String(url).includes('/settings/metadata'), status: 404,
+      json: async () => ({ stream_display_mode_options: [{ value: 'host_virtual_display', available: true }] }),
+    })))
+    const config = reactive(linuxConfig({
+      stream_display_mode_options: [{ value: 'host_virtual_display', available: false }],
+    }))
+    const wrapper = mountAudioVideo(config)
+    await flushPromises()
+    const virtualCard = () => wrapper.findAll('article').find((card) => card.text().includes('Host Virtual Display'))
+    expect(virtualCard().find('button').attributes('disabled')).toBeDefined()
+    await wrapper.setProps({ hostGeneration: 1 })
+    await flushPromises()
+    expect(virtualCard().find('button').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
   })
 
   it('renders the en.json copy for strings routed through the locale system', () => {
