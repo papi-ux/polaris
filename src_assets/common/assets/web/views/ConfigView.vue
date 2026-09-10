@@ -882,6 +882,7 @@ async function focusSectionTarget(sectionId) {
 }
 
 async function configSaveFailureMessage(response) {
+  if (response?.status === 412) return 'Settings changed on the host. Refresh Settings and review your changes before saving.'
   const fallbackMessage = 'Failed to save configuration'
   if (!response || typeof response.text !== 'function') return fallbackMessage
 
@@ -914,6 +915,7 @@ function serialize() {
     configCopy.trusted_subnets = configCopy.trusted_subnets.filter(s => s && s.trim()).join(',')
   }
 
+  delete configCopy.adaptive_bitrate_enabled
   stripConfigResponseOnly(configCopy)
 
   return configCopy
@@ -942,11 +944,14 @@ function save() {
 
   return fetch("./api/config", {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(config.value.configuration_revision
+      ? { 'If-Match': `"${config.value.configuration_revision}"` } : {}) },
     method: 'POST',
     body: JSON.stringify(configCopy),
   }).then(async (r) => {
     if (r.status === 200) {
+      const result = await r.json()
+      config.value.configuration_revision = result.configuration_revision
       saved.value = true
       initialSerialized.value = JSON.stringify(serialize())
       toast(
@@ -1167,7 +1172,15 @@ function handleHash() {
     }
   }
 
+function acceptOwnLiveTuningSave(event) {
+  if (config.value?.configuration_revision === event.detail?.previousRevision) {
+    config.value.configuration_revision = event.detail.revision
+    responseOnlyConfig.value.configuration_revision = event.detail.revision
+  }
+}
+
 onMounted(() => {
+  window.addEventListener('polaris:live-tuning-saved', acceptOwnLiveTuningSave)
   handleHash()
   window.addEventListener("hashchange", handleHash)
 })
@@ -1188,6 +1201,7 @@ watch(currentTab, async (value) => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('polaris:live-tuning-saved', acceptOwnLiveTuningSave)
   clearSearchHighlight()
   window.removeEventListener("hashchange", handleHash)
 })

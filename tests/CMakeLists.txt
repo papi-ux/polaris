@@ -239,6 +239,7 @@ set(TEST_PAIRING_SOURCES
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_response_status.cpp
@@ -257,6 +258,7 @@ set(TEST_AUDIO_SOURCES
 )
 
 set(TEST_STREAM_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_claude_cli.cpp
