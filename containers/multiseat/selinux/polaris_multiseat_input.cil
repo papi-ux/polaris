@@ -3,4 +3,7 @@
 (type polaris_multiseat_input_device_t)
 (typeattributeset device_node (polaris_multiseat_input_device_t))
 (roletype object_r polaris_multiseat_input_device_t)
-(allow container_t polaris_multiseat_input_device_t (chr_file (getattr open read)))
+(allow container_t polaris_multiseat_input_device_t (chr_file (getattr open read ioctl)))
+; EVIOCGVERSION, EVIOCGNAME and EVIOCGPHYS validate the read-only allocation.
+; Never grant a whole ioctl type: evdev also exposes write, grab and revoke APIs.
+(allowx container_t polaris_multiseat_input_device_t (ioctl chr_file (0x4501 0x4506 0x4507)))

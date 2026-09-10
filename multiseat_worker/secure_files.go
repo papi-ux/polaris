@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,7 +67,9 @@ func privateDirectory(path string, expectedUID uint32) error {
 }
 
 func openPrivateRegular(path string, expectedUID uint32, maxBytes int64) (*os.File, error) {
-	descriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	// Validate the opened descriptor without first waiting for an attacker-
+	// supplied FIFO's writer. Regular files retain the same read semantics.
+	descriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, errors.New("private file is inaccessible")
 	}
@@ -182,6 +185,15 @@ func socketReady(path string, expectedUID uint32) bool {
 }
 
 func checkHealth(config workerConfig, paths workerPaths, expectedUID uint32) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*handshakeTimeout)
+	defer cancel()
+	return checkHealthContext(ctx, config, paths, expectedUID)
+}
+
+func checkHealthContext(ctx context.Context, config workerConfig, paths workerPaths, expectedUID uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := privateDirectory(paths.IPC, expectedUID); err != nil {
 		return err
 	}
@@ -210,6 +222,7 @@ func checkHealth(config workerConfig, paths workerPaths, expectedUID uint32) err
 		return errors.New("worker IPC sockets are not ready")
 	}
 	if err := probeWorkerSocket(
+		ctx,
 		filepath.Join(paths.IPC, controlSocketName),
 		config,
 		capability,
@@ -219,6 +232,7 @@ func checkHealth(config workerConfig, paths workerPaths, expectedUID uint32) err
 		return err
 	}
 	if err := probeWorkerSocket(
+		ctx,
 		filepath.Join(paths.IPC, mediaSocketName),
 		config,
 		capability,

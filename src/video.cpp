@@ -1780,7 +1780,7 @@ namespace video {
 
     config_t config;
     int frame_nr;
-    void *channel_data;
+    stream_packets::destination_t channel_data;
   };
 
   struct sync_session_t {
@@ -1794,7 +1794,7 @@ namespace video {
   struct capture_ctx_t {
     img_event_t images;
     config_t config;
-    void *channel_data;
+    stream_packets::destination_t channel_data;
   };
 
   struct capture_thread_async_ctx_t {
@@ -2727,7 +2727,7 @@ namespace video {
     {
 #ifdef __linux__
     session_media::pending_start_owner_scope_t initial_owner_scope {
-      capture_ctxs.front().channel_data
+      capture_ctxs.front().channel_data.capture_owner_tag()
     };
 #endif
     if (!exact_display_name.empty()) {
@@ -2986,7 +2986,7 @@ namespace video {
                 {
 #ifdef __linux__
                   session_media::pending_start_owner_scope_t owner_scope {
-                    capture_ctxs.front().channel_data
+                    capture_ctxs.front().channel_data.capture_owner_tag()
                   };
 #endif
                   reset_display(
@@ -3032,7 +3032,7 @@ namespace video {
               {
 #ifdef __linux__
                 session_media::pending_start_owner_scope_t owner_scope {
-                  capture_ctxs.front().channel_data
+                  capture_ctxs.front().channel_data.capture_owner_tag()
                 };
 #endif
                 reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
@@ -3066,7 +3066,7 @@ namespace video {
     }
   }
 
-  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto *encode_device = session.device();
     if (!encode_device || !encode_device->frame) {
       return -1;
@@ -3150,7 +3150,7 @@ namespace video {
     return 0;
   }
 
-  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
     auto encode_done_timestamp = std::chrono::steady_clock::now();
     if (encoded_frame.data.empty()) {
@@ -3172,7 +3172,7 @@ namespace video {
     return 0;
   }
 
-  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+  int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     int result = -1;
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       result = encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
@@ -3707,7 +3707,7 @@ namespace video {
     safe::signal_t &reinit_event,
     safe::signal_t &reinit_request_event,
     const encoder_t &encoder,
-    void *channel_data,
+    stream_packets::destination_t channel_data,
     packet_queue_t packets
   ) {
     // A disable/rollback may have superseded the target while a former
@@ -4318,7 +4318,7 @@ namespace video {
         {
 #ifdef __linux__
           session_media::pending_start_owner_scope_t owner_scope {
-            synced_session_ctxs.front()->channel_data
+            synced_session_ctxs.front()->channel_data.capture_owner_tag()
           };
 #endif
           reset_display(
@@ -4366,7 +4366,7 @@ namespace video {
       {
 #ifdef __linux__
         session_media::pending_start_owner_scope_t owner_scope {
-          synced_session_ctxs.front()->channel_data
+          synced_session_ctxs.front()->channel_data.capture_owner_tag()
         };
 #endif
         reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config);
@@ -4567,7 +4567,7 @@ namespace video {
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    void *channel_data,
+    stream_packets::destination_t channel_data,
     packet_queue_t packets
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
@@ -4695,7 +4695,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    stream_packets::destination_t channel_data
   ) {
     capture(mail, std::move(config), channel_data, mail::man->queue<packet_t>(mail::video_packets));
   }
@@ -4703,7 +4703,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data,
+    stream_packets::destination_t channel_data,
     packet_queue_t packets
   ) {
     // A probe mutates chosen_encoder and the static encoder capability records.
@@ -6047,7 +6047,7 @@ namespace video {
     auto packets = mailbox->queue<packet_t>(mail::video_packets);
     std::vector<int> results;
     for (std::size_t index = 0; index < frame_count; ++index) {
-      results.push_back(encode_avcodec(index, session, packets, nullptr, std::nullopt));
+      results.push_back(encode_avcodec(index, session, packets, stream_packets::destination_t {}, std::nullopt));
     }
     return results;
   }

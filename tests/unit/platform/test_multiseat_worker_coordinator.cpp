@@ -941,6 +941,44 @@ TEST(MultiseatWorkerCoordinator, AuthorizesOnlyExactRunningAuthenticatedSeat) {
   );
 }
 
+TEST(MultiseatWorkerCoordinator, SeatMetadataCannotGrantConnectionAccess) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability()};
+  registry_t registry {"controller-current", {shared_gpu()}};
+  auto sessions = std::make_shared<session_state_t>();
+  fake_worker_backend_t backend;
+  worker_coordinator_t coordinator {
+    registry, backend, store, short_options(), {}, session_factory(sessions)
+  };
+  const auto seat = admit_and_bind(registry, "paired-client", "profile", "game");
+  int calls = 0;
+  const authenticated_worker_connection_action_t action = [&](const auto &, const auto &) {
+    ++calls;
+  };
+  EXPECT_EQ(coordinator.with_authenticated_worker_connection({}, action),
+    worker_seat_authorization_status_e::invalid_request);
+  EXPECT_EQ(coordinator.with_authenticated_worker_connection(seat.handle, {}),
+    worker_seat_authorization_status_e::invalid_request);
+  EXPECT_EQ(coordinator.with_authenticated_worker_connection(seat.handle, action),
+    worker_seat_authorization_status_e::reconciliation_required);
+  ASSERT_TRUE(coordinator.reconcile().admission_ready);
+  EXPECT_EQ(coordinator.with_authenticated_worker_connection(seat.handle, action),
+    worker_seat_authorization_status_e::seat_not_running);
+  ASSERT_EQ(coordinator.start_seat(seat.handle), coordinator_start_result_e::started);
+  ASSERT_TRUE(backend.mark_ready(identity_for(seat)));
+  ASSERT_EQ(coordinator.reconcile().broker.ready_transitions, std::size_t {1});
+  // This test double reports authenticated metadata but has no real transport.
+  EXPECT_EQ(coordinator.with_authenticated_worker_seat(seat.handle, [](const auto &) {}),
+    worker_seat_authorization_status_e::applied);
+  EXPECT_EQ(coordinator.with_authenticated_worker_connection(seat.handle, action),
+    worker_seat_authorization_status_e::endpoint_not_authenticated);
+  auto stale = seat.handle;
+  ++stale.generation;
+  EXPECT_EQ(coordinator.with_authenticated_worker_connection(stale, action),
+    worker_seat_authorization_status_e::seat_not_found);
+  EXPECT_EQ(calls, 0);
+}
+
 TEST(MultiseatWorkerCoordinator, AuthorizationSerializesWithExactStop) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability()};

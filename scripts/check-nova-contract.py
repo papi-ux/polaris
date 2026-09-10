@@ -30,6 +30,10 @@ from pathlib import Path
 ACCESSORS = "optString|optBoolean|optInt|optLong|optDouble|optJSONObject|optJSONArray|opt|getString|getBoolean|getInt|getLong|has|isNull"
 
 
+class ReaderUnavailableError(ValueError):
+    """A declared consumer is absent in the inspected Nova revision."""
+
+
 def function_body(source: str, name: str) -> str:
     """The body of one Kotlin function, up to the next declaration at its level.
 
@@ -46,7 +50,7 @@ def function_body(source: str, name: str) -> str:
         re.M,
     )
     if not start:
-        raise SystemExit(f"function not found: {name}")
+        raise ReaderUnavailableError(f"function not found: {name}")
     rest = source[start.end():]
     # Local helper functions are deeper-indented and remain part of the reader
     # scope. Only a sibling declaration at the exact same indentation closes
@@ -90,7 +94,7 @@ def nova_reads(nova: Path, reader: dict) -> set[str]:
     """Fields Nova reads for one contract object."""
     path = nova / reader["file"]
     if not path.is_file():
-        raise SystemExit(f"not found: {path}\nIs --nova pointing at a Nova checkout?")
+        raise ReaderUnavailableError(f"reader file not found: {reader['file']}")
     return reads_for_object(path.read_text(), reader)
 
 
@@ -99,6 +103,8 @@ def main() -> int:
     parser.add_argument("--nova", required=True, type=Path, help="path to a Nova checkout")
     parser.add_argument("--polaris", type=Path, default=Path(__file__).resolve().parent.parent)
     args = parser.parse_args()
+    if not args.nova.is_dir():
+        parser.error("--nova must name an existing Nova source directory")
 
     manifest = polaris_manifest(args.polaris)
     drift = manifest.get("known_drift", {})
@@ -119,13 +125,21 @@ def main() -> int:
             print(f"{name}: Polaris serves {len(served)}, no Nova reader yet [not yet consumed]")
             continue
         path = args.nova / reader["file"]
-        if not path.is_file():
-            raise SystemExit(f"not found: {path}\nIs --nova pointing at a Nova checkout?")
-        if path not in sources:
-            sources[path] = path.read_text()
-
         served = set(obj["fields"])
-        read = reads_for_object(sources[path], reader)
+        try:
+            if not path.is_file():
+                raise ReaderUnavailableError(f"reader file not found: {reader['file']}")
+            if path not in sources:
+                sources[path] = path.read_text()
+            read = reads_for_object(sources[path], reader)
+        except ReaderUnavailableError as error:
+            # A stale/missing reader is a failed contract check. Keep auditing
+            # later objects, without treating unknown reads as an empty set or
+            # allowing known field drift to suppress the missing consumer.
+            print(f"{name}: Polaris serves {len(served)}, Nova reader unavailable [drift]")
+            print(f"    DRIFT  {error}")
+            new_findings += 1
+            continue
 
         # Not every served field has to be consumed. A host may publish diagnostics a
         # client has no use for, so only fields absent from informational_ok count.
@@ -152,7 +166,7 @@ def main() -> int:
         new_findings += len(fresh_missing) + len(fresh_unread)
 
     print()
-    print("no new drift" if not new_findings else f"{new_findings} new drift field(s)")
+    print("no new drift" if not new_findings else f"{new_findings} new drift finding(s)")
     return 1 if new_findings else 0
 
 

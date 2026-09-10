@@ -34,6 +34,10 @@ namespace multiseat {
     virtual worker_ipc::transport_status_e shutdown() = 0;
     virtual void close() noexcept = 0;
     [[nodiscard]] virtual bool connected() const noexcept = 0;
+    /** Only a real mutually authenticated session can provide a live lease. */
+    [[nodiscard]] virtual worker_ipc::controller_connection_t lease_connection() const {
+      return {};
+    }
   };
 
   using worker_control_session_factory_t =
@@ -123,8 +127,22 @@ namespace multiseat {
       const seat_handle_t &handle,
       const authenticated_worker_seat_action_t &action
     ) override;
+    [[nodiscard]] worker_seat_authorization_status_e
+    with_authenticated_worker_connection(
+      const seat_handle_t &handle,
+      const authenticated_worker_connection_action_t &action
+    ) override;
 
   private:
+    using authenticated_session_action_t = std::function<worker_seat_authorization_status_e(
+      const authenticated_worker_seat_t &,
+      worker_control_session_t &
+    )>;
+    [[nodiscard]] worker_seat_authorization_status_e with_authenticated_session(
+      const seat_handle_t &handle,
+      const authenticated_session_action_t &action
+    );
+
     struct managed_worker_t {
       worker_identity_t identity;
       worker_ipc::authority_handle_t authority;

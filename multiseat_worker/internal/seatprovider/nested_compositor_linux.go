@@ -24,7 +24,6 @@ const (
 	gamescopeLimiterNamePrefix     = "polaris-gamescope-limiter-"
 	gamescopeSessionNamePrefix     = "polaris-gamescope-session-"
 	gamescopeArtifactNameDomain    = "polaris-gamescope-artifacts-v1\x00"
-	gamescopeSessionRecordHeader   = "POLARIS-GAMESCOPE-SESSION/1\n"
 	maximumGamescopeReadyRecord    = 64
 	defaultGamescopeStartupTimeout = 120 * time.Second
 )
@@ -43,7 +42,7 @@ type gamescopeReadyInfo struct {
 	waylandName   string
 }
 
-func RunNestedCompositor(arguments []string, environment []string) error {
+func RunNestedCompositor(arguments []string, environment []string) (result error) {
 	request, err := parseProviderInvocation(
 		seatruntime.StageNestedCompositor,
 		arguments,
@@ -62,6 +61,15 @@ func RunNestedCompositor(arguments []string, environment []string) error {
 	// application timeout and may never expose an app id.
 	options.startupTimeout = defaultGamescopeStartupTimeout
 	options, err = normalizeProviderOptions(options)
+	if err != nil {
+		_ = ready.Close()
+		return err
+	}
+	var cleanup func() error
+	options, cleanup, err = preparePrivateX11(options)
+	if cleanup != nil {
+		defer func() { result = errors.Join(result, cleanup()) }()
+	}
 	if err != nil {
 		_ = ready.Close()
 		return err
@@ -511,14 +519,6 @@ func prepareGamescopeWaylandAlias(
 	return nil
 }
 
-func gamescopeSessionRecord(info gamescopeReadyInfo, targetWayland string) []byte {
-	return []byte(gamescopeSessionRecordHeader +
-		"DISPLAY=" + info.displayName + "\n" +
-		"STEAM_GAME_DISPLAY_0=" + info.displayName + "\n" +
-		"WAYLAND_DISPLAY=" + targetWayland + "\n" +
-		"GAMESCOPE_WAYLAND_DISPLAY=" + targetWayland + "\n")
-}
-
 func verifyParentWaylandIdentity(
 	runtime *runtimeDirectory,
 	path string,
@@ -855,7 +855,7 @@ func runNestedCompositor(
 	x11Locks, err := openFixedDirectory(
 		options.x11LockDirectory,
 		options.x11DirectoryOwnerUID,
-		options.x11DirectoryMode,
+		options.x11LockDirectoryMode,
 	)
 	if err != nil {
 		return err
@@ -962,9 +962,11 @@ func runNestedCompositor(
 		cleanupError := cleanupGamescopeRuntimeArtifacts(runtime, paths, knownRuntime, false)
 		return errors.Join(err, cleanupError)
 	}
+	var lifetime *processLifetime
 	readyPublished := false
 	knownX11 := make(map[string]artifactIdentity)
 	defer func() {
+		defer func() { lifetime.close() }()
 		_ = readyFIFO.Close()
 		stopError := child.stop(options.stopTimeout)
 		if !readyPublished && len(knownX11) == 0 {
@@ -1069,10 +1071,17 @@ func runNestedCompositor(
 	if child.exited() {
 		return errors.New("runtime Gamescope exited before readiness")
 	}
+	if child.pidFD == nil {
+		return errors.New("compositor lifetime unavailable")
+	}
+	lifetime, err = retainProcessLifetime(child.command.Process.Pid, int(child.pidFD.Fd()), processCookie{})
+	if err != nil {
+		return err
+	}
 	sessionIdentity, err := createGamescopeRegularArtifact(
 		runtime,
 		paths.sessionRecord,
-		gamescopeSessionRecord(info, request.WaylandSocket),
+		gamescopeLauncherRecord(info, request, child.command.Process.Pid, lifetime.cookie),
 	)
 	if sessionIdentity != (artifactIdentity{}) {
 		knownRuntime[paths.sessionRecord] = sessionIdentity

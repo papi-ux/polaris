@@ -64,7 +64,8 @@ func audioEnvironment(runtimePath string, sink string) []string {
 		"XDG_RUNTIME_DIR=" + runtimePath,
 		"DBUS_SESSION_BUS_ADDRESS=unix:path=" + filepath.Join(runtimePath, "bus"),
 		"PIPEWIRE_RUNTIME_DIR=" + runtimePath,
-		"PIPEWIRE_NODE=" + sink,
+		// PIPEWIRE_NODE belongs to application environments. In a Pulse
+		// server it overwrites every client's target.object before policy runs.
 		"PULSE_SERVER=unix:" + filepath.Join(runtimePath, "pulse", "native"),
 		"PULSE_SINK=" + sink,
 	}
@@ -190,8 +191,8 @@ func waitForProbe(
 	probe func(time.Duration) error,
 ) error {
 	for {
-		if parent == nil {
-			return errors.New("runtime audio probe context is missing")
+		if err := audioStartupActive(parent, deadline); err != nil {
+			return err
 		}
 		for _, child := range children {
 			if child == nil || child.exited() {
@@ -203,7 +204,7 @@ func waitForProbe(
 			return errors.New("runtime audio readiness timed out")
 		}
 		if err := probe(remaining); err == nil {
-			return nil
+			return audioStartupActive(parent, deadline)
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -215,6 +216,21 @@ func waitForProbe(
 		case <-timer.C:
 		}
 	}
+}
+
+func audioStartupActive(parent context.Context, deadline time.Time) error {
+	if parent == nil {
+		return errors.New("runtime audio probe context is missing")
+	}
+	select {
+	case <-parent.Done():
+		return errors.New("runtime audio startup was canceled")
+	default:
+	}
+	if time.Until(deadline) <= 0 {
+		return errors.New("runtime audio readiness timed out")
+	}
+	return nil
 }
 
 func boundedProbeTimeout(remaining time.Duration, configured time.Duration) time.Duration {
@@ -310,6 +326,21 @@ func probeAudioGraph(
 	return nil
 }
 
+func stopAudioChildren(children []*managedChild, deadline time.Time) error {
+	var result error
+	for index, child := range children {
+		if child != nil {
+			budget := time.Until(deadline) / time.Duration(2*(len(children)-index))
+			if budget <= 0 {
+				result = errors.Join(result, child.killWithoutWaiting())
+			} else {
+				result = errors.Join(result, child.stop(budget))
+			}
+		}
+	}
+	return result
+}
+
 func runAudio(
 	parent context.Context,
 	request seatruntime.Request,
@@ -348,6 +379,7 @@ func runAudio(
 		return err
 	}
 	environment := audioEnvironment(runtime.path, request.AudioSink)
+	startupDeadline := time.Now().Add(options.startupTimeout)
 	pipeWire, err := startManagedChild(
 		options.pipeWirePath,
 		options.executableOwnerUID,
@@ -359,21 +391,24 @@ func runAudio(
 		return err
 	}
 	var pulse *managedChild
+	var policy *managedChild
 	var artifacts map[string]artifactIdentity
 	readyPublished := false
 	defer func() {
-		var pulseStopError error
-		if pulse != nil {
-			pulseStopError = pulse.stop(options.stopTimeout)
+		// Share the termination budget as the number of supervised children
+		// grows. Preserve artifacts whenever any dependent lifetime is unproven.
+		deadline := time.Now().Add(2 * options.stopTimeout)
+		stopError := stopAudioChildren([]*managedChild{pulse, policy, pipeWire}, deadline)
+		if stopError != nil {
+			result = errors.Join(result, stopError)
+			return
 		}
-		pipeWireStopError := pipeWire.stop(options.stopTimeout)
 		cleanupError := cleanupAudioArtifacts(runtime, artifacts, !readyPublished)
-		result = errors.Join(result, pulseStopError, pipeWireStopError, cleanupError)
+		result = errors.Join(result, cleanupError)
 	}()
-	coreDeadline := time.Now().Add(options.startupTimeout)
 	if err := waitForProbe(
 		parent,
-		coreDeadline,
+		startupDeadline,
 		options.probeInterval,
 		[]*managedChild{pipeWire},
 		func(remaining time.Duration) error {
@@ -392,9 +427,34 @@ func runAudio(
 		options.executableOwnerUID,
 		[]string{"-r", "pipewire-0", "create-node", "adapter", nodeProperties},
 		environment,
-		options.probeTimeout,
+		boundedProbeTimeout(time.Until(startupDeadline), options.probeTimeout),
 	); err != nil || pipeWire.exited() {
 		return errors.New("runtime audio sink could not be created")
+	}
+	// Capture the allocated object's serial before admitting any application.
+	// The policy may configure and link this sink, but cannot adopt a namesake.
+	var allocatedNode audioNodeIdentity
+	if err := waitForProbe(parent, startupDeadline, options.probeInterval,
+		[]*managedChild{pipeWire}, func(remaining time.Duration) error {
+			output, err := dumpAudioGraph(options, environment, request.AudioSink, remaining)
+			if err != nil {
+				return err
+			}
+			allocatedNode, err = parseAllocatedAudioNode(output, request.AudioSink, false)
+			return err
+		}); err != nil {
+		return err
+	}
+	if err := audioStartupActive(parent, startupDeadline); err != nil {
+		return err
+	}
+	policy, err = startManagedChild(options.wirePlumberPath, options.executableOwnerUID,
+		[]string{"--profile=polaris"}, audioPolicyEnvironment(runtime.path, request.AudioSink, allocatedNode), nil)
+	if err != nil {
+		return err
+	}
+	if err := audioStartupActive(parent, startupDeadline); err != nil {
+		return err
 	}
 	pulse, err = startManagedChild(
 		options.pipeWirePulsePath,
@@ -406,14 +466,17 @@ func runAudio(
 	if err != nil {
 		return err
 	}
-	audioDeadline := time.Now().Add(options.startupTimeout)
 	if err := waitForProbe(
 		parent,
-		audioDeadline,
+		startupDeadline,
 		options.probeInterval,
-		[]*managedChild{pipeWire, pulse},
+		[]*managedChild{pipeWire, policy, pulse},
 		func(remaining time.Duration) error {
-			return probeAudioGraph(options, environment, request.AudioSink, remaining)
+			deadline := time.Now().Add(remaining)
+			if err := probeAudioGraph(options, environment, request.AudioSink, remaining); err != nil {
+				return err
+			}
+			return probeAudioPolicy(options, environment, request.AudioSink, allocatedNode, policy, time.Until(deadline))
 		},
 	); err != nil {
 		return err
@@ -423,6 +486,12 @@ func runAudio(
 	}
 	artifacts, err = captureAudioArtifacts(runtime)
 	if err != nil {
+		return err
+	}
+	if pipeWire.exited() || policy.exited() || pulse.exited() {
+		return errors.New("runtime audio child exited before readiness")
+	}
+	if err := audioStartupActive(parent, startupDeadline); err != nil {
 		return err
 	}
 	if err := publishReadiness(ready); err != nil {
@@ -437,5 +506,7 @@ func runAudio(
 		return errors.New("runtime PipeWire core exited unexpectedly")
 	case <-pulse.done:
 		return errors.New("runtime Pulse service exited unexpectedly")
+	case <-policy.done:
+		return errors.New("runtime audio policy exited unexpectedly")
 	}
 }

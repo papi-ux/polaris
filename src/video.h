@@ -12,6 +12,7 @@
 #include "nvenc/nvenc_config.h"
 #include "platform/common.h"
 #include "thread_safe.h"
+#include "stream_packet_owner.h"
 #include "video_colorspace.h"
 #include "video_rate.h"
 
@@ -440,7 +441,7 @@ namespace video {
 
     // Packets can remain queued after their encoder session has been retired.
     std::shared_ptr<const std::vector<replace_t>> replacements;
-    void *channel_data = nullptr;
+    stream_packets::destination_t channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
 
@@ -577,13 +578,13 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    stream_packets::destination_t channel_data
   );
 
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data,
+    stream_packets::destination_t channel_data,
     packet_queue_t packets
   );
 

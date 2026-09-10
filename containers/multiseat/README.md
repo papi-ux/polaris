@@ -13,10 +13,10 @@ separate avoids multiplying package and credential state inside one large
 image.
 
 Final build stages have no module or package download step. The worker, dispatcher,
-and four providers use only the Go standard library, disable CGO and
+and six providers use only the Go standard library, disable CGO and
 module-network access, run their tests, then emit static Linux/amd64 binaries.
 The final stage fails its build unless the locked root supplies the fixed D-Bus,
-PipeWire, `pw-cli`, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
+PipeWire, `pw-cli`, `pw-dump`, WirePlumber, `pactl`, GStreamer, Gamescope, and Xwayland executables; the
 `waylanddisplaysrc`, `unixfdsink`, `unixfdsrc`, and `fakesink` elements; and both
 trusted PipeWire configuration files. The image job builds all four Linux/amd64
 profiles at an exact Polaris revision and exports downloadable OCI archives,
@@ -42,16 +42,34 @@ publish the exact `POLARIS-RUNTIME-READY/1` record on an inherited descriptor
 before the stage is ready. Shutdown targets the owned process group with TERM
 and escalates to KILL at the component deadline.
 
-That adapter set is a concrete supervision boundary, not the missing media
-implementation. The image now carries `polaris-seat-runtime` plus real private
-session-bus, audio, outer display/capture, and nested Gamescope providers, but
-the production `run` command still injects no adapters. The other three
-provider locations remain absent, so this image does not start Steam, Heroic,
-Lutris, encoding, or virtual input. Treating its healthy supervisor as a
-streaming-capable worker would still be a false gate. Tests exercise catalog
-creation, the synthetic process boundary, the real dispatcher, and isolated
-host D-Bus, PipeWire, Wayland, and raw-frame transports; they never invoke a
-launcher or physical device.
+The image carries the dispatcher and private session-bus, audio, outer capture,
+nested Gamescope, verified input-reader, and experimental launcher providers.
+The launcher currently accepts only the image-owned `input-pong-v1` workload
+with the Gamescope profile. This small offline X11 game exercises keyboard,
+pointer, optional gamepad, and private Pulse audio without launcher accounts.
+Its executable is compiled against each profile's locked X11/GStreamer ABI;
+image checks resolve its ELF dependencies and the SBOM records its source hash.
+The launcher validates the allocated display protocols, retained compositor process lifetime, and input identities,
+retains the private profile, and owns its entire descendant process tree,
+including helpers that detach into another session.
+
+The isolated physical game harness can also run bounded codec observations.
+`POLARIS_PHYSICAL_ENCODED_GAME=1` checks captured game motion through OpenH264;
+`POLARIS_PHYSICAL_ENCODED_AUDIO=1` checks the allocated sink monitor through
+Opus at 48 kHz stereo with 5 ms packets capped at 1400 bytes. Both require
+`POLARIS_PHYSICAL_GAME=1`. The audio check pins the private Pulse socket, checks
+the selected monitor, and measures the fixed game's quiet 440 Hz tone after
+decoding. Each enabled observation runs for both seats and again for the
+surviving seat after its peer's container is removed. These observations prove
+worker-local codec roundtrips; continuous media transport and client playback
+remain separate acceptance gates.
+
+The production `run` command still injects no adapters. Worker-local encoding
+and host media routing are incomplete, and the Steam, Heroic, and Lutris launcher
+implementations remain outstanding. Provider readiness proves a resource or
+supervised process is available; it does not prove game frames reached a client.
+Unit tests and isolated physical input receipts likewise do not establish
+compositor input delivery or successful game streaming.
 
 The controller now also has an injected host-brokered input authority and a
 Linux inputtino lifecycle backend, but neither is wired to this image or the
@@ -343,6 +361,22 @@ and blocks admission rather than being deleted by name or recursively.
 
 ## Isolated input acceptance with crun
 
+The experimental input provider verifies every fixed alias using read-only
+evdev descriptors, generation-specific kernel names and physical identities.
+It rejects unexpected aliases, duplicate devices, missing core devices and
+noncontiguous gamepad slots. Descriptors remain owned until shutdown; periodic
+checks fail on namespace replacement or source-device removal. The display
+request can explicitly select an input seat. That path supplies only verified
+keyboard/pointer aliases to the pinned compositor plugin and requires that the
+actual producer retain them before reporting ready. Requests without an input
+seat preserve the existing capture-only behavior. The production entrypoint
+still supplies no runtime adapters.
+
+The opt-in SELinux policies permit only the three evdev identity queries
+(`EVIOCGVERSION`, `EVIOCGNAME`, `EVIOCGPHYS`) in addition to event reads. Broader
+compositor capability queries and real game input delivery need separate
+physical verification; the new provider does not yet establish that acceptance.
+
 The Linux worker backend explicitly selects `/usr/bin/crun` and combines
 `--group-add=keep-groups` with `--userns=keep-id`. The runtime must be a
 root-owned regular executable below root-owned directories that are not
@@ -382,3 +416,34 @@ The worker UID is passed explicitly, because an image `USER` can override
 Podman's implicit `keep-id` choice. Live inventory requires matching Config.User
 and OCI process.user.uid evidence. Use a short private IPC parent for the
 physical harness so both generated Unix socket paths fit Linux's 108-byte limit.
+
+Experimental compositor input uses the fixed native `capture-input` producer.
+The Go provider verifies and passes already-open, read-only keyboard and mouse
+descriptors in a fixed order. A bounded native decoder sends the pinned plugin's
+existing input events. It performs no device discovery, device writes, or input
+ioctls and needs no host udev metadata. The initial mapping covers keyboard,
+relative/absolute pointer, buttons, and wheel; gamepads remain direct workload
+readers. Touch and pen allocations fail this experimental admission until their
+mappings are implemented. Source retirement, dropped kernel events, excessive
+input backlog, or stalled capture fails the provider and tears down its stream.
+
+A post-creation X11 directory failure without a retained inode leaves cleanup
+unproven. Startup fails and the worker's private tmpfs must be destroyed before
+reuse. There is no same-worker retry path; unidentified or replacement paths
+must never be removed by provider cleanup.
+
+The private audio provider supervises WirePlumber 0.5.8 with a fixed `polaris`
+profile. Hardware discovery, D-Bus integration, saved routing, default-device
+fallback, and stream movement are disabled. Before launcher admission it captures
+the allocated null sink's object serial, proves that the policy process is
+attached to this private server, and verifies both stereo playback and monitor
+ports. Dynamic streams may link only to that original sink; a replacement with
+the same name does not inherit its authority. Policy exit retires the audio
+provider, which stops Pulse and policy before the PipeWire core.
+
+Each profile adds the hash-locked `wireplumber_0.5.8-1_amd64.deb` from Ubuntu's
+signed Plucky release archive. This supplemental package uses the explicit
+archive URL in its lock entry; the existing January 20 snapshot inputs retain
+their versions and hashes. Offline installation against all four locked source
+roots and runtime package sets adds only WirePlumber: its library, Lua, and
+PipeWire dependencies are already covered. Final builds remain network-free.

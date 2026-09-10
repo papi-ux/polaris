@@ -55,6 +55,13 @@ func runtimeProcessTestHelper(mode string) int {
 	if mode == "child" {
 		blockRuntimeProcessTestHelper()
 	}
+	if mode == "retained-child" {
+		signal.Ignore(syscall.SIGTERM)
+		if os.WriteFile(os.Getenv("POLARIS_CHILD_READY"), []byte("ready"), 0600) != nil {
+			return 111
+		}
+		blockRuntimeProcessTestHelper()
+	}
 	eventFile := os.Getenv("POLARIS_RUNTIME_PROCESS_TEST_EVENT_FILE")
 	stage := runtimeProcessTestStage()
 	readyDescriptor, err := strconv.Atoi(os.Getenv(runtimeReadyFDSetting))
@@ -79,6 +86,11 @@ func runtimeProcessTestHelper(mode string) int {
 		}
 		child = exec.Command(executable)
 		child.Env = []string{runtimeProcessTestMode + "=child"}
+		if mode == "leave-helper" {
+			child.Env = []string{runtimeProcessTestMode + "=retained-child", "POLARIS_CHILD_READY=" + childPIDFile + ".ready"}
+			child.ExtraFiles = []*os.File{ready}
+			child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		}
 		if err := child.Start(); err != nil {
 			return 96
 		}
@@ -90,6 +102,18 @@ func runtimeProcessTestHelper(mode string) int {
 			_ = child.Process.Kill()
 			return 97
 		}
+		if mode == "leave-helper" {
+			deadline := time.Now().Add(time.Second)
+			for {
+				if _, err := os.Stat(childPIDFile + ".ready"); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					return 112
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
 	}
 	signals := make(chan os.Signal, 1)
 	if mode == "ignore-term" {
@@ -98,7 +122,7 @@ func runtimeProcessTestHelper(mode string) int {
 		signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	}
 	switch mode {
-	case "ready", "ignore-term":
+	case "ready", "ignore-term", "leave-helper", "cleanup-error":
 		if err := appendRuntimeProcessTestEvent(eventFile, "start:"+stage); err != nil {
 			return 101
 		}
@@ -116,12 +140,28 @@ func runtimeProcessTestHelper(mode string) int {
 	if mode == "ignore-term" {
 		blockRuntimeProcessTestHelper()
 	}
+	if mode == "leave-helper" {
+		for {
+			select {
+			case <-signals:
+				return 0
+			default:
+			}
+			if _, err := os.Stat(os.Getenv("POLARIS_EXIT_TRIGGER")); err == nil {
+				return 0
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	<-signals
 	if err := appendRuntimeProcessTestEvent(eventFile, "stop:"+stage); err != nil {
 		return 102
 	}
 	if child != nil {
 		_ = child.Wait()
+	}
+	if mode == "cleanup-error" {
+		return 106
 	}
 	return 0
 }
@@ -303,9 +343,15 @@ func TestOSRuntimeProcessHostReturnsCleanableLeaseForReadinessFailures(t *testin
 			}
 			stopContext, cancelStop := context.WithTimeout(context.Background(), time.Second)
 			defer cancelStop()
-			if err := lease.Stop(stopContext); err != nil {
+			err = lease.Stop(stopContext)
+			if test.mode == "exit-before-ready" {
+				if err == nil {
+					t.Fatal("nonzero provider failure was discarded")
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
+			waitForProcessAbsent(t, lease.(*osRuntimeProcessLease).process.Pid)
 		})
 	}
 }
@@ -452,4 +498,15 @@ func TestOSRuntimeProcessHostRejectsInvalidSpecificationsBeforeStart(t *testing.
 			}
 		})
 	}
+}
+
+func TestOSRuntimeProcessRetainsProviderCleanupFailure(t *testing.T) {
+	lease, err := (osRuntimeProcessHost{}).Start(context.Background(), runtimeProcessTestSpec(t, "cleanup-error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Stop(context.Background()); err == nil || !strings.Contains(err.Error(), "provider reported failure") {
+		t.Fatalf("cleanup failure discarded: %v", err)
+	}
+	waitForProcessAbsent(t, lease.(*osRuntimeProcessLease).process.Pid)
 }

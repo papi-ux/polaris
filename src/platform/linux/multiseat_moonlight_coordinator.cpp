@@ -267,7 +267,8 @@ namespace multiseat::input {
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
     seat_handle_t handle,
     std::string_view expected_input_seat,
-    bool controller_feedback
+    bool controller_feedback,
+      worker_connection_selection_t worker_connection
   ) {
     std::scoped_lock lock {impl_->state_mutex_};
     if (impl_->shutting_down_ || impl_->closed_) {
@@ -283,12 +284,17 @@ namespace multiseat::input {
     if (!key || !launch->is_pending()) {
       return moonlight_launch_selection_status_e::invalid_selection;
     }
+    if (worker_connection.required != static_cast<bool>(worker_connection.connection) ||
+        (worker_connection.required && !worker_connection.connection->matches_launch(*launch))) {
+      return moonlight_launch_selection_status_e::invalid_selection;
+    }
 
     auto selected = impl_->activation_gate_->register_selection(
       *key,
       handle,
       expected_input_seat,
-      controller_feedback
+      controller_feedback,
+      std::move(worker_connection)
     );
     if (selected.status != moonlight_launch_selection_status_e::registered ||
         !selected.selection) {

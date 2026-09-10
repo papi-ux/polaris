@@ -7,6 +7,14 @@
   "source_manifest_sha256": "047c4c6123cbdea9d821ebb1608cd8129cbcad6b72bcc89e76d58a93091fe188",
   "runtime": [
     {
+      "name": "gstreamer1.0-gl",
+      "version": "1.26.0-1ubuntu0.1",
+      "architecture": "amd64",
+      "filename": "gstreamer1.0-gl_1.26.0-1ubuntu0.1_amd64.deb",
+      "sha256": "9c930fbfe9743754de1b3bec8407d795b59288c9ec0feeaa4d25bde02e1e3f35",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/g/gst-plugins-base1.0/gstreamer1.0-gl_1.26.0-1ubuntu0.1_amd64.deb"
+    },
+    {
       "name": "gstreamer1.0-tools",
       "version": "1.26.0-3",
       "architecture": "amd64",
@@ -77,6 +85,14 @@
       "filename": "pipewire-pulse_1.2.7-1ubuntu5.1_amd64.deb",
       "sha256": "611be8d6b8620f5d266e7a8a232bb7cb96f558fc8a73205af7aaec084c3ab8eb",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/p/pipewire/pipewire-pulse_1.2.7-1ubuntu5.1_amd64.deb"
+    },
+    {
+      "name": "wireplumber",
+      "version": "0.5.8-1",
+      "architecture": "amd64",
+      "filename": "wireplumber_0.5.8-1_amd64.deb",
+      "sha256": "435b2206be4f6ededb7f3bd0230786371f8368a73ed044594e31dc537edf6944",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/wireplumber_0.5.8-1_amd64.deb"
     }
   ],
   "build": [
@@ -311,6 +327,14 @@
       "filename": "glslang-tools_15.1.0-2_amd64.deb",
       "sha256": "98d8b12ebaa3a9bcf7e68087d08a43a997356a52c130f01a5624a208fa8ab9d7",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/universe/g/glslang/glslang-tools_15.1.0-2_amd64.deb"
+    },
+    {
+      "name": "gstreamer1.0-gl",
+      "version": "1.26.0-1ubuntu0.1",
+      "architecture": "amd64",
+      "filename": "gstreamer1.0-gl_1.26.0-1ubuntu0.1_amd64.deb",
+      "sha256": "9c930fbfe9743754de1b3bec8407d795b59288c9ec0feeaa4d25bde02e1e3f35",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/g/gst-plugins-base1.0/gstreamer1.0-gl_1.26.0-1ubuntu0.1_amd64.deb"
     },
     {
       "name": "gstreamer1.0-tools",
@@ -1471,6 +1495,14 @@
       "filename": "wayland-protocols_1.41-1_all.deb",
       "sha256": "3a0942c89ced71ebc809718c9d21910627d2a257b1277d6a9173a672cf53125f",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260120T000000Z/pool/main/w/wayland-protocols/wayland-protocols_1.41-1_all.deb"
+    },
+    {
+      "name": "wireplumber",
+      "version": "0.5.8-1",
+      "architecture": "amd64",
+      "filename": "wireplumber_0.5.8-1_amd64.deb",
+      "sha256": "435b2206be4f6ededb7f3bd0230786371f8368a73ed044594e31dc537edf6944",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wireplumber/wireplumber_0.5.8-1_amd64.deb"
     },
     {
       "name": "x11proto-dev",

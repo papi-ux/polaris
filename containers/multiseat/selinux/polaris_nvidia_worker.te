@@ -2,6 +2,7 @@ policy_module(polaris_nvidia_worker, 1.0.0)
 
 gen_require(`
     type container_file_t;
+    type bin_t;
     type xserver_misc_device_t;
     type polaris_multiseat_input_device_t;
 ')
@@ -14,4 +15,10 @@ container_domain_template(polaris_nvidia_worker, container)
 # standard container template retains file-management permissions; dropped Linux
 # capabilities and the mount classifier must constrain those permissions.
 allow polaris_nvidia_worker_t xserver_misc_device_t:chr_file { getattr open read write ioctl map };
-allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read };
+allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read ioctl };
+allowxperm polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file ioctl { 0x4501 0x4506 0x4507 };
+
+# Podman's --init binds only the mount-classifier-approved host catatonit.
+# Initial entry into this domain also requires entrypoint on that bin_t file.
+# Do not add this domain to broad sandbox execution attributes or grant new mounts.
+allow polaris_nvidia_worker_t bin_t:file { getattr open read map execute execute_no_trans entrypoint };

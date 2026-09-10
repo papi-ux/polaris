@@ -520,9 +520,13 @@ func TestNestedCompositorPublishesOnlyAfterWaylandX11AndGeometry(t *testing.T) {
 	nested := startFakeNestedProvider(t, request, options)
 	_, _, sessionName := gamescopeScopedNames(request.RuntimeNamespace)
 	sessionContent, err := os.ReadFile(filepath.Join(runtimePath, sessionName))
-	wantSession := gamescopeSessionRecord(
+	parsedSession, parseErr := parseLauncherSession(sessionContent, request.WaylandSocket)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	wantSession := gamescopeLauncherRecord(
 		gamescopeReadyInfo{displayNumber: 0, displayName: ":0", waylandName: gamescopeWaylandSocket},
-		request.WaylandSocket,
+		request, parsedSession.pid, parsedSession.cookie,
 	)
 	if err != nil || !slices.Equal(sessionContent, wantSession) {
 		stopRealProvider(t, nested)

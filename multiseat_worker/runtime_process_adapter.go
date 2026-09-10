@@ -32,6 +32,7 @@ type runtimeProcessHost interface {
 
 type processRuntimeAdapterOptions struct {
 	HelperExecutable string
+	CompositorInput  bool
 }
 
 type processRuntimeAdapter struct {
@@ -201,17 +202,18 @@ func (adapter *processRuntimeAdapter) Start(
 		!validProcessRuntimeAllocation(allocation) {
 		return nil, errors.New("worker runtime process adapter is invalid")
 	}
-	arguments, err := runtimeProcessArguments(
-		adapter.stage,
-		allocation,
-	)
+	request, err := seatRuntimeRequest(adapter.stage, allocation)
 	if err != nil {
 		return nil, err
 	}
-	environment, err := runtimeProcessEnvironment(
-		adapter.stage,
-		allocation,
-	)
+	if adapter.options.CompositorInput && adapter.stage == runtimeStageDisplayCapture {
+		request.InputSeat = allocation.InputSeat
+	}
+	arguments, err := seatruntime.Arguments(request)
+	if err != nil {
+		return nil, err
+	}
+	environment, err := seatruntime.Environment(request)
 	if err != nil {
 		return nil, err
 	}
