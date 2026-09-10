@@ -1,196 +1,108 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 
-/**
- * Composable for real-time stream statistics using Server-Sent Events (SSE).
- *
- * Connects to the SSE endpoint for push-based updates.
- * Falls back to HTTP polling if SSE fails to connect after the first attempt.
- * The fallback loop waits for each request to settle and backs off after failures.
- *
- * @param {number} pollFallbackMs - Polling interval in ms if SSE is unavailable (default: 1000)
- * @param {{ pauseWhenHidden?: boolean, maxFallbackBackoffMs?: number }} options
- * @returns {{ stats: Ref, connected: Ref<boolean> }}
- */
-export function useStreamStats(pollFallbackMs = 1000, options = {}) {
+// One transport per open host UI, shared by dashboard, Doctor and tuning controls.
+let shared = null
+function createChannel(pollMs, options) {
   const stats = ref(null)
   const connected = ref(false)
-
-  const maxFallbackBackoffMs = Math.max(
-    pollFallbackMs,
-    options.maxFallbackBackoffMs ?? pollFallbackMs * 8,
-  )
-
-  let eventSource = null
-  let pollTimer = null
-  let fallbackInFlight = null
-  let useFallback = false
-  let consecutiveFallbackFailures = 0
-
-  function shouldPauseForVisibility() {
-    return options.pauseWhenHidden !== false && typeof document !== 'undefined' && document.hidden
-  }
-
-  function fallbackDelayMs() {
-    if (consecutiveFallbackFailures <= 0) {
-      return pollFallbackMs
-    }
-    return Math.min(maxFallbackBackoffMs, pollFallbackMs * (2 ** consecutiveFallbackFailures))
-  }
-
-  /**
-   * Start SSE connection to the stream-sse endpoint.
-   */
-  function connectSSE() {
-    if (eventSource || shouldPauseForVisibility()) return
-
-    // EventSource sends cookies automatically for the already-loaded Polaris UI origin.
-    eventSource = new EventSource('./api/stats/stream-sse')
-
-    eventSource.onopen = () => {
-      connected.value = true
-    }
-
-    eventSource.onmessage = (event) => {
-      try {
-        stats.value = JSON.parse(event.data)
-        connected.value = true
-      } catch {
-        // Ignore malformed messages.
-      }
-    }
-
-    let sseErrorCount = 0
-    eventSource.onerror = () => {
-      connected.value = false
-      sseErrorCount++
-
-      // If there are too many errors, give up on SSE and fall back to polling.
-      // This prevents hammering the server when auth has expired or it is under load.
-      if (sseErrorCount > 5 || (!stats.value && !useFallback)) {
-        useFallback = true
-        cleanupSSE()
-        if (!shouldPauseForVisibility()) {
-          startPolling()
-        }
-      }
-    }
-  }
-
-  /**
-   * Clean up the SSE connection.
-   */
-  function cleanupSSE() {
-    if (eventSource) {
-      eventSource.close()
-      eventSource = null
-    }
-  }
-
-  function cleanupPolling() {
-    if (pollTimer) {
-      clearTimeout(pollTimer)
-      pollTimer = null
-    }
-  }
-
-  function scheduleNextPoll(delayMs = fallbackDelayMs()) {
-    cleanupPolling()
-    if (!useFallback || shouldPauseForVisibility()) {
-      return
-    }
-
-    pollTimer = setTimeout(async () => {
-      pollTimer = null
-      const keepPolling = await fetchStats()
-      if (keepPolling) {
-        scheduleNextPoll()
-      }
-    }, delayMs)
-  }
-
-  /**
-   * Fallback: poll the JSON endpoint after each prior request settles.
-   */
-  async function fetchStats() {
-    if (shouldPauseForVisibility()) return false
-    if (fallbackInFlight) return fallbackInFlight
-
-    fallbackInFlight = (async () => {
-      let ok = false
-      let keepPolling = true
-
-      try {
-        const res = await fetch('./api/stats/stream', { credentials: 'include' })
-        if (res.ok) {
-          stats.value = await res.json()
-          connected.value = true
-          ok = true
-        } else if (res.status === 401) {
-          // Session expired so stop polling and redirect to login.
-          cleanupPolling()
-          cleanupSSE()
-          window.location.hash = '#/login'
-          keepPolling = false
-        } else {
-          connected.value = false
-        }
-      } catch {
-        connected.value = false
-      } finally {
-        if (keepPolling) {
-          consecutiveFallbackFailures = ok ? 0 : consecutiveFallbackFailures + 1
-        }
-        fallbackInFlight = null
-      }
-
-      return keepPolling
-    })()
-
-    return fallbackInFlight
-  }
-
-  function startPolling() {
-    if (pollTimer || shouldPauseForVisibility()) return
-    fetchStats().then((keepPolling) => {
-      if (keepPolling) {
-        scheduleNextPoll()
-      }
-    })
-  }
-
-  function start() {
-    if (shouldPauseForVisibility()) return
-    if (useFallback) startPolling()
-    else connectSSE()
-  }
+  let users = 0
+  let source = null
+  let timer = null
+  let watchdog = null
+  let controller = null
+  let epoch = 0
+  let failures = 0
+  let fallback = false
+  const paused = () => options.pauseWhenHidden !== false && document.hidden
+  const active = () => users > 0 && !paused()
+  const maxDelay = Math.max(pollMs, options.maxFallbackBackoffMs ?? pollMs * 8)
 
   function stop() {
-    cleanupSSE()
-    cleanupPolling()
+    ++epoch
+    source?.close()
+    source = null
+    controller?.abort()
+    controller = null
+    clearTimeout(timer)
+    clearTimeout(watchdog)
+    timer = watchdog = null
     connected.value = false
   }
-
-  function handleVisibilityChange() {
-    if (shouldPauseForVisibility()) {
+  function receive(value) {
+    stats.value = value
+    connected.value = true
+    failures = 0
+    clearTimeout(watchdog)
+    watchdog = setTimeout(() => {
       stop()
-    } else {
+      fallback = true
       start()
+    }, Math.max(5000, pollMs * 3))
+  }
+  async function poll() {
+    if (!active() || controller) return
+    const current = epoch
+    const abort = new AbortController()
+    controller = abort
+    try {
+      const response = await fetch('./api/stats/stream', { credentials: 'include', signal: abort.signal })
+      if (current !== epoch || !active()) return
+      if (response.status === 401) {
+        stop()
+        window.location.hash = '#/login'
+        return
+      }
+      if (!response.ok) throw new Error('stats-unavailable')
+      const value = await response.json()
+      if (current === epoch && active()) receive(value)
+    } catch {
+      if (current === epoch) { connected.value = false; failures++ }
+    } finally {
+      if (controller === abort) controller = null
+      if (current === epoch && active()) {
+        timer = setTimeout(poll, Math.min(maxDelay, pollMs * (2 ** failures)))
+      }
     }
   }
-
-  onMounted(() => {
-    start()
-    if (options.pauseWhenHidden !== false && typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibilityChange)
+  function start() {
+    if (!active() || source || controller) return
+    if (fallback || typeof EventSource !== 'function') { poll(); return }
+    const current = epoch
+    const connection = new EventSource('./api/stats/stream-sse')
+    source = connection
+    connection.onmessage = event => {
+      if (current !== epoch || !active()) return
+      try { receive(JSON.parse(event.data)) } catch { connected.value = false }
     }
-  })
-
-  onUnmounted(() => {
-    stop()
-    if (options.pauseWhenHidden !== false && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    connection.onerror = () => {
+      if (current !== epoch) return
+      stop()
+      fallback = true
+      start()
     }
-  })
-
-  return { stats, connected }
+    watchdog = setTimeout(() => { stop(); fallback = true; start() }, 5000)
+  }
+  function visibility() { stop(); fallback = false; start() }
+  return {
+    stats, connected,
+    retain() {
+      if (++users === 1) {
+        document.addEventListener('visibilitychange', visibility)
+        start()
+      }
+    },
+    release() {
+      if (--users === 0) {
+        stop()
+        document.removeEventListener('visibilitychange', visibility)
+        shared = null
+      }
+    },
+  }
+}
+export function useStreamStats(pollFallbackMs = 1000, options = {}) {
+  const channel = shared || (shared = createChannel(pollFallbackMs, options))
+  onMounted(channel.retain)
+  onUnmounted(channel.release)
+  return { stats: channel.stats, connected: channel.connected }
 }

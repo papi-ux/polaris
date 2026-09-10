@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { shallowMount } from '@vue/test-utils'
+import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, reactive, ref } from 'vue'
 
@@ -83,6 +83,37 @@ describe('Linux Streaming Setup checklist', () => {
     vi.unstubAllGlobals()
   })
 
+  it('refreshes saved KScreen readiness after the host restarts without discarding local edits', async () => {
+    let ready = false
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/settings/metadata')
+        ? {
+            status: true, version: 1, fields: {},
+            modes: [{ value: 'host_virtual_display', available: ready,
+              unavailable_reason: ready ? '' : 'Set linux_streaming_output' }],
+          }
+        : { status: true },
+    })))
+    const config = reactive(linuxConfig({ linux_streaming_output: '' }))
+    const wrapper = mountAudioVideo(config)
+    await flushPromises()
+    const virtualCard = () => wrapper.findAll('article').find((card) => card.text().includes('Host Virtual Display'))
+    expect(virtualCard().find('button').attributes('disabled')).toBeDefined()
+    config.linux_streaming_output = 'DP-2'
+    await nextTick()
+    expect(virtualCard().find('button').attributes('disabled')).toBeDefined()
+    ready = true
+    config.max_bitrate = 42000
+    await wrapper.setProps({ hostGeneration: 1 })
+    await flushPromises()
+    expect(virtualCard().find('button').attributes('disabled')).toBeUndefined()
+    expect(config.max_bitrate).toBe(42000)
+    await virtualCard().find('button').trigger('click')
+    expect(config.linux_stream_mode).toBe('host_virtual_display')
+    wrapper.unmount()
+  })
+
   it('renders the en.json copy for strings routed through the locale system', () => {
     const wrapper = mountAudioVideo()
     const text = wrapper.text()
@@ -93,7 +124,6 @@ describe('Linux Streaming Setup checklist', () => {
     for (const key of [
       'av_mode_headless_stream_copy',
       'av_checklist_path_title',
-      'av_auto_quality_badge_manual',
       'av_planned_family_mode_copy',
       'av_planner_moonlight_title',
     ]) {
@@ -111,7 +141,7 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Linux Streaming Setup')
     expect(checklist.text()).toContain('Pick a stream path')
     expect(checklist.text()).toContain('Encoder and quality')
-    expect(checklist.text()).toContain('Manual')
+    expect(checklist.text()).toContain('Live Tuning: Unknown')
     expect(checklist.text()).toContain('labwc GPU-native capture')
     expect(checklist.text()).toContain('Safe default')
   })
@@ -188,7 +218,7 @@ describe('Linux Streaming Setup checklist', () => {
 
     expect(text).toContain('Private Stream (GPU-native)')
     expect(text).toContain('GPU-native requested')
-    expect(text).toContain('Auto Quality: On')
+    expect(text).toContain('Live Tuning: Unknown')
     expect(text).toContain('DMA-BUF capture GPU-resident')
     expect(text).not.toContain('CUDA')
     expect(text).not.toContain('NVIDIA')

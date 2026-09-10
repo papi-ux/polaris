@@ -725,12 +725,31 @@ namespace rtsp_stream {
       return cancelled && static_cast<bool>(discarded);
     }
 
+    std::shared_ptr<launch_session_t> take_pending_client(std::string_view unique_id) {
+      std::shared_ptr<launch_session_t> discarded;
+      {
+        std::lock_guard timer_lock(_launch_timer_mutex);
+        const auto pending = launch_event.view(0s);
+        if (!pending || pending->unique_id != unique_id || !pending->is_pending_or_handoff()) {
+          return {};
+        }
+        pending->cancel();
+        ++_raised_timer_generation;
+        raised_timer.cancel();
+        discarded = launch_event.pop_if([&](const auto &candidate) { return candidate == pending; });
+      }
+      return discarded;
+    }
+
     std::uint64_t launch_timer_generation() const {
       return _raised_timer_generation.load();
     }
 
     bool session_raise(std::shared_ptr<launch_session_t> launch_session) {
       std::lock_guard timer_lock(_launch_timer_mutex);
+      if (launch_session->is_cancelled()) {
+        return false;
+      }
       const auto launch_session_id = launch_session->id;
       const auto launch_session_token = launch_session->session_token;
       if (!launch_event.raise_if_empty(std::move(launch_session))) {
@@ -1082,6 +1101,20 @@ namespace rtsp_stream {
 
   void launch_session_clear(uint32_t launch_session_id) {
     server.session_clear(launch_session_id);
+  }
+
+  void cancel_pending_launch_for_client(std::string_view unique_id) {
+    finish_cancelled_launch(take_pending_launch_for_client(unique_id));
+  }
+
+  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id) {
+    return server.take_pending_client(unique_id);
+  }
+
+  void finish_cancelled_launch(const std::shared_ptr<launch_session_t> &launch) {
+    if (launch) {
+      cancel_registered_multiseat_launch(launch);
+    }
   }
 
   void launch_session_finish(
@@ -1583,15 +1616,13 @@ namespace rtsp_stream {
 
       config.monitor.height = util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
       config.monitor.width = util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
-      config.monitor.framerate = util::from_view(args.at("x-nv-video[0].maxFPS"sv));
-      config.monitor.stream_rate = video::rate::from_wire(config.monitor.framerate,
-        util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv)));
-      if (!video::rate::valid(config.monitor.stream_rate) || session.fps <= 0) {
+      if (!video::configure_announced_rates(config.monitor,
+            util::from_view(args.at("x-nv-video[0].maxFPS"sv)),
+            util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv)),
+            session.fps, config::video.limit_framerate)) {
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;
       }
-      config.monitor.encode_rate = config::video.limit_framerate ?
-        video::rate::from_millihertz(session.fps) : config.monitor.stream_rate;
       config.monitor.bitrate = util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
       config.monitor.slicesPerFrame = util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
       config.monitor.numRefFrames = util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
@@ -1609,22 +1640,6 @@ namespace rtsp_stream {
                           << "]; honoring client request for this RTSP session"sv;
           session.preferred_codec.reset();
         }
-      }
-
-      if (config::video.limit_framerate) {
-        config.monitor.encodingFramerate = session.fps;
-      } else {
-        if (config.monitor.framerate > 1000) {
-          config.monitor.encodingFramerate = config.monitor.framerate;
-        } else {
-          config.monitor.encodingFramerate = config.monitor.framerate * 1000;
-        }
-      }
-
-      // When fractional refresh rate requested from client side, it should be well above 1000fps
-      // 4000fps is when Warp2 Mode is enabled on the client, requested framerate can be actual * 4
-      if (config.monitor.framerate > 4000) {
-        config.monitor.framerate = std::round((float)config.monitor.framerate / 1000);
       }
 
       config.monitor.input_only = session.input_only;

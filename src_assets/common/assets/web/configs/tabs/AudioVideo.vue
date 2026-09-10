@@ -18,12 +18,8 @@ import {
 } from '../../client-settings-sync'
 import { buildResolutionPlanner } from '../../display-resolution-planner'
 import { provenanceLabel, useConfigProjection } from '../../composables/useConfigProjection'
-import { useStreamStats } from '../../composables/useStreamStats'
-import {
-  autoQualityHostStateKey,
-  autoQualityHostTone,
-  buildLiveAutoQualityRows,
-} from '../../auto-quality-live'
+import LiveTuningControl from '../../components/LiveTuningControl.vue'
+import { useLiveTuning } from '../../composables/useLiveTuning'
 
 const $t = inject('i18n').t;
 
@@ -32,6 +28,7 @@ const props = defineProps([
   'config',
   'vdisplay',
   'min_fps_factor',
+  'hostGeneration',
 ])
 
 const sudovdaStatus = {
@@ -53,15 +50,12 @@ const projection = useConfigProjection()
 onMounted(() => {
   projection.load()
 })
-const liveStreamStats = typeof window !== 'undefined' && typeof window.EventSource === 'function'
-  ? useStreamStats(2000, { pauseWhenHidden: true }).stats
-  : ref(null)
+watch(() => props.hostGeneration, () => projection.load())
+const tuningControl = useLiveTuning()
 const projectionModes = computed(() => (
   projection.ok.value && Array.isArray(projection.modes.value) ? projection.modes.value : null
 ))
 const hostStreamDisplay = computed(() => (projection.ok.value ? projection.streamDisplay.value : null))
-const liveTuning = computed(() => liveStreamStats.value?.tuning || projection.tuning.value || null)
-const liveAutoQuality = computed(() => liveStreamStats.value?.auto_quality || projection.autoQuality.value || null)
 const provenanceFor = (configKey) => provenanceLabel(projection, configKey)
 const isLinux = computed(() => props.platform === 'linux')
 const isWindows = computed(() => props.platform === 'windows')
@@ -282,86 +276,10 @@ const clientSettingsRows = computed(() => [
   ...(lastConfigWriteRow.value ? [lastConfigWriteRow.value] : []),
 ])
 
-const autoQualityEnabled = computed(() => (
-  config.value.ai_enabled === 'enabled' && config.value.adaptive_bitrate_enabled === 'enabled'
-))
-// The split state is reachable when the config file was edited by hand or an
-// older host upgraded: exactly one of the pair is on.
-const autoQualityPartial = computed(() => (
-  (config.value.ai_enabled === 'enabled') !== (config.value.adaptive_bitrate_enabled === 'enabled')
-))
-// Live strip: present when the host serves the projection and a policy snapshot.
-const autoQualityLive = computed(() => Boolean(projection.ok.value && liveAutoQuality.value))
-const autoQualityLiveStateKey = computed(() => autoQualityHostStateKey(liveAutoQuality.value))
-const autoQualityLiveRows = computed(() => buildLiveAutoQualityRows(
-  { autoQuality: liveAutoQuality.value, tuning: liveTuning.value },
-  $t,
-))
-const autoQualityBadge = computed(() => {
-  if (autoQualityLive.value) {
-    return $t('config.av_auto_quality_badge_live', {
-      state: $t(`config.av_auto_quality_live_state_${autoQualityLiveStateKey.value}`),
-    })
-  }
-  if (autoQualityEnabled.value) return $t('config.av_auto_quality_badge_on')
-  if (autoQualityPartial.value) return $t('config.av_auto_quality_badge_partial')
-  return $t('config.av_auto_quality_badge_manual')
-})
-const autoQualityTone = computed(() => {
-  if (autoQualityLive.value) {
-    const tone = autoQualityHostTone(autoQualityLiveStateKey.value)
-    if (tone === 'pass') return 'border-success/30 bg-success/10 text-success'
-    if (tone === 'warning') return 'border-warning/30 bg-warning/10 text-warning-bright'
-    return 'border-storm/40 bg-storm/10 text-storm'
-  }
-  if (autoQualityEnabled.value) return 'border-success/30 bg-success/10 text-success'
-  if (autoQualityPartial.value) return 'border-warning/30 bg-warning/10 text-warning-bright'
-  return 'border-storm/40 bg-storm/10 text-storm'
-})
-const autoQualityCopy = computed(() => {
-  if (autoQualityEnabled.value) {
-    return $t('config.av_auto_quality_copy_on')
-  }
-  if (autoQualityPartial.value) {
-    return $t('config.av_auto_quality_copy_partial')
-  }
-  return $t('config.av_auto_quality_copy_manual')
-})
-const autoQualityRows = computed(() => [
-  {
-    label: $t('config.av_auto_quality_row_profile'),
-    value: config.value.ai_enabled === 'enabled'
-      ? $t('config.av_auto_quality_profile_auto')
-      : $t('config.av_auto_quality_profile_manual'),
-    note: config.value.ai_enabled === 'enabled'
-      ? $t('config.av_auto_quality_profile_note_auto')
-      : $t('config.av_auto_quality_profile_note_manual'),
-  },
-  {
-    label: $t('config.av_auto_quality_row_bitrate'),
-    value: config.value.adaptive_bitrate_enabled === 'enabled'
-      ? $t('config.av_auto_quality_bitrate_adaptive')
-      : $t('config.av_auto_quality_bitrate_fixed'),
-    note: config.value.adaptive_bitrate_enabled === 'enabled'
-      ? $t('config.av_auto_quality_bitrate_range_note', {
-          min: Number(config.value.adaptive_bitrate_min || 0) / 1000,
-          max: Number(config.value.adaptive_bitrate_max || 0) / 1000,
-        })
-      : $t('config.av_auto_quality_bitrate_cap_note', { cap: Number(config.value.max_bitrate || 0) / 1000 }),
-  },
-  {
-    label: $t('config.av_auto_quality_row_runtime'),
-    value: selectedStreamDisplayMode.value.title,
-    note: selectedStreamDisplayMode.value.badge,
-  },
-  {
-    label: $t('config.av_auto_quality_row_nova'),
-    value: clientSettingsSyncBadge.value,
-    note: clientSettingsSync.value.relaunchRequired
-      ? $t('config.av_auto_quality_nova_note_relaunch')
-      : $t('config.av_auto_quality_nova_note_ready'),
-  },
-])
+const autoQualityEnabled = computed(() => tuningControl.state.value?.enabled === true)
+const autoQualityBadge = tuningControl.label
+const autoQualityTone = computed(() => autoQualityEnabled.value ? 'text-success' : 'text-storm')
+
 const isLabwcPath = computed(() => (
   streamDisplayMode.value === 'headless_stream' || streamDisplayMode.value === 'windowed_stream'
 ))
@@ -429,14 +347,8 @@ const linuxStreamingSetupChecklist = computed(() => {
   return items
 })
 
-function setEnabledConfig(key, enabled) {
-  config.value[key] = enabled ? 'enabled' : 'disabled'
-}
 
-function setAutoQuality(enabled) {
-  setEnabledConfig('adaptive_bitrate_enabled', enabled)
-  setEnabledConfig('ai_enabled', enabled)
-}
+
 
 const dongleOutputs = ref([])
 const dongleDetectStatus = ref('')
@@ -938,54 +850,11 @@ function updateDisplayPlannerSource(event) {
 
     <section class="settings-section">
       <div class="settings-section-header">
-        <div class="section-kicker">Auto Quality</div>
-        <h3 class="settings-section-title">Performance and quality balance</h3>
-        <div class="settings-summary-copy">One primary mode for bitrate, launch profile, and recovery behavior. Advanced controls stay available below.</div>
+        <div class="section-kicker">Live Tuning</div>
+        <h3 class="settings-section-title">Automatic bitrate adjustment</h3>
+        <div class="settings-summary-copy">Applies immediately on supported streams. Launch presets remain separate.</div>
       </div>
-
-      <div class="settings-subtle-surface space-y-4">
-        <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <div class="text-base font-semibold text-silver">
-                {{ autoQualityEnabled ? $t('config.av_auto_quality_heading_on') : autoQualityPartial ? $t('config.av_auto_quality_heading_partial') : $t('config.av_auto_quality_heading_manual') }}
-              </div>
-              <span class="meta-pill" :class="autoQualityTone">{{ autoQualityBadge }}</span>
-            </div>
-            <div class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ autoQualityCopy }}</div>
-          </div>
-          <button
-            type="button"
-            class="focus-ring dashboard-action-button"
-            :class="autoQualityEnabled ? 'dashboard-action-button-secondary' : 'dashboard-action-button-primary'"
-            @click="setAutoQuality(!autoQualityEnabled)"
-          >
-            {{ autoQualityEnabled ? $t('config.av_auto_quality_disable_action') : $t('config.av_auto_quality_enable_action') }}
-          </button>
-        </div>
-
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <div class="section-kicker" :data-auto-quality-strip-source="autoQualityLive ? 'host' : 'saved'">
-            {{ autoQualityLive ? $t('config.av_auto_quality_live_kicker') : $t('config.av_auto_quality_saved_kicker') }}
-          </div>
-          <p
-            v-if="provenanceFor('adaptive_bitrate_enabled')"
-            class="text-[11px] text-storm"
-            data-provenance="adaptive_bitrate_enabled"
-          >
-            {{ $t('config.av_provenance_set_by', { source: provenanceFor('adaptive_bitrate_enabled') }) }}
-          </p>
-        </div>
-        <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" data-auto-quality-strip>
-          <StatTile
-            v-for="row in (autoQualityLive ? autoQualityLiveRows : autoQualityRows)"
-            :key="row.label"
-            :label="row.label"
-            :value="row.value"
-            :note="row.note"
-          />
-        </div>
-      </div>
+      <LiveTuningControl />
     </section>
 
     <details class="settings-section settings-disclosure" open>
@@ -1224,6 +1093,7 @@ pactl info | grep Source</pre>
         <VirtualDisplayStatus
           :platform="platform"
           :config="config"
+          :host-generation="hostGeneration"
         />
       </div>
     </details>

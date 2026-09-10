@@ -7,6 +7,9 @@
 #include <src/config.h>
 #include <src/doctor_actions.h>
 #include <src/adaptive_bitrate.h>
+#include <src/private_state_file.h>
+#include <src/utility.h>
+#include "../tests_events.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -73,6 +76,21 @@ namespace {
     }
 
     std::filesystem::path path;
+  };
+
+  struct LiveConfigurationGuard {
+    std::string old = config::sunshine.config_file;
+    std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("polaris-live-config-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    LiveConfigurationGuard() {
+      std::filesystem::create_directory(directory);
+      config::sunshine.config_file = (directory / "polaris.conf").string();
+      (void) private_state_file::write_atomic(config::sunshine.config_file, "adaptive_bitrate_enabled = disabled\n");
+    }
+    ~LiveConfigurationGuard() {
+      config::sunshine.config_file = old;
+      std::filesystem::remove_all(directory);
+    }
   };
 
   void mark_doctor_pacing_window_confirmed(stream_stats::stats_t &stats) {
@@ -2621,6 +2639,7 @@ TEST(DoctorActionTests, OlderStreamCannotAutoFixAfterTheNewestViewerLeaves) {
 }
 
 TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
+  LiveConfigurationGuard live_configuration;
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -2706,6 +2725,7 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
 }
 
 TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) {
+  LiveConfigurationGuard live_configuration;
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -2841,7 +2861,27 @@ TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
   stream_stats::update_stream_active(false);
 }
 
+TEST(PolarisEventListenerTests, ReportsExceptionsWithoutASourceLocation) {
+  PolarisEventListener listener;
+  const testing::TestPartResult result(
+    testing::TestPartResult::kFatalFailure, nullptr, -1, "test exception"
+  );
+  listener.OnTestProgramStart(*testing::UnitTest::GetInstance());
+  const auto cleanup = util::fail_guard([&] {
+    listener.OnTestProgramEnd(*testing::UnitTest::GetInstance());
+  });
+  EXPECT_NO_THROW(listener.OnTestPartResult(result));
+  std::string output;
+  {
+    const auto backend = listener.sink->locked_backend();
+    output = listener.sink_buffer->str();
+  }
+  EXPECT_NE(output.find("<unknown file>"), std::string::npos);
+  EXPECT_NE(output.find("test exception"), std::string::npos);
+}
+
 TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGeneration) {
+  LiveConfigurationGuard live_configuration;
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -2860,6 +2900,11 @@ TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGenerati
   doctor_actions::session_started("client-owner", generation, "launch-423", 20000);
   adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
   stream_stats::start_session_timing("client-owner", generation, "launch-423");
+  const auto cleanup = util::fail_guard([&] {
+    doctor_actions::session_ended("client-owner", generation);
+    stream_stats::stop_session_timing("client-owner", generation);
+    stream_stats::update_stream_active(false);
+  });
 
   doctor_actions::recovery_action_context_t context;
   context.active_owner = true;
@@ -2872,27 +2917,40 @@ TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGenerati
 
   nlohmann::json first_request;
   for (int i = 0; i < 128; ++i) {
+    // Owner updates persist configuration. A slow filesystem must not age the
+    // synthetic observation out while this test fills the receipt history.
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
     context.stats = stream_stats::get_current();
     const auto request = trusted_doctor_action_request(context);
+    ASSERT_EQ(request.value("action_id", ""), "lower_bitrate") << request.dump();
     if (i == 0) first_request = request;
     const auto applied = doctor_actions::execute(request, context);
-    ASSERT_TRUE(applied.at("status").get<bool>());
+    ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
     ASSERT_EQ(applied.at("state"), "applying");
     ASSERT_TRUE(doctor_actions::set_owner_live_bitrate(
       "client-owner", generation, "launch-423", 20000
     ));
   }
 
+  // Capacity and retained idempotency receipts do not depend on live telemetry.
+  // Reuse an admitted action envelope with a new ID rather than deriving an
+  // action from expired evidence, which correctly offers no new live fix.
+  stream_stats::age_latest_network_observation_for_tests(std::chrono::seconds(3));
   context.stats = stream_stats::get_current();
+  ASSERT_GE(context.stats.network_last_received_age_ms, 2000);
+  ASSERT_GE(context.stats.media_loss_last_received_age_ms, 2000);
+  auto capacity_request = first_request;
+  capacity_request["request_id"] = "test-doctor-request-over-capacity";
   const auto over_capacity = doctor_actions::execute(
-    trusted_doctor_action_request(context), context
+    capacity_request, context
   );
-  EXPECT_FALSE(over_capacity.at("status").get<bool>());
+  ASSERT_FALSE(over_capacity.at("status").get<bool>()) << over_capacity.dump();
+  ASSERT_TRUE(over_capacity.contains("state")) << over_capacity.dump();
   EXPECT_EQ(over_capacity.at("state"), "generation_action_limit");
   EXPECT_EQ(over_capacity.at("code"), "doctor_idempotency_capacity_reached");
 
   const auto oldest_retry = doctor_actions::execute(first_request, context);
-  EXPECT_TRUE(oldest_retry.at("status").get<bool>());
+  ASSERT_TRUE(oldest_retry.at("status").get<bool>()) << oldest_retry.dump();
   EXPECT_FALSE(oldest_retry.at("changed").get<bool>());
   EXPECT_EQ(oldest_retry.at("state"), "superseded");
   EXPECT_EQ(
@@ -2901,9 +2959,6 @@ TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGenerati
   );
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
 
-  doctor_actions::session_ended("client-owner", generation);
-  stream_stats::stop_session_timing("client-owner", generation);
-  stream_stats::update_stream_active(false);
 }
 
 TEST(DoctorActionTests, AdaptiveToggleRestoresDoctorTargetBeforeChangingPolicy) {

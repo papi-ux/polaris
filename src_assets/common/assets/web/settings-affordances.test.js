@@ -131,11 +131,7 @@ describe('settings affordances', () => {
     expect(source).not.toMatch(/rounded-md border border-storm\/20 bg-void\/25[^"]*font-mono/)
   })
 
-  it('treats the Auto Quality split state as a real state instead of dead code', () => {
-    const source = webSource('configs/tabs/AudioVideo.vue')
 
-    expect(source).toMatch(/autoQualityPartial[\s\S]{0,200}!==/)
-  })
 })
 
 // F7: the Video/Audio page binds host truth from the settings projection and
@@ -148,11 +144,8 @@ describe('settings projection binding', () => {
     expect(source).toContain('projection.load()')
     expect(source).toContain('projectionModes.value?.find(')
     expect(source).toContain('resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)')
-    expect(source).toContain('data-auto-quality-strip')
     expect(source).toContain("data-provenance=\"max_bitrate\"")
     expect(source).toContain("data-provenance=\"fallback_mode\"")
-    expect(source).toContain("data-provenance=\"adaptive_bitrate_enabled\"")
-    expect(source).toMatch(/autoQualityLive \? autoQualityLiveRows : autoQualityRows/)
   })
 
   it('lets the host name the response-only keys the save path strips', () => {
@@ -170,8 +163,5 @@ describe('attribute interpolation', () => {
     expect(offenders, `mustache inside an attribute in ${relativePath}`).toEqual([])
   })
 
-  it('binds the Auto Quality strip source marker', () => {
-    const source = webSource('configs/tabs/AudioVideo.vue')
-    expect(source).toContain(`:data-auto-quality-strip-source="autoQualityLive ? 'host' : 'saved'"`)
-  })
+
 })

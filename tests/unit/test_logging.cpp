@@ -3,6 +3,7 @@
  * @brief Test src/logging.*.
  */
 #include "../tests_common.h"
+#include "../tests_environment.h"
 #include "../tests_log_checker.h"
 #include "../tests_paths.h"
 
@@ -279,11 +280,8 @@ TEST(LoggingOwnerLock, SecondInitFallsBackToConsoleAndLeavesOwnedFilesUntouched)
   EXPECT_TRUE(fs::exists(active.string() + ".backup"));
   guard.reset();
 
-  // Restore the harness's file logging for later suites; the environment's
-  // lifetime guard still tears logging down at binary exit, so this init's
-  // own guard is intentionally leaked rather than deinitializing on scope
-  // exit and leaving the shared log file sinkless.
-  (void) logging::init(0, test_paths::log_file().string()).release();
+  // Keep the replacement guard owned by the test environment until teardown.
+  PolarisEnvironment::restore_logging();
 
   fs::remove_all(root, error);
 }

@@ -39,6 +39,8 @@
 
 // local includes
 #include "config.h"
+#include "configuration_store.h"
+#include "live_tuning.h"
 #include "adaptive_bitrate.h"
 #include "browser_stream.h"
 #include "client_support_report.h"
@@ -1388,6 +1390,14 @@ namespace confighttp {
    * This function uses session cookies (if set) and ensures they have not expired.
    * It also supports API key authentication via the Authorization: Bearer header.
    */
+  bool hasValidBearerAuth(req_https_t request) {
+    std::lock_guard credential_lock {s_credential_lifecycle_mutex};
+    const auto header = request->header.find("authorization");
+    return header != request->header.end() && header->second.starts_with("Bearer ") &&
+      !config::sunshine.api_key.empty() &&
+      crypto::constant_time_equals(header->second.substr(7), config::sunshine.api_key);
+  }
+
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
     std::lock_guard credential_lock {s_credential_lifecycle_mutex};
     if (!checkIPOrigin(response, request))
@@ -1518,12 +1528,7 @@ namespace confighttp {
       return false;
     }
 
-    // Detected by header presence, not re-validation - authenticate() has
-    // already succeeded overall by this point, and a real Bearer token is
-    // the only way that's true when this header is present (a garbage
-    // Authorization header would have made authenticate() fall through to
-    // the cookie check, and fail if that also failed).
-    const bool used_bearer_token_auth = request->header.find("authorization") != request->header.end();
+    const bool used_bearer_token_auth = hasValidBearerAuth(request);
     if (!used_bearer_token_auth && !validateCsrf(request)) {
       BOOST_LOG(warning) << "Benchmark control: ["sv << address << "] -- invalid CSRF token"sv;
       // Inlined rather than calling forbidden() - that helper is defined
@@ -1588,6 +1593,20 @@ namespace confighttp {
 
     response->write(code, tree.dump(), headers);
   }
+
+
+  template<class Handler>
+  auto withCsrf(Handler handler) {
+    return [handler](resp_https_t response, req_https_t request) {
+      if (!hasValidBearerAuth(request) && !hasVerifiedClientCert(request) && !validateCsrf(request)) {
+        BOOST_LOG(warning) << "CSRF token validation failed for "sv << request->path;
+        forbidden(response, request, "CSRF token missing or invalid");
+        return;
+      }
+      handler(response, request);
+    };
+  }
+
 
   void conflict_response(resp_https_t response, const nlohmann::json &tree) {
     constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_conflict;
@@ -4260,7 +4279,13 @@ namespace confighttp {
 #else
     output_tree["stream_display_mode_options"] = nlohmann::json::array();
 #endif
-    auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    std::lock_guard configuration_guard(configuration_store::mutex());
+    const auto observed = configuration_store::read(config::sunshine.config_file);
+    if (!observed) {
+      response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+      return;
+    }
+    auto vars = config::parse_config(observed->contents);
     for (auto &[name, value] : vars) {
       if (is_write_only_secret_config_key(name)) {
         if (name == "ai_api_key") {
@@ -4282,8 +4307,11 @@ namespace confighttp {
     output_tree["has_steamgriddb_api_key"] = output_tree.value("has_steamgriddb_api_key", false);
     output_tree["has_api_key"] = output_tree.value("has_api_key", false);
     output_tree["ai_auto_quality_enabled"] = bool_config_value(ai_optimizer::is_enabled());
-    output_tree["adaptive_bitrate_enabled"] = bool_config_value(adaptive_bitrate::is_enabled());
-    output_tree["ai_enabled"] = bool_config_value(ai_optimizer::is_enabled());
+    output_tree["adaptive_bitrate_enabled"] = bool_config_value(adaptive_bitrate::get_state().configured_enabled);
+    output_tree["ai_enabled"] = bool_config_value(config::video.ai_optimizer.enabled);
+    output_tree["ai_explanations_ready"] = ai_optimizer::is_enabled();
+    output_tree["configuration_revision"] = observed->revision;
+    output_tree["live_tuning"] = live_tuning::snapshot(stream_stats::get_current());
     send_response(response, output_tree);
   }
 
@@ -4424,7 +4452,58 @@ namespace confighttp {
    * keep unmentioned keys must merge them in first (see patchConfig). Answers
    * the request itself on failure and returns false.
    */
-  bool write_config_tree(resp_https_t response, req_https_t request, const nlohmann::json &tree, const std::string &writer) {
+  std::optional<std::string> expected_configuration_revision(req_https_t request) {
+    const auto it = request->header.find("If-Match");
+    if (it == request->header.end()) return std::nullopt;
+    const auto &value = it->second;
+    if (value.size() != 66 || value.front() != '"' || value.back() != '"') return std::string {};
+    return value.substr(1, 64);
+  }
+
+  bool configuration_current(resp_https_t response, req_https_t request, bool required) {
+    const auto expected = expected_configuration_revision(request);
+    if ((!expected && !required) ||
+        (expected && !expected->empty() && *expected == configuration_store::revision(config::sunshine.config_file, true))) return true;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(412),
+      nlohmann::json({{"status", false}, {"code", "configuration_changed"},
+        {"error", "Settings changed. Refresh before saving."}}).dump(), headers);
+    return false;
+  }
+
+  void liveTuning(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    if (request->method == "GET") {
+      auto state = live_tuning::snapshot(stream_stats::get_current());
+      state["can_change"] = true;
+      send_response(response, {{"status", true}, {"live_tuning", state}});
+      return;
+    }
+    if (!validateContentType(response, request, "application/json")) return;
+    try {
+      const auto body = nlohmann::json::parse(request->content.string());
+      if (!body.is_object() || body.size() != 1 || !body.contains("enabled") || !body["enabled"].is_boolean()) {
+        bad_request(response, request, "enabled must be the only field and must be boolean");
+        return;
+      }
+      auto authority = doctor_actions::acquire_admin_global_control();
+      const auto expected = expected_configuration_revision(request);
+      auto result = live_tuning::set_enabled(authority, body["enabled"].get<bool>(),
+        expected.value_or(std::string {}));
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.value("http_status", 500)), result.dump(), headers);
+    } catch (const std::exception &error) {
+      bad_request(response, request, error.what());
+    }
+  }
+
+  bool write_config_tree(resp_https_t response, req_https_t request, const nlohmann::json &tree, const std::string &writer,
+                         doctor_actions::paired_global_control_guard_t &authority,
+                         const std::optional<std::string> &observed_revision = std::nullopt) {
+    const auto before = expected_configuration_revision(request).value_or(
+      observed_revision.value_or(configuration_store::revision(config::sunshine.config_file, true)));
     std::stringstream config_stream;
     const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     std::vector<std::string> written_keys;
@@ -4440,6 +4519,10 @@ namespace confighttp {
       config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
       written_keys.push_back(k);
     }
+    if (!tree.contains("adaptive_bitrate_enabled")) {
+      config_stream << "adaptive_bitrate_enabled = "
+                    << bool_config_value(adaptive_bitrate::get_state().configured_enabled) << std::endl;
+    }
     std::size_t dropped = 0;
     for (const auto &[key, value] : existing_vars) {
       if (tree.contains(key) || value.empty()) {
@@ -4454,7 +4537,7 @@ namespace confighttp {
     if (dropped > 0) {
       BOOST_LOG(info) << "SaveConfig: "sv << writer << " left "sv << dropped << " existing key(s) out of the payload; they revert to defaults"sv;
     }
-    if (config::write_config_with_vaapi_settings(config::sunshine.config_file, config_stream.str()) != 0) {
+    if (config::write_config_with_vaapi_settings(config::sunshine.config_file, config_stream.str(), before) != 0) {
       const std::string message = "Failed to write config file: " + config::sunshine.config_file;
       BOOST_LOG(error) << "SaveConfig: "sv << message;
       bad_request(response, request, message);
@@ -4462,9 +4545,8 @@ namespace confighttp {
     }
     settings_metadata::note_config_write(writer, std::move(written_keys));
     if (tree.contains("adaptive_bitrate_enabled")) {
-      doctor_actions::set_adaptive_enabled(
-        json_config_enabled(tree["adaptive_bitrate_enabled"])
-      );
+      const bool enabled = json_config_enabled(tree["adaptive_bitrate_enabled"]);
+      if (enabled != adaptive_bitrate::get_state().configured_enabled) authority.set_adaptive_enabled(enabled);
     }
     if (tree.contains("ai_enabled")) {
       ai_optimizer::set_enabled(json_config_enabled(tree["ai_enabled"]));
@@ -4505,11 +4587,18 @@ namespace confighttp {
       if (!read_config_payload(response, request, input_tree)) {
         return;
       }
-      if (!write_config_tree(response, request, input_tree, "web_ui")) {
+      auto authority = doctor_actions::acquire_admin_global_control();
+      std::lock_guard configuration_guard(configuration_store::mutex());
+      const bool changes_tuning = input_tree.contains("adaptive_bitrate_enabled") &&
+        json_config_enabled(input_tree["adaptive_bitrate_enabled"]) != adaptive_bitrate::get_state().configured_enabled;
+      if (!configuration_current(response, request, changes_tuning)) return;
+      if (!write_config_tree(response, request, input_tree, "web_ui", authority)) {
         return;
       }
       nlohmann::json output_tree;
       output_tree["status"] = true;
+      output_tree["configuration_revision"] = configuration_store::revision(config::sunshine.config_file);
+      output_tree["live_tuning"] = live_tuning::snapshot(stream_stats::get_current());
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SaveConfig: "sv << e.what();
@@ -4538,13 +4627,21 @@ namespace confighttp {
       if (!read_config_payload(response, request, input_tree)) {
         return;
       }
+      auto authority = doctor_actions::acquire_admin_global_control();
+      std::lock_guard configuration_guard(configuration_store::mutex());
+      const bool changes_tuning = input_tree.contains("adaptive_bitrate_enabled") &&
+        json_config_enabled(input_tree["adaptive_bitrate_enabled"]) != adaptive_bitrate::get_state().configured_enabled;
+      if (!configuration_current(response, request, changes_tuning)) return;
+      const auto observed_revision = configuration_store::revision(config::sunshine.config_file, true);
       const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       const auto merged = validation::merge_config_patch(existing_vars, input_tree);
-      if (!write_config_tree(response, request, merged, "api_patch")) {
+      if (!write_config_tree(response, request, merged, "api_patch", authority, observed_revision)) {
         return;
       }
       nlohmann::json output_tree;
       output_tree["status"] = true;
+      output_tree["configuration_revision"] = configuration_store::revision(config::sunshine.config_file);
+      output_tree["live_tuning"] = live_tuning::snapshot(stream_stats::get_current());
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "PatchConfig: "sv << e.what();
@@ -7041,6 +7138,7 @@ namespace confighttp {
       proc::proc.current_app_has_mangohud()
     );
     stats_json["auto_quality"] = nvhttp::auto_quality_status_json();
+    stats_json["live_tuning"] = live_tuning::snapshot(stats);
     return stats_json;
   }
 
@@ -7197,6 +7295,8 @@ namespace confighttp {
         });
         if (header_sent.get_future().get()) return;
 
+        const auto event_instance = uuid_util::uuid_t::generate().string();
+        uint64_t sent_sequence = 0;
         uint64_t last_seq;
         {
           std::lock_guard lk(s_event_mtx);
@@ -7224,19 +7324,20 @@ namespace confighttp {
 #endif
           state["seq"] = current_seq;
           state["session_state"] = get_session_state();
+          state["live_tuning"] = live_tuning::snapshot(stream_stats::get_current());
 
           // Send only events emitted after this SSE client cursor.
           // Older terminal events may still be retained for other clients, but
           // they must not be replayed into a fresh Nova game activity.
           if (!pending_events.empty()) {
             for (const auto &evt : pending_events) {
-              *response << "event: session\ndata: " << evt << "\n\n";
+              *response << "id: " << event_instance << ":" << ++sent_sequence << "\nevent: session\ndata: " << evt << "\n\n";
             }
             last_seq = current_seq;
           }
 
           // Always send heartbeat with state
-          *response << "event: state\ndata: " << state.dump() << "\n\n";
+          *response << "id: " << event_instance << ":" << ++sent_sequence << "\nevent: state\ndata: " << state.dump() << "\n\n";
 
           std::promise<bool> send_err;
           response->send([&send_err](const SimpleWeb::error_code &ec) {
@@ -7299,20 +7400,7 @@ namespace confighttp {
       response->write(output.dump(), headers);
     };
 
-    auto withCsrf = [](auto handler) {
-      return [handler](resp_https_t response, req_https_t request) {
-        // Skip CSRF check for API key auth (Bearer token)
-        auto auth_header = request->header.find("authorization");
-        bool has_bearer = auth_header != request->header.end() &&
-                          auth_header->second.substr(0, 7) == "Bearer ";
-        if (!has_bearer && !hasVerifiedClientCert(request) && !validateCsrf(request)) {
-          BOOST_LOG(warning) << "CSRF token validation failed for "sv << request->path;
-          forbidden(response, request, "CSRF token missing or invalid");
-          return;
-        }
-        handler(response, request);
-      };
-    };
+
 
     server.default_resource["DELETE"] = [](resp_https_t response, req_https_t request) {
       bad_request(response, request);
@@ -7473,6 +7561,8 @@ namespace confighttp {
     server.resource["^/api/polaris/session$"]["GET"] = getPolarisSession;
     server.resource["^/api/polaris/unlock$"]["POST"] = withCsrf(postPolarisUnlock);
     server.resource["^/api/polaris/events$"]["GET"] = getPolarisEventsSSE;
+    server.resource["^/api/live-tuning$"]["GET"] = liveTuning;
+    server.resource["^/api/live-tuning$"]["POST"] = withCsrf(liveTuning);
 
     server.resource["^/images/polaris.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-polaris-45.png$"]["GET"] = getApolloLogoImage;
@@ -7530,6 +7620,25 @@ namespace confighttp {
   }
 
 #ifdef POLARIS_TESTS
+  void live_tuning_http_for_tests(resp_https_t response, req_https_t request) {
+    withCsrf(liveTuning)(response, request);
+  }
+
+  void with_web_session_for_tests(const std::filesystem::path &path, const std::string &csrf,
+                                  const std::function<void(const std::string &)> &run) {
+    auto previous_store = std::move(s_web_sessions);
+    const auto previous_csrf = csrfToken;
+    auto restore = util::fail_guard([&] {
+      s_web_sessions = std::move(previous_store);
+      csrfToken = previous_csrf;
+    });
+    csrfToken = csrf;
+    s_web_sessions = std::make_unique<web_session_store::manager_t>(path,
+      web_session_credential_fingerprint(), web_session_policy());
+    s_web_sessions->load(web_session_clock_now());
+    run(create_web_session(web_session_credential_fingerprint()).value());
+  }
+
   bool config_request_authorized_for_tests(
     const crypto::p_named_cert_t &candidate,
     std::string_view request_path

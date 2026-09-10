@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(polaris_claude_cli_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+get_filename_component(POLARIS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+include("${POLARIS_ROOT}/cmake/dependencies/nlohmann_json.cmake")
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+add_subdirectory("${POLARIS_ROOT}/third-party/googletest" googletest)
+add_executable(test_ai_claude_cli
+  "${POLARIS_ROOT}/src/ai_claude_cli.cpp"
+  "${POLARIS_ROOT}/tests/unit/test_ai_claude_cli.cpp")
+target_include_directories(test_ai_claude_cli PRIVATE "${POLARIS_ROOT}")
+target_link_libraries(test_ai_claude_cli PRIVATE nlohmann_json::nlohmann_json GTest::gtest_main)
+enable_testing()
+add_test(NAME claude_cli COMMAND test_ai_claude_cli)

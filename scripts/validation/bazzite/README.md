@@ -19,7 +19,7 @@ VM evidence may satisfy package, boot, reboot, removal, rollback, shared `/var`,
 2. Pin the installer checksum, target image digest, candidate digest, source commit, and every booted deployment checksum in the receipt.
 3. Keep candidate artifacts in a private validation path. Do not upload them to releases or Actions artifacts.
 4. Validate candidate identity before any package-manager or extension operation.
-5. For RPM validation, stage with `rpm-ostree install -r` and inspect the pending deployment before rebooting.
+5. For RPM validation, stage with `rpm-ostree install` and inspect the pending deployment before rebooting separately.
 6. For a future system-extension candidate, prove ELF closure and execution before copying anything into `/var/lib/extensions`.
 7. `setup-host` runs only after the installed deployment boots, package identity matches, every ELF dependency resolves, and SELinux is enforcing.
 8. Never automate a reboot in the same command that stages a deployment. Capture state first, then reboot as a separate controlled transition.

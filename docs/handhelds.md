@@ -71,9 +71,7 @@ do it:
   fight the Steam that Game Mode already has open.
 
 Two capture routes already exist in Polaris that a Game Mode session could use: the PipeWire node
-gamescope exports on its own, and DRM/KMS capture of whatever is on screen. Which one holds up on
-real hardware is the open question, and nobody on the project has a Game Mode host to answer it
-with. Progress lives in [#626](https://github.com/papi-ux/polaris/issues/626).
+gamescope exports on its own, and DRM/KMS capture of whatever is on screen. Which one holds up across real hardware is still being validated. Progress lives in [#626](https://github.com/papi-ux/polaris/issues/626).
 
 ## Help validate Game Mode streaming
 
@@ -82,7 +80,10 @@ code. It uses KMS capture, which is how Sunshine streams a Steam Deck in Game Mo
 the `cap_sys_admin` capability on the Polaris binary, which `--enable-kms` grants and
 `sudo setcap -r "$(readlink -f "$(command -v polaris)")"` removes again.
 
-1. From Desktop Mode, make Polaris boot independent and allow KMS capture:
+1. From Desktop Mode, make Polaris boot independent and allow KMS capture. On Bazzite, follow
+   [headless boot setup](bazzite.md#headless-boot-and-deck-images) and the
+   [optional KMS runtime copy](bazzite.md#optional-drmkms-capture) instead of applying a capability
+   directly to the read-only packaged binary. On a host with a writable packaged binary:
 
    ```bash
    sudo -H polaris --setup-host --enable-headless-boot --enable-kms

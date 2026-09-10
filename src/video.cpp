@@ -90,6 +90,7 @@ namespace video {
       std::function<bool(encoder_t &, bool)> validate;
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
+    thread_local const std::function<bool(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
 #endif
 
 #ifdef __linux__
@@ -3709,6 +3710,11 @@ namespace video {
     stream_packets::destination_t channel_data,
     packet_queue_t packets
   ) {
+    // A disable/rollback may have superseded the target while a former
+    // FFmpeg encoder was being retired. Use the latest pending request.
+    if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+      config.bitrate = request->target_bitrate_kbps;
+    }
     auto session = make_encode_session(disp, encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
@@ -4006,13 +4012,14 @@ namespace video {
           int effective_bitrate = applied_adaptive_bitrate;
           if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
             if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
-              switch (session->update_bitrate(request->target_bitrate_kbps)) {
+              auto update = encode_session_t::bitrate_update_e::rejected;
+              const bool current = adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+                update = session->update_bitrate(request->target_bitrate_kbps);
+                return update == encode_session_t::bitrate_update_e::applied;
+              });
+              if (current) switch (update) {
                 case encode_session_t::bitrate_update_e::applied:
                   applied_adaptive_bitrate = request->target_bitrate_kbps;
-                  adaptive_bitrate::acknowledge_live_bitrate_applied(
-                    request->revision,
-                    applied_adaptive_bitrate
-                  );
                   effective_bitrate = applied_adaptive_bitrate;
                   break;
                 case encode_session_t::bitrate_update_e::recreate_session:
@@ -4650,6 +4657,40 @@ namespace video {
       );
     }
   }
+
+  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
+#ifdef POLARIS_TESTS
+    if (capture_prepare_test_hook) return (*capture_prepare_test_hook)(config, preparation);
+#endif
+#ifdef __linux__
+    const auto &generation = config.capture_generation;
+    if (config.input_only || generation.stream_mode != "desktop_display" ||
+        generation.use_cage_compositor || generation.headless_mode ||
+        !generation.exact_display_name.empty()) {
+      return true;
+    }
+    // Match capture's encoder lease and backend dispatch. Do not run a probe or
+    // select a different source to obtain screen-sharing permission.
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    if (!chosen_encoder) {
+      return false;
+    }
+    return platf::prepare_desktop_capture(chosen_encoder->platform_formats->dev_type, config, preparation);
+#else
+    return true;
+#endif
+  }
+
+#ifdef POLARIS_TESTS
+  void with_capture_preparation_for_tests(
+      const std::function<bool(const config_t &, std::shared_ptr<void> &)> &prepare,
+      const std::function<void()> &body) {
+    const auto previous = capture_prepare_test_hook;
+    capture_prepare_test_hook = &prepare;
+    auto restore = util::fail_guard([previous] { capture_prepare_test_hook = previous; });
+    body();
+  }
+#endif
 
   void capture(
     safe::mail_t mail,

@@ -73,6 +73,9 @@ namespace rtsp_stream {
     crypto::PERM perm;
     bool watch_only;
     bool temporary_authorization = false;
+    // Shared with an allocated stream until it adopts prepared capture. Use
+    // atomic shared_ptr operations because cancellation can race SETUP.
+    std::atomic<std::shared_ptr<void>> capture_preparation;
 
     enum class setup_state_e : std::uint8_t {
       pending,
@@ -95,6 +98,7 @@ namespace rtsp_stream {
       auto expected = setup_state.load();
       while (expected == setup_state_e::pending || expected == setup_state_e::handoff) {
         if (setup_state.compare_exchange_weak(expected, setup_state_e::cancelled)) {
+          capture_preparation.store({});
           return true;
         }
       }
@@ -103,6 +107,7 @@ namespace rtsp_stream {
 
     void cancel() {
       setup_state.store(setup_state_e::cancelled);
+      capture_preparation.store({});
     }
 
     bool is_pending() const {
@@ -196,6 +201,9 @@ namespace rtsp_stream {
   };
 
   bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  void cancel_pending_launch_for_client(std::string_view unique_id);
+  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id);
+  void finish_cancelled_launch(const std::shared_ptr<launch_session_t> &launch);
 
   /**
    * @brief Clear state for the specified launch session.

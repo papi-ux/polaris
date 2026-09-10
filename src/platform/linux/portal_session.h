@@ -28,6 +28,9 @@
 
   #include <gio/gio.h>
 
+namespace video { struct config_t; }
+namespace platf { enum class mem_type_e; }
+
 namespace portal {
 
   constexpr uint32_t portal_source_monitor = 1;
@@ -54,6 +57,11 @@ namespace portal {
   // Complete bus acquisition and version query share one bounded, owner-scoped
   // cancellable. Unknown or unavailable KWin versions use variable capture.
   bool running_kwin_uses_fixed_rate();
+
+  // Acquire the normal session media cache before the launch response. Capture
+  // later reuses it; session_media remains its sole teardown owner.
+  bool prepare_capture(platf::mem_type_e mem_type, const video::config_t &config,
+                       std::shared_ptr<void> &preparation);
 
   /**
    * @brief Cancel in-flight portal D-Bus calls and response waits.
@@ -84,6 +92,10 @@ namespace portal {
   bool portal_cancel_pending_request_for_tests();
   bool portal_cancel_request_owner_for_tests();
   bool portal_cancel_source_wakes_wait_for_tests();
+  std::shared_ptr<const void> install_prepared_cache_for_tests();
+  void adopt_prepared_cache_for_tests();
+  void release_prepared_cache_for_tests(const std::shared_ptr<const void> &token);
+  bool prepared_cache_present_for_tests();
 #endif
 
   /**
