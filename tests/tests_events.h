@@ -27,7 +27,10 @@ struct PolarisEventListener: testing::EmptyTestEventListener {
   }
 
   void OnTestPartResult(const testing::TestPartResult &test_part_result) override {
-    std::string file = test_part_result.file_name();
+    const char *file = test_part_result.file_name();
+    if (file == nullptr) {
+      file = "<unknown file>";
+    }
     BOOST_LOG(tests) << "At " << file << ":" << test_part_result.line_number();
 
     auto result_text = test_part_result.passed()            ? "Success" :
