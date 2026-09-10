@@ -250,9 +250,6 @@ TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) 
            "bool proc_t::launch_input_only_and_raise(",
            "void proc_t::launch_input_only_impl("),
          between(process,
-           "int proc_t::execute_and_raise(",
-           "int proc_t::validate_resolved_profile_for_running_app("),
-         between(process,
            "bool proc_t::raise_session_for_admitted_launch(",
            "std::optional<std::uint64_t> proc_t::capture_session_launch_generation(")
        }) {
@@ -264,6 +261,19 @@ TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) 
   }
 
   const auto nvhttp = source("src/nvhttp.cpp");
+  const auto execute = between(process,
+    "int proc_t::execute_and_raise(",
+    "int proc_t::validate_resolved_profile_for_running_app(");
+  const auto preparation = execute.find("prepare_capture_for_admitted_launch(launch_session)");
+  const auto publication = execute.find("prepare_error ? prepare_error : publish()");
+  ASSERT_NE(preparation, std::string::npos);
+  ASSERT_NE(publication, std::string::npos);
+  EXPECT_LT(preparation, publication);
+  const auto callback = nvhttp.find("execute_and_raise(*app_iter, launch_session, [&]()");
+  ASSERT_NE(callback, std::string::npos);
+  const auto callback_end = nvhttp.find("launch_session_raised = err == 0", callback);
+  ASSERT_NE(callback_end, std::string::npos);
+  EXPECT_NE(nvhttp.substr(callback, callback_end - callback).find("raise_session_for_admitted_launch(launch_session)"), std::string::npos);
   constexpr std::string_view lifecycle_binding =
     "launch_session->lifecycle_generation = *launch_generation;";
   const auto first_binding = nvhttp.find(lifecycle_binding);

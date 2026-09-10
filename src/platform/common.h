@@ -750,6 +750,12 @@ namespace platf {
    */
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
+#ifdef __linux__
+  // Only the selected portal backend needs interactive Desktop preparation.
+  bool prepare_desktop_capture(mem_type_e hwdevice_type, const video::config_t &config,
+                               std::shared_ptr<void> &preparation);
+#endif
+
   // A list of names of displays accepted as display_name with the mem_type_e
   std::vector<std::string> display_names(mem_type_e hwdevice_type);
 #ifdef __linux__

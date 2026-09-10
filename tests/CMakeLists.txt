@@ -183,6 +183,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_desktop_takeover.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_display_topology.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_ram_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_helper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
@@ -258,6 +259,8 @@ set(TEST_AUDIO_SOURCES
 set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_claude_cli.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_provider_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
@@ -593,6 +596,9 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CUDA_FOUND)
+        target_include_directories(test_polaris_platform SYSTEM PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    endif()
 
     configure_polaris_full_test_target(test_polaris_input
         ${TEST_INPUT_SOURCES}
@@ -621,6 +627,10 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_audio
         ${TEST_AUDIO_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(test_polaris_audio PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_audio_process_id.cpp)
+    endif()
 
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
@@ -634,6 +644,12 @@ if (BUILD_FULL_TESTS)
         add_dependencies(test_polaris_video encoder_probe_provider_fixture)
         target_compile_definitions(test_polaris_video PRIVATE
             POLARIS_PROBE_PROVIDER_FIXTURE="$<TARGET_FILE:encoder_probe_provider_fixture>")
+        target_sources(test_polaris_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_avcodec_session_lifecycle.cpp)
+        target_link_options(test_polaris_video PRIVATE
+            -Wl,--wrap=avcodec_send_frame
+            -Wl,--wrap=avcodec_receive_packet
+            -Wl,--wrap=avcodec_free_context)
     endif()
 
     # Keep the historical target name as a build aggregate while the runtime coverage

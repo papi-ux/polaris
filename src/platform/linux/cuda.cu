@@ -330,15 +330,17 @@ namespace cuda {
 
   int tex_t::copy(std::uint8_t *src, int height, int pitch) {
     CU_CHECK(cudaMemcpy2DToArray(array, 0, 0, src, pitch, pitch, height, cudaMemcpyDeviceToDevice), "Couldn't copy to cuda array from deviceptr");
+    CU_CHECK(cudaStreamSynchronize(nullptr), "Couldn't complete cuda array device copy");
 
     return 0;
   }
 
-  std::optional<tex_t> tex_t::make(int height, int pitch) {
+  std::optional<tex_t> tex_t::make(int height, int width_pixels) {
+    if (height <= 0 || width_pixels <= 0) return std::nullopt;
     tex_t tex;
 
     auto format = cudaCreateChannelDesc<uchar4>();
-    CU_CHECK_OPT(cudaMallocArray(&tex.array, &format, pitch, height, cudaArrayDefault), "Couldn't allocate cuda array");
+    CU_CHECK_OPT(cudaMallocArray(&tex.array, &format, width_pixels, height, cudaArrayDefault), "Couldn't allocate cuda array");
 
     cudaResourceDesc res {};
     res.resType = cudaResourceTypeArray;
@@ -539,11 +541,16 @@ namespace cuda {
     const auto *color_p = colorspace.bit_depth >= 10
       ? video::new_color_vectors_from_colorspace(colorspace)
       : video::color_vectors_from_colorspace(colorspace);
-    CU_CHECK_IGNORE(cudaMemcpy(color_matrix.get(), color_p, sizeof(video::color_t), cudaMemcpyHostToDevice), "Couldn't copy color matrix to cuda");
+    CU_CHECK_VOID(cudaMemcpy(color_matrix.get(), color_p, sizeof(video::color_t), cudaMemcpyHostToDevice), "Couldn't copy color matrix to cuda");
+    CU_CHECK_VOID(cudaStreamSynchronize(nullptr), "Couldn't complete cuda color matrix upload");
   }
 
   int sws_t::load_ram(platf::img_t &img, cudaArray_t array) {
-    return CU_CHECK_IGNORE(cudaMemcpy2DToArray(array, 0, 0, img.data, img.row_pitch, img.width * img.pixel_pitch, img.height, cudaMemcpyHostToDevice), "Couldn't copy to cuda array");
+    CU_CHECK(cudaMemcpy2DToArray(array, 0, 0, img.data, img.row_pitch, img.width * img.pixel_pitch, img.height, cudaMemcpyHostToDevice), "Couldn't copy to cuda array");
+    // Pageable host uploads may return after staging. Our conversion stream is
+    // nonblocking, so it cannot rely on implicit ordering with the default stream.
+    CU_CHECK(cudaStreamSynchronize(nullptr), "Couldn't complete cuda array upload");
+    return 0;
   }
 
 }  // namespace cuda

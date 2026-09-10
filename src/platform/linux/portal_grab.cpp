@@ -113,6 +113,8 @@ namespace portal {
     // cache type independent lets portal/PipeWire builds omit Wayland helpers.
     std::shared_ptr<void> kwin;
     std::shared_ptr<pipewire_capture::capture_t> capture;
+    // Non-null only while a specific HTTP launch owns unclaimed preparation.
+    std::shared_ptr<const void> prepared_token;
     int requested_width = 0;
     int requested_height = 0;
     AVRational requested_rate {0, 1};
@@ -124,6 +126,7 @@ namespace portal {
     bool prefer_sdr = false;
 
     void clear_meta() {
+      prepared_token.reset();
       requested_width = 0;
       requested_height = 0;
       requested_rate = {0, 1};
@@ -462,7 +465,7 @@ namespace portal {
       // "failed to connect to wayland socket" until the new generation owns
       // gamescope-0. Retry a few times rather than fail the whole stream.
       for (int attempt = 1;
-           attempt <= 4 &&
+           generation.stream_mode == "gamescope_stream" && attempt <= 4 &&
            (!g_media.portal || g_media.portal->failed || !g_media.portal->ready ||
             g_media.portal->pw_node_id == 0);
            ++attempt) {
@@ -524,7 +527,8 @@ namespace portal {
     platf::mem_type_e mem_type,
     int client_dynamic_range,
     const capture_generation::identity_t &generation,
-    AVRational requested_rate
+    AVRational requested_rate,
+    const std::shared_ptr<const void> &prepared_token = {}
   ) {
     if (!portal_capture_backend_allowed(generation.capture_backend)) {
       BOOST_LOG(error) << "portal: capture generation backend ["sv << generation.capture_backend
@@ -535,6 +539,9 @@ namespace portal {
     std::lock_guard transition_lock(g_capture_transition_mu);
     auto start = session_media::begin_start();
     reap_portal_cleanup();
+    if (session_media::pending_start_cancelled(session_media::pending_start_owner())) {
+      return nullptr;
+    }
     // Lock contract (SB-2 + S4 single mutex):
     // 1) Under g_media_mu: ensure session + start PipeWire (no dual-mutex nesting).
     // 2) Wait for negotiation OUTSIDE the lock so release_global_capture can progress.
@@ -554,12 +561,20 @@ namespace portal {
                                 g_media.prefer_sdr == want_prefer_sdr;
         if (compatible) {
           if (capture_start_cancelled()) return nullptr;
+          // A normal capture call atomically adopts the preparation. A later
+          // expiry of its HTTP launch must not stop an active video thread.
+          g_media.prepared_token = prepared_token;
           return g_media.capture;
         }
 
         BOOST_LOG(info) << "portal: capture configuration changed; retiring PipeWire generation before reconnect"sv;
         auto retired_capture = std::move(g_media.capture);
-        auto retired_portal = std::move(g_media.portal);
+        // ANNOUNCE may refine size/HDR after HTTP launch. Retain the permission
+        // session for the same prepared source so that renegotiating PipeWire
+        // cannot reopen a picker after the client starts its video timer.
+        const bool retain_prepared_portal = g_media.prepared_token &&
+          g_media.generation == generation;
+        auto retired_portal = retain_prepared_portal ? nullptr : std::move(g_media.portal);
         auto retired_kwin = std::move(g_media.kwin);
         g_media.clear_meta();
         lock.unlock();
@@ -583,6 +598,8 @@ namespace portal {
         retired_kwin.reset();
         lock.lock();
       }
+
+      g_media.prepared_token = prepared_token;
 
       // W3/W5 gamescopegrab: prefer session-graph Video/Source (media.name=gamescope)
       // without private portal ScreenCast when linux_stream_mode=gamescope_stream.
@@ -852,6 +869,58 @@ namespace portal {
       return g_media.capture;
     }
   }
+
+  static void release_prepared_capture(const std::shared_ptr<const void> &token) {
+    std::lock_guard transition_lock(g_capture_transition_mu);
+    {
+      std::lock_guard media_lock(g_media_mu);
+      if (g_media.prepared_token != token) {
+        return;
+      }
+    }
+    // Reject stale leases before entering teardown: begin_teardown itself
+    // cancels portal requests. The transition lock fences replacement/adoption.
+    release_global_capture();
+  }
+
+  bool prepare_capture(platf::mem_type_e mem_type, const video::config_t &config,
+                       std::shared_ptr<void> &preparation) {
+    auto token = std::make_shared<const char>();
+    auto owner = std::shared_ptr<void>(new char, [token](void *value) {
+      delete static_cast<char *>(value);
+      session_media::schedule_retirement([token]() { release_prepared_capture(token); });
+    });
+    if (!ensure_global_capture(config.width, config.height, mem_type,
+                               config.dynamicRange, config.capture_generation,
+                               video::framerate_to_rational(config), token)) {
+      return false;
+    }
+    preparation = std::move(owner);
+    return true;
+  }
+
+#ifdef POLARIS_TESTS
+  std::shared_ptr<const void> install_prepared_cache_for_tests() {
+    std::lock_guard lock(g_media_mu);
+    g_media.portal = std::make_unique<portal_session_t>();
+    g_media.prepared_token = std::make_shared<const char>();
+    return g_media.prepared_token;
+  }
+
+  void adopt_prepared_cache_for_tests() {
+    std::lock_guard lock(g_media_mu);
+    g_media.prepared_token.reset();
+  }
+
+  void release_prepared_cache_for_tests(const std::shared_ptr<const void> &token) {
+    release_prepared_capture(token);
+  }
+
+  bool prepared_cache_present_for_tests() {
+    std::lock_guard lock(g_media_mu);
+    return !g_media.empty();
+  }
+#endif
 
   // -----------------------------------------------------------------------
   // Display backend

@@ -90,6 +90,7 @@ namespace video {
       std::function<bool(encoder_t &, bool)> validate;
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
+    thread_local const std::function<bool(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
 #endif
 
 #ifdef __linux__
@@ -1591,7 +1592,9 @@ namespace video {
       const bool vulkan_codec = avcodec_ctx->codec && avcodec_ctx->codec->name &&
                                 std::string_view {avcodec_ctx->codec->name}.ends_with("_vulkan"sv);
       if (vulkan_codec) {
-        BOOST_LOG(info) << "Vulkan encoder teardown: draining codec"sv;
+        BOOST_LOG(info) << (frame_submitted ?
+          "Vulkan encoder teardown: draining codec"sv :
+          "Vulkan encoder teardown: skipping drain; no frame was accepted"sv);
       }
 
       // Some hardware encoders cannot flush an initialized session that never
@@ -4649,6 +4652,40 @@ namespace video {
     }
   }
 
+  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
+#ifdef POLARIS_TESTS
+    if (capture_prepare_test_hook) return (*capture_prepare_test_hook)(config, preparation);
+#endif
+#ifdef __linux__
+    const auto &generation = config.capture_generation;
+    if (config.input_only || generation.stream_mode != "desktop_display" ||
+        generation.use_cage_compositor || generation.headless_mode ||
+        !generation.exact_display_name.empty()) {
+      return true;
+    }
+    // Match capture's encoder lease and backend dispatch. Do not run a probe or
+    // select a different source to obtain screen-sharing permission.
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    if (!chosen_encoder) {
+      return false;
+    }
+    return platf::prepare_desktop_capture(chosen_encoder->platform_formats->dev_type, config, preparation);
+#else
+    return true;
+#endif
+  }
+
+#ifdef POLARIS_TESTS
+  void with_capture_preparation_for_tests(
+      const std::function<bool(const config_t &, std::shared_ptr<void> &)> &prepare,
+      const std::function<void()> &body) {
+    const auto previous = capture_prepare_test_hook;
+    capture_prepare_test_hook = &prepare;
+    auto restore = util::fail_guard([previous] { capture_prepare_test_hook = previous; });
+    body();
+  }
+#endif
+
   void capture(
     safe::mail_t mail,
     config_t config,
@@ -5989,6 +6026,26 @@ namespace video {
   }
 
 #ifdef POLARIS_TESTS
+  std::vector<int> encode_and_destroy_avcodec_session_for_tests(
+    avcodec_ctx_t context,
+    std::unique_ptr<platf::avcodec_encode_device_t> device,
+    std::size_t frame_count
+  ) {
+    // Exercise the real submission path and destructor without creating a
+    // display or opening a hardware device. Tests own the codec-call boundary.
+    auto converter = std::make_unique<encode_device_frame_converter_t<platf::avcodec_encode_device_t>>(
+      "lifecycle-test", std::move(device), conversion_request_t {}
+    );
+    avcodec_encode_session_t session {std::move(context), std::move(converter), {}, 0, false};
+    auto mailbox = std::make_shared<safe::mail_raw_t>();
+    auto packets = mailbox->queue<packet_t>(mail::video_packets);
+    std::vector<int> results;
+    for (std::size_t index = 0; index < frame_count; ++index) {
+      results.push_back(encode_avcodec(index, session, packets, nullptr, std::nullopt));
+    }
+    return results;
+  }
+
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type) {
     return hevc_profile_for_input(bit_depth, chroma_sampling_type);
   }
