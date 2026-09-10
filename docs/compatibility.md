@@ -2,7 +2,8 @@
 
 What Polaris supports today, how well each path is validated, and where the honest limits are. Status
 words mean specific things here: **Recommended** paths have official package assets and the most
-validation, **Experimental** paths ship but need broader real-hardware coverage, and
+validation, **Supported installation** paths have a maintained package/setup workflow with
+feature-specific hardware limits, **Experimental** paths need broader real-hardware coverage, and
 **Source-build** paths have no published package yet.
 
 Polaris is Linux-only by design. Windows and macOS host ports are not planned.
@@ -15,7 +16,7 @@ Polaris is Linux-only by design. Windows and macOS host ports are not planned.
 | Arch Linux | Recommended | Official package asset. See the [Arch guide](arch.md). |
 | CachyOS / Arch derivatives | Expected via Arch package | Pacman-compatible derivatives should start there; report derivative-specific dependency or runtime gaps. |
 | SteamOS 3.8 x86_64 | Experimental Desktop Mode package | Dedicated package; physical Steam Deck gameplay, Game Mode, suspend, and update persistence are not yet certified. See the [SteamOS guide](steamos.md). |
-| Bazzite | Experimental | Layer the Fedora RPM with `rpm-ostree`; Desktop Mode validated on NVIDIA with Headless Stream, real Steam and Game Mode need more coverage. See the [Bazzite guide](bazzite.md). |
+| Bazzite 44 | Supported installation | Layer the Fedora 44 RPM with `rpm-ostree`; NVIDIA Desktop Mode has streaming evidence. Game Mode and driver-specific game flows need more coverage. The standalone system extension remains withdrawn. See the [Bazzite guide](bazzite.md). |
 | Ubuntu 24.04 | Experimental tester path | The DEB asset exists but this path needs broader real-hardware validation. See the [Ubuntu guide](ubuntu.md). |
 | openSUSE Tumbleweed | Source-build supported | Dedicated dependency and build guide plus CI build coverage; no published package asset yet. See the [openSUSE guide](openSUSE.md). |
 | Debian-family distros | Source-build oriented | Ubuntu 24.04 is the only direct DEB asset today. |
@@ -70,8 +71,9 @@ to expect on older LTS hosts and what packages each one needs.
 - Polaris is a Linux-only host. Windows and macOS host ports are not planned.
 - Fedora and Arch are the most validated package paths. CachyOS should use the Arch path first, but
   derivative-specific issues still need reports.
-- Bazzite support is experimental. Desktop Mode has Headless Stream validation on NVIDIA and growing
-  AMD Mesa VAAPI coverage; real Steam and Game Mode flows need more hardware reports.
+- Bazzite uses the supported Fedora RPM installation. Desktop Mode has NVIDIA streaming evidence;
+  Game Mode and AMD/Intel game flows need additional hardware validation. The withdrawn `.raw`
+  system extension is a separate packaging path and is not promoted by this status.
 - Ubuntu 24.04 DEB packaging is experimental; other Debian-family distros are still source-build
   oriented.
 - openSUSE Tumbleweed has source-build guidance and CI coverage but no published package asset yet.

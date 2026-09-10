@@ -4996,6 +4996,25 @@ namespace nvhttp {
     return replacement;
   }
 
+  int publish_authorized_launch(const crypto::p_named_cert_t &candidate,
+                                crypto::PERM required_permission,
+                                const std::function<bool()> &publish) {
+    std::lock_guard lock(client_state_mutex);
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) {
+      return 401;
+    }
+    if (!(current->perm & required_permission)) {
+      return 403;
+    }
+    // Client records are immutable. A replacement may change launch commands,
+    // guest status, display locks or permissions: resolve a fresh request.
+    if (current != candidate) {
+      return 409;
+    }
+    return publish() ? 0 : 409;
+  }
+
   inline crypto::p_named_cert_t get_verified_cert(
     const crypto::p_named_cert_t &candidate,
     std::string_view request_path
@@ -6183,15 +6202,21 @@ namespace nvhttp {
           }
         } catch (...) {}
 
-        auto err = proc::proc.execute_and_raise(*app_iter, launch_session);
+        auto err = proc::proc.execute_and_raise(*app_iter, launch_session, [&]() {
+          return publish_authorized_launch(named_cert_p, perm, [&]() {
+            return proc::proc.raise_session_for_admitted_launch(launch_session);
+          });
+        });
         launch_session_raised = err == 0;
         if (err) {
           tree.put("root.<xmlattr>.status_code", err);
           tree.put(
             "root.<xmlattr>.status_message",
             err == 503
-            ? "Failed to initialize video capture/encoding. Is a display connected and turned on?"
-            : "Failed to start the specified application");
+            ? "Video capture or encoding could not start. If prompted, approve screen sharing on the host."
+            : (err == 401 || err == 403 || err == 409)
+              ? "Authorization or session state changed during launch; reconnect to retry"
+              : "Failed to start the specified application");
           tree.put("root.gamesession", 0);
 
           return;
@@ -6203,10 +6228,23 @@ namespace nvhttp {
       tree.put("root.gamesession", 0);
     }
 
-    if (!launch_session_raised && !proc::proc.raise_session_for_admitted_launch(launch_session)) {
+    if (!launch_session_raised) {
+      if (const auto capture_error = proc::proc.prepare_capture_for_admitted_launch(launch_session)) {
+        tree.put("root.gamesession", 0);
+        tree.put("root.<xmlattr>.status_code", capture_error);
+        tree.put("root.<xmlattr>.status_message", "Desktop screen sharing was cancelled or capture could not be prepared");
+        return;
+      }
+    }
+    const auto publish_error = launch_session_raised ? 0 :
+      publish_authorized_launch(named_cert_p, perm, [&]() {
+        return proc::proc.raise_session_for_admitted_launch(launch_session);
+      });
+    if (publish_error) {
+      launch_session->cancel();
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 409);
-      tree.put("root.<xmlattr>.status_message", "Another launch is already pending");
+      tree.put("root.<xmlattr>.status_code", publish_error);
+      tree.put("root.<xmlattr>.status_message", "Authorization or session state changed during launch; reconnect to retry");
       return;
     }
 #ifdef __linux__
@@ -6457,10 +6495,19 @@ namespace nvhttp {
     }
 #endif
 
-    if (!proc::proc.raise_session_for_admitted_launch(launch_session)) {
+    if (const auto capture_error = proc::proc.prepare_capture_for_admitted_launch(launch_session)) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 409);
-      tree.put("root.<xmlattr>.status_message", "Another launch is already pending");
+      tree.put("root.<xmlattr>.status_code", capture_error);
+      tree.put("root.<xmlattr>.status_message", "Desktop screen sharing was cancelled or capture could not be prepared");
+      return;
+    }
+    if (const auto publish_error = publish_authorized_launch(named_cert_p, PERM::_allow_view, [&]() {
+          return proc::proc.raise_session_for_admitted_launch(launch_session);
+        })) {
+      launch_session->cancel();
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", publish_error);
+      tree.put("root.<xmlattr>.status_message", "Authorization or session state changed during resume; reconnect to retry");
       return;
     }
 #ifdef __linux__
@@ -6525,6 +6572,8 @@ namespace nvhttp {
     }
 
     const auto session_token = get_arg(args, "sessiontoken", "");
+    auto pending_capture_cancel = proc::proc.cancel_capture_preparation_for_shutdown(
+      named_cert_p->uuid, session_token, true, false);
     // Paired cert UUID is the owner identity. Never require sessiontoken for the
     // owner — Artemis/Moonlight often send a stale token and map any cancel
     // failure to "started by another device".
@@ -10427,6 +10476,7 @@ namespace nvhttp {
     const bool always_use_virtual_display,
     const std::optional<bool> temporary_authorization
   ) {
+    std::shared_ptr<rtsp_stream::launch_session_t> cancelled_launch;
     {
       std::lock_guard lock(client_state_mutex);
       const auto it = std::find_if(
@@ -10456,8 +10506,10 @@ namespace nvhttp {
         return client_mutation_result_t::persistence_failed;
       }
       rebuild_cert_chain_locked();
+      cancelled_launch = rtsp_stream::take_pending_launch_for_client(uuid);
     }
 
+    rtsp_stream::finish_cancelled_launch(cancelled_launch);
     find_and_udpate_session_info(uuid, name, newPerm);
     return client_mutation_result_t::success;
   }
@@ -10491,17 +10543,21 @@ namespace nvhttp {
   }
 
   bool expire_temporary_client_authorization(const std::string_view uuid) {
-    std::lock_guard lock(client_state_mutex);
-    const auto before = client_root.named_devices.size();
-    std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
-      return client->uuid == uuid && client->temporary_authorization;
-    });
-    if (client_root.named_devices.size() == before) {
-      return false;
+    std::shared_ptr<rtsp_stream::launch_session_t> cancelled_launch;
+    {
+      std::lock_guard lock(client_state_mutex);
+      const auto before = client_root.named_devices.size();
+      std::erase_if(client_root.named_devices, [&](const crypto::p_named_cert_t &client) {
+        return client->uuid == uuid && client->temporary_authorization;
+      });
+      if (client_root.named_devices.size() == before) {
+        return false;
+      }
+      rebuild_cert_chain_locked();
+      cancelled_launch = rtsp_stream::take_pending_launch_for_client(uuid);
     }
-
-    rebuild_cert_chain_locked();
     BOOST_LOG(info) << "Expired temporary authorization for client ["sv << uuid << ']';
+    rtsp_stream::finish_cancelled_launch(cancelled_launch);
     return true;
   }
 
@@ -10521,6 +10577,7 @@ namespace nvhttp {
   client_mutation_result_t unpair_client_result(const std::string_view uuid) {
     bool no_clients_remain = false;
     bool removed_temporary_authorization = false;
+    std::shared_ptr<rtsp_stream::launch_session_t> cancelled_launch;
     {
       std::lock_guard lock(client_state_mutex);
       auto previous_clients = client_root.named_devices;
@@ -10540,8 +10597,10 @@ namespace nvhttp {
       }
       rebuild_cert_chain_locked();
       no_clients_remain = client_root.named_devices.empty();
+      cancelled_launch = rtsp_stream::take_pending_launch_for_client(uuid);
     }
 
+    rtsp_stream::finish_cancelled_launch(cancelled_launch);
     if (auto session = rtsp_stream::find_session(std::string(uuid))) {
       stop_session(*session, true);
     }

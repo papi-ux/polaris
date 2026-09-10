@@ -4,6 +4,7 @@
  */
 
 #include "ai_optimizer.h"
+#include "ai_claude_cli.h"
 #include "config.h"
 #include "game_classifier.h"
 #include "logging.h"
@@ -53,6 +54,7 @@ namespace ai_optimizer {
     constexpr const char *PROVIDER_ANTHROPIC = "anthropic";
     constexpr const char *PROVIDER_OPENAI = "openai";
     constexpr const char *PROVIDER_GEMINI = "gemini";
+    constexpr const char *PROVIDER_DEEPSEEK = "deepseek";
     constexpr const char *PROVIDER_LOCAL = "local";
 
     constexpr const char *AUTH_API_KEY = "api_key";
@@ -62,11 +64,13 @@ namespace ai_optimizer {
     constexpr const char *DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
     constexpr const char *DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
     constexpr const char *DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+    constexpr const char *DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
     constexpr const char *DEFAULT_LOCAL_MODEL = "gpt-oss";
 
     constexpr const char *DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
     constexpr const char *DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
     constexpr const char *DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+    constexpr const char *DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
     constexpr const char *DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
 
     constexpr int OPTIMIZATION_SCHEMA_VERSION = 3;
@@ -150,6 +154,7 @@ namespace ai_optimizer {
     provider = to_lower_copy(provider);
     if (provider == "claude" || provider == "anthropic") return PROVIDER_ANTHROPIC;
     if (provider == "openai") return PROVIDER_OPENAI;
+    if (provider == "deepseek") return PROVIDER_DEEPSEEK;
     if (provider == "google" || provider == "google-ai" || provider == "gemini") return PROVIDER_GEMINI;
     if (provider == "ollama" || provider == "lmstudio" || provider == "lm-studio" || provider == "openai_compatible" || provider == "local") {
       return PROVIDER_LOCAL;
@@ -170,12 +175,13 @@ namespace ai_optimizer {
   }
 
   static std::string subscription_login_command(const std::string &provider) {
-    return provider == PROVIDER_OPENAI ? "codex login" : "";
+    return provider == PROVIDER_OPENAI ? "codex login" : "claude auth login";
   }
 
   static std::string default_model_for_provider(const std::string &provider) {
     if (provider == PROVIDER_OPENAI) return DEFAULT_OPENAI_MODEL;
     if (provider == PROVIDER_GEMINI) return DEFAULT_GEMINI_MODEL;
+    if (provider == PROVIDER_DEEPSEEK) return DEFAULT_DEEPSEEK_MODEL;
     if (provider == PROVIDER_LOCAL) return DEFAULT_LOCAL_MODEL;
     return DEFAULT_ANTHROPIC_MODEL;
   }
@@ -183,11 +189,13 @@ namespace ai_optimizer {
   static std::string default_base_url_for_provider(const std::string &provider) {
     if (provider == PROVIDER_OPENAI) return DEFAULT_OPENAI_BASE_URL;
     if (provider == PROVIDER_GEMINI) return DEFAULT_GEMINI_BASE_URL;
+    if (provider == PROVIDER_DEEPSEEK) return DEFAULT_DEEPSEEK_BASE_URL;
     if (provider == PROVIDER_LOCAL) return DEFAULT_LOCAL_BASE_URL;
     return DEFAULT_ANTHROPIC_BASE_URL;
   }
 
   static std::string normalize_auth_mode(std::string auth_mode, const std::string &provider, bool legacy_subscription, const std::string &api_key) {
+    if (provider == PROVIDER_DEEPSEEK) return AUTH_API_KEY;
     auth_mode = to_lower_copy(auth_mode);
 
     if (auth_mode.empty()) {
@@ -1969,6 +1977,27 @@ namespace ai_optimizer {
     };
   }
 
+  static void apply_chat_response_format(const config_t &active_cfg,
+                                         nlohmann::json &request_body,
+                                         const nlohmann::json &response_format) {
+    if (active_cfg.provider != PROVIDER_DEEPSEEK) {
+      request_body["response_format"] = response_format;
+      return;
+    }
+
+    // DeepSeek supports JSON objects, not OpenAI's strict json_schema mode.
+    // Supply the same contract in the prompt; local validation still decides
+    // whether an explanation can be displayed. These short requests do not
+    // need reasoning tokens to consume their bounded output/time budget.
+    request_body["response_format"] = {{"type", "json_object"}};
+    request_body["thinking"] = {{"type", "disabled"}};
+    request_body["max_tokens"] = 1024;
+    request_body["messages"][0]["content"] =
+      request_body["messages"][0]["content"].get<std::string>() +
+      "\nReturn a JSON object conforming to this schema:\n" +
+      response_format.at("json_schema").at("schema").dump();
+  }
+
   static std::string anthropic_cli_model(const config_t &active_cfg) {
     auto model = to_lower_copy(active_cfg.model);
     if (model.find("haiku") != std::string::npos) return "haiku";
@@ -2046,6 +2075,9 @@ namespace ai_optimizer {
     } else if (active_cfg.provider == PROVIDER_GEMINI) {
       append_unique_model(models, seen_ids, "gemini-2.5-flash");
       append_unique_model(models, seen_ids, "gemini-2.5-pro");
+    } else if (active_cfg.provider == PROVIDER_DEEPSEEK) {
+      append_unique_model(models, seen_ids, "deepseek-v4-flash");
+      append_unique_model(models, seen_ids, "deepseek-v4-pro");
     } else if (active_cfg.provider == PROVIDER_LOCAL) {
       append_unique_model(models, seen_ids, "gpt-oss");
       append_unique_model(models, seen_ids, "qwen3-8b");
@@ -2282,7 +2314,7 @@ namespace ai_optimizer {
       {{"role", "system"}, {"content", build_system_prompt()}},
       {{"role", "user"}, {"content", build_user_prompt(device_name, app_name, gpu_info, game_category, history, mode)}}
     });
-    request_body["response_format"] = optimization_response_format();
+    apply_chat_response_format(active_cfg, request_body, optimization_response_format());
 
     std::vector<std::string> headers;
     if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
@@ -2777,9 +2809,20 @@ namespace ai_optimizer {
   static std::optional<std::string> call_doctor_explanation_provider(
       const config_t &active_cfg,
       const std::string &redacted_evidence_json,
-      provider_test_result_t *test_result = nullptr) {
+      provider_test_result_t *test_result = nullptr,
+      const std::string &claude_executable = {}) {
     if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       return call_openai_codex_doctor_cli(active_cfg, redacted_evidence_json);
+    }
+    if (active_cfg.provider == PROVIDER_ANTHROPIC && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      const auto result = claude_cli::explain(active_cfg.model, doctor_explanation_system_prompt(),
+        doctor_explanation_response_format().at("json_schema").at("schema").dump(),
+        redacted_evidence_json, active_cfg.timeout_ms, claude_executable);
+      if (!result.response) {
+        set_provider_test_failure(test_result, result.code, result.error,
+          "Polaris could not obtain a bounded, structured Claude subscription explanation.", result.action);
+      }
+      return result.response;
     }
     if (active_cfg.provider == PROVIDER_ANTHROPIC || active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       BOOST_LOG(warning) << "ai_optimizer: Doctor explanation currently uses OpenAI-compatible local/API endpoints; provider/auth mode not supported for this explanation path"sv;
@@ -2788,7 +2831,7 @@ namespace ai_optimizer {
         "explanation_transport_unsupported",
         "This provider mode cannot run Doctor explanations",
         "The selected provider or authentication mode does not expose the supported explanation transport.",
-        "Choose an OpenAI-compatible endpoint or signed-in OpenAI subscription mode.",
+        "Choose a signed-in Claude or OpenAI subscription, or an OpenAI-compatible endpoint. For DeepSeek, use the DeepSeek profile.",
         false
       );
       return std::nullopt;
@@ -2802,7 +2845,7 @@ namespace ai_optimizer {
       {{"role", "system"}, {"content", doctor_explanation_system_prompt()}},
       {{"role", "user"}, {"content", "Redacted Polaris Doctor/support evidence follows. Explain it without adding unsupported facts.\n" + redacted_evidence_json}}
     });
-    request_body["response_format"] = doctor_explanation_response_format();
+    apply_chat_response_format(active_cfg, request_body, doctor_explanation_response_format());
 
     std::vector<std::string> headers;
     if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
@@ -2941,7 +2984,8 @@ namespace ai_optimizer {
   }
 
   std::string explain_doctor_json_with_config(const config_t &config,
-                                              const std::string &redacted_evidence_json) {
+                                              const std::string &redacted_evidence_json,
+                                              const std::string &claude_executable) {
     nlohmann::json evidence = nlohmann::json::object();
     try {
       if (!redacted_evidence_json.empty()) {
@@ -2956,7 +3000,7 @@ namespace ai_optimizer {
       return doctor_explanation_fallback("AI explanations are disabled or not fully configured.", evidence).dump();
     }
     try {
-      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump());
+      auto provider_text = call_doctor_explanation_provider(active_cfg, evidence.dump(), nullptr, claude_executable);
       if (!provider_text) {
         return doctor_explanation_fallback("Provider returned no explanation result", evidence).dump();
       }
@@ -3638,6 +3682,12 @@ namespace ai_optimizer {
         if (authenticated.has_value()) {
           status["cli_authenticated"] = *authenticated;
         }
+      }
+      if (cfg.provider == PROVIDER_ANTHROPIC) {
+        const auto claude = claude_cli::status();
+        status["cli_available"] = claude.available;
+        status["cli_authenticated"] = claude.authenticated.value_or(false);
+        status["cli_auth_verified"] = claude.authenticated.has_value();
       }
     }
 

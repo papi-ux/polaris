@@ -435,7 +435,38 @@ ai_enabled = enabled
 ai_provider = anthropic
 ai_model = claude-haiku-4-5-20251001
 ai_auth_mode = subscription
+ai_timeout_ms = 30000
 ```
+
+For Claude subscription explanations, install a current [Claude Code CLI](https://code.claude.com/docs/en/cli-reference)
+with `--safe-mode` support on the Polaris host. Sign in as the same OS user running Polaris:
+
+```bash
+claude auth login
+claude auth status
+```
+
+Polaris reuses that CLI subscription login. There is no separate Claude login in the web UI,
+and a login on another computer or under `root` does not authorize the Polaris service account.
+Choose **Claude → Claude CLI**, run **Test provider**, then save and enable explanations.
+The saved-runtime status distinguishes CLI discovery from verified subscription authentication.
+
+Doctor sends redacted evidence through a private, temporary request directory, with CLI tools,
+MCP servers, ordinary discovered customizations, and session persistence disabled. The installed,
+unmodified Claude Code and its administrator configuration are trusted host software: managed
+hooks and policy can still run with the service user's permissions. This is not an OS sandbox.
+Polaris does not collect, copy, or intermediate subscription tokens; sign-in stays with Claude Code.
+Polaris validates the returned explanation and does not apply settings or run recovery actions
+from AI responses. This response boundary also applies to the other Doctor providers.
+Requests use the configured timeout, bounded to 1–120 seconds, and a 64 KiB output limit.
+Older CLIs that do not support the required restriction flags fail rather than retrying without them.
+This Doctor transport uses Claude subscriptions; Anthropic API-key Doctor explanations remain unsupported.
+
+Subscription availability is provider-specific. OpenAI uses the signed-in Codex CLI below.
+DeepSeek's documented integration uses an API key; signing into its chat website does not establish
+a supported Polaris subscription transport. Local endpoints can run without a provider account.
+See [Claude Code authentication and credential use](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+and [DeepSeek's API setup](https://api-docs.deepseek.com/).
 
 ### OpenAI
 
@@ -456,6 +487,33 @@ ai_model = gemini-2.5-flash
 ai_auth_mode = api_key
 ai_api_key = YOUR_GEMINI_KEY
 ```
+
+### DeepSeek
+
+Select the **DeepSeek** provider and **DeepSeek API** profile in the web UI, enter a DeepSeek
+API key, refresh the model list, and run **Test Explanation** before saving. To configure it
+directly:
+
+```ini
+ai_enabled = enabled
+ai_provider = deepseek
+ai_model = deepseek-v4-flash
+ai_auth_mode = api_key
+ai_api_key = YOUR_DEEPSEEK_KEY
+ai_base_url = https://api.deepseek.com
+ai_timeout_ms = 30000
+```
+
+The profile uses DeepSeek's [OpenAI-compatible endpoint](https://api-docs.deepseek.com/) for
+model discovery and chat completions, with [JSON-object output](https://api-docs.deepseek.com/guides/json_mode/)
+and thinking disabled for bounded explanations. Polaris validates the returned explanation against
+the same six-field contract and keeps deterministic Doctor results as the source of truth.
+
+If you previously entered a DeepSeek URL under OpenAI or Anthropic, select the DeepSeek API profile
+and enter its key again. This sets the compatible output format and base URL; the Anthropic
+`/anthropic` endpoint is not used by Polaris's Doctor explanation path. Subscription login is not
+supported for DeepSeek. Model discovery reflects the API's current list; the configured default is
+only a fallback when discovery is unavailable.
 
 ### Local OpenAI-compatible server
 

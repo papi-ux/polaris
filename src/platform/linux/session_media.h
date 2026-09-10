@@ -93,6 +93,9 @@ namespace session_media {
    */
   void schedule(std::function<void()> work);
 
+  // Exact-resource retirements cannot be dropped when stop jobs coalesce.
+  void schedule_retirement(std::function<void()> work);
+
 }  // namespace session_media
 
 #endif  // __linux__

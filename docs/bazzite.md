@@ -1,491 +1,378 @@
 # Install on Bazzite
 
-Bazzite is Fedora-based, but it is an immutable `rpm-ostree` system rather than a
-normal DNF-managed Fedora install. The clean Polaris path for everyday Bazzite
-users is to layer the matching Fedora RPM, reboot into the new deployment, run
-the host setup once, then start Polaris from a writable `/usr/local` copy when
-DRM/KMS capture is needed.
+The supported Polaris installation on Bazzite is the matching Fedora RPM layered
+with `rpm-ostree`. Install the package, reboot, run host setup, and start the user
+service. Bazzite 44 uses `Polaris-fedora44-x86_64.rpm` from the
+[latest Polaris release](https://github.com/papi-ux/polaris/releases/latest).
 
-This is still a validation path until Bazzite Desktop Mode, Game Mode, NVIDIA,
-AMD, and common Moonlight client flows have more real-hardware coverage. The
-install should be simple, but keep the rollback notes handy.
+The RPM installation is supported. Capture and game compatibility still depend
+on the GPU, driver, and host session; [Validation status](#validation-status)
+records those limits. The withdrawn standalone `Polaris-sysext-x86_64.raw` image
+is not part of this installation process.
 
-> [!IMPORTANT]
-> Use a Polaris release that includes an RPM matching your Bazzite Fedora base.
-> Bazzite 44 should use `Polaris-fedora44-x86_64.rpm`. If the latest release
-> does not include your Fedora version yet, wait for the next release or use a
-> tester build intentionally.
+## Before you install
 
-## Validation Status
+Use a terminal on the Bazzite host, initially in Desktop Mode. Check the Fedora
+base and the booted deployment:
 
-| Image | Session | Result |
-|:------|:--------|:-------|
-| `bazzite-nvidia-open:stable` `44.20260430` | KDE Plasma Wayland Desktop Mode | Polaris service, ports, Headless Stream launch, client profile application, and host-input isolation validated |
-| `bazzite-nvidia-open:stable` `44.20260430` | Steam/Game Mode | Pending on a Game Mode-capable image |
+```bash
+rpm -E %fedora
+rpm-ostree status
+```
 
-The tested `bazzite-nvidia-open:stable` host is a Desktop image based on
-Kinoite. It exposes only `/usr/share/wayland-sessions/plasma.desktop` to the
-display manager. The host has `gamescope`, `gamescopectl`, `gamescopestream`,
-`bazzite-steam`, and Steam installed, but it does not include a
-`gamescope-session` package or a selectable Steam/Game Mode session.
+Use an RPM matching that Fedora version and architecture. If no matching asset
+exists in the release, wait for a compatible release rather than installing an
+RPM built for another Fedora version. If Polaris is already installed, follow
+[Update](#update) instead of the fresh-install command.
 
-That means this validation currently covers Desktop Mode only. Do not treat this
-image as real Bazzite Game Mode coverage until Polaris is retested on an image
-that can enter a gamescope Steam session from the host UI.
+Polaris and Sunshine use the same default GameStream ports. Stop and disable the
+Sunshine service you actually use before starting Polaris. Common unit names are
+`sunshine.service`, `homebrew.sunshine.service`, and
+`app-dev.lizardbyte.app.Sunshine.service`; inspect your user services first:
+
+```bash
+systemctl --user list-unit-files '*sunshine*' '*Sunshine*'
+# Example for a native Sunshine user service:
+systemctl --user disable --now sunshine.service
+```
+
+If you installed the withdrawn system extension, complete
+[its removal](#system-extension-withdrawn) before layering the RPM.
 
 ## Install
 
-If you already enabled Sunshine on Bazzite, stop it first. Sunshine and Polaris
-both use the default GameStream ports, so only one host should be running.
+### 1. Download and stage the package
 
-```bash
-systemctl --user disable --now homebrew.sunshine.service 2>/dev/null || true
-systemctl --user disable --now app-dev.lizardbyte.app.Sunshine.service 2>/dev/null || true
-```
-
-Install Polaris from the Fedora 44 release RPM:
+For Bazzite 44 on x86_64:
 
 ```bash
 rpm_name="Polaris-fedora44-x86_64.rpm"
-wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
-sudo rpm-ostree install -r "./${rpm_name}"
+curl --fail --location --output "./${rpm_name}" \
+  "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
+sudo rpm-ostree install "./${rpm_name}"
 ```
 
-After the reboot:
+Continue only after the transaction succeeds. Inspect the pending deployment:
 
 ```bash
+rpm-ostree status
+```
+
+The downloaded RPM appears under `LocalPackages`. It is still layered onto the
+host; `LayeredPackages` lists packages requested from repositories by name.
+Local RPMs do not update automatically when Bazzite updates. See
+[Bazzite's package-layering documentation](https://docs.bazzite.gg/Installing_and_Managing_Software/rpm-ostree/).
+
+Save your work, then reboot separately:
+
+```bash
+systemctl reboot
+```
+
+### 2. Set up the host after reboot
+
+Confirm the new deployment is booted, then run setup as your normal desktop user
+through `sudo`:
+
+```bash
+rpm -q polaris
 sudo -H polaris --setup-host
-systemctl --user stop polaris 2>/dev/null || true
-sudo install -D -m 0755 "$(readlink -f "$(command -v polaris)")" /usr/local/bin/polaris-kms
-sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms
-getcap /usr/local/bin/polaris-kms
-printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/polaris-kms\n' \
-  | systemctl --user edit --stdin --drop-in=10-bazzite-kms.conf polaris
-systemctl --user daemon-reload
+```
+
+Follow any input-access instructions printed by setup. If it reports missing
+input-group membership, complete [Controller and input group](#controller-and-input-group)
+and reboot or sign out and back in before continuing. A successful root device
+check alone does not establish that the running user service can use input.
+
+Start the packaged service:
+
+```bash
 systemctl --user enable --now polaris
+systemctl --user is-active polaris
 ```
 
-**Fresh install:** open `https://127.0.0.1:47990/#/welcome`, create the web UI
-account, and pair Moonlight, Nova, or another GameStream-compatible client.
+Normal Private Stream and portal capture do not require a manual binary copy or
+`cap_sys_admin`. Use [Optional DRM/KMS capture](#optional-drmkms-capture) only when
+you intentionally need that backend.
 
-**Upgrade or reinstall:** open `https://127.0.0.1:47990/#/login` and use the
-existing account. The rpm-ostree transaction intentionally leaves credentials,
-pairing keys, settings, and the library under `~/.config/polaris`, even if an old
-Polaris layer had to be removed before the new RPM could be installed. If needed,
-follow the [credential reset](troubleshooting.md#web-ui-credentials) instead of
-returning to Welcome.
+### 3. Open the console and pair
 
-This Bazzite-specific copy is intentional. Bazzite's `/usr` deployment is backed
-by composefs, so `setcap` can fail on the layered `/usr/bin/polaris-*` binary
-even when run with `sudo`. `/usr/local` points into writable `/var/usrlocal`,
-which can hold the capability-marked runtime copy used by the user service.
+- **Fresh install:** open `https://127.0.0.1:47990/#/welcome` and create the
+  web account.
+- **Upgrade or reinstall:** open `https://127.0.0.1:47990/#/login` with your existing
+  account. Package changes preserve credentials, paired devices, settings, and
+  the library in `~/.config/polaris`.
 
-Re-run the `/usr/local/bin/polaris-kms` copy and `setcap` commands after each
-Polaris package update so the service uses the newly installed binary.
+Pair Nova or Moonlight from the console. If you forgot the existing web password,
+use [credential reset](troubleshooting.md#web-ui-credentials); an update does not
+require repeating first-run signup.
 
-If you want to test the EVDI virtual display path instead of the headless labwc
-path, pre-create one EVDI device before starting Polaris:
+## First stream
 
-```bash
-systemctl --user stop polaris
-sudo modprobe -r evdi
-sudo modprobe evdi initial_device_count=1
-cat /sys/devices/evdi/count
-ls -l /dev/dri/card*
-systemctl --user start polaris
-```
+Start with a modest client profile such as 1920×1080 at 60 FPS. Select the launch
+mode for the app you intend to use:
 
-The expected result is `cat /sys/devices/evdi/count` returning `1` and an extra
-`/dev/dri/cardN` whose driver is `evdi`. To make that survive reboots:
+- **Private Stream:** Polaris starts a separate compositor for the game. The
+  app, capture, and supported input devices must all belong to that session.
+- **Mirror Desktop:** captures the logged-in desktop. A Desktop app stream in
+  this mode proves desktop capture, not a private game session.
 
-```bash
-echo evdi | sudo tee /etc/modules-load.d/evdi.conf
-echo 'options evdi initial_device_count=1' | sudo tee /etc/modprobe.d/evdi-polaris.conf
-```
+Check the active mode, capture path, and encoder in Mission Control after the
+client connects. A preferred Private Stream setting does not prove the active
+session used it. Stop and inspect the launch result if the mode is unexpected.
 
-## Controller and Input Group
+For Private Stream, let Polaris create and select its Wayland socket. Do not
+export `WAYLAND_DISPLAY` manually or add display-switch scripts for the initial
+setup. SHM/CPU fallback can still provide a working stream; it is a performance
+characteristic, not proof of a failed session. See
+[launch modes and capture paths](launch-modes.md).
 
-Seat isolation (`client_gamepad_seat_isolation`, `client_keyboard_mouse_seat_isolation`)
-needs the account Polaris runs as to be in the `input` group. Polaris warns at startup when
-it is not.
+## Headless boot and Deck images
 
-**`sudo usermod -aG input $USER` does not work on Bazzite.** The `input` group is defined in
-`/usr/lib/group` rather than `/etc/group`, so `usermod` cannot find a group to add anyone to.
-Use the Universal Blue recipe, which copies the definition across first:
-
-```bash
-ujust add-user-to-input-group
-```
-
-Then sign out and back in — group membership only applies to new sessions.
-
-```bash
-id -nG | tr ' ' '\n' | grep -qx input && echo "in the input group" || echo "not in it"
-```
-
-Thanks to [@SVelothi](https://github.com/papi-ux/polaris/issues/274) for finding this.
-
-## Why rpm-ostree Layering
-
-Polaris needs host-level integration: the binary, web assets, desktop metadata,
-the user service, udev rules for virtual input, and compositor helpers such as
-`grim`, `labwc`, `wlr-randr`, Xwayland, and `xdpyinfo`. On Bazzite, layering the RPM is
-cleaner than running Polaris from a toolbox, distrobox, or unpacked archive
-because the package manager can install those host dependencies into the booted
-deployment.
-
-The Polaris RPM declares the headless runtime dependencies, so the install
-command should not need separate `grim`, `labwc`, or `wlr-randr` arguments.
-
-## Recommended Bazzite Optimization
-
-Start in Desktop Mode first. Game Mode and Deck-style gamescope sessions can hide
-display, portal, and environment details that are easier to debug from Desktop
-Mode.
-
-Use Headless Stream for the first stream:
-
-```ini
-headless_mode = enabled
-linux_use_cage_compositor = enabled
-linux_prefer_gpu_native_capture = enabled
-```
-
-This is the recommended Bazzite Desktop Mode optimization for NVIDIA/NVENC and
-AMD/Mesa VAAPI hosts. It creates an isolated headless `labwc` runtime for the
-stream, routes launched apps and virtual input into that socket, and avoids
-targeting the physical KDE desktop.
-
-With `linux_prefer_gpu_native_capture = enabled`, logs may still report SHM/RAM
-capture, CPU frame residency, or an extra CPU-side copy/conversion path when the
-current compositor, driver, or encoder import path cannot stay GPU-native. Treat
-those as performance notes, not startup failures, when the client receives a
-stable stream from `HEADLESS-1`. If the setting prevents launch on a specific
-AMD/NVIDIA stack, temporarily switch it to `disabled` and report the capture
-decision JSON/logs.
-
-Do not manually export `WAYLAND_DISPLAY`; Polaris starts `labwc` with its own
-Wayland socket and routes launched apps into that socket. Do not add EVDI or
-dummy-plug display routing for this validation path.
-
-If you want to test a physical dummy plug instead, leave headless/labwc disabled
-and test it as a normal host display.
-
-## Desktop Mode Baseline
-
-On the tested NVIDIA Desktop image:
-
-- `polaris.service` was active under the user manager.
-- The service was enabled through `xdg-desktop-autostart.target`.
-- A local drop-in launched `/usr/local/bin/polaris-kms`.
-- `/usr/local/bin/polaris-kms` had `cap_sys_admin=ep`.
-- Polaris listened on `47984`, `47989`, `47990`, and `48010`.
-- The active graphical session was KDE Plasma Wayland through
-  `plasmalogin-autologin`.
-
-Baseline checks:
-
-```bash
-systemctl --user status polaris --no-pager -l
-systemctl --user cat polaris
-getcap /usr/local/bin/polaris-kms
-grep -E 'headless_mode|linux_use_cage_compositor|linux_prefer_gpu_native_capture' \
-  ~/.config/polaris/polaris.conf
-loginctl list-sessions
-loginctl show-session "$XDG_SESSION_ID" -p Type -p Desktop -p Class -p State
-ss -ltnup | grep -E '47984|47989|47990|48010'
-```
-
-The Desktop Mode logs still reported the physical display:
-
-```text
-Name: DP-3
-Found monitor: Samsung Electric Company Odyssey G95NC
-Resolution: 7680x2160
-```
-
-This is expected for the Desktop image before a client launches a headless labwc
-stream.
-
-## Headless Boot and Deck Images
-
-The packaged service enables into `xdg-desktop-autostart.target`, which only a
-full desktop session fires. Two common Bazzite setups never fire it (for the
-handheld side of this, including what Game Mode itself supports, see
-[Handhelds and Game Mode](handhelds.md)):
-
-- Deck images that boot straight into the gamescope Steam session. The gamescope
-  session does not run XDG autostart, so Polaris only starts once you visit
-  Desktop Mode.
-- A monitor-less host (dedicated streaming box, dummy plug removed). With no
-  graphical session at all, nothing starts the service after a reboot.
-
-For both, make Polaris boot-independent explicitly:
+To keep Polaris available after reboot, before desktop login, or across switches
+between Desktop Mode and Game Mode:
 
 ```bash
 sudo -H polaris --setup-host --enable-headless-boot
+systemctl --user enable --now polaris
 ```
 
-This enables lingering for your account (your user services start at boot,
-before any login) and hooks the Polaris user service into `default.target`. Run
-it from Desktop Mode's terminal or over SSH, as your normal user via sudo. Undo
-it later with `--disable-headless-boot`.
+This enables lingering for your account and attaches the user service to
+`default.target`. Run it through `sudo` from your normal account so setup targets
+the right user. To undo that startup policy, use
+`sudo -H polaris --setup-host --disable-headless-boot`.
 
-Opening Polaris from the Desktop Mode application menu starts this same user
-service rather than a second process, so a desktop launch does not replace the
-boot instance with one that ends when you quit it or log out.
-
-Verify after a reboot, over SSH if there is no display:
+Verify after reboot or a mode switch:
 
 ```bash
 systemctl --user is-active polaris
 journalctl --user -u polaris --since "10 minutes ago" --no-pager
 ```
 
-Two honest notes:
+Service availability and capture availability are separate. Mirror Desktop
+needs a graphical session. Steam already running in the host's Game Mode can
+also affect Private Stream or Gamescope Stream launch ownership; boot setup
+does not resolve those conflicts. Follow
+[Handhelds and Game Mode](handhelds.md) for the current capture limits.
 
-- Private Stream and Gamescope Stream need no desktop session, so streaming
-  works on a fully headless boot. Streaming the visible desktop (Mirror
-  Desktop, Host Virtual Display) still needs a desktop login, and Polaris must
-  be restarted after that login to see it.
-- You do not need the host to boot into Big Picture to play Big Picture. With
-  Private Stream, launching Steam Big Picture from the client starts it inside
-  the private session at the client's resolution; the host can sit at a black
-  screen. See [Launch modes and capture paths](launch-modes.md).
+If you use the machine as an always-available streaming host, review automatic
+suspend in Plasma's power settings. Lingering keeps the user service alive; it
+does not keep a suspended computer reachable. A disconnected SSH session or a
+locked screen is not by itself evidence that Polaris crashed.
 
-## Game Mode Validation
+## Controller and input group
 
-Game Mode remains pending for `bazzite-nvidia-open:stable` Desktop images. A
-valid Game Mode test host must expose a real Steam/Game Mode session, usually
-through a gamescope session package and display-manager entry.
-
-After entering Game Mode, verify Polaris before connecting a client:
+Run this if setup reports that the account needs the `input` group:
 
 ```bash
-systemctl --user is-active polaris
-systemctl --user status polaris --no-pager -l
-ss -ltnup | grep -E '47984|47989|47990|48010' || true
-journalctl --user -u polaris --since "5 minutes ago" --no-pager
+ujust add-user-to-input-group
 ```
 
-Then connect with Nova at `1920x1080x60`, followed by Moonlight or a Retroid
-profile such as `1280x720x60`. For each connection, collect:
+Bazzite can define this group in `/usr/lib/group`, so a plain
+`usermod -aG input` may not find it. The Bazzite command handles that layout.
+Reboot after changing the group to ensure both your login and a lingering user
+manager inherit it. Check from the new session:
 
 ```bash
-journalctl --user -u polaris --since "3 minutes ago" --no-pager \
-  | grep -Ei "New streaming|stream_active|CLIENT|RTSP|session_event|labwc|HEADLESS|Steam|failed|Warning|Error"
-```
-
-Success markers include:
-
-```text
-Applying client profile for "<client name>"
-session_optimization: ... layers=client_profile+device_db+runtime_policy
-labwc: Starting in headless mode
-labwc: Ready
-Selected monitor [Headless output 1] for streaming
-Wayland virtual input: routing supported devices to labwc socket
-Encoder cache saved: nvenc
-New streaming session started
-session_event: stream_active
-CLIENT CONNECTED
-```
-
-Steam should report the client stream resolution, not the physical `7680x2160`
-`DP-3` desktop.
-
-There should not be a warning that virtual input is falling back to host uinput
-during a healthy headless `labwc` stream. If that appears, stop testing and
-report it as an input-isolation issue because host Plasma may receive remote
-mouse or keyboard input.
-
-If Polaris is inactive after entering Game Mode, treat it as a service or
-autostart packaging issue first:
-
-```bash
+id -nG
+sudo -H polaris --setup-host
 systemctl --user restart polaris
-systemctl --user status polaris --no-pager -l
 ```
 
-If Polaris is active but clients cannot discover or connect, verify listener
-ports and mDNS/Avahi from the Game Mode session before changing encoder code.
+Account-database membership and the supplementary groups of an already-running
+service are different. If input is still unavailable, inspect the actual service
+process rather than repeatedly adding the account to the group:
 
-If clients connect but the stream is black, check whether logs mention
-`HEADLESS-1` or the physical display. `DP-3` means app routing escaped the
-headless labwc runtime. `HEADLESS-1` means routing worked and capture or encoder
-warnings should be inspected next.
+```bash
+polaris_pid="$(systemctl --user show polaris -p MainPID --value)"
+if [ "$polaris_pid" -gt 0 ]; then
+  grep '^Groups:' "/proc/${polaris_pid}/status"
+fi
+ls -l /dev/uinput /dev/uhid
+```
+
+Keep SELinux enforcing. If logs show an input denial after group access is
+correct, report the denial and package version; do not disable SELinux or grant
+world-writable device permissions.
+
+## Update
+
+Download the newer matching RPM, then replace the old local package request in
+one transaction:
+
+```bash
+rpm_name="Polaris-fedora44-x86_64.rpm"
+curl --fail --location --output "./${rpm_name}" \
+  "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
+sudo rpm-ostree install --uninstall=polaris "./${rpm_name}"
+```
+
+Use this for an existing Polaris layer. A fresh install uses the command in
+[Install](#install). The explicit replacement avoids the local-RPM
+`cannot install both polaris-...` / `conflicting requests` error. Do not remove
+unrelated layers or reset your configuration to resolve that error.
+
+After a successful transaction, inspect `rpm-ostree status`, save your work, and
+reboot. The booted deployment is marked `●`; a pending version above it is not
+running yet. The dashboard may therefore show the old version until reboot.
+
+After reboot:
+
+```bash
+rpm -q polaris
+sudo -H polaris --setup-host
+systemctl --user restart polaris
+systemctl --user is-active polaris
+```
+
+If you previously installed a KMS runtime copy, refresh it using the next section
+before restarting. A copy under `/usr/local` is outside the deployment and does
+not change automatically with an RPM update or rollback. Check
+`systemctl --user cat polaris` if the service still runs an older binary.
+
+## Optional DRM/KMS capture
+
+Use this section only for explicit DRM/KMS capture, including a controlled Game
+Mode capture test. On composefs-backed Bazzite deployments, adding a capability
+to the packaged binary under `/usr` can fail even as root. Use a writable runtime
+copy for that backend:
+
+```bash
+systemctl --user stop polaris
+polaris_binary="$(readlink -f "$(command -v polaris)")"
+sudo install -D -m 0755 "$polaris_binary" /usr/local/bin/polaris-kms &&
+sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms &&
+getcap /usr/local/bin/polaris-kms
+```
+
+Continue only if the copy succeeded and `getcap` reports `cap_sys_admin=ep`:
+
+```bash
+printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/polaris-kms\n' \
+  | systemctl --user edit --stdin --drop-in=10-bazzite-kms.conf polaris
+systemctl --user daemon-reload
+systemctl --user start polaris
+```
+
+Repeat the copy and capability steps after every package update or rollback.
+`/usr/local` maps into writable `/var/usrlocal`, which is shared across
+rpm-ostree deployments. The capability grants access needed by KMS; it does not
+select a capture backend or validate Game Mode streaming.
+
+To return to the packaged executable, stop Polaris, remove only the
+`10-bazzite-kms.conf` drop-in you created, reload the user manager, and restart:
+
+```bash
+systemctl --user stop polaris
+rm -f ~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf
+systemctl --user daemon-reload
+systemctl --user start polaris
+sudo rm -f /usr/local/bin/polaris-kms
+```
+
+Other custom service overrides may still select another binary; inspect
+`systemctl --user cat polaris` rather than removing unrelated overrides.
+
+## Roll back
+
+Select the previous deployment in the boot menu, or stage it explicitly:
+
+```bash
+sudo rpm-ostree rollback
+rpm-ostree status
+```
+
+Save your work and reboot. Refresh any optional KMS copy from the now-booted
+package. Your Polaris configuration and other `/var` contents are shared across
+deployments; deployment rollback does not restore those files.
+
+## Uninstall
+
+```bash
+systemctl --user disable --now polaris
+sudo rpm-ostree uninstall polaris
+rpm-ostree status
+```
+
+Reboot after the transaction succeeds. If you used the optional KMS copy, remove
+that copy and its dedicated drop-in. Keep `~/.config/polaris` to preserve your
+account, paired devices, and settings for reinstalling.
+
+You can then re-enable the Sunshine service you used previously. Run one host
+at a time because their default ports overlap.
 
 ## System Extension (withdrawn)
 
-> [!WARNING]
-> The experimental `Polaris-sysext-x86_64.raw` image was withdrawn on
-> September 5, 2026. The image did not include the runtime dependencies required by Bazzite.
-> Polaris can therefore fail to start immediately. A reported boot problem after
-> installation is also under investigation. Do not use cached copies.
+The standalone `Polaris-sysext-x86_64.raw` release image was withdrawn on
+September 5, 2026 because its runtime dependencies were incomplete. It remains
+withdrawn. Validation of newer private candidates does not make cached release
+images usable, and the RPM's supported status does not promote the extension.
 
-The supported Bazzite install remains the Fedora 44 RPM through `rpm-ostree`, as
-described in [Install](#install). The extension is not a substitute for the RPM
-until its dependency closure, SELinux behavior, failed-install rollback, and
-boot recovery have been validated on real Bazzite hardware.
-
-An installed extension remains at `/var/lib/extensions/polaris.raw`. That path is
-outside an individual rpm-ostree `/usr` deployment, so selecting another
-deployment does not remove the image. If the host still reaches Desktop Mode, a
-TTY, or SSH, remove the extension before rebooting again:
+An old extension at `/var/lib/extensions/polaris.raw` persists across deployment
+rollbacks. If the host reaches Desktop Mode, a TTY, or SSH, remove that specific
+extension before installing the RPM:
 
 ```bash
 systemctl --user disable --now polaris 2>/dev/null || true
-sudo systemd-sysext unmerge
-sudo rm -f /var/lib/extensions/polaris.raw
+sudo systemd-sysext unmerge &&
+sudo rm -f /var/lib/extensions/polaris.raw &&
 sudo systemd-sysext refresh
 systemctl --user daemon-reload
 sudo systemd-sysext status
 ```
 
-The final status must not list `polaris`. The `refresh` step restores any other
-installed system extensions after Polaris is removed. After cleanup, use the
-Fedora 44 RPM install path above.
+The final status must not list `polaris`. Unmerge temporarily affects all active
+system extensions; refresh restores the remaining installed extensions. For a
+host that cannot reach login, ask in the
+[Polaris Matrix room](https://matrix.to/#/#polaris:papi-ux.com) with the boot
+symptom before attempting recovery. Switching deployments alone does not remove
+an extension stored in `/var`.
 
-If the host no longer reaches a login, do not keep switching deployments or
-reinstall Bazzite. Ask in the
-[public Polaris Matrix room](https://matrix.to/#/#polaris:papi-ux.com) before
-making more changes so recovery can be matched to the exact boot symptom.
+## Validation status
 
-## Update
+| Area | Current scope |
+|:-----|:--------------|
+| Fedora 44 RPM on Bazzite | Supported installation, with explicit update and rollback steps |
+| NVIDIA / KDE Plasma Wayland Desktop Mode | Service, pairing, capture, input isolation, and reconnect evidence exists; a successful desktop stream does not establish private-game acceptance |
+| Bazzite Deck / Steam Game Mode | Boot-independent service setup is available; end-to-end Game Mode game streaming still needs hardware validation |
+| AMD / Intel Bazzite hosts | Use the matching Fedora RPM; driver-specific capture, encoding, and Game Mode behavior need additional hardware coverage |
+| Standalone system extension | Withdrawn; separate package, SELinux, lifecycle, and physical validation gates remain |
+| Container multiseat | Separate development work; production activation remains off |
 
-Layer the newer Fedora 44 RPM and reboot. `rpm-ostree` will stage the
-newer local RPM over the existing layered Polaris package:
+The earlier NVIDIA Desktop Mode baseline used `bazzite-nvidia-open:stable`
+`44.20260430`. It was a Plasma Desktop image, not a Game Mode-capable Deck image.
+More recent candidate testing does not certify every released package, GPU, or
+Steam launch path. See [Compatibility](compatibility.md) and
+[the system-extension validation requirements](../scripts/validation/bazzite/README.md).
 
-```bash
-rpm_name="Polaris-fedora44-x86_64.rpm"
-wget --output-document="./${rpm_name}" "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
-sudo rpm-ostree install -r "./${rpm_name}"
-```
+## Troubleshooting
 
-If you installed without `-r`, or rolled back a deployment and installed again, the
-new package is only staged: the running deployment, and the version the dashboard
-reports, do not change until you reboot. `rpm-ostree status` lists the staged
-deployment above the booted one. `rpm-ostree install` answering "already installed"
-while the dashboard still shows the old version means exactly this.
+- **Host disappears after reboot or leaving Desktop Mode:** verify the user
+  service and [headless boot setup](#headless-boot-and-deck-images), then check
+  whether the computer suspended or the network disconnected.
+- **Old version after update:** check the booted deployment, then the service's
+  `ExecStart` and any `/usr/local` copy. Do not repeat first-run signup.
+- **Black screen or unexpected Mirror Desktop:** inspect the active launch mode
+  and capture decision. A physical connector name alone does not diagnose an
+  app-routing failure; use the session's actual backend and compositor records.
+- **KMS capability warning while portal/private capture works:** use the normal
+  installation. Apply the optional capability only for explicit KMS capture.
+- **Input reaches the physical desktop during Private Stream:** stop the session
+  and report the input-routing details as an isolation issue.
 
-After the reboot, refresh `/usr/local/bin/polaris-kms` and its capability using
-the copy and `setcap` steps from [Install](#install), restart the service, and
-return to `https://127.0.0.1:47990/#/login` with the existing credentials. Do not
-use the first-run Welcome page merely because the package layer was replaced.
-
-## Roll Back
-
-Bazzite keeps previous deployments. If the new deployment does not work, choose
-the previous deployment from the boot menu or run:
-
-```bash
-sudo rpm-ostree rollback -r
-```
-
-## Uninstall
-
-Disable the user service before removing the layer:
-
-```bash
-systemctl --user disable --now polaris
-sudo rpm-ostree uninstall -r polaris
-```
-
-After rebooting, re-enable the Sunshine user service that matches the previous
-installation. The unit names are alternatives; run only the applicable command:
+For a report, include the Bazzite image/Fedora version, Desktop or Game Mode,
+GPU/driver, Polaris package version, active launch/capture mode, client and
+requested resolution/FPS. These local checks help identify the installed and
+running components:
 
 ```bash
-# Homebrew Sunshine
-systemctl --user enable --now homebrew.sunshine.service
-
-# Flatpak Sunshine
-systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
+rpm-ostree status
+rpm -q polaris
+systemctl --user status polaris --no-pager
+systemctl --user cat polaris
+journalctl --user -u polaris --since "10 minutes ago" --no-pager
+command -v polaris grim labwc wlr-randr
 ```
 
-Polaris and Sunshine use the same default GameStream ports, so do not enable both
-hosts at the same time.
-
-## Known Bazzite Log Messages
-
-`labwc: No new Wayland socket appeared within 10s` means the isolated `labwc`
-runtime failed to start or exited before creating its Wayland socket. Confirm the
-matching Fedora RPM was installed, rebooted into the new deployment, and retry
-from Desktop Mode first.
-
-`Environment variable WAYLAND_DISPLAY has not been defined` usually points to a
-windowed Wayland runtime being launched without a parent Wayland session. In
-private Headless Stream mode, Polaris can still start its own `labwc` socket for
-the client; treat the message as a desktop-preview or portal-capture clue unless
-the client stream itself fails to connect.
-
-`Couldn't scale frame ... src_fmt=bgr0 ... src_stride=0` means Polaris received a
-CPU BGR0 frame without a valid row pitch. Use a release newer than `v1.0.4`, where
-the headless CPU fallback path was fixed.
-
-`Failed to gain CAP_SYS_ADMIN` with `KMS probe could not access DRM framebuffer
-handles; continuing with non-KMS capture backends when available` is only a
-startup probe warning for portal/compositor users. Do not apply `setcap` for the
-normal portal path.
-
-`KMS display capture requires CAP_SYS_ADMIN` is actionable only when you
-intentionally selected explicit KMS capture. On Bazzite, copy the current
-packaged binary to `/usr/local/bin/polaris-kms`, apply `setcap` there, and make
-sure the `~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf` override
-points `ExecStart` at that file.
-
-`Virtual display: failed to open EVDI device` usually means the EVDI kernel
-module is loaded without a pre-created DRM card. Load EVDI with
-`initial_device_count=1` and confirm that `/sys/devices/evdi/count` returns `1`
-before starting Polaris.
-
-`Virtual display: could not determine EVDI output name, using fallback
-[VIRTUAL-1]` means Polaris could not map the opened EVDI card to its DRM
-connector. On Bazzite with a pre-created device, the connector should look like
-`card1-DVI-I-1` under `/sys/class/drm`.
-
-`wlr: Using RAM capture path because this build does not include a GPU-native
-uploader for the selected encoder` and `capture will incur an extra CPU-side
-copy/conversion path` are not startup failures. Confirm the stream is connected
-by looking for `session_event: stream_active`, `CLIENT CONNECTED`, `Selected
-monitor [Headless output 1]`, and `Found H.264 encoder: h264_nvenc [nvenc]`.
-For performance reports, though, treat `capture_transport=shm
-frame_residency=cpu frame_format=bgra8`, `target_residency=cpu`, or `Build
-features: cuda=disabled` with NVENC as important clues because they mean Polaris
-is taking a CPU copy/upload path.
-
-For NVIDIA true-headless performance testing, the fast path should report
-`Build features: cuda=enabled`, `capture_transport=dmabuf frame_residency=gpu`,
-and `target_device=cuda target_residency=gpu`. In the web UI or
-`/polaris/v1/session/status`, `capture.reason=headless_extcopy_dmabuf` is the
-desired true-headless marker; `headless_shm_fallback` means the stream can still
-be healthy, but it is using the conservative CPU-side capture path.
-
-`display_preview: Failed to capture cage screenshot` affects the web dashboard
-preview path. It does not mean the Moonlight/Nova stream failed if the client is
-already connected and receiving frames. Polaris rate-limits repeated preview
-capture failures, but if the preview itself matters, include `command -v grim`
-with the report.
-
-If local Plasma receives remote mouse or keyboard input while using headless
-labwc, treat that as an input-isolation bug and include the validation details
-below.
-
-## Validation Checklist
-
-Please include these details when reporting Bazzite issues:
-
-- Bazzite image name and version from `rpm-ostree status`
-- Desktop Mode or Game Mode
-- GPU model and driver stack
-- Polaris RPM asset used, such as `Polaris-fedora44-x86_64.rpm`
-- output of `command -v polaris grim labwc wlr-randr`
-- the `Build features: cuda=...` line
-- output of `getcap /usr/local/bin/polaris-kms`
-- output of `systemctl --user cat polaris`
-- whether `sudo -H polaris --setup-host` completed successfully
-- whether `systemctl --user status polaris` is running
-- whether the web UI opens at `https://127.0.0.1:47990`
-- client used for pairing, such as Steam Deck Moonlight, Android Moonlight, or Nova
-- active capture path shown in the Polaris dashboard
-- requested client resolution, FPS, codec, and whether the web UI preview was open
-- whether headless mode and virtual display behavior worked after a reboot
+Review logs before sharing them and remove credentials, pairing material, and
+private network or account details.

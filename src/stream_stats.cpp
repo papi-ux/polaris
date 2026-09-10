@@ -782,9 +782,9 @@ namespace stream_stats {
         amd_vaapi && config::video.encoder == "vaapi") {
       configuration_warnings.push_back({
         {"id", "amd_private_explicit_vaapi_shm"},
-        {"severity", "warning"},
-        {"message", "AMD Private Stream is explicitly pinned to VA-API while capture is crossing SHM/system-memory frames; this compatibility path can be throughput-limited at high resolution or refresh rate."},
-        {"action", "Set Force a Specific Encoder to Autodetect (recommended), restart Polaris, and start a fresh Private Stream. Auto will live-probe Vulkan Video and fall back to VA-API if the exact GPU-native path is unavailable."}
+        {"severity", "info"},
+        {"message", "AMD Private Stream is using the explicitly selected VA-API compatibility path with SHM/system-memory capture. This can limit throughput at high resolution or refresh rate, but is not itself a configuration error."},
+        {"action", "Keep VA-API selected if it provides stable streaming. If throughput is insufficient, first reduce resolution, frame rate, or bitrate. Change encoder only after checking a current build on this GPU and driver; a successful fallback cannot be assumed if a hardware probe crashes."}
       });
     }
   #endif

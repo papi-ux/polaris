@@ -26,7 +26,7 @@ namespace ai_optimizer {
    */
   struct config_t {
     bool enabled = false;
-    std::string provider;            ///< anthropic, openai, gemini, local
+    std::string provider;            ///< anthropic, openai, gemini, deepseek, local
     std::string model;               ///< Provider-specific model id
     std::string auth_mode;           ///< api_key, subscription, none
     std::string api_key;             ///< Provider API key when auth_mode == api_key
@@ -305,9 +305,12 @@ namespace ai_optimizer {
    * @brief Explain redacted Doctor/support-bundle evidence with an ad-hoc AI config.
    * Returns a structured JSON response and falls back to deterministic evidence on
    * disabled AI, provider failures, or invalid provider output.
+   * The optional CLI executable is an in-process test dependency; browser
+   * requests and provider configuration cannot set it.
    */
   std::string explain_doctor_json_with_config(const config_t &config,
-                                              const std::string &redacted_evidence_json);
+                                              const std::string &redacted_evidence_json,
+                                              const std::string &claude_executable = {});
 
   /**
    * @brief Explain redacted Doctor/support-bundle evidence with Polaris' active
