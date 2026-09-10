@@ -638,6 +638,39 @@ namespace {
     EXPECT_EQ(inventory[0].handle, second.handle);
   }
 
+  TEST(InputtinoMultiseatBackend, PropagatedPhysKeepsBothMouseNodesAndSeatsDisjoint) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    factory.carry_phys = true;
+    inputtino_host_backend_t backend {factory, probe, fast_options()};
+    const auto first = expectation_for(0, 3, {.touch = true, .pen = true, .gamepad_slots = 2});
+    const auto second = expectation_for(1, 4);
+    const auto a = backend.create(first);
+    const auto b = backend.create(second);
+    ASSERT_EQ(a.result, backend_result_e::applied);
+    ASSERT_EQ(b.result, backend_result_e::applied);
+    ASSERT_TRUE(a.allocation.has_value());
+    ASSERT_TRUE(b.allocation.has_value());
+    EXPECT_TRUE(valid_allocation(*a.allocation, first));
+    EXPECT_TRUE(valid_allocation(*b.allocation, second));
+    ASSERT_GT(a.allocation->nodes.size(), 2U);
+    EXPECT_EQ(a.allocation->nodes[1].phys, a.allocation->nodes[2].phys);
+    for (const auto &left : a.allocation->nodes) {
+      EXPECT_FALSE(left.phys.empty());
+      for (const auto &right : b.allocation->nodes) {
+        EXPECT_FALSE(right.phys.empty());
+        EXPECT_NE(left.phys, right.phys);
+        EXPECT_NE(left.host_path, right.host_path);
+      }
+    }
+    EXPECT_EQ(backend.destroy(first.handle, first.input_seat), backend_result_e::applied);
+    const auto inventory = backend.inventory();
+    ASSERT_EQ(inventory.size(), 1U);
+    EXPECT_EQ(inventory[0], *b.allocation);
+    EXPECT_EQ(backend.destroy(second.handle, second.input_seat), backend_result_e::applied);
+    EXPECT_TRUE(backend.inventory().empty());
+  }
+
   TEST(InputtinoMultiseatBackend, ConcurrentCreatesRemainSerializedAndDisjoint) {
     fake_kernel_probe_t probe;
     fake_device_factory_t factory {probe};
