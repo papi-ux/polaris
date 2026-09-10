@@ -340,7 +340,7 @@ jobs:
             gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
             libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
             nlohmann-json npm numactl openssl opus pipewire python shaderc vulkan-headers vulkan-icd-loader \
-            wayland wayland-protocols which
+            util-linux wayland wayland-protocols which
 
       - name: Install pinned Boost ABI
         run: |
@@ -402,9 +402,30 @@ jobs:
         # the C++/Go interop fixture. Require all suites so a missing fixture
         # cannot silently reduce this gate to host-only coverage.
         run: |
-          ctest --test-dir build/tests --output-on-failure --no-tests=error -R '^test_multiseat_runtime$'
-          ctest --test-dir build/tests --output-on-failure --no-tests=error -R '^test_polaris_stream$'
-          ctest --test-dir build/tests --output-on-failure --no-tests=error -R '^polaris_multiseat_worker_go$'
+          set -euo pipefail
+          # The worker authority intentionally refuses root. This container
+          # builds as root, so exercise admission with an ordinary service UID.
+          # A private TMPDIR also avoids the preceding root suite's temp files.
+          test_root="$(mktemp -d /tmp/polaris-ci.XXXXXX)"
+          trap 'rm -rf -- "$test_root"' EXIT
+          useradd --user-group --no-create-home --home-dir "$test_root/home" polaris-tests
+          install -d -m 700 -o polaris-tests -g polaris-tests \
+            "$test_root" "$test_root/home" "$test_root/tmp" "$test_root/runtime" \
+            "$test_root/config" "$test_root/cache" "$test_root/go-cache"
+          chown -hR polaris-tests:polaris-tests build/tests
+          test "$(runuser -u polaris-tests -- id -u)" -ne 0
+          run_test_suite() {
+            runuser -u polaris-tests -- env -i \
+              PATH=/usr/local/bin:/usr/bin USER=polaris-tests LOGNAME=polaris-tests \
+              HOME="$test_root/home" TMPDIR="$test_root/tmp" \
+              XDG_RUNTIME_DIR="$test_root/runtime" XDG_CONFIG_HOME="$test_root/config" \
+              XDG_CACHE_HOME="$test_root/cache" GOCACHE="$test_root/go-cache" \
+              ctest --test-dir "$GITHUB_WORKSPACE/build/tests" \
+                --output-on-failure --no-tests=error -R "$1"
+          }
+          run_test_suite '^test_multiseat_runtime$'
+          run_test_suite '^test_polaris_stream$'
+          run_test_suite '^polaris_multiseat_worker_go$'
 
       - name: Generate Arch package files
         run: |
