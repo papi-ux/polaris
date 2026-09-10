@@ -5,7 +5,9 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 
+from assemble import verify_signers, verify_package_signature
 from bounded import BuildError, run
 from transaction import package_identity, simulate
 from tree import sha256
@@ -96,6 +98,54 @@ echo payload > %{{buildroot}}/usr/share/{name}/data
         with self.assertRaises(BuildError):
             package_identity(self.command, self.obsoletes)
         self.assertEqual(self.db_hashes(self.source_db), self.before)
+
+    @unittest.skipUnless(shutil.which('rpmsign') and shutil.which('gpg') and shutil.which('gpgconf'), 'requires RPM signature fixtures')
+    def test_locked_signers_exclude_wrong_unsigned_and_ambient_keys(self):
+        work = Path(tempfile.mkdtemp(dir=self.root, prefix='signers-'))
+        homes, keys = [], []
+        try:
+            for label in ('a', 'b'):
+                home = work / ('secret-' + label)
+                home.mkdir(mode=0o700)
+                homes.append(home)
+                self.command('gpg', '--homedir', home, '--batch', '--pinentry-mode', 'loopback', '--passphrase', '',
+                             '--quick-generate-key', 'Sysext fixture ' + label, 'ed25519', 'sign', '0')
+                listing = self.command('gpg', '--homedir', home, '--batch', '--with-colons', '--list-keys')['stdout'].decode()
+                fingerprint = next(row.split(':')[9].lower() for row in listing.splitlines() if row.startswith('fpr:'))
+                key = work / (label + '.asc')
+                key.write_bytes(self.command('gpg', '--homedir', home, '--batch', '--armor', '--export', fingerprint)['stdout'])
+                keys.append({'path': key.name, 'sha256': sha256(key), 'fingerprint': fingerprint})
+            signed = work / 'signed.rpm'
+            shutil.copyfile(self.consumer, signed)
+            self.command('rpmsign', '--define', '_openpgp_sign gpg', '--define', '_gpg_path ' + str(homes[0]),
+                         '--define', '_gpg_name ' + keys[0]['fingerprint'], '--addsign', signed)
+            ambient = work / 'ambient-db'
+            self.command('rpm', '--dbpath', ambient, '--initdb')
+            self.command('rpmkeys', '--dbpath', ambient, '--import', work / keys[0]['path'])
+            def command(tool, *args, **kwargs):
+                # Model a trusted key already present in the ambient default
+                # database without modifying the builder's real RPMDB.
+                defaults = ['--define', '_dbpath ' + str(ambient)] if tool in ('rpm', 'rpmkeys') else []
+                return self.command(tool, *defaults, *args, **kwargs)
+            frozen = SimpleNamespace(destination=work)
+            for index, key in enumerate(keys):
+                destination = work / ('check-' + str(index))
+                destination.mkdir(mode=0o700)
+                keyring = verify_signers(command, frozen, {'keys': [key]}, destination)
+                if index == 0:
+                    verify_package_signature(command, keyring, signed)
+                else:
+                    with self.assertRaises(BuildError):
+                        verify_package_signature(command, keyring, signed)
+                with self.assertRaises(BuildError):
+                    verify_package_signature(command, keyring, self.consumer)
+            wrong = work / 'wrong-fingerprint'
+            wrong.mkdir()
+            with self.assertRaises(BuildError):
+                verify_signers(command, frozen, {'keys': [{**keys[0], 'fingerprint': keys[1]['fingerprint']}]}, wrong)
+        finally:
+            for home in homes:
+                self.command('gpgconf', '--homedir', home, '--kill', 'all', check=False)
 
 
 if __name__ == '__main__':

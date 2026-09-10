@@ -70,6 +70,7 @@ class BoundedTests(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'owned command runner requires Linux waitid')
     def test_command_bounds_and_failures(self):
         with tempfile.TemporaryDirectory() as directory:
             good = run([sys.executable, '-c', 'print("ok")'], cwd=directory)
@@ -83,6 +84,7 @@ class BoundedTests(unittest.TestCase):
                     run([sys.executable, '-c', code], cwd=directory, **kwargs)
                 self.assertLess(time.monotonic() - started, 5)
 
+    @unittest.skipUnless(sys.platform == 'linux', 'owned command runner requires Linux waitid')
     def test_exited_parent_does_not_leave_pipe_child(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / 'pid'

@@ -17,6 +17,7 @@ import stat
 
 MAX_PAYLOAD = 128 * 1024 * 1024
 MAX_ENTRIES = 65536
+MAX_MATERIALIZED = 256 * 1024 * 1024
 METADATA_DIR = 'usr/lib/extension-release.d'
 
 
@@ -62,6 +63,16 @@ def validate_ancestors(entries):
                 break
             require(str(parent) not in entries or stat.S_ISDIR(entries[str(parent)].mode),
                     'non-directory archive ancestor: ' + name)
+
+
+def validate_size(entries):
+    # Hardlink members are materialized as separate regular files. Account for
+    # every resulting copy, including groups whose archive stores the body once.
+    total = 0
+    for entry in entries.values():
+        if stat.S_ISREG(entry.mode):
+            total += len(entry.data)
+            require(total <= MAX_MATERIALIZED, 'materialized payload exceeds size bound')
 
 
 def parse_cpio(data):
@@ -124,6 +135,7 @@ def parse_cpio(data):
         for name, mode, _, _ in members:
             entries[name] = Entry(mode, content)
     validate_ancestors(entries)
+    validate_size(entries)
     return entries
 
 
@@ -136,6 +148,7 @@ def merge_payloads(payloads):
             else:
                 merged[name] = entry
     validate_ancestors(merged)
+    validate_size(merged)
     # Record implicit parents explicitly so round-trip manifests are complete.
     for name in list(merged):
         for parent in PurePosixPath(name).parents:
@@ -155,6 +168,7 @@ def with_metadata(entries, content):
 def materialize(entries, root):
     """Create a new tree below a caller-owned private parent, using no-follow FDs."""
     validate_ancestors(entries)
+    validate_size(entries)
     root = Path(root)
     root.mkdir(mode=0o755)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

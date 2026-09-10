@@ -86,6 +86,8 @@ must never be reused as a new build destination.
   `/opt`, special nodes, non-root ownership, privileged modes/capabilities,
   writable payloads, malformed hardlinks and cross-package path collisions are
   rejected. Extension metadata is generated in a reserved directory.
+- Expanded regular-file bytes, including every reconstructed hardlink copy,
+  have a 256 MiB aggregate limit checked before materialization.
 - The exact executable hash must match. The admitted file manifest must match
   the written tree. Locked target policy labels the private tree, and the full
   file/label manifest must survive SquashFS extraction unchanged.
@@ -112,10 +114,14 @@ python3 -m unittest discover -s scripts/packaging/sysext -p 'test_*.py'
 ```
 
 The ordinary source check runs parser, manifest, staging, bounded-child and
-completion-failure tests. The existing Fedora RPM job also requires `rpm` and
-`rpmbuild` and runs real disposable-package transaction tests. These install only
+completion-failure tests. Linux also tests TERM/HUP at child creation and receipt
+commit, and keeps process-group ownership until cleanup finishes. Command
+execution uses Linux `waitid`; macOS runs only the portable parser/contract tests.
+The existing Fedora RPM job also requires RPM build/signing tools and GPG and
+runs real disposable-package transaction and signer tests. These install only
 fixture metadata into temporary RPMDBs, then test dependency closure, missing
 transitive dependencies, base replacements, obsoletes, scriptlet non-execution,
-and preservation of the original database. They do not build or publish a raw
+preservation of the original database, correct/wrong/unsigned package keys and
+exclusion of an ambient trusted key. They do not build or publish a raw
 artifact. Full assembly and namespace lifecycle integration need the reviewed
 candidate/target/toolchain inputs described above.

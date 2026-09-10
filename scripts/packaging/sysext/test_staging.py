@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from assemble import assemble, finish_receipt
-from bounded import BuildError
+from bounded import BuildError, copy_verified
 from staging import Inputs, snapshot_metadata, verify_snapshot
 
 
@@ -58,6 +59,28 @@ class StagingTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires a disposable Linux root builder')
 class RootStagingTests(unittest.TestCase):
+    def test_writable_tool_ancestor_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / 'usr/bin/tool'
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b'tool')
+            binary.chmod(0o755)
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            digest = hashlib.sha256(b'tool').hexdigest()
+            try:
+                copy_verified(fd, 'usr/bin/tool', digest, io.BytesIO(), trusted=True)
+                binary.parent.chmod(0o777)
+                with self.assertRaises(BuildError):
+                    copy_verified(fd, 'usr/bin/tool', digest, io.BytesIO(), trusted=True)
+                binary.parent.chmod(0o755)
+                os.chown(binary.parent, 1, 1)
+                with self.assertRaises(BuildError):
+                    copy_verified(fd, 'usr/bin/tool', digest, io.BytesIO(), trusted=True)
+                os.chown(binary.parent, 0, 0)
+            finally:
+                os.close(fd)
+
     def test_target_copy_is_complete_and_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
