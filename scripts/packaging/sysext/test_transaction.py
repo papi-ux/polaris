@@ -101,11 +101,18 @@ echo payload > %{{buildroot}}/usr/share/{name}/data
         self.assertEqual(self.db_hashes(self.source_db), self.before)
 
     @unittest.skipUnless(shutil.which('rpm2archive'), 'requires RPM archive tooling')
-    def test_regular_archive_tool_emits_bounded_newc_without_installing(self):
+    def test_regular_archive_tool_emits_newc_or_rejects_unsupported_format(self):
         before = set(self.root.iterdir())
-        archive = extract_payload(self.command, self.consumer)
-        entries = parse_cpio(archive)
-        self.assertEqual(entries['usr/share/fixture-consumer/data'].data, b'payload\n')
+        help_text = self.command('rpm2archive', '--help')['stdout']
+        if b'--format' in help_text:
+            archive = extract_payload(self.command, self.consumer)
+            entries = parse_cpio(archive)
+            self.assertEqual(entries['usr/share/fixture-consumer/data'].data, b'payload\n')
+        else:
+            # The portable CI runner also has older RPM versions. Verify they
+            # fail closed; the Fedora builder separately requires CPIO support.
+            with self.assertRaises(BuildError):
+                extract_payload(self.command, self.consumer)
         self.assertEqual(set(self.root.iterdir()), before)
         self.assertEqual(self.db_hashes(self.source_db), self.before)
         self.assertFalse((self.private / 'fixture-script-ran').exists())

@@ -122,8 +122,10 @@ The ordinary source check runs parser, manifest, staging, bounded-child and
 completion-failure tests. Linux also tests TERM/HUP at child creation and receipt
 commit, and keeps process-group ownership until cleanup finishes. Command
 execution uses Linux `waitid`; macOS runs only the portable parser/contract tests.
-The existing Fedora RPM job also requires RPM build/signing tools and GPG and
-runs real disposable-package transaction and signer tests. These install only
+The existing Fedora RPM job also requires RPM build/signing tools, CPIO support
+in `rpm2archive`, and GPG, and runs real disposable-package transaction and signer
+tests. Older RPM versions in the portable lane must reject extraction rather
+than falling back to another format. These tests install only
 fixture metadata into temporary RPMDBs, then test dependency closure, missing
 transitive dependencies, base replacements, obsoletes, scriptlet non-execution,
 preservation of the original database, correct/wrong/unsigned package keys and
