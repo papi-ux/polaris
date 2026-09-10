@@ -332,17 +332,16 @@ an extension stored in `/var`.
 
 | Area | Current scope |
 |:-----|:--------------|
-| Fedora 44 RPM on Bazzite | Supported installation, with explicit update and rollback steps |
-| NVIDIA / KDE Plasma Wayland Desktop Mode | Service, pairing, capture, input isolation, and reconnect evidence exists; a successful desktop stream does not establish private-game acceptance |
+| Fedora 44 RPM on Bazzite | Supported installation, with explicit update and rollback steps, exercised end to end on an NVIDIA host on 2026-09-10 |
+| NVIDIA / KDE Plasma Wayland Desktop Mode | Verified 2026-09-10 on `bazzite-nvidia-open` 44.20260908 with an RTX 4090 and the 1.4.5 RPM: staged install, reboot, host setup, a Private Stream game session at 1920x1080@120 with controller, game audio, and rumble from a Retroid Pocket 6, disconnect and resume, End Session cleanup, rollback to 1.4.4 and back. Capture ran on the system-memory path with NVENC; the GPU-native path needs a CUDA build |
 | Bazzite Deck / Steam Game Mode | Boot-independent service setup is available; end-to-end Game Mode game streaming still needs hardware validation |
 | AMD / Intel Bazzite hosts | Use the matching Fedora RPM; driver-specific capture, encoding, and Game Mode behavior need additional hardware coverage |
 | Standalone system extension | Withdrawn; separate package, SELinux, lifecycle, and physical validation gates remain |
 | Container multiseat | Separate development work; production activation remains off |
 
-The earlier NVIDIA Desktop Mode baseline used `bazzite-nvidia-open:stable`
-`44.20260430`. It was a Plasma Desktop image, not a Game Mode-capable Deck image.
-More recent candidate testing does not certify every released package, GPU, or
-Steam launch path. See [Compatibility](compatibility.md) and
+The NVIDIA Desktop Mode baseline is `bazzite-nvidia-open` `44.20260908`, a Plasma
+Desktop image with autologin, not a Game Mode-capable Deck image. One host and one
+GPU do not certify every released package, GPU, or Steam launch path. See [Compatibility](compatibility.md) and
 [the system-extension validation requirements](../scripts/validation/bazzite/README.md).
 
 ## Troubleshooting

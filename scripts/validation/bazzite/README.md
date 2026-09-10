@@ -4,6 +4,44 @@ Publication remains disabled for the standalone Polaris system extension. This d
 
 The supported Fedora 44 RPM path remains separate. Its dependencies may be resolved by `rpm-ostree`; a standalone system extension must carry every runtime dependency not already guaranteed by the target image.
 
+## Local host observation
+
+Before a local acceptance run, capture the booted and pending deployments, the
+installed RPM, the actual user-service process, executable hashes, supplementary
+groups, SELinux mode, and the persistent Polaris extension, if present:
+
+```sh
+observation_dir="$(mktemp -d "$HOME/polaris-bazzite-observation.XXXXXX")"
+python3 scripts/validation/bazzite/inspect_host.py \
+  --output "$observation_dir/before.json"
+```
+
+The tool only queries state and writes a new mode-0600 file in an existing private
+directory. It does not install, merge, reboot, alter services, or open input
+devices. It omits service command arguments, environments, configuration contents
+and the large embedded OCI metadata. Keep the report private: it includes local
+paths and process/user identifiers.
+
+An executable with capabilities can make `/proc/PID/exe` unreadable to its own
+user. The report then records the executable comparison as unavailable. When a
+privileged observation is needed, select the normal service user explicitly with
+`sudo python3 ... --user-uid "$(id -u)" --output ...`; never select root's user
+manager. Root observation does not prove desktop-user device access.
+
+Use `--expected-executable-sha256` with the digest from the candidate's actual
+build receipt to distinguish that candidate from an older running preview. The
+report also compares the running executable with `/usr/bin/polaris`, since a local
+service override can keep a preview running while the RPM database reports a
+different package. Service restarts, process changes, missing identity and
+unreadable files remain explicit. A zero exit means a consistent service
+observation, not a passed installation, input, streaming or publication gate.
+
+Run the portable checks locally without a native build:
+
+```sh
+python3 -m unittest discover -s scripts/validation/bazzite -p 'test_*.py'
+```
+
 ## Required targets
 
 Every candidate is bound to one exact SHA-256 digest and one exact source commit. The same bytes must pass both current Fedora 44 targets:

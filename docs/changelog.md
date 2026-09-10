@@ -7,12 +7,21 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-- Reworks the supported Bazzite RPM guide around staged installation, explicit reboot, local-RPM replacement, and boot-independent service setup; moves the composefs KMS copy into an optional section and keeps Game Mode hardware limits and the withdrawn system extension explicit
+## v1.4.5 - 2026-09-10
 
+A Bazzite and Live Tuning update matched with Nova v1.4.5. Live Tuning is one saved host preference that every console surface and paired client reads the same way, Bazzite Desktop launches prepare capture before the stream starts, hosts running a Steam Game Mode session learn why they go offline and how headless boot keeps them reachable, and `--setup-host` reports it. The supported Bazzite RPM path was exercised end to end on an NVIDIA Open host with a Retroid Pocket 6. Existing configurations and paired devices remain valid.
+
+- Reworks the supported Bazzite RPM guide around staged installation, explicit reboot, local-RPM replacement, and boot-independent service setup; moves the composefs KMS copy into an optional section and keeps Game Mode hardware limits and the withdrawn system extension explicit
+- Shares one saved Live Tuning preference across Quick Controls, the Audio/Video settings page, paired session status, and session events, independent of AI provider sign-in. Clients see the requested bitrate separately from the encoder-confirmed rate, with waiting, measuring, applying, adjusting, stable, unavailable, and unknown states; turning Live Tuning off holds the last confirmed bitrate, and an explicit fixed bitrate supersedes adaptive ownership (#641)
+- Prepares desktop capture before stream startup on Bazzite, normalises the resume policy, keeps native audio ownership with the session, and corrects CUDA conversion ownership and upload ordering, so a Bazzite Desktop launch or resume no longer prepares the portal too late or inherits unsuitable display semantics (#639)
+- Refreshes display capabilities once the host is back after Save + Apply, so Host Virtual Display no longer stays unavailable on the settings page because of a stale capability response; late responses cannot overwrite the new snapshot and Reset Changes keeps the refreshed capabilities (#642, #633)
+- Keeps DualSense reports in order: a periodic report can no longer land after newer button updates and replay stale input; the sender and reader threads are retained and joined, and descriptors close if construction fails (#643, #634)
+- Preserves the configured physical identity of every virtual input device on all nine uinput creation paths and keeps descriptor ownership until destruction, so reserved-device udev rules identify them reliably (#644, #494)
 - Protects unused encoder capability probes from a null-frame flush, adds actual submission/teardown regressions for the first-launch Vulkan crash, and keeps Doctor from telling a stable AMD VA-API/SHM user to switch to Auto with a promised fallback (#628)
 - Repins native PipeWire session audio when the stream omits its PID by resolving its owning client, while preserving session markers, unrelated desktop audio, and the no-default-sink-claim setting (#629)
-
 - Recognises hosts with a Steam Game Mode session (SteamOS, Bazzite deck images, CachyOS handheld edition, other gamescope-session hosts). `--setup-host` says why Polaris goes offline when the host leaves Desktop Mode and prints the headless-boot command, `/api/stats/system` reports `game_mode_host` with Game Mode-aware boot readiness and display-session guidance, and the console names a running Game Mode session instead of asking for a desktop restart. New handhelds guide with the Game Mode validation recipe (#626)
+- Adds the experimental multiseat worker foundation (default off and unwired in production), a maintained offline system-extension assembler with locked inputs, a read-only Bazzite host observer for local acceptance runs, and steadier Doctor CI fixtures (#640, #645, #646)
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
 
 ## v1.4.4 - 2026-09-06
 
