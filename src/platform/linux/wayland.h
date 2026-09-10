@@ -202,6 +202,8 @@ namespace wl {
     bool prefer_linear_dmabuf {false};
 
   private:
+    // GBM borrows this descriptor; buffers and the device die before it closes.
+    file_t gbm_fd;
     ::gbm_device *gbm_device {nullptr};
     bool y_invert {false};
 
@@ -321,6 +323,8 @@ namespace wl {
     ext_image_capture_source_v1 *capture_source {nullptr};
     ext_image_copy_capture_session_v1 *capture_session {nullptr};
     ext_image_copy_capture_frame_v1 *capture_frame_object {nullptr};
+    // GBM borrows this descriptor; buffers and the device die before it closes.
+    file_t gbm_fd;
     ::gbm_device *gbm_device {nullptr};
     std::string render_node;
     dev_t gbm_device_id {};

@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -22,6 +23,7 @@
 #include <spa/utils/hook.h>
 
 #include "src/platform/common.h"
+#include "src/platform/linux/pipewire_rate.h"
 #include "src/platform/linux/graphics.h"
 
 namespace pipewire_capture {
@@ -62,6 +64,8 @@ namespace pipewire_capture {
     // Exclusive 8-bit EnumFormat (no xBGR_210LE). When the stream encodes SDR,
     // mixed offers still prefer 10-bit first and produce PQ→SDR red wash.
     bool prefer_sdr_formats = false;
+    AVRational requested_rate {0, 1};
+    bool request_fixed_rate = false;
   };
 
   struct egl_dmabuf_format_t {
@@ -178,6 +182,9 @@ namespace pipewire_capture {
     capture_t &operator=(const capture_t &) = delete;
 
     bool start();
+    // One retry for producers rejecting maxFramerate, before any successful
+    // negotiation. The same node, formats and device containment are retained.
+    bool retry_rate_negotiation(const std::function<bool()> &cancelled = {});
     // Wake waiters and mark capture terminal without destroying (SB-2 teardown).
     void stop();
     // Idempotently disconnect and destroy PipeWire resources even while other
@@ -191,12 +198,16 @@ namespace pipewire_capture {
     bool fill_frame(std::shared_ptr<platf::img_t> &image);
 
   private:
+#ifdef POLARIS_TESTS
+    friend struct capture_test_access;
+#endif
     static void on_process(void *userdata) noexcept;
     static void on_add_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
     static void on_remove_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
     static void on_param_changed(void *userdata, std::uint32_t id, const struct spa_pod *param) noexcept;
     static void on_state_changed(void *userdata, enum pw_stream_state old, enum pw_stream_state state, const char *errmsg) noexcept;
 
+    bool connect_stream(bool use_max_framerate);
     bool process_buffer(struct pw_buffer *buffer);
     void set_terminal(wait_result_e result);
     void queue_buffer(struct pw_buffer *buffer);
@@ -212,6 +223,7 @@ namespace pipewire_capture {
     std::unordered_map<struct pw_buffer *, std::uint64_t> buffer_keys_;
 
     std::mutex shutdown_mtx_;
+    std::mutex start_stop_mtx_;
     bool shutdown_complete_ = false;
 
     mutable std::mutex frame_mtx_;
@@ -229,6 +241,10 @@ namespace pipewire_capture {
     bool negotiated_ = false;
     bool negotiated_dmabuf_ = false;
     bool running_ = false;
+    bool stop_requested_ = false;
+    bool rate_retry_attempted_ = false;
+    AVRational negotiated_rate_ {0, 1};
+    std::chrono::steady_clock::time_point next_delivery_ {};
     enum pw_stream_state stream_state_ = PW_STREAM_STATE_UNCONNECTED;
     wait_result_e terminal_result_ = wait_result_e::timeout;
     std::uint64_t sequence_ = 0;

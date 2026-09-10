@@ -13,6 +13,7 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <limits>
@@ -50,6 +51,33 @@ namespace multiseat::podman {
 
   bool local_host_t::executable_file(const std::filesystem::path &path) const {
     return accessible_as(path, S_IFREG, X_OK);
+  }
+
+  bool local_host_t::trusted_runtime_file(const std::filesystem::path &path) const {
+    if (!path.is_absolute() || path.lexically_normal() != path || path.filename() != "crun") return false;
+    struct stat metadata {};
+    if (lstat(path.c_str(), &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+        metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) != 0 ||
+        faccessat(AT_FDCWD, path.c_str(), X_OK, AT_EACCESS) != 0) return false;
+    for (auto directory = path.parent_path();; directory = directory.parent_path()) {
+      if (lstat(directory.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+          metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) return false;
+      if (directory == directory.root_path()) break;
+    }
+    return true;
+  }
+
+  std::optional<std::vector<std::uint64_t>> local_host_t::supplementary_groups() const {
+    const auto count = getgroups(0, nullptr);
+    if (count < 0 || count > 65536) return std::nullopt;
+    // Allocate at least one element: getgroups(0, ...) only queries the size.
+    std::vector<gid_t> groups(std::max(count, 1));
+    const auto received = getgroups(static_cast<int>(groups.size()), groups.data());
+    if (received < 0 || received > count) return std::nullopt;
+    std::vector<std::uint64_t> result(groups.begin(), groups.begin() + received);
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
   }
 
   bool local_host_t::readable_directory(const std::filesystem::path &path) const {

@@ -596,28 +596,29 @@ namespace wl {
       return false;
     }
 
-    int drm_fd = -1;
+    file_t drm_fd;
     for (int i = 0; i < n; i++) {
       if (devices[i]->available_nodes & (1 << DRM_NODE_RENDER)) {
-        drm_fd = open(devices[i]->nodes[DRM_NODE_RENDER], O_RDWR);
-        if (drm_fd >= 0) {
+        drm_fd.el = open(devices[i]->nodes[DRM_NODE_RENDER], O_RDWR | O_CLOEXEC);
+        if (drm_fd.el >= 0) {
           break;
         }
       }
     }
     drmFreeDevices(devices, n);
 
-    if (drm_fd < 0) {
+    if (drm_fd.el < 0) {
       BOOST_LOG(error) << "Failed to open DRM render node"sv;
       return false;
     }
 
-    gbm_device = gbm_create_device(drm_fd);
+    gbm_device = gbm_create_device(drm_fd.el);
     if (!gbm_device) {
-      close(drm_fd);
       BOOST_LOG(error) << "Failed to create GBM device"sv;
       return false;
     }
+
+    gbm_fd = std::move(drm_fd);
 
     static bool logged_gbm_backend = false;
     if (!logged_gbm_backend) {
@@ -693,7 +694,6 @@ namespace wl {
     }
 
     if (gbm_device) {
-      // We should close the DRM FD, but it's owned by GBM
       gbm_device_destroy(gbm_device);
       gbm_device = nullptr;
     }
@@ -1308,19 +1308,19 @@ namespace wl {
       return false;
     }
 
-    auto drm_fd = open(node.c_str(), O_RDWR | O_CLOEXEC);
-    if (drm_fd < 0) {
+    file_t drm_fd {open(node.c_str(), O_RDWR | O_CLOEXEC)};
+    if (drm_fd.el < 0) {
       BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to open DRM node ["sv << node << ']';
       return false;
     }
 
-    gbm_device = gbm_create_device(drm_fd);
+    gbm_device = gbm_create_device(drm_fd.el);
     if (!gbm_device) {
-      close(drm_fd);
       BOOST_LOG(error) << "Extcopy DMA-BUF capture failed to create GBM device"sv;
       return false;
     }
 
+    gbm_fd = std::move(drm_fd);
     gbm_device_id = device;
     gbm_device_id_valid = true;
     render_node = path_for_fd(gbm_device_get_fd(gbm_device));
@@ -1340,6 +1340,8 @@ namespace wl {
       gbm_device_destroy(gbm_device);
       gbm_device = nullptr;
     }
+
+    gbm_fd = {};
 
     gbm_device_id = {};
     gbm_device_id_valid = false;

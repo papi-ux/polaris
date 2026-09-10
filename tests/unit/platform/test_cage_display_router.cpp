@@ -6,7 +6,12 @@
 
 #ifdef __linux__
   #include <src/config.h>
+  #include <src/process.h>
   #include <src/platform/linux/cage_display_router.h>
+  #include <src/platform/linux/process_environment.h>
+  #include <linux/capability.h>
+  #include <sys/syscall.h>
+  #include <sys/prctl.h>
   #include <src/platform/linux/wayland.h>
 
   #include <cerrno>
@@ -14,6 +19,8 @@
   #include <drm_fourcc.h>
   #include <filesystem>
   #include <fstream>
+  #include <fcntl.h>
+  #include <nlohmann/json.hpp>
   #include <sstream>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -82,6 +89,19 @@ TEST(WaylandOutputRegistryStateTests, RemovingNonOutputGlobalDoesNotDirtyOutputT
 
 #ifdef POLARIS_TESTS
 TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRelaunch) {
+  // The isolated file-capability lane starts this test binary with file caps,
+  // then simulates the host's portal drop before its supervisor re-exec.
+  if (const auto drop = getenv("POLARIS_TEST_DROP_PARENT_CAPABILITIES"); drop && std::string_view(drop) == "1") {
+    __user_cap_header_struct header {_LINUX_CAPABILITY_VERSION_3, 0};
+    __user_cap_data_struct capabilities[2] {};
+    ASSERT_EQ(syscall(SYS_capget, &header, capabilities), 0);
+    ASSERT_NE(capabilities[CAP_SYS_ADMIN / 32].permitted & (1u << (CAP_SYS_ADMIN % 32)), 0u)
+      << "File capability test must run from a filesystem that permits file capabilities";
+    capabilities[0] = {};
+    capabilities[1] = {};
+    ASSERT_EQ(syscall(SYS_capset, &header, capabilities), 0);
+    ASSERT_EQ(prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), 0);
+  }
   namespace fs = std::filesystem;
 
   struct cleanup_t {
@@ -169,7 +189,9 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
     std::ofstream script(fake_labwc);
     ASSERT_TRUE(script.good());
     script << R"PY(#!/usr/bin/python3
+import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -179,9 +201,29 @@ if len(sys.argv) > 1 and sys.argv[1] == "-V":
     print("fake labwc wlroots headless backend")
     raise SystemExit(0)
 
+with open(f"/proc/{os.getppid()}/cmdline", "rb") as source:
+    supervisor_args = source.read().decode().split("\0")
+with open(f"/proc/{os.getppid()}/status") as source:
+    supervisor_status = dict(line.rstrip().split(":", 1) for line in source if ":" in line)
+with open(f"/proc/{os.getppid()}/environ", "rb") as source:
+    supervisor_environment_readable = bool(source.read())
+report = {
+    "supervisor_args": supervisor_args,
+    "supervisor_status": supervisor_status,
+    "supervisor_environment_readable": supervisor_environment_readable,
+    "environment": {key: os.environ.get(key) for key in ("MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG", "DISPLAY", "WAYLAND_DISPLAY", "POLARIS_PRIVATE_SESSION", "POLARIS_SESSION_INSTANCE_ID")},
+    "leaked_high_fds": [name for name in os.listdir("/proc/self/fd") if int(name) >= 128 and os.path.exists("/proc/self/fd/" + name)],
+}
+with open(os.environ["FAKE_LABWC_COMPOSITOR_PID_FILE"] + ".environment.json", "w") as output:
+    json.dump(report, output)
+
 socket_path = os.path.join(os.environ["XDG_RUNTIME_DIR"], f"wayland-{(os.getpid() % 10000) + 100}")
 wayland_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 wayland_socket.bind(socket_path)
+if "-s" in sys.argv:
+    startup_command = sys.argv[sys.argv.index("-s") + 1]
+    if "diagnostic-remap" in startup_command:
+        subprocess.Popen(shlex.split(startup_command), pass_fds=(3, 4))
 escape_child = os.environ.get("FAKE_LABWC_ESCAPE_CHILD") == "1"
 worker_command = ["sleep", "60"]
 if escape_child:
@@ -230,6 +272,30 @@ exit 0
   }
   ASSERT_EQ(chmod(fake_wlr_randr.c_str(), 0755), 0);
 
+  const auto fake_xdpyinfo = bin_dir / "xdpyinfo";
+  { std::ofstream script(fake_xdpyinfo); script << "#!/bin/sh\nexit 0\n"; }
+  ASSERT_EQ(chmod(fake_xdpyinfo.c_str(), 0755), 0);
+
+  const std::vector<std::string> host_environment_names {"MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG", "DISPLAY", "WAYLAND_DISPLAY"};
+  std::vector<std::optional<std::string>> original_environment;
+  for (const auto &name : host_environment_names) {
+    const auto value = getenv(name.c_str());
+    original_environment.push_back(value ? std::make_optional<std::string>(value) : std::nullopt);
+    ASSERT_EQ(setenv(name.c_str(), "host-value-retained", 1), 0);
+  }
+  auto restore_host_environment = util::fail_guard([&] {
+    for (size_t i = 0; i < host_environment_names.size(); ++i) {
+      if (original_environment[i]) setenv(host_environment_names[i].c_str(), original_environment[i]->c_str(), 1);
+      else unsetenv(host_environment_names[i].c_str());
+    }
+  });
+  const auto null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(null_fd, 0);
+  const auto inherited_sentinel = fcntl(null_fd, F_DUPFD, 128);
+  close(null_fd);
+  ASSERT_GE(inherited_sentinel, 128);
+  auto close_sentinel = util::fail_guard([&] { close(inherited_sentinel); });
+
   config::video.linux_display.stream_mode.clear();
   config::video.linux_display.private_runtime = "labwc";
   config::video.linux_display.use_cage_compositor = true;
@@ -244,19 +310,96 @@ exit 0
   ASSERT_EQ(setenv("FAKE_LABWC_CHILD_PID_FILE", pid_file.c_str(), 1), 0);
   ASSERT_EQ(setenv("FAKE_LABWC_COMPOSITOR_PID_FILE", compositor_pid_file.c_str(), 1), 0);
 
+  const std::string mode_report = R"JSON([{"name":"HEADLESS-1","enabled":true,"modes":[{"width":1280,"height":720,"refresh":60.0,"current":true}]}])JSON";
+  auto query_mode = [&](const std::string &) -> std::optional<std::string> { return mode_report; };
+  std::optional<std::string> previous_topology;
+  EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+
   for (int cycle = 0; cycle < 2; ++cycle) {
     std::error_code ec;
     fs::remove(pid_file, ec);
     fs::remove(compositor_pid_file, ec);
+    if (const auto drop = getenv("POLARIS_TEST_DROP_PARENT_CAPABILITIES"); drop && std::string_view(drop) == "1") {
+      ASSERT_EQ(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0)
+        << "File capability re-exec evidence requires no-new-privileges to be unset";
+    }
     ASSERT_TRUE(cage_display_router::start(
       1280,
       720,
       60,
-      "",
+      cycle == 1 ? "bash -c 'printf diagnostic-remap >&2; exit 7'" : "",
       false,
       false,
       "external-exit-cycle-" + std::to_string(cycle)
     ));
+
+    for (const auto &name : host_environment_names) EXPECT_STREQ(getenv(name.c_str()), "host-value-retained");
+    std::ifstream report_file(compositor_pid_file.string() + ".environment.json");
+    const auto report = nlohmann::json::parse(report_file);
+    ASSERT_GE(report.at("supervisor_args").size(), 5u);
+    EXPECT_EQ(report.at("supervisor_args").at(1), "--internal-labwc-supervisor");
+    EXPECT_TRUE(report.at("leaked_high_fds").empty());
+    EXPECT_TRUE(report.at("supervisor_environment_readable").get<bool>());
+    for (const auto capability : {"CapInh", "CapPrm", "CapEff", "CapAmb"}) {
+      EXPECT_EQ(std::stoull(report.at("supervisor_status").at(capability).get<std::string>(), nullptr, 16), 0u);
+    }
+    EXPECT_EQ(std::stoi(report.at("supervisor_status").at("NoNewPrivs").get<std::string>()), prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0));
+    if (cycle == 1) {
+      std::optional<labwc_startup_diagnostics::snapshot_t> diagnostics;
+      for (int i = 0; i < 100; ++i) {
+        diagnostics = cage_display_router::get_startup_client_diagnostics("external-exit-cycle-1");
+        if (diagnostics && diagnostics->shell_exit_status) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      ASSERT_TRUE(diagnostics);
+      EXPECT_EQ(diagnostics->shell_exit_status, 7);
+      EXPECT_NE(diagnostics->stderr_summary.find("diagnostic-remap"), std::string::npos);
+    }
+    for (const auto &name : host_environment_names) EXPECT_TRUE(report.at("environment").at(name).is_null());
+    EXPECT_EQ(report.at("environment").at("POLARIS_PRIVATE_SESSION"), "1");
+    EXPECT_EQ(report.at("environment").at("POLARIS_SESSION_INSTANCE_ID"), "external-exit-cycle-" + std::to_string(cycle));
+
+    const auto topology = cage_display_router::encoder_probe_topology_for_tests(query_mode);
+    ASSERT_TRUE(topology);
+    EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    if (previous_topology) EXPECT_NE(topology, previous_topology);
+    previous_topology = topology;
+    for (const auto invalid : {"[]", "{}", "malformed", "[{\"name\":\"HEADLESS-1\",\"enabled\":false}]"}) {
+      EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+        [&](const std::string &) -> std::optional<std::string> { return invalid; }
+      ));
+    }
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+      [](const std::string &) -> std::optional<std::string> { return std::nullopt; }
+    ));
+    EXPECT_TRUE(cage_display_router::ensure_output_refresh(60, true));
+    EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    // A mode mutation between observations must survive even if it returns to
+    // exactly the same output bytes. Mutation during a query cannot publish.
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+      [&](const std::string &) -> std::optional<std::string> {
+        // The fake compositor rejects 120 Hz and still reports 60 Hz. The
+        // attempted mutation must nevertheless retire the old observation.
+        EXPECT_FALSE(cage_display_router::ensure_output_refresh(120, false));
+        return mode_report;
+      }
+    ));
+    EXPECT_NE(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    // Pinning prevents inode reuse but does not make a pathname immutable.
+    // Replace it during the observation and require the post-query read-back.
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
+      [&](const std::string &socket) -> std::optional<std::string> {
+        const auto saved = socket + ".saved-probe";
+        fs::rename(socket, saved);
+        { std::ofstream replacement(socket); replacement << "replacement"; }
+        return mode_report;
+      }
+    ));
+    const auto socket = runtime_dir / cage_display_router::get_wayland_socket();
+    ASSERT_TRUE(fs::remove(socket));
+    fs::rename(socket.string() + ".saved-probe", socket);
+    // A detected endpoint replacement remains uncertain for this generation.
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
 
     const auto runtime_state = cage_display_router::runtime_state();
     EXPECT_TRUE(runtime_state.requested_headless);
@@ -280,7 +423,9 @@ exit 0
 
     ASSERT_EQ(kill(compositor_pid, SIGTERM), 0);
     ASSERT_TRUE(wait_for_router_exit(std::chrono::seconds(3)));
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
     cage_display_router::stop();
+    EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
 
     const bool worker_exited = wait_for_process_exit(worker, std::chrono::seconds(2));
     EXPECT_TRUE(worker_exited)
@@ -422,6 +567,7 @@ exit 0
     "pidfd-unavailable-external-exit"
   ));
   EXPECT_FALSE(cage_display_router::cage_pidfd_available_for_tests());
+  EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
   const auto no_pidfd_supervisor_pid = cage_display_router::get_pid();
   ASSERT_GT(no_pidfd_supervisor_pid, 0);
   const auto no_pidfd_compositor_pid = wait_for_pid_file(compositor_pid_file);
@@ -1180,5 +1326,58 @@ TEST(CageDisplayRouterResumeRefreshTests, ResumePathReappliesRefreshInNvhttp) {
 #else
 TEST(CageDisplayRouterPolicyTests, LinuxOnly) {
   GTEST_SKIP() << "Linux-only runtime policy tests";
+}
+#endif
+
+#ifdef __linux__
+TEST(CageDisplayRouterEnvironmentTests, SnapshotIsSerializedWithPlatformEnvironmentWriters) {
+  constexpr auto key = "POLARIS_TEST_SUPERVISOR_ENVIRONMENT";
+  const auto previous = process_environment::get(key);
+  auto restore = util::fail_guard([&] {
+    if (previous) platf::set_env(key, *previous);
+    else platf::unset_env(key);
+  });
+  platf::unset_env(key);
+  const std::string first(8192, 'a'), second(8192, 'b');
+  std::thread writer([&] {
+    for (int i = 0; i < 1000; ++i) {
+      platf::set_env(key, i % 2 ? first : second);
+      if (i % 3 == 0) platf::unset_env(key);
+    }
+  });
+  for (int i = 0; i < 1000; ++i) {
+    const auto environment = process_environment::snapshot();
+    const auto found = environment.find(key);
+    if (found != environment.end()) EXPECT_TRUE(found->second == first || found->second == second);
+  }
+  writer.join();
+}
+#endif
+
+#ifdef __linux__
+TEST(CageDisplayRouterEnvironmentTests, AppsJsonNativeEnvironmentUpdatesShareTheSnapshotLock) {
+  const auto prefix = "POLARIS_TEST_APPS_ENV_" + std::to_string(getpid()) + "_";
+  const auto path = std::filesystem::temp_directory_path() / (prefix + "apps.json");
+  auto cleanup = util::fail_guard([&] {
+    for (int i = 0; i < 20; ++i) platf::unset_env(prefix + std::to_string(i));
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  });
+  const std::string value(8192, 'x');
+  std::jthread reader([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      for (const auto &[key, observed] : process_environment::snapshot()) {
+        if (key.starts_with(prefix)) EXPECT_EQ(observed, value);
+      }
+    }
+  });
+  for (int i = 0; i < 20; ++i) {
+    const auto key = prefix + std::to_string(i);
+    nlohmann::json apps {{"version", 13}, {"env", {{key, value}}}, {"apps", nlohmann::json::array()}};
+    { std::ofstream output(path); output << apps.dump(); ASSERT_TRUE(output.good()); }
+    const auto parsed = proc::parse(path.string());
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(process_environment::get(key.c_str()), value);
+  }
 }
 #endif

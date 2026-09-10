@@ -518,3 +518,81 @@ Optional DRM/KMS setup:
 ```bash
 sudo -H polaris --setup-host --enable-kms
 ```
+
+
+### VA-API session controls
+
+These settings apply to VA-API on Linux. A successful web configuration save
+publishes the settings for the next encoder session; an active codec keeps its
+current settings. Hand-edited configuration is loaded when Polaris starts.
+
+| Setting | Default | Choices |
+| --- | --- | --- |
+| `vaapi_quality` | `auto` | `auto`, `speed`, `balanced`, `quality` |
+| `vaapi_rc` | `auto` | `auto`, `cbr`, `vbr`, `avbr`, `cqp`, `icq`, `qvbr` |
+| `vaapi_blbrc` | `auto` | `auto`, `enabled`, `disabled` |
+| `vaapi_strict_rc_buffer` | `disabled` | `enabled`, `disabled` |
+
+Automatic quality and block bitrate control leave the codec's existing defaults
+untouched. Automatic rate control preserves Polaris's current policy: Intel,
+AV1, and explicit strict-buffer requests prefer VBR with a single-frame buffer,
+then CBR, then CQP. Other paths prefer CBR, then VBR, then CQP with the existing
+buffer size. No new AMD or Intel default is promoted by these controls.
+
+Quality presets use the selected driver profile and encoding entrypoint's
+reported range: quality selects level 1, speed selects the highest level, and
+balanced selects half the range, rounded down with a minimum of 1. Unknown or
+unsupported ranges retain the driver default. This adjusts encoding effort;
+it is separate from the `qp` setting.
+
+A manual rate-control choice must be supported by both the driver and codec.
+Unsupported choices use automatic policy and produce a warning. A supported
+manual mode overrides the Intel/AV1 buffer preference; `vaapi_strict_rc_buffer`
+still requests a single-frame buffer. CQP, ICQ, and QVBR use `qp` for their
+quality value. CQP and ICQ do not enforce a bitrate target; FFmpeg may ignore
+buffer settings in modes that do not use a hypothetical reference decoder.
+
+Block bitrate control requires the driver's `VA_RC_MB` capability and a mode
+other than CQP. An unsupported enable request is reported and disabled when
+the codec exposes the option. Startup logs report the selected rate control,
+selection policy, buffer choice, compression level, quality range, and block
+bitrate control. Controls are queried for every encoder initialization, using
+the selected profile and entrypoint. Existing DMA-BUF containment is preserved.
+
+Example of an opt-in configuration:
+
+```ini
+vaapi_quality = balanced
+vaapi_rc = vbr
+vaapi_blbrc = enabled
+vaapi_strict_rc_buffer = enabled
+```
+
+These settings follow the [libva quality and rate-control API](https://github.com/intel/libva/blob/master/va/va.h)
+and [FFmpeg VA-API mode handling](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavcodec/vaapi_encode.c).
+Hardware acceptance on AMD and Intel is required before changing automatic
+encoder defaults.
+
+### Stable KMS connector selection
+
+With KMS capture, `output_name` accepts the connector's kernel name (for example
+`DP-1` or `HDMI-A-1`) when that name identifies one available output. The log
+also lists a qualified form such as `kms:pci-0000:01:00.0/DP-1`. Qualification
+uses the GPU's PCI address, not its changing `/dev/dri/cardN` number. The
+`pci-0000:01:00.0/DP-1` shorthand is accepted too.
+
+Use the qualified form when different GPUs expose the same connector name.
+An ambiguous or missing request fails; Polaris does not select another output.
+Named capture rechecks the opened GPU, connector, and CRTC during initialization
+and rechecks the connector binding while capturing. A disconnect or reassignment
+requires capture reinitialization. Replugging the same physical port can resolve
+its qualified name even when card or display enumeration order changes.
+
+Existing numeric configurations retain the original enumeration positions. The
+list is not sorted or renumbered by the new names. A GPU without a reliable PCI
+identity, or a connector with multiple active capture planes, retains numeric
+selection. When unnamed entries remain, use qualified names for named requests;
+a plain connector alias cannot rule out ambiguity with those entries.
+
+These identifiers select KMS capture outputs. They do not change the X11,
+Wayland private-runtime, Windows, or macOS display-selection contracts.

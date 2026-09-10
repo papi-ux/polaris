@@ -14,11 +14,11 @@
 // lib includes
 #include <boost/endian/arithmetic.hpp>
 #include <openssl/err.h>
+#include <rs.h>
 
 extern "C" {
   // clang-format off
 #include <moonlight-common-c/src/Limelight-internal.h>
-#include "rswrapper.h"
   // clang-format on
 }
 
@@ -1793,7 +1793,7 @@ namespace stream {
       // D = 255 / (1 + F)
       // multiplied by 100 since F is the percentage as an integer:
       // D = (255 * 100) / (100 + F)
-      auto max_data_shards_per_fec_block = (DATA_SHARDS_MAX * 100) / (100 + fecPercentage);
+      auto max_data_shards_per_fec_block = (RS8_DATA_SHARDS_MAX * 100) / (100 + fecPercentage);
 
       // Compute the number of FEC blocks needed for this frame using the block size and max shards
       auto max_data_per_fec_block = max_data_shards_per_fec_block * blocksize;
@@ -2822,9 +2822,7 @@ namespace stream {
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
         session.session_target_fps > 0 ? static_cast<double>(session.session_target_fps) / 1000.0 : 0.0,
-        session.config.monitor.encodingFramerate > 1000 ?
-          static_cast<double>(session.config.monitor.encodingFramerate) / 1000.0 :
-          static_cast<double>(session.config.monitor.encodingFramerate),
+        av_q2d(video::encoding_framerate_to_rational(session.config.monitor)),
         session.pacing_policy,
         session.optimization_source,
         session.optimization_confidence,
