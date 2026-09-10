@@ -45,6 +45,9 @@ jobs:
       - name: Verify Bazzite validation receipt gate
         run: python3 scripts/validation/bazzite/test_validate_receipt.py
 
+      - name: Verify private sysext input and assembly boundaries
+        run: python3 -m unittest discover -s scripts/packaging/sysext -p 'test_*.py'
+
       - name: Bind release tag to source commit
         id: source
         env:
@@ -1208,6 +1211,17 @@ jobs:
             sleep $((attempt * 10))
           done
           exit 1
+
+      - name: Verify offline sysext RPM transactions
+        run: |
+          dnf install -y rpm-sign gnupg2
+          command -v rpm
+          command -v rpmbuild
+          command -v rpmsign
+          command -v rpm2archive
+          rpm2archive --help | grep -q -- '--format'
+          command -v gpg
+          python3 -m unittest discover -s scripts/packaging/sysext -p 'test_*.py'
 
       - name: Install CUDA toolkit
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
