@@ -24,7 +24,7 @@ struct Event { std::string kind; int fd; std::string value; };
 std::vector<Event> events;
 std::map<int, std::string> identities;
 std::string failure;
-int attempts = 0, fail_at = 1;
+int attempts = 0, fail_at = 1, unrelated_guard = -1;
 void require(bool value, const char *message) {
   if (!value) throw std::runtime_error(message);
 }
@@ -34,6 +34,7 @@ void reset(std::string fail = {}, int at = 1) {
 }
 void check_closed() {
   require(identities.empty(), "input descriptor leaked");
+  require(unrelated_guard >= 0 && fcntl(unrelated_guard, F_GETFD) >= 0, "cleanup closed an unrelated descriptor");
   for (size_t i = 0; i < events.size(); ++i) {
     if (events[i].kind != "close") continue;
     // Every successful creation must be destroyed before that close.
@@ -119,6 +120,8 @@ int main(int argc, char **argv) {
     const DeviceDefinition definition{.name="Polaris fixture", .vendor_id=0x1234, .product_id=2, .version=1,
         .device_phys="polaris/seat-fixture/mouse"};
     using Factory = Result<libevdev_uinput_ptr> (*)(const DeviceDefinition &);
+    unrelated_guard = ::open("/dev/null", O_RDONLY);
+    require(unrelated_guard >= 0, "unrelated cleanup guard failed");
     const Factory factories[] = {create_keyboard, create_mouse, create_mouse_abs, create_touch_screen,
       create_tablet, create_trackpad, create_xbox_controller, create_nintendo_controller, create_ps_controller};
     for (const auto factory : factories) {
@@ -163,6 +166,7 @@ int main(int argc, char **argv) {
       inputtino_mouse_destroy(mouse);
       check_closed();
     }
+    ::close(unrelated_guard);
     std::cout << "PASS: nine creation paths, identity failures, shared lifetime, C API and exec inheritance\n";
     return 0;
   } catch (const std::exception &error) {
