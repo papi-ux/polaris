@@ -34,6 +34,20 @@ const respond = (status, body) => async (url, init) => ({
 })
 
 describe('useConfigProjection', () => {
+  it.each([true, false])('ignores metadata from before a newer refresh (old response ok=%s)', async (oldOk) => {
+    const pending = []
+    const projection = useConfigProjection({ fetchImpl: () => new Promise((resolve) => pending.push(resolve)) })
+    const old = projection.load()
+    const current = projection.load()
+    const refreshed = { ...payload(), modes: [{ value: 'host_virtual_display', available: true }] }
+    pending[1]({ ok: true, json: async () => refreshed })
+    expect(await current).toBe(true)
+    pending[0]({ ok: oldOk, status: 503, json: async () => payload() })
+    expect(await old).toBe(false)
+    expect(projection.ok.value).toBe(true)
+    expect(projection.modes.value[0].available).toBe(true)
+    expect(projection.error.value).toBeNull()
+  })
   it('binds the host projection when the endpoint answers with version 1', async () => {
     const calls = []
     const projection = useConfigProjection({
