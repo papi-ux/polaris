@@ -1,8 +1,9 @@
-import { shallowMount } from '@vue/test-utils'
+import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
 import ConfigView from './views/ConfigView.vue'
+import { requestHostRestart } from './restart-host.js'
 
 const mockToast = vi.fn()
 
@@ -86,7 +87,7 @@ function mountConfigView(config = {}) {
       stubs: {
         Skeleton: { template: '<div />' },
         General: { props: ['config'], template: '<div><input id="sunshine_name" data-setting-key="sunshine_name" v-model="config.sunshine_name"></div>' },
-        AudioVideo: { props: ['config'], template: '<div><input id="max_bitrate" data-setting-key="max_bitrate" v-model="config.max_bitrate"></div>' },
+        AudioVideo: { name: 'AudioVideo', props: ['config'], template: '<div><input id="max_bitrate" data-setting-key="max_bitrate" v-model="config.max_bitrate"></div>' },
         Inputs: { template: '<div />' },
         Network: { template: '<div />' },
         Files: { template: '<div />' },
@@ -99,6 +100,30 @@ function mountConfigView(config = {}) {
 }
 
 describe('ConfigView pending changes review', () => {
+  it.each(['onReady', 'onTimeout'])('refreshes host capabilities only after restart readiness (%s)', async (outcome) => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    wrapper.vm.currentTab = 'av'
+    wrapper.vm.config.linux_streaming_output = 'DP-2'
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true, configuration_revision: 'b'.repeat(64) }) })
+    let restartCallbacks
+    requestHostRestart.mockImplementationOnce((callbacks) => {
+      restartCallbacks = callbacks
+      return Promise.resolve()
+    })
+    wrapper.vm.apply()
+    await flushPromises()
+    expect(restartCallbacks).toBeDefined()
+    expect(wrapper.vm.hostGeneration).toBe(0)
+    wrapper.vm.config.max_bitrate = 42000
+    restartCallbacks[outcome]()
+    await nextTick()
+    expect(wrapper.vm.hostGeneration).toBe(outcome === 'onReady' ? 1 : 0)
+    expect(wrapper.vm.config.max_bitrate).toBe(42000)
+    const tab = wrapper.findComponent({ name: 'AudioVideo' })
+    expect(Number(tab.attributes('host-generation'))).toBe(outcome === 'onReady' ? 1 : 0)
+    wrapper.unmount()
+  })
   afterEach(() => {
     document.body.innerHTML = ''
     mockToast.mockClear()

@@ -28,6 +28,7 @@ const props = defineProps([
   'config',
   'vdisplay',
   'min_fps_factor',
+  'hostGeneration',
 ])
 
 const sudovdaStatus = {
@@ -48,6 +49,25 @@ const config = ref(props.config)
 const projection = useConfigProjection()
 onMounted(() => {
   projection.load()
+})
+watch(() => props.hostGeneration, async (generation) => {
+  // Older hosts have no metadata endpoint. Refresh only their read-only mode
+  // options; replacing the form would discard edits made during the restart.
+  await Promise.all([
+    projection.load(),
+    (async () => {
+      try {
+        const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
+        if (!response.ok) return
+        const data = await response.json()
+        if (generation === props.hostGeneration && Array.isArray(data.stream_display_mode_options)) {
+          config.value.stream_display_mode_options = data.stream_display_mode_options
+        }
+      } catch {
+        // Keep the last host capability snapshot when the refresh is unavailable.
+      }
+    })(),
+  ])
 })
 const tuningControl = useLiveTuning()
 const projectionModes = computed(() => (
@@ -1091,6 +1111,7 @@ pactl info | grep Source</pre>
         <VirtualDisplayStatus
           :platform="platform"
           :config="config"
+          :host-generation="hostGeneration"
         />
       </div>
     </details>

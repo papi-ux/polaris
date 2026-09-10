@@ -216,6 +216,7 @@
           :config="config"
           :platform="platform"
           :vdisplay="vdisplayStatus"
+          :host-generation="hostGeneration"
         >
         </audio-video>
 
@@ -284,6 +285,7 @@ const saved = ref(false)
 const restarted = ref(false)
 const saving = ref(false)
 const restarting = ref(false)
+const hostGeneration = ref(0)
 const config = ref(null)
 const responseOnlyConfig = ref({})
 const currentTab = ref("general")
@@ -987,6 +989,9 @@ function apply() {
       toast(i18n.t('config.restart_note') || 'Polaris is restarting...', 'info', 5000)
       requestHostRestart({
         onReady: () => {
+          // Capabilities depend on the newly loaded host configuration. Keep
+          // local form edits, but retire status fetched before this restart.
+          ++hostGeneration.value
           saved.value = false
           restarted.value = false
           restarting.value = false
