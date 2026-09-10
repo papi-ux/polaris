@@ -10,6 +10,27 @@ describe('virtual display status presentation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('recovers its status after restart instead of retaining an earlier failure', async () => {
+    let ready = false
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: ready,
+      json: async () => String(url).includes('/status')
+        ? { available: true, backend_detected: true, backend: 'kscreen-doctor', policy_mode: 'host_virtual_display' }
+        : { backends: [] },
+    })))
+    const config = reactive({ linux_streaming_output: 'DP-2' })
+    const wrapper = shallowMount(VirtualDisplayStatus, { props: { platform: 'linux', config, hostGeneration: 0 } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Failed to fetch virtual display status')
+    ready = true
+    await wrapper.setProps({ hostGeneration: 1 })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Failed to fetch virtual display status')
+    expect(wrapper.text()).toContain('kscreen-doctor')
+    expect(config.linux_streaming_output).toBe('DP-2')
+    wrapper.unmount()
+  })
+
   it('explains that Private Stream intentionally bypasses host virtual displays', () => {
     const state = presentVirtualDisplayStatus({
       policy_mode: 'headless_stream',

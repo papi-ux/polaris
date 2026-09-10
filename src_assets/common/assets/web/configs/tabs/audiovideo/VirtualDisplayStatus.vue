@@ -1,47 +1,56 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { presentVirtualDisplayStatus } from '../../../virtual-display-status.js'
 
-defineProps({
+const props = defineProps({
   platform: String,
   config: Object,
+  hostGeneration: Number,
 })
 
 const loading = ref(true)
 const error = ref(null)
 const vdStatus = ref(null)
 const backends = ref([])
+let requestGeneration = 0
 const presentation = computed(() => presentVirtualDisplayStatus(vdStatus.value || {}))
 
-async function fetchStatus() {
+async function fetchStatus(generation = requestGeneration) {
   try {
-    const resp = await fetch('./api/vdisplay/status', { credentials: 'include' })
+    const resp = await fetch('./api/vdisplay/status', { credentials: 'include', cache: 'no-store' })
     if (resp.ok) {
-      vdStatus.value = await resp.json()
-    } else {
+      const data = await resp.json()
+      if (generation === requestGeneration) vdStatus.value = data
+    } else if (generation === requestGeneration) {
       error.value = 'Failed to fetch virtual display status'
     }
   } catch (e) {
-    error.value = 'Virtual display API not available'
+    if (generation === requestGeneration) error.value = 'Virtual display API not available'
   }
 }
 
-async function fetchBackends() {
+async function fetchBackends(generation = requestGeneration) {
   try {
-    const resp = await fetch('./api/vdisplay/backends', { credentials: 'include' })
+    const resp = await fetch('./api/vdisplay/backends', { credentials: 'include', cache: 'no-store' })
     if (resp.ok) {
       const data = await resp.json()
-      backends.value = data.backends || []
+      if (generation === requestGeneration) backends.value = data.backends || []
     }
   } catch (e) {
     // Non-critical: backends list is supplementary
   }
 }
 
-onMounted(async () => {
-  await Promise.all([fetchStatus(), fetchBackends()])
-  loading.value = false
-})
+async function refresh() {
+  const generation = ++requestGeneration
+  loading.value = true
+  error.value = null
+  await Promise.all([fetchStatus(generation), fetchBackends(generation)])
+  if (generation === requestGeneration) loading.value = false
+}
+
+onMounted(refresh)
+watch(() => props.hostGeneration, refresh)
 </script>
 
 <template>

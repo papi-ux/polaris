@@ -24,8 +24,10 @@ export function useConfigProjection({ fetchImpl } = {}) {
   const ok = ref(false)
   const loading = ref(false)
   const error = ref(null)
+  let requestGeneration = 0
 
   async function load(clientUuid = '') {
+    const generation = ++requestGeneration
     const doFetch = fetchImpl || ((...args) => fetch(...args))
     const url = clientUuid
       ? `${SETTINGS_METADATA_ENDPOINT}?client=${encodeURIComponent(clientUuid)}`
@@ -35,6 +37,7 @@ export function useConfigProjection({ fetchImpl } = {}) {
     try {
       const response = await doFetch(url, {
         credentials: 'include',
+        cache: 'no-store',
         headers: { Accept: 'application/json' },
       })
       if (!response.ok) {
@@ -44,14 +47,16 @@ export function useConfigProjection({ fetchImpl } = {}) {
       if (!isValidSettingsMetadata(body)) {
         throw new Error('settings metadata has an unexpected shape')
       }
+      if (generation !== requestGeneration) return false
       payload.value = body
       ok.value = true
     } catch (cause) {
+      if (generation !== requestGeneration) return false
       payload.value = null
       ok.value = false
       error.value = cause
     } finally {
-      loading.value = false
+      if (generation === requestGeneration) loading.value = false
     }
     return ok.value
   }
