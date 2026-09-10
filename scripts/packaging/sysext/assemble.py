@@ -35,6 +35,8 @@ def finish_receipt(output, receipt):
     temporary = output / 'receipt.pending.json'
     write_json(temporary, receipt)
     fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    termination = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, termination)
     linked = False
     try:
         os.link(temporary, output / 'build-receipt.json')
@@ -42,12 +44,18 @@ def finish_receipt(output, receipt):
         os.fsync(fd)
         temporary.unlink()
         os.fsync(fd)
+        # Deliver queued termination while the completion marker can still be
+        # revoked by this guard, including a signal raised just after link().
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
     except BaseException:
+        signal.pthread_sigmask(signal.SIG_BLOCK, termination)
         if linked:
             (output / 'build-receipt.json').unlink()
+            os.fsync(fd)
         raise
     finally:
         os.close(fd)
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
 
 
 class Commands:
@@ -75,7 +83,7 @@ def verify_tools(lock):
     root = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for record in lock['tools'].values():
-            copy_verified(root, record['path'], record['sha256'], io.BytesIO())
+            copy_verified(root, record['path'], record['sha256'], io.BytesIO(), trusted=True)
             info = Path('/' + record['path']).stat()
             require(info.st_uid == 0 and not info.st_mode & 0o022 and info.st_mode & 0o111, 'untrusted build tool')
         require(Path(sys.executable).resolve() == Path('/' + lock['tools']['python3']['path']), 'unexpected Python interpreter')
@@ -106,7 +114,7 @@ def verify_signers(command, frozen, dependencies, work):
     command('rpm', '--dbpath', keyring, '--initdb')
     for key in dependencies['keys']:
         path = frozen.destination / key['path']
-        result = command('gpg', '--homedir', home, '--batch', '--no-options', '--with-colons',
+        result = command('gpg', '--homedir', home, '--batch', '--no-options', '--no-autostart', '--with-colons',
                          '--import-options', 'show-only', '--import', path)['stdout'].decode('utf-8')
         rows = [line.split(':') for line in result.splitlines()]
         require(sum(row[0] == 'pub' for row in rows) == 1, 'signing key bundle must have one primary key')
@@ -114,6 +122,11 @@ def verify_signers(command, frozen, dependencies, work):
         require(fingerprints and fingerprints[0] == key['fingerprint'], 'signer fingerprint mismatch')
         command('rpmkeys', '--dbpath', keyring, '--import', path)
     return keyring
+
+
+def verify_package_signature(command, keyring, path):
+    signature = command('rpmkeys', '--dbpath', keyring, '--checksig', path)['stdout'].decode('utf-8')
+    require('signatures OK' in signature, 'dependency has no verified signature')
 
 
 def assemble(args):
@@ -155,8 +168,7 @@ def assemble(args):
         require(identities[0]['name'] == 'polaris' and identities[0]['nevra'] == attestation['nevra'] and
                 identities[0]['architecture'] == 'x86_64', 'candidate RPM identity mismatch')
         for item, path in zip(dependencies['packages'], packages[1:]):
-            signature = command('rpmkeys', '--dbpath', keyring, '--checksig', path)['stdout'].decode('utf-8')
-            require('signatures OK' in signature, 'dependency has no verified signature')
+            verify_package_signature(command, keyring, path)
             identity = package_identity(command, path)
             require(all(identity[key] == item[key] for key in ('name', 'nevra', 'architecture', 'license')),
                     'dependency RPM identity mismatch')

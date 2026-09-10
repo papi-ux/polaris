@@ -104,7 +104,22 @@ class PayloadTests(unittest.TestCase):
         with patch('payload.MAX_PAYLOAD', 10), self.assertRaises(PayloadError):
             parse_cpio(archive(record('usr/a')))
         with patch('payload.MAX_ENTRIES', 1), self.assertRaises(PayloadError):
-            parse_cpio(archive(record('usr/a'), record('usr/b')))
+                parse_cpio(archive(record('usr/a'), record('usr/b')))
+
+    def test_hardlink_expansion_and_combined_projection_are_bounded(self):
+        linked = archive(record('usr/a', nlink=3), record('usr/b', nlink=3),
+                         record('usr/c', b'12345', nlink=3))
+        with patch('payload.MAX_MATERIALIZED', 14), self.assertRaises(PayloadError):
+            parse_cpio(linked)
+        packages = [{'usr/a': Entry(stat.S_IFREG | 0o644, b'12345')},
+                    {'usr/b': Entry(stat.S_IFREG | 0o644, b'12345')}]
+        with patch('payload.MAX_MATERIALIZED', 9), self.assertRaises(PayloadError):
+            merge_payloads(packages)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'tree'
+            with patch('payload.MAX_MATERIALIZED', 4), self.assertRaises(PayloadError):
+                materialize(packages[0], root)
+            self.assertFalse(root.exists())
 
     def test_optimized_python_keeps_admission_checks(self):
         command = 'from payload import parse_cpio, PayloadError; from test_payload import archive, record\ntry: parse_cpio(archive(record("../escape")))\nexcept PayloadError: raise SystemExit(0)\nraise SystemExit(1)'
