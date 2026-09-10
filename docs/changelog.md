@@ -9,7 +9,7 @@ starts at `v1.0.0`.
 
 ## v1.4.5 - 2026-09-10
 
-A Bazzite and Live Tuning update matched with Nova v1.4.5. Live Tuning is one saved host preference that every console surface and paired client reads the same way, Bazzite Desktop launches prepare capture before the stream starts, hosts running a Steam Game Mode session learn why they go offline and how headless boot keeps them reachable, and `--setup-host` reports it. Existing configurations and paired devices remain valid.
+A Bazzite and Live Tuning update matched with Nova v1.4.5. Live Tuning is one saved host preference that every console surface and paired client reads the same way, Bazzite Desktop launches prepare capture before the stream starts, hosts running a Steam Game Mode session learn why they go offline and how headless boot keeps them reachable, and `--setup-host` reports it. The supported Bazzite RPM path was exercised end to end on an NVIDIA Open host with a Retroid Pocket 6. Existing configurations and paired devices remain valid.
 
 - Reworks the supported Bazzite RPM guide around staged installation, explicit reboot, local-RPM replacement, and boot-independent service setup; moves the composefs KMS copy into an optional section and keeps Game Mode hardware limits and the withdrawn system extension explicit
 - Shares one saved Live Tuning preference across Quick Controls, the Audio/Video settings page, paired session status, and session events, independent of AI provider sign-in. Clients see the requested bitrate separately from the encoder-confirmed rate, with waiting, measuring, applying, adjusting, stable, unavailable, and unknown states; turning Live Tuning off holds the last confirmed bitrate, and an explicit fixed bitrate supersedes adaptive ownership (#641)
