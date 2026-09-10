@@ -160,6 +160,7 @@ func validateRequest(request Request) error {
 			return errors.New("runtime audio request is invalid")
 		}
 	case StageDisplayCapture:
+		base.InputSeat = request.InputSeat
 		base.CaptureWaylandSocket = request.CaptureWaylandSocket
 		base.RenderNode = request.RenderNode
 		base.DisplayTopology = request.DisplayTopology
@@ -169,6 +170,7 @@ func validateRequest(request Request) error {
 		base.DisplayRefreshMillihertz = request.DisplayRefreshMillihertz
 		base.DisplayHDR = request.DisplayHDR
 		if request != base ||
+			(request.InputSeat != "" && !validNameToken(request.InputSeat, 128)) ||
 			!validNameToken(request.CaptureWaylandSocket, 128) ||
 			!validRenderNode(request.RenderNode) ||
 			request.DisplayTopology != DisplayTopologyCaptureHostNested ||
@@ -263,7 +265,7 @@ func Arguments(request Request) ([]string, error) {
 		if request.DisplayHDR {
 			hdr = "1"
 		}
-		return append(arguments,
+		arguments = append(arguments,
 			"--capture-wayland-socket="+request.CaptureWaylandSocket,
 			"--render-node="+request.RenderNode,
 			"--display-topology="+request.DisplayTopology,
@@ -272,7 +274,11 @@ func Arguments(request Request) ([]string, error) {
 			"--display-height="+canonicalUint(request.DisplayHeight),
 			"--display-refresh-millihz="+canonicalUint(request.DisplayRefreshMillihertz),
 			"--display-hdr="+hdr,
-		), nil
+		)
+		if request.InputSeat != "" {
+			arguments = append(arguments, "--input-seat="+request.InputSeat)
+		}
+		return arguments, nil
 	case StageNestedCompositor:
 		hdr := "0"
 		if request.DisplayHDR {
@@ -431,7 +437,7 @@ func parseArguments(arguments []string) (Request, error) {
 		}
 		request.AudioSink, err = value(3, "--audio-sink=")
 	case StageDisplayCapture:
-		if len(arguments) != 11 {
+		if len(arguments) != 11 && len(arguments) != 12 {
 			return Request{}, errors.New("runtime helper argv is invalid")
 		}
 		if request.CaptureWaylandSocket, err = value(3, "--capture-wayland-socket="); err == nil {
@@ -479,6 +485,9 @@ func parseArguments(arguments []string) (Request, error) {
 			default:
 				err = errors.New("runtime helper HDR flag is invalid")
 			}
+		}
+		if err == nil && len(arguments) == 12 {
+			request.InputSeat, err = value(11, "--input-seat=")
 		}
 	case StageNestedCompositor:
 		if len(arguments) != 11 {

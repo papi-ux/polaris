@@ -110,6 +110,7 @@ set(TEST_AUDIT_SUPPORT_SOURCES
 )
 
 set(TEST_FAST_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_benchmark_control_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_builtin_artwork_contract.cpp
@@ -258,6 +259,8 @@ set(TEST_AUDIO_SOURCES
 )
 
 set(TEST_STREAM_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_session.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
@@ -272,6 +275,7 @@ set(TEST_STREAM_SOURCES
 
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_STREAM_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_stream_send_cancellation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_activation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_runtime.cpp
@@ -637,6 +641,18 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(test_polaris_stream PRIVATE
+            "-Wl,--wrap=sendmsg" "-Wl,--wrap=sendmmsg" "-Wl,--wrap=poll")
+        if(POLARIS_MULTISEAT_GO_INTEROP_SUPPORTED)
+            add_dependencies(test_polaris_stream polaris-multiseat-go-interop-fixture)
+            target_sources(test_polaris_stream PRIVATE
+                ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_worker_interop.cpp)
+            target_compile_definitions(test_polaris_stream PRIVATE
+                POLARIS_WORKER_STREAM_INTEROP
+                POLARIS_MULTISEAT_GO_INTEROP_BINARY="${POLARIS_MULTISEAT_GO_INTEROP_BINARY}")
+        endif()
+    endif()
 
     configure_polaris_full_test_target(test_polaris_video
         ${TEST_VIDEO_SOURCES}

@@ -7,6 +7,7 @@
 #ifdef __linux__
 
   #include "multiseat_moonlight_session_adapters.h"
+  #include "multiseat_worker_launch_connection.h"
 
   #include <cstddef>
   #include <cstdint>
@@ -135,7 +136,8 @@ namespace multiseat::input {
       moonlight_launch_selection_key_t key,
       seat_handle_t handle,
       std::string_view expected_input_seat,
-      bool controller_feedback
+      bool controller_feedback,
+      worker_connection_selection_t worker_connection = {}
     );
     [[nodiscard]] moonlight_session_activation_status_e activate(
       stream::session_t &session

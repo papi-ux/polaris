@@ -64,7 +64,13 @@ frozen/offline; Meson wraps cannot download.
 
 Each root compiles `waylanddisplaysrc` against its own GStreamer development ABI.
 The installed system plugin directory also supplies `unixfdsink`, `unixfdsrc`,
-`fakesink`, and `videoconvert`. Fixed provider executables, plugin files, and
+`fakesink`, and `videoconvert`. The encoder dependency gate additionally requires
+H.264/Opus encoders and decoders, Pulse capture, appsink, and the GL import,
+conversion, and download elements. Their presence does not establish that a
+particular GPU's DMA-BUF format can be imported or that game frames encode.
+The GL plugin and its dependencies use the same signed snapshot and each root's
+GStreamer ABI; Steam already includes that package in its pinned source root.
+Fixed provider executables, plugin files, and
 PipeWire configurations must be trusted regular files; dynamic library checks
 must resolve. The custom Gamescope executable is `/usr/bin/gamescope`; the
 source root's packaged `/usr/games/gamescope` remains recorded in the package
@@ -146,3 +152,50 @@ encoding, launcher process management, production media routing, seat-aware
 status, and real concurrent game streams remain the next milestone. Runtime
 startup must also establish the private X11 directory ownership expected by the
 provider before production wiring; the isolated tests provide their own fixture.
+
+### Isolated physical game probe
+
+The experimental Gamescope image contains `input-pong-v1`, a small offline game
+with keyboard, pointer and controller counters plus a private audio tone. The
+opt-in native physical harness can select it with `POLARIS_PHYSICAL_GAME=1`.
+This requires the Gamescope profile, newly initialized private profile volumes,
+the exact GPU/input catalog, and the separately reviewed NVIDIA SELinux domain
+on the matching physical validation lane. The harness applies that fixed domain
+only after the normal backend has admitted the worker's mounts and devices.
+
+The worker's `physical-game-probe start|state|finish TOKEN` command accepts a
+32-character lowercase hexadecimal token. It requires the existing validated
+allocation and authenticated worker health, claims one private probe, and starts
+six real providers. Only this explicit probe enables retained-FD compositor
+input. Startup is bounded to 90 seconds, total lifetime to 150 seconds, and
+providers stop in reverse order. Errors remain errors even when outer worker
+destruction subsequently removes the remaining resources.
+
+The harness compares each game's counters before and after host-authority input,
+checks the other game's counters stay unchanged, and verifies that the surviving
+game keeps advancing after the first stops. These are game/process/input checks.
+The probe excludes the encoder, publishes no media readiness, and does not claim
+an encoded stream or client playback. Production adapter selection stays off.
+
+### Encoded game observation
+
+The isolated Gamescope physical harness can additionally set
+`POLARIS_PHYSICAL_ENCODED_GAME=1` together with `POLARIS_PHYSICAL_GAME=1`.
+Its fixed `physical-game-probe media <token>` operation imports the allocated
+raw-frame socket through a GBM/EGL context created from the allocated render
+node, explicitly encodes 60 frames with software OpenH264, and decodes them
+inside the worker. The bounded probe checks both Pong paddles, background and
+visible ball displacement, including another observation after the other worker
+stops. It rejects an empty or frozen scene, invalid geometry in any frame, incorrect frame
+counts, missing keyframes and oversized output. Build-time synthetic codec
+checks are labeled separately and cannot satisfy the physical observation.
+The probe connects through a retained socket identity. Its health checks and
+codec process share one deadline. It preserves GPU ownership until its pipeline
+and frames retire; unproven teardown terminates the isolated probe process
+without releasing resources that remaining streaming threads could still use.
+
+This operation neither attaches media IPC nor delivers packets to a client.
+It does not advertise NVENC support, measure input-to-photon latency or enable
+the production worker adapter. Recorded encode/decode evidence is separate from
+successful game streaming. Audio encoding and continuous session media routing
+remain part of the subsequent implementation.

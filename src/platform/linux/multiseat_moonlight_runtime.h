@@ -102,7 +102,8 @@ namespace multiseat::input {
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
       seat_handle_t handle,
       std::string_view expected_input_seat,
-      bool controller_feedback
+      bool controller_feedback,
+      worker_connection_selection_t worker_connection = {}
     );
 
     [[nodiscard]] moonlight_runtime_lifecycle_status_e cancel_launch(
@@ -167,7 +168,8 @@ namespace multiseat::input {
     const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
     seat_handle_t handle,
     std::string_view expected_input_seat,
-    bool controller_feedback
+    bool controller_feedback,
+      worker_connection_selection_t worker_connection = {}
   );
 
   /** Common RTSP rejection, timeout, and shutdown notification. */

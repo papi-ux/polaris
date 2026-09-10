@@ -254,6 +254,17 @@ namespace {
     EXPECT_FALSE(result.selection_status);
   }
 
+  TEST(MultiseatMoonlightWorkerAdapter, MetadataOnlyAuthorityCannotReserveMedia) {
+    const auto expectation = adapter_expectation(20);
+    fake_worker_authority_t worker {worker_seat(expectation)};
+    moonlight_worker_launch_adapter_t adapter {worker};
+    const auto result = adapter.select_with_connection(adapter_launch(1020, 2020), expectation.handle);
+    EXPECT_EQ(result.status, moonlight_worker_selection_status_e::worker_not_authorized);
+    EXPECT_EQ(result.authority_status, worker_seat_authorization_status_e::endpoint_not_authenticated);
+    EXPECT_FALSE(result.selection_status);
+    EXPECT_EQ(worker.calls, 0U);
+  }
+
   TEST(MultiseatMoonlightWorkerAdapter, RejectsMismatchedAuthorityProjection) {
     const auto expectation = adapter_expectation(3);
     auto wrong = worker_seat(expectation);

@@ -27,6 +27,8 @@ const (
 	// regular executable itself and never follow the packaging symlink.
 	defaultPipeWirePulsePath  = "/usr/bin/pipewire"
 	defaultPWCLIPath          = "/usr/bin/pw-cli"
+	defaultPWDumpPath         = "/usr/bin/pw-dump"
+	defaultWirePlumberPath    = "/usr/bin/wireplumber"
 	defaultPactlPath          = "/usr/bin/pactl"
 	defaultGSTLaunchPath      = "/usr/bin/gst-launch-1.0"
 	defaultGSTInspectPath     = "/usr/bin/gst-inspect-1.0"
@@ -46,6 +48,8 @@ type providerOptions struct {
 	pipeWirePath          string
 	pipeWirePulsePath     string
 	pwCLIPath             string
+	pwDumpPath            string
+	wirePlumberPath       string
 	pactlPath             string
 	gstLaunchPath         string
 	gstInspectPath        string
@@ -57,6 +61,7 @@ type providerOptions struct {
 	x11LockDirectory      string
 	x11DirectoryOwnerUID  uint32
 	x11DirectoryMode      uint32
+	x11LockDirectoryMode  uint32
 	softwareGamescope     bool
 	softwareVulkanICDPath string
 	allowSharedX11        bool
@@ -75,6 +80,8 @@ func defaultProviderOptions() providerOptions {
 		pipeWirePath:         defaultPipeWirePath,
 		pipeWirePulsePath:    defaultPipeWirePulsePath,
 		pwCLIPath:            defaultPWCLIPath,
+		pwDumpPath:           defaultPWDumpPath,
+		wirePlumberPath:      defaultWirePlumberPath,
 		pactlPath:            defaultPactlPath,
 		gstLaunchPath:        defaultGSTLaunchPath,
 		gstInspectPath:       defaultGSTInspectPath,
@@ -97,11 +104,16 @@ func validAbsolutePath(path string) bool {
 }
 
 func normalizeProviderOptions(options providerOptions) (providerOptions, error) {
+	if options.x11LockDirectoryMode == 0 {
+		options.x11LockDirectoryMode = options.x11DirectoryMode
+	}
 	if !validAbsolutePath(options.runtimeDirectory) ||
 		!validAbsolutePath(options.dbusDaemonPath) ||
 		!validAbsolutePath(options.pipeWirePath) ||
 		!validAbsolutePath(options.pipeWirePulsePath) ||
 		!validAbsolutePath(options.pwCLIPath) ||
+		!validAbsolutePath(options.pwDumpPath) ||
+		!validAbsolutePath(options.wirePlumberPath) ||
 		!validAbsolutePath(options.pactlPath) ||
 		!validAbsolutePath(options.gstLaunchPath) ||
 		!validAbsolutePath(options.gstInspectPath) ||
@@ -114,6 +126,7 @@ func normalizeProviderOptions(options providerOptions) (providerOptions, error) 
 		(options.softwareVulkanICDPath != "" &&
 			!validAbsolutePath(options.softwareVulkanICDPath)) ||
 		options.x11DirectoryMode == 0 || options.x11DirectoryMode > 0o7777 ||
+		options.x11LockDirectoryMode > 0o7777 ||
 		(options.softwareGamescope && options.softwareVulkanICDPath == "") ||
 		(!options.softwareGamescope && options.softwareVulkanICDPath != "") ||
 		options.startupTimeout <= 0 || options.probeTimeout <= 0 ||

@@ -123,6 +123,12 @@ namespace rtsp_stream {
       return setup_state.load() == setup_state_e::cancelled;
     }
 
+    /** Sticky across selection cancellation and every allocation of this launch. */
+    void require_worker_connection() { worker_connection_required_->store(true); }
+    std::shared_ptr<const std::atomic_bool> worker_connection_requirement() const {
+      return worker_connection_required_;
+    }
+
     // Moonlight sends SETUP and PLAY over separate TCP connections, so started sessions remain admissible.
     bool accepts_control_connection() const {
       return setup_state.load() != setup_state_e::cancelled;
@@ -188,6 +194,10 @@ namespace rtsp_stream {
   #ifdef _WIN32
     GUID display_guid{};
   #endif
+
+  private:
+    const std::shared_ptr<std::atomic_bool> worker_connection_required_ =
+      std::make_shared<std::atomic_bool>(false);
   };
 
   bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);

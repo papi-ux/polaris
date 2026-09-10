@@ -366,3 +366,36 @@ func runtimeAllocationForTest(t *testing.T, config workerConfig) runtimeAllocati
 	}
 	return allocation
 }
+
+func TestCompositorInputIsExplicitAndLimitedToCaptureStage(t *testing.T) {
+	config := runtimeTestConfig("worker-explicit-input", 80, 2)
+	allocation, err := runtimeAllocationFromConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{false, true} {
+		host := &fakeRuntimeProcessHost{recorder: &fakeRuntimeRecorder{}}
+		adapters, err := newProcessRuntimeAdapters(host, processRuntimeAdapterOptions{CompositorInput: enabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, component := range adapters.ordered() {
+			if _, err := component.adapter.Start(context.Background(), allocation); err != nil {
+				t.Fatal(err)
+			}
+		}
+		specs, _ := host.snapshot()
+		for _, spec := range specs {
+			want, err := runtimeProcessArguments(spec.Stage, allocation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if enabled && spec.Stage == runtimeStageDisplayCapture {
+				want = append(want, "--input-seat="+allocation.InputSeat)
+			}
+			if !reflect.DeepEqual(spec.Arguments, want) {
+				t.Fatalf("stage %s input=%t: %v != %v", spec.Stage, enabled, spec.Arguments, want)
+			}
+		}
+	}
+}

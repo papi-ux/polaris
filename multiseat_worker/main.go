@@ -18,6 +18,8 @@ func run(arguments []string) error {
 	uid := uint32(os.Geteuid())
 	paths := productionPaths()
 	switch arguments[0] {
+	case "physical-game-probe":
+		return physicalGameProbe(arguments[1:])
 	case "health":
 		if len(arguments) != 1 {
 			return errors.New("health does not accept arguments")

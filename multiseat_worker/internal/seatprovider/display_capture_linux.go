@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/papi-ux/polaris/multiseat_worker/internal/seatinput"
 	"github.com/papi-ux/polaris/multiseat_worker/internal/seatruntime"
 )
 
@@ -697,13 +698,38 @@ func runDisplayCapture(
 			return err
 		}
 	}
+	var inputs *seatinput.Set
+	var inputFiles []*os.File
+	executable := options.gstLaunchPath
+	arguments := displayProducerArguments(request, mediaSocket, options.softwareDisplay)
+	if request.InputSeat != "" {
+		inputs, err = seatinput.Open(seatinput.Directory, request.InputSeat)
+		if err != nil {
+			return err
+		}
+		defer inputs.Close()
+		inputFiles, err = inputs.CompositorFiles()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			for _, file := range inputFiles {
+				_ = file.Close()
+			}
+		}()
+		executable = "/usr/libexec/polaris-seat/capture-input"
+		// The native producer receives keyboard/relative/absolute FDs 4/5/6.
+		// It uses existing plugin events; libinput device discovery is absent.
+		arguments = append([]string{strconv.FormatUint(uint64(request.DisplayWidth), 10),
+			strconv.FormatUint(uint64(request.DisplayHeight), 10), "--", "waylanddisplaysrc", "name=display"}, arguments[2:]...)
+	}
 	environment := displayEnvironment(options)
 	child, err := startManagedChildWithUmask(
-		options.gstLaunchPath,
+		executable,
 		options.executableOwnerUID,
-		displayProducerArguments(request, mediaSocket, options.softwareDisplay),
+		arguments,
 		environment,
-		nil,
+		inputFiles,
 		0o077,
 	)
 	if err != nil {
@@ -774,15 +800,36 @@ func runDisplayCapture(
 	if err := verifyDisplayArtifacts(runtime, artifacts, targetSocket, mediaSocket); err != nil {
 		return err
 	}
+	if inputs != nil {
+		if child.pidFD == nil {
+			return errors.New("runtime input consumer lifetime unavailable")
+		}
+		if err := inputs.VerifyConsumer(child.command.Process.Pid, int(child.pidFD.Fd())); err != nil {
+			return err
+		}
+	}
+	if child.exited() {
+		return errors.New("runtime display exited during input verification")
+	}
 	if err := publishReadiness(ready); err != nil {
 		return err
 	}
 	readyPublished = true
 	ready = nil
-	select {
-	case <-parent.Done():
-		return nil
-	case <-child.done:
-		return errors.New("runtime display exited unexpectedly")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-parent.Done():
+			return nil
+		case <-child.done:
+			return errors.New("runtime display exited unexpectedly")
+		case <-ticker.C:
+			if inputs != nil {
+				if err := inputs.VerifyConsumer(child.command.Process.Pid, int(child.pidFD.Fd())); err != nil {
+					return err
+				}
+			}
+		}
 	}
 }
