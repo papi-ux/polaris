@@ -84,8 +84,10 @@ must never be reused as a new build destination.
   the locked keys. The private candidate is admitted by its reviewed build
   attestation and hash, without claiming a release signature.
 - `rpm --install --test` checks dependency and file conflicts against a private
-  copy of the target RPMDB. Base package replacements and packages declaring
-  obsoletes are rejected. No repository is consulted. The original target files
+  copy of the target RPMDB. Base package replacements and matching obsoletes
+  are rejected. Historical obsoletes that do not match the target are recorded
+  and allowed: RPM's install operation treats matching declarations as conflicts,
+  including their version constraints. No repository is consulted. The original target files
   are rehashed, and the private package inventory must remain unchanged.
 - Complete CPIO archives are validated before writing. Paths outside `/usr` and
   `/opt`, special nodes, non-root ownership, privileged modes/capabilities,
