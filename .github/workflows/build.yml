@@ -262,6 +262,8 @@ jobs:
       # Keep the base immutable. The repository snapshot and hash-pinned Boost
       # overlay below define the complete package userspace used by the build.
       image: archlinux@sha256:4bf33b21a715aac0b48ce6e9eaed4782a898eae96f88f5da3635572129c2584a
+      # Worker launches also use --init to reap orphaned provider descendants.
+      options: --init
     env:
       ARCH_REPOSITORY_SNAPSHOT: 2026/08/19
       ARCH_BOOST_PACKAGE_VERSION: 1.92.0-1
