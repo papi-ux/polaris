@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <functional>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -26,6 +27,12 @@ namespace adaptive_bitrate {
   };
 
   struct state_t {
+    std::uint64_t session_generation = 0;
+    std::string app_session_id;
+    bool session_exclusive = false;
+    bool configured_enabled = false;
+    bool feedback_initialized = false;
+    int applied_bitrate_kbps = 0;
     bool enabled = false;
     bool active = false;
     bool runtime_update_supported = false;
@@ -195,6 +202,13 @@ namespace adaptive_bitrate {
 
   /** Return the current encoder request, including one-shot rollback work. */
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
+
+  // The callback may only update the encoder; it must not call this controller.
+  // Validate, apply and acknowledge under one boundary with operator changes.
+  bool apply_live_bitrate_request(const live_bitrate_request_t &request,
+                                  const std::function<bool()> &apply);
+  void set_session_scope(std::uint64_t generation, const std::string &app_session_id,
+                         bool exclusive);
 
   /**
    * Invalidate the retiring encoder session before recreating it for an exact

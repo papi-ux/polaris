@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <thread>
+#include <future>
 
 using namespace std::chrono_literals;
 
@@ -748,4 +749,73 @@ TEST(AdaptiveBitrateController, NewerExplicitIncreaseReplacesDoctorTargetExactly
   EXPECT_TRUE(adaptive_bitrate::is_active());
   EXPECT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 30000);
   EXPECT_GT(after.revision, *doctor_revision);
+}
+
+TEST(AdaptiveBitrateController, DisableRejectsFetchedButUnappliedRequest) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_live_bitrate(14000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  adaptive_bitrate::set_enabled(false);
+  bool called = false;
+  EXPECT_FALSE(adaptive_bitrate::apply_live_bitrate_request(*request, [&] { called = true; return true; }));
+  EXPECT_FALSE(called);
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 20000);
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+}
+
+TEST(AdaptiveBitrateController, DisableHoldsCompletedEncoderApplication) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_live_bitrate(14000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*request, [] { return true; }));
+  adaptive_bitrate::set_enabled(false);
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 14000);
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+}
+
+TEST(AdaptiveBitrateController, DisableDuringRecreationReconcilesToLastProvenRate) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_live_bitrate(14000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision, 14000));
+  adaptive_bitrate::set_enabled(false);
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 0);
+  ASSERT_TRUE(adaptive_bitrate::get_live_bitrate_request());
+  EXPECT_EQ(adaptive_bitrate::get_live_bitrate_request()->target_bitrate_kbps, 20000);
+  // If creation already began with the old target, its actual rate remains
+  // visible until the held target is reconciled, even with tuning disabled.
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 14000);
+  const auto reconcile = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(reconcile);
+  ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*reconcile, [] { return true; }));
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 20000);
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+}
+
+TEST(AdaptiveBitrateController, DisableSerializesWithInFlightEncoderApplication) {
+  enable_controller();
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_live_bitrate(14000);
+  const auto request = *adaptive_bitrate::get_live_bitrate_request();
+  std::promise<void> entered, finish;
+  auto resume = finish.get_future();
+  auto update = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(request, [&] {
+      entered.set_value(); resume.wait(); return true;
+    });
+  });
+  entered.get_future().wait();
+  auto disable = std::async(std::launch::async, [] { adaptive_bitrate::set_enabled(false); });
+  EXPECT_EQ(disable.wait_for(20ms), std::future_status::timeout);
+  finish.set_value();
+  EXPECT_TRUE(update.get());
+  disable.get();
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 14000);
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
 }

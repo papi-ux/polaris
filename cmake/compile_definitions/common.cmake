@@ -207,6 +207,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/sync.h"
         "${CMAKE_SOURCE_DIR}/src/round_robin.h"
         "${CMAKE_SOURCE_DIR}/src/settings_metadata.cpp"
+        "${CMAKE_SOURCE_DIR}/src/configuration_store.cpp"
+        "${CMAKE_SOURCE_DIR}/src/live_tuning.cpp"
         "${CMAKE_SOURCE_DIR}/src/settings_metadata.h"
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.h"
         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
