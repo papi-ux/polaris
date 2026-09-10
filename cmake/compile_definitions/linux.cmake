@@ -444,7 +444,10 @@ endif()
 set(LIBEVDEV_CUSTOM_INCLUDE_DIR "${EVDEV_INCLUDE_DIR}")
 set(LIBEVDEV_CUSTOM_LIBRARY "${EVDEV_LIBRARY}")
 
-add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/inputtino")
+include("${CMAKE_SOURCE_DIR}/cmake/dependencies/inputtino.cmake")
+set(POLARIS_INPUTTINO_SOURCE_DIR "${CMAKE_BINARY_DIR}/dependencies/inputtino-source")
+polaris_prepare_inputtino("${CMAKE_SOURCE_DIR}/third-party/inputtino" "${POLARIS_INPUTTINO_SOURCE_DIR}")
+add_subdirectory("${POLARIS_INPUTTINO_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/dependencies/inputtino-build")
 set_target_properties(libinputtino PROPERTIES
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON)
