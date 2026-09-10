@@ -28,6 +28,9 @@ class RpmTransactionTests(unittest.TestCase):
                                  scripts='%post\necho ran > /fixture-script-ran\n')
         cls.replacement = cls.build('fixture-base', version='2')
         cls.obsoletes = cls.build('fixture-obsoletes', extra='Obsoletes: fixture-base\n')
+        cls.obsoletes_versioned = cls.build('fixture-obsoletes-versioned', extra='Obsoletes: fixture-base < 2\n')
+        cls.obsoletes_historical = cls.build('fixture-obsoletes-historical',
+            extra='Obsoletes: fixture-base < 1\nObsoletes: fixture-absent < 2\n')
 
     @classmethod
     def tearDownClass(cls):
@@ -96,9 +99,20 @@ echo payload > %{{buildroot}}/usr/share/{name}/data
         for package in (self.base, self.replacement):
             with self.subTest(package=package.name), self.assertRaises(BuildError):
                 simulate(self.command, self.private, [package], [package_identity(self.command, package)])
-        with self.assertRaises(BuildError):
-            package_identity(self.command, self.obsoletes)
+        for package in (self.obsoletes, self.obsoletes_versioned):
+            identity = package_identity(self.command, package)
+            self.assertTrue(identity['obsoletes'])
+            with self.subTest(package=package.name), self.assertRaises(BuildError):
+                simulate(self.command, self.private, [package], [identity])
         self.assertEqual(self.db_hashes(self.source_db), self.before)
+
+    def test_historical_obsoletes_without_target_matches_are_recorded_and_allowed(self):
+        identity = package_identity(self.command, self.obsoletes_historical)
+        self.assertEqual(set(identity['obsoletes']), {'fixture-base < 1', 'fixture-absent < 2'})
+        result = simulate(self.command, self.private, [self.obsoletes_historical], [identity])
+        self.assertTrue(result['rpm_test_passed'])
+        self.assertEqual(self.db_hashes(self.source_db), self.before)
+        self.assertFalse((self.private / 'usr/share/fixture-obsoletes-historical').exists())
 
     @unittest.skipUnless(shutil.which('rpm2archive'), 'requires RPM archive tooling')
     def test_regular_archive_tool_emits_newc_or_rejects_unsupported_format(self):

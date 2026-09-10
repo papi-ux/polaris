@@ -13,9 +13,10 @@ def package_identity(command, rpm):
     require(architecture in ('x86_64', 'noarch'), 'unsupported RPM architecture')
     caps = command('rpm', '-qp', '--qf', '[%{FILECAPS}\n]', rpm)['stdout'].decode('utf-8')
     require(all(value in ('', '(none)') for value in caps.splitlines()), 'RPM carries file capabilities')
-    require(not command('rpm', '-qp', '--obsoletes', rpm)['stdout'].strip(), 'extension package declares replacements')
+    obsoletes = command('rpm', '-qp', '--obsoletes', rpm)['stdout'].decode('utf-8').splitlines()
     scripts = command('rpm', '-qp', '--scripts', '--triggers', '--filetriggers', rpm)['stdout'].decode('utf-8')
-    return {'name': name, 'nevra': nevra, 'architecture': architecture, 'license': license_name, 'scripts': scripts}
+    return {'name': name, 'nevra': nevra, 'architecture': architecture, 'license': license_name,
+            'scripts': scripts, 'obsoletes': obsoletes}
 
 
 def database_packages(command, private):
@@ -32,6 +33,10 @@ def simulate(command, private, packages, identities):
     require(not installed.intersection(item['name'] for item in identities), 'candidate would replace an installed base package')
     # No repository resolver and no network path. --test performs dependency,
     # conflict, file and transaction checks without installing or running scripts.
+    # --install (never --upgrade) treats matching Obsoletes as conflicts. Allow
+    # historical declarations whose version ranges do not match this target;
+    # signed Fedora dependencies can carry them without replacing a base RPM.
+    # https://rpm.org/docs/latest/manual/dependencies.html
     command('rpm', '--noplugins', '--root', private, '--dbpath', '/usr/share/rpm', '--install', '--test',
             '--noscripts', '--notriggers', '--nosignature', *packages, timeout=300)
     require(database_packages(command, private) == before, 'test transaction changed private RPMDB inventory')
