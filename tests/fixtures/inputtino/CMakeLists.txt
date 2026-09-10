@@ -30,3 +30,23 @@ foreach(target test_inputtino_reports test_inputtino_device)
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES TIMEOUT 30)
 endforeach()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(INPUTTINO_TEST_EVDEV REQUIRED IMPORTED_TARGET libevdev)
+add_executable(test_inputtino_phys physical_identity.cpp)
+foreach(name keyboard touchscreen pentablet trackpad joypad_xbox joypad_nintendo joypad_ps)
+    target_sources(test_inputtino_phys PRIVATE "${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/${name}.cpp")
+endforeach()
+target_sources(test_inputtino_phys PRIVATE "${POLARIS_INPUTTINO_SOURCE_DIR}/src/c-bindings/mouse.cpp")
+target_compile_features(test_inputtino_phys PRIVATE cxx_std_20)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/inputtino/export_static.h" "#pragma once\n#define LIBINPUTTINO_EXPORT\n")
+target_include_directories(test_inputtino_phys PRIVATE
+    "${POLARIS_INPUTTINO_SOURCE_DIR}/include"
+    "${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/include"
+    "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_definitions(test_inputtino_phys PRIVATE INPUTTINO_STATIC_DEFINE
+    POLARIS_TEST_MOUSE_SOURCE="${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/mouse.cpp")
+target_compile_options(test_inputtino_phys PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/uinput_boundary.hpp")
+target_link_libraries(test_inputtino_phys PRIVATE PkgConfig::INPUTTINO_TEST_EVDEV Threads::Threads)
+add_test(NAME test_inputtino_phys COMMAND test_inputtino_phys)
+set_tests_properties(test_inputtino_phys PROPERTIES TIMEOUT 30)
