@@ -929,23 +929,11 @@ TEST(DoctorResetContract, ClientSettingsPersistencePreservesExistingConfigAtomic
 
   EXPECT_EQ(persistence.find("file_handler::read_file"), std::string::npos);
   EXPECT_EQ(persistence.find("file_handler::write_file"), std::string::npos);
-  EXPECT_NE(persistence.find("fs::symlink_status"), std::string::npos);
-  EXPECT_NE(persistence.find("std::ifstream input"), std::string::npos);
-  EXPECT_NE(persistence.find("input.bad()"), std::string::npos);
-  EXPECT_NE(persistence.find("input.close()"), std::string::npos);
-  EXPECT_NE(persistence.find("input.fail()"), std::string::npos);
-  EXPECT_NE(persistence.find("const bool unchanged = std::all_of"), std::string::npos);
-  EXPECT_NE(persistence.find("if (unchanged)"), std::string::npos);
-  EXPECT_NE(persistence.find("config_file_update::apply"), std::string::npos);
-  EXPECT_NE(persistence.find("private_state_file::write_atomic"), std::string::npos);
-  EXPECT_NE(
-    persistence.find("private_state_file::write_status_e::not_committed"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    persistence.find("private_state_file::write_status_e::durability_uncertain"),
-    std::string::npos
-  );
+  EXPECT_NE(persistence.find("configuration_store::patch"), std::string::npos);
+  const auto store = source("src/configuration_store.cpp");
+  EXPECT_NE(store.find("config_file_update::apply"), std::string::npos);
+  EXPECT_NE(store.find("private_state_file::update_atomic"), std::string::npos);
+
 }
 
 TEST(DoctorResetContract, ExactTopologyAssertionHasItsOwnCapabilityVersion) {

@@ -7,6 +7,7 @@
 #include <src/config.h>
 #include <src/doctor_actions.h>
 #include <src/adaptive_bitrate.h>
+#include <src/private_state_file.h>
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -73,6 +74,21 @@ namespace {
     }
 
     std::filesystem::path path;
+  };
+
+  struct LiveConfigurationGuard {
+    std::string old = config::sunshine.config_file;
+    std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("polaris-live-config-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    LiveConfigurationGuard() {
+      std::filesystem::create_directory(directory);
+      config::sunshine.config_file = (directory / "polaris.conf").string();
+      (void) private_state_file::write_atomic(config::sunshine.config_file, "adaptive_bitrate_enabled = disabled\n");
+    }
+    ~LiveConfigurationGuard() {
+      config::sunshine.config_file = old;
+      std::filesystem::remove_all(directory);
+    }
   };
 
   void mark_doctor_pacing_window_confirmed(stream_stats::stats_t &stats) {
@@ -2621,6 +2637,7 @@ TEST(DoctorActionTests, OlderStreamCannotAutoFixAfterTheNewestViewerLeaves) {
 }
 
 TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
+  LiveConfigurationGuard live_configuration;
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -2706,6 +2723,7 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
 }
 
 TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) {
+  LiveConfigurationGuard live_configuration;
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -2842,6 +2860,7 @@ TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
 }
 
 TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGeneration) {
+  LiveConfigurationGuard live_configuration;
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
