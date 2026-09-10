@@ -671,3 +671,8 @@ if (BUILD_FULL_TESTS)
             test_polaris_video
     )
 endif ()
+
+# Exercise actual inputtino code with private in-memory/socket transports.
+if(UNIX AND NOT APPLE)
+    add_subdirectory(fixtures/inputtino)
+endif()
