@@ -36,7 +36,12 @@ contain small synthetic examples, not usable package locks.
 | `polaris-rpm-build` | The build producer's exact source, RPM and executable identities, NEVRA, `x86_64`, and `release` build mode |
 | `polaris-sysext-dependencies` | Supported target image digests, key files with full primary fingerprints, and each dependency's path/hash/name/NEVRA/architecture/license/credential-free HTTPS acquisition URL |
 | `polaris-sysext-target` | Fedora 44 Bazzite variant, image digest, OSTree commit, architecture, target metadata inventory reference, RPMDB and policy paths |
-| `polaris-sysext-toolchain` | Immutable builder digest and exact path/hash/package NEVRA for Python, RPM, rpmkeys, rpm2cpio, GPG, setfiles, mksquashfs and unsquashfs |
+| `polaris-sysext-toolchain` | Immutable builder digest and exact path/hash/package NEVRA for Python, RPM, rpmkeys, rpm2archive, GPG, setfiles, mksquashfs and unsquashfs |
+
+Pin the regular `rpm2archive` executable, with support for `--nocompression
+--format=cpio`. The assembler captures its standard output through a bounded pipe.
+Modern RPM packages provide `rpm2cpio` as a symlink; tool admission still rejects
+symlinks and does not resolve them implicitly.
 
 The target inventory has kind `polaris-sysext-target-metadata`, and `files` maps
 relative paths to `{ "sha256": "...", "mode": 420 }` records. Include every

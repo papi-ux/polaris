@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from bounded import require, relative_path
 
 HEX = re.compile(r'[0-9a-f]+\Z')
-TOOLS = {'rpm', 'rpmkeys', 'rpm2cpio', 'mksquashfs', 'unsquashfs', 'setfiles', 'gpg', 'python3'}
+TOOLS = {'rpm', 'rpmkeys', 'rpm2archive', 'mksquashfs', 'unsquashfs', 'setfiles', 'gpg', 'python3'}
 
 
 def object_keys(value, keys, label):

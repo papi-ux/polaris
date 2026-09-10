@@ -1218,6 +1218,7 @@ jobs:
           command -v rpm
           command -v rpmbuild
           command -v rpmsign
+          command -v rpm2archive
           command -v gpg
           python3 -m unittest discover -s scripts/packaging/sysext -p 'test_*.py'
 
