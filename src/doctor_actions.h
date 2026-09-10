@@ -58,9 +58,10 @@ namespace doctor_actions {
     paired_global_control_guard_t(paired_global_control_guard_t &&) noexcept = default;
     paired_global_control_guard_t &operator=(paired_global_control_guard_t &&) noexcept = default;
 
-    explicit operator bool() const noexcept { return authorized_; }
+    explicit operator bool() const noexcept { return authorized_ && lock_.owns_lock(); }
     bool set_adaptive_enabled(bool enabled);
     void release() noexcept {
+      authorized_ = false;
       if (lock_.owns_lock()) lock_.unlock();
     }
 
@@ -70,6 +71,7 @@ namespace doctor_actions {
       std::uint64_t session_generation,
       std::string_view launch_instance_id
     );
+    friend paired_global_control_guard_t acquire_admin_global_control();
 
     paired_global_control_guard_t(std::unique_lock<std::mutex> lock,
                                   bool authorized) noexcept:
@@ -86,6 +88,9 @@ namespace doctor_actions {
     std::uint64_t session_generation = 0,
     std::string_view launch_instance_id = {}
   );
+
+  /** Authenticated web admin: serialize with session handoff and paired writers. */
+  paired_global_control_guard_t acquire_admin_global_control();
 
   /** Atomically apply a live paired-client bitrate only for the sole owner. */
   bool set_owner_live_bitrate(std::string_view owner_uuid,

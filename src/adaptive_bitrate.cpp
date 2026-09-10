@@ -30,6 +30,9 @@ namespace adaptive_bitrate {
   static std::condition_variable state_changed;
 
   static config_t current_config;
+  static std::uint64_t scope_generation = 0;
+  static std::string scope_app_session_id;
+  static bool scope_exclusive = false;
   static std::atomic<bool> enabled {false};
   static std::atomic<bool> runtime_update_supported {false};
   static std::atomic<int> base_bitrate_kbps {0};
@@ -63,6 +66,7 @@ namespace adaptive_bitrate {
   // The encoder thread is the only authority for what was actually applied.
   // Protected by state_mutex.
   static int encoder_applied_bitrate_kbps = 0;
+  static int last_confirmed_bitrate_kbps = 0;
   static std::uint64_t encoder_applied_revision = 0;
   static std::chrono::steady_clock::time_point encoder_applied_at {};
   // -1 is unknown for a new stream, 0 allows quality restoration, and 1 is a
@@ -407,6 +411,12 @@ namespace adaptive_bitrate {
   state_t get_state() {
     std::lock_guard<std::mutex> lock(state_mutex);
     state_t state;
+    state.session_generation = scope_generation;
+    state.app_session_id = scope_app_session_id;
+    state.session_exclusive = scope_exclusive;
+    state.configured_enabled = current_config.enabled;
+    state.feedback_initialized = initialized;
+    state.applied_bitrate_kbps = encoder_applied_bitrate_kbps;
     state.enabled = enabled.load(std::memory_order_relaxed);
     state.runtime_update_supported = runtime_update_supported.load(std::memory_order_relaxed);
     const bool doctor_override = doctor_override_active.load(std::memory_order_relaxed);
@@ -606,6 +616,31 @@ namespace adaptive_bitrate {
     return live_bitrate_request_t {target, operator_revision};
   }
 
+  bool apply_live_bitrate_request(const live_bitrate_request_t &request,
+                                  const std::function<bool()> &apply) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (request.revision != operator_revision ||
+        request.target_bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed) ||
+        !runtime_update_supported.load(std::memory_order_relaxed)) return false;
+    if (apply()) {
+      encoder_applied_bitrate_kbps = request.target_bitrate_kbps;
+      last_confirmed_bitrate_kbps = request.target_bitrate_kbps;
+      encoder_applied_revision = request.revision;
+      encoder_applied_at = std::chrono::steady_clock::now();
+      pending_live_update_active.store(false, std::memory_order_relaxed);
+      state_changed.notify_all();
+    }
+    return true;
+  }
+
+  void set_session_scope(std::uint64_t generation, const std::string &app_session_id,
+                         bool exclusive) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    scope_generation = generation;
+    scope_app_session_id = app_session_id;
+    scope_exclusive = exclusive;
+  }
+
   bool begin_live_bitrate_session_recreation(
       std::uint64_t revision,
       int bitrate_kbps) {
@@ -637,6 +672,7 @@ namespace adaptive_bitrate {
       return;
     }
     encoder_applied_bitrate_kbps = bitrate_kbps;
+    last_confirmed_bitrate_kbps = bitrate_kbps;
     encoder_applied_revision = revision;
     encoder_applied_at = std::chrono::steady_clock::now();
     pending_live_update_active.store(false, std::memory_order_relaxed);
@@ -730,6 +766,12 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
+    // Disabling holds what the encoder actually applied, never an unacknowledged
+    // automatic increase. Re-enabling starts from that same live bitrate.
+    if (!enable && last_confirmed_bitrate_kbps > 0) {
+      target_bitrate_kbps.store(last_confirmed_bitrate_kbps, std::memory_order_relaxed);
+    }
+    current_config.enabled = enable;
     config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
     ++action_authority_revision;
@@ -769,6 +811,7 @@ namespace adaptive_bitrate {
     if (supported) {
       if (initial_encoder_bitrate_kbps > 0) {
         encoder_applied_bitrate_kbps = initial_encoder_bitrate_kbps;
+        last_confirmed_bitrate_kbps = initial_encoder_bitrate_kbps;
         encoder_applied_revision = operator_revision;
         encoder_applied_at = std::chrono::steady_clock::now();
       }
@@ -835,6 +878,7 @@ namespace adaptive_bitrate {
     base_bitrate_kbps.store(0, std::memory_order_relaxed);
     target_bitrate_kbps.store(0, std::memory_order_relaxed);
     encoder_applied_bitrate_kbps = 0;
+    last_confirmed_bitrate_kbps = 0;
     encoder_applied_revision = 0;
     encoder_applied_at = {};
     doctor_video_policy_class = -1;

@@ -17,6 +17,7 @@
 #include "video_rate.h"
 
 #include <cstddef>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -72,6 +73,20 @@ namespace video {
     return rate::valid(config.stream_rate) ? config.stream_rate : rate::fraction(config.framerate, 1);
   }
 
+  // Apply ANNOUNCE's stream request independently of the admitted launch rate.
+  // Keep the legacy integer bitrate budget and Warp fields alongside exact rates.
+  inline bool configure_announced_rates(config_t &config, int max_fps, int refresh_x100,
+                                       int launch_fps_millihertz, bool limit_framerate) {
+    const auto stream_rate = rate::from_wire(max_fps, refresh_x100);
+    if (!rate::valid(stream_rate) || launch_fps_millihertz <= 0) return false;
+    config.stream_rate = stream_rate;
+    config.encode_rate = limit_framerate ? rate::from_millihertz(launch_fps_millihertz) : stream_rate;
+    config.encodingFramerate = limit_framerate ? launch_fps_millihertz :
+      (max_fps > 1000 ? max_fps : max_fps * 1000);
+    config.framerate = max_fps > 4000 ? static_cast<int>(std::round(static_cast<float>(max_fps) / 1000)) : max_fps;
+    return true;
+  }
+
   inline AVRational encoding_framerate_to_rational(const config_t &config) {
     if (rate::valid(config.encode_rate)) return config.encode_rate;
     return config.encodingFramerate > 0 ? rate::from_millihertz(config.encodingFramerate) : framerate_to_rational(config);
@@ -86,6 +101,9 @@ namespace video {
   }
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
+
+  // Complete interactive Mirror Desktop capture setup before RTSP admission.
+  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);
 
   void free_ctx(AVCodecContext *ctx);
@@ -659,6 +677,10 @@ namespace video {
   bool active_encoder_runtime_supports_live_gpu_capture(const config_t &config);
 
 #ifdef POLARIS_TESTS
+  void with_capture_preparation_for_tests(
+    const std::function<bool(const config_t &, std::shared_ptr<void> &)> &prepare,
+    const std::function<void()> &body
+  );
   /** Own the supplied codec/converter through real frame submission and teardown. */
   std::vector<int> encode_and_destroy_avcodec_session_for_tests(
     avcodec_ctx_t context,

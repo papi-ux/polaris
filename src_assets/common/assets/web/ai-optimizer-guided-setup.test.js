@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
+
+enableAutoUnmount(afterEach)
 
 // The tab renders through the injected translator; resolve the real English
 // locale here so the assertions below keep reading the shipped copy.
@@ -93,7 +95,7 @@ describe('AI optimizer guided setup', () => {
       base_url: 'https://api.anthropic.com',
       cli_available: true,
       cli_authenticated: false,
-      cli_login_command: 'claude login',
+      cli_login_command: 'claude auth login',
       subscription_cli: 'Claude CLI',
       cache_count: 0,
       in_flight_requests: 0,
@@ -121,7 +123,86 @@ describe('AI optimizer guided setup', () => {
     expect(text).not.toContain('Build first stream profile')
     expect(text).toContain('Auth: Subscription, API Key')
     expect(text).toContain('Saved runtime')
-    expect(text).toContain('Run claude login')
+    expect(text).toContain('Run claude auth login')
+  })
+
+  it('shows Claude sign-in instructions even before runtime status is available', async () => {
+    mockState.status.value = null
+    const config = defaultConfig()
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    expect(wrapper.text()).toContain('claude auth login')
+    expect(wrapper.text()).toContain('same user running Polaris')
+    expect(wrapper.text()).toContain('no separate subscription sign-in')
+    expect(wrapper.text()).toContain('Polaris does not collect subscription credentials')
+    expect(wrapper.text()).toContain('Administrator-managed hooks and policy can still run')
+    expect(wrapper.text()).toContain('Polaris does not apply settings or run recovery actions from AI responses')
+    const profile = wrapper.findAll('button').find(button => button.text().includes('Use the local Claude subscription session.'))
+    await profile.trigger('click')
+    expect(config.ai_timeout_ms).toBe(30000)
+    wrapper.unmount()
+  })
+
+  it('distinguishes an unverified Claude login from a signed-in CLI', async () => {
+    mockState.status.value.cli_auth_verified = false
+    const wrapper = mountOptimizer()
+    await flushMounted()
+    expect(wrapper.text()).toContain('sign-in could not be verified')
+    mockState.status.value.cli_auth_verified = true
+    mockState.status.value.cli_authenticated = true
+    await nextTick()
+    expect(wrapper.text()).not.toContain('sign-in could not be verified')
+    expect(wrapper.text()).toContain('Signed in')
+    wrapper.unmount()
+  })
+
+  it('replaces the inherited five-second Claude timeout before testing a draft', async () => {
+    const config = defaultConfig()
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(30000)
+    const testButton = wrapper.findAll('button').find(button => button.text().includes('Test explanation'))
+    await testButton.trigger('click')
+    await flushMounted()
+    expect(mockAiOptimizer.testConnection.mock.calls[0][0]).toMatchObject({ ai_timeout_ms: 30000 })
+    wrapper.unmount()
+  })
+
+  it('uses the Claude timeout when selecting its provider card or subscription auth', async () => {
+    const config = defaultConfig({ ai_provider: 'gemini', ai_auth_mode: 'api_key', ai_use_subscription: 'disabled' })
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    const claudeCard = wrapper.findAll('button').find(button => button.text().includes('Claude') && !button.text().includes('Claude CLI'))
+    await claudeCard.trigger('click')
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(5000)
+    const subscriptionCard = wrapper.findAll('button').find(button => button.text().startsWith('Subscription'))
+    await subscriptionCard.trigger('click')
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(30000)
+    const openAiCard = wrapper.findAll('button').find(button => button.text().includes('OpenAI'))
+    await openAiCard.trigger('click')
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(5000)
+    await claudeCard.trigger('click')
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(30000)
+    wrapper.unmount()
+  })
+
+  it('preserves a longer custom Claude timeout through mounting and provider changes', async () => {
+    const config = defaultConfig({ ai_timeout_ms: 90000 })
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(90000)
+    const openAiCard = wrapper.findAll('button').find(button => button.text().includes('OpenAI'))
+    await openAiCard.trigger('click')
+    await flushMounted()
+    const claudeCard = wrapper.findAll('button').find(button => button.text().includes('Claude') && !button.text().includes('Claude CLI'))
+    await claudeCard.trigger('click')
+    await flushMounted()
+    expect(config.ai_timeout_ms).toBe(90000)
+    wrapper.unmount()
   })
 
   it('applies provider-card selection as the first guided setup step', async () => {
@@ -161,6 +242,53 @@ describe('AI optimizer guided setup', () => {
     expect(config.ai_auth_mode).toBe('none')
     expect(config.ai_timeout_ms).toBe(60000)
     expect(wrapper.find('input[type="number"][max="120000"]').exists()).toBe(true)
+  })
+
+  it('selects DeepSeek API settings without reusing another provider key', async () => {
+    vi.useFakeTimers()
+    const config = defaultConfig({ ai_api_key: 'previous-provider-key', has_ai_api_key: true })
+    const wrapper = mountOptimizer(config)
+    try {
+      await flushMounted()
+      const card = wrapper.findAll('button').find(button => button.text().includes('DeepSeek'))
+      await card.trigger('click')
+      await nextTick()
+      expect(config.ai_provider).toBe('deepseek')
+      expect(config.ai_model).toBe('deepseek-v4-flash')
+      expect(config.ai_base_url).toBe('https://api.deepseek.com')
+      expect(config.ai_auth_mode).toBe('api_key')
+      expect(config.ai_use_subscription).toBe('disabled')
+      expect(config.ai_timeout_ms).toBe(30000)
+      expect(config.ai_api_key).toBe('')
+      expect(config.clear_ai_api_key).toBe(true)
+      await vi.advanceTimersByTimeAsync(400)
+      expect(mockAiOptimizer.fetchModels).toHaveBeenLastCalledWith(expect.objectContaining({
+        ai_provider: 'deepseek', ai_api_key: '', clear_ai_api_key: true,
+      }))
+      await wrapper.find('input[placeholder="sk-..."]').setValue('new-deepseek-fixture-key')
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(400)
+      expect(mockAiOptimizer.fetchModels).toHaveBeenLastCalledWith(expect.objectContaining({
+        ai_provider: 'deepseek', ai_api_key: 'new-deepseek-fixture-key', clear_ai_api_key: false,
+      }))
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('preserves a saved DeepSeek configuration and custom timeout when opening the tab', async () => {
+    const config = defaultConfig({
+      ai_provider: 'deepseek', ai_model: 'deepseek-v4-pro', ai_auth_mode: 'api_key',
+      ai_base_url: 'https://api.deepseek.com/v1', ai_timeout_ms: 45000, has_ai_api_key: true,
+    })
+    const wrapper = mountOptimizer(config)
+    await flushMounted()
+    expect(config.ai_model).toBe('deepseek-v4-pro')
+    expect(config.ai_base_url).toBe('https://api.deepseek.com/v1')
+    expect(config.ai_timeout_ms).toBe(45000)
+    expect(config.clear_ai_api_key).toBe(false)
+    wrapper.unmount()
   })
 
   it('renders failed draft tests as structured actionable feedback', async () => {

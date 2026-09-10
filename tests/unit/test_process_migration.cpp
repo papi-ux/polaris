@@ -559,7 +559,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   };
   const auto begin_stop_body = function_source_between(
     source,
-    "bool session_lifecycle_gate_t::begin_stop()",
+    "bool session_lifecycle_gate_t::begin_stop(",
     "void session_lifecycle_gate_t::finish_stop(bool"
   );
   const auto snapshot_wait = begin_stop_body.find("_state != state_e::snapshotting");
@@ -693,13 +693,16 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   ASSERT_NE(stop_start, std::string::npos);
   ASSERT_NE(stop_end, std::string::npos);
   const auto stop_impl = source.substr(stop_start, stop_end - stop_start);
-  const auto claim = stop_impl.find("begin_stop()");
-  const auto rtsp_snapshot = stop_impl.find("rtsp_stream::session_snapshot(unique_id)");
+  const auto claim = stop_impl.find("begin_stop(");
+  const auto authorization = stop_impl.find("get_session_stop_snapshot_locked(");
+  const auto rtsp_snapshot = stop_impl.find("rtsp_stream::session_snapshot(unique_id)", claim);
   const auto rtsp_terminate = stop_impl.find("rtsp_stream::terminate_sessions()");
   const auto process_terminate = stop_impl.find("terminate_impl(");
   const auto stop_commit = stop_impl.find("stop_committed = true");
   const auto release = stop_impl.rfind("finish_stop(stop_committed)");
   ASSERT_NE(claim, std::string::npos);
+  ASSERT_NE(authorization, std::string::npos);
+  EXPECT_LT(authorization, claim);
   ASSERT_NE(rtsp_snapshot, std::string::npos);
   ASSERT_NE(rtsp_terminate, std::string::npos);
   ASSERT_NE(process_terminate, std::string::npos);
@@ -726,14 +729,14 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(lifecycle_handoff.find("return true"), std::string::npos);
 
   for (const auto &body : {
-         function_source_between(source, "void session_lifecycle_gate_t::begin_launch()", "std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation"),
+         function_source_between(source, "void session_lifecycle_gate_t::begin_launch(", "std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation"),
          function_source_between(source, "std::optional<std::uint64_t> session_lifecycle_gate_t::capture_launch_generation", "bool session_lifecycle_gate_t::try_begin_rtsp_launch()"),
-         function_source_between(source, "bool session_lifecycle_gate_t::try_begin_rtsp_launch()", "bool session_lifecycle_gate_t::try_begin_rtsp_launch(std::uint64_t"),
+         function_source_between(source, "bool session_lifecycle_gate_t::try_begin_rtsp_launch()", "bool session_lifecycle_gate_t::try_begin_rtsp_launch(\n"),
          function_source_between(source, "void session_lifecycle_gate_t::begin_snapshot()", "void session_lifecycle_gate_t::finish_snapshot()")
        }) {
     EXPECT_NE(body.find("_launch_to_stop_handoff"), std::string::npos);
   }
-  EXPECT_NE(stop_impl.find("[this, &stop_committed]"), std::string::npos);
+  EXPECT_NE(stop_impl.find("[this, &stop_committed, &pending_cancel]"), std::string::npos);
 
   const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
@@ -793,7 +796,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   EXPECT_NE(
-    launch_handler.find("execute_and_raise(*app_iter, launch_session)"),
+    launch_handler.find("execute_and_raise(*app_iter, launch_session, [&]()"),
     std::string::npos
   );
   EXPECT_NE(
@@ -801,10 +804,10 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   const auto launch_gate = launch_handler.find("raise_session_for_admitted_launch(");
-  const auto launch_raise_guard = launch_handler.find("if (!launch_session_raised && !proc::proc.raise_session_for_admitted_launch(launch_session))");
+  const auto launch_raise_guard = launch_handler.find("if (publish_error)");
   const auto launch_success = launch_handler.rfind("tree.put(\"root.<xmlattr>.status_code\", 200)");
   ASSERT_NE(launch_raise_guard, std::string::npos);
-  EXPECT_NE(launch_handler.substr(launch_raise_guard, launch_success - launch_raise_guard).find("status_code\", 409"), std::string::npos);
+  EXPECT_NE(launch_handler.substr(launch_raise_guard, launch_success - launch_raise_guard).find("status_code\", publish_error"), std::string::npos);
   EXPECT_LT(launch_gate, launch_success);
 
   EXPECT_EQ(resume_handler.find("rtsp_stream::launch_session_raise("), std::string::npos);
@@ -813,10 +816,10 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   const auto resume_gate = resume_handler.find("raise_session_for_admitted_launch(");
-  const auto resume_raise_guard = resume_handler.find("if (!proc::proc.raise_session_for_admitted_launch(launch_session))");
+  const auto resume_raise_guard = resume_handler.find("if (const auto publish_error = publish_authorized_launch(");
   const auto resume_success = resume_handler.find("tree.put(\"root.<xmlattr>.status_code\", 200)");
   ASSERT_NE(resume_raise_guard, std::string::npos);
-  EXPECT_NE(resume_handler.substr(resume_raise_guard, resume_success - resume_raise_guard).find("status_code\", 409"), std::string::npos);
+  EXPECT_NE(resume_handler.substr(resume_raise_guard, resume_success - resume_raise_guard).find("status_code\", publish_error"), std::string::npos);
   EXPECT_LT(resume_gate, resume_success);
 
   const auto rtsp = read_source_file_for_contract("src/rtsp.cpp");
@@ -4157,6 +4160,145 @@ TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPre
   EXPECT_FALSE(launch_session.virtual_display);
   EXPECT_TRUE(launch_session.user_locked_virtual_display)
     << "the semantic overrides this launch without mutating paired settings";
+}
+
+class ProcessResumeDisplayTests: public testing::Test {
+protected:
+  void SetUp() override {
+    config::video.linux_display.stream_mode = "headless_stream";
+    desktop.name = "Desktop";
+    desktop.uuid = "resume-display-test";
+    desktop.desktop_mirror = true;
+  }
+
+  void TearDown() override {
+    config::video.linux_display = saved_display;
+  }
+
+  std::shared_ptr<rtsp_stream::launch_session_t> request() {
+    auto session = std::make_shared<rtsp_stream::launch_session_t>();
+    session->resolved_profile_from_client = true;
+    session->expected_stream_mode = "desktop_display";
+    session->requested_fps = session->fps = 60000;
+    return session;
+  }
+
+  void activate(const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
+    // Match execute_impl's normalization of a successfully launched app.
+    proc::apply_app_display_semantics(desktop, *session);
+    process.set_active_launch_for_tests(desktop, session);
+  }
+
+  decltype(config::video.linux_display) saved_display = config::video.linux_display;
+  proc::ctx_t desktop {};
+  proc::proc_t process {boost::process::v1::environment {}, {}};
+};
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeAppliesAppSemanticsToFreshRequest) {
+  activate(request());
+  for (const bool paired_virtual : {false, true}) {
+    for (const std::string mode : {"", "headless_stream"}) {
+      SCOPED_TRACE(mode + (paired_virtual ? " paired virtual" : " default"));
+      auto resume = request();
+      resume->stream_mode = mode;
+      resume->virtual_display = paired_virtual;
+      resume->user_locked_virtual_display = paired_virtual;
+      ASSERT_FALSE(resume->mirror_desktop);
+
+      EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 0);
+      EXPECT_TRUE(resume->mirror_desktop);
+      EXPECT_FALSE(resume->virtual_display);
+      EXPECT_EQ(resume->user_locked_virtual_display, paired_virtual);
+      EXPECT_EQ(resume->stream_mode, mode);
+    }
+  }
+}
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsWrongExpectedTopology) {
+  activate(request());
+  auto resume = request();
+  resume->expected_stream_mode = "headless_stream";
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+}
+
+TEST_F(ProcessResumeDisplayTests, TakeoverResumePreservesExplicitAndConfiguredSelection) {
+  for (const bool explicit_selection : {false, true}) {
+    SCOPED_TRACE(explicit_selection);
+    config::video.linux_display.stream_mode =
+      explicit_selection ? "headless_stream" : "desktop_takeover";
+    auto active = request();
+    active->stream_mode = explicit_selection ? "desktop_takeover" : "";
+    active->expected_stream_mode = "desktop_takeover";
+    activate(active);
+    // execute_impl creates a virtual output after resolving takeover mode.
+    active->virtual_display = true;
+    ASSERT_FALSE(active->mirror_desktop);
+
+    auto resume = request();
+    resume->stream_mode = active->stream_mode;
+    resume->expected_stream_mode = "desktop_takeover";
+    resume->virtual_display = explicit_selection;
+    EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 0);
+    EXPECT_FALSE(resume->mirror_desktop);
+    EXPECT_EQ(resume->virtual_display, explicit_selection);
+    EXPECT_TRUE(active->virtual_display);
+
+    resume->mirror_desktop = true;
+    EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+  }
+}
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsChangeToTakeover) {
+  activate(request());
+  auto resume = request();
+  resume->stream_mode = "desktop_takeover";
+  resume->expected_stream_mode = "desktop_takeover";
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+  EXPECT_FALSE(resume->mirror_desktop);
+}
+
+TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsForcePrivateChangesInBothDirections) {
+  for (const bool active_force_private : {false, true}) {
+    SCOPED_TRACE(active_force_private);
+    auto active = request();
+    active->force_private_after_desktop_steam_shutdown = active_force_private;
+    activate(active);
+    auto resume = request();
+    resume->force_private_after_desktop_steam_shutdown = !active_force_private;
+    EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+    EXPECT_EQ(resume->force_private_after_desktop_steam_shutdown, !active_force_private);
+  }
+}
+
+TEST_F(ProcessResumeDisplayTests, NonDesktopResumeStillRequiresMatchingMirrorFlag) {
+  desktop.desktop_mirror = false;
+  auto active = request();
+  active->mirror_desktop = true;
+  activate(active);
+  auto resume = request();
+  resume->stream_mode = "desktop_display";
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
+  EXPECT_FALSE(resume->mirror_desktop);
+}
+
+TEST_F(ProcessResumeDisplayTests, ViewerKeepsActiveTakeoverSemantics) {
+  auto active = request();
+  active->stream_mode = "desktop_takeover";
+  active->expected_stream_mode = "desktop_takeover";
+  activate(active);
+  active->virtual_display = true;
+  auto viewer = request();
+  viewer->watch_only = true;
+  viewer->mirror_desktop = true;
+  viewer->virtual_display = true;
+  viewer->force_private_after_desktop_steam_shutdown = true;
+  viewer->expected_stream_mode = "desktop_takeover";
+
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->stream_mode, "desktop_takeover");
+  EXPECT_FALSE(viewer->mirror_desktop);
+  EXPECT_TRUE(viewer->virtual_display);
+  EXPECT_FALSE(viewer->force_private_after_desktop_steam_shutdown);
 }
 #endif
 

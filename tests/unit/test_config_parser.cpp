@@ -6,6 +6,7 @@
 
 #include <src/config.h>
 #include <src/nvenc/nvenc_config.h>
+#include <src/private_state_file.h>
 #include <src/utility.h>
 
 TEST(ConfigParserTests, ProtocolDecimalsUseDotAndRequireTheWholeValue) {
@@ -169,27 +170,53 @@ TEST(ConfigParserTests, ConcurrentVaapiSnapshotsNeverMixSavedSettings) {
 #ifdef __linux__
 TEST(ConfigParserTests, FailedConfigWriteDoesNotPublishVaapiSettings) {
   const auto saved = config::vaapi::snapshot();
-  auto restore = util::fail_guard([&] { config::vaapi::publish(saved); });
+  const auto directory = std::filesystem::temp_directory_path() / ("polaris-vaapi-write-failure-" + std::to_string(
+    std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto restore = util::fail_guard([&] {
+    private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::none);
+    config::vaapi::publish(saved);
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+  });
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+  const auto path = (directory / "polaris.conf").string();
   config::vaapi::publish({});
-  // /dev/full opens successfully; buffered output fails only when flushed.
-  ASSERT_NE(config::write_config_with_vaapi_settings("/dev/full",
-    "vaapi_quality = quality\nvaapi_rc = vbr\nvaapi_blbrc = enabled\n"), 0);
-  const auto after = config::vaapi::snapshot();
-  EXPECT_EQ(after.quality, config::vaapi::quality_e::automatic);
-  EXPECT_EQ(after.rc, config::vaapi::rc_e::automatic);
-  EXPECT_FALSE(after.blbrc.has_value());
+  ASSERT_EQ(config::write_config_with_vaapi_settings(path, ""), 0);
+  // The protected writer rejects device nodes before writing. Exercise failures
+  // after admission instead, and verify both the saved file and published state.
+  for (const auto fault : {private_state_file::write_fault_e::short_write,
+         private_state_file::write_fault_e::flush, private_state_file::write_fault_e::sync,
+         private_state_file::write_fault_e::rename}) {
+    SCOPED_TRACE(static_cast<int>(fault));
+    private_state_file::set_write_fault_for_tests(fault);
+    ASSERT_NE(config::write_config_with_vaapi_settings(path,
+      "vaapi_quality = quality\nvaapi_rc = vbr\nvaapi_blbrc = enabled\nvaapi_strict_rc_buffer = enabled\n"), 0);
+    const auto after = config::vaapi::snapshot();
+    EXPECT_EQ(after.quality, config::vaapi::quality_e::automatic);
+    EXPECT_EQ(after.rc, config::vaapi::rc_e::automatic);
+    EXPECT_FALSE(after.blbrc.has_value());
+    EXPECT_FALSE(after.strict_rc_buffer);
+    const auto persisted = private_state_file::read_secure(path, 4096);
+    ASSERT_TRUE(persisted);
+    EXPECT_TRUE(persisted.payload.empty());
+  }
 }
 #endif
 
 TEST(ConfigParserTests, SuccessfulConfigWritePublishesCompleteVaapiSettingsAndClearRestoresDefaults) {
   const auto saved = config::vaapi::snapshot();
-  const auto path = std::filesystem::temp_directory_path() / ("polaris-vaapi-config-" + std::to_string(
+  const auto directory = std::filesystem::temp_directory_path() / ("polaris-vaapi-config-" + std::to_string(
     std::chrono::steady_clock::now().time_since_epoch().count()));
   auto restore = util::fail_guard([&] {
     config::vaapi::publish(saved);
     std::error_code error;
-    std::filesystem::remove(path, error);
+    std::filesystem::remove_all(directory, error);
   });
+  // The atomic writer requires an owned parent that others cannot modify.
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+  const auto path = directory / "polaris.conf";
   ASSERT_EQ(config::write_config_with_vaapi_settings(path.string(),
     "vaapi_quality = balanced\nvaapi_rc = qvbr\nvaapi_blbrc = enabled\nvaapi_strict_rc_buffer = enabled\n"), 0);
   const auto after = config::vaapi::snapshot();

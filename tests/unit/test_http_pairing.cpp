@@ -26,6 +26,7 @@
 #include <src/config.h>
 #include <src/httpcommon.h>
 #include <src/nvhttp.h>
+#include <src/rtsp.h>
 
 using namespace nvhttp;
 using namespace std::literals;
@@ -730,6 +731,129 @@ TEST_F(PairingAccessPresetTest, ConcurrentRevocationRejectsEstablishedAuthorizat
   EXPECT_EQ(stale_authorizations.load(), 0);
 }
 
+TEST_F(PairingAccessPresetTest, RevocationDuringInteractiveLaunchRejectsPublicationWithAnotherClientPaired) {
+  TemporaryPairingState state {"interactive-revocation"};
+  auto first = std::make_shared<crypto::named_cert_t>();
+  first->uuid = "interactive-first";
+  first->cert = PUBLIC_CERT;
+  first->temporary_authorization = true;
+  ASSERT_TRUE(add_authorized_client_for_tests(first, crypto::PERM::_all));
+  auto second = std::make_shared<crypto::named_cert_t>();
+  second->uuid = "interactive-second";
+  second->cert = crypto::gen_creds("Second launch client", 2048).x509;
+  second->temporary_authorization = true;
+  ASSERT_TRUE(add_authorized_client_for_tests(second, crypto::PERM::_all));
+  const auto snapshot = resolve_authorized_client(first);
+  ASSERT_TRUE(snapshot);
+
+  std::promise<void> prompt_started, approve;
+  auto approval = approve.get_future();
+  std::atomic<int> publications {0};
+  auto request = std::async(std::launch::async, [&]() {
+    prompt_started.set_value();
+    approval.wait();
+    return publish_authorized_launch(snapshot, crypto::PERM::launch, [&]() {
+      ++publications;
+      return true;
+    });
+  });
+  prompt_started.get_future().wait();
+  EXPECT_EQ(unpair_client_result(first->uuid), client_mutation_result_t::success);
+  approve.set_value();
+  EXPECT_EQ(request.get(), 401);
+  EXPECT_EQ(publications.load(), 0);
+  EXPECT_TRUE(resolve_authorized_client(second));
+}
+
+TEST_F(PairingAccessPresetTest, LaunchPublicationRejectsChangedPermissionsAndGuestExpiration) {
+  TemporaryPairingState state {"interactive-policy-change"};
+  auto client = std::make_shared<crypto::named_cert_t>();
+  client->uuid = "interactive-policy";
+  client->cert = PUBLIC_CERT;
+  client->temporary_authorization = true;
+  ASSERT_TRUE(add_authorized_client_for_tests(client, crypto::PERM::_all));
+  const auto snapshot = resolve_authorized_client(client);
+  ASSERT_TRUE(snapshot);
+  int publications = 0;
+  const auto publish = [&]() { ++publications; return true; };
+  EXPECT_EQ(publish_authorized_launch(snapshot, crypto::PERM::launch, publish), 0);
+  auto changed = std::make_shared<crypto::named_cert_t>();
+  changed->uuid = client->uuid;
+  changed->cert = with_crlf_line_endings(PUBLIC_CERT);
+  changed->temporary_authorization = true;
+  ASSERT_TRUE(add_authorized_client_for_tests(changed, crypto::PERM::_default));
+  EXPECT_EQ(publish_authorized_launch(snapshot, crypto::PERM::launch, publish), 403);
+  EXPECT_EQ(publish_authorized_launch(snapshot, crypto::PERM::_allow_view, publish), 409);
+  const auto current = resolve_authorized_client(changed);
+  ASSERT_TRUE(current);
+  EXPECT_EQ(publish_authorized_launch(current, crypto::PERM::_allow_view, publish), 0);
+  EXPECT_TRUE(expire_temporary_client_authorization(current->uuid));
+  EXPECT_EQ(publish_authorized_launch(current, crypto::PERM::_allow_view, publish), 401);
+  EXPECT_EQ(publications, 2);
+}
+
+TEST_F(PairingAccessPresetTest, RevocationAfterPublicationCancelsOnlyThatPendingLaunch) {
+  TemporaryPairingState state {"pending-launch-revocation"};
+  auto client = std::make_shared<crypto::named_cert_t>();
+  client->uuid = "pending-guest";
+  client->cert = PUBLIC_CERT;
+  client->temporary_authorization = true;
+  ASSERT_TRUE(add_authorized_client_for_tests(client, crypto::PERM::_all));
+  const auto snapshot = resolve_authorized_client(client);
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 62801;
+  launch->unique_id = client->uuid;
+  std::weak_ptr<void> preparation;
+  {
+    auto lease = std::make_shared<int>(1);
+    preparation = lease;
+    launch->capture_preparation.store(lease);
+  }
+  ASSERT_EQ(publish_authorized_launch(snapshot, crypto::PERM::launch, [&]() {
+    return rtsp_stream::launch_session_raise(launch);
+  }), 0);
+  rtsp_stream::cancel_pending_launch_for_client("another-client");
+  EXPECT_FALSE(launch->is_cancelled());
+  EXPECT_FALSE(preparation.expired());
+  EXPECT_TRUE(expire_temporary_client_authorization(client->uuid));
+  EXPECT_TRUE(launch->is_cancelled());
+  EXPECT_TRUE(preparation.expired());
+  EXPECT_EQ(rtsp_stream::session_snapshot(client->uuid).pending_sessions, 0);
+}
+
+TEST_F(PairingAccessPresetTest, PublicationAndGuestRevocationShareOneCommitBoundary) {
+  auto client = std::make_shared<crypto::named_cert_t>();
+  client->uuid = "serialized-guest";
+  client->cert = PUBLIC_CERT;
+  client->temporary_authorization = true;
+  ASSERT_TRUE(add_authorized_client_for_tests(client, crypto::PERM::_all));
+  const auto snapshot = resolve_authorized_client(client);
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 62802;
+  launch->unique_id = client->uuid;
+  std::promise<void> publishing, release, revoking;
+  auto release_publication = release.get_future().share();
+  auto request = std::async(std::launch::async, [&]() {
+    return publish_authorized_launch(snapshot, crypto::PERM::launch, [&]() {
+      publishing.set_value();
+      release_publication.wait();
+      return rtsp_stream::launch_session_raise(launch);
+    });
+  });
+  publishing.get_future().wait();
+  auto mutation = std::async(std::launch::async, [&]() {
+    revoking.set_value();
+    return expire_temporary_client_authorization(client->uuid);
+  });
+  revoking.get_future().wait();
+  EXPECT_EQ(mutation.wait_for(20ms), std::future_status::timeout);
+  release.set_value();
+  EXPECT_EQ(request.get(), 0);
+  EXPECT_TRUE(mutation.get());
+  EXPECT_TRUE(launch->is_cancelled());
+  EXPECT_EQ(rtsp_stream::session_snapshot(client->uuid).pending_sessions, 0);
+}
+
 TEST_F(PairingAccessPresetTest, SameUuidDifferentCertificateRejectsEstablishedRequestSnapshot) {
   TemporaryPairingState state {"same-uuid-different-certificate"};
   auto original = std::make_shared<crypto::named_cert_t>();
@@ -782,7 +906,7 @@ TEST_F(PairingAccessPresetTest, ParsedPolarisPathPersistsNovaClientFamily) {
 }
 
 TEST_F(PairingAccessPresetTest, PolarisMutationHandlersRenderTheCommittedLiveClient) {
-  const auto source_path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "src/nvhttp.cpp";
+  const auto source_path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/nvhttp.cpp";
   std::ifstream source_stream(source_path);
   ASSERT_TRUE(source_stream.is_open());
   const std::string source {

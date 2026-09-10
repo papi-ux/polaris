@@ -66,6 +66,12 @@ namespace cuda {
   using cdf_t = util::safe_ptr<CudaFunctions, cff>;
 
   static cdf_t cdf;
+#ifdef POLARIS_TESTS
+  static thread_local ram_conversion_stream_hook_t ram_conversion_stream_hook;
+  ram_conversion_stream_hook_t set_ram_conversion_stream_hook_for_tests(ram_conversion_stream_hook_t hook) {
+    return std::exchange(ram_conversion_stream_hook, hook);
+  }
+#endif
 
   inline static int check(CUresult result, const std::string_view &sv) {
     if (result != CUDA_SUCCESS) {
@@ -144,14 +150,13 @@ namespace cuda {
         }
       }
 
-      auto cuda_ctx = (AVCUDADeviceContext *) hwframe_ctx->device_ctx->hwctx;
-
       stream = make_stream();
       if (!stream) {
         return -1;
       }
 
-      cuda_ctx->stream = stream.get();
+      // NVENC already captured the device context's stream during codec open.
+      // Keep it intact and complete our conversion stream before handing back a frame.
 
       auto sws_opt = sws_t::make(width, height, frame->width, frame->height, width * 4);
       if (!sws_opt) {
@@ -168,7 +173,7 @@ namespace cuda {
     void apply_colorspace() override {
       sws.apply_colorspace(colorspace);
 
-      auto tex = tex_t::make(height, width * 4);
+      auto tex = tex_t::make(height, width);
       if (!tex) {
         return;
       }
@@ -190,7 +195,13 @@ namespace cuda {
         return;
       }
 
-      sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex->texture.linear, stream.get(), {frame->width, frame->height, 0, 0});
+      complete_conversion(sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex->texture.linear, stream.get(), {frame->width, frame->height, 0, 0}));
+    }
+
+    int complete_conversion(int result) {
+      // Always wait, including partially submitted work on an error path.
+      const int sync = check(cdf->cuStreamSynchronize(stream.get()), "Couldn't complete CUDA conversion: "sv);
+      return result || sync ? -1 : 0;
     }
 
     cudaTextureObject_t tex_obj(const tex_t &tex) const {
@@ -211,7 +222,11 @@ namespace cuda {
   class cuda_ram_t: public cuda_t {
   public:
     int convert(platf::img_t &img) override {
-      return sws.load_ram(img, tex.array) || sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(tex), stream.get());
+      if (sws.load_ram(img, tex.array)) return -1;
+#ifdef POLARIS_TESTS
+      if (ram_conversion_stream_hook) ram_conversion_stream_hook(stream.get());
+#endif
+      return complete_conversion(sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(tex), stream.get()));
     }
 
     int set_frame(AVFrame *frame, AVBufferRef *hw_frames_ctx) override {
@@ -219,7 +234,7 @@ namespace cuda {
         return -1;
       }
 
-      auto tex_opt = tex_t::make(height, width * 4);
+      auto tex_opt = tex_t::make(height, width);
       if (!tex_opt) {
         return -1;
       }
@@ -235,7 +250,7 @@ namespace cuda {
   class cuda_vram_t: public cuda_t {
   public:
     int convert(platf::img_t &img) override {
-      return sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(((img_t *) &img)->tex), stream.get());
+      return complete_conversion(sws.convert(frame->data[0], frame->data[1], frame->linesize[0], frame->linesize[1], tex_obj(((img_t *) &img)->tex), stream.get()));
     }
   };
 
@@ -458,14 +473,10 @@ namespace cuda {
       this->sws = std::move(*sws_opt);
       this->nv12 = std::move(*nv12_opt);
 
-      auto cuda_ctx = (AVCUDADeviceContext *) hw_frames_ctx->device_ctx->hwctx;
-
       stream = make_stream();
       if (!stream) {
         return -1;
       }
-
-      cuda_ctx->stream = stream.get();
 
       CU_CHECK(cdf->cuGraphicsGLRegisterImage(&y_res, nv12->tex[0], GL_TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY), "Couldn't register Y plane texture");
       CU_CHECK(cdf->cuGraphicsGLRegisterImage(&uv_res, nv12->tex[1], GL_TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY), "Couldn't register UV plane texture");
@@ -576,7 +587,8 @@ namespace cuda {
         cdf->cuGraphicsUnmapResources(2, resources, stream.get()),
         "Couldn't unmap GL textures from CUDA: "sv
       );
-      return copy_failed || unmap_failed ? -1 : 0;
+      const bool sync_failed = check(cdf->cuStreamSynchronize(stream.get()), "Couldn't complete GL to CUDA frame copy: "sv);
+      return copy_failed || unmap_failed || sync_failed ? -1 : 0;
     }
 
     /**
@@ -716,7 +728,6 @@ namespace cuda {
       if (!stream) {
         return -1;
       }
-      device_ctx->stream = stream.get();
 
       auto sws_opt = sws_t::make(width, height, frame->width, frame->height, width * 4);
       if (!sws_opt) {
@@ -725,7 +736,7 @@ namespace cuda {
       sws = std::move(*sws_opt);
       linear_interpolation = width != frame->width || height != frame->height;
 
-      staging_tex = tex_t::make(height, width * 4);
+      staging_tex = tex_t::make(height, width);
       if (!staging_tex) {
         return -1;
       }
@@ -748,8 +759,11 @@ namespace cuda {
         return -1;
       }
       const int result = convert_inner(static_cast<egl::img_descriptor_t &>(img));
+      // Also cover cached-frame, blank and mmap fallback conversions before
+      // NVENC reads the frame or this thread releases the CUDA context.
+      const int sync = check(cdf->cuStreamSynchronize(stream.get()), "Couldn't complete DMA-BUF CUDA conversion: "sv);
       cdf->cuCtxPopCurrent(&popped);
-      return result;
+      return result || sync ? -1 : 0;
     }
 
   private:
@@ -2044,7 +2058,7 @@ namespace cuda {
         img->pixel_pitch = 4;
         img->row_pitch = img->width * img->pixel_pitch;
 
-        auto tex_opt = tex_t::make(height, width * img->pixel_pitch);
+        auto tex_opt = tex_t::make(height, width);
         if (!tex_opt) {
           return nullptr;
         }

@@ -583,22 +583,22 @@ namespace proc {
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
-    bool elevated;
-    bool auto_detach;
-    bool wait_all;
-    bool virtual_display;
-    bool virtual_display_primary;
+    bool elevated = false;
+    bool auto_detach = false;
+    bool wait_all = false;
+    bool virtual_display = false;
+    bool virtual_display_primary = false;
     bool desktop_mirror = false;
     // Per-app twin of the closeDesktopSteamForPrivate launch parameter: when
     // desktop Steam blocks a private launch of this app, shut it down and
     // proceed instead of refusing.
     bool close_desktop_steam_for_private = false;
-    bool use_app_identity;
-    bool per_client_app_identity;
-    bool allow_client_commands;
-    bool terminate_on_pause;
-    int  scale_factor;
-    std::chrono::seconds exit_timeout;
+    bool use_app_identity = false;
+    bool per_client_app_identity = false;
+    bool allow_client_commands = false;
+    bool terminate_on_pause = false;
+    int  scale_factor = 0;
+    std::chrono::seconds exit_timeout {};
   };
 
   /**
@@ -682,19 +682,21 @@ namespace proc {
 
   class session_lifecycle_gate_t {
   public:
-    void begin_launch();
+    void begin_launch(const std::function<void()> &on_admitted = {});
     std::optional<std::uint64_t> capture_launch_generation() const;
     bool try_begin_rtsp_launch();
-    bool try_begin_rtsp_launch(std::uint64_t expected_generation);
+    bool try_begin_rtsp_launch(std::uint64_t expected_generation,
+                               const std::function<void()> &on_admitted = {});
     bool try_begin_rtsp_setup(std::uint64_t expected_generation);
     void finish_rtsp_setup();
-    bool begin_stop();
+    bool begin_stop(const std::function<void()> &cancel_launch = {},
+                    const std::function<bool()> &admissible = {});
     bool begin_stop_if(const std::function<bool()> &condition);
     bool transition_launch_to_stop();
     void begin_snapshot();
     bool try_begin_snapshot();
     void finish_snapshot();
-    void finish_launch();
+    void finish_launch(const std::function<void()> &before_release = {});
     void finish_stop(bool committed = true);
     bool stop_in_progress() const;
 
@@ -778,12 +780,17 @@ namespace proc {
     bool launch_input_only_and_raise(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
-    int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
+                          const std::function<int()> &publish);
     int validate_resolved_profile_for_running_app(
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
       bool exact_private_refresh_reapply_will_run = false
     );
     bool raise_session_for_admitted_launch(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int prepare_capture_for_admitted_launch(const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session);
+    std::shared_ptr<void> cancel_capture_preparation_for_shutdown(
+      const std::string &unique_id, std::string_view expected_token,
+      bool can_launch, bool require_exact_token);
     std::optional<std::uint64_t> capture_session_launch_generation() const;
     bool try_begin_session_launch(std::uint64_t expected_generation);
     void finish_session_launch();
@@ -858,7 +865,12 @@ namespace proc {
     );
 #endif
 #if defined(POLARIS_TESTS)
+    void set_active_launch_for_tests(
+      const ctx_t &app,
+      std::shared_ptr<rtsp_stream::launch_session_t> launch_session
+    );
     std::pair<const void *, const void *> session_lifecycle_identity_for_tests() const;
+    const void *capture_preparation_owner_for_tests() const;
     void with_session_lifecycle_lock_for_tests(const std::function<void()> &callback);
     bool begin_session_stop_for_tests();
     void finish_session_stop_for_tests(bool committed);
@@ -867,6 +879,10 @@ namespace proc {
   private:
     struct session_lifecycle_sync_t {
       std::recursive_mutex mutex;
+      std::atomic<std::shared_ptr<const char>> capture_owner {std::make_shared<const char>()};
+      // Protected by mutex; binds the launch metadata to its admission identity.
+      std::shared_ptr<const char> metadata_capture_owner {capture_owner.load()};
+      std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
     };
 
     void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
@@ -902,7 +918,8 @@ namespace proc {
       std::string_view expected_token,
       bool require_exact_token,
       const rtsp_stream::session_snapshot_t &rtsp_snapshot,
-      bool stop_in_progress
+      bool stop_in_progress,
+      bool refresh_running = true
     );
 
     int _app_id = 0;

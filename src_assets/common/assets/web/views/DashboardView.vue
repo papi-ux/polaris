@@ -100,7 +100,7 @@
                 <span class="mt-1.5 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
                 <h3 class="text-xl font-semibold leading-tight text-silver">{{ doctorHeadline }}</h3>
               </div>
-              <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta role="list" aria-label="Doctor confidence and Auto Quality status">
+              <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta role="list" aria-label="Doctor confidence and Live Tuning status">
                 <div v-if="doctorConfidenceLabel" class="control-chip" role="listitem">{{ doctorConfidenceLabel }}</div>
                 <div class="meta-pill" :class="autoQuality.toneClass" role="listitem">{{ autoQuality.compactLabel }}</div>
                 <div class="inline-flex" role="listitem">
@@ -313,7 +313,7 @@
               <span v-if="lastSessionChip" class="data-pill">{{ lastSessionChip }}</span>
               <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
               <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
-              <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ aiStatus?.enabled ? 'Auto Quality: On' : 'Auto Quality: Manual' }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
+              <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ liveTuningLabel }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
             </div>
           </div>
           <div class="flex shrink-0 flex-col items-end gap-3">
@@ -550,6 +550,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useLiveTuning } from '../composables/useLiveTuning'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
 import { useSessionHistory, formatDuration } from '../composables/useSessionHistory'
@@ -573,6 +574,7 @@ import {
 } from '../dashboard-summary'
 
 const { stats } = useStreamStats(1000)
+const { label: liveTuningLabel } = useLiveTuning()
 const { gpu, displays, audio, sessionType } = useSystemStats(3000)
 const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)
 

@@ -42,6 +42,7 @@ const providerOptions = [
     pill: 'text-warning-bright border-warning/30',
     subscriptionLabel: 'Claude CLI',
     subscriptionBinary: 'claude',
+    subscriptionLoginCommand: 'claude auth login',
     keyPlaceholder: 'sk-ant-api03-...',
     keyHintKey: 'config.ai_provider_anthropic_key_hint',
     profiles: [
@@ -118,6 +119,31 @@ const providerOptions = [
         descriptionKey: 'config.ai_profile_gemini_default_desc',
         model: 'gemini-2.5-flash',
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+        authMode: 'api_key'
+      }
+    ]
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    eyebrowKey: 'config.ai_provider_deepseek_eyebrow',
+    summaryKey: 'config.ai_provider_deepseek_summary',
+    defaultModel: 'deepseek-v4-flash',
+    defaultBaseUrl: 'https://api.deepseek.com',
+    defaultAuth: 'api_key',
+    defaultTimeout: 30000,
+    authModes: ['api_key'],
+    accent: 'border-info/30 bg-info/8 text-info-bright',
+    pill: 'text-info-bright border-info/30',
+    keyPlaceholder: 'sk-...',
+    keyHintKey: 'config.ai_provider_deepseek_key_hint',
+    profiles: [
+      {
+        id: 'deepseek-default',
+        name: 'DeepSeek API',
+        descriptionKey: 'config.ai_profile_deepseek_default_desc',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com',
         authMode: 'api_key'
       }
     ]
@@ -266,7 +292,7 @@ const draftMatchesRuntime = computed(() => {
     && aiStatus.value.auth_mode === config.value.ai_auth_mode
     && aiStatus.value.base_url === config.value.ai_base_url
     && (aiStatus.value.codex_home || '') === (config.value.ai_codex_home || '')
-    && Number(aiStatus.value.timeout_ms || 0) === (Number(config.value.ai_timeout_ms) || 5000)
+    && Number(aiStatus.value.timeout_ms || 0) === (Number(config.value.ai_timeout_ms) || providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode))
     && Number(aiStatus.value.cache_ttl_hours || 0) === (Number(config.value.ai_cache_ttl_hours) || 168)
 })
 
@@ -477,16 +503,31 @@ function subscriptionRuntimeTone(status) {
 
 function subscriptionRuntimeSummary(status) {
   if (!status) return $t('config.ai_not_loaded')
+  if (status.cli_available && status.cli_auth_verified === false) return $t('config.ai_cli_auth_unverified')
   if (status.cli_authenticated === true) return $t('config.ai_cli_signed_in')
   if (status.cli_authenticated === false && status.cli_login_command) return $t('config.ai_auth_run_command', { command: status.cli_login_command })
   return status.cli_available ? $t('config.ai_cli_detected') : $t('config.ai_cli_missing')
+}
+
+function providerDefaultTimeout(provider, authMode = provider?.defaultAuth) {
+  if (provider?.id === 'anthropic' && authMode === 'subscription') return 30000
+  return provider?.defaultTimeout || (provider?.id === 'local' ? 60000 : 5000)
+}
+
+function syncProviderTimeout(previousDefaultTimeout) {
+  const defaultTimeout = providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode)
+  const configuredTimeout = Number(config.value.ai_timeout_ms)
+  const inheritedFastDefault = configuredTimeout === 5000 && defaultTimeout > 5000
+  if (!configuredTimeout || inheritedFastDefault || configuredTimeout === previousDefaultTimeout) {
+    config.value.ai_timeout_ms = defaultTimeout
+  }
 }
 
 function applyProviderProfile(profile) {
   config.value.ai_model = profile.model || currentProvider.value.defaultModel
   config.value.ai_base_url = profile.baseUrl || currentProvider.value.defaultBaseUrl
   config.value.ai_auth_mode = profile.authMode || currentProvider.value.defaultAuth
-  config.value.ai_timeout_ms = profile.timeoutMs || (currentProvider.value.id === 'local' ? 60000 : 5000)
+  config.value.ai_timeout_ms = profile.timeoutMs || providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode)
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
   if (config.value.ai_auth_mode === 'none') {
@@ -534,12 +575,7 @@ function syncProviderDefaults(previousProviderId) {
     }
   }
 
-  const previousDefaultTimeout = previousProvider?.id === 'local' ? 60000 : 5000
-  const configuredTimeout = Number(config.value.ai_timeout_ms)
-  const legacyLocalDefault = provider.id === 'local' && configuredTimeout === 5000
-  if (!configuredTimeout || legacyLocalDefault || (previousProvider && configuredTimeout === previousDefaultTimeout)) {
-    config.value.ai_timeout_ms = provider.id === 'local' ? 60000 : 5000
-  }
+  syncProviderTimeout(previousProvider && providerDefaultTimeout(previousProvider))
 
   config.value.ai_use_subscription = config.value.ai_auth_mode === 'subscription' ? 'enabled' : 'disabled'
 
@@ -566,10 +602,17 @@ function scheduleModelRefresh() {
 }
 
 watch(() => config.value.ai_provider, (nextProvider, previousProvider) => {
+  // Never auto-discover models at a newly selected provider using a key that
+  // was entered or saved for the previous provider.
+  if (previousProvider && nextProvider !== previousProvider) {
+    config.value.ai_api_key = ''
+    config.value.clear_ai_api_key = true
+  }
   syncProviderDefaults(previousProvider)
 }, { immediate: true })
 
-watch(() => config.value.ai_auth_mode, (nextMode) => {
+watch(() => config.value.ai_auth_mode, (nextMode, previousMode) => {
+  syncProviderTimeout(providerDefaultTimeout(currentProvider.value, previousMode))
   config.value.ai_use_subscription = nextMode === 'subscription' ? 'enabled' : 'disabled'
   if (nextMode === 'none') {
     config.value.ai_api_key = ''
@@ -577,6 +620,7 @@ watch(() => config.value.ai_auth_mode, (nextMode) => {
 })
 
 watch(() => config.value.ai_api_key, (nextKey, previousKey) => {
+  if (nextKey) config.value.clear_ai_api_key = false
   if (!!nextKey !== !!previousKey) {
     scheduleModelRefresh()
   }
@@ -600,7 +644,7 @@ function buildDraftPayload() {
     ai_base_url: config.value.ai_base_url,
     ai_use_subscription: config.value.ai_use_subscription,
     ai_codex_home: config.value.ai_codex_home || '',
-    ai_timeout_ms: Number(config.value.ai_timeout_ms) || 5000,
+    ai_timeout_ms: Number(config.value.ai_timeout_ms) || providerDefaultTimeout(currentProvider.value, config.value.ai_auth_mode),
     ai_cache_ttl_hours: Number(config.value.ai_cache_ttl_hours) || 168
   }
 }
@@ -902,6 +946,9 @@ onBeforeUnmount(() => {
               <div v-if="currentSubscriptionLoginCommand" class="text-xs text-storm mt-2">
                 {{ $t('config.ai_subscription_login_copy', { command: currentSubscriptionLoginCommand }) }}
               </div>
+              <p v-if="config.ai_provider === 'anthropic'" class="text-xs text-storm mt-2">
+                {{ $t('config.ai_claude_host_policy_copy') }}
+              </p>
             </div>
             <div v-if="config.ai_provider === 'openai'">
               <label class="block text-sm font-medium text-silver mb-1">{{ $t('config.ai_codex_home_label') }}</label>

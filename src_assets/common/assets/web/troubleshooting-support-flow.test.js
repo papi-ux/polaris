@@ -66,7 +66,7 @@ describe('Troubleshooting self-service support flow', () => {
     expect(source).toContain('AI_DOCTOR_EXPLANATION_CATEGORIES')
     expect(locale).toContain('Disabled unless you configure AI')
     expect(locale).toContain('Ollama or LM Studio')
-    expect(locale).toContain('AI cannot execute recovery actions')
+    expect(locale).toContain('Polaris does not apply settings or run recovery actions from AI responses')
   })
 
   it('keeps live provider controls separate from the anonymized support bundle', () => {

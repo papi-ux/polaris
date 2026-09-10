@@ -476,6 +476,7 @@ namespace stream {
 
   struct session_t {
     config_t config;
+    std::shared_ptr<void> capture_preparation;
 
     safe::mail_t mail;
 
@@ -3049,6 +3050,7 @@ namespace stream {
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session) {
       auto session = std::make_shared<session_t>();
+      session->capture_preparation = launch_session.capture_preparation.load();
 
       auto mail = std::make_shared<safe::mail_raw_t>();
 
