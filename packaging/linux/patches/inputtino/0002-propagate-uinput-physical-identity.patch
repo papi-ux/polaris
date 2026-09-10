@@ -1,0 +1,303 @@
+--- a/src/uinput/include/inputtino/protected_types.hpp
++++ b/src/uinput/include/inputtino/protected_types.hpp
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <cstring>
++#include <fcntl.h>
++#include <linux/uinput.h>
++#include <sys/ioctl.h>
+ #include <inputtino/input.hpp>
+ #include <iostream>
+ #include <libevdev/libevdev-uinput.h>
+@@ -12,6 +15,35 @@
+ 
+ using libevdev_uinput_ptr = std::shared_ptr<libevdev_uinput>;
+ using libevdev_event_ptr = std::shared_ptr<input_event>;
++
++// Preserve the requested physical identity on the descriptor used for creation.
++// Empty identities retain libevdev's existing managed-descriptor behavior.
++static Result<libevdev_uinput_ptr> create_uinput_device(libevdev *dev, const std::string &phys) {
++  if (phys.find('\0') != std::string::npos) {
++    return Error("Physical identity contains a null byte");
++  }
++  struct PendingFd {
++    int fd = -1;
++    ~PendingFd() { if (fd >= 0) close(fd); }
++  } pending;
++  int fd = LIBEVDEV_UINPUT_OPEN_MANAGED;
++  if (!phys.empty()) {
++    pending.fd = open("/dev/uinput", O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    if (pending.fd < 0) return Error(strerror(errno));
++    fd = pending.fd;
++    if (ioctl(fd, UI_SET_PHYS, phys.c_str()) < 0) return Error(strerror(errno));
++  }
++  libevdev_uinput *device = nullptr;
++  auto error = libevdev_uinput_create_from_device(dev, fd, &device);
++  if (error != 0) return Error(strerror(-error));
++  // shared_ptr invokes this deleter even if its control-block allocation fails.
++  pending.fd = -1;
++  return libevdev_uinput_ptr{device, [fd](libevdev_uinput *value) {
++    libevdev_uinput_destroy(value);
++    if (fd >= 0) close(fd);
++  }};
++}
++
+ 
+ /**
+  * Given a uinput fd will read all queued events available at this time up to max_events
+--- a/src/uinput/keyboard.cpp
++++ b/src/uinput/keyboard.cpp
+@@ -21,8 +21,9 @@
+ }
+ 
+ Result<libevdev_uinput_ptr> create_keyboard(const DeviceDefinition &device) {
+-  auto dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -37,13 +38,7 @@
+     libevdev_enable_event_code(dev, EV_KEY, ev.second.linux_code, nullptr);
+   }
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ static std::optional<keyboard::KEY_MAP> press_btn(libevdev_uinput *kb, short key_code) {
+--- a/src/uinput/mouse.cpp
++++ b/src/uinput/mouse.cpp
+@@ -23,8 +23,9 @@
+ constexpr int ABS_MAX_HEIGHT = 12000;
+ 
+ static Result<libevdev_uinput_ptr> create_mouse(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -54,18 +55,13 @@
+   libevdev_enable_event_type(dev, EV_MSC);
+   libevdev_enable_event_code(dev, EV_MSC, MSC_SCAN, nullptr);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ static Result<libevdev_uinput_ptr> create_mouse_abs(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, (device.name + " (absolute)").c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -87,13 +83,7 @@
+   absinfo.maximum = ABS_MAX_HEIGHT;
+   libevdev_enable_event_code(dev, EV_ABS, ABS_Y, &absinfo);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ Mouse::Mouse() : _state(std::make_shared<MouseState>()) {}
+--- a/src/uinput/touchscreen.cpp
++++ b/src/uinput/touchscreen.cpp
+@@ -22,8 +22,9 @@
+ static constexpr int PRESSURE_MAX = 253;
+ 
+ Result<libevdev_uinput_ptr> create_touch_screen(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -63,13 +64,7 @@
+   // https://docs.kernel.org/input/event-codes.html#touchscreens
+   libevdev_enable_property(dev, INPUT_PROP_DIRECT);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ TouchScreen::TouchScreen() : _state(std::make_shared<TouchScreenState>()) {}
+--- a/src/uinput/pentablet.cpp
++++ b/src/uinput/pentablet.cpp
+@@ -28,8 +28,9 @@
+ static constexpr int RESOLUTION = 28;
+ 
+ Result<libevdev_uinput_ptr> create_tablet(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -67,13 +68,7 @@
+   // https://docs.kernel.org/input/event-codes.html#tablets
+   libevdev_enable_property(dev, INPUT_PROP_POINTER);
+   libevdev_enable_property(dev, INPUT_PROP_DIRECT);
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ PenTablet::PenTablet() : _state(std::make_shared<PenTabletState>()) {}
+--- a/src/uinput/trackpad.cpp
++++ b/src/uinput/trackpad.cpp
+@@ -23,8 +23,9 @@
+ static constexpr int PRESSURE_MAX = 253;
+ 
+ Result<libevdev_uinput_ptr> create_trackpad(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -70,13 +71,7 @@
+   libevdev_enable_property(dev, INPUT_PROP_POINTER);
+   libevdev_enable_property(dev, INPUT_PROP_BUTTONPAD);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ Trackpad::Trackpad() : _state(std::make_shared<TrackpadState>()) {}
+--- a/src/uinput/joypad_xbox.cpp
++++ b/src/uinput/joypad_xbox.cpp
+@@ -21,8 +21,9 @@
+ }
+ 
+ Result<libevdev_uinput_ptr> create_xbox_controller(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -67,13 +68,7 @@
+   libevdev_enable_event_code(dev, EV_FF, FF_RAMP, nullptr);
+   libevdev_enable_event_code(dev, EV_FF, FF_GAIN, nullptr);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ XboxOneJoypad::XboxOneJoypad() : _state(std::make_shared<XboxOneJoypadState>()) {}
+--- a/src/uinput/joypad_nintendo.cpp
++++ b/src/uinput/joypad_nintendo.cpp
+@@ -22,8 +22,9 @@
+ }
+ 
+ Result<libevdev_uinput_ptr> create_nintendo_controller(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -70,13 +71,7 @@
+   libevdev_enable_event_code(dev, EV_FF, FF_RAMP, nullptr);
+   libevdev_enable_event_code(dev, EV_FF, FF_GAIN, nullptr);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ SwitchJoypad::SwitchJoypad() : _state(std::make_shared<SwitchJoypadState>()) {}
+--- a/src/uinput/joypad_ps.cpp
++++ b/src/uinput/joypad_ps.cpp
+@@ -21,8 +21,9 @@
+ }
+ 
+ Result<libevdev_uinput_ptr> create_ps_controller(const DeviceDefinition &device) {
+-  libevdev *dev = libevdev_new();
+-  libevdev_uinput *uidev;
++  std::unique_ptr<libevdev, decltype(&libevdev_free)> dev_owner{libevdev_new(), libevdev_free};
++  if (!dev_owner) return Error("Unable to allocate input device definition");
++  libevdev *dev = dev_owner.get();
+ 
+   libevdev_set_name(dev, device.name.c_str());
+   libevdev_set_id_vendor(dev, device.vendor_id);
+@@ -70,13 +71,7 @@
+   libevdev_enable_event_code(dev, EV_FF, FF_RAMP, nullptr);
+   libevdev_enable_event_code(dev, EV_FF, FF_GAIN, nullptr);
+ 
+-  auto err = libevdev_uinput_create_from_device(dev, LIBEVDEV_UINPUT_OPEN_MANAGED, &uidev);
+-  libevdev_free(dev);
+-  if (err != 0) {
+-    return Error(strerror(-err));
+-  }
+-
+-  return libevdev_uinput_ptr{uidev, ::libevdev_uinput_destroy};
++  return create_uinput_device(dev, device.device_phys);
+ }
+ 
+ PS5Joypad::PS5Joypad(uint16_t vendor_id, std::array<unsigned char, 6> mac_address) : _state(std::make_shared<PS5JoypadState>()) {
