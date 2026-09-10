@@ -1068,8 +1068,13 @@ TEST_F(MultiseatWorkerClientConcurrency, TimeoutClosesBeforeAnotherRequestCanAcc
     }
     received->set_value();
     // Waiting for EOF is deterministic: the late ACK is attempted only after
-    // the first caller's timeout has retired the connection.
-    peer.await_close();
+    // a caller's timeout has retired the connection.
+    std::uint8_t byte {};
+    ssize_t count {};
+    do {
+      count = ::recv(fd, &byte, sizeof(byte), 0);
+    } while (count < 0 && errno == EINTR);
+    EXPECT_EQ(count, 0);  // No second request may reach the retired channel.
     EXPECT_FALSE(peer.send(message_e::heartbeat_ack));
     return true;
   },
@@ -1082,8 +1087,12 @@ TEST_F(MultiseatWorkerClientConcurrency, TimeoutClosesBeforeAnotherRequestCanAcc
     return client.heartbeat(channel_e::control);
   });
   EXPECT_EQ(first.get(), transport_status_e::timeout);
-  EXPECT_EQ(second.get(), transport_status_e::closed);
+  // Each caller has its own deadline. The queued caller may expire and retire
+  // the connection before the first caller is scheduled to handle its timeout.
+  const auto second_status = second.get();
+  EXPECT_TRUE(second_status == transport_status_e::closed || second_status == transport_status_e::timeout);
   EXPECT_FALSE(client.connected());
+  EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::closed);
 }
 
 TEST_F(MultiseatWorkerClientConcurrency, CloseCancelsPartialReadAndAllRequestWaiters) {

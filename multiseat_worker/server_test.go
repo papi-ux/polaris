@@ -25,7 +25,14 @@ type testWorker struct {
 
 func prepareTestWorkerPaths(t *testing.T, name string) workerPaths {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), name)
+	// Unix socket paths have a small fixed limit. Keep the random private root
+	// independent of the test name, including when CI supplies a private TMPDIR.
+	temporary, err := os.MkdirTemp("", "psw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(temporary) })
+	root := filepath.Join(temporary, name)
 	ipc := filepath.Join(root, "ipc")
 	auth := filepath.Join(root, "auth")
 	state := filepath.Join(root, "state")
