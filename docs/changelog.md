@@ -7,6 +7,20 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.4.6 - 2026-09-11
+
+A correctness update for Linux hosts that stream a private display, and for three failures that used to happen in silence. A game's stored virtual-display preference no longer overrides a host that already provides the session's display, a paused session no longer changes what the host recommends to other clients, and an encoder, a driver reading and a refused directory now each say what went wrong. Existing configurations and paired devices remain valid.
+
+- Stops an app's stored virtual-display preference, or a client that never locked its topology, from moving a private headless host onto the host virtual display. A locked client choice, the paired always-virtual default, an explicit session stream mode and desktop mirroring all still win, so the mode stays reachable by asking for it rather than by inheriting it (#649)
+- Keeps a session-scoped display override out of the topology the host recommends to other clients. The override stays in force for its own session, including the whole paused-session resume window, but is no longer read back as the host's own default, so one client's choice can no longer become the next client's recommendation (#649)
+- Reports when a host virtual display backend replaces an explicitly configured capture backend for that session, instead of substituting it silently (#649)
+- Records which input moved a session off the host's own topology, so a silent promotion no longer reads in the log exactly like a deliberate choice (#651)
+- Adds a contract over the launch topology resolver: across every registered path and every combination of the resolver's inputs, a private host must either defer to its own default or return a topology the caller named (#651)
+- Rejects nvidia-smi's failure banner as a driver version. The banner was stored in the driver cache, which is keyed on the tool's path and modification time rather than its content, so a single bad reading survived restarts and stopped the encoder cache from noticing a driver change; an already-poisoned cache now heals itself
+- Names the directory that refused to hold private state, along with its owner, its mode, the user Polaris runs as, and the remedy. One run under sudo leaves the per-user configuration directory owned by root, after which saving credentials fails permanently, and since v1.4.5 it failed with nothing in the log at all
+- Keeps libav errors at the default verbosity instead of silencing them. An encoder that cannot start because the graphics driver is older than the linked FFmpeg's nvenc API now reports both versions, rather than falling back to software encoding without explanation
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
+
 ## v1.4.5 - 2026-09-10
 
 A Bazzite and Live Tuning update matched with Nova v1.4.5. Live Tuning is one saved host preference that every console surface and paired client reads the same way, Bazzite Desktop launches prepare capture before the stream starts, hosts running a Steam Game Mode session learn why they go offline and how headless boot keeps them reachable, and `--setup-host` reports it. The supported Bazzite RPM path was exercised end to end on an NVIDIA Open host with a Retroid Pocket 6. Existing configurations and paired devices remain valid.
