@@ -82,6 +82,15 @@ namespace multiseat::input {
            matches(launch_id_, lifecycle_generation_, seat_.client_key, seat_.handle);
   }
 
+  worker_ipc::controller_connection_t worker_launch_connection_t::stream_connection(
+    const std::uint64_t stream_generation
+  ) const {
+    if (!registered_.load() || retired_.load() || !bound_to(stream_generation)) {
+      return {};
+    }
+    return connection_;
+  }
+
   void worker_launch_connection_t::retire() noexcept {
     retired_.store(true);
   }

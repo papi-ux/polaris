@@ -920,7 +920,7 @@ TEST_F(WorkerLaunchConnection, DestroyedAllocationRetiresReservationAndPacketDes
   EXPECT_EQ(owner->connection_for_tests().heartbeat(channel_e::control), transport_status_e::applied);
 }
 
-TEST_F(WorkerLaunchConnection, ReservedWorkerCannotStartHostMedia) {
+TEST_F(WorkerLaunchConnection, ReservedWorkerReachesTheStartItsWorkerWillServe) {
   const auto seat = prepare("client-a");
   auto value = launch(410, 510);
   select(value, seat);
@@ -932,12 +932,18 @@ TEST_F(WorkerLaunchConnection, ReservedWorkerCannotStartHostMedia) {
   const auto host_starts = std::make_shared<std::atomic_uint>(0);
   stream::session::set_host_start_abort_hook_for_tests([host_starts] { ++*host_starts; });
   EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
-  EXPECT_EQ(host_starts->load(), 0U);
+  // A reserved worker is no longer refused for want of a producer: its media
+  // comes from the worker, so the start now reaches the commit point, which
+  // this hook stands in for and then aborts. What a worker session must never
+  // reach is host capture, and that is pinned where it now lives, in the
+  // session's own threads (MultiseatWorkerMediaPump.AWorkerSessionCannotReachHostCapture).
+  EXPECT_EQ(host_starts->load(), 1U);
   EXPECT_EQ(stream::session::active_count(), before);
   EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPED);
   EXPECT_FALSE(owner->bound_to(stream::session::generation(*session)));
   EXPECT_FALSE(stream::session::packet_destination_for_tests(*session).acquire());
   EXPECT_TRUE(owner->connection_for_tests().connected());
+  // The aborted start never attached, so the worker is left exactly as found.
   EXPECT_FALSE(owner->connection_for_tests().data_plane_attached());
 }
 
