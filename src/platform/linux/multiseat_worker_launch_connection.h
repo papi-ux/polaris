@@ -45,6 +45,15 @@ namespace multiseat::input {
       std::string_view client_key, const seat_handle_t &handle,
       const std::shared_ptr<const std::atomic_bool> &requirement) const;
     void retire() noexcept;
+    /**
+     * The reserved connection, for the one consumer that carries this stream's
+     * media. Empty unless this reservation is still live and already claimed by
+     * exactly that stream generation, so no other stream and no retired
+     * reservation can reach the worker.
+     */
+    [[nodiscard]] worker_ipc::controller_connection_t stream_connection(
+      std::uint64_t stream_generation
+    ) const;
 
 #ifdef POLARIS_TESTS
     [[nodiscard]] const worker_ipc::controller_connection_t &connection_for_tests() const {

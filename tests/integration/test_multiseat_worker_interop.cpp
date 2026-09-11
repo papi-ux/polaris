@@ -14,6 +14,8 @@
 
 #if defined(__linux__) && defined(POLARIS_MULTISEAT_GO_INTEROP_BINARY)
 
+  #include "src/platform/linux/multiseat_worker_media_pump.h"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -269,7 +271,8 @@ namespace {
   child_process_t launch_go_worker(
     const authority_handle_t &authority,
     const std::filesystem::path &state,
-    const std::filesystem::path &log
+    const std::filesystem::path &log,
+    const std::string &server_test = "TestNativeControllerInteropServer"
   ) {
     // A second worker starts while the first client's reader threads run.
     // Build all strings in the parent; no allocation or setenv after fork.
@@ -278,7 +281,8 @@ namespace {
     for (auto &entry : environment) envp.push_back(entry.data());
     envp.push_back(nullptr);
     const char *binary = POLARIS_MULTISEAT_GO_INTEROP_BINARY;
-    const char *arguments[] {binary, "-test.run=^TestNativeControllerInteropServer$",
+    const std::string filter = "-test.run=^" + server_test + "$";
+    const char *arguments[] {binary, filter.c_str(),
       "-test.count=1", "-test.timeout=10s", nullptr};
     posix_spawn_file_actions_t actions;
     if (::posix_spawn_file_actions_init(&actions) != 0) return child_process_t {-1};
@@ -504,6 +508,95 @@ TEST(MultiseatWorkerInterop, NativeClientAuthenticatesRealGoWorkerOnBothChannels
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 
+
+TEST(MultiseatWorkerInterop, PumpCarriesRealWorkerMediaUnderAnAcknowledgedContract) {
+  temporary_tree_t tree;
+  authority_store_t store {tree.authority(), interop_capability()};
+  auto created = store.create(
+    interop_identity(),
+    "native-interop-media-71",
+    interop_provider_selection()
+  );
+  ASSERT_TRUE(created.created());
+  auto authority = std::move(*created.authority);
+  const auto log = tree.root() / "go-worker-media.log";
+  auto child = launch_go_worker(authority, tree.state(), log, "TestNativeMediaContractInteropServer");
+  ASSERT_GT(child.pid(), 0);
+  ASSERT_TRUE(wait_for_worker(authority, child.pid())) << read_log(log);
+
+  controller_client_t client;
+  const controller_client_options_t options {
+    .connect_timeout = 2s,
+    .handshake_timeout = 2s,
+    .io_timeout = 2s,
+  };
+  ASSERT_EQ(client.connect(authority, options), transport_status_e::applied) << read_log(log);
+
+  std::mutex delivered_mutex;
+  std::vector<std::pair<std::string, std::int64_t>> video;
+  std::vector<std::string> audio;
+  std::atomic<int> frames {0};
+  std::atomic<bool> stopping {false};
+  const multiseat::media::delivery_sinks_t sinks {
+    .video = [&](std::vector<std::uint8_t> &&bytes, const std::int64_t index, bool) {
+      std::scoped_lock lock {delivered_mutex};
+      video.emplace_back(std::string {bytes.begin(), bytes.end()}, index);
+      ++frames;
+    },
+    .audio = [&](std::vector<std::uint8_t> &&bytes) {
+      std::scoped_lock lock {delivered_mutex};
+      audio.emplace_back(bytes.begin(), bytes.end());
+      ++frames;
+    },
+  };
+  const multiseat::media::host_requests_t requests {
+    .stop_requested = [&] { return stopping.load(); },
+    .take_idr_request = [] { return false; },
+    .take_invalidation = [] { return std::optional<std::pair<std::int64_t, std::int64_t>> {}; },
+  };
+  // The worker holds its frames until the contract is acknowledged, so both
+  // arriving is itself the proof that the negotiation completed.
+  std::jthread stopper {[&] {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (frames.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(10ms);
+    }
+    stopping.store(true);
+  }};
+  const auto report = multiseat::media::run(
+    client.lease_connection(),
+    {
+      .width = 1920,
+      .height = 1080,
+      .fps = 60,
+      .video_format = 0,
+      .audio_channels = 2,
+    },
+    sinks,
+    requests
+  );
+
+  EXPECT_EQ(report.status, multiseat::media::pump_status_e::ended_on_shutdown) << read_log(log);
+  EXPECT_EQ(report.video_frames, 1U);
+  EXPECT_EQ(report.audio_frames, 1U);
+  EXPECT_EQ(report.contract.width, 1920);
+  EXPECT_EQ(report.contract.height, 1080);
+  EXPECT_EQ(report.contract.audio_sample_rate, 48000U);
+  {
+    std::scoped_lock lock {delivered_mutex};
+    ASSERT_EQ(video.size(), 1U);
+    EXPECT_EQ(video[0].first, "native-video");
+    EXPECT_EQ(video[0].second, 1);
+    ASSERT_EQ(audio.size(), 1U);
+    EXPECT_EQ(audio[0], "native-audio");
+  }
+
+  const auto status = child.wait_for(5s);
+  ASSERT_TRUE(status.has_value()) << read_log(log);
+  ASSERT_TRUE(WIFEXITED(*status)) << read_log(log);
+  EXPECT_EQ(WEXITSTATUS(*status), 0) << read_log(log);
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
 
 TEST_F(WorkerConnectionAuthority, RetainedLeaseRetiresWithItsSeatAndLeavesOtherSeatUsable) {
   const auto a = start("client-a");
@@ -920,7 +1013,7 @@ TEST_F(WorkerLaunchConnection, DestroyedAllocationRetiresReservationAndPacketDes
   EXPECT_EQ(owner->connection_for_tests().heartbeat(channel_e::control), transport_status_e::applied);
 }
 
-TEST_F(WorkerLaunchConnection, ReservedWorkerCannotStartHostMedia) {
+TEST_F(WorkerLaunchConnection, ReservedWorkerReachesTheStartItsWorkerWillServe) {
   const auto seat = prepare("client-a");
   auto value = launch(410, 510);
   select(value, seat);
@@ -932,12 +1025,18 @@ TEST_F(WorkerLaunchConnection, ReservedWorkerCannotStartHostMedia) {
   const auto host_starts = std::make_shared<std::atomic_uint>(0);
   stream::session::set_host_start_abort_hook_for_tests([host_starts] { ++*host_starts; });
   EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
-  EXPECT_EQ(host_starts->load(), 0U);
+  // A reserved worker is no longer refused for want of a producer: its media
+  // comes from the worker, so the start now reaches the commit point, which
+  // this hook stands in for and then aborts. What a worker session must never
+  // reach is host capture, and that is pinned where it now lives, in the
+  // session's own threads (MultiseatWorkerMediaPump.AWorkerSessionCannotReachHostCapture).
+  EXPECT_EQ(host_starts->load(), 1U);
   EXPECT_EQ(stream::session::active_count(), before);
   EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPED);
   EXPECT_FALSE(owner->bound_to(stream::session::generation(*session)));
   EXPECT_FALSE(stream::session::packet_destination_for_tests(*session).acquire());
   EXPECT_TRUE(owner->connection_for_tests().connected());
+  // The aborted start never attached, so the worker is left exactly as found.
   EXPECT_FALSE(owner->connection_for_tests().data_plane_attached());
 }
 
