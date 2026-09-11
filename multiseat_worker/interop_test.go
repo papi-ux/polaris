@@ -83,3 +83,91 @@ func TestNativeControllerInteropServer(t *testing.T) {
 		t.Fatal("native controller input did not reach the worker data plane")
 	}
 }
+
+// TestNativeMediaContractInteropServer serves one worker that announces a
+// media contract and then produces frames, but only after the controller has
+// acknowledged that contract. The native pump drives it from the other side.
+func TestNativeMediaContractInteropServer(t *testing.T) {
+	if os.Getenv("POLARIS_NATIVE_INTEROP") != "1" {
+		t.Skip("native controller interop helper is not active")
+	}
+	if os.Geteuid() == 0 {
+		t.Fatal("native controller interop refuses root")
+	}
+	lookup := os.LookupEnv
+	workloadKindValue, err := requiredEnvironment(lookup, "POLARIS_INTEROP_WORKLOAD_KIND")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workloadID, err := requiredEnvironment(lookup, "POLARIS_INTEROP_WORKLOAD_ID")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadWorkerConfig(lookup, workloadPlan{Kind: workloadKind(workloadKindValue), TargetID: workloadID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipc, err := requiredEnvironment(lookup, "POLARIS_INTEROP_IPC_PATH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := requiredEnvironment(lookup, "POLARIS_INTEROP_AUTH_PATH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := requiredEnvironment(lookup, "POLARIS_INTEROP_STATE_PATH")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	announced, err := encodeMediaConfig(goldenMediaConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeSet := newFakeRuntimeSet()
+	plane := newFakeWorkerDataPlane()
+	plane.media <- routedOutput{
+		Identity: config.Identity,
+		Message:  messageMediaConfig,
+		Payload:  announced,
+	}
+	plane.routeMediaControl = func(ctx context.Context, control routedMediaControl) error {
+		if control.Message == messageMediaConfigAck {
+			video, err := encodeMediaFrame(mediaFrame{FrameIndex: 1, IDR: true}, []byte("native-video"))
+			if err != nil {
+				return err
+			}
+			audio, err := encodeMediaFrame(mediaFrame{FrameIndex: 1}, []byte("native-audio"))
+			if err != nil {
+				return err
+			}
+			plane.media <- routedOutput{Identity: config.Identity, Message: messageVideo, Payload: video}
+			plane.media <- routedOutput{Identity: config.Identity, Message: messageAudio, Payload: audio}
+		}
+		select {
+		case plane.mediaControls <- control:
+		default:
+		}
+		return nil
+	}
+
+	if err := runWorkerWithRuntimeAndDataPlane(
+		context.Background(),
+		config,
+		workerPaths{IPC: ipc, Auth: auth, State: state},
+		uint32(os.Geteuid()),
+		&runtimeSet.adapters,
+		plane,
+		defaultRuntimeOptions(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case control := <-plane.mediaControls:
+		if control.Identity != config.Identity || control.Message != messageMediaConfigAck {
+			t.Fatalf("the contract was acknowledged by something else: %+v", control)
+		}
+	default:
+		t.Fatal("the native controller never acknowledged the announced contract")
+	}
+}

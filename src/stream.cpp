@@ -37,6 +37,8 @@ extern "C" {
 #ifdef __linux__
   #include "platform/linux/multiseat_moonlight_activation.h"
   #include "platform/linux/multiseat_moonlight_live_session.h"
+  #include "platform/linux/multiseat_worker_launch_connection.h"
+  #include "platform/linux/multiseat_worker_media_pump.h"
   #include "platform/linux/session_media.h"
 #endif
 #include "process.h"
@@ -494,6 +496,13 @@ namespace stream {
     // Never downgraded to host capture, including after reservation retirement.
     bool worker_connection_required = false;
     std::shared_ptr<const std::atomic_bool> launch_worker_connection_required;
+#endif
+
+#ifdef __linux__
+    // Set once the audio socket knows its peer. The worker's media arrives on
+    // one channel read by the video thread, which can reach an audio frame
+    // before the audio thread has learned where to send it.
+    std::atomic_bool audio_peer_known {false};
 #endif
 
     std::thread audioThread;
@@ -2383,6 +2392,90 @@ namespace stream {
     return -1;
   }
 
+#ifdef __linux__
+  /**
+   * Carry this session's worker media instead of capturing the host.
+   *
+   * The worker encodes for exactly this client, so its frames enter the same
+   * queues the host's own encoder feeds, stamped with this stream's packet
+   * destination. From there the ordinary broadcast path does the rest: one
+   * routing rule, one place that owns delivery. Every way this ends, ends the
+   * stream, because a worker session has no host capture to fall back to.
+   */
+  void worker_media_thread(session_t *session) {
+    const auto connection =
+      session->worker_connection->connection->stream_connection(session->session_generation);
+    auto video_packets = mail::man->queue<video::packet_t>(mail::video_packets);
+    auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
+    const auto destination = session->packet_owner.destination();
+    auto shutdown_event = session->mail->event<bool>(mail::shutdown);
+    auto idr_events = session->mail->event<bool>(mail::idr);
+    auto invalidate_events =
+      session->mail->event<std::pair<std::int64_t, std::int64_t>>(mail::invalidate_ref_frames);
+    std::uint64_t dropped_before_audio_peer = 0;
+
+    const multiseat::media::delivery_sinks_t sinks {
+      .video = [&](std::vector<std::uint8_t> &&bytes, const std::int64_t index, const bool idr) {
+        auto packet = std::make_unique<video::packet_raw_generic>(std::move(bytes), index, idr);
+        packet->channel_data = destination;
+        video_packets->raise(std::move(packet));
+      },
+      .audio = [&](std::vector<std::uint8_t> &&bytes) {
+        // An audio frame that predates the client's audio socket has nowhere
+        // to go, and the host's own capture has the same shape: it starts only
+        // after that socket's ping. Dropping the first few is what that costs.
+        if (!session->audio_peer_known.load(std::memory_order_acquire)) {
+          ++dropped_before_audio_peer;
+          return;
+        }
+        audio::buffer_t buffer {bytes.size()};
+        std::copy(bytes.begin(), bytes.end(), std::begin(buffer));
+        audio_packets->raise(destination, std::move(buffer));
+      },
+    };
+    const multiseat::media::host_requests_t requests {
+      .stop_requested = [&] {
+        return !shutdown_event->running() || shutdown_event->peek();
+      },
+      .take_idr_request = [&] {
+        return static_cast<bool>(idr_events->try_pop());
+      },
+      .take_invalidation = [&]() -> std::optional<std::pair<std::int64_t, std::int64_t>> {
+        if (auto range = invalidate_events->try_pop()) {
+          return *range;
+        }
+        return {};
+      },
+    };
+    const multiseat::media::expected_media_t expected {
+      .width = static_cast<std::uint16_t>(session->config.monitor.width),
+      .height = static_cast<std::uint16_t>(session->config.monitor.height),
+      .fps = static_cast<std::uint32_t>(session->config.monitor.framerate),
+      .video_format = session->config.monitor.videoFormat,
+      .audio_channels = static_cast<std::uint8_t>(session->config.audio.channels),
+    };
+
+    BOOST_LOG(info) << "Carrying worker media for this session"sv;
+    const auto report = multiseat::media::run(connection, expected, sinks, requests);
+    const auto summary = [&] {
+      return std::string {multiseat::media::describe(report.status)} +
+             (report.detail.empty() ? std::string {} : " ("s + report.detail + ")"s) +
+             ": "s + std::to_string(report.video_frames) + " video frames, "s +
+             std::to_string(report.audio_frames) + " audio frames, "s +
+             std::to_string(report.discontinuities) + " discontinuities, "s +
+             std::to_string(report.idr_requests) + " keyframe requests"s +
+             (dropped_before_audio_peer == 0 ? std::string {} :
+                ", "s + std::to_string(dropped_before_audio_peer) +
+                  " audio frames dropped before the client's audio socket answered"s);
+    };
+    if (multiseat::media::ended_cleanly(report.status)) {
+      BOOST_LOG(info) << "Worker media ended: "sv << summary();
+    } else {
+      BOOST_LOG(error) << "Worker media failed: "sv << summary();
+    }
+  }
+#endif
+
   void videoThread(session_t *session) {
     auto fg = util::fail_guard([&]() {
       session::stop(*session);
@@ -2400,6 +2493,12 @@ namespace stream {
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
+#ifdef __linux__
+    if (session->worker_connection) {
+      worker_media_thread(session);
+      return;
+    }
+#endif
     BOOST_LOG(debug) << "Start capturing Video"sv;
     video::capture(session->mail, session->config.monitor, session->packet_owner.destination());
   }
@@ -2421,6 +2520,16 @@ namespace stream {
     auto address = session->audio.peer.address();
     session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
+#ifdef __linux__
+    session->audio_peer_known.store(true, std::memory_order_release);
+    if (session->worker_connection) {
+      // One worker channel carries both, and the video thread reads it. This
+      // thread still owns the audio socket's ping and QoS, so it stays for the
+      // life of the session rather than ending it by returning.
+      session->mail->event<bool>(mail::shutdown)->view();
+      return;
+    }
+#endif
     BOOST_LOG(debug) << "Start capturing Audio"sv;
     audio::capture(session->mail, session->config.audio, session->packet_owner.destination());
   }
@@ -2877,12 +2986,8 @@ namespace stream {
       }
 
 #ifdef __linux__
-      // Remember an authenticated worker selection even if its gate has since
-      // been retired, or selection happened after this allocation was created.
-      if (session.launch_worker_connection_required && session.launch_worker_connection_required->load()) {
-        BOOST_LOG(warning) << "Worker media producers are not available"sv;
-        return -1;
-      }
+      // A launch that requires a worker is checked after activation, below,
+      // where whether one was actually bound is known.
       const auto multiseat_activation =
         multiseat::input::activate_registered_moonlight_session(session);
       switch (multiseat_activation) {
@@ -2903,10 +3008,20 @@ namespace stream {
       }
       {
         std::scoped_lock lock {session.multiseat_input_binding_mutex};
-        // Reservation is implemented; worker producers are still a later slice.
-        // A selected worker must never fall through to singleton host capture.
-        if (session.worker_connection_required) {
-          BOOST_LOG(warning) << "Worker media producers are not available"sv;
+        // A selected worker must never fall through to singleton host capture,
+        // so a session that requires one starts only with its reservation in
+        // hand, and only when that reservation still answers for this stream.
+        // The launch's own requirement counts too: it outlives a gate that was
+        // retired, or a selection that never reached this allocation.
+        const bool requires_worker =
+          session.worker_connection_required ||
+          (session.launch_worker_connection_required &&
+           session.launch_worker_connection_required->load());
+        if (requires_worker &&
+            (!session.worker_connection ||
+             !session.worker_connection->connection->stream_connection(session.session_generation)
+                .connected())) {
+          BOOST_LOG(warning) << "Refusing stream: its worker connection is not available"sv;
           return -1;
         }
 #ifdef POLARIS_TESTS
