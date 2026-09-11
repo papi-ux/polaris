@@ -209,7 +209,25 @@ namespace {
     cross_routed_media,
     oversized_handshake_payload,
     stall,
+    media_contract,
   };
+
+  media_config_t fake_media_config() {
+    return {
+      .video_codec = video_codec_e::h264,
+      .profile_idc = 100,
+      .level_idc = 42,
+      .width = 1280,
+      .height = 720,
+      .fps_numerator = 60,
+      .fps_denominator = 1,
+      .bitrate_ceiling_kbps = 15000,
+      .audio_codec = audio_codec_e::opus,
+      .audio_channels = 2,
+      .audio_frame_duration_us = 5000,
+      .audio_sample_rate = 48000,
+    };
+  }
 
   class fake_worker_t {
   public:
@@ -290,6 +308,16 @@ namespace {
     [[nodiscard]] std::vector<std::uint8_t> input() const {
       std::scoped_lock lock {input_mutex_};
       return input_;
+    }
+
+    [[nodiscard]] std::vector<message_e> contract_messages() const {
+      std::scoped_lock lock {contract_mutex_};
+      return contract_messages_;
+    }
+
+    [[nodiscard]] std::optional<frame_range_t> invalidated() const {
+      std::scoped_lock lock {contract_mutex_};
+      return invalidated_;
     }
 
   private:
@@ -394,6 +422,17 @@ namespace {
             if (behavior_ == fake_behavior_e::cross_routed_media) {
               ++output_identity.generation;
             }
+            if (behavior_ == fake_behavior_e::media_contract &&
+                !send_test_frame(connection, {
+                                               .channel = channel,
+                                               .message = message_e::media_config,
+                                               .slot = output_identity.slot,
+                                               .generation = output_identity.generation,
+                                               .sequence = outgoing++,
+                                               .payload = encode_media_config(fake_media_config()),
+                                             })) {
+              break;
+            }
             if (!send_test_frame(connection, {
                                                .channel = channel,
                                                .message = message_e::video,
@@ -435,6 +474,28 @@ namespace {
                                              .generation = identity_.generation,
                                              .sequence = outgoing++,
                                              .payload = {'r', 'u', 'm', 'b', 'l', 'e'},
+                                           })) {
+            break;
+          }
+          continue;
+        }
+        if (channel == channel_e::control && attached &&
+            (request.message == message_e::media_config_ack ||
+             request.message == message_e::request_idr ||
+             request.message == message_e::invalidate_ref_frames)) {
+          {
+            std::scoped_lock lock {contract_mutex_};
+            contract_messages_.push_back(request.message);
+            if (request.message == message_e::invalidate_ref_frames) {
+              invalidated_ = parse_frame_range(request.payload);
+            }
+          }
+          if (!send_test_frame(connection, {
+                                             .channel = channel,
+                                             .message = message_e::media_control_ack,
+                                             .slot = identity_.slot,
+                                             .generation = identity_.generation,
+                                             .sequence = outgoing++,
                                            })) {
             break;
           }
@@ -540,6 +601,9 @@ namespace {
     std::thread media_thread_;
     mutable std::mutex input_mutex_;
     std::vector<std::uint8_t> input_;
+    mutable std::mutex contract_mutex_;
+    std::vector<message_e> contract_messages_;
+    std::optional<frame_range_t> invalidated_;
     std::atomic<bool> stopped_ = false;
     std::atomic<bool> failed_ = false;
   };
@@ -604,6 +668,55 @@ TEST(MultiseatWorkerClient, AttachesAndRoutesInputFeedbackAndEncodedMedia) {
   ASSERT_EQ(client.receive_media(media), transport_status_e::applied);
   EXPECT_EQ(media.message, message_e::audio);
   EXPECT_EQ(media.payload, (std::vector<std::uint8_t> {'a', 'u', 'd', 'i', 'o'}));
+
+  EXPECT_EQ(client.shutdown(), transport_status_e::applied);
+  worker.stop();
+  EXPECT_FALSE(worker.failed());
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerClient, AnnouncesMediaContractAndCarriesItsInstructions) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x31)};
+  auto authority = create_authority(store, identity_for(), "generation-media-contract");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract};
+  controller_client_t client;
+
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  // The contract's instructions are data-plane traffic: refused until attached.
+  EXPECT_EQ(client.acknowledge_media_config(), transport_status_e::closed);
+  EXPECT_EQ(client.request_idr(), transport_status_e::closed);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+
+  // The contract arrives on the media channel ahead of the frames it describes.
+  encoded_media_packet_t packet;
+  ASSERT_EQ(client.receive_media(packet), transport_status_e::applied);
+  ASSERT_EQ(packet.message, message_e::media_config);
+  const auto announced = parse_media_config(packet.payload);
+  ASSERT_TRUE(announced);
+  EXPECT_EQ(announced->width, 1280);
+  EXPECT_EQ(announced->height, 720);
+  EXPECT_EQ(announced->audio_sample_rate, 48000U);
+
+  ASSERT_EQ(client.acknowledge_media_config(), transport_status_e::applied);
+  ASSERT_EQ(client.receive_media(packet), transport_status_e::applied);
+  EXPECT_EQ(packet.message, message_e::video);
+  ASSERT_EQ(client.receive_media(packet), transport_status_e::applied);
+  EXPECT_EQ(packet.message, message_e::audio);
+
+  ASSERT_EQ(client.request_idr(), transport_status_e::applied);
+  ASSERT_EQ(client.invalidate_ref_frames({.first = 11, .last = 14}), transport_status_e::applied);
+  // An inverted span never reaches the worker.
+  EXPECT_EQ(client.invalidate_ref_frames({.first = 9, .last = 8}), transport_status_e::invalid_argument);
+
+  EXPECT_EQ(
+    worker.contract_messages(),
+    (std::vector<message_e> {message_e::media_config_ack, message_e::request_idr, message_e::invalidate_ref_frames})
+  );
+  const auto invalidated = worker.invalidated();
+  ASSERT_TRUE(invalidated);
+  EXPECT_EQ(invalidated->first, 11U);
+  EXPECT_EQ(invalidated->last, 14U);
 
   EXPECT_EQ(client.shutdown(), transport_status_e::applied);
   worker.stop();
