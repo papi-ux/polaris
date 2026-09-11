@@ -53,6 +53,13 @@ namespace stream_display_policy {
    * Explicit accepted streamMode and mirrorDesktop remain authoritative. An
    * app default is used only when the client did not explicitly lock the
    * virtual-display choice.
+   *
+   * @param host_provides_private_display The host's own configuration already
+   *        creates the session's output, so an unlocked virtual-display
+   *        preference has nothing to add and is refused. A locked client choice
+   *        and an explicit accepted streamMode still win. Pass
+   *        host_default_provides_private_display(); every call site has to pass
+   *        the same answer or a resume can disagree with its own launch.
    */
   std::string effective_session_selection_for_launch(
     std::string_view requested_selection,
@@ -60,8 +67,19 @@ namespace stream_display_policy {
     bool launch_virtual_display,
     bool app_virtual_display,
     bool virtual_display_user_locked,
-    bool virtual_display_optimization_present = false
+    bool virtual_display_optimization_present = false,
+    bool host_provides_private_display = false
   );
+
+  /**
+   * @brief Whether the host's own configuration already provides the display.
+   *
+   * True for a headless labwc host: the private runtime creates the stream
+   * output itself. Reads the host default rather than the live config, so a
+   * session parked on a virtual display does not make the host stop being a
+   * private host.
+   */
+  bool host_default_provides_private_display();
 
   /**
    * @brief Keep the created virtual connector name when display mapping cannot

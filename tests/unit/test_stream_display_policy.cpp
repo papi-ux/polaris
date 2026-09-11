@@ -122,6 +122,70 @@ namespace {
   }
 }  // namespace
 
+TEST(StreamDisplayPolicyTests, APrivateHostRefusesAnUnlockedVirtualDisplayPreference) {
+  using stream_display_policy::effective_session_selection_for_launch;
+
+  // A headless labwc host creates the session's output itself. An app's stored
+  // virtual-display default, or a client toggle that never locked topology, has
+  // nothing to add and would trade a GPU-native path for an EVDI one.
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, false, true, false, false, true),
+    ""
+  ) << "an app's stored default must not drag a private host onto a virtual display";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, true, false, false, false, true),
+    ""
+  ) << "nor may a client toggle that did not lock topology";
+
+  // A deliberate choice still wins, so the mode stays reachable on this host.
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, true, false, true, false, true),
+    "host_virtual_display"
+  ) << "a locked client choice, including the paired always-virtual default, is honored";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("host_virtual_display", false, false, true, false, false, true),
+    "host_virtual_display"
+  ) << "an explicit accepted streamMode is honored on a private host";
+  EXPECT_EQ(
+    effective_session_selection_for_launch("headless_stream", false, false, true, false, false, true),
+    "headless_stream"
+  ) << "and an explicit private streamMode is no longer overridden by the app default";
+
+  // Desktop mirroring still outranks everything.
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", true, true, true, false, false, true),
+    "desktop_display"
+  ) << "mirrorDesktop stays authoritative";
+
+  // Without the host answer, every one of those keeps its old meaning.
+  EXPECT_EQ(
+    effective_session_selection_for_launch("", false, false, true, false, false, false),
+    "host_virtual_display"
+  ) << "a host that does not provide the display still takes the app default";
+}
+
+TEST(StreamDisplayPolicyTests, PrivateHostAnswerReadsTheHostNotTheParkedSession) {
+  LinuxDisplayPolicyGuard guard;
+  HeldHostDefaultGuard held;
+  configure_headless_cage(true);
+
+  EXPECT_TRUE(stream_display_policy::host_default_provides_private_display());
+
+  // Park a virtual-display session on it, exactly as a launch override does.
+  stream_display_policy::remember_host_default(
+    stream_display_policy::legacy_booleans_t {true, true, true},
+    "",
+    "wlr"
+  );
+  config::video.linux_display.stream_mode =
+    std::string {stream_display_policy::k_host_virtual_display};
+  config::video.linux_display.use_cage_compositor = false;
+  config::video.capture = "portal";
+
+  EXPECT_TRUE(stream_display_policy::host_default_provides_private_display())
+    << "a session parked on a virtual display does not stop the host being a private host";
+}
+
 TEST(StreamDisplayPolicyTests, HostDefaultOutlivesASessionScopedVirtualDisplayOverride) {
   LinuxDisplayPolicyGuard guard;
   HeldHostDefaultGuard held;

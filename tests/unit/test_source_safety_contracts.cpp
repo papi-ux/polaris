@@ -391,8 +391,8 @@ TEST(SourceSafetyContracts, ASessionDisplayOverrideNeverBecomesTheAdvertisedHost
   const auto prefers_end = nvhttp_source.find('}', nvhttp_source.find("#endif", prefers));
   ASSERT_NE(prefers_end, std::string::npos);
   const auto prefers_body = nvhttp_source.substr(prefers, prefers_end - prefers);
-  EXPECT_NE(prefers_body.find("resolve_host_default"), std::string::npos)
-    << "the launch-mode recommendation must resolve the host default";
+  EXPECT_NE(prefers_body.find("host_default"), std::string::npos)
+    << "the launch-mode recommendation must answer from the host default";
   EXPECT_EQ(prefers_body.find("resolve_current"), std::string::npos)
     << "resolve_current reads the session-mutated config";
 
@@ -411,6 +411,32 @@ TEST(SourceSafetyContracts, ASessionDisplayOverrideNeverBecomesTheAdvertisedHost
   EXPECT_NE(normalize_body.find("previous_capture"), std::string::npos);
   EXPECT_NE(normalize_body.find("BOOST_LOG"), std::string::npos)
     << "silently replacing an operator's capture backend is what made this bug invisible";
+}
+
+TEST(SourceSafetyContracts, EveryLaunchTopologyResolverCallPassesTheHostPrivateDisplayAnswer) {
+  // A resume validates topology with the same resolver its launch used. If one
+  // call site answers "the host already provides the display" and another does
+  // not, a resume can reject the very session its own launch produced.
+  for (const auto *relative : {"src/process.cpp", "src/nvhttp.cpp"}) {
+    std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / relative);
+    ASSERT_TRUE(input.is_open()) << relative;
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const auto source = contents.str();
+
+    size_t calls = 0;
+    for (size_t at = source.find("effective_session_selection_for_launch(");
+         at != std::string::npos;
+         at = source.find("effective_session_selection_for_launch(", at + 1)) {
+      const auto close = source.find(");", at);
+      ASSERT_NE(close, std::string::npos) << relative;
+      const auto arguments = source.substr(at, close - at);
+      EXPECT_NE(arguments.find("host_default_provides_private_display()"), std::string::npos)
+        << relative << " resolves a launch topology without passing the host's own answer";
+      ++calls;
+    }
+    EXPECT_GT(calls, 0u) << relative << " no longer resolves launch topology at all";
+  }
 }
 
 TEST(SourceSafetyContracts, LinuxVirtualDisplayCreationUsesOnlyTheEffectiveMode) {

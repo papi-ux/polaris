@@ -843,10 +843,7 @@ namespace nvhttp {
       // override rewrites the live config, and a paused session keeps it
       // rewritten for its whole resume window, so reading live values here
       // would recommend one client's topology to the next one that asks.
-      const auto resolved = stream_display_policy::resolve_host_default(
-        stream_display_policy::input_t {virtual_display::is_available(), false, false}
-      );
-      return resolved.uses_labwc() && resolved.requested_headless;
+      return stream_display_policy::host_default_provides_private_display();
 #else
       return false;
 #endif
@@ -9906,7 +9903,8 @@ namespace nvhttp {
         requested_selection == stream_display_policy::k_host_virtual_display,
         app_virtual_display,
         topology_locked || paired_virtual_lock,
-        false
+        false,
+        stream_display_policy::host_default_provides_private_display()
       );
       if (!mirror_desktop && !requested_selection.empty()) {
         if (effective_selection == requested_selection) {
