@@ -28,3 +28,46 @@ TEST(EntryHandlerTests, LogPublisherDataTest) {
   ASSERT_TRUE(log_checker::line_starts_with(test_paths::log_file().string(), "Info: Publisher Website: "));
   ASSERT_TRUE(log_checker::line_starts_with(test_paths::log_file().string(), "Info: Get support: "));
 }
+
+TEST(EntryHandlerTests, HostSetupRepairsOnlyRootOwnedConfigDirectories) {
+  // A single `sudo polaris` creates the per-user configuration directory as
+  // root, and from then on running as the account fails its ownership check
+  // with a failed credential save as the only symptom. Host setup is already
+  // privileged, so it is the one place that can undo it.
+  constexpr std::uint32_t root = 0;
+  constexpr std::uint32_t account = 1000;
+  constexpr std::uint32_t someone_else = 1001;
+
+  EXPECT_EQ(
+    config_ownership_action(true, true, false, root, account),
+    config_ownership_action_e::repair
+  ) << "a root-owned directory is exactly the mistake this undoes";
+
+  EXPECT_EQ(
+    config_ownership_action(true, true, false, account, account),
+    config_ownership_action_e::nothing
+  ) << "a directory already owned by the account needs no privileged rewrite";
+
+  EXPECT_EQ(
+    config_ownership_action(false, false, false, root, account),
+    config_ownership_action_e::nothing
+  ) << "an absent directory is created later by the account itself";
+
+  // The refusals matter more than the repair. A root process rewriting
+  // ownership on a path it cannot explain is worse than the problem it fixes.
+  EXPECT_EQ(
+    config_ownership_action(true, true, false, someone_else, account),
+    config_ownership_action_e::refuse
+  ) << "a third account's directory was not created by this mistake";
+
+  EXPECT_EQ(
+    config_ownership_action(true, false, true, root, account),
+    config_ownership_action_e::refuse
+  ) << "a symlink must never be followed by a privileged chown";
+
+  EXPECT_EQ(
+    config_ownership_action(true, false, false, root, account),
+    config_ownership_action_e::refuse
+  ) << "something that is not a directory is not this directory";
+}
+
