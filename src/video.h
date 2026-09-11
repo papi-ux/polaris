@@ -627,12 +627,27 @@ namespace video {
     std::string preferred_encoder;
     std::string fallback_encoder;
     std::string selected_encoder;
+    std::string driver_version;
     std::string reason;
     bool exact_live_probe_required = false;
     bool fallback_used = false;
   };
 
   encoder_selection_info_t active_encoder_selection_info();
+
+  /**
+   * @brief The extra sentence shown when a preferred NVENC encoder did not start.
+   *
+   * Points at the libav error that names the nvenc API version the linked FFmpeg
+   * required, which is the one fact that separates "this driver is too old" from
+   * every other reason an encoder can fail to open. Empty unless NVENC was asked
+   * for, did not land, and a driver version is known.
+   */
+  std::string nvenc_fallback_detail(
+    std::string_view preferred_encoder,
+    std::string_view selected_encoder,
+    std::string_view driver_version
+  );
 
   /**
    * @brief Get the name of the currently selected encoder.
