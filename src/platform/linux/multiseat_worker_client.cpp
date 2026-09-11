@@ -453,10 +453,21 @@ namespace multiseat::worker_ipc {
       if (channel == channel_e::control) {
         return message == message_e::feedback;
       }
-      return message == message_e::video ||
+      // The media contract arrives unsolicited on the channel it describes,
+      // ahead of the frames it describes.
+      return message == message_e::media_config ||
+             message == message_e::video ||
              message == message_e::audio ||
              message == message_e::end_of_stream ||
              message == message_e::discontinuity;
+    }
+
+    /** Messages the worker may only answer once its data plane is attached. */
+    bool requires_attached_data_plane(message_e message) {
+      return message == message_e::input ||
+             message == message_e::media_config_ack ||
+             message == message_e::request_idr ||
+             message == message_e::invalidate_ref_frames;
     }
   }  // namespace
 
@@ -698,7 +709,7 @@ namespace multiseat::worker_ipc {
       if (!authenticated || terminal.load() || stopping) {
         return transport_status_e::closed;
       }
-      if (message == message_e::input && !(control.attached && media.attached)) {
+      if (requires_attached_data_plane(message) && !(control.attached && media.attached)) {
         return transport_status_e::closed;
       }
       channel.request_busy = true;
@@ -877,6 +888,18 @@ namespace multiseat::worker_ipc {
     return controller_connection_t {implementation_->snapshot()}.send_input(payload);
   }
 
+  transport_status_e controller_client_t::acknowledge_media_config() {
+    return controller_connection_t {implementation_->snapshot()}.acknowledge_media_config();
+  }
+
+  transport_status_e controller_client_t::request_idr() {
+    return controller_connection_t {implementation_->snapshot()}.request_idr();
+  }
+
+  transport_status_e controller_client_t::invalidate_ref_frames(const frame_range_t &range) {
+    return controller_connection_t {implementation_->snapshot()}.invalidate_ref_frames(range);
+  }
+
   transport_status_e controller_client_t::receive_feedback(std::vector<std::uint8_t> &payload) {
     return controller_connection_t {implementation_->snapshot()}.receive_feedback(payload);
   }
@@ -916,6 +939,28 @@ namespace multiseat::worker_ipc {
     }
     const auto &connection = connection_;
     return connection ? connection->request(connection->control, message_e::input, message_e::input_ack, payload) : transport_status_e::closed;
+  }
+
+  transport_status_e controller_connection_t::acknowledge_media_config() const {
+    const auto &connection = connection_;
+    return connection ? connection->request(connection->control, message_e::media_config_ack, message_e::media_control_ack) : transport_status_e::closed;
+  }
+
+  transport_status_e controller_connection_t::request_idr() const {
+    const auto &connection = connection_;
+    return connection ? connection->request(connection->control, message_e::request_idr, message_e::media_control_ack) : transport_status_e::closed;
+  }
+
+  transport_status_e controller_connection_t::invalidate_ref_frames(const frame_range_t &range) const {
+    if (range.first > range.last) {
+      return transport_status_e::invalid_argument;
+    }
+    const auto &connection = connection_;
+    if (!connection) {
+      return transport_status_e::closed;
+    }
+    const auto body = encode_frame_range(range);
+    return connection->request(connection->control, message_e::invalidate_ref_frames, message_e::media_control_ack, body);
   }
 
   transport_status_e controller_connection_t::receive_feedback(std::vector<std::uint8_t> &payload) const {
