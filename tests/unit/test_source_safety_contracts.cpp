@@ -344,6 +344,101 @@ TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevalua
   EXPECT_NE(teardown.find("config::video.capture = initial_capture"), std::string::npos);
 }
 
+TEST(SourceSafetyContracts, ASessionDisplayOverrideNeverBecomesTheAdvertisedHostDefault) {
+  // A session override rewrites config::video.linux_display and the capture
+  // backend in place, and a paused session holds that rewrite for its whole
+  // resume window. Every site that arms the override has to publish the host
+  // policy it displaced, and teardown has to retire it, or the host recommends
+  // one client's topology to the next.
+  std::ifstream process_input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
+  ASSERT_TRUE(process_input.is_open());
+  std::ostringstream process_contents;
+  process_contents << process_input.rdbuf();
+  const auto process_source = process_contents.str();
+
+  const auto armed = [&process_source]() {
+    size_t count = 0;
+    for (size_t at = process_source.find("initial_linux_display_saved = true");
+         at != std::string::npos;
+         at = process_source.find("initial_linux_display_saved = true", at + 1)) {
+      ++count;
+    }
+    return count;
+  }();
+  const auto published = [&process_source]() {
+    size_t count = 0;
+    for (size_t at = process_source.find("remember_host_display_default(*this)");
+         at != std::string::npos;
+         at = process_source.find("remember_host_display_default(*this)", at + 1)) {
+      ++count;
+    }
+    return count;
+  }();
+  EXPECT_EQ(published, armed)
+    << "every site that arms a session display override must publish the host default it displaced";
+  EXPECT_NE(process_source.find("stream_display_policy::forget_host_default()"), std::string::npos)
+    << "teardown must retire the published host default";
+
+  // The advice surfaces must read the host policy, not the live config.
+  std::ifstream nvhttp_input(fs::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp");
+  ASSERT_TRUE(nvhttp_input.is_open());
+  std::ostringstream nvhttp_contents;
+  nvhttp_contents << nvhttp_input.rdbuf();
+  const auto nvhttp_source = nvhttp_contents.str();
+
+  const auto prefers = nvhttp_source.find("bool host_prefers_headless()");
+  ASSERT_NE(prefers, std::string::npos);
+  const auto prefers_end = nvhttp_source.find('}', nvhttp_source.find("#endif", prefers));
+  ASSERT_NE(prefers_end, std::string::npos);
+  const auto prefers_body = nvhttp_source.substr(prefers, prefers_end - prefers);
+  EXPECT_NE(prefers_body.find("host_default"), std::string::npos)
+    << "the launch-mode recommendation must answer from the host default";
+  EXPECT_EQ(prefers_body.find("resolve_current"), std::string::npos)
+    << "resolve_current reads the session-mutated config";
+
+  // And the backend substitution that discards a configured capture must say so.
+  std::ifstream policy_input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/stream_display_policy.cpp");
+  ASSERT_TRUE(policy_input.is_open());
+  std::ostringstream policy_contents;
+  policy_contents << policy_input.rdbuf();
+  const auto policy_source = policy_contents.str();
+
+  const auto normalize = policy_source.find("void normalize_host_virtual_display_state_for_backend(");
+  ASSERT_NE(normalize, std::string::npos);
+  const auto normalize_end = policy_source.find("\n  }", normalize);
+  ASSERT_NE(normalize_end, std::string::npos);
+  const auto normalize_body = policy_source.substr(normalize, normalize_end - normalize);
+  EXPECT_NE(normalize_body.find("previous_capture"), std::string::npos);
+  EXPECT_NE(normalize_body.find("BOOST_LOG"), std::string::npos)
+    << "silently replacing an operator's capture backend is what made this bug invisible";
+}
+
+TEST(SourceSafetyContracts, EveryLaunchTopologyResolverCallPassesTheHostPrivateDisplayAnswer) {
+  // A resume validates topology with the same resolver its launch used. If one
+  // call site answers "the host already provides the display" and another does
+  // not, a resume can reject the very session its own launch produced.
+  for (const auto *relative : {"src/process.cpp", "src/nvhttp.cpp"}) {
+    std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / relative);
+    ASSERT_TRUE(input.is_open()) << relative;
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const auto source = contents.str();
+
+    size_t calls = 0;
+    for (size_t at = source.find("effective_session_selection_for_launch(");
+         at != std::string::npos;
+         at = source.find("effective_session_selection_for_launch(", at + 1)) {
+      const auto close = source.find(");", at);
+      ASSERT_NE(close, std::string::npos) << relative;
+      const auto arguments = source.substr(at, close - at);
+      EXPECT_NE(arguments.find("host_default_provides_private_display()"), std::string::npos)
+        << relative << " resolves a launch topology without passing the host's own answer";
+      ++calls;
+    }
+    EXPECT_GT(calls, 0u) << relative << " no longer resolves launch topology at all";
+  }
+}
+
 TEST(SourceSafetyContracts, LinuxVirtualDisplayCreationUsesOnlyTheEffectiveMode) {
   std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
   ASSERT_TRUE(input.is_open());
