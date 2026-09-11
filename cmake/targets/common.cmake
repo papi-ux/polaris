@@ -250,7 +250,18 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/src/upnp.cpp"
         PROPERTIES COMPILE_FLAGS -Wno-pedantic)
 
 # src/process / src/ai_optimizer
+#
+# These two translation units used to crash GCC's optimiser in a release build,
+# so they are compiled unoptimised. That is a real cost on the launch path, paid
+# on every distribution whose compiler needs it, so the workaround is scoped to
+# the compilers that actually need it rather than to GCC as a whole.
+#
+# Measured on 2026-09-11: GCC 15.x and 16.2.1 both compile both files at the
+# normal release optimisation level with no internal compiler error. Older GCC
+# was not retested, so it keeps the workaround. Raise this bound only with the
+# same measurement, never on the assumption that a newer compiler is fine.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15 AND
         (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
     set(GCC_RELEASE_ICE_WORKAROUND_FLAGS "")
     string(APPEND GCC_RELEASE_ICE_WORKAROUND_FLAGS "-O0 ")
