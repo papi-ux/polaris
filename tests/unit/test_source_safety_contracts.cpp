@@ -431,8 +431,12 @@ TEST(SourceSafetyContracts, EveryLaunchTopologyResolverCallPassesTheHostPrivateD
       const auto close = source.find(");", at);
       ASSERT_NE(close, std::string::npos) << relative;
       const auto arguments = source.substr(at, close - at);
-      EXPECT_NE(arguments.find("host_default_provides_private_display()"), std::string::npos)
-        << relative << " resolves a launch topology without passing the host's own answer";
+      const bool passes_the_host_answer =
+        arguments.find("host_default_provides_private_display()") != std::string::npos ||
+        arguments.find("host_private") != std::string::npos;
+      EXPECT_TRUE(passes_the_host_answer)
+        << relative << " resolves a launch topology without passing the host's own answer, "
+        << "either by calling host_default_provides_private_display() or by passing a host_private local";
       ++calls;
     }
     EXPECT_GT(calls, 0u) << relative << " no longer resolves launch topology at all";

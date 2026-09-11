@@ -7149,6 +7149,7 @@ namespace proc {
       launch_session->virtual_display ||
       (app.virtual_display && !launch_session->user_locked_virtual_display);
     const auto configured_session_mode = stream_display_policy::configured_selection();
+    const bool host_private = stream_display_policy::host_default_provides_private_display();
     auto session_mode = stream_display_policy::effective_session_selection_for_launch(
       launch_session->stream_mode,
       launch_session->mirror_desktop || app_desktop_mirror_applies(app, *launch_session),
@@ -7156,10 +7157,23 @@ namespace proc {
       app.virtual_display,
       launch_session->user_locked_virtual_display,
       false,
-      stream_display_policy::host_default_provides_private_display()
+      host_private
     );
     if (session_mode.empty()) {
       session_mode = configured_session_mode;
+    }
+    if (!session_mode.empty() && session_mode != configured_session_mode) {
+      // Name the inputs that moved this session off the host's own topology.
+      // Without this line a silent promotion is indistinguishable in the log
+      // from a choice the operator made, which is how one shipped for six
+      // releases. Printed before the flags below are rewritten from the result.
+      BOOST_LOG(info) << "process: session topology ["sv << session_mode
+                      << "] differs from the host default ["sv << configured_session_mode
+                      << "]; requested=["sv << launch_session->stream_mode
+                      << "] app_virtual_display="sv << (app.virtual_display ? 1 : 0)
+                      << " launch_virtual_display="sv << (launch_session->virtual_display ? 1 : 0)
+                      << " user_locked="sv << (launch_session->user_locked_virtual_display ? 1 : 0)
+                      << " private_host="sv << (host_private ? 1 : 0);
     }
     if (!session_mode.empty()) {
       launch_session->virtual_display =
