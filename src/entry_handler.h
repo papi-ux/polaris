@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <cstdint>
+
 // standard includes
 #include <atomic>
 #include <string>
@@ -174,3 +176,30 @@ namespace service_ctrl {
   bool wait_for_ui_ready();
 }  // namespace service_ctrl
 #endif
+
+/** What host setup may do about the ownership of a per-user directory. */
+enum class config_ownership_action_e {
+  nothing,  ///< Absent, or already owned by the account that streams.
+  repair,  ///< Owned by root, which only a privileged run can have caused.
+  refuse,  ///< Owned by a third account, or not a plain directory.
+};
+
+/**
+ * @brief Decide whether host setup may hand a per-user directory back.
+ *
+ * One `sudo polaris` creates the per-user configuration directory as root, and
+ * every later run as the account then fails its ownership check, with saving
+ * credentials as the visible symptom. Host setup already runs as root, so it is
+ * the one place that can undo it.
+ *
+ * Root ownership is the only case repaired. A directory owned by some third
+ * account was not created by this mistake, and a root process rewriting
+ * ownership on a path it cannot explain is worse than the problem.
+ */
+config_ownership_action_e config_ownership_action(
+  bool exists,
+  bool is_directory,
+  bool is_symlink,
+  std::uint32_t owner_uid,
+  std::uint32_t account_uid
+);
