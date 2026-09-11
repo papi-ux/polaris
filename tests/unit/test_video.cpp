@@ -161,6 +161,26 @@ TEST(VideoCacheTests, DriverVersionCacheHitRequiresMatchingBinaryMetadata) {
   std::filesystem::remove_all(cache_dir, ec);
 }
 
+TEST(VideoCacheTests, NvencFallbackNamesTheDriverAndWhereToLook) {
+  // An nvenc encoder that cannot open because the linked FFmpeg wants a newer
+  // API than the driver provides used to surface as nothing at all: the stream
+  // silently dropped to software. Polaris 1.4.6 stopped discarding libav's own
+  // error, which names the required and found versions; this points at it.
+  const auto detail = video::nvenc_fallback_detail("nvenc", "software", "580.178.04");
+  EXPECT_NE(detail.find("580.178.04"), std::string::npos)
+    << "the reason must name the driver actually running";
+  EXPECT_NE(detail.find("nvenc API version"), std::string::npos)
+    << "and must send the reader to the line that names what was required";
+
+  // Silent everywhere it would be guessing.
+  EXPECT_TRUE(video::nvenc_fallback_detail("nvenc", "nvenc", "580.178.04").empty())
+    << "nvenc started, so there is nothing to explain";
+  EXPECT_TRUE(video::nvenc_fallback_detail("vaapi", "software", "580.178.04").empty())
+    << "a vaapi fallback is not an nvenc driver problem";
+  EXPECT_TRUE(video::nvenc_fallback_detail("nvenc", "software", "").empty())
+    << "without a known driver version there is no fact to report";
+}
+
 TEST(VideoCacheTests, DriverVersionRejectsAnythingThatIsNotAVersion) {
   // nvidia-smi prints its NVML failure to stdout, so without this the banner
   // becomes the driver string, and because the cache is keyed on the tool's

@@ -183,6 +183,20 @@ namespace video {
       return info;
     }
 
+    /** See video.h. Pure, so the wording is testable without a GPU. */
+    std::string nvenc_fallback_detail_impl(
+      std::string_view preferred_encoder,
+      std::string_view selected_encoder,
+      std::string_view driver_version
+    ) {
+      if (preferred_encoder != "nvenc" || selected_encoder == "nvenc" || driver_version.empty()) {
+        return {};
+      }
+      return " NVENC did not start on NVIDIA driver [" + std::string {driver_version} +
+             "]; the libav error above names the nvenc API version it required, and a driver "
+             "older than that is the usual cause.";
+    }
+
     void finalize_encoder_selection_info(
       encoder_selection_info_t &info,
       std::string_view selected_encoder
@@ -201,6 +215,11 @@ namespace video {
         info.reason += " Preferred encoder [" + info.preferred_encoder +
                        "] did not satisfy this runtime; selected [" +
                        info.selected_encoder + "] instead.";
+        info.reason += nvenc_fallback_detail_impl(
+          info.preferred_encoder,
+          info.selected_encoder,
+          info.driver_version
+        );
       } else if (!info.selected_encoder.empty()) {
         info.reason += " Selected [" + info.selected_encoder + "].";
       }
@@ -5525,6 +5544,9 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+    if (encoder_selection_info.gpu_driver == "nvidia") {
+      encoder_selection_info.driver_version = current_nvidia_driver_version();
+    }
     finalize_encoder_selection_info(encoder_selection_info, encoder.name);
     BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
                     << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
@@ -5890,6 +5912,14 @@ namespace video {
     return std::string(chosen_encoder->name);
   }
 
+  std::string nvenc_fallback_detail(
+    std::string_view preferred_encoder,
+    std::string_view selected_encoder,
+    std::string_view driver_version
+  ) {
+    return nvenc_fallback_detail_impl(preferred_encoder, selected_encoder, driver_version);
+  }
+
   encoder_selection_info_t active_encoder_selection_info() {
     std::shared_lock encoder_state_lock {encoder_state_mutex};
 
@@ -5899,6 +5929,9 @@ namespace video {
 
     auto info = planned_encoder_selection_info();
     if (chosen_encoder) {
+      if (info.gpu_driver == "nvidia") {
+        info.driver_version = current_nvidia_driver_version();
+      }
       finalize_encoder_selection_info(info, chosen_encoder->name);
     }
     return info;
