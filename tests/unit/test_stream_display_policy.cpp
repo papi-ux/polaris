@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -121,6 +122,65 @@ namespace {
     config::video.linux_display.private_runtime = "labwc";
   }
 }  // namespace
+
+TEST(StreamDisplayPolicyTests, APrivateHostIsNeverMovedOffItsOwnTopologyWithoutBeingAsked) {
+  // The class of bug this catches: a host configured to provide its own private
+  // display gets silently resolved onto some other topology, and the operator
+  // has no way to tell that from a choice they made. It shipped once already,
+  // as an app's stored virtual-display flag outranking the host, and the cost
+  // was an EVDI path at 16.7 fps that nobody selected.
+  //
+  // The invariant, over every registered path and every combination of the
+  // resolver's inputs: on a private host the answer must either defer to the
+  // host default, or be something the caller explicitly named. Enumerating
+  // stream_path::registry() means a path added later is covered on the day it
+  // is added, without anyone remembering to extend this test.
+  using stream_display_policy::effective_session_selection_for_launch;
+
+  std::vector<std::string> candidates {""};
+  for (const auto &descriptor : stream_path::registry()) {
+    candidates.emplace_back(descriptor.id);
+  }
+  ASSERT_GT(candidates.size(), 1u) << "the path registry is empty, so this gate proves nothing";
+
+  size_t checked = 0;
+  for (const auto &requested : candidates) {
+    for (int bits = 0; bits < 32; ++bits) {
+      const bool mirror_desktop = bits & 1;
+      const bool launch_virtual_display = bits & 2;
+      const bool app_virtual_display = bits & 4;
+      const bool user_locked = bits & 8;
+      const bool optimization_present = bits & 16;
+
+      const auto selection = effective_session_selection_for_launch(
+        requested,
+        mirror_desktop,
+        launch_virtual_display,
+        app_virtual_display,
+        user_locked,
+        optimization_present,
+        true  // the host already provides a private display
+      );
+      ++checked;
+
+      const bool deferred_to_the_host = selection.empty();
+      const bool the_caller_named_it = !requested.empty() && selection == requested;
+      const bool mirroring_won = mirror_desktop &&
+        selection == stream_display_policy::k_desktop_display;
+      const bool a_locked_choice_won = user_locked && launch_virtual_display &&
+        selection == stream_display_policy::k_host_virtual_display;
+
+      EXPECT_TRUE(deferred_to_the_host || the_caller_named_it || mirroring_won || a_locked_choice_won)
+        << "a private host was moved to [" << selection << "] with nothing asking for it: "
+        << "requested=[" << requested << "] mirror=" << mirror_desktop
+        << " launch_vd=" << launch_virtual_display
+        << " app_vd=" << app_virtual_display
+        << " locked=" << user_locked
+        << " optimization=" << optimization_present;
+    }
+  }
+  EXPECT_EQ(checked, candidates.size() * 32);
+}
 
 TEST(StreamDisplayPolicyTests, APrivateHostRefusesAnUnlockedVirtualDisplayPreference) {
   using stream_display_policy::effective_session_selection_for_launch;

@@ -19,6 +19,10 @@
 #include <src/bounded_log_file.h>
 #include <src/logging.h>
 
+extern "C" {
+#include <libavutil/log.h>
+}
+
 namespace {
   std::array log_levels = {
     std::tuple("verbose", &verbose),
@@ -284,4 +288,20 @@ TEST(LoggingOwnerLock, SecondInitFallsBackToConsoleAndLeavesOwnedFilesUntouched)
   PolarisEnvironment::restore_logging();
 
   fs::remove_all(root, error);
+}
+
+TEST(LoggingTests, LibavErrorsSurviveEveryVerbosity) {
+  // Silencing libav at the default verbosity is how an encoder refusing to open
+  // became a silent fall back to software. FFmpeg names the required and the
+  // found nvenc API versions in its own error line; Polaris only ever printed
+  // the resulting "Function not implemented".
+  EXPECT_EQ(logging::av_log_level_for(2), AV_LOG_ERROR);
+  EXPECT_EQ(logging::av_log_level_for(3), AV_LOG_ERROR);
+  EXPECT_EQ(logging::av_log_level_for(1), AV_LOG_WARNING);
+  EXPECT_EQ(logging::av_log_level_for(0), AV_LOG_DEBUG);
+
+  for (int verbosity = 0; verbosity <= 5; ++verbosity) {
+    EXPECT_GE(logging::av_log_level_for(verbosity), AV_LOG_ERROR)
+      << "verbosity " << verbosity << " discards libav errors";
+  }
 }

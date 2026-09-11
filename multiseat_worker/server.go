@@ -348,6 +348,37 @@ func (server *workerServer) serveConnection(
 			if err := writer.send(messageInputAck, nil); err != nil {
 				return
 			}
+		case messageMediaConfigAck, messageRequestIDR, messageInvalidateReferenceFrames:
+			// The contract messages reach the encoder through the same gate as
+			// input: the exact control channel of an attached data plane.
+			if selectedChannel != channelControl || !attached ||
+				nilRuntimeInterface(server.dataPlane) {
+				return
+			}
+			control := routedMediaControl{
+				Identity: server.config.Identity,
+				Message:  value.Message,
+			}
+			if value.Message == messageInvalidateReferenceFrames {
+				span, err := parseFrameRange(value.Payload)
+				if err != nil {
+					return
+				}
+				control.Range = span
+			}
+			routeContext, cancelRoute := context.WithTimeout(
+				connectionContext,
+				dataPlaneRouteTimeout,
+			)
+			err := server.dataPlane.RouteMediaControl(routeContext, control)
+			cancelRoute()
+			if err != nil {
+				server.failDataPlane("media control")
+				return
+			}
+			if err := writer.send(messageMediaControlAck, nil); err != nil {
+				return
+			}
 		case messageShutdown:
 			if selectedChannel != channelControl {
 				return
