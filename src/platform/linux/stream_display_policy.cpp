@@ -9,15 +9,96 @@
 #include "desktop_takeover.h"
 #include "stream_path.h"
 #include "src/config.h"
+#include "src/logging.h"
 #include "virtual_display.h"
 
 #include <cctype>
+#include <mutex>
+#include <optional>
 
 namespace stream_display_policy {
 
   namespace {
 
     using stream_path::to_lower_copy;
+
+    /**
+     * The host's own display policy, held while a session-scoped override has
+     * rewritten the live config. A paused session keeps that rewrite standing
+     * for as long as it stays resumable, so anything that advises a client what
+     * to ask for reads this instead of the live values.
+     */
+    struct host_default_t {
+      legacy_booleans_t booleans;
+      std::string stream_mode;
+      std::string capture;
+    };
+
+    std::mutex host_default_mutex;
+    std::optional<host_default_t> held_host_default;
+
+    std::optional<host_default_t> load_host_default() {
+      const std::lock_guard<std::mutex> guard {host_default_mutex};
+      return held_host_default;
+    }
+
+    /** One held snapshot resolves to exactly one selection, lock-free. */
+    std::string selection_for_host_default(const host_default_t &held) {
+      if (!held.stream_mode.empty() && stream_path::find(held.stream_mode)) {
+        return stream_path::to_lower_copy(held.stream_mode);
+      }
+      return selection_from_legacy_booleans(held.booleans);
+    }
+
+    legacy_booleans_t live_booleans() {
+      const auto &linux_display = config::video.linux_display;
+      return legacy_booleans_t {
+        linux_display.headless_mode,
+        linux_display.use_cage_compositor,
+        linux_display.prefer_gpu_native_capture,
+      };
+    }
+
+    /** Resolve one explicit policy state rather than whatever config holds now. */
+    resolved_t resolve_for_state(
+      const input_t &input,
+      std::string_view selection,
+      std::string_view stream_mode,
+      const legacy_booleans_t &booleans,
+      std::string_view configured_capture
+    ) {
+      const auto *path = stream_path::find(selection);
+      stream_path::descriptor_t desc {};
+      if (path) {
+        desc = *path;
+      }
+      else {
+        desc = *stream_path::find(stream_path::k_desktop_display);
+      }
+
+      // Edge: legacy !headless + cage without stream_mode -> windowed private labwc.
+      if (stream_mode.empty() &&
+          !booleans.headless_mode &&
+          booleans.use_cage_compositor) {
+        if (const auto *windowed = stream_path::find(stream_path::k_windowed_stream)) {
+          desc = *windowed;
+          desc.request_headless = false;
+        }
+      }
+
+      auto caps = stream_path::probe_host_capabilities();
+      caps.configured_capture = std::string {configured_capture};
+      if (input.virtual_display_available) {
+        caps.virtual_display_available = true;
+      }
+
+      return stream_path::resolve_path(
+        desc,
+        caps,
+        input.active_encoder_requires_gpu_native_capture,
+        input.runtime_gpu_native_override_active
+      );
+    }
 
     void clear_connector_output_authority(bool retire_connectors) {
       auto &linux_display = config::video.linux_display;
@@ -326,10 +407,23 @@ namespace stream_display_policy {
     // profile's separate primary-output authority. EVDI and wlroots create a
     // new output, so their old connector and capture-output pins are retired.
     linux_display.primary_output.clear();
+    const auto previous_capture = config::video.capture;
     config::video.capture = capture_for_host_virtual_display_backend(
       backend,
-      config::video.capture
+      previous_capture
     );
+    if (config::video.capture != previous_capture) {
+      // This discards a capture backend the operator chose. Say so, rather than
+      // leaving them to infer it from a capture path they did not pick.
+      const auto describe = [](const std::string &capture) {
+        return capture.empty() ? std::string {"auto"} : capture;
+      };
+      BOOST_LOG(info) << "stream_display_policy: host virtual display backend ["
+                      << virtual_display::backend_name(backend)
+                      << "] cannot be captured through [" << describe(previous_capture)
+                      << "]; this session uses [" << describe(config::video.capture)
+                      << "] and the host setting is restored at teardown";
+    }
   }
 
   bool host_virtual_backend_creates_output(
@@ -347,36 +441,53 @@ namespace stream_display_policy {
   }
 
   resolved_t resolve(const input_t &input) {
-    const auto selection = configured_selection();
-    const auto *path = stream_path::find(selection);
-    stream_path::descriptor_t desc {};
-    if (path) {
-      desc = *path;
-    }
-    else {
-      desc = *stream_path::find(stream_path::k_desktop_display);
-    }
+    return resolve_for_state(
+      input,
+      configured_selection(),
+      config::video.linux_display.stream_mode,
+      live_booleans(),
+      config::video.capture
+    );
+  }
 
-    // Edge: legacy !headless + cage without stream_mode → windowed private labwc.
-    if (config::video.linux_display.stream_mode.empty() &&
-        !config::video.linux_display.headless_mode &&
-        config::video.linux_display.use_cage_compositor) {
-      if (const auto *windowed = stream_path::find(stream_path::k_windowed_stream)) {
-        desc = *windowed;
-        desc.request_headless = false;
-      }
-    }
+  void remember_host_default(
+      const legacy_booleans_t &booleans,
+      std::string_view stream_mode,
+      std::string_view capture) {
+    const std::lock_guard<std::mutex> guard {host_default_mutex};
+    held_host_default = host_default_t {
+      booleans,
+      std::string {stream_mode},
+      std::string {capture},
+    };
+  }
 
-    auto caps = stream_path::probe_host_capabilities();
-    if (input.virtual_display_available) {
-      caps.virtual_display_available = true;
-    }
+  void forget_host_default() {
+    const std::lock_guard<std::mutex> guard {host_default_mutex};
+    held_host_default.reset();
+  }
 
-    return stream_path::resolve_path(
-      desc,
-      caps,
-      input.active_encoder_requires_gpu_native_capture,
-      input.runtime_gpu_native_override_active
+  std::string host_default_selection() {
+    const auto held = load_host_default();
+    if (!held) {
+      return configured_selection();
+    }
+    return selection_for_host_default(*held);
+  }
+
+  resolved_t resolve_host_default(const input_t &input) {
+    // One read of the held snapshot for the selection and the state it resolves
+    // against, so a teardown landing mid-call cannot mix the two.
+    const auto held = load_host_default();
+    if (!held) {
+      return resolve(input);
+    }
+    return resolve_for_state(
+      input,
+      selection_for_host_default(*held),
+      held->stream_mode,
+      held->booleans,
+      held->capture
     );
   }
 
