@@ -498,6 +498,13 @@ namespace stream {
     std::shared_ptr<const std::atomic_bool> launch_worker_connection_required;
 #endif
 
+#ifdef __linux__
+    // Set once the audio socket knows its peer. The worker's media arrives on
+    // one channel read by the video thread, which can reach an audio frame
+    // before the audio thread has learned where to send it.
+    std::atomic_bool audio_peer_known {false};
+#endif
+
     std::thread audioThread;
     std::thread videoThread;
 
@@ -2405,6 +2412,7 @@ namespace stream {
     auto idr_events = session->mail->event<bool>(mail::idr);
     auto invalidate_events =
       session->mail->event<std::pair<std::int64_t, std::int64_t>>(mail::invalidate_ref_frames);
+    std::uint64_t dropped_before_audio_peer = 0;
 
     const multiseat::media::delivery_sinks_t sinks {
       .video = [&](std::vector<std::uint8_t> &&bytes, const std::int64_t index, const bool idr) {
@@ -2413,6 +2421,13 @@ namespace stream {
         video_packets->raise(std::move(packet));
       },
       .audio = [&](std::vector<std::uint8_t> &&bytes) {
+        // An audio frame that predates the client's audio socket has nowhere
+        // to go, and the host's own capture has the same shape: it starts only
+        // after that socket's ping. Dropping the first few is what that costs.
+        if (!session->audio_peer_known.load(std::memory_order_acquire)) {
+          ++dropped_before_audio_peer;
+          return;
+        }
         audio::buffer_t buffer {bytes.size()};
         std::copy(bytes.begin(), bytes.end(), std::begin(buffer));
         audio_packets->raise(destination, std::move(buffer));
@@ -2448,7 +2463,10 @@ namespace stream {
              ": "s + std::to_string(report.video_frames) + " video frames, "s +
              std::to_string(report.audio_frames) + " audio frames, "s +
              std::to_string(report.discontinuities) + " discontinuities, "s +
-             std::to_string(report.idr_requests) + " keyframe requests"s;
+             std::to_string(report.idr_requests) + " keyframe requests"s +
+             (dropped_before_audio_peer == 0 ? std::string {} :
+                ", "s + std::to_string(dropped_before_audio_peer) +
+                  " audio frames dropped before the client's audio socket answered"s);
     };
     if (multiseat::media::ended_cleanly(report.status)) {
       BOOST_LOG(info) << "Worker media ended: "sv << summary();
@@ -2503,6 +2521,7 @@ namespace stream {
     session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
 #ifdef __linux__
+    session->audio_peer_known.store(true, std::memory_order_release);
     if (session->worker_connection) {
       // One worker channel carries both, and the video thread reads it. This
       // thread still owns the audio socket's ping and QoS, so it stays for the

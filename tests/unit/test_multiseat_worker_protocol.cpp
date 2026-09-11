@@ -367,7 +367,7 @@ TEST(MultiseatWorkerProtocol, MediaConfigMatchesLanguageNeutralGoldenVector) {
   EXPECT_FALSE(parse_media_config({}));
 
   // A body the worker never produced must not decode into a usable contract.
-  for (const auto [offset, value] : {
+  for (const auto &[offset, value] : {
          std::pair<std::size_t, std::uint8_t> {0, 2},   // unknown contract version
          std::pair<std::size_t, std::uint8_t> {31, 1},  // reserved tail in use
          std::pair<std::size_t, std::uint8_t> {1, 7},   // unknown video codec
@@ -428,7 +428,7 @@ TEST(MultiseatWorkerProtocol, MediaFrameMatchesLanguageNeutralGoldenVector) {
   // A prefix with nothing after it carries no frame.
   EXPECT_FALSE(parse_media_frame(std::span {payload}.first(media_frame_prefix_size), encoded));
 
-  for (const auto [offset, value] : {
+  for (const auto &[offset, value] : {
          std::pair<std::size_t, std::uint8_t> {0, 0},     // unknown contract version
          std::pair<std::size_t, std::uint8_t> {1, 0x03},  // unknown flag bit
          std::pair<std::size_t, std::uint8_t> {2, 1},     // reserved 16 in use
