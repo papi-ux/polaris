@@ -228,6 +228,14 @@ namespace {
       failure = directory.string();
       return false;
     }
+    // Ownership alone is not enough. The private-state guard refuses a group or
+    // other writable directory just as firmly, and that is the more common
+    // failure because directory creation honours the umask.
+    fs::permissions(directory, fs::perms::owner_all, fs::perm_options::replace, ec);
+    if (ec) {
+      failure = directory.string();
+      return false;
+    }
     auto walk = fs::recursive_directory_iterator(
       directory,
       fs::directory_options::skip_permission_denied,
@@ -418,7 +426,8 @@ config_ownership_action_e config_ownership_action(
   bool is_directory,
   bool is_symlink,
   std::uint32_t owner_uid,
-  std::uint32_t account_uid
+  std::uint32_t account_uid,
+  std::uint32_t mode
 ) {
   if (!exists) {
     return config_ownership_action_e::nothing;
@@ -426,8 +435,14 @@ config_ownership_action_e config_ownership_action(
   if (is_symlink || !is_directory) {
     return config_ownership_action_e::refuse;
   }
+  // Group or other writable is refused by the private-state guard just as
+  // firmly as the wrong owner is, and it is the more common way in: directory
+  // creation honours the umask, so a umask of 002 produces 0775 unasked. A
+  // directory the account already owns can be narrowed safely.
+  const bool writable_by_others = (mode & 0022) != 0;
   if (owner_uid == account_uid) {
-    return config_ownership_action_e::nothing;
+    return writable_by_others ? config_ownership_action_e::repair :
+                                config_ownership_action_e::nothing;
   }
   if (owner_uid == 0) {
     return config_ownership_action_e::repair;
@@ -610,14 +625,17 @@ namespace args {
         present && S_ISDIR(metadata.st_mode),
         present && S_ISLNK(metadata.st_mode),
         present ? static_cast<std::uint32_t>(metadata.st_uid) : 0,
-        static_cast<std::uint32_t>(target_pw->pw_uid)
+        static_cast<std::uint32_t>(target_pw->pw_uid),
+        present ? static_cast<std::uint32_t>(metadata.st_mode & 07777) : 0
       )) {
         case config_ownership_action_e::repair: {
           std::string failure;
           if (hand_back_config_directory(config_dir, target_pw->pw_uid, target_pw->pw_gid, failure)) {
             std::cout
-              << "Polaris host setup: ["sv << config_dir.string() << "] was owned by root, which stops"sv << std::endl
-              << "Polaris saving its settings when it runs as "sv << setup_target_user << ". Handed it back."sv << std::endl;
+              << "Polaris host setup: ["sv << config_dir.string() << "] could not hold private state,"sv << std::endl
+              << "which is what stops Polaris saving its settings as "sv << setup_target_user
+              << ". It now belongs to that"sv << std::endl
+              << "account and is readable only by it."sv << std::endl;
           } else {
             BOOST_LOG(error)
               << "Polaris host setup could not hand ["sv << failure << "] back to "sv
