@@ -6586,7 +6586,8 @@ namespace proc {
         launch_session->virtual_display,
         app.virtual_display,
         launch_session->user_locked_virtual_display,
-        false
+        false,
+        stream_display_policy::host_default_provides_private_display()
       );
       if (effective_selection.empty()) {
         effective_selection = stream_display_policy::configured_selection();
@@ -6754,7 +6755,8 @@ namespace proc {
           session->virtual_display,
           _app.virtual_display,
           session->user_locked_virtual_display,
-          false
+          false,
+          stream_display_policy::host_default_provides_private_display()
         );
         return selection.empty() ? stream_display_policy::configured_selection() : selection;
       };
@@ -7153,7 +7155,8 @@ namespace proc {
       launch_session->virtual_display,
       app.virtual_display,
       launch_session->user_locked_virtual_display,
-      false
+      false,
+      stream_display_policy::host_default_provides_private_display()
     );
     if (session_mode.empty()) {
       session_mode = configured_session_mode;
