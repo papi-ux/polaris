@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iterator>
 #include <random>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,21 +50,56 @@ namespace private_state_file {
       return flags;
     }
 
-    bool secure_directory_descriptor(int descriptor, bool final_parent) {
+    /**
+     * @brief Whether this directory may hold private state, and if not, why.
+     *
+     * The reason matters as much as the answer. A single `sudo polaris` leaves
+     * the per-user config directory owned by root, after which every later run
+     * as the user fails here forever, and the only thing the operator sees is
+     * that saving credentials did not work.
+     */
+    bool secure_directory_descriptor(int descriptor, bool final_parent, std::string *reason = nullptr) {
+      const auto refuse = [reason](std::string explanation) {
+        if (reason) {
+          *reason = std::move(explanation);
+        }
+        return false;
+      };
+
       struct stat metadata {};
       if (::fstat(descriptor, &metadata) != 0 || !S_ISDIR(metadata.st_mode)) {
-        return false;
+        return refuse("it is not a directory this process can inspect");
       }
 
       const auto effective_user = ::geteuid();
       const auto writable_by_others = (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0;
+      const auto describe = [&metadata, effective_user](std::string_view problem) {
+        std::ostringstream detail;
+        detail << problem << " (owner uid " << metadata.st_uid
+               << ", mode 0" << std::oct << (metadata.st_mode & 07777) << std::dec
+               << ", this process runs as uid " << effective_user << ')';
+        return detail.str();
+      };
+
       if (final_parent) {
-        return metadata.st_uid == effective_user && !writable_by_others;
+        if (metadata.st_uid != effective_user) {
+          return refuse(describe("it is owned by another user"));
+        }
+        if (writable_by_others) {
+          return refuse(describe("it is writable by group or other"));
+        }
+        return true;
       }
 
       const auto trusted_owner = metadata.st_uid == 0 || metadata.st_uid == effective_user;
       const auto sticky_when_writable = !writable_by_others || (metadata.st_mode & S_ISVTX) != 0;
-      return trusted_owner && sticky_when_writable;
+      if (!trusted_owner) {
+        return refuse(describe("a parent directory is owned by another user"));
+      }
+      if (!sticky_when_writable) {
+        return refuse(describe("a parent directory is writable by others without the sticky bit"));
+      }
+      return true;
     }
 
     std::filesystem::path trusted_home_symlink() {
@@ -197,9 +233,20 @@ namespace private_state_file {
             parent_entry_needs_sync = true;
             next = ::openat(descriptor_, component.c_str(), directory_open_flags());
           }
-          if (next < 0 || !secure_directory_descriptor(next, final_parent)) {
+          std::string rejection;
+          if (next < 0 || !secure_directory_descriptor(next, final_parent, &rejection)) {
             if (next >= 0) {
               ::close(next);
+            }
+            if (!rejection.empty()) {
+              // The only place this is ever explained. Everything downstream
+              // reports that a write did not commit, which sends people looking
+              // at the file they were saving rather than at the directory.
+              BOOST_LOG(error) << "Refusing to keep private state in ["
+                               << path_.parent_path().string() << "] because "
+                               << rejection << ". If that directory is owned by root, a single "
+                               << "\"sudo polaris\" created it; chown it back to your own user and "
+                               << "run Polaris without sudo.";
             }
             (void) close();
             return;

@@ -161,6 +161,53 @@ TEST(VideoCacheTests, DriverVersionCacheHitRequiresMatchingBinaryMetadata) {
   std::filesystem::remove_all(cache_dir, ec);
 }
 
+TEST(VideoCacheTests, DriverVersionRejectsAnythingThatIsNotAVersion) {
+  // nvidia-smi prints its NVML failure to stdout, so without this the banner
+  // becomes the driver string, and because the cache is keyed on the tool's
+  // path and mtime rather than its output it then survives every restart.
+  EXPECT_EQ(video::parse_nvidia_driver_version_for_tests("610.57.04"), "610.57.04");
+  EXPECT_EQ(video::parse_nvidia_driver_version_for_tests("570.144\n"), "570.144");
+  EXPECT_EQ(video::parse_nvidia_driver_version_for_tests("610.57.04.01"), "610.57.04.01");
+
+  for (const auto *banner : {
+         "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.",
+         "Failed to initialize NVML: Driver/library version mismatch",
+         "No devices were found",
+         "",
+         "610",
+         "610.",
+         ".57",
+         "610..57",
+         "610.57.04.01.02",
+       }) {
+    EXPECT_TRUE(video::parse_nvidia_driver_version_for_tests(banner).empty())
+      << "accepted [" << banner << "] as a driver version";
+  }
+}
+
+TEST(VideoCacheTests, DriverVersionCacheHealsItselfWhenAlreadyPoisoned) {
+  // A cache written by an older build outlives the fix otherwise, because the
+  // entry is only reconsidered when nvidia-smi itself changes on disk.
+  const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-video-cache-poison-tests";
+  const auto cache_path = cache_dir / "driver_version_cache.txt";
+  const auto binary_path = cache_dir / "nvidia-smi";
+
+  std::error_code ec;
+  std::filesystem::create_directories(cache_dir, ec);
+  ASSERT_FALSE(ec);
+
+  ASSERT_TRUE(video::write_driver_version_cache_for_tests(
+    cache_path,
+    binary_path,
+    "12345",
+    "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."
+  ));
+  EXPECT_TRUE(video::read_driver_version_cache_for_tests(cache_path, binary_path, "12345").empty())
+    << "a poisoned driver cache entry must not be believed";
+
+  std::filesystem::remove_all(cache_dir, ec);
+}
+
 TEST(VideoCacheTests, ResetDisplayRetryDelayBackoffCapsAtTwoHundredMilliseconds) {
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(0), std::chrono::milliseconds(50));
   EXPECT_EQ(video::reset_display_retry_delay_for_tests(1), std::chrono::milliseconds(100));
