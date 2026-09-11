@@ -1755,9 +1755,30 @@ namespace config {
 
     bool config_loaded = false;
     try {
-      // Create appdata folder if it does not exist
+      // Create appdata folder if it does not exist.
+      //
+      // It holds credentials, tokens and session state, and the private-state
+      // guard refuses any directory that is group or other writable. Directory
+      // creation honours the umask, so on a host with umask 002 Polaris would
+      // create this at 0775 and then refuse to write into it, with a failed
+      // credential save as the only symptom. Narrow it on the way in rather
+      // than depending on the umask the user happens to have.
       const auto appdata_dir = platf::appdata();
       file_handler::make_directory(appdata_dir.string());
+      if (std::error_code permissions_error; true) {
+        fs::permissions(
+          appdata_dir,
+          fs::perms::owner_all,
+          fs::perm_options::replace,
+          permissions_error
+        );
+        if (permissions_error) {
+          BOOST_LOG(warning)
+            << "Could not restrict ["sv << appdata_dir.string()
+            << "] to this account: "sv << permissions_error.message()
+            << ". Saving credentials will fail if it is group or other writable."sv;
+        }
+      }
 
       // Migration: if an older Polaris build left a Sunshine-named config in
       // Polaris's own config directory, copy it to polaris.conf once. Keep the

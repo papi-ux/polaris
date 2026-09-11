@@ -201,5 +201,6 @@ config_ownership_action_e config_ownership_action(
   bool is_directory,
   bool is_symlink,
   std::uint32_t owner_uid,
-  std::uint32_t account_uid
+  std::uint32_t account_uid,
+  std::uint32_t mode
 );
