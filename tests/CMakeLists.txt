@@ -424,6 +424,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_multiseat_input_authority.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_gamepad_hid_identity.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_input_protocol.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_input_adapter.cpp
