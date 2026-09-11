@@ -14,17 +14,35 @@ import (
 )
 
 type fakeWorkerDataPlane struct {
-	inputs     chan routedInput
-	feedback   chan routedOutput
-	media      chan routedOutput
-	routeInput func(context.Context, routedInput) error
+	inputs            chan routedInput
+	mediaControls     chan routedMediaControl
+	feedback          chan routedOutput
+	media             chan routedOutput
+	routeInput        func(context.Context, routedInput) error
+	routeMediaControl func(context.Context, routedMediaControl) error
 }
 
 func newFakeWorkerDataPlane() *fakeWorkerDataPlane {
 	return &fakeWorkerDataPlane{
-		inputs:   make(chan routedInput, 8),
-		feedback: make(chan routedOutput, 8),
-		media:    make(chan routedOutput, 8),
+		inputs:        make(chan routedInput, 8),
+		mediaControls: make(chan routedMediaControl, 8),
+		feedback:      make(chan routedOutput, 8),
+		media:         make(chan routedOutput, 8),
+	}
+}
+
+func (plane *fakeWorkerDataPlane) RouteMediaControl(
+	ctx context.Context,
+	control routedMediaControl,
+) error {
+	if plane.routeMediaControl != nil {
+		return plane.routeMediaControl(ctx, control)
+	}
+	select {
+	case plane.mediaControls <- control:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -186,6 +204,112 @@ func (client *testConnection) input(t *testing.T, payload []byte) {
 	client.outgoing++
 	if response := client.read(t); response.Message != messageInputAck {
 		t.Fatalf("input did not receive an exact acknowledgement: %+v", response)
+	}
+}
+
+// mediaControl sends one controller-to-worker contract message and requires
+// the worker's single acknowledgement for it.
+func (client *testConnection) mediaControl(t *testing.T, kind message, payload []byte) {
+	t.Helper()
+	if err := writeFrame(client.connection, frame{
+		Channel: channelControl, Message: kind,
+		Slot:       client.worker.config.Identity.Slot,
+		Generation: client.worker.config.Identity.Generation,
+		Sequence:   client.outgoing, Payload: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client.outgoing++
+	if response := client.read(t); response.Message != messageMediaControlAck {
+		t.Fatalf("media control did not receive an exact acknowledgement: %+v", response)
+	}
+}
+
+func TestMediaContractIsAnnouncedOnMediaAndInstructedOnControl(t *testing.T) {
+	plane := newFakeWorkerDataPlane()
+	worker, _ := createRoutedTestWorker(t, "worker-contract", 91, 0, plane)
+	control := connectAndAuthenticate(t, worker, channelControl)
+	media := connectAndAuthenticate(t, worker, channelMedia)
+	defer control.connection.Close()
+	defer media.connection.Close()
+	control.attach(t)
+	media.attach(t)
+
+	// The worker announces its contract on the channel it describes.
+	config, err := encodeMediaConfig(goldenMediaConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plane.media <- routedOutput{
+		Identity: worker.config.Identity,
+		Message:  messageMediaConfig,
+		Payload:  config,
+	}
+	announced := media.read(t)
+	if announced.Message != messageMediaConfig {
+		t.Fatalf("contract was not announced on the media channel: %+v", announced)
+	}
+	if decoded, err := parseMediaConfig(announced.Payload); err != nil || decoded != goldenMediaConfig() {
+		t.Fatalf("announced contract did not survive the wire: %+v, %v", decoded, err)
+	}
+
+	span, err := encodeFrameRange(frameRange{First: 11, Last: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.mediaControl(t, messageMediaConfigAck, nil)
+	control.mediaControl(t, messageRequestIDR, nil)
+	control.mediaControl(t, messageInvalidateReferenceFrames, span)
+
+	for _, want := range []routedMediaControl{
+		{Identity: worker.config.Identity, Message: messageMediaConfigAck},
+		{Identity: worker.config.Identity, Message: messageRequestIDR},
+		{Identity: worker.config.Identity, Message: messageInvalidateReferenceFrames, Range: frameRange{First: 11, Last: 14}},
+	} {
+		select {
+		case got := <-plane.mediaControls:
+			if got != want {
+				t.Fatalf("media control reached the encoder changed: %+v, want %+v", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("media control never reached the encoder: %+v", want)
+		}
+	}
+}
+
+func TestMediaContractRejectsAMalformedSpanAndTheWrongChannel(t *testing.T) {
+	plane := newFakeWorkerDataPlane()
+	worker, _ := createRoutedTestWorker(t, "worker-contract-bad", 92, 0, plane)
+	control := connectAndAuthenticate(t, worker, channelControl)
+	media := connectAndAuthenticate(t, worker, channelMedia)
+	defer media.connection.Close()
+	control.attach(t)
+	media.attach(t)
+
+	// An inverted span is refused before it can reach the encoder, and the
+	// exact connection fails closed rather than answering.
+	inverted := make([]byte, frameRangeSize)
+	inverted[7] = 9
+	inverted[15] = 5
+	if err := writeFrame(control.connection, frame{
+		Channel: channelControl, Message: messageInvalidateReferenceFrames,
+		Slot:       worker.config.Identity.Slot,
+		Generation: worker.config.Identity.Generation,
+		Sequence:   control.outgoing, Payload: inverted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	control.outgoing++
+	select {
+	case err := <-worker.done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a malformed reference span did not fail its connection closed")
+	}
+	if len(plane.mediaControls) != 0 {
+		t.Fatalf("a malformed reference span reached the encoder: %+v", <-plane.mediaControls)
 	}
 }
 
