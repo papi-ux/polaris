@@ -53,6 +53,13 @@ namespace stream_display_policy {
    * Explicit accepted streamMode and mirrorDesktop remain authoritative. An
    * app default is used only when the client did not explicitly lock the
    * virtual-display choice.
+   *
+   * @param host_provides_private_display The host's own configuration already
+   *        creates the session's output, so an unlocked virtual-display
+   *        preference has nothing to add and is refused. A locked client choice
+   *        and an explicit accepted streamMode still win. Pass
+   *        host_default_provides_private_display(); every call site has to pass
+   *        the same answer or a resume can disagree with its own launch.
    */
   std::string effective_session_selection_for_launch(
     std::string_view requested_selection,
@@ -60,8 +67,19 @@ namespace stream_display_policy {
     bool launch_virtual_display,
     bool app_virtual_display,
     bool virtual_display_user_locked,
-    bool virtual_display_optimization_present = false
+    bool virtual_display_optimization_present = false,
+    bool host_provides_private_display = false
   );
+
+  /**
+   * @brief Whether the host's own configuration already provides the display.
+   *
+   * True for a headless labwc host: the private runtime creates the stream
+   * output itself. Reads the host default rather than the live config, so a
+   * session parked on a virtual display does not make the host stop being a
+   * private host.
+   */
+  bool host_default_provides_private_display();
 
   /**
    * @brief Keep the created virtual connector name when display mapping cannot
@@ -76,8 +94,11 @@ namespace stream_display_policy {
    * @brief Resolve the capture backend required by a host virtual display.
    *
    * Native wlroots headless outputs are capturable directly by output name.
-   * EVDI/KScreen outputs remain on the portal/KWin path unless an operator
-   * explicitly selected another backend.
+   * EVDI and KScreen outputs are reachable only through the portal/KWin path,
+   * so an explicitly configured backend does not apply to them and is replaced
+   * for the session. This discards an operator's choice, which is why
+   * normalize_host_virtual_display_state_for_backend says so in the log; the
+   * caller restores the host setting at teardown.
    */
   std::string capture_for_host_virtual_display_backend(
     virtual_display::backend_e backend,
@@ -214,8 +235,37 @@ namespace stream_display_policy {
 
   /**
    * @brief Return the configured selection after legacy-boolean normalization.
+   *
+   * This reads the live config, which a session-scoped override rewrites in
+   * place. Use host_default_selection() for anything that advises a client.
    */
   std::string configured_selection();
+
+  /**
+   * @brief Remember the host's own display policy while an override stands.
+   *
+   * A session-scoped override rewrites stream_mode, the legacy booleans and the
+   * capture backend in place, and a paused session keeps them rewritten for as
+   * long as it remains resumable. Surfaces that tell a client what to ask for
+   * have to answer for the host rather than for the session parked on it, or
+   * one client's topology silently becomes the next client's recommendation.
+   */
+  void remember_host_default(
+    const legacy_booleans_t &booleans,
+    std::string_view stream_mode,
+    std::string_view capture
+  );
+
+  /** @brief Forget the remembered host policy once the override is restored. */
+  void forget_host_default();
+
+  /**
+   * @brief The host's own configured selection, ignoring any live override.
+   *
+   * Falls back to configured_selection() when no override is standing, so this
+   * is always safe to call.
+   */
+  std::string host_default_selection();
 
   /**
    * @brief Whether a mode creates/owns the stream output refresh rate.
@@ -237,6 +287,11 @@ namespace stream_display_policy {
    */
   resolved_t resolve_current(bool active_encoder_requires_gpu_native_capture = false,
                              bool runtime_gpu_native_override_active = false);
+
+  /**
+   * @brief Resolve the host's own configured mode, ignoring a live override.
+   */
+  resolved_t resolve_host_default(const input_t &input = {});
 
   /**
    * @brief Resolve the effective mode while a session is live.
