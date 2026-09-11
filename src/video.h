@@ -709,6 +709,8 @@ namespace video {
     std::string_view binary_mtime
   );
 
+  std::string parse_nvidia_driver_version_for_tests(std::string_view reported);
+
   bool write_encoder_probe_cache_for_tests(
     const std::filesystem::path &cache_path,
     std::string_view driver_version,
