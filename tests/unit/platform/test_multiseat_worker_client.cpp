@@ -7,7 +7,9 @@
 #ifdef __linux__
 
   #include <chrono>
+  #include <fcntl.h>
   #include <optional>
+  #include <thread>
   #include <string>
   #include <vector>
 
@@ -876,7 +878,15 @@ namespace {
     auto second_identity = identity_for(12);
     second_identity.worker_name = "polaris-worker-controller-c3d4-12";
     auto second = create_authority(store, second_identity, "after-blocked-writer");
-    fake_worker_t replacement {second};
+    // A worker parked in accept() has already reserved a descriptor number for
+    // the connection it is waiting for, and the kernel will not hand that
+    // number to anything else while it waits. Reconnecting consumes the wait,
+    // so the replacement can stand ready here; closing does not, so in that
+    // case it starts only after this test has claimed the retired number.
+    std::optional<fake_worker_t> replacement;
+    if (reconnect) {
+      replacement.emplace(second);
+    }
     const auto began = std::chrono::steady_clock::now();
     if (reconnect) {
       EXPECT_EQ(client.connect(second, short_options()), transport_status_e::applied);
@@ -897,16 +907,33 @@ namespace {
     if (unrelated[1] == old_socket) {
       sender = unrelated[0];
     } else if (unrelated[0] != old_socket) {
-      receiver = ::fcntl(unrelated[0], F_DUPFD_CLOEXEC, old_socket);
-      EXPECT_EQ(receiver, old_socket);
+      // The retired socket is closed by the reader that owned it, on its own
+      // thread, so its number frees a moment after close() returns rather than
+      // inside it. Wait for the claim to succeed instead of assuming it already
+      // can: this test is about late cleanup, not about scheduling, and
+      // sanitizers are slow enough to lose that race on a correct client.
+      const auto free_by = std::chrono::steady_clock::now() + 5s;
+      while (true) {
+        receiver = ::fcntl(unrelated[0], F_DUPFD_CLOEXEC, old_socket);
+        if (receiver == old_socket || std::chrono::steady_clock::now() >= free_by) {
+          break;
+        }
+        if (receiver >= 0) {
+          EXPECT_EQ(::close(receiver), 0);
+        }
+        std::this_thread::sleep_for(1ms);
+      }
+      EXPECT_EQ(receiver, old_socket) << "the retired descriptor number never became claimable";
       EXPECT_EQ(::close(unrelated[0]), 0);
     }
     if (!reconnect) {
+      replacement.emplace(second);
       EXPECT_EQ(client.connect(second, short_options()), transport_status_e::applied);
     }
     EXPECT_EQ(client.heartbeat(channel_e::control), transport_status_e::applied);
     client.close();
-    replacement.stop();
+    ASSERT_TRUE(replacement);
+    replacement->stop();
     const std::array<std::uint8_t, 1> marker {0x55};
     EXPECT_TRUE(write_all(sender, marker));
     std::array<std::uint8_t, 1> observed {};
