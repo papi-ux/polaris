@@ -7032,6 +7032,27 @@ namespace proc {
   }
 #endif
 
+#ifdef __linux__
+  namespace {
+    /**
+     * Publish the pre-override host display policy, so the surfaces that tell a
+     * client what to ask for keep answering for the host while this session's
+     * override holds the live config rewritten. terminate_impl retires it.
+     */
+    void remember_host_display_default(const proc_t &proc) {
+      stream_display_policy::remember_host_default(
+        stream_display_policy::legacy_booleans_t {
+          proc.initial_headless_mode,
+          proc.initial_use_cage_compositor,
+          proc.initial_prefer_gpu_native_capture,
+        },
+        proc.initial_stream_mode,
+        proc.initial_capture
+      );
+    }
+  }  // namespace
+#endif
+
   int proc_t::execute_impl(
     const ctx_t& app,
     std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
@@ -7188,6 +7209,7 @@ namespace proc {
       config::video.output_name = initial_display;
       config::video.color_range = initial_color_range;
       config::video.nvenc_tune = initial_nvenc_tune;
+      stream_display_policy::forget_host_default();
     };
 
     bool session_mode_applied = false;
@@ -7214,6 +7236,7 @@ namespace proc {
             config::video.capture = session_capture;
           }
           this->initial_linux_display_saved = true;
+          remember_host_display_default(*this);
           session_mode_applied = true;
           BOOST_LOG(info) << "process: final session stream mode override ["sv << session_mode
                           << "] applied in-memory after optimization; host default restored at teardown"sv;
@@ -7951,6 +7974,7 @@ namespace proc {
             linux_vdisplay->backend
           );
           this->initial_linux_display_saved = true;
+          remember_host_display_default(*this);
           launch_session->virtual_display = true;
           this->virtual_display = true;
           this->display_name = linux_vdisplay->output_name;
@@ -10349,6 +10373,8 @@ namespace proc {
       // re-bake it for the restored host default. Teardown above already ran
       // against the session's effective mode, which is why this sits here.
       platf::reevaluate_capture_sources();
+      // The live config is the host default again, so stop holding a copy of it.
+      stream_display_policy::forget_host_default();
 #endif
     }
 

@@ -839,8 +839,13 @@ namespace nvhttp {
 
     bool host_prefers_headless() {
 #ifdef __linux__
-      // One resolve_current snapshot for the two flags (no hand-built input_t thrash).
-      const auto resolved = stream_display_policy::resolve_current();
+      // The host's own policy, not the session parked on it. A session-scoped
+      // override rewrites the live config, and a paused session keeps it
+      // rewritten for its whole resume window, so reading live values here
+      // would recommend one client's topology to the next one that asks.
+      const auto resolved = stream_display_policy::resolve_host_default(
+        stream_display_policy::input_t {virtual_display::is_available(), false, false}
+      );
       return resolved.uses_labwc() && resolved.requested_headless;
 #else
       return false;
@@ -9929,7 +9934,9 @@ namespace nvhttp {
         }
       }
       if (effective_selection.empty()) {
-        effective_selection = stream_display_policy::configured_selection();
+        // The host default, so a paused session's topology is not echoed back
+        // to this client as the topology it should then assert on /launch.
+        effective_selection = stream_display_policy::host_default_selection();
       }
       if (!effective_selection.empty()) {
         std::string topology_reject_reason;

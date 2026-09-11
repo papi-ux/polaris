@@ -106,6 +106,13 @@ namespace {
     std::string output_name;
   };
 
+  /** A remembered host default is process-wide; never let one leak out of a test. */
+  struct HeldHostDefaultGuard {
+    ~HeldHostDefaultGuard() {
+      stream_display_policy::forget_host_default();
+    }
+  };
+
   void configure_headless_cage(bool prefer_gpu_native_capture) {
     config::video.linux_display.headless_mode = true;
     config::video.linux_display.use_cage_compositor = true;
@@ -114,6 +121,47 @@ namespace {
     config::video.linux_display.private_runtime = "labwc";
   }
 }  // namespace
+
+TEST(StreamDisplayPolicyTests, HostDefaultOutlivesASessionScopedVirtualDisplayOverride) {
+  LinuxDisplayPolicyGuard guard;
+  HeldHostDefaultGuard held;
+  configure_headless_cage(true);
+
+  // What this host is, before any client launches anything on it.
+  ASSERT_EQ(stream_display_policy::configured_selection(), "windowed_stream");
+
+  // A launch takes the virtual display path. apply_selection rewrites the live
+  // config in place and normalize_host_virtual_display_state_for_backend
+  // replaces the capture backend, and a paused session keeps both rewritten
+  // until its resume window closes. Reproduce that state exactly.
+  stream_display_policy::remember_host_default(
+    stream_display_policy::legacy_booleans_t {true, true, true},
+    "",
+    "wlr"
+  );
+  config::video.linux_display.stream_mode =
+    std::string {stream_display_policy::k_host_virtual_display};
+  config::video.linux_display.use_cage_compositor = false;
+  config::video.capture = "portal";
+
+  EXPECT_EQ(stream_display_policy::configured_selection(), "host_virtual_display")
+    << "the live config is the running session's topology while the override stands";
+  EXPECT_EQ(stream_display_policy::host_default_selection(), "windowed_stream")
+    << "the host default must not become whatever the last client asked for";
+
+  const auto host_default = stream_display_policy::resolve_host_default(
+    stream_display_policy::input_t {}
+  );
+  EXPECT_TRUE(host_default.uses_labwc());
+  EXPECT_TRUE(host_default.requested_headless);
+  EXPECT_FALSE(stream_display_policy::resolve(stream_display_policy::input_t {}).uses_labwc())
+    << "the session's own resolution still follows the live override";
+
+  // Teardown retires the override, and the two answers agree again.
+  stream_display_policy::forget_host_default();
+  EXPECT_EQ(stream_display_policy::host_default_selection(), "host_virtual_display")
+    << "with nothing held, the host default is simply the live configuration";
+}
 
 TEST(StreamDisplayPolicyTests, GpuNativePreferenceLabelsPrivateStreamCaptureCapability) {
   LinuxDisplayPolicyGuard guard;
