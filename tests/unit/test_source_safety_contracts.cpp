@@ -413,6 +413,30 @@ TEST(SourceSafetyContracts, ASessionDisplayOverrideNeverBecomesTheAdvertisedHost
     << "silently replacing an operator's capture backend is what made this bug invisible";
 }
 
+TEST(SourceSafetyContracts, RefusingToKeepPrivateStateSaysWhichDirectoryAndWhy) {
+  // Everything downstream of this rejection reports only that a write did not
+  // commit, which sends people looking at the file they were saving instead of
+  // at the directory that refused it. One sudo run is enough to cause it, and
+  // for one release the failure had no log line at all.
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/private_state_file.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+
+  const auto guard = source.find("bool secure_directory_descriptor(");
+  ASSERT_NE(guard, std::string::npos);
+  EXPECT_NE(source.find("std::string *reason", guard), std::string::npos)
+    << "the guard must report why it refused, not just that it did";
+
+  EXPECT_NE(source.find("Refusing to keep private state in ["), std::string::npos)
+    << "the rejection must name the directory it refused";
+  EXPECT_NE(source.find("owner uid "), std::string::npos)
+    << "the rejection must name the owner, which is the thing that is wrong";
+  EXPECT_NE(source.find("without sudo"), std::string::npos)
+    << "the rejection must name the remedy";
+}
+
 TEST(SourceSafetyContracts, EveryLaunchTopologyResolverCallPassesTheHostPrivateDisplayAnswer) {
   // A resume validates topology with the same resolver its launch used. If one
   // call site answers "the host already provides the display" and another does

@@ -862,6 +862,47 @@ namespace video {
       return static_cast<bool>(f);
     }
 
+    /**
+     * @brief A driver version, or nothing at all.
+     *
+     * nvidia-smi prints its NVML failure banner to stdout, not stderr, so an
+     * unvalidated read stores that sentence as the driver string. The driver
+     * cache is keyed on the tool's path and mtime rather than its output, so a
+     * banner captured once outlives every restart and permanently defeats the
+     * driver-change invalidation in load_encoder_cache. Accept only something
+     * shaped like a version.
+     */
+    std::string parse_nvidia_driver_version(std::string_view reported) {
+      auto trimmed = trim_trailing_ascii_whitespace(std::string {reported});
+      if (trimmed.empty() || trimmed.size() > 24) {
+        return {};
+      }
+
+      std::size_t parts = 0;
+      std::size_t digits_in_part = 0;
+      for (const char character : trimmed) {
+        if (character >= '0' && character <= '9') {
+          ++digits_in_part;
+          continue;
+        }
+        if (character != '.' || digits_in_part == 0) {
+          return {};
+        }
+        ++parts;
+        digits_in_part = 0;
+      }
+      if (digits_in_part == 0) {
+        return {};
+      }
+      ++parts;
+
+      // major.minor at least, and nothing longer than 610.57.04.01.
+      if (parts < 2 || parts > 4) {
+        return {};
+      }
+      return trimmed;
+    }
+
     std::string read_driver_version_cache(
       const std::filesystem::path &cache_path,
       const std::filesystem::path &binary_path,
@@ -883,7 +924,9 @@ namespace video {
         return {};
       }
 
-      return trim_trailing_ascii_whitespace(std::move(cached_driver_version));
+      // Validate on the way out too, so a cache poisoned by an older build
+      // heals on its own instead of staying wrong until nvidia-smi is replaced.
+      return parse_nvidia_driver_version(cached_driver_version);
     }
 
     std::string query_nvidia_driver_version_uncached() {
@@ -895,7 +938,7 @@ namespace video {
 
       char buf[128];
       if (fgets(buf, sizeof(buf), pipe)) {
-        driver_version = trim_trailing_ascii_whitespace(buf);
+        driver_version = parse_nvidia_driver_version(buf);
       }
       pclose(pipe);
       return driver_version;
@@ -6063,6 +6106,10 @@ namespace video {
     std::string_view driver_version
   ) {
     return write_driver_version_cache(cache_path, binary_path, binary_mtime, driver_version);
+  }
+
+  std::string parse_nvidia_driver_version_for_tests(std::string_view reported) {
+    return parse_nvidia_driver_version(reported);
   }
 
   std::string read_driver_version_cache_for_tests(

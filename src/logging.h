@@ -68,6 +68,15 @@ namespace logging {
   [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file);
 
   /**
+   * @brief The libav log level Polaris runs at for a given verbosity.
+   *
+   * Errors always pass, at every verbosity. FFmpeg reports an encoder refusing
+   * to open, and why, through its own log; silencing it turns a diagnosable
+   * failure into a silent fall back to software encoding.
+   */
+  int av_log_level_for(int min_log_level);
+
+  /**
    * @brief Setup AV logging.
    * @param min_log_level The log level.
    */
