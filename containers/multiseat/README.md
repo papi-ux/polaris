@@ -64,9 +64,14 @@ surviving seat after its peer's container is removed. These observations prove
 worker-local codec roundtrips; continuous media transport and client playback
 remain separate acceptance gates.
 
-The production `run` command still injects no adapters. Worker-local encoding
-and host media routing are incomplete, and the Steam, Heroic, and Lutris launcher
-implementations remain outstanding. Provider readiness proves a resource or
+The production `run` command still injects no adapters, so no worker announces
+a media contract yet. Worker-local encoding is still missing, and the Steam,
+Heroic, and Lutris launcher implementations remain outstanding. The controller
+side of the media path is now complete: a worker that announces a contract on
+its media channel has it held against what the client negotiated, acknowledged,
+and its frames carried to that client's own packet destination, with keyframe
+requests and reference invalidations travelling back on control. What is left
+between here and a streaming worker is the producer. Provider readiness proves a resource or
 supervised process is available; it does not prove game frames reached a client.
 Unit tests and isolated physical input receipts likewise do not establish
 compositor input delivery or successful game streaming.
@@ -397,7 +402,23 @@ mount classifier still applies. SELinux stays enforcing.
 is an opt-in acceptance test. Set `POLARIS_MULTISEAT_PHYSICAL=1`, an exact
 `POLARIS_PHYSICAL_IMAGE`, a private `POLARIS_PHYSICAL_IPC_ROOT` parent, and
 two distinct pre-created profile volumes through `POLARIS_PHYSICAL_VOLUME`
-and `POLARIS_PHYSICAL_VOLUME_B`. `POLARIS_PHYSICAL_PROFILE` selects gamescope,
+and `POLARIS_PHYSICAL_VOLUME_B`. `POLARIS_PHYSICAL_IMAGE` must be a manifest
+digest reference, `name@sha256:<64 hex>`; a tag is refused before launch.
+
+Each profile volume must be private before a worker can use it. Podman creates
+a volume's data directory mode 0755, the image carries no `/var/lib/polaris-seat`
+for Podman to copy up from, and the worker requires its own profile directory to
+be exactly mode 0700 owned by its effective uid, so a correctly created volume
+otherwise fails with `private directory ownership or mode is unsafe` before any
+provider starts:
+
+```sh
+podman volume create pv-seat-a
+chmod 0700 "$(podman volume inspect pv-seat-a --format '{{.Mountpoint}}')"
+```
+
+Admission should check this before launch rather than leaving it to the worker;
+until it does, it is an operator step. `POLARIS_PHYSICAL_PROFILE` selects gamescope,
 steam, heroic, or lutris. The image must contain the separately packaged
 `polaris-seat-input-probe` acceptance helper. GPU device paths must belong to
 the explicit catalog supplied through the physical harness environment.

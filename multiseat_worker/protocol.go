@@ -18,6 +18,15 @@ const (
 	proofSize         = 32
 	maxControlPayload = 64 * 1024
 	maxMediaPayload   = 16 * 1024 * 1024
+	// mediaConfigSize is the fixed big-endian body of a media_config message.
+	mediaConfigSize = 32
+	// mediaFramePrefixSize is the fixed prefix inside every video/audio payload.
+	mediaFramePrefixSize = 32
+	// frameRangeSize is the fixed body of an invalidate_ref_frames message.
+	frameRangeSize       = 16
+	mediaContractVersion = 1
+	mediaFrameFlagIDR    = 0x01
+	mediaFrameKnownFlags = mediaFrameFlagIDR
 )
 
 var (
@@ -62,6 +71,19 @@ const (
 	messageAttach      message = 22
 	messageAttached    message = 23
 	messageInputAck    message = 24
+	// messageMediaConfig travels worker to controller on the media channel as
+	// the first frame there, ahead of every frame it describes.
+	messageMediaConfig message = 25
+	// messageMediaConfigAck travels controller to worker; no media may be
+	// sent before it arrives.
+	messageMediaConfigAck message = 26
+	// messageRequestIDR asks for the next produced frame to be an IDR.
+	messageRequestIDR message = 27
+	// messageInvalidateReferenceFrames carries an inclusive frameRange body.
+	messageInvalidateReferenceFrames message = 28
+	// messageMediaControlAck is the one acknowledgement the worker returns for
+	// the three controller to worker contract messages above.
+	messageMediaControlAck message = 29
 
 	messageVideo         message = 32
 	messageAudio         message = 33
@@ -201,6 +223,14 @@ func validMessage(selectedChannel channel, selectedMessage message, payloadSize 
 		return payloadSize == 0
 	case messageInputAck:
 		return selectedChannel == channelControl && payloadSize == 0
+	case messageMediaConfig:
+		// The contract rides the channel it describes, ahead of the frames it
+		// describes, so it can never be read out of order with them.
+		return selectedChannel == channelMedia && payloadSize == mediaConfigSize
+	case messageMediaConfigAck, messageRequestIDR, messageMediaControlAck:
+		return selectedChannel == channelControl && payloadSize == 0
+	case messageInvalidateReferenceFrames:
+		return selectedChannel == channelControl && payloadSize == frameRangeSize
 	case messageInput, messageFeedback:
 		return selectedChannel == channelControl && payloadSize > 0
 	case messageError:
@@ -332,4 +362,204 @@ func (guard *sequenceGuard) accept(sequence uint64) bool {
 		guard.next++
 	}
 	return true
+}
+
+type videoCodec uint8
+
+const videoCodecH264 videoCodec = 1
+
+type audioCodec uint8
+
+const audioCodecOpus audioCodec = 1
+
+// mediaConfig is the media contract one worker produces for the lifetime of
+// its data plane. It mirrors media_config_t in src/multiseat_worker_protocol.h
+// byte for byte; only H.264 video and 48 kHz Opus audio are representable.
+type mediaConfig struct {
+	VideoCodec           videoCodec
+	ProfileIDC           uint8
+	LevelIDC             uint8
+	Width                uint16
+	Height               uint16
+	FPSNumerator         uint32
+	FPSDenominator       uint32
+	BitrateCeilingKbps   uint32
+	AudioCodec           audioCodec
+	AudioChannels        uint8
+	AudioFrameDurationUS uint16
+	AudioSampleRate      uint32
+}
+
+// mediaFrame is the prefix carried inside every video and audio payload.
+type mediaFrame struct {
+	FrameIndex uint64
+	IDR        bool
+	// CLOCK_MONOTONIC nanoseconds on the shared kernel; zero means unknown.
+	CaptureTimestampNS uint64
+	EncodeTimestampNS  uint64
+}
+
+// frameRange is an inclusive frame index range whose references must not be
+// used again.
+type frameRange struct {
+	First uint64
+	Last  uint64
+}
+
+func legalOpusFrameDuration(microseconds uint16) bool {
+	switch microseconds {
+	case 2500, 5000, 10000, 20000, 40000, 60000:
+		return true
+	default:
+		return false
+	}
+}
+
+func legalH264Profile(profileIDC uint8) bool {
+	switch profileIDC {
+	case 66, 77, 88, 100:
+		return true
+	default:
+		return false
+	}
+}
+
+// validMediaConfig mirrors valid_media_config: known codecs, even geometry
+// between 16 and 16384 pixels, a positive frame rate of at most 1000 Hz, a
+// bitrate ceiling of at most 1 Gbit/s, 48 kHz Opus with one to eight channels
+// and a legal Opus frame duration.
+func validMediaConfig(config mediaConfig) bool {
+	const minimumDimension, maximumDimension = 16, 16384
+	const maximumBitrateKbps = 1000000
+	const maximumFPS = 1000
+	if config.VideoCodec != videoCodecH264 || !legalH264Profile(config.ProfileIDC) ||
+		config.LevelIDC < 10 || config.LevelIDC > 62 {
+		return false
+	}
+	if config.Width < minimumDimension || config.Width > maximumDimension ||
+		config.Height < minimumDimension || config.Height > maximumDimension ||
+		config.Width%2 != 0 || config.Height%2 != 0 {
+		return false
+	}
+	if config.FPSNumerator == 0 || config.FPSDenominator == 0 ||
+		config.FPSNumerator < config.FPSDenominator ||
+		uint64(config.FPSNumerator) > maximumFPS*uint64(config.FPSDenominator) {
+		return false
+	}
+	if config.BitrateCeilingKbps == 0 || config.BitrateCeilingKbps > maximumBitrateKbps {
+		return false
+	}
+	return config.AudioCodec == audioCodecOpus &&
+		config.AudioChannels >= 1 && config.AudioChannels <= 8 &&
+		config.AudioSampleRate == 48000 &&
+		legalOpusFrameDuration(config.AudioFrameDurationUS)
+}
+
+func encodeMediaConfig(config mediaConfig) ([]byte, error) {
+	if !validMediaConfig(config) {
+		return nil, errors.New("invalid worker media configuration")
+	}
+	body := make([]byte, mediaConfigSize)
+	body[0] = mediaContractVersion
+	body[1] = byte(config.VideoCodec)
+	body[2] = config.ProfileIDC
+	body[3] = config.LevelIDC
+	binary.BigEndian.PutUint16(body[4:6], config.Width)
+	binary.BigEndian.PutUint16(body[6:8], config.Height)
+	binary.BigEndian.PutUint32(body[8:12], config.FPSNumerator)
+	binary.BigEndian.PutUint32(body[12:16], config.FPSDenominator)
+	binary.BigEndian.PutUint32(body[16:20], config.BitrateCeilingKbps)
+	body[20] = byte(config.AudioCodec)
+	body[21] = config.AudioChannels
+	binary.BigEndian.PutUint16(body[22:24], config.AudioFrameDurationUS)
+	binary.BigEndian.PutUint32(body[24:28], config.AudioSampleRate)
+	// bytes 28-31 are reserved and stay zero.
+	return body, nil
+}
+
+func parseMediaConfig(body []byte) (mediaConfig, error) {
+	if len(body) != mediaConfigSize || body[0] != mediaContractVersion ||
+		binary.BigEndian.Uint32(body[28:32]) != 0 {
+		return mediaConfig{}, errors.New("invalid worker media configuration body")
+	}
+	config := mediaConfig{
+		VideoCodec:           videoCodec(body[1]),
+		ProfileIDC:           body[2],
+		LevelIDC:             body[3],
+		Width:                binary.BigEndian.Uint16(body[4:6]),
+		Height:               binary.BigEndian.Uint16(body[6:8]),
+		FPSNumerator:         binary.BigEndian.Uint32(body[8:12]),
+		FPSDenominator:       binary.BigEndian.Uint32(body[12:16]),
+		BitrateCeilingKbps:   binary.BigEndian.Uint32(body[16:20]),
+		AudioCodec:           audioCodec(body[20]),
+		AudioChannels:        body[21],
+		AudioFrameDurationUS: binary.BigEndian.Uint16(body[22:24]),
+		AudioSampleRate:      binary.BigEndian.Uint32(body[24:28]),
+	}
+	if !validMediaConfig(config) {
+		return mediaConfig{}, errors.New("invalid worker media configuration")
+	}
+	return config, nil
+}
+
+// encodeMediaFrame builds one media payload: the fixed prefix followed by
+// the encoded bytes. An empty frame or one over the limit is rejected.
+func encodeMediaFrame(frame mediaFrame, encoded []byte) ([]byte, error) {
+	if len(encoded) == 0 || len(encoded) > maxMediaPayload-mediaFramePrefixSize {
+		return nil, errors.New("invalid worker media frame")
+	}
+	payload := make([]byte, mediaFramePrefixSize+len(encoded))
+	payload[0] = mediaContractVersion
+	if frame.IDR {
+		payload[1] = mediaFrameFlagIDR
+	}
+	// bytes 2-7 are reserved and stay zero.
+	binary.BigEndian.PutUint64(payload[8:16], frame.FrameIndex)
+	binary.BigEndian.PutUint64(payload[16:24], frame.CaptureTimestampNS)
+	binary.BigEndian.PutUint64(payload[24:32], frame.EncodeTimestampNS)
+	copy(payload[mediaFramePrefixSize:], encoded)
+	return payload, nil
+}
+
+// parseMediaFrame splits one media payload into its prefix and encoded
+// bytes. It rejects an unknown version, unknown flags, non-zero reserved
+// bytes and a payload without at least one encoded byte after the prefix.
+func parseMediaFrame(payload []byte) (mediaFrame, []byte, error) {
+	if len(payload) <= mediaFramePrefixSize || len(payload) > maxMediaPayload ||
+		payload[0] != mediaContractVersion ||
+		payload[1]&^mediaFrameKnownFlags != 0 ||
+		binary.BigEndian.Uint16(payload[2:4]) != 0 ||
+		binary.BigEndian.Uint32(payload[4:8]) != 0 {
+		return mediaFrame{}, nil, errors.New("invalid worker media frame prefix")
+	}
+	return mediaFrame{
+		FrameIndex:         binary.BigEndian.Uint64(payload[8:16]),
+		IDR:                payload[1]&mediaFrameFlagIDR != 0,
+		CaptureTimestampNS: binary.BigEndian.Uint64(payload[16:24]),
+		EncodeTimestampNS:  binary.BigEndian.Uint64(payload[24:32]),
+	}, payload[mediaFramePrefixSize:], nil
+}
+
+func encodeFrameRange(value frameRange) ([]byte, error) {
+	if value.First > value.Last {
+		return nil, errors.New("invalid worker frame range")
+	}
+	body := make([]byte, frameRangeSize)
+	binary.BigEndian.PutUint64(body[0:8], value.First)
+	binary.BigEndian.PutUint64(body[8:16], value.Last)
+	return body, nil
+}
+
+func parseFrameRange(body []byte) (frameRange, error) {
+	if len(body) != frameRangeSize {
+		return frameRange{}, errors.New("invalid worker frame range body")
+	}
+	value := frameRange{
+		First: binary.BigEndian.Uint64(body[0:8]),
+		Last:  binary.BigEndian.Uint64(body[8:16]),
+	}
+	if value.First > value.Last {
+		return frameRange{}, errors.New("invalid worker frame range")
+	}
+	return value, nil
 }
