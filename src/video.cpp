@@ -183,6 +183,20 @@ namespace video {
       return info;
     }
 
+    /** See video.h. Pure, so the wording is testable without a GPU. */
+    std::string nvenc_fallback_detail_impl(
+      std::string_view preferred_encoder,
+      std::string_view selected_encoder,
+      std::string_view driver_version
+    ) {
+      if (preferred_encoder != "nvenc" || selected_encoder == "nvenc" || driver_version.empty()) {
+        return {};
+      }
+      return " NVENC did not start on NVIDIA driver [" + std::string {driver_version} +
+             "]; the libav error above names the nvenc API version it required, and a driver "
+             "older than that is the usual cause.";
+    }
+
     void finalize_encoder_selection_info(
       encoder_selection_info_t &info,
       std::string_view selected_encoder
@@ -201,6 +215,11 @@ namespace video {
         info.reason += " Preferred encoder [" + info.preferred_encoder +
                        "] did not satisfy this runtime; selected [" +
                        info.selected_encoder + "] instead.";
+        info.reason += nvenc_fallback_detail_impl(
+          info.preferred_encoder,
+          info.selected_encoder,
+          info.driver_version
+        );
       } else if (!info.selected_encoder.empty()) {
         info.reason += " Selected [" + info.selected_encoder + "].";
       }
@@ -862,6 +881,47 @@ namespace video {
       return static_cast<bool>(f);
     }
 
+    /**
+     * @brief A driver version, or nothing at all.
+     *
+     * nvidia-smi prints its NVML failure banner to stdout, not stderr, so an
+     * unvalidated read stores that sentence as the driver string. The driver
+     * cache is keyed on the tool's path and mtime rather than its output, so a
+     * banner captured once outlives every restart and permanently defeats the
+     * driver-change invalidation in load_encoder_cache. Accept only something
+     * shaped like a version.
+     */
+    std::string parse_nvidia_driver_version(std::string_view reported) {
+      auto trimmed = trim_trailing_ascii_whitespace(std::string {reported});
+      if (trimmed.empty() || trimmed.size() > 24) {
+        return {};
+      }
+
+      std::size_t parts = 0;
+      std::size_t digits_in_part = 0;
+      for (const char character : trimmed) {
+        if (character >= '0' && character <= '9') {
+          ++digits_in_part;
+          continue;
+        }
+        if (character != '.' || digits_in_part == 0) {
+          return {};
+        }
+        ++parts;
+        digits_in_part = 0;
+      }
+      if (digits_in_part == 0) {
+        return {};
+      }
+      ++parts;
+
+      // major.minor at least, and nothing longer than 610.57.04.01.
+      if (parts < 2 || parts > 4) {
+        return {};
+      }
+      return trimmed;
+    }
+
     std::string read_driver_version_cache(
       const std::filesystem::path &cache_path,
       const std::filesystem::path &binary_path,
@@ -883,7 +943,9 @@ namespace video {
         return {};
       }
 
-      return trim_trailing_ascii_whitespace(std::move(cached_driver_version));
+      // Validate on the way out too, so a cache poisoned by an older build
+      // heals on its own instead of staying wrong until nvidia-smi is replaced.
+      return parse_nvidia_driver_version(cached_driver_version);
     }
 
     std::string query_nvidia_driver_version_uncached() {
@@ -895,7 +957,7 @@ namespace video {
 
       char buf[128];
       if (fgets(buf, sizeof(buf), pipe)) {
-        driver_version = trim_trailing_ascii_whitespace(buf);
+        driver_version = parse_nvidia_driver_version(buf);
       }
       pclose(pipe);
       return driver_version;
@@ -5482,6 +5544,9 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+    if (encoder_selection_info.gpu_driver == "nvidia") {
+      encoder_selection_info.driver_version = current_nvidia_driver_version();
+    }
     finalize_encoder_selection_info(encoder_selection_info, encoder.name);
     BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
                     << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
@@ -5847,6 +5912,14 @@ namespace video {
     return std::string(chosen_encoder->name);
   }
 
+  std::string nvenc_fallback_detail(
+    std::string_view preferred_encoder,
+    std::string_view selected_encoder,
+    std::string_view driver_version
+  ) {
+    return nvenc_fallback_detail_impl(preferred_encoder, selected_encoder, driver_version);
+  }
+
   encoder_selection_info_t active_encoder_selection_info() {
     std::shared_lock encoder_state_lock {encoder_state_mutex};
 
@@ -5856,6 +5929,9 @@ namespace video {
 
     auto info = planned_encoder_selection_info();
     if (chosen_encoder) {
+      if (info.gpu_driver == "nvidia") {
+        info.driver_version = current_nvidia_driver_version();
+      }
       finalize_encoder_selection_info(info, chosen_encoder->name);
     }
     return info;
@@ -6063,6 +6139,10 @@ namespace video {
     std::string_view driver_version
   ) {
     return write_driver_version_cache(cache_path, binary_path, binary_mtime, driver_version);
+  }
+
+  std::string parse_nvidia_driver_version_for_tests(std::string_view reported) {
+    return parse_nvidia_driver_version(reported);
   }
 
   std::string read_driver_version_cache_for_tests(

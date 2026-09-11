@@ -69,6 +69,16 @@ namespace multiseat::worker_ipc {
           return payload_size == 0;
         case message_e::input_ack:
           return channel == channel_e::control && payload_size == 0;
+        case message_e::media_config:
+          // The contract rides the channel it describes, ahead of the frames it
+          // describes, so it can never be read out of order with them.
+          return channel == channel_e::media && payload_size == media_config_size;
+        case message_e::media_config_ack:
+        case message_e::request_idr:
+        case message_e::media_control_ack:
+          return channel == channel_e::control && payload_size == 0;
+        case message_e::invalidate_ref_frames:
+          return channel == channel_e::control && payload_size == frame_range_size;
         case message_e::input:
         case message_e::feedback:
           return channel == channel_e::control && payload_size > 0;
@@ -359,6 +369,181 @@ namespace multiseat::worker_ipc {
       .consumed = total_size,
       .required = total_size,
     };
+  }
+
+  namespace {
+    constexpr std::uint8_t media_frame_flag_idr = 0x01;
+    constexpr std::uint8_t media_frame_known_flags = media_frame_flag_idr;
+
+    bool legal_opus_frame_duration(std::uint16_t microseconds) {
+      switch (microseconds) {
+        case 2500:
+        case 5000:
+        case 10000:
+        case 20000:
+        case 40000:
+        case 60000:
+          return true;
+      }
+      return false;
+    }
+
+    bool legal_h264_profile(std::uint8_t profile_idc) {
+      switch (profile_idc) {
+        case 66:  // Baseline
+        case 77:  // Main
+        case 88:  // Extended
+        case 100:  // High
+          return true;
+      }
+      return false;
+    }
+  }  // namespace
+
+  bool valid_media_config(const media_config_t &config) {
+    constexpr std::uint16_t minimum_dimension = 16;
+    constexpr std::uint16_t maximum_dimension = 16384;
+    constexpr std::uint32_t maximum_bitrate_kbps = 1000000;
+    constexpr std::uint64_t maximum_fps = 1000;
+    if (config.video_codec != video_codec_e::h264 ||
+        !legal_h264_profile(config.profile_idc) ||
+        config.level_idc < 10 || config.level_idc > 62) {
+      return false;
+    }
+    if (config.width < minimum_dimension || config.width > maximum_dimension ||
+        config.height < minimum_dimension || config.height > maximum_dimension ||
+        config.width % 2 != 0 || config.height % 2 != 0) {
+      return false;
+    }
+    if (config.fps_numerator == 0 || config.fps_denominator == 0 ||
+        config.fps_numerator < config.fps_denominator ||
+        static_cast<std::uint64_t>(config.fps_numerator) >
+          maximum_fps * static_cast<std::uint64_t>(config.fps_denominator)) {
+      return false;
+    }
+    if (config.bitrate_ceiling_kbps == 0 ||
+        config.bitrate_ceiling_kbps > maximum_bitrate_kbps) {
+      return false;
+    }
+    return config.audio_codec == audio_codec_e::opus &&
+           config.audio_channels >= 1 && config.audio_channels <= 8 &&
+           config.audio_sample_rate == 48000 &&
+           legal_opus_frame_duration(config.audio_frame_duration_us);
+  }
+
+  std::vector<std::uint8_t> encode_media_config(const media_config_t &config) {
+    if (!valid_media_config(config)) {
+      throw std::invalid_argument {"invalid multiseat worker media configuration"};
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(media_config_size);
+    body.push_back(media_contract_version);
+    body.push_back(static_cast<std::uint8_t>(config.video_codec));
+    body.push_back(config.profile_idc);
+    body.push_back(config.level_idc);
+    append_u16(body, config.width);
+    append_u16(body, config.height);
+    append_u32(body, config.fps_numerator);
+    append_u32(body, config.fps_denominator);
+    append_u32(body, config.bitrate_ceiling_kbps);
+    body.push_back(static_cast<std::uint8_t>(config.audio_codec));
+    body.push_back(config.audio_channels);
+    append_u16(body, config.audio_frame_duration_us);
+    append_u32(body, config.audio_sample_rate);
+    append_u32(body, 0);
+    return body;
+  }
+
+  std::optional<media_config_t> parse_media_config(std::span<const std::uint8_t> body) {
+    if (body.size() != media_config_size || body[0] != media_contract_version ||
+        read_u32(body.subspan(28, 4)) != 0) {
+      return std::nullopt;
+    }
+    media_config_t config {
+      .video_codec = static_cast<video_codec_e>(body[1]),
+      .profile_idc = body[2],
+      .level_idc = body[3],
+      .width = read_u16(body.subspan(4, 2)),
+      .height = read_u16(body.subspan(6, 2)),
+      .fps_numerator = read_u32(body.subspan(8, 4)),
+      .fps_denominator = read_u32(body.subspan(12, 4)),
+      .bitrate_ceiling_kbps = read_u32(body.subspan(16, 4)),
+      .audio_codec = static_cast<audio_codec_e>(body[20]),
+      .audio_channels = body[21],
+      .audio_frame_duration_us = read_u16(body.subspan(22, 2)),
+      .audio_sample_rate = read_u32(body.subspan(24, 4)),
+    };
+    if (!valid_media_config(config)) {
+      return std::nullopt;
+    }
+    return config;
+  }
+
+  std::vector<std::uint8_t> encode_media_frame(
+    const media_frame_t &frame,
+    std::span<const std::uint8_t> encoded
+  ) {
+    if (encoded.empty() || encoded.size() > max_media_payload - media_frame_prefix_size) {
+      throw std::invalid_argument {"invalid multiseat worker media frame"};
+    }
+    std::vector<std::uint8_t> payload;
+    payload.reserve(media_frame_prefix_size + encoded.size());
+    payload.push_back(media_contract_version);
+    payload.push_back(frame.idr ? media_frame_flag_idr : 0);
+    append_u16(payload, 0);
+    append_u32(payload, 0);
+    append_u64(payload, frame.frame_index);
+    append_u64(payload, frame.capture_timestamp_ns);
+    append_u64(payload, frame.encode_timestamp_ns);
+    payload.insert(payload.end(), encoded.begin(), encoded.end());
+    return payload;
+  }
+
+  std::optional<media_frame_t> parse_media_frame(
+    std::span<const std::uint8_t> payload,
+    std::span<const std::uint8_t> &encoded
+  ) {
+    encoded = {};
+    if (payload.size() <= media_frame_prefix_size ||
+        payload.size() > max_media_payload ||
+        payload[0] != media_contract_version ||
+        (payload[1] & ~media_frame_known_flags) != 0 ||
+        read_u16(payload.subspan(2, 2)) != 0 ||
+        read_u32(payload.subspan(4, 4)) != 0) {
+      return std::nullopt;
+    }
+    encoded = payload.subspan(media_frame_prefix_size);
+    return media_frame_t {
+      .frame_index = read_u64(payload.subspan(8, 8)),
+      .idr = (payload[1] & media_frame_flag_idr) != 0,
+      .capture_timestamp_ns = read_u64(payload.subspan(16, 8)),
+      .encode_timestamp_ns = read_u64(payload.subspan(24, 8)),
+    };
+  }
+
+  std::vector<std::uint8_t> encode_frame_range(const frame_range_t &range) {
+    if (range.first > range.last) {
+      throw std::invalid_argument {"invalid multiseat worker frame range"};
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(frame_range_size);
+    append_u64(body, range.first);
+    append_u64(body, range.last);
+    return body;
+  }
+
+  std::optional<frame_range_t> parse_frame_range(std::span<const std::uint8_t> body) {
+    if (body.size() != frame_range_size) {
+      return std::nullopt;
+    }
+    const frame_range_t range {
+      .first = read_u64(body.subspan(0, 8)),
+      .last = read_u64(body.subspan(8, 8)),
+    };
+    if (range.first > range.last) {
+      return std::nullopt;
+    }
+    return range;
   }
 
 }  // namespace multiseat::worker_ipc

@@ -532,6 +532,29 @@ recipe now fails closed unless its locked root contains `gst-launch-1.0`,
 have not yet passed that gate. Virtual input, encoder, and launcher providers
 remain missing; Podman health still means only supervisor liveness.
 
+### What changed after this checkpoint
+
+Recorded here so the entry above can be read as the checkpoint it was.
+
+- The four locked application roots do pass the dependency gate, and CI builds
+  a worker image for each of them as a downloadable artifact. See
+  `containers/multiseat/RUNTIME-IMAGES.md`.
+- The virtual-input and launcher providers exist and are installed in the image.
+  The encoder provider is still missing, which is the one thing standing between
+  a worker and a stream.
+- A worker's supplementary groups are preserved: the launch argv uses trusted
+  crun with `--userns=keep-id`, an explicit launching uid and
+  `--group-add=keep-groups`, and the inventory requires the OCI runtime spec's
+  `run.oci.keep_original_groups` annotation rather than trusting inspect output.
+- `device_phys` is written through to uinput, so an allocated node carries the
+  physical identity the worker verifies.
+- The media path has a negotiated contract. A worker announces what it produces
+  on its media channel, the controller holds that against what the client
+  negotiated and acknowledges it, frames carry a prefix with their index and
+  keyframe flag, and keyframe requests and reference invalidations travel back
+  on control. The controller side of that path is implemented and carries an
+  announced contract's frames to the client's own packet destination.
+
 ## Host-brokered virtual-input authority checkpoint
 
 Virtual input must be created before the worker launch, on the trusted host

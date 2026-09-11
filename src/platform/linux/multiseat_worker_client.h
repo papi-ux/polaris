@@ -61,7 +61,17 @@ namespace multiseat::worker_ipc {
     [[nodiscard]] bool operator==(const controller_connection_t &) const = default;
     [[nodiscard]] transport_status_e attach_data_plane() const;
     [[nodiscard]] transport_status_e send_input(std::span<const std::uint8_t> payload) const;
+    /** Release the worker's media after its announced contract was accepted. */
+    [[nodiscard]] transport_status_e acknowledge_media_config() const;
+    /** Ask the worker's encoder to make the next frame an IDR. */
+    [[nodiscard]] transport_status_e request_idr() const;
+    /** Retire an inclusive span of frames the client can no longer reference. */
+    [[nodiscard]] transport_status_e invalidate_ref_frames(const frame_range_t &range) const;
     [[nodiscard]] transport_status_e receive_feedback(std::vector<std::uint8_t> &payload) const;
+    /**
+     * The next media frame. The worker's media_config arrives before any video
+     * or audio frame, so the caller reads the message to tell them apart.
+     */
     [[nodiscard]] transport_status_e receive_media(encoded_media_packet_t &packet) const;
     [[nodiscard]] transport_status_e heartbeat(channel_e channel) const;
     [[nodiscard]] transport_status_e shutdown() const;
@@ -83,8 +93,9 @@ namespace multiseat::worker_ipc {
    * authentication for the exact authority generation. This checkpoint only
    * exposes heartbeat and graceful shutdown immediately. Data-plane attachment
    * is separate so health probes cannot consume media. Once both channels are
-   * attached, input travels only controller-to-worker while feedback and
-   * already encoded media travel only worker-to-controller.
+   * attached, input and the media contract's instructions travel only
+   * controller-to-worker while feedback, the worker's announced media contract
+   * and already encoded media travel only worker-to-controller.
    *
    * Concurrent control and media operations use independent readers. Each
    * channel admits one request awaiting its ACK; async packets share a bounded
@@ -120,6 +131,9 @@ namespace multiseat::worker_ipc {
     [[nodiscard]] controller_connection_t lease_connection() const;
     [[nodiscard]] transport_status_e attach_data_plane();
     [[nodiscard]] transport_status_e send_input(std::span<const std::uint8_t> payload);
+    [[nodiscard]] transport_status_e acknowledge_media_config();
+    [[nodiscard]] transport_status_e request_idr();
+    [[nodiscard]] transport_status_e invalidate_ref_frames(const frame_range_t &range);
     [[nodiscard]] transport_status_e receive_feedback(std::vector<std::uint8_t> &payload);
     [[nodiscard]] transport_status_e receive_media(encoded_media_packet_t &packet);
     [[nodiscard]] transport_status_e heartbeat(channel_e channel);
