@@ -340,12 +340,24 @@ namespace logging {
   }
 
 #ifndef __ANDROID__
-  void setup_av_logging(int min_log_level) {
-    if (min_log_level >= 1) {
-      av_log_set_level(AV_LOG_QUIET);
-    } else {
-      av_log_set_level(AV_LOG_DEBUG);
+  int av_log_level_for(int min_log_level) {
+    // This used to silence libavcodec completely at any level above the most
+    // verbose, which threw away the one line that explains an encoder refusing
+    // to open. When the linked FFmpeg wants a newer nvenc API than the driver
+    // provides, FFmpeg itself names both versions and Polaris only ever printed
+    // the resulting "Function not implemented", so the stream silently fell back
+    // to software with nothing saying why. Errors now always come through.
+    if (min_log_level >= 2) {
+      return AV_LOG_ERROR;
     }
+    if (min_log_level == 1) {
+      return AV_LOG_WARNING;
+    }
+    return AV_LOG_DEBUG;
+  }
+
+  void setup_av_logging(int min_log_level) {
+    av_log_set_level(av_log_level_for(min_log_level));
     av_log_set_callback([](void *ptr, int level, const char *fmt, va_list vl) {
       static int print_prefix = 1;
       char buffer[1024];
