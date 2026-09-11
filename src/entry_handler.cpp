@@ -214,6 +214,38 @@ namespace {
    * run the documented way; a bare root login cannot name it, and this command
    * deliberately never guesses which account streams.
    */
+  /**
+   * @brief Hand a root-owned per-user directory back to its account.
+   *
+   * Walks without following symlinks and uses lchown, so a link planted inside
+   * can only ever have its own ownership changed, never its target's. The
+   * directory is root-owned at this point, which is what makes the walk safe to
+   * start; entries below it may be anything.
+   */
+  bool hand_back_config_directory(const fs::path &directory, uid_t uid, gid_t gid, std::string &failure) {
+    std::error_code ec;
+    if (lchown(directory.c_str(), uid, gid) != 0) {
+      failure = directory.string();
+      return false;
+    }
+    auto walk = fs::recursive_directory_iterator(
+      directory,
+      fs::directory_options::skip_permission_denied,
+      ec
+    );
+    if (ec) {
+      failure = directory.string();
+      return false;
+    }
+    for (const auto &entry : walk) {
+      if (lchown(entry.path().c_str(), uid, gid) != 0) {
+        failure = entry.path().string();
+        return false;
+      }
+    }
+    return true;
+  }
+
   std::optional<headless_boot_account_t> resolve_headless_boot_account() {
     const auto user = platf::input_access::setup_host_target_user();
     if (user.empty() || user == "root") {
@@ -381,6 +413,28 @@ void launch_ui(const std::optional<std::string> &path) {
   platf::open_url(url);
 }
 
+config_ownership_action_e config_ownership_action(
+  bool exists,
+  bool is_directory,
+  bool is_symlink,
+  std::uint32_t owner_uid,
+  std::uint32_t account_uid
+) {
+  if (!exists) {
+    return config_ownership_action_e::nothing;
+  }
+  if (is_symlink || !is_directory) {
+    return config_ownership_action_e::refuse;
+  }
+  if (owner_uid == account_uid) {
+    return config_ownership_action_e::nothing;
+  }
+  if (owner_uid == 0) {
+    return config_ownership_action_e::repair;
+  }
+  return config_ownership_action_e::refuse;
+}
+
 namespace args {
   int creds(const char *name, int argc, char *argv[]) {
     if (argc < 2 || argv[0] == "help"sv || argv[1] == "help"sv) {
@@ -539,6 +593,51 @@ namespace args {
     }
 
     bool ok = true;
+    // A single earlier `sudo polaris` leaves this directory owned by root, and
+    // from then on Polaris cannot save anything when it runs as the account
+    // that streams. Setup already holds the privilege needed to undo it, so it
+    // does, rather than leaving someone to infer it from a failed credential
+    // save. Only the default location is checked: a session that moved it with
+    // XDG_CONFIG_HOME is not visible from a root setup run, so nothing here
+    // claims to have checked one.
+    if (const auto *target_pw = setup_target_user.empty() || setup_target_user == "root" ? nullptr : getpwnam(setup_target_user.c_str());
+        target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
+      const auto config_dir = fs::path(target_pw->pw_dir) / ".config" / "polaris";
+      struct stat metadata {};
+      const bool present = ::lstat(config_dir.c_str(), &metadata) == 0;
+      switch (config_ownership_action(
+        present,
+        present && S_ISDIR(metadata.st_mode),
+        present && S_ISLNK(metadata.st_mode),
+        present ? static_cast<std::uint32_t>(metadata.st_uid) : 0,
+        static_cast<std::uint32_t>(target_pw->pw_uid)
+      )) {
+        case config_ownership_action_e::repair: {
+          std::string failure;
+          if (hand_back_config_directory(config_dir, target_pw->pw_uid, target_pw->pw_gid, failure)) {
+            std::cout
+              << "Polaris host setup: ["sv << config_dir.string() << "] was owned by root, which stops"sv << std::endl
+              << "Polaris saving its settings when it runs as "sv << setup_target_user << ". Handed it back."sv << std::endl;
+          } else {
+            BOOST_LOG(error)
+              << "Polaris host setup could not hand ["sv << failure << "] back to "sv
+              << setup_target_user << "; run: sudo chown -R "sv << setup_target_user << ' '
+              << config_dir.string();
+            ok = false;
+          }
+          break;
+        }
+        case config_ownership_action_e::refuse:
+          BOOST_LOG(warning)
+            << "Polaris host setup: ["sv << config_dir.string() << "] is not a directory owned by "sv
+            << setup_target_user << " or by root, so setup will not change it. Polaris cannot save its "sv
+            << "settings there until it belongs to "sv << setup_target_user << '.';
+          break;
+        case config_ownership_action_e::nothing:
+          break;
+      }
+    }
+
     if (udev_from_package) {
       retire_shadowing_etc_asset("/etc/udev/rules.d/60-polaris.rules", udev_source, "udev rules");
     } else {
