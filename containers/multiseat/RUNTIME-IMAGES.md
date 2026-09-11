@@ -147,9 +147,10 @@ runtime directories remain part of the trust boundary: inode retention does not
 make a pathname check followed by unlink atomic against a concurrent writer.
 
 None of these receipts proves successful game streaming. Production `run` still
-injects no lifecycle adapters. Virtual-input provider integration, worker-local
-encoding, launcher process management, production media routing, seat-aware
-status, and real concurrent game streams remain the next milestone. Runtime
+injects no lifecycle adapters, so no worker announces a media contract. The
+controller now carries an announced contract's frames to the client that
+negotiated it, which leaves worker-local encoding, launcher process management,
+seat-aware status, and real concurrent game streams as the next milestone. Runtime
 startup must also establish the private X11 directory ownership expected by the
 provider before production wiring; the isolated tests provide their own fixture.
 
