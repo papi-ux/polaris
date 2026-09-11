@@ -19,7 +19,7 @@
 using namespace std::chrono_literals;
 namespace inputtino_test {
 bool fail_create = false;
-struct Report { unsigned buttons; unsigned sequence; };
+struct Report { unsigned buttons; unsigned sequence; uint8_t x, y, rx, ry, z, rz; };
 std::mutex mutex;
 std::condition_variable changed;
 std::vector<Report> reports;
@@ -61,7 +61,7 @@ inputtino::Result<bool> accept(const uhid_event &ev) {
     changed.notify_all();
     require(changed.wait_for(lock, 3s, [] { return release; }), "report gate timed out");
   }
-  reports.push_back({buttons, report.seq_number});
+  reports.push_back({buttons, report.seq_number, report.x, report.y, report.rx, report.ry, report.z, report.rz});
   changed.notify_all();
   return true;
 }
@@ -69,6 +69,19 @@ void reset() {
   std::lock_guard lock(mutex);
   reports.clear();
   gate = waiting = release = false;
+}
+// A pad nobody has touched must already describe a pad nobody is touching.
+// Centred sticks, released triggers.
+void verify_resting_axes() {
+  std::lock_guard lock(mutex);
+  require(!reports.empty(), "no resting report");
+  const auto &resting = reports.front();
+  require(resting.x == uhid::PS5_AXIS_NEUTRAL && resting.y == uhid::PS5_AXIS_NEUTRAL,
+          "left stick is deflected before any input");
+  require(resting.rx == uhid::PS5_AXIS_NEUTRAL && resting.ry == uhid::PS5_AXIS_NEUTRAL,
+          "right stick is deflected before any input");
+  require(resting.z == uhid::PS5_AXIS_MIN && resting.rz == uhid::PS5_AXIS_MIN,
+          "a trigger is pulled before any input");
 }
 void verify_order() {
   std::lock_guard lock(mutex);
@@ -85,6 +98,19 @@ int main() {
     fail_create = true;
     require(!inputtino::PS5Joypad::create(), "failed create unexpectedly succeeded");
     fail_create = false;
+    // The periodic sender starts reporting as soon as the pad exists, so the
+    // first report leaves before any client input can correct it.
+    reset();
+    {
+      auto result = inputtino::PS5Joypad::create();
+      require(bool(result), "resting create failed");
+      inputtino::PS5Joypad pad(std::move(*result));
+      for (int wait = 0; wait < 300; ++wait) {
+        { std::lock_guard lock(mutex); if (!reports.empty()) break; }
+        std::this_thread::sleep_for(10ms);
+      }
+      verify_resting_axes();
+    }
     // Real create/move/repeat/destruction run each time, without a kernel device.
     for (int iteration = 0; iteration < 5; ++iteration) {
       reset();
@@ -169,7 +195,7 @@ int main() {
       require(feedback > 0, "feedback callback never exercised");
       verify_order();
     }
-    std::cout << "PASS: report order, CRC, concurrent setters/feedback, failed create, move and repeat teardown\n";
+    std::cout << "PASS: resting axes, report order, CRC, concurrent setters/feedback, failed create, move and repeat teardown\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';

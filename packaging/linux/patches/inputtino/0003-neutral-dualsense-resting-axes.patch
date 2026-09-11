@@ -1,0 +1,20 @@
+--- a/src/uhid/include/uhid/ps5.hpp
++++ b/src/uhid/include/uhid/ps5.hpp
+@@ -442,9 +442,14 @@
+ constexpr size_t PS_INPUT_REPORT_BT_OFFSET = 13;
+ 
+ struct dualsense_input_report {
+-  uint8_t x, y = PS5_AXIS_NEUTRAL;   // LS
+-  uint8_t rx, ry = PS5_AXIS_NEUTRAL; // RS
+-  uint8_t z, rz = PS5_AXIS_NEUTRAL;  // L2, R2
++  // Each member needs its own initializer: in a comma-separated declaration the
++  // initializer binds only to the member it follows, so x, rx and z were left
++  // unset and a pad reported both sticks hard left before any input arrived.
++  uint8_t x = PS5_AXIS_NEUTRAL, y = PS5_AXIS_NEUTRAL;   // LS
++  uint8_t rx = PS5_AXIS_NEUTRAL, ry = PS5_AXIS_NEUTRAL; // RS
++  // A released trigger reads as the minimum rather than the centre, because
++  // set_triggers(0, 0) scales to PS5_AXIS_MIN. Neutral here left R2 half pulled.
++  uint8_t z = PS5_AXIS_MIN, rz = PS5_AXIS_MIN;          // L2, R2
+   uint8_t seq_number = 0;
+   // HAT_SWITCH is neutral when 0x8 is reported
+   uint8_t buttons[4] = {HAT_NEUTRAL, 0, 0, 0};
