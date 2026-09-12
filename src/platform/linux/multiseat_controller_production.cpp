@@ -9,6 +9,7 @@
   #include "multiseat_container_host.h"
   #include "src/uuid.h"
 
+  #include <algorithm>
   #include <set>
   #include <unordered_set>
   #include <utility>
@@ -199,7 +200,7 @@ namespace multiseat {
     production_controller_options_t options,
     production_controller_factories_t factories
   ) {
-    if (!options.enabled) {
+    if (!options.enabled || (options.container.profiles.empty() && options.profile_routes.empty())) {
       return controller_runtime_t::create({}, {});
     }
     if (!valid_catalog_boundary(options)) {
@@ -208,11 +209,37 @@ namespace multiseat {
       };
     }
 
-    const controller_runtime_options_t runtime_options {
+    controller_runtime_options_t runtime_options {
       .enabled = true, .worker_media_enabled = options.container.media_enabled,
     };
+    // Resolve profile storage/image and workload from the same trusted catalog
+    // the backend will enforce. No second GPU or image allowlist is accepted.
+    for (const auto &route : options.profile_routes) {
+      const auto &profiles = options.container.profiles;
+      const auto profile = std::find_if(profiles.begin(), profiles.end(), [&](const auto &entry) {
+        return entry.profile_key == route.profile_key;
+      });
+      if (profile == profiles.end() ||
+          std::count_if(profiles.begin(), profiles.end(), [&](const auto &entry) {
+            return entry.profile_key == route.profile_key;
+          }) != 1 ||
+          std::find(options.container.workloads.begin(), options.container.workloads.end(),
+            route.workload) == options.container.workloads.end()) {
+        return {.status = controller_runtime_create_status_e::invalid_dependencies};
+      }
+      controller_profile_route_t resolved {
+        .profile_key = route.profile_key,
+        .client_keys = route.client_keys,
+        .runtime_profile = profile->runtime_profile,
+        .workload = route.workload,
+      };
+      for (const auto &gpu : options.gpus) {
+        resolved.logical_gpu_ids.push_back(gpu.logical_gpu_id);
+      }
+      runtime_options.profile_routes.push_back(std::move(resolved));
+    }
     return controller_runtime_t::create(
-      runtime_options,
+      std::move(runtime_options),
       [options = std::move(options), factories = std::move(factories)]()
         mutable -> std::optional<controller_runtime_dependencies_t> {
         const auto epoch = factories.controller_epoch ?

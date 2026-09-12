@@ -34,6 +34,12 @@ namespace multiseat {
     std::uint32_t max_encoder_sessions = 1;
   };
 
+  struct production_controller_profile_route_t {
+    std::string profile_key;
+    std::vector<std::string> client_keys;
+    workload_plan_t workload;
+  };
+
   struct production_controller_options_t {
     bool enabled = false;
     std::vector<production_controller_gpu_t> gpus;
@@ -43,6 +49,8 @@ namespace multiseat {
      */
     container::options_t container;
     worker_coordinator_options_t worker;
+    /** Image family and GPU order are derived from the container/GPU catalogs. */
+    std::vector<production_controller_profile_route_t> profile_routes;
   };
 
   using production_controller_epoch_factory_t =
@@ -73,8 +81,9 @@ namespace multiseat {
   /**
    * Compose concrete production dependencies behind the trusted owner.
    *
-   * Disabled options return before validating the catalog or invoking any
-   * factory. This function has no production caller yet.
+   * Disabled options, or an empty profile catalog with no routes, return before
+   * validating GPUs or invoking any factory. This function has no production
+   * caller yet.
    */
   [[nodiscard]] controller_runtime_create_result_t
   create_production_controller_runtime(

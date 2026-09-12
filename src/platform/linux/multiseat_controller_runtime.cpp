@@ -9,10 +9,52 @@
 
   #include <algorithm>
   #include <mutex>
+  #include <string_view>
+  #include <unordered_set>
   #include <utility>
 
 namespace multiseat {
   namespace {
+    bool routing_key(std::string_view key) {
+      return !key.empty() && key.size() <= 128 &&
+             key.find_first_not_of(
+               "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+             ) == std::string_view::npos;
+    }
+
+    bool valid_profile_routes(const controller_runtime_options_t &options) {
+      if (options.profile_routes.empty()) {
+        return true;
+      }
+      if (!options.worker_media_enabled || options.profile_routes.size() > 4096) {
+        return false;
+      }
+      std::unordered_set<std::string> profiles;
+      std::unordered_set<std::string> clients;
+      for (const auto &route : options.profile_routes) {
+        if (!routing_key(route.profile_key) ||
+            !profiles.insert(route.profile_key).second ||
+            !valid_workload_plan(route.workload) ||
+            !workload_matches_runtime_profile(route.workload, route.runtime_profile) ||
+            route.client_keys.size() > 4096 || route.logical_gpu_ids.empty() ||
+            route.logical_gpu_ids.size() > 64) {
+          return false;
+        }
+        for (const auto &client : route.client_keys) {
+          if (!routing_key(client) || !clients.insert(client).second || clients.size() > 65536) {
+            return false;
+          }
+        }
+        std::unordered_set<std::string> gpus;
+        for (const auto &gpu : route.logical_gpu_ids) {
+          if (!routing_key(gpu) || !gpus.insert(gpu).second) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
     bool valid_expectation_syntax(
       const std::vector<input::expectation_t> &expectations
     ) {
@@ -50,7 +92,7 @@ namespace multiseat {
   }  // namespace
 
   struct controller_runtime_t::impl_t {
-    explicit impl_t(controller_runtime_dependencies_t dependencies, bool media_enabled) :
+    explicit impl_t(controller_runtime_dependencies_t dependencies, controller_runtime_options_t options) :
         registry(std::move(dependencies.registry)),
         worker_authority_store(
           std::move(dependencies.worker_authority_store)
@@ -62,7 +104,8 @@ namespace multiseat {
         worker_backend(std::move(dependencies.worker_backend)),
         input_expectations(
           std::move(dependencies.recovered_input_expectations)
-        ), worker_media_enabled(media_enabled) {
+        ), worker_media_enabled(options.worker_media_enabled),
+        profile_routes(std::move(options.profile_routes)) {
       workers = std::make_unique<worker_coordinator_t>(
         *registry,
         *worker_backend,
@@ -89,6 +132,7 @@ namespace multiseat {
     std::mutex shutdown_mutex;
     std::vector<input::expectation_t> input_expectations;
     const bool worker_media_enabled;
+    const std::vector<controller_profile_route_t> profile_routes;
     bool admission_ready = false;
     bool shutting_down = false;
     bool closed = false;
@@ -122,6 +166,9 @@ namespace multiseat {
       return {
         .status = controller_runtime_create_status_e::ready_disabled,
       };
+    }
+    if (!valid_profile_routes(options)) {
+      return {.status = controller_runtime_create_status_e::invalid_dependencies};
     }
     if (!dependencies_factory) {
       return {
@@ -162,7 +209,7 @@ namespace multiseat {
         .status = controller_runtime_create_status_e::ready_enabled,
         .runtime = std::unique_ptr<controller_runtime_t> {
           new controller_runtime_t(
-            std::make_unique<impl_t>(std::move(*dependencies), options.worker_media_enabled)
+            std::make_unique<impl_t>(std::move(*dependencies), std::move(options))
           )
         },
       };
@@ -280,6 +327,65 @@ namespace multiseat {
     } catch (...) {
       impl_->admission_ready = false;
       return {.rejection = admission_rejection_e::invalid_request};
+    }
+  }
+
+  controller_profile_admission_result_t
+  controller_runtime_t::admit_authenticated_profile_launch(
+    const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+    seat_display_mode_t display_mode
+  ) {
+    using status_e = controller_profile_admission_status_e;
+    std::scoped_lock lock {impl_->state_mutex};
+    if (impl_->profile_routes.empty()) {
+      return {.status = status_e::unselected};
+    }
+    if (!launch || launch->unique_id.empty()) {
+      return {.status = status_e::invalid_launch};
+    }
+    const auto route = std::find_if(
+      impl_->profile_routes.begin(), impl_->profile_routes.end(),
+      [&](const auto &candidate) {
+        return std::find(candidate.client_keys.begin(), candidate.client_keys.end(),
+                 launch->unique_id) != candidate.client_keys.end();
+      }
+    );
+    if (route == impl_->profile_routes.end()) {
+      return {.status = status_e::unselected};
+    }
+    // Routing is sticky even if admission or a later worker step fails. Stream
+    // startup must never silently capture the host for a selected profile.
+    launch->require_worker_connection();
+    if (launch->id == 0 || !launch->lifecycle_generation ||
+        *launch->lifecycle_generation == 0 || !launch->is_pending() ||
+        launch->watch_only || launch->input_only || launch->temporary_authorization ||
+        !(launch->perm & crypto::PERM::launch)) {
+      return {.status = status_e::invalid_launch};
+    }
+    if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
+      return {.status = status_e::controller_not_ready};
+    }
+    const seat_request_t request {
+      .client_key = launch->unique_id,
+      .profile_key = route->profile_key,
+      .workload = route->workload,
+      .logical_gpu_id = {},
+      .runtime_profile = route->runtime_profile,
+      .data_plane = {
+        .display_topology = display_topology_e::capture_host_with_nested_compositor,
+        .media_pipeline = media_pipeline_e::worker_local_capture_encode,
+      },
+      .display_mode = display_mode,
+      .requested_compositor = compositor_e::gamescope,
+      .encoder_sessions = 1,
+    };
+    try {
+      auto admission = impl_->registry->admit_first_available(request, route->logical_gpu_ids);
+      const auto status = admission.accepted() ? status_e::admitted : status_e::rejected;
+      return {.status = status, .admission = std::move(admission)};
+    } catch (...) {
+      impl_->admission_ready = false;
+      return {.status = status_e::controller_not_ready};
     }
   }
 

@@ -22,6 +22,7 @@ extern "C" {
   #include <cstdlib>
   #include <filesystem>
   #include <fstream>
+  #include <functional>
   #include <future>
   #include <gtest/gtest.h>
   #include <memory>
@@ -512,10 +513,11 @@ namespace {
     const std::filesystem::path &root,
     const std::shared_ptr<controller_test_state_t> &state,
     std::vector<input::expectation_t> recovered = {},
-    bool media_enabled = false
+    bool media_enabled = false,
+    std::vector<controller_profile_route_t> routes = {}
   ) {
     return controller_runtime_t::create(
-      {.enabled = true, .worker_media_enabled = media_enabled},
+      {.enabled = true, .worker_media_enabled = media_enabled, .profile_routes = std::move(routes)},
       [root, state, recovered = std::move(recovered)]() mutable
         -> std::optional<controller_runtime_dependencies_t> {
         auto store = std::make_unique<authority_store_t>(
@@ -611,6 +613,7 @@ namespace {
     launch->session_token = "controller-runtime-token";
     launch->perm = crypto::PERM::_game_control;
     launch->watch_only = false;
+    launch->input_only = false;
     return launch;
   }
 
@@ -654,8 +657,8 @@ namespace {
 
   class MultiseatControllerRuntimeTest : public testing::Test {
   protected:
-    void create_ready_controller(bool media_enabled = false) {
-      auto created = create_controller(root_.path(), state_, {}, media_enabled);
+    void create_ready_controller(bool media_enabled = false, std::vector<controller_profile_route_t> routes = {}) {
+      auto created = create_controller(root_.path(), state_, {}, media_enabled, std::move(routes));
       ASSERT_EQ(
         created.status,
         controller_runtime_create_status_e::ready_enabled
@@ -788,6 +791,152 @@ namespace {
       controller_->shutdown().status,
       controller_shutdown_status_e::closed
     );
+  }
+
+  controller_profile_route_t shared_profile_route() {
+    return {
+      .profile_key = "shared-profile",
+      .client_keys = {"paired-client", "paired-television"},
+      .runtime_profile = runtime_profile_e::steam,
+      .workload = {workload_kind_e::steam, "steam-controller-game"},
+      .logical_gpu_ids = {controller_gpu},
+    };
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, EmptyRoutesAndUnmappedClientsPreserveHostLaunch) {
+    create_ready_controller();
+    auto launch = controller_launch(2001, 3001);
+    auto result = controller_->admit_authenticated_profile_launch(launch, {});
+    EXPECT_TRUE(result.use_host_launch());
+    EXPECT_FALSE(launch->worker_connection_requirement()->load());
+    EXPECT_EQ(controller_->seats(), 0U);
+    ASSERT_TRUE(controller_->shutdown().closed());
+    controller_.reset();
+
+    create_ready_controller(true, {shared_profile_route()});
+    launch = controller_launch(2002, 3002, "unmapped-paired-client");
+    // A display name or client launch-preset field cannot select another profile.
+    launch->device_name = "paired-client";
+    launch->profile_preference = "shared-profile";
+    result = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    EXPECT_TRUE(result.use_host_launch());
+    EXPECT_FALSE(launch->worker_connection_requirement()->load());
+    EXPECT_EQ(controller_->seats(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, RoutesPairedDevicesToOneProfileAndReleasesItsReservation) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2001, 3001);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    EXPECT_FALSE(admitted.use_host_launch());
+    EXPECT_TRUE(launch->worker_connection_requirement()->load());
+    const auto &seat = *admitted.admission.seat;
+    EXPECT_EQ(seat.client_key, "paired-client");
+    EXPECT_EQ(seat.profile_key, "shared-profile");
+    EXPECT_EQ(seat.workload, shared_profile_route().workload);
+    EXPECT_EQ(seat.runtime_profile, runtime_profile_e::steam);
+    EXPECT_EQ(seat.handle.logical_gpu_id, controller_gpu);
+    EXPECT_EQ(seat.resources.worker_name.find("shared-profile"), std::string::npos);
+    EXPECT_EQ(controller_->managed_workers(), 0U);
+    EXPECT_EQ(controller_->input_allocations(), 0U);
+
+    auto other = controller_launch(2002, 3002, "paired-television");
+    auto busy = controller_->admit_authenticated_profile_launch(other, {1920, 1080, 60000, false});
+    EXPECT_EQ(busy.admission.rejection, admission_rejection_e::profile_already_active);
+    EXPECT_FALSE(busy.use_host_launch());
+    EXPECT_TRUE(other->worker_connection_requirement()->load());
+    auto session = controller_stream(*other);
+    ASSERT_TRUE(session);
+    unsigned host_starts = 0;
+    stream::session::set_host_start_abort_hook_for_tests([&] { ++host_starts; });
+    auto restore = util::fail_guard([] { stream::session::set_host_start_abort_hook_for_tests({}); });
+    EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
+    EXPECT_EQ(host_starts, 0U);
+    stream::session::stop(*session);
+
+    launch->cancel();
+    const auto stopped = controller_->stop_seat(seat.handle);
+    EXPECT_EQ(stopped.status, controller_stop_status_e::released);
+    EXPECT_EQ(controller_->seats(), 0U);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    auto retried = controller_->admit_authenticated_profile_launch(
+      controller_launch(2003, 3003, "paired-television"), {1280, 720, 60000, false});
+    ASSERT_TRUE(retried.admitted());
+    EXPECT_GT(retried.admission.seat->handle.generation, seat.handle.generation);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, RoutedLaunchRejectsInvalidAuthorityAndModeWithoutReserving) {
+    create_ready_controller(true, {shared_profile_route()});
+    const std::vector<std::function<void(rtsp_stream::launch_session_t &)>> changes {
+      [](auto &launch) { launch.id = 0; },
+      [](auto &launch) { launch.lifecycle_generation.reset(); },
+      [](auto &launch) { launch.lifecycle_generation = 0; },
+      [](auto &launch) { launch.cancel(); },
+      [](auto &launch) { launch.watch_only = true; },
+      [](auto &launch) { launch.input_only = true; },
+      [](auto &launch) { launch.temporary_authorization = true; },
+      [](auto &launch) { launch.perm = crypto::PERM::_default; },
+    };
+    for (const auto &change : changes) {
+      auto launch = controller_launch(2001, 3001);
+      change(*launch);
+      auto result = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+      EXPECT_EQ(result.status, controller_profile_admission_status_e::invalid_launch);
+      EXPECT_FALSE(result.use_host_launch());
+      EXPECT_TRUE(launch->worker_connection_requirement()->load());
+    }
+    auto result = controller_->admit_authenticated_profile_launch(controller_launch(2002, 3002), {});
+    EXPECT_EQ(result.status, controller_profile_admission_status_e::rejected);
+    EXPECT_EQ(result.admission.rejection, admission_rejection_e::invalid_request);
+    EXPECT_FALSE(result.use_host_launch());
+    EXPECT_FALSE(controller_->admit_authenticated_profile_launch({}, {}).use_host_launch());
+    EXPECT_EQ(controller_->seats(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, RoutedLaunchWaitsForReconciliationAndStopsAtShutdown) {
+    auto created = create_controller(root_.path(), state_, {}, true, {shared_profile_route()});
+    ASSERT_TRUE(created.runtime);
+    controller_ = std::move(created.runtime);
+    auto launch = controller_launch(2001, 3001);
+    auto result = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    EXPECT_EQ(result.status, controller_profile_admission_status_e::controller_not_ready);
+    EXPECT_FALSE(result.use_host_launch());
+    EXPECT_EQ(controller_->seats(), 0U);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    ASSERT_TRUE(controller_->shutdown().closed());
+    result = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    EXPECT_EQ(result.status, controller_profile_admission_status_e::controller_not_ready);
+    EXPECT_FALSE(result.use_host_launch());
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, InvalidRoutesFailBeforeInvokingDependencies) {
+    const auto route = shared_profile_route();
+    auto duplicate_client = route;
+    duplicate_client.profile_key = "other-profile";
+    auto duplicate_within = route;
+    duplicate_within.client_keys.push_back("paired-client");
+    auto mismatch = route;
+    mismatch.runtime_profile = runtime_profile_e::heroic;
+    auto unknown_gpu = route;
+    unknown_gpu.logical_gpu_ids.clear();
+    auto duplicate_gpu = route;
+    duplicate_gpu.logical_gpu_ids.push_back(controller_gpu);
+    auto injected_key = route;
+    injected_key.profile_key = "/private/profile";
+    for (const auto &routes : std::vector<std::vector<controller_profile_route_t>> {
+           {route, route}, {route, duplicate_client}, {duplicate_within},
+           {mismatch}, {unknown_gpu}, {duplicate_gpu}, {injected_key}}) {
+      unsigned calls = 0;
+      const auto result = controller_runtime_t::create(
+        {.enabled = true, .worker_media_enabled = true, .profile_routes = routes},
+        [&]() -> std::optional<controller_runtime_dependencies_t> { ++calls; return std::nullopt; });
+      EXPECT_EQ(result.status, controller_runtime_create_status_e::invalid_dependencies);
+      EXPECT_EQ(calls, 0U);
+    }
+    const auto result = controller_runtime_t::create(
+      {.enabled = true, .profile_routes = {route}}, {});
+    EXPECT_EQ(result.status, controller_runtime_create_status_e::invalid_dependencies);
   }
 
   TEST_F(MultiseatControllerRuntimeTest, MediaSelectionRequiresARealLeaseAndCannotFallBackToHostCapture) {

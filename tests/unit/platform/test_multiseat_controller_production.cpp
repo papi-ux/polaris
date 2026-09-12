@@ -4,6 +4,7 @@
  */
 #include "src/platform/linux/multiseat_controller_production.h"
 #include "src/platform/linux/multiseat_moonlight_activation.h"
+#include "src/rtsp.h"
 
 #ifdef __linux__
 
@@ -14,6 +15,7 @@
   #include <cstdint>
   #include <cstdlib>
   #include <filesystem>
+  #include <functional>
   #include <gtest/gtest.h>
   #include <map>
   #include <nlohmann/json.hpp>
@@ -830,6 +832,82 @@ TEST(
     EXPECT_EQ(factory_state->worker_session_calls, 0U);
     EXPECT_FALSE(input::moonlight_session_runtime_installed());
     EXPECT_FALSE(input::moonlight_session_activation_gate_installed());
+  }
+
+  TEST(MultiseatControllerProduction, EnabledWithoutProfilesDoesNotTouchHostOrInstallRuntime) {
+    production_controller_options_t options;
+    options.enabled = true;
+    // An empty profile catalog is an intentional no-op even before GPU setup.
+    unsigned calls = 0;
+    production_controller_factories_t factories;
+    factories.controller_epoch = [&]() -> std::optional<std::string> { ++calls; return std::nullopt; };
+    const auto result = create_production_controller_runtime(options, factories);
+    EXPECT_EQ(result.status, controller_runtime_create_status_e::ready_disabled);
+    EXPECT_FALSE(result.runtime);
+    EXPECT_EQ(calls, 0U);
+    EXPECT_FALSE(input::moonlight_session_runtime_installed());
+    EXPECT_FALSE(input::moonlight_session_activation_gate_installed());
+  }
+
+  TEST(MultiseatControllerProduction, ProfileRoutesRejectUnknownOrConflictingCatalogEntriesBeforeFactories) {
+    temporary_production_root_t root;
+    auto valid = production_options(root.path());
+    valid.container.media_enabled = true;
+    valid.profile_routes = {{"profile-production", {"paired-client"}, valid.container.workloads.front()}};
+    const std::vector<std::function<void(production_controller_options_t &)>> changes {
+      [](auto &options) { options.container.profiles.clear(); },
+      [](auto &options) { options.profile_routes.front().profile_key = "missing-profile"; },
+      [](auto &options) { options.profile_routes.front().workload.target_id = "missing-workload"; },
+      [](auto &options) { options.container.profiles.push_back(options.container.profiles.front()); },
+      [](auto &options) { options.container.profiles.front().runtime_profile = runtime_profile_e::heroic; },
+      [](auto &options) { options.container.media_enabled = false; },
+      [](auto &options) { options.profile_routes.push_back(options.profile_routes.front()); },
+    };
+    for (const auto &change : changes) {
+      auto options = valid;
+      change(options);
+      unsigned calls = 0;
+      production_controller_factories_t factories;
+      factories.controller_epoch = [&]() -> std::optional<std::string> { ++calls; return std::nullopt; };
+      auto result = create_production_controller_runtime(std::move(options), std::move(factories));
+      EXPECT_EQ(result.status, controller_runtime_create_status_e::invalid_dependencies);
+      EXPECT_FALSE(result.runtime);
+      EXPECT_EQ(calls, 0U);
+      EXPECT_FALSE(input::moonlight_session_runtime_installed());
+    }
+  }
+
+  TEST(MultiseatControllerProduction, ProfileRoutesDeriveImageFamilyAndGpuOrderFromAdmittedCatalog) {
+    temporary_production_root_t root;
+    auto options = production_options(root.path());
+    options.container.media_enabled = true;
+    options.gpus.front().max_seats = 1;
+    options.gpus.push_back(second_production_gpu());
+    options.profile_routes = {{"profile-production", {"paired-client"}, options.container.workloads.front()}};
+    auto factory_state = std::make_shared<production_factory_state_t>();
+    auto input_state = std::make_shared<production_input_state_t>();
+    auto host_state = std::make_shared<production_host_state_t>();
+    auto created = create_production_controller_runtime(
+      std::move(options), production_factories(factory_state, input_state, host_state));
+    ASSERT_TRUE(created.runtime);
+    auto &controller = *created.runtime;
+    ASSERT_TRUE(controller.reconcile().ready());
+    auto first = controller.admit(production_request("occupied-client", "occupied-profile"));
+    ASSERT_TRUE(first.accepted());
+    auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+    launch->id = 3001;
+    launch->lifecycle_generation = 4001;
+    launch->unique_id = "paired-client";
+    launch->perm = crypto::PERM::_game_control;
+    auto routed = controller.admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(routed.admitted());
+    EXPECT_EQ(routed.admission.seat->runtime_profile, runtime_profile_e::steam);
+    EXPECT_EQ(routed.admission.seat->workload.target_id, "steam-production-game");
+    EXPECT_EQ(routed.admission.seat->handle.logical_gpu_id, "gpu-production-secondary");
+    EXPECT_EQ(routed.admission.seat->render_node, "/dev/dri/renderD129");
+    EXPECT_TRUE(launch->worker_connection_requirement()->load());
+    EXPECT_EQ(controller.managed_workers(), 0U);
+    EXPECT_TRUE(controller.shutdown().closed());
   }
 
   TEST(

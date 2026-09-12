@@ -17,6 +17,11 @@ streaming has not been accepted and host activation and profile routing are
 still unfinished. See `container-multiseat-encoder-provider.md` for the current
 implementation and evidence boundary.
 
+The [paired client admission API](container-multiseat-profile-routing.md) now
+implements immutable profile assignments, atomic GPU placement and typed
+capacity refusals. Persistent configuration, automatic provisioning during
+pairing, public refusal fields and production launch integration remain pending.
+
 ## Two nouns, not one
 
 Today the vocabulary has one word, "seat", doing two jobs. The architecture
