@@ -58,17 +58,29 @@ namespace private_state_file {
      * as the user fails here forever, and the only thing the operator sees is
      * that saving credentials did not work.
      */
-    bool secure_directory_descriptor(int descriptor, bool final_parent, std::string *reason = nullptr) {
-      const auto refuse = [reason](std::string explanation) {
-        if (reason) {
-          *reason = std::move(explanation);
+    enum class directory_remedy_e {
+      none,  ///< Nothing actionable; the directory could not even be inspected.
+      take_ownership,  ///< Owned by another user, usually one "sudo polaris".
+      restrict_permissions,  ///< Group or other writable, usually a 002 umask.
+    };
+
+    struct directory_refusal_t {
+      std::string reason;
+      directory_remedy_e remedy = directory_remedy_e::none;
+    };
+
+    bool secure_directory_descriptor(int descriptor, bool final_parent, directory_refusal_t *refusal = nullptr) {
+      const auto refuse = [refusal](std::string explanation, directory_remedy_e remedy) {
+        if (refusal) {
+          refusal->reason = std::move(explanation);
+          refusal->remedy = remedy;
         }
         return false;
       };
 
       struct stat metadata {};
       if (::fstat(descriptor, &metadata) != 0 || !S_ISDIR(metadata.st_mode)) {
-        return refuse("it is not a directory this process can inspect");
+        return refuse("it is not a directory this process can inspect", directory_remedy_e::none);
       }
 
       const auto effective_user = ::geteuid();
@@ -83,10 +95,10 @@ namespace private_state_file {
 
       if (final_parent) {
         if (metadata.st_uid != effective_user) {
-          return refuse(describe("it is owned by another user"));
+          return refuse(describe("it is owned by another user"), directory_remedy_e::take_ownership);
         }
         if (writable_by_others) {
-          return refuse(describe("it is writable by group or other"));
+          return refuse(describe("it is writable by group or other"), directory_remedy_e::restrict_permissions);
         }
         return true;
       }
@@ -94,10 +106,10 @@ namespace private_state_file {
       const auto trusted_owner = metadata.st_uid == 0 || metadata.st_uid == effective_user;
       const auto sticky_when_writable = !writable_by_others || (metadata.st_mode & S_ISVTX) != 0;
       if (!trusted_owner) {
-        return refuse(describe("a parent directory is owned by another user"));
+        return refuse(describe("a parent directory is owned by another user"), directory_remedy_e::take_ownership);
       }
       if (!sticky_when_writable) {
-        return refuse(describe("a parent directory is writable by others without the sticky bit"));
+        return refuse(describe("a parent directory is writable by others without the sticky bit"), directory_remedy_e::restrict_permissions);
       }
       return true;
     }
@@ -203,7 +215,7 @@ namespace private_state_file {
         }
 
         descriptor_ = ::open(path_.is_absolute() ? "/" : ".", directory_open_flags());
-        if (descriptor_ < 0 || !secure_directory_descriptor(descriptor_, components.empty())) {
+        if (descriptor_ < 0 || !secure_directory_descriptor(descriptor_, components.empty(), nullptr)) {
           (void) close();
           return;
         }
@@ -233,20 +245,39 @@ namespace private_state_file {
             parent_entry_needs_sync = true;
             next = ::openat(descriptor_, component.c_str(), directory_open_flags());
           }
-          std::string rejection;
-          if (next < 0 || !secure_directory_descriptor(next, final_parent, &rejection)) {
+          directory_refusal_t refusal;
+          if (next < 0 || !secure_directory_descriptor(next, final_parent, &refusal)) {
             if (next >= 0) {
               ::close(next);
             }
-            if (!rejection.empty()) {
+            if (!refusal.reason.empty()) {
               // The only place this is ever explained. Everything downstream
               // reports that a write did not commit, which sends people looking
               // at the file they were saving rather than at the directory.
+              //
+              // Name the directory the walk actually refused. Reporting the
+              // state file's parent instead sent one reporter to a directory
+              // whose mode was fine while quoting the mode of another.
+              auto rejected = path_.is_absolute() ? std::filesystem::path {"/"} : std::filesystem::path {};
+              for (std::size_t walked = 0; walked <= index; ++walked) {
+                rejected /= components[walked];
+              }
+              std::string remedy;
+              switch (refusal.remedy) {
+                case directory_remedy_e::take_ownership:
+                  remedy = ". Take it back with \"sudo chown -R \"$USER\": " + rejected.string() +
+                           "\" and start Polaris without sudo; one \"sudo polaris\" is enough to leave it root-owned.";
+                  break;
+                case directory_remedy_e::restrict_permissions:
+                  remedy = ". Restrict it with \"chmod 700 " + rejected.string() +
+                           "\"; a umask of 002 is enough to leave it group writable.";
+                  break;
+                case directory_remedy_e::none:
+                  break;
+              }
               BOOST_LOG(error) << "Refusing to keep private state in ["
-                               << path_.parent_path().string() << "] because "
-                               << rejection << ". If that directory is owned by root, a single "
-                               << "\"sudo polaris\" created it; chown it back to your own user and "
-                               << "run Polaris without sudo.";
+                               << rejected.string() << "] because "
+                               << refusal.reason << remedy;
             }
             (void) close();
             return;
