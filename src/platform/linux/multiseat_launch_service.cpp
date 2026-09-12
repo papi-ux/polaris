@@ -429,6 +429,16 @@ namespace multiseat {
     std::unique_lock lock(impl_->mutex);
     return impl_->closed.wait_for(lock, timeout, [&] { return impl_->stopped; });
   }
+  profile_session_snapshot_t profile_launch_service_t::session_snapshot(std::string_view client) const {
+    std::lock_guard lock(impl_->mutex);
+    for (const auto &weak : impl_->tracked) {
+      const auto launch = weak.lock();
+      if (launch && !launch->is_cancelled() && launch->unique_id == client &&
+          launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started)
+        return {true, launch->session_token, launch->width, launch->height, launch->fps / 1000};
+    }
+    return {};
+  }
   bool install_profile_launch_service(const std::shared_ptr<profile_launch_service_t> &service) {
     std::lock_guard lock(installed_mutex);
     if (!service || installed) return false;

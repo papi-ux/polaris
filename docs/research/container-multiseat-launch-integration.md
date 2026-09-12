@@ -110,6 +110,14 @@ launches clear host client commands and suppress host clipboard reads and
 server commands. Server info reports only the requesting device's profile
 session. Unassigned devices retain the ordinary app list and launch path.
 
+The profile session status endpoint reports only the requesting device's
+session token and admitted media settings. It does not reuse desktop capture
+counters, encoder selection, another client's state or host Doctor findings.
+Worker measurements and live tuning are not yet exposed through this endpoint.
+Profile capabilities disable host diagnostics, host settings synchronization
+and host media controls. A profile stop request checks the current paired
+identity and exact session token before cancelling that device's worker.
+
 ## Cancellation and shutdown
 
 The Devices page shows separate gaming profiles only when a profile controller

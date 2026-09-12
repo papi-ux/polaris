@@ -125,6 +125,9 @@ namespace nvhttp {
   };
   std::optional<profile_api_response_t> resolve_profile_request(
     const crypto::p_named_cert_t &candidate, const args_t &args);
+  std::optional<profile_api_response_t> profile_session_status(const crypto::p_named_cert_t &candidate);
+  std::optional<profile_api_response_t> stop_profile_session(
+    const crypto::p_named_cert_t &candidate, std::string_view expected_token);
   struct profile_launch_response_t {
     int status;
     std::string message;

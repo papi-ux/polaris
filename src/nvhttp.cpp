@@ -5013,6 +5013,55 @@ namespace nvhttp {
   }
 
 #ifdef __linux__
+  std::optional<profile_api_response_t> profile_session_status(const crypto::p_named_cert_t &candidate) {
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return profile_api_response_t {401, {{"status", false}}};
+    const auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    const auto session = service->session_snapshot(current->uuid);
+    // These are the worker's admitted settings and the requesting device's
+    // lifecycle. Global host capture counters and Doctor findings are unrelated.
+    nlohmann::json output {
+      {"source", "worker_profile_v1"}, {"state", session.active ? "streaming" : "idle"},
+      {"streaming_active", session.active}, {"owned_by_client", session.active},
+      {"client_role", session.active ? "owner" : "none"}, {"viewer_count", 0},
+      {"session_token", session.token}, {"app_session_id", session.token},
+      {"game", session.active ? "Polaris Profile" : ""},
+      {"game_id", session.active ? multiseat::profile_app_id : 0},
+      {"game_uuid", session.active ? std::string(multiseat::profile_app_uuid) : ""},
+      {"controls", {{"host_tuning_allowed", false}, {"quit_allowed", session.active}, {"stop_allowed", session.active},
+        {"client_commands_enabled", false}, {"device_commands_enabled", false}, {"shutdown_in_progress", false}}},
+      {"display_mode", {{"selection", "gamescope_stream"}, {"label", "Polaris Profile"},
+        {"mirror_desktop", false}, {"virtual_display", false}, {"force_private_after_steam_close", false}}},
+      {"capture", {{"backend", "worker"}, {"resolution", session.active ?
+        std::to_string(session.width) + "x" + std::to_string(session.height) : ""}}},
+      {"encoder", {{"active_backend", "unknown"}, {"effective_backend", "unknown"}, {"codec", "h264"},
+        {"bitrate_kbps", session.active ? 8000 : 0}, {"session_target_fps", session.fps}}},
+      {"health", {{"grade", "unknown"}, {"summary", "Profile performance diagnostics are not available yet."}}},
+      {"live_tuning", nullptr}
+    };
+    return profile_api_response_t {200, std::move(output)};
+  }
+
+  std::optional<profile_api_response_t> stop_profile_session(
+    const crypto::p_named_cert_t &candidate, std::string_view expected_token) {
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return profile_api_response_t {401, {{"status", false}}};
+    const auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    if (expected_token.empty() || expected_token.size() > 128)
+      return profile_api_response_t {400, {{"status", false}, {"error", "A current profile session token is required"}}};
+    const auto status = publish_authorized_launch(current, PERM::launch, [&] {
+      return service->cancel_client(current->uuid, expected_token);
+    });
+    if (status) return profile_api_response_t {status, {{"status", false}, {"error", "Profile session is no longer current"}}};
+    rtsp_stream::cancel_pending_launch_for_client(current->uuid, expected_token);
+    if (auto session = rtsp_stream::find_session(current->uuid);
+        session && stream::session::session_token(*session) == expected_token)
+      stream::session::graceful_stop(*session);
+    return profile_api_response_t {200, {{"status", true}, {"stopped", true}, {"shutdown_requested", true}}};
+  }
+
   std::optional<profile_api_response_t> resolve_profile_request(
     const crypto::p_named_cert_t &candidate, const args_t &args) {
     auto reject = [](int status, const char *message) {
@@ -7118,6 +7167,23 @@ namespace nvhttp {
         return;
       }
 
+#ifdef __linux__
+      if (multiseat::profile_service_for(named_cert_p->uuid)) {
+        const nlohmann::json output {{"server", "polaris"}, {"version", PROJECT_VERSION},
+          {"features", {{"worker_profile_v1", true}, {"game_library", true},
+            {"deterministic_launch_presets_v1", true}, {"resolved_profile_provenance_v1", true},
+            {"expected_topology_assertion_v1", true}, {"session_lifecycle", true},
+            {"disconnect_resume_v1", false}, {"session_stop_v1", true},
+            {"client_settings_v1", false}, {"live_tuning_v1", false},
+            {"live_media_telemetry_v1", false}, {"diagnostics_doctor_v1", false},
+            {"doctor_actions_v1", false}, {"doctor_trials_v1", false}}}};
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+        return;
+      }
+#endif
+
       nlohmann::json output;
       output["server"] = "polaris";
       output["version"] = PROJECT_VERSION;
@@ -7255,6 +7321,15 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+
+#ifdef __linux__
+      if (const auto result = profile_session_status(named_cert_p)) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(static_cast<SimpleWeb::StatusCode>(result->status), result->body.dump(), headers);
+        return;
+      }
+#endif
 
       nlohmann::json output;
 
@@ -9794,6 +9869,12 @@ namespace nvhttp {
         return;
       }
 
+#ifdef __linux__
+      if (const auto result = stop_profile_session(named_cert_p, expected_token)) {
+        write_json(result->body, static_cast<SimpleWeb::StatusCode>(result->status));
+        return;
+      }
+#endif
       const auto shutdown = proc::proc.request_session_shutdown(
         named_cert_p->uuid,
         expected_token,

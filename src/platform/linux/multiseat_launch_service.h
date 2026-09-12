@@ -53,6 +53,11 @@ namespace multiseat {
     bool available = false, changing = false, failed = false;
     std::vector<profile_summary_t> profiles;
   };
+  struct profile_session_snapshot_t {
+    bool active = false;
+    std::string token;
+    int width = 0, height = 0, fps = 0;
+  };
 
   class profile_launch_service_t final {
   public:
@@ -71,6 +76,7 @@ namespace multiseat {
     // owner thread. Empty tokens allow an authenticated owner to cancel itself.
     [[nodiscard]] bool cancel_client(std::string_view client, std::string_view token = {});
     [[nodiscard]] std::optional<std::string> session_token(std::string_view client) const;
+    [[nodiscard]] profile_session_snapshot_t session_snapshot(std::string_view client) const;
     void stop_admission();
     [[nodiscard]] bool shutdown(std::chrono::milliseconds timeout);
   private:

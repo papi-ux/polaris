@@ -527,6 +527,60 @@ namespace {
     }
   };
 
+  TEST_F(MultiseatProfileHttp, StatusContainsOnlyTheRequestingDevicesWorkerSettings) {
+    const auto other = launch("client-b");
+    ASSERT_TRUE(service->prepare(other).prepared());
+    ASSERT_TRUE(other->try_begin_setup_handoff());
+    ASSERT_TRUE(other->commit_setup_start());
+    auto idle = nvhttp::profile_session_status(client);
+    ASSERT_TRUE(idle);
+    EXPECT_FALSE(idle->body["streaming_active"]);
+    EXPECT_EQ(idle->body["session_token"], "");
+    EXPECT_EQ(idle->body["game_id"], 0);
+    EXPECT_FALSE(idle->body.contains("doctor"));
+    EXPECT_FALSE(idle->body.contains("owner_device_name"));
+    EXPECT_FALSE(idle->body["capture"].contains("cpu_copy"));
+    EXPECT_EQ(idle->body["display_mode"]["label"], "Polaris Profile");
+    const auto own = launch();
+    ASSERT_TRUE(service->prepare(own).prepared());
+    ASSERT_TRUE(own->try_begin_setup_handoff());
+    ASSERT_TRUE(own->commit_setup_start());
+    const auto status = nvhttp::profile_session_status(client);
+    ASSERT_TRUE(status);
+    EXPECT_EQ(status->body["session_token"], own->session_token);
+    EXPECT_NE(status->body["session_token"], other->session_token);
+    EXPECT_TRUE(status->body["owned_by_client"]);
+    EXPECT_TRUE(status->body["streaming_active"]);
+    EXPECT_EQ(status->body["capture"]["resolution"], "1920x1080");
+    EXPECT_EQ(status->body["encoder"]["session_target_fps"], 60);
+    EXPECT_FALSE(status->body["encoder"].contains("fps"));
+    EXPECT_FALSE(status->body["controls"]["host_tuning_allowed"]);
+    own->cancel();
+    EXPECT_FALSE(nvhttp::profile_session_status(client)->body["streaming_active"]);
+    EXPECT_FALSE(other->is_cancelled());
+  }
+
+  TEST_F(MultiseatProfileHttp, ProfileStopRequiresCurrentAuthorizationAndExactOwnToken) {
+    const auto own = launch(), other = launch("client-b");
+    ASSERT_TRUE(service->prepare(own).prepared());
+    ASSERT_TRUE(service->prepare(other).prepared());
+    EXPECT_EQ(nvhttp::stop_profile_session(client, "")->status, 400);
+    EXPECT_EQ(nvhttp::stop_profile_session(client, other->session_token)->status, 409);
+    EXPECT_FALSE(own->is_cancelled());
+    EXPECT_FALSE(other->is_cancelled());
+    EXPECT_EQ(nvhttp::stop_profile_session(client, own->session_token)->status, 200);
+    EXPECT_TRUE(own->is_cancelled());
+    EXPECT_FALSE(other->is_cancelled());
+    const auto replacement = launch();
+    ASSERT_TRUE(service->prepare(replacement).prepared());
+    EXPECT_EQ(nvhttp::stop_profile_session(client, own->session_token)->status, 409);
+    EXPECT_FALSE(replacement->is_cancelled());
+    nvhttp::reset_pairing_state_for_tests();
+    EXPECT_EQ(nvhttp::stop_profile_session(client, replacement->session_token)->status, 401);
+    EXPECT_EQ(nvhttp::profile_session_status(client)->status, 401);
+    EXPECT_FALSE(replacement->is_cancelled());
+  }
+
   TEST_F(MultiseatProfileHttp, UsesCurrentPairedIdentityAndPublishesWorkerOnlyLaunch) {
     auto request = args();
     request.emplace("uniqueid", "client-b");
