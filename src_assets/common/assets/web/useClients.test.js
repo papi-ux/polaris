@@ -24,6 +24,28 @@ describe('client permission presets', () => {
     expect(permissionPresetKey(mask)).toBe('game_control')
   })
 
+  it('maps Gamepad Access to viewing plus controller input and nothing else', () => {
+    const mask = permissionPresetMask('gamepad')
+
+    expect(mask).toBe(permissionMapping.view | permissionMapping.input_controller)
+    expect(mask & permissionMapping._all_inputs).toBe(permissionMapping.input_controller)
+    expect(mask & permissionMapping.list).toBe(0)
+    expect(mask & permissionMapping.launch).toBe(0)
+    expect(mask & permissionMapping._all_operations).toBe(0)
+    expect(permissionPresetKey(mask)).toBe('gamepad')
+  })
+
+  it('still reads a hand-tuned permission set as Custom Access', () => {
+    // Viewer plus keyboard matches no preset, and must not be mistaken for the gamepad one.
+    const handTuned = permissionMapping.view | permissionMapping.input_kbd
+    expect(permissionPresetKey(handTuned)).toBe('custom')
+  })
+
+  it('maps Viewer Access to viewing alone', () => {
+    expect(permissionPresetMask('viewer')).toBe(permissionMapping.view)
+    expect(permissionPresetKey(permissionMapping.view)).toBe('viewer')
+  })
+
   it('maps Full Control to the existing full permission mask', () => {
     expect(permissionPresetMask('full')).toBe(permissionMapping._all)
     expect(permissionPresetKey(permissionMapping._all)).toBe('full')

@@ -74,7 +74,7 @@
             {{ selectedPairingAccessLabel }}
           </span>
         </div>
-        <div class="mt-4 grid gap-2 lg:grid-cols-3" role="radiogroup" :aria-label="$t('pin.pairing_access_title')">
+        <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" role="radiogroup" :aria-label="$t('pin.pairing_access_title')">
           <button
             v-for="preset in pairingPermissionPresets"
             :key="preset.key"
@@ -1005,6 +1005,12 @@ const permissionPresets = [
     activeClass: 'border-info/40 bg-info/10 text-info-bright',
   },
   {
+    key: 'gamepad',
+    labelKey: 'pin.gamepad_access',
+    descriptionKey: 'pin.gamepad_access_desc',
+    activeClass: 'border-warning/40 bg-warning/10 text-warning-bright',
+  },
+  {
     key: 'game_control',
     labelKey: 'pin.game_control_access',
     descriptionKey: 'pin.game_control_access_desc',
@@ -1024,7 +1030,7 @@ const permissionPresets = [
     activeClass: 'border-danger/40 bg-danger/10 text-danger-bright',
   },
 ]
-const pairingPermissionPresets = permissionPresets.filter((preset) => ['standard', 'game_control', 'full'].includes(preset.key))
+const pairingPermissionPresets = permissionPresets.filter((preset) => ['gamepad', 'standard', 'game_control', 'full'].includes(preset.key))
 
 let resetOTPTimeout = null
 let qrContainer = null
@@ -1521,6 +1527,8 @@ function accessPresetLabel(perm) {
       return i18n.t('pin.game_control_access')
     case 'standard':
       return i18n.t('pin.standard_access')
+    case 'gamepad':
+      return i18n.t('pin.gamepad_access')
     case 'viewer':
       return i18n.t('pin.viewer_access')
     default:
@@ -1536,6 +1544,8 @@ function accessToneClass(perm) {
       return 'border-success/30 bg-success/10 text-success-bright'
     case 'standard':
       return 'border-ice/30 bg-ice/10 text-ice'
+    case 'gamepad':
+      return 'border-warning/30 bg-warning/10 text-warning-bright'
     case 'viewer':
       return 'border-info/30 bg-info/10 text-info-bright'
     default:
