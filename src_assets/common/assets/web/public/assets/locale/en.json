@@ -1500,6 +1500,8 @@
     "full_control_desc": "Game Control plus clipboard, file transfer, and server commands. Use only for fully trusted devices.",
     "game_control_access": "Game Control",
     "game_control_access_desc": "Browse, launch, and control games without clipboard, file, or server-command access.",
+    "gamepad_access": "Gamepad Access",
+    "gamepad_access_desc": "Watch an existing stream and play with a controller. Cannot browse the library, launch games, or send keyboard, mouse, touch, or pen input.",
     "generate_qr": "Generate QR Code",
     "host_address": "Host Address",
     "host_address_placeholder": "e.g. 10.0.0.10",
