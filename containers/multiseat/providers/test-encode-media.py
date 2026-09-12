@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Device-free real codec/control check. Does not establish game streaming."""
 import argparse
+import concurrent.futures
 import os
 import select
 import signal
@@ -8,9 +9,10 @@ import struct
 import subprocess
 import sys
 import time
+import threading
 
 
-def check(executable, invalid=False, render_node=None):
+def check(executable, invalid=False, render_node=None, peers=None, survivor=False):
     arguments = ['--self-test-gpu', render_node] if render_node else ['--self-test']
     child = subprocess.Popen([executable, *arguments], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -40,6 +42,8 @@ def check(executable, invalid=False, render_node=None):
         assert struct.unpack('>HHII', contract[4:16]) == (640, 480, 60000, 1000)
         assert contract[20:24] == bytes([1, 2, 0x13, 0x88])
         assert not select.select([child.stdout], [], [], 0.15)[0], 'media before start'
+        if peers:
+            peers['ready'].wait(timeout=25)
         child.stdin.write(bytes([9 if invalid else 1])); child.stdin.flush()
         if invalid:
             assert child.wait(timeout=3) == 1
@@ -68,14 +72,41 @@ def check(executable, invalid=False, render_node=None):
         assert counts[2] >= 10 and counts[3] >= 50
         before = counts[2]
         child.stdin.write(bytes([2])); child.stdin.flush()
+        deadline = time.monotonic() + 5
         while not frame():
+            assert time.monotonic() < deadline, 'requested IDR timed out'
             assert counts[2]-before < 8, 'requested IDR did not arrive promptly'
+        if peers and survivor:
+            deadline = time.monotonic() + 10
+            while not peers['stopped'].is_set():
+                assert not peers['failed'].is_set(), 'peer failed before clean stop'
+                assert time.monotonic() < deadline, 'peer stop timed out'
+                frame()
+            assert not peers['failed'].is_set(), 'peer stop failed'
+            before = counts[2]
+            audio_before = counts[3]
+            deadline = time.monotonic() + 5
+            while counts[2] - before < 30:
+                assert time.monotonic() < deadline, 'survivor video timed out'
+                frame()
+            assert counts[3] > audio_before, 'audio stopped with the peer'
         child.send_signal(signal.SIGTERM)
         assert child.wait(timeout=3) == 0
-        subprocess.run(['gst-launch-1.0', '-q', 'fdsrc', 'fd=0', '!', 'h264parse', '!',
-                        'openh264dec', '!', 'fakesink', 'sync=false'], input=encoded_video,
-                       timeout=10, check=True)
+        if peers and not survivor:
+            peers['stopped'].set()
+        decoded = subprocess.run(['gst-launch-1.0', '-q', 'fdsrc', 'fd=0', '!', 'h264parse', '!',
+                                  'openh264dec', '!', 'videoconvert', '!',
+                                  'video/x-raw,format=I420,width=640,height=480', '!',
+                                  'fdsink', 'fd=1', 'sync=false'], input=encoded_video,
+                                 stdout=subprocess.PIPE, timeout=10, check=True)
+        assert len(decoded.stdout) == counts[2] * 640 * 480 * 3 // 2, 'decoded frame count differs'
+
         print('synthetic H.264 decode, Opus packets, ack gate, IDR and clean stop passed', flush=True)
+    except BaseException:
+        if peers:
+            peers['failed'].set()
+            peers['ready'].abort()
+        raise
     finally:
         if child.poll() is None:
             child.kill()
@@ -90,6 +121,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('executable')
     parser.add_argument('--render-node')
+    parser.add_argument('--two-seats', action='store_true')
     args = parser.parse_args()
-    check(args.executable, render_node=args.render_node)
-    check(args.executable, invalid=True, render_node=args.render_node)
+    if args.two_seats:
+        peers = {'ready': threading.Barrier(2), 'stopped': threading.Event(), 'failed': threading.Event()}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(check, args.executable, render_node=args.render_node,
+                                   peers=peers, survivor=survivor) for survivor in (False, True)]
+            for future in futures:
+                future.result()
+        print('two concurrent encoder sessions, IDRs and 30 survivor frames after peer stop passed')
+    else:
+        check(args.executable, render_node=args.render_node)
+        check(args.executable, invalid=True, render_node=args.render_node)

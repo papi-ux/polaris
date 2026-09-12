@@ -99,7 +99,9 @@ ownership, cancellation and controller acknowledgement order.
 
 Passing `--render-node=/dev/dri/renderD128` to `test-encode-media.py` explicitly
 selects a synthetic hardware-codec check. It encodes generated video and audio,
-checks acknowledgement and IDR recovery, and decodes H.264. It does not capture
+checks acknowledgement and IDR recovery, and decodes H.264. Add `--two-seats`
+to start both sessions together, stop one and require 30 further video frames
+and continued audio from its peer. This generated-media test does not capture
 a game or establish two-client streaming. Use only the allocated GPU devices
 and the exact NVIDIA image matching the host driver, or the matching VA image.
 
