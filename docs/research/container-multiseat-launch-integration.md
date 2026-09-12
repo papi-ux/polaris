@@ -133,12 +133,21 @@ tokens, cancellation, deadlines, incomplete shutdown, strict configuration,
 current pairing authority, revocation and permission replacement during startup,
 RTSP rollback, worker input allocation, and host versus worker exit behavior.
 Injected controller tests do not prove Docker startup, media delivery, controller
-latency, or client playback on this revision.
+latency, or client playback on their own.
+
+The NVIDIA physical harness has exercised two Gamescope workers with changing
+video, decoded audio, isolated keyboard, pointer and controller input, and
+independent teardown. Two Moonlight instances with separate paired identities
+also launched assigned profiles through the normal protocol, decoded and
+rendered approximately 60 frames per second, and cancelled independently. That
+client check used one host and loopback networking. It does not establish
+independent physical client, LAN latency or reconnect acceptance.
 
 Available workloads are Gamescope `input-pong-v1` and the experimental
 [Steam launcher](container-multiseat-steam.md), with Big Picture or a typed game
-ID. Real Steam game acceptance, profile settings and assignment UI, Nova launch integration, and
-two-client audio, video, input, reconnect, and cleanup acceptance remain pending.
+ID. Real Steam game acceptance, profile settings and assignment UI, Nova launch
+integration, AMD hardware and independent physical client acceptance remain
+pending, including reconnect and measured latency.
 The UI must preserve the existing flow for one person with one device.
 Runtime images use Polaris builds from official Ubuntu. Required third party
 source and license notices remain intact until those dependencies are replaced.
