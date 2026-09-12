@@ -7450,6 +7450,19 @@ namespace proc {
       return it != preset_resolution.fields.end() && it->is_object() ?
         it->value("source", std::string {}) : std::string {};
     };
+    const auto resolved_field_reason = [&](std::string_view field) -> std::string {
+      const auto it = preset_resolution.fields.find(std::string {field});
+      return it != preset_resolution.fields.end() && it->is_object() ?
+        it->value("reason_code", std::string {}) : std::string {};
+    };
+    // Record why HDR ended up where it did, so Doctor can say so later. A saved setting that
+    // turns HDR off stops the client ever requesting it, which means every capability-based
+    // check downstream stays silent and the user is left with no explanation at all.
+    stream_stats::update_hdr_policy(
+      preset_resolution.hdr,
+      resolved_field_reason("hdr"),
+      launch_session->device_name
+    );
     resolved_optimization.display_mode = parsed_display_mode_t {
       preset_resolution.width,
       preset_resolution.height,
