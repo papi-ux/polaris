@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "capture-gpu.h"
 #include "encoder-gpu.h"
+#include "encoder-sockets.h"
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
 #include <gst/video/video-event.h>
@@ -55,15 +56,6 @@ static gboolean token(const char *name) {
   if(!*name || strlen(name)>128)return FALSE;
   for(const char *p=name;*p;++p)if(!g_ascii_isalnum(*p) && *p!='-' && *p!='_')return FALSE;
   return TRUE;
-}
-static int pin_socket(const char *path) {
-  struct stat parent,status;
-  if(lstat("/run/polaris",&parent) || !S_ISDIR(parent.st_mode) || parent.st_uid!=geteuid() || (parent.st_mode&07777)!=0700)return -1;
-  int fd=open(path,O_PATH|O_NOFOLLOW|O_CLOEXEC);
-  if(fd<0)return -1;
-  if(fstat(fd,&status) || !S_ISSOCK(status.st_mode) || status.st_uid!=geteuid() ||
-    ((status.st_mode&07777)!=0600 && (status.st_mode&07777)!=0700)){close(fd);return -1;}
-  return fd;
 }
 static gboolean capture_name(const char *name) {
   const char prefix[]="/run/polaris/polaris-frames-";
@@ -127,8 +119,12 @@ int main(int argc,char **argv) {
   struct capture_gpu gpu={.descriptor=-1,.egl=EGL_NO_DISPLAY};
   struct encoder_choice choice={.kind=ENCODER_SOFTWARE};
   if(!synthetic) {
-    capture=pin_socket(argv[1]);pulse=pin_socket("/run/polaris/pulse/native");
-    if(capture<0 || pulse<0)goto finish;
+    capture=pin_encoder_socket("/run/polaris",strrchr(argv[1],'/')+1,false);
+    pulse=pin_encoder_socket("/run/polaris","native",true);
+    if(capture<0 || pulse<0) {
+      fprintf(stderr,"encoder %s socket identity rejected\n",capture<0?"capture":"audio");
+      goto finish;
+    }
   }
   if(!software && (!open_gpu(argv[2],&gpu) || !choose_hardware_encoder(gpu.descriptor,&choice))) {
     fprintf(stderr,"no H.264 hardware encoder matches the allocated render device\n");

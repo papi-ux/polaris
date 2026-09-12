@@ -103,6 +103,7 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
     timeout 40s /out/test-encoded-game-check
 
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror /providers/test-encoder-sockets.c -o /out/test-encoder-sockets && /out/test-encoder-sockets
 RUN cc -std=c11 -O2 -Wall -Wextra -Werror /providers/test-encoder-gpu.c -o /out/test-encoder-gpu \
       $(pkg-config --cflags --libs gstreamer-1.0 libdrm) -ldl && /out/test-encoder-gpu
 
