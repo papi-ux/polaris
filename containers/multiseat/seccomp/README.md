@@ -13,6 +13,9 @@ license. Polaris adds only these rules:
 * Allow `clone` with `CLONE_NEWUSER` on the supported x86 image architectures.
 * Allow `mount`, `umount2`, `pivot_root`, and `chroot`. The kernel still requires
   the corresponding capability in the namespace where the operation acts.
+* Allow the exact `CLONE_NEWPID | SIGCHLD` clone used by Chromium's renderer
+  sandbox on x86. It requires namespace capabilities and remains denied to the
+  outer worker, which has none.
 
 The outer worker remains nonroot with all capabilities dropped, no new
 privileges, a read only root filesystem, private namespaces, and enforcing

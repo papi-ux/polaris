@@ -27,6 +27,9 @@ class SteamSeccompProfile(unittest.TestCase):
                 {"index": 0, "value": 0x10000000, "valueTwo": 0x10000000,
                  "op": "SCMP_CMP_MASKED_EQ"}], "includes": {"arches": ["amd64", "x86"]}},
             {"names": ["mount", "umount2", "pivot_root", "chroot"], "action": "SCMP_ACT_ALLOW"},
+            {"names": ["clone"], "action": "SCMP_ACT_ALLOW", "args": [
+                {"index": 0, "value": 0x20000011, "op": "SCMP_CMP_EQ"}],
+             "includes": {"arches": ["amd64", "x86"]}},
         ]
         actual = json.loads((DIRECTORY / "steam.json").read_text())
         self.assertEqual(actual, expected)

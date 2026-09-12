@@ -913,6 +913,25 @@
         "pivot_root",
         "chroot"
       ]
+    },
+    {
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "op": "SCMP_CMP_EQ",
+          "value": 536870929
+        }
+      ],
+      "includes": {
+        "arches": [
+          "amd64",
+          "x86"
+        ]
+      },
+      "names": [
+        "clone"
+      ]
     }
   ]
 }
