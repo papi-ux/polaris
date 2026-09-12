@@ -1,6 +1,24 @@
 const ENCODER_PROBE_START = 'Testing for available encoders, this may generate errors. You can safely ignore those errors.'
 const ENCODER_PROBE_END = 'Ignore any errors mentioned above, they are not relevant.'
 
+/**
+ * Probe failures that are not probe noise.
+ *
+ * The probe window exists because Polaris deliberately tries codec and profile combinations
+ * the host may not have. A driver too old for the NVENC API this build was compiled against
+ * is a different thing: it is not one combination failing, it is every NVIDIA encoder on the
+ * host failing for a reason the person can act on. That is the whole of #650, where a host
+ * dropped to software encoding and the console showed nothing at all.
+ */
+const PROBE_SURVIVING_PATTERNS = [
+  'does not support the required nvenc API version',
+  'minimum required Nvidia driver for nvenc',
+]
+
+function survivesProbeWindow(message) {
+  return PROBE_SURVIVING_PATTERNS.some((pattern) => message.includes(pattern))
+}
+
 function probeBoundary(line) {
   if (line.includes(ENCODER_PROBE_START)) return 'start'
   if (line.includes(ENCODER_PROBE_END)) return 'end'
@@ -26,6 +44,9 @@ function parseIssueLine(line) {
  * that context keeps an identical codec failure visible when it occurs during
  * a real stream. If a bounded log tail begins inside a probe, the first end
  * banner also lets us infer that the leading lines belong to the probe window.
+ *
+ * A few failures are reported even inside a probe window, because they describe the host
+ * rather than the combination being tried. See PROBE_SURVIVING_PATTERNS.
  */
 export function groupRecentIssueLogs(logText, {
   maxSourceLines = 300,
@@ -49,7 +70,8 @@ export function groupRecentIssueLogs(logText, {
     }
 
     const issue = parseIssueLine(line)
-    if (issue && !insideEncoderProbe) visibleIssues.push(issue)
+    if (!issue) continue
+    if (!insideEncoderProbe || survivesProbeWindow(issue.message)) visibleIssues.push(issue)
   }
 
   const grouped = new Map()
