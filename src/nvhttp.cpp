@@ -4052,7 +4052,12 @@ namespace nvhttp {
     const std::filesystem::path state_path {config::nvhttp.file_state};
     state_file_lock_t interprocess_lock {state_path};
     const auto fail_closed = [&](std::string_view reason) {
-      BOOST_LOG(error) << "Refusing authorization state from "sv << state_path << ": "sv << reason;
+      // This reads as fatal and is not: the host carries on with a fresh
+      // identity. A reporter on discussion #637 hit it right after fixing a
+      // directory mode and took it for a new failure.
+      BOOST_LOG(error) << "Refusing authorization state from "sv << state_path << ": "sv << reason
+                       << ". Continuing with a new host identity, so any client paired before "
+                          "now has to pair again."sv;
       clear_authorization_state_locked();
       http::uuid = uuid_util::uuid_t::generate();
       http::unique_id = http::uuid.string();

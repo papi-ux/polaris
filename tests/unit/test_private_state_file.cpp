@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstring>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -23,10 +24,47 @@
   #include <unistd.h>
 #endif
 
+#include <boost/core/null_deleter.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/smart_ptr/make_shared_object.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
+
 #include <src/private_state_file.h>
 
 namespace {
   std::atomic_uint64_t path_counter {0};
+
+  // Reads back what an operator would see, because the whole point of this
+  // message is the person in the terminal.
+  class log_capture_t {
+  public:
+    log_capture_t():
+        stream_ {boost::make_shared<std::ostringstream>()} {
+      auto backend = boost::make_shared<boost::log::sinks::text_ostream_backend>();
+      backend->add_stream(boost::shared_ptr<std::ostream> {stream_.get(), boost::null_deleter {}});
+      backend->auto_flush(true);
+      sink_ = boost::make_shared<sink_t>(backend);
+      boost::log::core::get()->add_sink(sink_);
+    }
+
+    ~log_capture_t() {
+      boost::log::core::get()->remove_sink(sink_);
+    }
+
+    log_capture_t(const log_capture_t &) = delete;
+    log_capture_t &operator=(const log_capture_t &) = delete;
+
+    [[nodiscard]] std::string text() const {
+      return stream_->str();
+    }
+
+  private:
+    using sink_t = boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend>;
+    boost::shared_ptr<std::ostringstream> stream_;
+    boost::shared_ptr<sink_t> sink_;
+  };
 
   class PrivateStateFileTest: public testing::Test {
   protected:
@@ -752,5 +790,39 @@ TEST_F(PrivateStateFileTest, TransactionFailsPromptlyWhileAnotherProcessHoldsLoc
   int status; ASSERT_EQ(::waitpid(pid, &status, 0), pid);
   EXPECT_EQ(status, 0);
   EXPECT_EQ(private_state_file::read_secure(target, 4096).payload, "before");
+}
+#endif
+
+#if defined(__linux__)
+// A reporter on discussion #637 was sent to the wrong directory by this very
+// message: it named the state file's parent, whose mode was fine, while quoting
+// the mode of the directory that actually failed. It also only ever offered
+// chown, and their directory was correctly owned and merely group writable.
+TEST_F(PrivateStateFileTest, RefusalNamesTheDirectoryThatFailedAndItsOwnRemedy) {
+  const auto offending = directory / "inner";
+  ASSERT_TRUE(std::filesystem::create_directory(offending));
+  ASSERT_EQ(::chmod(offending.c_str(), 0775), 0) << std::strerror(errno);
+
+  std::string captured;
+  {
+    log_capture_t capture;
+    const auto result = private_state_file::write_atomic(offending / "state.json", "{}");
+    EXPECT_FALSE(bool(result));
+    captured = capture.text();
+  }
+
+  EXPECT_NE(captured.find("Refusing to keep private state in [" + offending.string() + "]"), std::string::npos)
+    << "the refusal must name the directory that failed, not its parent; got:\n"
+    << captured;
+  EXPECT_EQ(captured.find("[" + directory.string() + "]"), std::string::npos)
+    << "the refusal must not name a directory whose mode it did not read; got:\n"
+    << captured;
+  EXPECT_NE(captured.find("it is writable by group or other"), std::string::npos) << captured;
+  EXPECT_NE(captured.find("chmod 700 " + offending.string()), std::string::npos)
+    << "a group-writable directory is fixed by chmod, not by chown; got:\n"
+    << captured;
+  EXPECT_EQ(captured.find("chown"), std::string::npos)
+    << "offering chown for a correctly owned directory is what confused the reporter; got:\n"
+    << captured;
 }
 #endif
