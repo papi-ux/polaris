@@ -627,12 +627,15 @@ namespace stream {
 #ifdef __linux__
   namespace {
     multiseat::input::moonlight_input_permissions_t
-    multiseat_permissions(const crypto::PERM permission) {
+    multiseat_permissions(const crypto::PERM permission, bool worker_media) {
       return {
         .keyboard = !!(permission & crypto::PERM::input_kbd),
         .mouse = !!(permission & crypto::PERM::input_mouse),
-        .touch = !!(permission & crypto::PERM::input_touch),
-        .pen = !!(permission & crypto::PERM::input_pen),
+        // The worker compositor consumes no native tablet descriptors. Apply
+        // the same capability bound as profile allocation and RTSP DESCRIBE
+        // without changing the client's retained authorization permissions.
+        .touch = !worker_media && !!(permission & crypto::PERM::input_touch),
+        .pen = !worker_media && !!(permission & crypto::PERM::input_pen),
         .controller = !!(permission & crypto::PERM::input_controller),
       };
     }
@@ -2743,7 +2746,7 @@ namespace stream {
             .launch_session_id = session.launch_session_id,
             .session_generation = session.session_generation,
           },
-          .input_permissions = multiseat_permissions(session.permission),
+          .input_permissions = multiseat_permissions(session.permission, worker_connection.required),
         },
         std::move(handle),
         std::move(feedback_hub),

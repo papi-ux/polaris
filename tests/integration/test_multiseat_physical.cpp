@@ -453,8 +453,10 @@ namespace {
           seat.launch->gcm_key.resize(16); seat.launch->iv.resize(16);
           seat.launch->perm=static_cast<crypto::PERM>(static_cast<std::uint32_t>(crypto::PERM::input_kbd) | static_cast<std::uint32_t>(crypto::PERM::input_mouse) | static_cast<std::uint32_t>(crypto::PERM::input_controller)); seat.launch->watch_only=false;
         }
-        if (live_media) seat.launch->perm = static_cast<crypto::PERM>(
-          static_cast<std::uint32_t>(seat.launch->perm) | static_cast<std::uint32_t>(crypto::PERM::view));
+        // Use the normal paired-client preset, including native tablet grants.
+        // Worker binding must intersect it with the compositor's implemented
+        // input roles instead of requiring unsupported touch/pen allocations.
+        if (live_media) seat.launch->perm = crypto::PERM::_game_control;
         if (!controller->select_authenticated_launch(seat.launch,seat.snapshot.handle).selected()) { selected=false; continue; }
         stream::config_t stream_config {};
         seat.stream=stream::session::alloc(stream_config,*seat.launch); ASSERT_TRUE(seat.stream);
