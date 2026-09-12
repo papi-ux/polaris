@@ -3,6 +3,8 @@
 Continuous H.264/Opus media is packaged with an explicit worker opt-in. See
 [`container-multiseat-encoder-provider.md`](../../docs/research/container-multiseat-encoder-provider.md)
 for its contract, current Gamescope workload scope and remaining acceptance.
+GPU seats select NVENC or VA-API on their allocated render device. NVIDIA
+variants include the pinned nvcodec plugin; software capture retains OpenH264.
 
 
 Docker is the default build and worker engine. See

@@ -73,14 +73,14 @@ class ArtifactIntegrity(unittest.TestCase):
                         'runtime': [{'filename': 'pkg.deb', 'sha256': checksum}],
                         'build': [{'filename': 'pkg.deb', 'sha256': checksum}]}
             (here / 'locks/gamescope.packages.json').write_text(json.dumps(packages))
-            locks = {name: 'locks/' + name + '.json' for name in ['rust', 'plugin', 'gamescope']}
+            locks = {name: 'locks/' + name + '.json' for name in ['rust', 'plugin', 'gamescope', 'nvidia', 'nvcodec']}
             for name, path in locks.items():
-                (here / path).write_text(json.dumps({'sha256': checksum, 'url': 'https://example.invalid/rust.tar.xz'}))
+                (here / path).write_text(json.dumps({'sha256': checksum, 'url': 'https://example.invalid/' + name + '.tar.xz'}))
             (here / 'images.lock.json').write_text(json.dumps({
                 'runtime_profiles': [{'id': 'gamescope', 'dependency_lock': 'locks/gamescope.packages.json'}],
                 'dependency_locks': locks}))
             for filename in ['gamescope/runtime/pkg.deb', 'gamescope/build/pkg.deb',
-                             'toolchains/rust.tar.xz', 'plugin.tar', 'gamescope.tar']:
+                             'toolchains/rust.tar.xz', 'plugin.tar', 'gamescope.tar', 'nvidia.tar.xz', 'nvcodec.tar.xz']:
                 path = root / 'build/runtime-inputs' / filename
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'locked')
@@ -98,6 +98,17 @@ class ArtifactIntegrity(unittest.TestCase):
                 self.assertEqual(json.loads((context / 'containers/multiseat/locks/plugin.json').read_text())['sha256'], checksum)
                 (root / 'build/runtime-inputs/plugin.tar').write_bytes(b'changed cache')
                 self.assertEqual((context / 'build/runtime-inputs/plugin.tar').read_bytes(), b'locked')
+            (root / 'build/runtime-inputs/plugin.tar').write_bytes(b'locked')
+            with build.materialized_context(revision, 'gamescope', True) as context:
+                self.assertEqual((context / 'build/runtime-inputs/nvcodec.tar.xz').read_bytes(), b'locked')
+                (root / 'build/runtime-inputs/nvcodec.tar.xz').write_bytes(b'substituted codec')
+                self.assertEqual((context / 'build/runtime-inputs/nvcodec.tar.xz').read_bytes(), b'locked')
+            with self.assertRaisesRegex(ValueError, 'copied input differs'):
+                with build.materialized_context(revision, 'gamescope', True):
+                    pass
+            with build.materialized_context(revision, 'gamescope', False) as context:
+                self.assertFalse((context / 'build/runtime-inputs/nvcodec.tar.xz').exists())
+
 
     def test_offline_packages_reject_substitution(self):
         for mutation in ['valid', 'modified', 'missing', 'extra', 'symlink', 'traversal', 'duplicate']:

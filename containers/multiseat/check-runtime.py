@@ -22,11 +22,16 @@ encoded_audio = pathlib.Path('/usr/libexec/polaris-seat/encoded-audio-check')
 game_status = pathlib.Path('/usr/libexec/polaris-seat/game-status')
 capture_input = pathlib.Path('/usr/libexec/polaris-seat/capture-input')
 workload = pathlib.Path('/usr/libexec/polaris-seat/workloads/input-pong-v1')
-if sys.argv[1:] == ['--worker']:
+if sys.argv[1:] in (['--worker'], ['--nvidia']):
     files += [workload, capture_input, game_status, encoded_game, encoded_audio] + [pathlib.Path('/usr/libexec/polaris-seat') / name for name in
                           ['session-bus', 'audio', 'display-capture', 'nested-compositor', 'virtual-input', 'launcher', 'encoder', 'encode-media']]
 elif sys.argv[1:]:
     raise ValueError('unknown dependency check scope')
+hardware_libraries = []
+if '--nvidia' in sys.argv:
+    hardware_libraries = [pathlib.Path('/usr/lib/x86_64-linux-gnu') / name for name in
+                          ['gstreamer-1.0/libgstnvcodec.so', 'libgstcuda-1.0.so.0.2600.0']]
+    files += hardware_libraries
 for path in files:
     # A root build can read through an unsearchable COPY-created directory.
     # Seat workers have neither root identity nor DAC override capabilities.
@@ -39,15 +44,19 @@ for path in files:
         raise ValueError('untrusted provider dependency: ' + str(path))
     if (path.parent == pathlib.Path('/usr/bin') or path.is_relative_to('/usr/libexec/polaris-seat')) and not os.access(path, os.X_OK):
         raise ValueError('non-executable provider dependency: ' + str(path))
-for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if '--worker' in sys.argv else []):
-    linked = subprocess.check_output(['ldd', str(path)], text=True, stderr=subprocess.STDOUT)
-    if 'not found' in linked:
+for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if any(arg in sys.argv for arg in ('--worker', '--nvidia')) else []) + hardware_libraries:
+    linked = subprocess.check_output(['ldd', '-r', str(path)], text=True, stderr=subprocess.STDOUT)
+    if 'not found' in linked or 'undefined symbol:' in linked:
         raise ValueError('unresolved ELF dependency: ' + str(path))
 for element in ['waylanddisplaysrc', 'unixfdsink', 'unixfdsrc', 'fakesink', 'videoconvert',
                 'audiotestsrc', 'audioconvert', 'audioresample', 'pulsesink', 'pulsesrc',
                 'openh264enc', 'openh264dec', 'h264parse', 'opusenc', 'opusdec', 'appsink',
                 'glupload', 'glcolorconvert', 'gldownload']:
     subprocess.run(['/usr/bin/gst-inspect-1.0', element], check=True, stdout=subprocess.DEVNULL)
+if hardware_libraries:
+    # Registration can legitimately expose no encoders on a build machine with
+    # no GPU devices. Physical codec acceptance must require actual frames.
+    subprocess.run(['/usr/bin/gst-inspect-1.0', 'nvcodec'], check=True, stdout=subprocess.DEVNULL)
 help_text = subprocess.check_output(['/usr/bin/gamescope', '--help'], stderr=subprocess.STDOUT, text=True)
 if '--keep-alive' not in help_text or '--expose-wayland' not in help_text:
     raise ValueError('Gamescope lacks the provider lifecycle interface')

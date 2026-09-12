@@ -13,16 +13,34 @@ sink monitor. Its request includes the allocated render node, encoder session
 reservation, audio sink, width, height and refresh rate. It never discovers a
 replacement GPU or attaches to the desktop audio server.
 
-The current codec path is software H.264 constrained baseline at an 8 Mbps
-ceiling, with stereo 48 kHz Opus in five millisecond packets. It supports even
-SDR dimensions from 16 through 3840 pixels and refresh rates from 1 through
-240 Hz. These are admitted limits, not achieved performance claims. Hardware
-encoding, HDR, configurable bitrate and additional codecs remain unfinished.
+The codec contract is H.264 constrained baseline at an 8 Mbps ceiling, with
+stereo 48 kHz Opus in five millisecond packets. Software capture and device-free
+checks use OpenH264. GPU capture requires a matching hardware encoder: NVENC
+for NVIDIA or VA-API for AMD and Intel. Missing hardware support fails readiness;
+a GPU seat does not silently fall back to software or another GPU.
+
+The retained DRM descriptor establishes PCI identity. NVIDIA's CUDA device is
+matched by PCI domain, bus, device and function, then a per-device GStreamer
+factory must report that same CUDA ordinal. Automatic GPU-selection factories
+are excluded. VA-API factories must expose a character device with the same
+identity as the admitted render node. Selection is checked again on the running
+encoder before publishing readiness.
+
+Both hardware paths use CBR, no B frames and one frame of VBV/CPB capacity.
+NVIDIA also disables lookahead and selects the ultra-low-latency tune. These
+settings follow the [NVENC](https://gstreamer.freedesktop.org/documentation/nvcodec/nvh264enc.html)
+and [VA-API](https://gstreamer.freedesktop.org/documentation/va/vah264enc.html)
+plugin interfaces. They are configuration choices, not measured latency claims.
+
+The allocation admits even SDR dimensions from 16 through 3840 pixels and
+refresh rates from 1 through 240 Hz, subject to the selected encoder's actual
+caps. HDR, configurable bitrate and additional codecs remain unfinished.
 
 The GPU capture path shares the retained GBM/EGL context and explicit texture
 conversion used by the encoded capture probe. Imported GPU memory must pass
 texture-target checks before download. All pipelines retire before releasing
-the GPU descriptor or EGL objects.
+the GPU descriptor or EGL objects. Hardware encoding still uses this verified
+CPU download and upload path; zero-copy capture is not established.
 
 ## Readiness and transport
 
@@ -69,6 +87,8 @@ launchers still need concrete catalog-backed implementations and acceptance.
 
 ## Verification and remaining acceptance
 
+`test-encoder-gpu.c` checks PCI identity mismatches, CUDA ordinals, per-device
+factory names, VA device substitutions and symlink refusals without a GPU.
 `test-encode-media.py` checks actual software H.264 decoding, bounded Opus
 packets, the acknowledgement gate, requested IDRs, malformed controls and
 normal termination. The real Go provider test streams two synthetic seats and
@@ -76,6 +96,12 @@ proves that stopping one removes its endpoint while the other continues. The
 image builder requires this test to pass without skipping in the produced
 runtime filesystem. Unit and race checks cover contract validation, endpoint
 ownership, cancellation and controller acknowledgement order.
+
+Passing `--render-node=/dev/dri/renderD128` to `test-encode-media.py` explicitly
+selects a synthetic hardware-codec check. It encodes generated video and audio,
+checks acknowledgement and IDR recovery, and decodes H.264. It does not capture
+a game or establish two-client streaming. Use only the allocated GPU devices
+and the exact NVIDIA image matching the host driver, or the matching VA image.
 
 These checks do not validate GPU game capture or client playback. The existing
 physical encoded-game probe still skips the continuous encoder and runs its

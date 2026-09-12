@@ -103,9 +103,12 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
     timeout 40s /out/test-encoded-game-check
 
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror /providers/test-encoder-gpu.c -o /out/test-encoder-gpu \
+      $(pkg-config --cflags --libs gstreamer-1.0 libdrm) -ldl && /out/test-encoder-gpu
+
 RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
       /providers/encode-media.c -o /out/encode-media \
-      $(pkg-config --cflags --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
+      $(pkg-config --cflags --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm libdrm) -ldl && \
     python3 /providers/test-encode-media.py /out/encode-media
 
 FROM ${GO_BUILDER_IMAGE} AS worker-build
@@ -240,6 +243,13 @@ ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \
 ENTRYPOINT ["/usr/bin/provider-tests"]
 CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
 
+# Hardware codec support is compiled from the matching locked GStreamer release.
+FROM runtime-root-build AS nvcodec-build
+COPY containers/multiseat/locks/nvcodec.json /nvcodec.lock.json
+COPY containers/multiseat/build-nvcodec.py /build-nvcodec.py
+COPY build/runtime-inputs/gst-plugins-bad-1.26.0.tar.xz /nvcodec.tar.xz
+RUN python3 /build-nvcodec.py
+
 # Optional physical-lane userspace, extracted only inside the build container.
 FROM runtime-root-build AS nvidia-userspace
 COPY containers/multiseat/locks/nvidia.json /nvidia.lock.json
@@ -249,7 +259,9 @@ RUN python3 /package-nvidia.py
 
 FROM worker-base AS worker-nvidia
 COPY --from=nvidia-userspace /nvidia-root/ /
-RUN ldconfig
+COPY --from=nvcodec-build /nvcodec-root/ /
+COPY containers/multiseat/check-runtime.py /check-nvidia-runtime.py
+RUN ldconfig && python3 /check-nvidia-runtime.py --nvidia && rm /check-nvidia-runtime.py
 LABEL io.polaris.multiseat.nvidia.driver="610.57.04"
 
 FROM worker-nvidia AS provider-nvidia-test

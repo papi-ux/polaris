@@ -83,6 +83,14 @@ source root's packaged `/usr/games/gamescope` remains recorded in the package
 manifest but is not selected by the provider. The custom source lock and SBOM
 identify the executable that the provider uses.
 
+The NVIDIA variant adds `locks/nvcodec.json`, the upstream GStreamer 1.26.0
+archive and its published SHA-256 checksum. The build installs only the nvcodec
+plugin and its missing CUDA support library, preserving the root's other
+GStreamer libraries. It needs no CUDA toolkit and builds without GPU devices.
+The final image checks dynamic symbols against the installed ABI and records
+the source lock, installed file hashes, license and SBOM component. Plugin
+registration without GPU devices does not establish working hardware encoding.
+
 Lock refresh is explicit: run `resolve-packages.sh` in each disposable pinned
 root, review `write-package-lock.py` output and source manifests, reconstruct
 source archives with the pinned toolchain, and review every changed source or

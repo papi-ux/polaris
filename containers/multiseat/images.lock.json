@@ -50,7 +50,8 @@
     "rust": "locks/rust.json",
     "plugin": "locks/plugin.json",
     "gamescope": "locks/gamescope.json",
-    "nvidia": "locks/nvidia.json"
+    "nvidia": "locks/nvidia.json",
+    "nvcodec": "locks/nvcodec.json"
   },
   "produced_workers": {
     "directory": "build/worker-artifacts",

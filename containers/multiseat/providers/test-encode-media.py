@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Device-free real codec/control check. Does not establish game streaming."""
+import argparse
 import os
 import select
 import signal
@@ -9,8 +10,9 @@ import sys
 import time
 
 
-def check(executable, invalid=False):
-    child = subprocess.Popen([executable, '--self-test'], stdin=subprocess.PIPE,
+def check(executable, invalid=False, render_node=None):
+    arguments = ['--self-test-gpu', render_node] if render_node else ['--self-test']
+    child = subprocess.Popen([executable, *arguments], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def read_exact(size):
@@ -85,5 +87,9 @@ def check(executable, invalid=False):
 
 
 if __name__ == '__main__':
-    check(sys.argv[1])
-    check(sys.argv[1], invalid=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('executable')
+    parser.add_argument('--render-node')
+    args = parser.parse_args()
+    check(args.executable, render_node=args.render_node)
+    check(args.executable, invalid=True, render_node=args.render_node)

@@ -70,10 +70,10 @@ def materialized_context(revision, profile_id, nvidia):
                 if pathlib.Path(filename).name != filename:
                     raise ValueError('unsafe locked input filename')
                 inputs.append((pathlib.Path(profile_id) / role / filename, package['sha256']))
-        for name in ['rust', 'plugin', 'gamescope'] + (['nvidia'] if nvidia else []):
+        for name in ['rust', 'plugin', 'gamescope'] + (['nvidia', 'nvcodec'] if nvidia else []):
             lock = json.loads((here / images['dependency_locks'][name]).read_text())
             filename = pathlib.Path(name + '.tar')
-            if name in ['rust', 'nvidia']:
+            if name in ['rust', 'nvidia', 'nvcodec']:
                 filename = pathlib.Path(pathlib.PurePosixPath(lock['url']).name)
                 if name == 'rust':
                     filename = pathlib.Path('toolchains') / filename
@@ -98,7 +98,7 @@ def sbom(packages, profile, revision, context):
                        'properties': [{'name': 'polaris:workload-id', 'value': 'input-pong-v1'},
                                       {'name': 'polaris:source-sha256', 'value': digest(here / 'workloads/input-pong.c')}],
                        'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/papi-ux/polaris/blob/' + revision + '/containers/multiseat/workloads/input-pong.c'}]})
-    for name in ['capture-input.c', 'seat-input.c', 'seat-input.h', 'game-status.c', 'encoded-game-check.c', 'encoded-audio-check.c', 'encode-media.c', 'capture-gpu.h', 'polaris-audio-policy.conf', 'polaris-audio-target.lua']:
+    for name in ['capture-input.c', 'seat-input.c', 'seat-input.h', 'game-status.c', 'encoded-game-check.c', 'encoded-audio-check.c', 'encode-media.c', 'capture-gpu.h', 'encoder-gpu.h', 'polaris-audio-policy.conf', 'polaris-audio-target.lua']:
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
@@ -218,6 +218,11 @@ def build_artifact(args, revision, epoch, context):
     (artifact / 'packages.tsv').write_text(package_manifest)
     bill = sbom(package_manifest, args.profile, revision, context)
     if args.nvidia:
+        codec = json.loads((here / 'locks/nvcodec.json').read_text())
+        bill['components'].append({'type': 'library', 'name': 'gstreamer-nvcodec',
+                                   'version': codec['version'], 'bom-ref': 'gstreamer-nvcodec',
+                                   'externalReferences': [{'type': 'distribution', 'url': codec['url']}],
+                                   'properties': [{'name': 'polaris:source-archive-sha256', 'value': codec['sha256']}]})
         nvidia = json.loads((here / 'locks/nvidia.json').read_text())
         bill['components'].append({'type': 'library', 'name': 'nvidia-graphics-userspace',
                                    'version': nvidia['version'], 'bom-ref': 'nvidia-userspace',
@@ -234,7 +239,7 @@ def build_artifact(args, revision, epoch, context):
     # inside this downloadable archive identifies the delivered worker artifact.
     worker_digest = verify_archive(artifact / 'worker.oci.tar', config_digest)
     lock_files = [here / 'images.lock.json', here / profile['dependency_lock']]
-    lock_files += [here / path for name, path in images['dependency_locks'].items() if args.nvidia or name != 'nvidia']
+    lock_files += [here / path for name, path in images['dependency_locks'].items() if args.nvidia or name not in ('nvidia', 'nvcodec')]
     write_json(artifact / 'artifact.json', {
         'schema': 1, 'source_revision': revision, 'profile': args.profile,
         'platform': 'linux/amd64', 'variant': variant, 'source_root': profile['reference'],

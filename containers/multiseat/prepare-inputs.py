@@ -140,8 +140,9 @@ def main():
     rust = json.loads((HERE / 'locks/rust.json').read_text())
     downloads.append((rust, INPUTS / 'toolchains' / pathlib.PurePosixPath(rust['url']).name))
     if args.nvidia:
-        nvidia = json.loads((HERE / 'locks/nvidia.json').read_text())
-        downloads.append((nvidia, INPUTS / pathlib.PurePosixPath(nvidia['url']).name))
+        for name in ['nvidia', 'nvcodec']:
+            entry = json.loads((HERE / 'locks' / (name + '.json')).read_text())
+            downloads.append((entry, INPUTS / pathlib.PurePosixPath(entry['url']).name))
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda item: fetch(*item), downloads))
     prepare_plugin(json.loads((HERE / 'locks/plugin.json').read_text()), rust)
