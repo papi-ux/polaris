@@ -1,8 +1,8 @@
 /**
- * @file tests/unit/platform/test_multiseat_podman_host.cpp
+ * @file tests/unit/platform/test_multiseat_container_host.cpp
  * @brief Live-host adapter tests for the rootless Podman worker backend.
  */
-#include "src/platform/linux/multiseat_podman_host.h"
+#include "src/platform/linux/multiseat_container_host.h"
 
 #ifdef __linux__
 
@@ -54,9 +54,9 @@ namespace {
   }
 }  // namespace
 
-TEST(MultiseatPodmanHost, ReadsOwnedRegularFilesWithinTheBound) {
+TEST(MultiseatContainerHost, ReadsOwnedRegularFilesWithinTheBound) {
   temporary_directory_t root;
-  multiseat::podman::local_host_t host;
+  multiseat::container::local_host_t host;
   const std::string content {"{\"mounts\": []}\0tail", 20};
   write_file(root.path() / "config.json", content);
   write_file(root.path() / "empty.json", "");
@@ -75,9 +75,9 @@ TEST(MultiseatPodmanHost, ReadsOwnedRegularFilesWithinTheBound) {
   EXPECT_EQ(host.read_owned_regular_file(root.path() / "empty.json", 16), std::string {});
 }
 
-TEST(MultiseatPodmanHost, RefusesAnythingButAnOwnedRegularFile) {
+TEST(MultiseatContainerHost, RefusesAnythingButAnOwnedRegularFile) {
   temporary_directory_t root;
-  multiseat::podman::local_host_t host;
+  multiseat::container::local_host_t host;
   write_file(root.path() / "config.json", "{}");
   std::filesystem::create_symlink(root.path() / "config.json", root.path() / "link.json");
   ASSERT_EQ(::mkfifo((root.path() / "pipe").c_str(), 0600), 0);
@@ -93,8 +93,8 @@ TEST(MultiseatPodmanHost, RefusesAnythingButAnOwnedRegularFile) {
   }
 }
 
-TEST(MultiseatPodmanHost, ReadsRunningProcessGroupsInsteadOfAccountMembership) {
-  multiseat::podman::local_host_t host;
+TEST(MultiseatContainerHost, ReadsRunningProcessGroupsInsteadOfAccountMembership) {
+  multiseat::container::local_host_t host;
   const auto actual = host.supplementary_groups();
   ASSERT_TRUE(actual);
   const auto count = getgroups(0, nullptr);
@@ -108,9 +108,9 @@ TEST(MultiseatPodmanHost, ReadsRunningProcessGroupsInsteadOfAccountMembership) {
   EXPECT_EQ(*actual, expected);
 }
 
-TEST(MultiseatPodmanHost, RefusesUserControlledOrIndirectRuntime) {
+TEST(MultiseatContainerHost, RefusesUserControlledOrIndirectRuntime) {
   temporary_directory_t root;
-  multiseat::podman::local_host_t host;
+  multiseat::container::local_host_t host;
   write_file(root.path() / "crun", "executable");
   ASSERT_EQ(chmod((root.path() / "crun").c_str(), 0755), 0);
   std::filesystem::create_directory(root.path() / "links");
@@ -120,7 +120,8 @@ TEST(MultiseatPodmanHost, RefusesUserControlledOrIndirectRuntime) {
   EXPECT_FALSE(host.trusted_runtime_file(root.path() / "links/crun"));
   EXPECT_FALSE(host.trusted_runtime_file(root.path() / "bin-link/crun"));
   EXPECT_FALSE(host.trusted_runtime_file("crun"));
-  EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/runc"));
+  EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/sh"));
+  EXPECT_EQ(host.effective_gid(), static_cast<std::uint64_t>(::getegid()));
   EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/../bin/crun"));
 }
 

@@ -1,5 +1,9 @@
 # Multiseat worker image inputs
 
+Docker is the default build and worker engine. See
+[the Docker backend decision](../../docs/research/container-multiseat-docker.md)
+for the host trust boundary, image import, profile initialization, and acceptance.
+
 This directory defines an offline-reviewable image recipe. It does not enable
 multiseat or make the current Polaris process a container controller.
 
@@ -65,7 +69,8 @@ worker-local codec roundtrips; continuous media transport and client playback
 remain separate acceptance gates.
 
 The production `run` command still injects no adapters, so no worker announces
-a media contract yet. Worker-local encoding is still missing, and the Steam,
+a media contract yet. The experimental encoder provider is not wired into
+continuous worker media delivery, and the Steam,
 Heroic, and Lutris launcher implementations remain outstanding. The controller
 side of the media path is now complete: a worker that announces a contract on
 its media channel has it held against what the client negotiated, acknowledged,
@@ -80,7 +85,7 @@ The controller now also has an injected host-brokered input authority and a
 Linux inputtino lifecycle backend, but neither is wired to this image or the
 singleton runtime. The backend creates virtual devices outside the untrusted
 launcher boundary and derives the exact generation's event-node identity from
-`fstat`, sysfs, and udev before returning fixed worker-local paths. The Podman
+`fstat`, sysfs, and udev before returning fixed worker-local paths. The container
 adapter consumes that allocation through a separate injected source, verifies
 the full authority and kernel snapshot twice before command invocation, and
 maps each host event node to only its fixed worker alias. The former global
@@ -88,7 +93,7 @@ input-device option is gone; generated worker commands cannot receive raw
 `/dev/uinput`, `/dev/uhid`, or a host-wide `/dev/input` mapping.
 
 Each worker carries an opaque SHA-256 fingerprint of its complete generation
-manifest. Inventory compares that fingerprint and the inspected Podman device
+manifest. Inventory compares that fingerprint and the inspected container device
 bindings against the current authority. Podman may reconstruct a different
 host path from the stored major/minor pair, so reconciliation accepts that path
 only when the character-device identity and exact worker alias still match.
@@ -382,43 +387,33 @@ The opt-in SELinux policies permit only the three evdev identity queries
 compositor capability queries and real game input delivery need separate
 physical verification; the new provider does not yet establish that acceptance.
 
-The Linux worker backend explicitly selects `/usr/bin/crun` and combines
-`--group-add=keep-groups` with `--userns=keep-id`. The runtime must be a
-root-owned regular executable below root-owned directories that are not
-writable by other users. Launch reads the calling process's supplementary
-groups with `getgroups()` and rechecks that snapshot and device access at
-invocation. Account membership alone is insufficient: a user service must
-actually inherit the needed groups. Runtime and group failures reject new
-launches; stopping an existing worker remains available.
+The Linux worker backend defaults to Docker with runc, explicit numeric UID/GID
+and supplementary groups, and private temporary filesystems. Launch rechecks
+actual process groups and exact device identities immediately before invocation.
+A user service must inherit the required groups. Stopping an existing worker
+remains available after input access disappears. SELinux stays enforcing.
 
-Authoritative inventory requires the selected crun path and the OCI
-`run.oci.keep_original_groups=1` annotation. Podman consumes `keep-groups`
-while creating the OCI specification, so its inspected `HostConfig.GroupAdd`
-is empty. OCI `additionalGids` describe namespace IDs and are not evidence
-that host supplementary groups were retained. The existing exact device and
-mount classifier still applies. SELinux stays enforcing.
+The retained Podman option explicitly selects crun and uses `keep-id` and
+`keep-groups`; its OCI annotation checks remain specific to that engine. Earlier
+rootless Podman receipts must be repeated on Docker before claiming physical
+acceptance for the default backend.
 
 `MultiseatPhysical.TwoWorkersReadOnlyTheirAllocatedInputAndStopIndependently`
-is an opt-in acceptance test. Set `POLARIS_MULTISEAT_PHYSICAL=1`, an exact
+is an opt-in acceptance test, defaulting to Docker. Set `POLARIS_MULTISEAT_PHYSICAL=1`, an exact
 `POLARIS_PHYSICAL_IMAGE`, a private `POLARIS_PHYSICAL_IPC_ROOT` parent, and
 two distinct pre-created profile volumes through `POLARIS_PHYSICAL_VOLUME`
 and `POLARIS_PHYSICAL_VOLUME_B`. `POLARIS_PHYSICAL_IMAGE` must be a manifest
-digest reference, `name@sha256:<64 hex>`; a tag is refused before launch.
+digest reference, `name@sha256:<64 hex>`, or a full Docker image ID
+`sha256:<64 hex>` matching the verified artifact; a tag is refused before launch.
+Always add `--gtest_output=xml:<private receipt path>` to retain RecordProperty
+diagnostics.
 
-Each profile volume must be private before a worker can use it. Podman creates
-a volume's data directory mode 0755, the image carries no `/var/lib/polaris-seat`
-for Podman to copy up from, and the worker requires its own profile directory to
-be exactly mode 0700 owned by its effective uid, so a correctly created volume
-otherwise fails with `private directory ownership or mode is unsafe` before any
-provider starts:
+Each profile volume must be mode 0700 and owned by the controller UID. See the
+[Docker profile initialization recipe](../../docs/research/container-multiseat-docker.md#images-and-profile-state).
+Missing volumes and driver redirection are refused by admission; private root
+ownership is enforced by the worker at startup.
 
-```sh
-podman volume create pv-seat-a
-chmod 0700 "$(podman volume inspect pv-seat-a --format '{{.Mountpoint}}')"
-```
-
-Admission should check this before launch rather than leaving it to the worker;
-until it does, it is an operator step. `POLARIS_PHYSICAL_PROFILE` selects gamescope,
+`POLARIS_PHYSICAL_PROFILE` selects gamescope,
 steam, heroic, or lutris. The image must contain the separately packaged
 `polaris-seat-input-probe` acceptance helper. GPU device paths must belong to
 the explicit catalog supplied through the physical harness environment.
@@ -442,9 +437,9 @@ Passing this test establishes isolated input and worker lifecycle. Production
 provider selection and multiseat activation remain off; it does not establish
 successful game streaming.
 
-The worker UID is passed explicitly, because an image `USER` can override
-Podman's implicit `keep-id` choice. Live inventory requires matching Config.User
-and OCI process.user.uid evidence. Use a short private IPC parent for the
+The worker UID is passed explicitly so an image `USER` cannot override it.
+Docker inventory requires the exact Config.User and numeric group list; Podman
+inventory also checks OCI process.user.uid and retained-group evidence. Use a short private IPC parent for the
 physical harness so both generated Unix socket paths fit Linux's 108-byte limit.
 
 Experimental compositor input uses the fixed native `capture-input` producer.

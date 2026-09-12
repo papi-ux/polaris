@@ -1,8 +1,8 @@
 /**
- * @file src/platform/linux/multiseat_podman_host.cpp
- * @brief Live Linux host adapter for the rootless Podman worker backend.
+ * @file src/platform/linux/multiseat_container_host.cpp
+ * @brief Live Linux host adapter for Docker and the retained Podman backend.
  */
-#include "multiseat_podman_host.h"
+#include "multiseat_container_host.h"
 
 #ifdef __linux__
 
@@ -19,7 +19,7 @@
 #include <limits>
 #include <string>
 
-namespace multiseat::podman {
+namespace multiseat::container {
   namespace {
     bool accessible_as(const std::filesystem::path &path, mode_t type, int mode) {
       struct stat metadata {};
@@ -49,12 +49,17 @@ namespace multiseat::podman {
     return static_cast<std::uint64_t>(geteuid());
   }
 
+  std::uint64_t local_host_t::effective_gid() const {
+    return static_cast<std::uint64_t>(getegid());
+  }
+
   bool local_host_t::executable_file(const std::filesystem::path &path) const {
     return accessible_as(path, S_IFREG, X_OK);
   }
 
   bool local_host_t::trusted_runtime_file(const std::filesystem::path &path) const {
-    if (!path.is_absolute() || path.lexically_normal() != path || path.filename() != "crun") return false;
+    if (!path.is_absolute() || path.lexically_normal() != path ||
+        (path.filename() != "crun" && path.filename() != "runc")) return false;
     struct stat metadata {};
     if (lstat(path.c_str(), &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
         metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) != 0 ||
@@ -188,6 +193,6 @@ namespace multiseat::podman {
     };
   }
 
-}  // namespace multiseat::podman
+}  // namespace multiseat::container
 
 #endif

@@ -6,7 +6,7 @@
 
 #ifdef __linux__
 
-  #include "multiseat_podman_host.h"
+  #include "multiseat_container_host.h"
   #include "src/uuid.h"
 
   #include <set>
@@ -33,7 +33,7 @@ namespace multiseat {
     };
 
     class runtime_input_manifest_source_t final :
-        public podman::input_manifest_source_t {
+        public container::input_manifest_source_t {
     public:
       runtime_input_manifest_source_t(
         input::moonlight_session_runtime_t &runtime,
@@ -62,7 +62,7 @@ namespace multiseat {
 
     struct production_worker_backend_dependencies_t {
       production_worker_backend_dependencies_t(
-        std::unique_ptr<podman::host_t> host_value,
+        std::unique_ptr<container::host_t> host_value,
         std::unique_ptr<input::kernel_node_probe_t> probe_value,
         input::moonlight_session_runtime_t &runtime
       ) :
@@ -72,7 +72,7 @@ namespace multiseat {
       }
 
       // Reverse destruction keeps the manifest ahead of its referenced probe.
-      std::unique_ptr<podman::host_t> host;
+      std::unique_ptr<container::host_t> host;
       std::unique_ptr<input::kernel_node_probe_t> probe;
       runtime_input_manifest_source_t input_manifests;
     };
@@ -93,7 +93,7 @@ namespace multiseat {
     bool valid_catalog_boundary(
       const production_controller_options_t &options
     ) {
-      if (options.gpus.empty() || !options.podman.gpus.empty()) {
+      if (options.gpus.empty() || !options.container.gpus.empty()) {
         return false;
       }
       std::unordered_set<std::string> logical_ids;
@@ -125,19 +125,19 @@ namespace multiseat {
       return true;
     }
 
-    std::optional<std::vector<podman::gpu_t>> admitted_podman_gpus(
+    std::optional<std::vector<container::gpu_t>> admitted_container_gpus(
       const std::vector<production_controller_gpu_t> &gpus,
-      podman::host_t &host
+      container::host_t &host
     ) {
       using character_device_key_t =
         std::pair<std::uint32_t, std::uint32_t>;
       std::set<character_device_key_t> exclusive_devices;
       std::set<std::pair<std::uint64_t, std::uint64_t>> exclusive_inodes;
-      std::vector<podman::gpu_t> result;
+      std::vector<container::gpu_t> result;
       result.reserve(gpus.size());
       for (const auto &gpu : gpus) {
         std::set<character_device_key_t> local_devices;
-        podman::gpu_t admitted {
+        container::gpu_t admitted {
           .logical_gpu_id = gpu.logical_gpu_id,
           .render_node = gpu.render_node,
           .max_encoder_sessions = gpu.max_encoder_sessions,
@@ -219,11 +219,11 @@ namespace multiseat {
           return std::nullopt;
         }
 
-        auto host = factories.podman_host ?
-                      factories.podman_host() :
-                      std::make_unique<podman::local_host_t>();
+        auto host = factories.container_host ?
+                      factories.container_host() :
+                      std::make_unique<container::local_host_t>();
         auto admitted_gpus = host ?
-                               admitted_podman_gpus(options.gpus, *host) :
+                               admitted_container_gpus(options.gpus, *host) :
                                std::nullopt;
         if (!host || !admitted_gpus) {
           return std::nullopt;
@@ -252,7 +252,7 @@ namespace multiseat {
         );
         auto authority =
           std::make_unique<worker_ipc::authority_store_t>(
-            options.podman.ipc_root
+            options.container.ipc_root
           );
         if (authority->status() != worker_ipc::authority_status_e::applied) {
           return std::nullopt;
@@ -264,12 +264,12 @@ namespace multiseat {
             std::move(probe),
             *moonlight.runtime
         );
-        auto podman_options = std::move(options.podman);
-        podman_options.gpus = std::move(*admitted_gpus);
-        auto worker_backend = std::make_unique<podman::backend_t>(
+        auto container_options = std::move(options.container);
+        container_options.gpus = std::move(*admitted_gpus);
+        auto worker_backend = std::make_unique<container::backend_t>(
           *backend_dependencies->host,
           backend_dependencies->input_manifests,
-          std::move(podman_options)
+          std::move(container_options)
         );
 
         return controller_runtime_dependencies_t {

@@ -13,7 +13,7 @@ import tempfile
 import tomllib
 import urllib.parse
 
-from oci_archive import verify_archive
+from oci_archive import docker_to_oci, verify_archive
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -136,6 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('profile', choices=['gamescope', 'steam', 'heroic', 'lutris'])
     parser.add_argument('--nvidia', action='store_true')
+    parser.add_argument('--engine', choices=['docker', 'podman'], default='docker')
     args = parser.parse_args()
     revision = output(['git', 'rev-parse', 'HEAD']).strip()
     if output(['git', 'status', '--porcelain']):
@@ -156,15 +157,25 @@ def build_artifact(args, revision, epoch, context):
     artifact = REPO / 'build/worker-artifacts' / args.profile / variant
     artifact.mkdir(parents=True, exist_ok=True)
     image = 'localhost/polaris-worker-' + args.profile + '-' + variant + ':' + revision[:12]
-    command = ['podman', 'build', '--network=none', '--pull=never', '--platform=linux/amd64',
-               '--format=oci', '--timestamp=' + epoch, '-f', str(here / 'Containerfile'),
+    engine = [args.engine]
+    if args.engine == 'podman':
+        (artifact / 'worker.docker.tar').unlink(missing_ok=True)
+    # Require both locked roots to be present before invoking the builder.
+    for reference in [profile['reference'], images['builder']['reference']]:
+        output(engine + ['image', 'inspect', reference])
+    if args.engine == 'docker':
+        command = engine + ['buildx', '--builder=default', 'build', '--load',
+                            '--pull=false', '--provenance=false', '--build-arg', 'SOURCE_DATE_EPOCH=' + epoch]
+    else:
+        command = engine + ['build', '--pull=never', '--format=oci', '--timestamp=' + epoch]
+    command += ['--network=none', '--platform=linux/amd64', '-f', str(here / 'Containerfile'),
                '--build-arg', 'RUNTIME_PROFILE=' + args.profile,
                '--build-arg', 'RUNTIME_IMAGE=' + profile['reference'],
                '--build-arg', 'GO_BUILDER_IMAGE=' + images['builder']['reference'],
                '--build-arg', 'POLARIS_REVISION=' + revision]
     run(command + ['--target', 'worker-nvidia' if args.nvidia else 'worker', '-t', image, str(context)])
-    inspected = json.loads(output(['podman', 'image', 'inspect', image]))[0]
-    labels = inspected['Labels']
+    inspected = json.loads(output(engine + ['image', 'inspect', image]))[0]
+    labels = inspected['Config']['Labels'] if args.engine == 'docker' else inspected['Labels']
     if inspected['Architecture'] != 'amd64' or inspected['Os'] != 'linux' or labels.get('org.opencontainers.image.revision') != revision or labels.get('io.polaris.multiseat.profile') != args.profile:
         raise ValueError('produced worker identity does not match the build')
     config_digest = 'sha256:' + inspected['Id'].removeprefix('sha256:')
@@ -173,11 +184,11 @@ def build_artifact(args, revision, epoch, context):
     # Gamescope hardware acceptance is a separate required physical receipt.
     provider_image = image + '-providers'
     run(command + ['--target', 'provider-nvidia-test' if args.nvidia else 'provider-test', '-t', provider_image, str(context)])
-    provider_inspected = json.loads(output(['podman', 'image', 'inspect', provider_image]))[0]
+    provider_inspected = json.loads(output(engine + ['image', 'inspect', provider_image]))[0]
     worker_layers = inspected['RootFS']['Layers']
     if provider_inspected['RootFS']['Layers'][:len(worker_layers)] != worker_layers:
         raise ValueError('provider test image does not extend the produced worker filesystem')
-    test_command = ['podman', 'run', '--rm', '--network=none', '--cap-drop=all',
+    test_command = engine + ['run', '--rm', '--network=none', '--cap-drop=all',
                     '--security-opt=no-new-privileges', provider_image, '-test.v',
                     '-test.run=^TestReal(SessionBus|PrivateAudio|AudioReadiness|Display)', '-test.timeout=2m']
     with (artifact / 'providers.log').open('w') as log:
@@ -200,7 +211,7 @@ def build_artifact(args, revision, epoch, context):
                                             'variant': variant, 'worker_config_digest': config_digest,
                                             'provider_config_digest': 'sha256:' + provider_inspected['Id'].removeprefix('sha256:'),
                                             'scope': 'isolated session bus, audio and software display; no game stream'})
-    package_manifest = output(['podman', 'run', '--rm', '--network=none', '--read-only',
+    package_manifest = output(engine + ['run', '--rm', '--network=none', '--read-only',
                                '--cap-drop=all', '--security-opt=no-new-privileges',
                                '--entrypoint=/usr/bin/cat', image, '/usr/share/polaris/build/packages.tsv'])
     (artifact / 'packages.tsv').write_text(package_manifest)
@@ -211,8 +222,14 @@ def build_artifact(args, revision, epoch, context):
                                    'version': nvidia['version'], 'bom-ref': 'nvidia-userspace',
                                    'properties': [{'name': 'polaris:source-archive-sha256', 'value': nvidia['sha256']}]})
     write_json(artifact / 'sbom.cdx.json', bill)
-    run(['podman', 'save', '--format=oci-archive', '-o', str(artifact / 'worker.oci.tar'), image])
-    # Podman may rewrite the manifest when exporting. Only the verified digest
+    extra_files = []
+    if args.engine == 'docker':
+        run(engine + ['image', 'save', '-o', str(artifact / 'worker.docker.tar'), image])
+        docker_to_oci(artifact / 'worker.docker.tar', artifact / 'worker.oci.tar', config_digest, int(epoch))
+        extra_files.append('worker.docker.tar')
+    else:
+        run(engine + ['save', '--format=oci-archive', '-o', str(artifact / 'worker.oci.tar'), image])
+    # Export may rewrite the manifest. Only the verified digest
     # inside this downloadable archive identifies the delivered worker artifact.
     worker_digest = verify_archive(artifact / 'worker.oci.tar', config_digest)
     lock_files = [here / 'images.lock.json', here / profile['dependency_lock']]
@@ -221,8 +238,10 @@ def build_artifact(args, revision, epoch, context):
         'schema': 1, 'source_revision': revision, 'profile': args.profile,
         'platform': 'linux/amd64', 'variant': variant, 'source_root': profile['reference'],
         'worker_digest': worker_digest, 'worker_config_digest': config_digest,
+        'build_engine': args.engine,
+        'worker_reference': config_digest if args.engine == 'docker' else image.split(':')[0] + '@' + worker_digest,
         'dependency_locks': {str(path.relative_to(context)): digest(path) for path in lock_files},
-        'files': {name: {'sha256': digest(artifact / name)} for name in ['worker.oci.tar', 'packages.tsv', 'sbom.cdx.json', 'providers.json']},
+        'files': {name: {'sha256': digest(artifact / name)} for name in ['worker.oci.tar', 'packages.tsv', 'sbom.cdx.json', 'providers.json'] + extra_files},
         'validation': {'dependencies': 'passed', 'session_bus_audio_display': 'passed',
                        'nested_compositor': 'physical receipt required', 'input': 'physical receipt required',
                        'game_streaming': 'not exercised', 'production_activation': False},

@@ -1,9 +1,79 @@
 """Read and verify the single-platform OCI artifact without extracting files."""
 import hashlib
 import gzip
+import io
 import json
 import re
 import tarfile
+
+
+def docker_to_oci(source, destination, expected_config, epoch=0):
+    """Copy a single Docker save image into OCI without changing config/layers.
+
+    Never extract paths. The existing verifier checks the config digest and
+    ordered uncompressed layer hashes before this export is accepted.
+    """
+    with tarfile.open(source) as saved, tarfile.open(destination, 'w') as result:
+        members = {}
+        for member in saved.getmembers():
+            if (member.name in members or not (member.isfile() or member.isdir()) or
+                    member.name.startswith('/') or '..' in member.name.split('/')):
+                raise ValueError('unsafe or duplicate Docker archive member')
+            members[member.name] = member
+
+        def regular(name):
+            member = members.get(name)
+            if member is None or not member.isfile():
+                raise ValueError('Docker manifest references a missing or non-regular member')
+            return member
+
+        def read_json(name):
+            member = regular(name)
+            if member.size > 16 * 1024 * 1024:
+                raise ValueError('oversized Docker metadata')
+            return json.load(saved.extractfile(member))
+
+        written = set()
+
+        def write(name, stream, size):
+            if name in written:
+                return
+            member = tarfile.TarInfo(name)
+            member.size, member.mtime, member.mode = size, epoch, 0o644
+            result.addfile(member, stream)
+            written.add(name)
+
+        def copy_blob(name, media_type):
+            member = regular(name)
+            with saved.extractfile(member) as stream:
+                checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+            with saved.extractfile(member) as stream:
+                write('blobs/sha256/' + checksum, stream, member.size)
+            return {'mediaType': media_type, 'digest': 'sha256:' + checksum, 'size': member.size}
+
+        manifest = read_json('manifest.json')
+        if not isinstance(manifest, list) or len(manifest) != 1:
+            raise ValueError('expected one Docker worker image')
+        manifest = manifest[0]
+        config = copy_blob(manifest['Config'], 'application/vnd.oci.image.config.v1+json')
+        if config['digest'] != expected_config:
+            raise ValueError('Docker worker configuration differs from the validated image')
+        layers = []
+        for name in manifest['Layers']:
+            with saved.extractfile(regular(name)) as stream:
+                compressed = stream.read(2) == b'\x1f\x8b'
+            layers.append(copy_blob(name, 'application/vnd.oci.image.layer.v1.tar' + ('+gzip' if compressed else '')))
+        payload = json.dumps({'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.manifest.v1+json',
+                              'config': config, 'layers': layers}, separators=(',', ':')).encode()
+        checksum = hashlib.sha256(payload).hexdigest()
+        write('blobs/sha256/' + checksum, io.BytesIO(payload), len(payload))
+        descriptor = {'mediaType': 'application/vnd.oci.image.manifest.v1+json',
+                      'digest': 'sha256:' + checksum, 'size': len(payload)}
+        for name, data in [('oci-layout', {'imageLayoutVersion': '1.0.0'}),
+                           ('index.json', {'schemaVersion': 2, 'manifests': [descriptor]})]:
+            payload = json.dumps(data, separators=(',', ':')).encode()
+            write(name, io.BytesIO(payload), len(payload))
+    return verify_archive(destination, expected_config)
 
 
 def verify_archive(path, expected_config):

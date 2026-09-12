@@ -8,7 +8,7 @@
  * the image-owned Gamescope input game. Production adapter selection stays off.
  */
 #include "src/platform/linux/multiseat_controller_production.h"
-#include "src/platform/linux/multiseat_podman_host.h"
+#include "src/platform/linux/multiseat_container_host.h"
 #include "src/platform/linux/multiseat_moonlight_activation.h"
 #include "src/rtsp.h"
 #include "src/stream.h"
@@ -39,7 +39,7 @@ namespace {
   using namespace std::chrono_literals;
   using json = nlohmann::json;
   namespace input = multiseat::input;
-  namespace podman = multiseat::podman;
+  namespace container = multiseat::container;
   constexpr auto probe = "/usr/bin/polaris-seat-input-probe";
 
   std::string env_or(const char *name, const std::string &fallback = {}) {
@@ -118,7 +118,7 @@ namespace {
   class private_root_t {
   public:
     explicit private_root_t(const std::filesystem::path &parent) {
-      podman::local_host_t host;
+      container::local_host_t host;
       if (!host.private_read_write_directory(parent)) throw std::runtime_error {"private IPC parent is unavailable"};
       auto pattern = (parent / "physical-XXXXXX").string();
       const auto created = mkdtemp(pattern.data());
@@ -145,23 +145,32 @@ namespace {
 
   // Delegate every authority check to the real host, retaining only bounded
   // command failure output in private test evidence (never argv or auth files).
-  class observed_host_t final : public podman::host_t {
+  class observed_host_t final : public container::host_t {
   public:
-    explicit observed_host_t(std::string &failure, std::string &diagnostics, bool game): failure_(failure), diagnostics_(diagnostics), game_(game) {}
+    explicit observed_host_t(std::string &failure, std::string &diagnostics, bool game, container::options_t options): failure_(failure), diagnostics_(diagnostics), game_(game), options_(std::move(options)) {}
     std::uint64_t effective_uid() const override { return host_.effective_uid(); }
+    std::uint64_t effective_gid() const override { return host_.effective_gid(); }
     bool executable_file(const std::filesystem::path &path) const override { const auto result = host_.executable_file(path); if (!result) failure_ = "executable_file: " + path.filename().string(); return result; }
     bool trusted_runtime_file(const std::filesystem::path &path) const override { const auto result = host_.trusted_runtime_file(path); if (!result) failure_ = "trusted_runtime_file: " + path.filename().string(); return result; }
     std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return host_.supplementary_groups(); }
     bool readable_directory(const std::filesystem::path &path) const override { const auto result = host_.readable_directory(path); if (!result) failure_ = "readable_directory: " + path.filename().string(); return result; }
     bool private_read_write_directory(const std::filesystem::path &path) const override { const auto result = host_.private_read_write_directory(path); if (!result) failure_ = "private_read_write_directory: " + path.filename().string(); return result; }
     bool private_readable_file(const std::filesystem::path &path) const override { const auto result = host_.private_readable_file(path); if (!result) failure_ = "private_readable_file: " + path.filename().string(); return result; }
-    std::optional<podman::character_device_identity_t> read_write_character_device(const std::filesystem::path &path) const override { const auto result = host_.read_write_character_device(path); if (!result) failure_ = "device access: " + path.filename().string(); return result; }
+    std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &path) const override { const auto result = host_.read_write_character_device(path); if (!result) failure_ = "device access: " + path.filename().string(); return result; }
     std::optional<std::string> read_owned_regular_file(const std::filesystem::path &path, std::size_t maximum) const override { return host_.read_owned_regular_file(path, maximum); }
-    podman::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds timeout, std::size_t maximum) override {
+    container::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds timeout, std::size_t maximum) override {
       auto admitted = argv;
       // Physical NVIDIA lane only: fixed reviewed domain, after the real backend
       // has classified every mount/device. No CDI or arbitrary security options.
-      if (game_) {
+      if (game_ && options_.engine == container::engine_e::docker &&
+          (std::find(admitted.begin(), admitted.end(), "kill") != admitted.end() ||
+           std::find(admitted.begin(), admitted.end(), "rm") != admitted.end())) {
+        auto logs = container::command_prefix(options_);
+        logs.insert(logs.end(), {"logs", "--tail=100", admitted.back()});
+        const auto output = host_.run(logs, 2s, 65536);
+        if (output.exit_status == 0 && diagnostics_.size() + output.output.size() <= 65536) diagnostics_ += output.output;
+      }
+      if (game_ && options_.engine == container::engine_e::podman) {
         const auto run = std::find(admitted.begin(), admitted.end(), "run");
         if (run != admitted.end()) {
           admitted.insert(run + 1, "--security-opt=label=type:polaris_nvidia_worker_t");
@@ -186,10 +195,11 @@ namespace {
       return result;
     }
   private:
-    podman::local_host_t host_;
+    container::local_host_t host_;
     std::string &failure_;
     std::string &diagnostics_;
     bool game_;
+    container::options_t options_;
   };
 
   using bytes = std::vector<std::uint8_t>;
@@ -277,35 +287,42 @@ namespace {
     })) << "a gamescope seat needs the GPU's DRM primary node in its device catalog, not only "
            "its render node; for " << render << " that is "
         << (primary_node.empty() ? std::string {"a /dev/dri/card node"} : primary_node);
-    const auto executable = env_or("POLARIS_PHYSICAL_PODMAN", "/usr/bin/podman");
+    const auto engine = env_or("POLARIS_PHYSICAL_ENGINE", "docker");
+    ASSERT_TRUE(engine == "docker" || engine == "podman");
+    container::options_t engine_options;
+    engine_options.engine = engine == "docker" ? container::engine_e::docker : container::engine_e::podman;
+    engine_options.executable = engine == "docker" ? env_or("POLARIS_PHYSICAL_DOCKER", "/usr/bin/docker") : env_or("POLARIS_PHYSICAL_PODMAN", "/usr/bin/podman");
+    engine_options.runtime_executable = engine == "docker" ? env_or("POLARIS_PHYSICAL_RUNC", "/usr/bin/runc") : env_or("POLARIS_PHYSICAL_CRUN", "/usr/bin/crun");
+    engine_options.daemon_socket = env_or("POLARIS_PHYSICAL_DOCKER_SOCKET", "/var/run/docker.sock");
+    if (game && engine == "docker" && drm_driver_for(render) == "nvidia") engine_options.selinux_type = "polaris_nvidia_worker_t";
+    const auto prefix = container::command_prefix(engine_options);
     const auto deployment = "physical-" + nonce();
     private_root_t root {parent};
-    podman::local_host_t host;
+    container::local_host_t host;
     const auto command = [&](std::vector<std::string> arguments, std::chrono::milliseconds timeout = 5s) {
-      arguments.insert(arguments.begin(), {executable, "--remote=false"});
+      arguments.insert(arguments.begin(), prefix.begin(), prefix.end());
       return host.run(arguments, timeout, 1024*1024);
     };
     production_controller_options_t options;
     options.enabled = true;
     options.gpus = {{.logical_gpu_id="physical-gpu", .render_node=render, .devices=devices, .max_seats=2, .max_encoder_sessions=2}};
-    options.podman.executable = executable;
-    options.podman.runtime_executable = env_or("POLARIS_PHYSICAL_CRUN", "/usr/bin/crun");
-    options.podman.deployment_id = deployment;
-    options.podman.ipc_root = root.path;
-    for (int index = 0; index < 2; ++index) options.podman.profiles.push_back({
+    options.container = engine_options;
+    options.container.deployment_id = deployment;
+    options.container.ipc_root = root.path;
+    for (int index = 0; index < 2; ++index) options.container.profiles.push_back({
       .profile_key="physical-profile-"+std::to_string(index), .opaque_volume_name=volumes[index], .runtime_profile=profile, .image_reference=image});
-    options.podman.workloads = {{.kind=kind, .target_id=workload}};
-    ASSERT_TRUE(host.trusted_runtime_file(options.podman.runtime_executable));
+    options.container.workloads = {{.kind=kind, .target_id=workload}};
+    ASSERT_TRUE(host.trusted_runtime_file(options.container.runtime_executable));
     std::string command_failure, worker_diagnostics;
     production_controller_factories_t factories;
-    factories.podman_host = [&] { return std::make_unique<observed_host_t>(command_failure, worker_diagnostics, game); };
+    factories.container_host = [&] { return std::make_unique<observed_host_t>(command_failure, worker_diagnostics, game, engine_options); };
     auto created = create_production_controller_runtime(std::move(options), std::move(factories));
     ASSERT_EQ(created.status, controller_runtime_create_status_e::ready_enabled);
     auto controller = std::move(created.runtime);
     ASSERT_TRUE(controller);
     std::array<seat_t, 2> seats;
     std::array<std::jthread, 2> games;
-    std::array<podman::command_result_t, 2> game_results;
+    std::array<container::command_result_t, 2> game_results;
     std::array<std::atomic<bool>, 2> game_done {};
     const std::array game_tokens {nonce(), nonce()};
     constexpr auto game_probe = "/usr/bin/polaris-seat-worker";
@@ -315,8 +332,10 @@ namespace {
       const auto state = command({"inspect", "--format={{.State.Status}}", id});
       if (state.exit_status == 0) {
         EXPECT_NE(state.output, "running\n") << "running worker required outer fallback";
-        observed_host_t diagnostic_host {command_failure, worker_diagnostics, true};
-        const auto removed = diagnostic_host.run({executable, "--remote=false", "rm", "--force", "--", id}, 5s, 65536);
+        observed_host_t diagnostic_host {command_failure, worker_diagnostics, true, engine_options};
+        auto remove = prefix;
+        remove.insert(remove.end(), {"rm", "--force", "--", id});
+        const auto removed = diagnostic_host.run(remove, 5s, 65536);
         EXPECT_EQ(removed.exit_status, 0);
       }
       const auto remaining = command({"ps", "--all", "--filter=id="+id, "--format={{.ID}}"});
@@ -475,7 +494,7 @@ namespace {
       if (game) for (int index = 0; index < 2; ++index) if (both || index == target) {
         auto state = game_state(index); ASSERT_TRUE(state); game_before[index] = *state;
       }
-      std::array<podman::command_result_t,2> results;
+      std::array<container::command_result_t,2> results;
       std::array<std::string,2> tokens {nonce(),nonce()};
       std::vector<std::jthread> readers;
       for (int index=0; index<2; ++index) {

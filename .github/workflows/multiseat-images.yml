@@ -40,6 +40,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify Docker builder
+        run: |
+          docker version
+          docker buildx version
       - name: Fetch and verify locked inputs
         env:
           PROFILE: ${{ matrix.profile }}
@@ -68,6 +72,7 @@ jobs:
           if-no-files-found: error
           path: |
             build/worker-artifacts/**/worker.oci.tar
+            build/worker-artifacts/**/worker.docker.tar
             build/worker-artifacts/**/artifact.json
             build/worker-artifacts/**/packages.tsv
             build/worker-artifacts/**/sbom.cdx.json

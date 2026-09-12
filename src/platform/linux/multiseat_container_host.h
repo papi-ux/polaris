@@ -1,18 +1,19 @@
 /**
- * @file src/platform/linux/multiseat_podman_host.h
- * @brief Live Linux host adapter for the rootless Podman worker backend.
+ * @file src/platform/linux/multiseat_container_host.h
+ * @brief Live Linux host adapter for Docker and the retained Podman backend.
  */
 #pragma once
 
 #ifdef __linux__
 
-#include "multiseat_podman_backend.h"
+#include "multiseat_container_backend.h"
 
-namespace multiseat::podman {
+namespace multiseat::container {
 
   class local_host_t final : public host_t {
   public:
     [[nodiscard]] std::uint64_t effective_uid() const override;
+    [[nodiscard]] std::uint64_t effective_gid() const override;
     [[nodiscard]] bool executable_file(const std::filesystem::path &path) const override;
     [[nodiscard]] bool trusted_runtime_file(const std::filesystem::path &path) const override;
     [[nodiscard]] std::optional<std::vector<std::uint64_t>> supplementary_groups() const override;
@@ -38,6 +39,6 @@ namespace multiseat::podman {
     ) override;
   };
 
-}  // namespace multiseat::podman
+}  // namespace multiseat::container
 
 #endif

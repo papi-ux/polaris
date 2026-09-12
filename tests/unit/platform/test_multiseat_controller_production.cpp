@@ -30,7 +30,7 @@
 namespace {
   using namespace multiseat;
   namespace input = multiseat::input;
-  namespace podman = multiseat::podman;
+  namespace container = multiseat::container;
 
   class temporary_production_root_t {
   public:
@@ -198,7 +198,7 @@ namespace {
     bool observe_allocated_input_nodes = false;
     std::vector<simulated_container_t> containers;
 
-    std::map<std::string, podman::character_device_identity_t>
+    std::map<std::string, container::character_device_identity_t>
       character_devices {
         {
           "/dev/dri/renderD128",
@@ -363,7 +363,7 @@ namespace {
     };
   }
 
-  class production_fake_host_t final : public podman::host_t {
+  class production_fake_host_t final : public container::host_t {
   public:
     explicit production_fake_host_t(
       std::shared_ptr<production_host_state_t> state
@@ -401,7 +401,7 @@ namespace {
       return true;
     }
 
-    std::optional<podman::character_device_identity_t>
+    std::optional<container::character_device_identity_t>
     read_write_character_device(
       const std::filesystem::path &path
     ) const override {
@@ -431,7 +431,7 @@ namespace {
       return std::nullopt;
     }
 
-    podman::command_result_t run(
+    container::command_result_t run(
       const std::vector<std::string> &argv,
       std::chrono::milliseconds,
       std::size_t
@@ -465,10 +465,10 @@ namespace {
       );
     }
 
-    podman::command_result_t simulate_locked(
+    container::command_result_t simulate_locked(
       const std::vector<std::string> &argv
     ) {
-      const podman::command_result_t failure {.exit_status = 125};
+      const container::command_result_t failure {.exit_status = 125};
       const auto &verb = argv.at(2);
       if (verb == "run") {
         simulated_container_t container {
@@ -700,11 +700,13 @@ namespace {
       .max_seats = 2,
       .max_encoder_sessions = 2,
     }};
-    options.podman.executable = "/usr/bin/podman";
-    options.podman.deployment_id = "production-test-deployment";
-    options.podman.worker_entrypoint = "/usr/bin/polaris-seat-worker";
-    options.podman.ipc_root = root;
-    options.podman.profiles = {{
+    options.container.engine = container::engine_e::podman;
+    options.container.runtime_executable = "/usr/bin/crun";
+    options.container.executable = "/usr/bin/podman";
+    options.container.deployment_id = "production-test-deployment";
+    options.container.worker_entrypoint = "/usr/bin/polaris-seat-worker";
+    options.container.ipc_root = root;
+    options.container.profiles = {{
       .profile_key = "profile-production",
       .opaque_volume_name = "pv-production",
       .runtime_profile = runtime_profile_e::steam,
@@ -712,7 +714,7 @@ namespace {
         std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} +
         std::string(64, 'a'),
     }};
-    options.podman.workloads = {{
+    options.container.workloads = {{
       .kind = workload_kind_e::steam,
       .target_id = "steam-production-game",
     }};
@@ -751,7 +753,7 @@ namespace {
           }
         );
       },
-      .podman_host = [factory_state, host_state]() {
+      .container_host = [factory_state, host_state]() {
         ++factory_state->host_calls;
         return std::make_unique<production_fake_host_t>(host_state);
       },
@@ -793,7 +795,15 @@ namespace {
     };
   }
 
-  TEST(
+  TEST(MultiseatControllerProduction, DefaultsToDockerWithoutEnablingMultiseat) {
+  const production_controller_options_t options;
+  EXPECT_FALSE(options.enabled);
+  EXPECT_EQ(options.container.engine, container::engine_e::docker);
+  EXPECT_EQ(options.container.executable, "/usr/bin/docker");
+  EXPECT_EQ(options.container.runtime_executable, "/usr/bin/runc");
+}
+
+TEST(
     MultiseatControllerProduction,
     DisabledCreationDoesNotValidateCatalogOrInvokeFactories
   ) {
@@ -828,7 +838,7 @@ namespace {
   ) {
     temporary_production_root_t root;
     auto options = production_options(root.path());
-    options.podman.gpus.push_back({
+    options.container.gpus.push_back({
       .logical_gpu_id = "caller-supplied",
       .render_node = "/dev/dri/renderD129",
       .devices = {{
@@ -1049,7 +1059,7 @@ namespace {
       ),
       mutation_result_e::applied
     );
-    podman::character_device_identity_t admitted_secondary_identity;
+    container::character_device_identity_t admitted_secondary_identity;
     {
       std::scoped_lock lock {host_state->mutex};
       admitted_secondary_identity =
@@ -1107,7 +1117,7 @@ namespace {
     for (std::uint32_t index = 0; index < 3; ++index) {
       host_state->character_devices.emplace(
         "/dev/input/event" + std::to_string(256 + index),
-        podman::character_device_identity_t {
+        container::character_device_identity_t {
           .filesystem_device = 73,
           .inode = 18000 + index,
           .character_major = 13,
@@ -1285,7 +1295,7 @@ namespace {
   ) {
     temporary_production_root_t root;
     auto options = production_options(root.path());
-    options.podman.profiles.front().image_reference =
+    options.container.profiles.front().image_reference =
       "ghcr.io/papi-ux/polaris-seat-steam:latest";
     auto factory_state = std::make_shared<production_factory_state_t>();
     auto input_state = std::make_shared<production_input_state_t>();

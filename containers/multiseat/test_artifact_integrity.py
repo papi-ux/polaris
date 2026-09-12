@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from oci_archive import verify_archive
+from oci_archive import docker_to_oci, verify_archive
 
 spec = importlib.util.spec_from_file_location('verify_inputs', pathlib.Path(__file__).with_name('verify-inputs.py'))
 inputs = importlib.util.module_from_spec(spec)
@@ -21,6 +21,43 @@ spec.loader.exec_module(build)
 
 
 class ArtifactIntegrity(unittest.TestCase):
+    def test_docker_export_preserves_validated_config_and_ordered_layers(self):
+        for mutation in ['valid', 'gzip', 'substituted', 'reordered', 'config', 'missing', 'duplicate', 'symlink']:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                layers = [b'first layer', b'second layer']
+                config = json.dumps({'architecture': 'amd64', 'os': 'linux', 'rootfs': {
+                    'type': 'layers', 'diff_ids': ['sha256:' + hashlib.sha256(layer).hexdigest() for layer in layers]}}).encode()
+                expected = 'sha256:' + hashlib.sha256(config).hexdigest()
+                if mutation == 'gzip':
+                    layers = [gzip.compress(layer) for layer in layers]
+                elif mutation == 'substituted':
+                    layers[0] = b'different layer'
+                elif mutation == 'reordered':
+                    layers.reverse()
+                elif mutation == 'config':
+                    expected = 'sha256:' + '0' * 64
+                blobs = {'config.json': config, 'one/layer.tar': layers[0], 'two/layer.tar': layers[1],
+                         'manifest.json': json.dumps([{'Config': 'config.json',
+                                                       'Layers': ['one/layer.tar', 'two/layer.tar']}]).encode()}
+                if mutation == 'missing':
+                    del blobs['one/layer.tar']
+                source, destination = pathlib.Path(temporary) / 'docker.tar', pathlib.Path(temporary) / 'oci.tar'
+                with tarfile.open(source, 'w') as archive:
+                    for name, data in blobs.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                    if mutation in ['duplicate', 'symlink']:
+                        member = tarfile.TarInfo('manifest.json' if mutation == 'duplicate' else 'link')
+                        if mutation == 'symlink':
+                            member.type, member.linkname = tarfile.SYMTYPE, '/etc/passwd'
+                        archive.addfile(member)
+                if mutation in ['valid', 'gzip']:
+                    self.assertEqual(docker_to_oci(source, destination, expected), verify_archive(destination, expected))
+                else:
+                    with self.assertRaises(ValueError):
+                        docker_to_oci(source, destination, expected)
+
     def test_committed_context_excludes_ignored_injection_and_concurrent_edits(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(build, 'REPO', pathlib.Path(temporary)):
             root = pathlib.Path(temporary)

@@ -8,7 +8,7 @@ registry publication require separate review and are absent from this job.
 
 ## Build and inspect
 
-Use Linux/amd64, Python 3.11 or newer, Git, GNU tar, and rootless Podman. Prepare
+Use Linux/amd64, Python 3.11 or newer, Git, GNU tar, Docker Engine, and Buildx. Prepare
 inputs with network access, then build with network access disabled:
 
 ```sh
@@ -16,13 +16,14 @@ python3 containers/multiseat/prepare-inputs.py gamescope
 python3 containers/multiseat/build-image.py gamescope
 ```
 
-Repeat for `steam`, `heroic`, and `lutris`. Both commands accept `--nvidia` for
+Repeat for `steam`, `heroic`, and `lutris`. Both commands default to Docker and
+accept `--engine=podman` for the retained legacy lane. Both accept `--nvidia` for
 the driver-matched physical lane. The build command requires a clean commit and materializes sources and locks
 from that exact Git object into a private build context. Ignored files and edits
 made during a build cannot enter the image or change its later provenance.
 Only independently copied and hash-verified locked inputs enter that context.
 The CI matrix fetches exact locked inputs, runs integrity tests, builds with
-`--network=none --pull=never`, validates dependencies, and exercises the real
+`--network=none` and pre-inspected locked roots, validates dependencies, and exercises the real
 session-bus, private-audio, and software-display providers. Dependency skips fail
 the job. Worker binaries use the pinned Go toolchain root, only the standard
 library, and disabled module-network access.
@@ -30,6 +31,7 @@ library, and disabled module-network access.
 Each `build/worker-artifacts/<profile>/<default|nvidia>/` contains:
 
 - `worker.oci.tar`, a downloadable image with no registry publication;
+- `worker.docker.tar`, the Docker build's native archive for `docker image load`;
 - `artifact.json`, binding source revision, profile, architecture, source root,
   dependency locks, validation scope, and file hashes to that archive;
 - `packages.tsv`, the final root's complete installed package manifest;
@@ -38,8 +40,12 @@ Each `build/worker-artifacts/<profile>/<default|nvidia>/` contains:
 - `providers.json`, sanitized names and scope of completed real-provider tests.
 
 The private `providers.log` is retained locally and is excluded from uploads.
-`worker_digest` is the exported OCI manifest digest. Podman's local storage
-manifest may differ. Export verification hashes every referenced blob, checks
+`worker_digest` is the exported OCI manifest digest. An engine's local storage
+manifest may differ. Docker's `worker_reference` is its full configuration image
+ID, permitting immutable offline launch after loading `worker.docker.tar`. The
+OCI conversion verifies that configuration and the ordered layer contents. See
+the [Docker backend notes](../../docs/research/container-multiseat-docker.md) for
+import and profile initialization. Export verification hashes every referenced blob, checks
 sizes and Linux/amd64 configuration, and requires the same configuration digest
 as the validated image. Use the exported digest when importing/promoting that
 artifact; no source root or cached local tag establishes its identity.
@@ -84,7 +90,7 @@ dependency before rebuilding all four profiles. Never replace a failed hash
 with the downloaded value without investigating the difference. Byte identity
 does not establish publisher trust or a vulnerability policy. Final OCI metadata
 uses the source commit timestamp; input reproducibility does not promise identical
-image bytes across different Podman versions or compression implementations.
+image bytes across different engine versions or compression implementations.
 
 ## NVIDIA physical lane
 
@@ -115,7 +121,7 @@ It requires the dedicated input-device type from the input-access policy. Inspec
 the expanded policy and verify the module is absent before temporary installation.
 Record the installed module checksum from `semodule -l -m`. Explicit physical
 containers select `--security-opt=label=type:polaris_nvidia_worker_t` and retain
-Podman's fresh MCS categories, private namespaces, dropped capabilities, and exact
+the engine's fresh MCS categories, private namespaces, dropped capabilities, and exact
 catalog devices. Verify the effective process label and distinct MCS categories.
 Ordinary `container_t`, existing device labels, and broad device booleans remain
 unchanged. The standard template includes file-management permissions; Linux
@@ -161,8 +167,8 @@ with keyboard, pointer and controller counters plus a private audio tone. The
 opt-in native physical harness can select it with `POLARIS_PHYSICAL_GAME=1`.
 This requires the Gamescope profile, newly initialized private profile volumes,
 the exact GPU/input catalog, and the separately reviewed NVIDIA SELinux domain
-on the matching physical validation lane. The harness applies that fixed domain
-only after the normal backend has admitted the worker's mounts and devices.
+on the matching physical validation lane. The Docker backend explicitly admits that fixed domain along with the worker's
+mounts and devices. The retained Podman harness applies it for its legacy lane.
 
 The worker's `physical-game-probe start|state|finish TOKEN` command accepts a
 32-character lowercase hexadecimal token. It requires the existing validated

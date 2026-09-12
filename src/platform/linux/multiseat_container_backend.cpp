@@ -1,8 +1,8 @@
 /**
- * @file src/platform/linux/multiseat_podman_backend.cpp
+ * @file src/platform/linux/multiseat_container_backend.cpp
  * @brief Rootless Podman worker backend for isolated multiseat workers.
  */
-#include "multiseat_podman_backend.h"
+#include "multiseat_container_backend.h"
 #include "multiseat_worker_authority.h"
 
 #ifdef __linux__
@@ -21,7 +21,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace multiseat::podman {
+namespace multiseat::container {
   namespace {
     using json = nlohmann::json;
     using namespace std::literals;
@@ -247,7 +247,10 @@ namespace multiseat::podman {
              snapshot.host_seat == node.host_seat;
     }
 
-    bool pinned_image_reference(std::string_view value) {
+    bool pinned_image_reference(std::string_view value, engine_e engine) {
+      if (engine == engine_e::docker && value.starts_with("sha256:")) {
+        return lowercase_sha256(value.substr(7));
+      }
       constexpr auto marker = "@sha256:"sv;
       const auto marker_position = value.rfind(marker);
       if (marker_position == std::string_view::npos || marker_position == 0) {
@@ -574,6 +577,11 @@ namespace multiseat::podman {
     }
 
     void validate_options(const options_t &options) {
+      if ((options.engine != engine_e::docker && options.engine != engine_e::podman) ||
+          (options.engine == engine_e::docker && !safe_path(options.daemon_socket)) ||
+          (!options.selinux_type.empty() && options.selinux_type != "polaris_nvidia_worker_t")) {
+        throw std::invalid_argument {"container engine or local Docker socket is invalid"};
+      }
       if (!safe_path(options.executable) ||
           !safe_path(options.worker_entrypoint) ||
           !safe_path(options.ipc_root) ||
@@ -595,7 +603,7 @@ namespace multiseat::podman {
           options.health_retries == 0 ||
           options.health_log_count == 0 ||
           options.health_log_size == 0) {
-        throw std::invalid_argument {"rootless Podman worker options are incomplete"};
+        throw std::invalid_argument {"container worker options are incomplete"};
       }
 
       std::unordered_set<std::string> gpu_ids;
@@ -608,7 +616,7 @@ namespace multiseat::podman {
             gpu.devices.empty() || gpu.devices.size() > 64 ||
             gpu.max_encoder_sessions == 0 ||
             !gpu_ids.emplace(gpu.logical_gpu_id).second) {
-          throw std::invalid_argument {"rootless Podman GPU options are invalid"};
+          throw std::invalid_argument {"container GPU options are invalid"};
         }
         bool render_node_present = false;
         for (const auto &device : gpu.devices) {
@@ -623,13 +631,13 @@ namespace multiseat::podman {
                 device.admitted_identity.character_major,
                 device.admitted_identity.character_minor
               ).second) {
-            throw std::invalid_argument {"rootless Podman GPU devices are invalid"};
+            throw std::invalid_argument {"container GPU devices are invalid"};
           }
           render_node_present = render_node_present ||
                                 device.path == gpu.render_node;
         }
         if (!render_node_present) {
-          throw std::invalid_argument {"rootless Podman GPU device set omits its render node"};
+          throw std::invalid_argument {"container GPU device set omits its render node"};
         }
       }
 
@@ -639,10 +647,10 @@ namespace multiseat::podman {
         if (!opaque_reference(profile.profile_key) ||
             !opaque_name_token(profile.opaque_volume_name) ||
             !concrete_runtime_profile(profile.runtime_profile) ||
-            !pinned_image_reference(profile.image_reference) ||
+            !pinned_image_reference(profile.image_reference, options.engine) ||
             !profile_keys.emplace(profile.profile_key).second ||
             !profile_volumes.emplace(profile.opaque_volume_name).second) {
-          throw std::invalid_argument {"rootless Podman profile options are invalid"};
+          throw std::invalid_argument {"container profile options are invalid"};
         }
       }
 
@@ -650,7 +658,7 @@ namespace multiseat::podman {
       for (const auto &workload : options.workloads) {
         if (!valid_workload_plan(workload) ||
             std::find(workloads.begin(), workloads.end(), workload) != workloads.end()) {
-          throw std::invalid_argument {"rootless Podman workload options are invalid"};
+          throw std::invalid_argument {"container workload options are invalid"};
         }
         workloads.push_back(workload);
       }
@@ -662,7 +670,7 @@ namespace multiseat::podman {
             !safe_path(mount.host_path) ||
             !mount_names.emplace(mount.mount_name).second ||
             !mount_paths.emplace(mount.host_path.native()).second) {
-          throw std::invalid_argument {"rootless Podman game mounts are invalid"};
+          throw std::invalid_argument {"container game mounts are invalid"};
         }
       }
     }
@@ -748,6 +756,279 @@ namespace multiseat::podman {
     const std::filesystem::path &path
   ) {
     return probe_.observe(path);
+  }
+
+  std::vector<std::string> command_prefix(const options_t &options) {
+    if (options.engine == engine_e::podman) {
+      return {options.executable.native(), "--remote=false"};
+    }
+    // The CLI's inherited context, proxy configuration and credential helpers
+    // must never redirect host-device authority or modify the worker request.
+    return {
+      "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent",
+      options.executable.native(), "--config=/nonexistent/polaris-docker-cli",
+      "--host=unix://" + options.daemon_socket.native(),
+    };
+  }
+
+  bool backend_t::runtime_ready() const {
+    const auto expected = options_.engine == engine_e::docker ? "runc" : "crun";
+    return options_.runtime_executable.filename() == expected &&
+           host_.trusted_runtime_file(options_.runtime_executable);
+  }
+
+  void backend_t::require_docker_engine() {
+    if (options_.engine != engine_e::docker) return;
+    auto argv = command_prefix(options_);
+    argv.insert(argv.end(), {"info", "--format={{json .}}"});
+    const auto result = host_.run(argv, options_.command_timeout, options_.max_command_output_bytes);
+    if (result.exit_status != 0 || result.timed_out || result.output_truncated) {
+      throw std::runtime_error {"the local Docker Engine is unavailable"};
+    }
+    const auto info = json::parse(result.output);
+    const auto *security = object_member(info, "SecurityOptions");
+    const auto *runtimes = object_member(info, "Runtimes");
+    const auto *runtime = runtimes ? object_member(*runtimes, "runc") : nullptr;
+    const auto runtime_path = runtime ? string_member(*runtime, "path") : std::nullopt;
+    if (string_member(info, "OSType") != "linux" ||
+        !security || !security->is_array() || !runtime_path ||
+        (*runtime_path != "runc" && *runtime_path != options_.runtime_executable.native())) {
+      throw std::runtime_error {"Docker must provide a local Linux runc worker runtime"};
+    }
+    for (const auto &entry : *security) {
+      if (!entry.is_string() || entry.get<std::string>().starts_with("name=rootless")) {
+        throw std::runtime_error {"rootless Docker UID and device mappings are not admitted"};
+      }
+    }
+  }
+
+  namespace {
+    std::string health_command(const options_t &options) {
+      std::string quoted = "exec '";
+      for (const auto ch : options.worker_entrypoint.native()) {
+        quoted += ch == '\'' ? "'\\''" : std::string(1, ch);
+      }
+      return quoted + "' health";
+    }
+
+    json docker_tmpfs(const options_t &options, const host_t &host) {
+      const auto owner = ",uid=" + std::to_string(host.effective_uid()) +
+                         ",gid=" + std::to_string(host.effective_gid());
+      const auto bounded = [&owner](std::uint64_t bytes, std::string_view mode) {
+        return "rw,nosuid,nodev,size=" + std::to_string(bytes) +
+               ",mode=" + std::string(mode) + owner;
+      };
+      return {
+        {"/run", bounded(options.runtime_tmpfs_bytes, "0700")},
+        {"/run/polaris", bounded(options.runtime_tmpfs_bytes, "0700")},
+        {"/tmp", bounded(options.temporary_tmpfs_bytes, "1777")},
+        {"/var/tmp", bounded(options.temporary_tmpfs_bytes, "1777")},
+      };
+    }
+
+    bool empty_array_or_null(const json &object, std::string_view key) {
+      const auto *value = object_member(object, key);
+      return value && (value->is_null() || (value->is_array() && value->empty()));
+    }
+  }
+
+  std::vector<std::string> backend_t::docker_launch_arguments(
+    const worker_launch_spec_t &spec,
+    const profile_t &profile,
+    const std::vector<std::uint64_t> &groups
+  ) const {
+    auto argv = command_prefix(options_);
+    const std::vector<std::string> arguments {
+      "run", "--detach", "--rm", "--pull=never", "--restart=no",
+      "--runtime=runc", "--name=" + spec.identity.worker_name,
+      "--hostname=" + spec.identity.worker_name,
+      "--user=" + std::to_string(host_.effective_uid()) + ":" + std::to_string(host_.effective_gid()),
+      "--userns=host", "--network=none", "--ipc=private", "--cgroupns=private",
+      "--cap-drop=all", "--security-opt=no-new-privileges", "--read-only", "--init",
+      "--pids-limit=" + std::to_string(options_.pids_limit),
+      "--shm-size=" + std::to_string(options_.shared_memory_bytes),
+      "--log-driver=json-file", "--log-opt=max-size=" + std::to_string(options_.log_size_bytes),
+      "--log-opt=max-file=1",
+      "--health-cmd=" + health_command(options_),
+      "--health-interval=" + std::to_string(options_.health_interval.count()) + "ms",
+      "--health-timeout=" + std::to_string(options_.health_timeout.count()) + "ms",
+      "--health-start-period=" + std::to_string(options_.health_start_period.count()) + "ms",
+      "--health-retries=" + std::to_string(options_.health_retries),
+      "--stop-signal=TERM",
+      "--mount=type=volume,src=" + profile.opaque_volume_name +
+        ",dst=" + std::string(profile_volume_destination) + ",volume-nocopy",
+      "--volume=" + (options_.ipc_root / spec.resources.runtime_namespace / ipc_directory).native() +
+        ":" + std::string(container_ipc_directory) + ":rw,Z",
+      "--volume=" + (options_.ipc_root / spec.resources.runtime_namespace / auth_directory).native() +
+        ":" + std::string(container_auth_directory) + ":ro,Z",
+      "--workdir=" + std::string(profile_volume_destination),
+    };
+    argv.insert(argv.end(), arguments.begin(), arguments.end());
+    if (!options_.selinux_type.empty()) {
+      argv.push_back("--security-opt=label=type:" + options_.selinux_type);
+    }
+    for (const auto group : groups) argv.push_back("--group-add=" + std::to_string(group));
+    const auto tmpfs = docker_tmpfs(options_, host_);
+    for (const auto &[path, options] : tmpfs.items()) {
+      argv.push_back("--tmpfs=" + path + ":" + options.get<std::string>());
+    }
+    return argv;
+  }
+
+  void backend_t::validate_docker_record(
+    const json &record,
+    const runtime_spec_expectations_t &expectations,
+    const std::vector<std::pair<std::string, std::string>> &labels
+  ) const {
+    const auto &config = record.at("Config");
+    const auto &host = record.at("HostConfig");
+    const auto fail = []() { throw std::runtime_error {"Docker worker isolation or launch configuration changed"}; };
+    const auto exact = [&fail](const json &object, std::string_view key, const json &expected) {
+      const auto *value = object_member(object, key);
+      if (!value || *value != expected) fail();
+    };
+    exact(config, "User", std::to_string(host_.effective_uid()) + ":" + std::to_string(host_.effective_gid()));
+    exact(config, "Image", label_value(labels, label_runtime_image).value());
+    const auto image_reference = label_value(labels, label_runtime_image).value();
+    if (image_reference.starts_with("sha256:")) exact(record, "Image", image_reference);
+    exact(config, "Entrypoint", json::array({options_.worker_entrypoint.native()}));
+    exact(config, "Cmd", json::array({"run",
+      "--workload-kind=" + label_value(labels, label_workload_kind).value(),
+      "--workload-id=" + label_value(labels, label_workload_target).value()}));
+    exact(config, "WorkingDir", std::string(profile_volume_destination));
+    exact(host, "Privileged", false);
+    exact(host, "ReadonlyRootfs", true);
+    exact(host, "AutoRemove", true);
+    exact(host, "Init", true);
+    exact(host, "Runtime", "runc");
+    exact(host, "UsernsMode", "host");
+    exact(host, "NetworkMode", "none");
+    exact(host, "IpcMode", "private");
+    exact(host, "PidMode", "");
+    exact(host, "UTSMode", "");
+    exact(host, "CgroupnsMode", "private");
+    exact(host, "PidsLimit", options_.pids_limit);
+    exact(host, "ShmSize", options_.shared_memory_bytes);
+    exact(host, "CapDrop", json::array({"ALL"}));
+    auto security = json::array({"no-new-privileges"});
+    if (!options_.selinux_type.empty()) security.push_back("label=type:" + options_.selinux_type);
+    exact(host, "SecurityOpt", security);
+    exact(host, "Tmpfs", docker_tmpfs(options_, host_));
+    for (const auto key : {"CapAdd", "DeviceRequests", "DeviceCgroupRules", "VolumesFrom", "Links", "ExtraHosts"}) {
+      if (!empty_array_or_null(host, key)) fail();
+    }
+    exact(host.at("RestartPolicy"), "Name", "no");
+    exact(host.at("LogConfig"), "Type", "json-file");
+    exact(host.at("LogConfig"), "Config", json({
+      {"max-size", std::to_string(options_.log_size_bytes)}, {"max-file", "1"},
+    }));
+    exact(config.at("Healthcheck"), "Test", json::array({"CMD-SHELL", health_command(options_)}));
+    exact(config.at("Healthcheck"), "Interval", std::chrono::duration_cast<std::chrono::nanoseconds>(options_.health_interval).count());
+    exact(config.at("Healthcheck"), "Timeout", std::chrono::duration_cast<std::chrono::nanoseconds>(options_.health_timeout).count());
+    exact(config.at("Healthcheck"), "StartPeriod", std::chrono::duration_cast<std::chrono::nanoseconds>(options_.health_start_period).count());
+    exact(config.at("Healthcheck"), "Retries", options_.health_retries);
+
+    const auto profile = std::find_if(options_.profiles.begin(), options_.profiles.end(), [&](const auto &candidate) {
+      return candidate.opaque_volume_name == expectations.volume_name;
+    });
+    if (profile == options_.profiles.end() ||
+        profile->image_reference != label_value(labels, label_runtime_image) ||
+        runtime_profile_name(profile->runtime_profile) != label_value(labels, label_runtime_profile)) fail();
+
+    const auto groups = host_.supplementary_groups();
+    if (!groups) fail();
+    std::set<std::uint64_t> expected_groups(groups->begin(), groups->end());
+    std::set<std::uint64_t> observed_groups;
+    const auto &group_array = host.at("GroupAdd");
+    if (!group_array.is_array() && !(group_array.is_null() && expected_groups.empty())) fail();
+    if (group_array.is_array()) for (const auto &value : group_array) {
+      if (!value.is_string()) fail();
+      const auto group = parse_decimal<std::uint64_t>(value.get<std::string>());
+      if (!group || !observed_groups.emplace(*group).second) fail();
+    }
+    if (expected_groups != observed_groups) fail();
+
+    const auto &mounts = record.at("Mounts");
+    if (!mounts.is_array() || mounts.size() != expectations.controller_binds.size() + 1) fail();
+    std::set<std::string> destinations;
+    bool profile_present = false;
+    for (const auto &mount : mounts) {
+      const auto destination = string_member(mount, "Destination");
+      const auto source = string_member(mount, "Source");
+      const auto type = string_member(mount, "Type");
+      if (!destination || !source || !type || !destinations.emplace(*destination).second) fail();
+      if (*type == "volume") {
+        if (profile_present || *destination != profile_volume_destination) fail();
+        exact(mount, "Name", expectations.volume_name);
+        exact(mount, "Driver", "local");
+        exact(mount, "RW", true);
+        profile_present = true;
+      } else if (*type == "bind") {
+        const auto expected = expectations.controller_binds.find(*source);
+        if (expected == expectations.controller_binds.end() || expected->second.destination != *destination) fail();
+        exact(mount, "RW", expected->second.permissions == "rw");
+        exact(mount, "Propagation", "rprivate");
+      } else fail();
+    }
+    if (!profile_present) fail();
+    const auto &requested_mounts = host.at("Mounts");
+    if (!requested_mounts.is_array()) fail();
+    bool no_copy = false;
+    for (const auto &mount : requested_mounts) {
+      if (string_member(mount, "Type") != "volume") continue;
+      if (no_copy) fail();
+      exact(mount, "Source", expectations.volume_name);
+      exact(mount, "Target", std::string(profile_volume_destination));
+      exact(mount.at("VolumeOptions"), "NoCopy", true);
+      no_copy = true;
+    }
+    if (!no_copy) fail();
+
+    // Authenticate routing metadata from the executed environment as well as
+    // labels. A correct-looking label must never excuse a differently routed worker.
+    const std::map<std::string, std::string> required {
+      {"HOME", std::string(profile_volume_destination)},
+      {"XDG_CONFIG_HOME", "/var/lib/polaris-seat/.config"},
+      {"XDG_CACHE_HOME", "/var/lib/polaris-seat/.cache"},
+      {"XDG_DATA_HOME", "/var/lib/polaris-seat/.local/share"},
+      {"XDG_RUNTIME_DIR", "/run/polaris"},
+      {"DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/polaris/bus"},
+      {"PIPEWIRE_RUNTIME_DIR", "/run/polaris"},
+      {"PULSE_SERVER", "unix:/run/polaris/pulse/native"},
+      {"POLARIS_WORKER_NAME", label_value(labels, label_worker).value()},
+      {"POLARIS_RUNTIME_NAMESPACE", label_value(labels, label_runtime).value()},
+      {"POLARIS_CONTROLLER_EPOCH", label_value(labels, label_controller).value()},
+      {"POLARIS_LOGICAL_GPU_ID", label_value(labels, label_gpu).value()},
+      {"POLARIS_SEAT_SLOT", label_value(labels, label_slot).value()},
+      {"POLARIS_SEAT_GENERATION", label_value(labels, label_generation).value()},
+      {"POLARIS_RENDER_NODE", label_value(labels, label_render_node).value()},
+      {"POLARIS_INPUT_SEAT", label_value(labels, label_input).value()},
+      {"POLARIS_RUNTIME_PROFILE", label_value(labels, label_runtime_profile).value()},
+      {"POLARIS_DISPLAY_TOPOLOGY", label_value(labels, label_display_topology).value()},
+      {"POLARIS_MEDIA_PIPELINE", label_value(labels, label_media_pipeline).value()},
+      {"POLARIS_DISPLAY_WIDTH", label_value(labels, label_display_width).value()},
+      {"POLARIS_DISPLAY_HEIGHT", label_value(labels, label_display_height).value()},
+      {"POLARIS_DISPLAY_REFRESH_MILLIHZ", label_value(labels, label_display_refresh).value()},
+      {"POLARIS_DISPLAY_HDR", label_value(labels, label_display_hdr).value()},
+      {"POLARIS_COMPOSITOR", label_value(labels, label_compositor).value()},
+      {"POLARIS_ENCODER_SESSIONS", label_value(labels, label_encoders).value()},
+      {"WAYLAND_DISPLAY", label_value(labels, label_wayland).value()},
+      {"POLARIS_CAPTURE_WAYLAND_DISPLAY", label_value(labels, label_capture_wayland).value()},
+      {"PULSE_SINK", label_value(labels, label_audio).value()},
+    };
+    std::map<std::string, std::string> environment;
+    if (!config.at("Env").is_array()) fail();
+    for (const auto &value : config.at("Env")) {
+      if (!value.is_string()) fail();
+      const auto entry = value.get<std::string>();
+      const auto separator = entry.find('=');
+      if (separator == std::string::npos ||
+          !environment.emplace(entry.substr(0, separator), entry.substr(separator + 1)).second) fail();
+    }
+    for (const auto &[key, value] : required) {
+      const auto found = environment.find(key);
+      if (found == environment.end() || found->second != value) fail();
+    }
   }
 
   backend_t::backend_t(
@@ -1064,14 +1345,26 @@ namespace multiseat::podman {
   }
 
   std::optional<bool> backend_t::profile_volume_exists(const profile_t &profile) {
+    auto argv = command_prefix(options_);
+    if (options_.engine == engine_e::docker) {
+      argv.insert(argv.end(), {"volume", "inspect", "--format={{json .}}", profile.opaque_volume_name});
+      const auto result = host_.run(argv, options_.command_timeout, options_.max_command_output_bytes);
+      if (result.exit_status != 0 || result.timed_out || result.output_truncated) return std::nullopt;
+      const auto volume = json::parse(result.output);
+      const auto *driver_options = object_member(volume, "Options");
+      const auto mountpoint = string_member(volume, "Mountpoint");
+      if (string_member(volume, "Name") != profile.opaque_volume_name ||
+          string_member(volume, "Driver") != "local" || string_member(volume, "Scope") != "local" ||
+          !driver_options || !(driver_options->is_null() || (driver_options->is_object() && driver_options->empty())) ||
+          !mountpoint || !safe_path(*mountpoint) ||
+          !mountpoint->ends_with("/volumes/" + profile.opaque_volume_name + "/_data")) {
+        return false;
+      }
+      return true;
+    }
+    argv.insert(argv.end(), {"volume", "exists", profile.opaque_volume_name});
     const auto result = host_.run(
-      {
-        options_.executable.native(),
-        "--remote=false",
-        "volume",
-        "exists",
-        profile.opaque_volume_name,
-      },
+      argv,
       options_.command_timeout,
       options_.max_command_output_bytes
     );
@@ -1091,7 +1384,7 @@ namespace multiseat::podman {
     const worker_launch_spec_t &spec,
     const input::allocation_t &input_allocation
   ) const {
-    if (!base_host_ready() || !host_.trusted_runtime_file(options_.runtime_executable)) {
+    if (!base_host_ready() || !runtime_ready()) {
       return false;
     }
     const auto worker_authority_directory =
@@ -1156,66 +1449,72 @@ namespace multiseat::podman {
     const gpu_t &gpu,
     const profile_t &profile,
     const input::allocation_t &input_allocation,
-    std::string_view input_fingerprint
+    std::string_view input_fingerprint,
+    const std::vector<std::uint64_t> &groups
   ) const {
-    std::vector<std::string> argv {
-      options_.executable.native(),
-      "--remote=false",
-      "--runtime=" + options_.runtime_executable.native(),
-      "run",
-      "--detach",
-      "--rm",
-      "--pull=never",
-      "--restart=no",
-      "--name=" + spec.identity.worker_name,
-      "--hostname=" + spec.identity.worker_name,
-      "--userns=keep-id",
-      "--user=" + std::to_string(host_.effective_uid()),
-      "--group-add=keep-groups",
-      "--network=none",
-      "--no-hosts",
-      "--http-proxy=false",
-      "--ipc=private",
-      "--pid=private",
-      "--uts=private",
-      "--cgroupns=private",
-      "--cap-drop=all",
-      "--security-opt=no-new-privileges",
-      "--read-only",
-      "--read-only-tmpfs=true",
-      "--image-volume=tmpfs",
-      "--init",
-      "--pids-limit=" + std::to_string(options_.pids_limit),
-      "--shm-size=" + std::to_string(options_.shared_memory_bytes) + "b",
-      "--mount=type=tmpfs,dst=/run/polaris,rw=true,tmpfs-size=" +
-        std::to_string(options_.runtime_tmpfs_bytes) +
-        ",tmpfs-mode=0700,U=true,notmpcopyup",
-      "--mount=type=tmpfs,dst=/tmp,rw=true,tmpfs-size=" +
-        std::to_string(options_.temporary_tmpfs_bytes) +
-        ",tmpfs-mode=0700,U=true,notmpcopyup",
-      "--log-driver=k8s-file",
-      "--log-opt=max-size=" + std::to_string(options_.log_size_bytes) + "b",
-      "--health-cmd=" + json::array({options_.worker_entrypoint.native(), "health"}).dump(),
-      "--health-interval=" + std::to_string(options_.health_interval.count()) + "ms",
-      "--health-timeout=" + std::to_string(options_.health_timeout.count()) + "ms",
-      "--health-start-period=" + std::to_string(options_.health_start_period.count()) + "ms",
-      "--health-retries=" + std::to_string(options_.health_retries),
-      "--health-on-failure=none",
-      "--health-max-log-count=" + std::to_string(options_.health_log_count),
-      "--health-max-log-size=" + std::to_string(options_.health_log_size),
-      "--stop-signal=TERM",
-      "--volume=" + profile.opaque_volume_name + ":" +
-        std::string {profile_volume_destination} + ":rw,nosuid,nodev",
-      "--mount=type=bind,src=" +
-        (options_.ipc_root / spec.resources.runtime_namespace / ipc_directory).native() +
-        ",dst=" + std::string {container_ipc_directory} +
-        ",rw=true,relabel=private,bind-nonrecursive",
-      "--mount=type=bind,src=" +
-        (options_.ipc_root / spec.resources.runtime_namespace / auth_directory).native() +
-        ",dst=" + std::string {container_auth_directory} +
-        ",ro=true,relabel=private,bind-nonrecursive",
-      "--workdir=/var/lib/polaris-seat",
-    };
+    std::vector<std::string> argv;
+    if (options_.engine == engine_e::docker) {
+      argv = docker_launch_arguments(spec, profile, groups);
+    } else {
+      argv = {
+        options_.executable.native(),
+        "--remote=false",
+        "--runtime=" + options_.runtime_executable.native(),
+        "run",
+        "--detach",
+        "--rm",
+        "--pull=never",
+        "--restart=no",
+        "--name=" + spec.identity.worker_name,
+        "--hostname=" + spec.identity.worker_name,
+        "--userns=keep-id",
+        "--user=" + std::to_string(host_.effective_uid()),
+        "--group-add=keep-groups",
+        "--network=none",
+        "--no-hosts",
+        "--http-proxy=false",
+        "--ipc=private",
+        "--pid=private",
+        "--uts=private",
+        "--cgroupns=private",
+        "--cap-drop=all",
+        "--security-opt=no-new-privileges",
+        "--read-only",
+        "--read-only-tmpfs=true",
+        "--image-volume=tmpfs",
+        "--init",
+        "--pids-limit=" + std::to_string(options_.pids_limit),
+        "--shm-size=" + std::to_string(options_.shared_memory_bytes) + "b",
+        "--mount=type=tmpfs,dst=/run/polaris,rw=true,tmpfs-size=" +
+          std::to_string(options_.runtime_tmpfs_bytes) +
+          ",tmpfs-mode=0700,U=true,notmpcopyup",
+        "--mount=type=tmpfs,dst=/tmp,rw=true,tmpfs-size=" +
+          std::to_string(options_.temporary_tmpfs_bytes) +
+          ",tmpfs-mode=0700,U=true,notmpcopyup",
+        "--log-driver=k8s-file",
+        "--log-opt=max-size=" + std::to_string(options_.log_size_bytes) + "b",
+        "--health-cmd=" + json::array({options_.worker_entrypoint.native(), "health"}).dump(),
+        "--health-interval=" + std::to_string(options_.health_interval.count()) + "ms",
+        "--health-timeout=" + std::to_string(options_.health_timeout.count()) + "ms",
+        "--health-start-period=" + std::to_string(options_.health_start_period.count()) + "ms",
+        "--health-retries=" + std::to_string(options_.health_retries),
+        "--health-on-failure=none",
+        "--health-max-log-count=" + std::to_string(options_.health_log_count),
+        "--health-max-log-size=" + std::to_string(options_.health_log_size),
+        "--stop-signal=TERM",
+        "--volume=" + profile.opaque_volume_name + ":" +
+          std::string {profile_volume_destination} + ":rw,nosuid,nodev",
+        "--mount=type=bind,src=" +
+          (options_.ipc_root / spec.resources.runtime_namespace / ipc_directory).native() +
+          ",dst=" + std::string {container_ipc_directory} +
+          ",rw=true,relabel=private,bind-nonrecursive",
+        "--mount=type=bind,src=" +
+          (options_.ipc_root / spec.resources.runtime_namespace / auth_directory).native() +
+          ",dst=" + std::string {container_auth_directory} +
+          ",ro=true,relabel=private,bind-nonrecursive",
+        "--workdir=/var/lib/polaris-seat",
+      };
+    }
 
     for (const auto &[name, value] : labels_for(
            options_,
@@ -1319,6 +1618,7 @@ namespace multiseat::podman {
       if (!launching_groups || !launch_host_ready(spec, *input_allocation)) {
         return worker_command_result_e::rejected;
       }
+      require_docker_engine();
     } catch (...) {
       return worker_command_result_e::indeterminate;
     }
@@ -1345,9 +1645,10 @@ namespace multiseat::podman {
         *gpu,
         *profile,
         *input_allocation,
-        *input_fingerprint
+        *input_fingerprint,
+        *launching_groups
       );
-      if (!host_.trusted_runtime_file(options_.runtime_executable) ||
+      if (!runtime_ready() ||
           host_.supplementary_groups() != launching_groups ||
           !gpu_catalog_current() || !input_allocation_current(*input_allocation)) {
         return worker_command_result_e::rejected;
@@ -1429,10 +1730,7 @@ namespace multiseat::podman {
       return worker_command_result_e::already_applied;
     }
 
-    std::vector<std::string> argv {
-      options_.executable.native(),
-      "--remote=false",
-    };
+    auto argv = command_prefix(options_);
     if (mode == worker_stop_mode_e::force) {
       argv.insert(argv.end(), {"rm", "--force", exact->container_id});
     } else if (exact->runtime_state == "created" ||
@@ -1492,9 +1790,9 @@ namespace multiseat::podman {
     bool require_input_authority
   ) {
     if (!base_host_ready()) {
-      throw std::runtime_error {"rootless Podman is unavailable"};
+      throw std::runtime_error {"container engine client is unavailable"};
     }
-    if (require_input_authority && !host_.trusted_runtime_file(options_.runtime_executable)) {
+    if (require_input_authority && !runtime_ready()) {
       throw std::runtime_error {"the admitted crun runtime is unavailable"};
     }
     const auto require_current_gpu_catalog = [this, require_input_authority]() {
@@ -1504,21 +1802,20 @@ namespace multiseat::podman {
     };
     require_current_gpu_catalog();
 
+    require_docker_engine();
+    auto listing_argv = command_prefix(options_);
+    listing_argv.insert(listing_argv.end(), {
+      "ps", "--all", "--no-trunc",
+      "--filter=label=" + std::string {label_deployment} + "=" + options_.deployment_id,
+      "--format={{.ID}}",
+    });
     const auto listed = host_.run(
-      {
-        options_.executable.native(),
-        "--remote=false",
-        "ps",
-        "--all",
-        "--no-trunc",
-        "--filter=label=" + std::string {label_deployment} + "=" + options_.deployment_id,
-        "--format={{.ID}}",
-      },
+      listing_argv,
       options_.command_timeout,
       options_.max_command_output_bytes
     );
     if (listed.timed_out || listed.output_truncated || listed.exit_status != 0) {
-      throw std::runtime_error {"rootless Podman inventory listing failed"};
+      throw std::runtime_error {"container inventory listing failed"};
     }
     const auto ids = parse_container_ids(listed.output, options_.max_inventory_workers);
     if (ids.empty()) {
@@ -1526,12 +1823,8 @@ namespace multiseat::podman {
       return {};
     }
 
-    std::vector<std::string> inspect_argv {
-      options_.executable.native(),
-      "--remote=false",
-      "container",
-      "inspect",
-    };
+    auto inspect_argv = command_prefix(options_);
+    inspect_argv.insert(inspect_argv.end(), {"container", "inspect"});
     inspect_argv.insert(inspect_argv.end(), ids.begin(), ids.end());
     const auto inspected = host_.run(
       inspect_argv,
@@ -1539,7 +1832,7 @@ namespace multiseat::podman {
       options_.max_command_output_bytes
     );
     if (inspected.timed_out || inspected.output_truncated || inspected.exit_status != 0) {
-      throw std::runtime_error {"rootless Podman inventory inspection failed"};
+      throw std::runtime_error {"container inventory inspection failed"};
     }
 
     try {
@@ -1554,7 +1847,8 @@ namespace multiseat::podman {
       records.reserve(document.size());
       for (const auto &container : document) {
         const auto id = string_member(container, "Id");
-        const auto name = string_member(container, "Name");
+        auto name = string_member(container, "Name");
+        if (options_.engine == engine_e::docker && name && name->starts_with("/")) name->erase(0, 1);
         const auto *config = object_member(container, "Config");
         const auto *label_object = config ? object_member(*config, "Labels") : nullptr;
         const auto *host_config = object_member(container, "HostConfig");
@@ -1653,7 +1947,7 @@ namespace multiseat::podman {
             !workload_matches_runtime_profile(workload, parsed_runtime_profile) ||
             !display_topology || *display_topology != display_topology_name ||
             !media_pipeline || *media_pipeline != media_pipeline_name ||
-            !runtime_image || !pinned_image_reference(*runtime_image) ||
+            !runtime_image || !pinned_image_reference(*runtime_image, options_.engine) ||
             !display_width || !display_height || !display_refresh ||
             !display_hdr || (*display_hdr != "0" && *display_hdr != "1") ||
             !valid_display_mode(display_mode) ||
@@ -1704,9 +1998,10 @@ namespace multiseat::podman {
         if (require_input_authority && !released_stopped_worker) {
           const auto oci_runtime = string_member(container, "OCIRuntime");
           const auto *groups = host_config ? object_member(*host_config, "GroupAdd") : nullptr;
-          if (string_member(*config, "User") != std::to_string(host_.effective_uid()) ||
+          if (options_.engine == engine_e::podman &&
+              (string_member(*config, "User") != std::to_string(host_.effective_uid()) ||
               !oci_runtime || *oci_runtime != options_.runtime_executable.native() ||
-              !groups || !groups->is_array() || !groups->empty()) {
+              !groups || !groups->is_array() || !groups->empty())) {
             throw std::runtime_error {"Podman worker does not use the admitted input access policy"};
           }
           if (!device_array || !device_array->is_array() ||
@@ -1737,7 +2032,8 @@ namespace multiseat::podman {
             const auto host_path = string_member(device, "PathOnHost");
             const auto worker_path = string_member(device, "PathInContainer");
             const auto permissions = string_member(device, "CgroupPermissions");
-            if (!host_path || !worker_path) {
+            if (!host_path || !worker_path ||
+                (options_.engine == engine_e::docker && permissions != "rw")) {
               throw std::runtime_error {"invalid Podman device binding"};
             }
             inspected.push_back({
@@ -1752,32 +2048,35 @@ namespace multiseat::podman {
           // Podman fills one in, must then agree with the spec entry for
           // entry rather than add to it. A live worker also needs the OCI
           // keep-groups annotation, so inspection alone is insufficient.
+          runtime_spec_expectations_t expectations {
+            .container_id = *id,
+            .volume_name = *volume,
+          };
+          const auto authority = options_.ipc_root / *runtime;
+          expectations.controller_binds.emplace(
+            (authority / ipc_directory).native(),
+            expected_bind_t {std::string {container_ipc_directory}, "rw"}
+          );
+          expectations.controller_binds.emplace(
+            (authority / auth_directory).native(),
+            expected_bind_t {std::string {container_auth_directory}, "ro"}
+          );
+          for (const auto &mount : options_.shared_game_mounts) {
+            expectations.controller_binds.emplace(
+              mount.host_path.native(),
+              expected_bind_t {
+                std::string {shared_game_mount_root} + mount.mount_name,
+                "ro",
+              }
+            );
+          }
           std::vector<declared_device_binding_t> declared;
-          if (const auto *spec_path = object_member(container, "OCIConfigPath")) {
+          if (options_.engine == engine_e::docker) {
+            validate_docker_record(container, expectations, labels);
+            declared = inspected;
+          } else if (const auto *spec_path = object_member(container, "OCIConfigPath")) {
             if (!spec_path->is_string()) {
               throw std::runtime_error {"invalid Podman runtime spec path"};
-            }
-            runtime_spec_expectations_t expectations {
-              .container_id = *id,
-              .volume_name = *volume,
-            };
-            const auto authority = options_.ipc_root / *runtime;
-            expectations.controller_binds.emplace(
-              (authority / ipc_directory).native(),
-              expected_bind_t {std::string {container_ipc_directory}, "rw"}
-            );
-            expectations.controller_binds.emplace(
-              (authority / auth_directory).native(),
-              expected_bind_t {std::string {container_auth_directory}, "ro"}
-            );
-            for (const auto &mount : options_.shared_game_mounts) {
-              expectations.controller_binds.emplace(
-                mount.host_path.native(),
-                expected_bind_t {
-                  std::string {shared_game_mount_root} + mount.mount_name,
-                  "ro",
-                }
-              );
             }
             declared = runtime_spec_device_bindings(
               spec_path->get<std::string>(),
@@ -1865,11 +2164,11 @@ namespace multiseat::podman {
       return records;
     } catch (const std::exception &error) {
       throw std::runtime_error {
-        std::string {"rootless Podman returned invalid worker inventory: "} +
+        std::string {"container engine returned invalid worker inventory: "} +
         error.what()
       };
     } catch (...) {
-      throw std::runtime_error {"rootless Podman returned invalid worker inventory"};
+      throw std::runtime_error {"container engine returned invalid worker inventory"};
     }
   }
 
@@ -1910,6 +2209,6 @@ namespace multiseat::podman {
     return true;
   }
 
-}  // namespace multiseat::podman
+}  // namespace multiseat::container
 
 #endif

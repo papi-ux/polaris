@@ -124,6 +124,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('profile', choices=['gamescope', 'steam', 'heroic', 'lutris'])
     parser.add_argument('--nvidia', action='store_true')
+    parser.add_argument('--engine', choices=['docker', 'podman'], default='docker')
     args = parser.parse_args()
     if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'amd64'):
         parser.error('prepare inputs on Linux/amd64 with Python 3.11+, GNU tar and git')
@@ -150,7 +151,7 @@ def main():
     if images['schema'] != 2 or profile['reference'] != package_lock['source_root']:
         raise ValueError('package lock does not match the selected source root')
     for reference in [images['builder']['reference'], profile['reference']]:
-        run(['podman', 'pull', '--platform=linux/amd64', reference])
+        run([args.engine, 'pull', '--platform=linux/amd64', reference])
     print('Verified all offline inputs for ' + args.profile)
 
 

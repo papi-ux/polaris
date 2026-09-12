@@ -1,6 +1,6 @@
 /**
- * @file src/platform/linux/multiseat_podman_backend.h
- * @brief Rootless Podman worker backend for isolated multiseat workers.
+ * @file src/platform/linux/multiseat_container_backend.h
+ * @brief Docker worker backend with the retained Podman acceptance adapter.
  */
 #pragma once
 
@@ -19,8 +19,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <nlohmann/json_fwd.hpp>
 
-namespace multiseat::podman {
+namespace multiseat::container {
 
   struct command_result_t {
     int exit_status = 127;
@@ -48,6 +49,7 @@ namespace multiseat::podman {
     virtual ~host_t() = default;
 
     [[nodiscard]] virtual std::uint64_t effective_uid() const = 0;
+    [[nodiscard]] virtual std::uint64_t effective_gid() const { return effective_uid(); }
     [[nodiscard]] virtual bool executable_file(const std::filesystem::path &path) const = 0;
     /** Root-owned regular executable under root-owned, non-writable directories. */
     [[nodiscard]] virtual bool trusted_runtime_file(const std::filesystem::path &path) const = 0;
@@ -82,7 +84,7 @@ namespace multiseat::podman {
   };
 
   /**
-   * Trusted input-allocation boundary used immediately before Podman launch.
+   * Trusted input-allocation boundary used immediately before container launch.
    *
    * The production-shaped adapter below reads allocations from the generation-
    * fenced input authority and reuses its kernel probe. Tests inject a fake, so
@@ -151,9 +153,16 @@ namespace multiseat::podman {
     std::filesystem::path host_path;
   };
 
+  enum class engine_e { docker, podman };
+
   struct options_t {
-    std::filesystem::path executable {"/usr/bin/podman"};
-    std::filesystem::path runtime_executable {"/usr/bin/crun"};
+    engine_e engine = engine_e::docker;
+    std::filesystem::path executable {"/usr/bin/docker"};
+    std::filesystem::path runtime_executable {"/usr/bin/runc"};
+    /** Only a local Linux Docker Engine is admitted. No context or remote URI. */
+    std::filesystem::path daemon_socket {"/var/run/docker.sock"};
+    /** Empty uses the engine default; the only extra domain is our NVIDIA policy. */
+    std::string selinux_type;
     std::string deployment_id;
     std::filesystem::path worker_entrypoint {"/usr/bin/polaris-seat-worker"};
     std::filesystem::path ipc_root;
@@ -177,11 +186,15 @@ namespace multiseat::podman {
     std::uint32_t health_log_size = 1024;
   };
 
+  /** Explicit engine target; Docker also gets an empty client environment. */
+  [[nodiscard]] std::vector<std::string> command_prefix(const options_t &options);
+
   /**
-   * Rootless, shell-free Podman implementation of the worker backend.
+   * Engine-specific container execution behind one allocation policy.
    *
-   * It never uses `--privileged`, host networking, a host PID/IPC/UTS
-   * namespace, a wildcard device, or a raw Docker-compatible socket. Profile
+   * Workers never receive `--privileged`, host networking, a host PID/IPC/UTS
+   * namespace, a wildcard device, or an engine socket. The Docker controller
+   * uses the operator-authorized local daemon. Profile
    * homes are pre-created opaque named volumes; game payloads are read-only
    * bind mounts; all devices are explicit allowlisted character devices.
    */
@@ -215,7 +228,7 @@ namespace multiseat::podman {
       character_device_identity_t identity;
     };
 
-    /** A device binding as Podman declares it, before identity is read. */
+    /** A device binding as the engine declares it, before identity is read. */
     struct declared_device_binding_t {
       std::string host_path;
       std::string worker_path;
@@ -226,6 +239,13 @@ namespace multiseat::podman {
     [[nodiscard]] const profile_t *profile_for(const std::string &profile_key) const;
     [[nodiscard]] bool workload_allowed(const workload_plan_t &workload) const;
     [[nodiscard]] bool base_host_ready() const;
+    [[nodiscard]] bool runtime_ready() const;
+    void require_docker_engine();
+    [[nodiscard]] std::vector<std::string> docker_launch_arguments(
+      const worker_launch_spec_t &spec,
+      const profile_t &profile,
+      const std::vector<std::uint64_t> &groups
+    ) const;
     [[nodiscard]] bool gpu_catalog_current() const;
     /** True/false when the profile volume is present/absent; empty on error. */
     [[nodiscard]] std::optional<bool> profile_volume_exists(const profile_t &profile);
@@ -255,9 +275,15 @@ namespace multiseat::podman {
     struct runtime_spec_expectations_t {
       std::string_view container_id;
       std::string volume_name;
-      /** Exact host sources the controller itself asked Podman to bind. */
+      /** Exact host sources the controller itself asked the engine to bind. */
       std::map<std::string, expected_bind_t> controller_binds;
     };
+    /** Docker Engine inspection is authoritative for the admitted runc worker. */
+    void validate_docker_record(
+      const nlohmann::json &record,
+      const runtime_spec_expectations_t &expectations,
+      const std::vector<std::pair<std::string, std::string>> &labels
+    ) const;
     /**
      * The device bindings the container runtime applied, read from the
      * container's OCI runtime spec. Rootless Podman implements `--device` as
@@ -278,7 +304,8 @@ namespace multiseat::podman {
       const gpu_t &gpu,
       const profile_t &profile,
       const input::allocation_t &input_allocation,
-      std::string_view input_fingerprint
+      std::string_view input_fingerprint,
+      const std::vector<std::uint64_t> &groups
     ) const;
     [[nodiscard]] std::vector<container_record_t> inventory_records(
       bool require_input_authority = true
@@ -293,6 +320,6 @@ namespace multiseat::podman {
     const options_t options_;
   };
 
-}  // namespace multiseat::podman
+}  // namespace multiseat::container
 
 #endif

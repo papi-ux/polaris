@@ -147,6 +147,8 @@ RUN go test -trimpath ./... && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-nested-compositor ./cmd/polaris-seat-nested-compositor && \
+    go build -trimpath -buildvcs=false \
+      -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-encoder ./cmd/polaris-seat-encoder && \
     go build -trimpath -buildvcs=false -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-input-probe ./cmd/polaris-seat-input-probe && \

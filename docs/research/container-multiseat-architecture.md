@@ -1,11 +1,16 @@
 # Container multiseat architecture spike
 
-Status: architecture, an offline rootless-Podman backend, locked image inputs,
+Status: architecture, a Docker backend with retained Podman checks, locked image inputs,
 immutable per-seat runtime/data-plane bindings, typed workload plans, a
 supervisor/IPC routing proof, four isolated runtime providers, and a
 host-brokered virtual-input authority contract. Nothing in this document
 enables multiseat, launches a container, opens an input device, or changes the
 current single-workload runtime.
+
+Docker is the current default. The [Docker backend decision](container-multiseat-docker.md)
+records its rootful daemon and nonroot worker boundary. Rootless Podman details
+and receipts below describe the earlier implementation and its retained adapter;
+they do not establish Docker or Unraid physical acceptance.
 
 ## Outcome
 
@@ -210,10 +215,10 @@ The worker backend will eventually need a narrow contract for:
 - bounded logs and an exact health/ready signal;
 - graceful stop followed by a generation-fenced forced stop.
 
-A raw Docker socket and broad privileged mode are acceptable only for a
-throwaway laboratory control. A supported deployment should use an allowlisted
-broker and the smallest device and capability set that passes the acceptance
-matrix.
+Seat workers never receive the Docker socket or privileged mode. The current
+Docker controller uses an operator-authorized local daemon; that daemon grants
+broad host authority, as recorded in the Docker decision. A narrow host broker
+remains a possible later boundary and is not implemented by this migration.
 
 ## Rootless Podman backend checkpoint
 

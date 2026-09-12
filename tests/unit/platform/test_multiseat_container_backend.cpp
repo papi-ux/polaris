@@ -1,8 +1,8 @@
 /**
- * @file tests/unit/platform/test_multiseat_podman_backend.cpp
+ * @file tests/unit/platform/test_multiseat_container_backend.cpp
  * @brief Offline contract tests for the rootless Podman worker backend.
  */
-#include "src/platform/linux/multiseat_podman_backend.h"
+#include "src/platform/linux/multiseat_container_backend.h"
 
 #ifdef __linux__
 
@@ -33,16 +33,16 @@ namespace {
   using multiseat::worker_launch_spec_t;
   using multiseat::worker_observed_state_e;
   using multiseat::worker_stop_mode_e;
-  using multiseat::podman::backend_t;
-  using multiseat::podman::character_device_identity_t;
-  using multiseat::podman::command_result_t;
-  using multiseat::podman::gpu_device_t;
-  using multiseat::podman::gpu_t;
-  using multiseat::podman::host_t;
-  using multiseat::podman::input_manifest_source_t;
-  using multiseat::podman::options_t;
-  using multiseat::podman::profile_t;
-  using multiseat::podman::shared_game_mount_t;
+  using multiseat::container::backend_t;
+  using multiseat::container::character_device_identity_t;
+  using multiseat::container::command_result_t;
+  using multiseat::container::gpu_device_t;
+  using multiseat::container::gpu_t;
+  using multiseat::container::host_t;
+  using multiseat::container::input_manifest_source_t;
+  using multiseat::container::options_t;
+  using multiseat::container::profile_t;
+  using multiseat::container::shared_game_mount_t;
 
   constexpr auto first_id =
     "1111111111111111111111111111111111111111111111111111111111111111";
@@ -85,7 +85,7 @@ namespace {
     }
 
     bool trusted_runtime_file(const std::filesystem::path &path) const override {
-      return runtime_ready && path == "/usr/bin/crun";
+      return runtime_ready && (path == "/usr/bin/crun" || path == "/usr/bin/runc");
     }
 
     std::optional<std::vector<std::uint64_t>> supplementary_groups() const override {
@@ -160,6 +160,7 @@ namespace {
     std::optional<std::vector<std::uint64_t>> groups = std::vector<std::uint64_t> {39, 104, 105};
     std::set<std::string> executable_files {
       "/usr/bin/podman",
+      "/usr/bin/docker",
       "/usr/libexec/podman/catatonit",
     };
     std::set<std::string> readable_directories {
@@ -204,7 +205,9 @@ namespace {
 
   options_t options_for_tests() {
     return {
+      .engine = multiseat::container::engine_e::podman,
       .executable = "/usr/bin/podman",
+      .runtime_executable = "/usr/bin/crun",
       .deployment_id = "deployment-a1b2",
       .worker_entrypoint = "/usr/bin/polaris-seat-worker",
       .ipc_root = "/run/user/1000/polaris-workers",
@@ -544,7 +547,7 @@ namespace {
     const auto profile = spec.runtime_profile == runtime_profile_e::heroic ? "heroic" : "steam";
     const auto workload_kind = spec.workload.kind == workload_kind_e::heroic ?
                                  "heroic" : "steam";
-    const auto input_fingerprint = multiseat::podman::input_manifest_fingerprint(
+    const auto input_fingerprint = multiseat::container::input_manifest_fingerprint(
       input_allocation_for(spec.identity.seat)
     );
     if (!input_fingerprint) {
@@ -698,9 +701,9 @@ TEST(MultiseatPodmanBackend, RejectsUnpinnedImagesAndDuplicateProfileVolumes) {
 
 TEST(MultiseatPodmanBackend, InputManifestFingerprintBindsGenerationAndIdentity) {
   const auto first = input_allocation_for(valid_spec().identity.seat);
-  const auto repeated = multiseat::podman::input_manifest_fingerprint(first);
+  const auto repeated = multiseat::container::input_manifest_fingerprint(first);
   ASSERT_TRUE(repeated);
-  EXPECT_EQ(multiseat::podman::input_manifest_fingerprint(first), repeated);
+  EXPECT_EQ(multiseat::container::input_manifest_fingerprint(first), repeated);
 
   const auto second = input_allocation_for(valid_spec(
     1,
@@ -709,20 +712,20 @@ TEST(MultiseatPodmanBackend, InputManifestFingerprintBindsGenerationAndIdentity)
     "profile beta",
     "heroic-game"
   ).identity.seat);
-  const auto second_fingerprint = multiseat::podman::input_manifest_fingerprint(second);
+  const auto second_fingerprint = multiseat::container::input_manifest_fingerprint(second);
   ASSERT_TRUE(second_fingerprint);
   EXPECT_NE(*second_fingerprint, *repeated);
 
   auto changed_identity = first;
   changed_identity.nodes.front().inode += 1000;
   const auto changed_fingerprint =
-    multiseat::podman::input_manifest_fingerprint(changed_identity);
+    multiseat::container::input_manifest_fingerprint(changed_identity);
   ASSERT_TRUE(changed_fingerprint);
   EXPECT_NE(*changed_fingerprint, *repeated);
 
   auto malformed = first;
   malformed.nodes.front().worker_path = "/dev/input/polaris-gamepad-15";
-  EXPECT_FALSE(multiseat::podman::input_manifest_fingerprint(malformed));
+  EXPECT_FALSE(multiseat::container::input_manifest_fingerprint(malformed));
 }
 
 TEST(MultiseatPodmanBackend, AuthorityManifestSourceUsesExactAllocationAndProbe) {
@@ -738,7 +741,7 @@ TEST(MultiseatPodmanBackend, AuthorityManifestSourceUsesExactAllocationAndProbe)
   ASSERT_TRUE(report.inventory_authoritative);
   ASSERT_TRUE(report.admission_ready);
   fixed_kernel_probe_t probe {allocation};
-  multiseat::podman::authority_input_manifest_source_t source {
+  multiseat::container::authority_input_manifest_source_t source {
     authority,
     probe,
   };
@@ -943,7 +946,7 @@ TEST(MultiseatPodmanBackend, LaunchBuildsRootlessIsolatedArgumentVector) {
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_CAPTURE_WAYLAND_DISPLAY=polaris-capture-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=PULSE_SINK=polaris-audio-controller-a1b2-1"));
   EXPECT_TRUE(has_argument(argv, "--env=POLARIS_INPUT_SEAT=polaris-input-controller-a1b2-1"));
-  const auto input_fingerprint = multiseat::podman::input_manifest_fingerprint(
+  const auto input_fingerprint = multiseat::container::input_manifest_fingerprint(
     input_allocation_for(spec.identity.seat)
   );
   ASSERT_TRUE(input_fingerprint);
@@ -2413,7 +2416,7 @@ TEST(MultiseatPodmanBackend, InventoryFailureCarriesTheReason) {
     reason = error.what();
   }
 
-  EXPECT_NE(reason.find("rootless Podman returned invalid worker inventory"), std::string::npos);
+  EXPECT_NE(reason.find("container engine returned invalid worker inventory"), std::string::npos);
   EXPECT_NE(reason.find("unexpected Podman runtime spec mount"), std::string::npos);
 }
 
@@ -2581,6 +2584,317 @@ TEST(MultiseatPodmanBackend, RecoveryRejectsUnsupportedOrUntrustedRuntimeBeforeO
     EXPECT_THROW(backend.inventory(), std::runtime_error);
     EXPECT_TRUE(host.calls.empty());
   }
+}
+
+
+namespace {
+  options_t docker_options_for_tests() {
+    auto options = options_for_tests();
+    options.engine = multiseat::container::engine_e::docker;
+    options.executable = "/usr/bin/docker";
+    options.runtime_executable = "/usr/bin/runc";
+    return options;
+  }
+
+  json docker_info_for_tests() {
+    return {{"OSType", "linux"}, {"SecurityOptions", {"name=seccomp,profile=builtin", "name=selinux", "name=cgroupns"}},
+            {"Runtimes", {{"runc", {{"path", "runc"}}}}}};
+  }
+
+  json docker_volume_for_tests(std::string name = "pv-a9f0") {
+    return {{"Name", name}, {"Driver", "local"}, {"Scope", "local"}, {"Options", nullptr},
+            {"Mountpoint", "/var/lib/docker/volumes/" + name + "/_data"}};
+  }
+
+  // The Docker-specific fields follow an actual Docker Engine 29 create/inspect
+  // observation. Identity values come from the fixture allocation, never from
+  // the backend's command builder or inspection validator.
+  json docker_container_for(const worker_launch_spec_t &spec, std::string id, std::string status = "running") {
+    auto record = container_for(spec, std::move(id), std::move(status));
+    record.erase("OCIConfigPath");
+    record.erase("OCIRuntime");
+    record["Name"] = "/" + spec.identity.worker_name;
+    const auto labels = labels_for(spec);
+    const auto label = [&labels](const std::string &key) { return labels.at("io.polaris.multiseat." + key).get<std::string>(); };
+    const auto volume = label("volume");
+    const auto authority = "/run/user/1000/polaris-workers/" + spec.resources.runtime_namespace;
+    auto &config = record["Config"];
+    config["User"] = "1000:1000";
+    config["Image"] = label("runtime-image");
+    config["Entrypoint"] = {"/usr/bin/polaris-seat-worker"};
+    config["Cmd"] = {"run", "--workload-kind=" + label("workload-kind"), "--workload-id=" + label("workload-target")};
+    config["WorkingDir"] = "/var/lib/polaris-seat";
+    config["Healthcheck"] = {
+      {"Test", {"CMD-SHELL", "exec '/usr/bin/polaris-seat-worker' health"}},
+      {"Interval", 2000000000LL}, {"Timeout", 1000000000LL}, {"StartPeriod", 30000000000LL}, {"Retries", 15},
+    };
+    config["Env"] = {
+      "HOME=/var/lib/polaris-seat", "XDG_CONFIG_HOME=/var/lib/polaris-seat/.config",
+      "XDG_CACHE_HOME=/var/lib/polaris-seat/.cache", "XDG_DATA_HOME=/var/lib/polaris-seat/.local/share",
+      "XDG_RUNTIME_DIR=/run/polaris", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/polaris/bus",
+      "PIPEWIRE_RUNTIME_DIR=/run/polaris", "PULSE_SERVER=unix:/run/polaris/pulse/native",
+      "PULSE_SINK=" + spec.resources.audio_sink, "WAYLAND_DISPLAY=" + spec.resources.wayland_socket,
+      "POLARIS_CAPTURE_WAYLAND_DISPLAY=" + spec.resources.capture_wayland_socket,
+      "POLARIS_RUNTIME_NAMESPACE=" + spec.resources.runtime_namespace,
+      "POLARIS_WORKER_NAME=" + spec.identity.worker_name, "POLARIS_INPUT_SEAT=" + spec.resources.input_seat,
+      "POLARIS_CONTROLLER_EPOCH=" + spec.identity.seat.controller_epoch,
+      "POLARIS_LOGICAL_GPU_ID=" + spec.identity.seat.logical_gpu_id,
+      "POLARIS_SEAT_SLOT=" + std::to_string(spec.identity.seat.slot),
+      "POLARIS_SEAT_GENERATION=" + std::to_string(spec.identity.seat.generation),
+      "POLARIS_RENDER_NODE=" + spec.render_node, "POLARIS_RUNTIME_PROFILE=" + label("runtime-profile"),
+      "POLARIS_DISPLAY_TOPOLOGY=" + label("display-topology"), "POLARIS_MEDIA_PIPELINE=" + label("media-pipeline"),
+      "POLARIS_DISPLAY_WIDTH=" + label("display-width"), "POLARIS_DISPLAY_HEIGHT=" + label("display-height"),
+      "POLARIS_DISPLAY_REFRESH_MILLIHZ=" + label("display-refresh-millihz"),
+      "POLARIS_DISPLAY_HDR=" + label("display-hdr"), "POLARIS_COMPOSITOR=" + label("compositor"),
+      "POLARIS_ENCODER_SESSIONS=" + label("encoders"), "PATH=/usr/bin:/bin",
+    };
+    auto &host = record["HostConfig"];
+    for (auto &device : host["Devices"]) device["CgroupPermissions"] = "rw";
+    host.update({
+      {"GroupAdd", {"39", "104", "105"}}, {"Privileged", false}, {"ReadonlyRootfs", true},
+      {"AutoRemove", true}, {"Init", true}, {"Runtime", "runc"}, {"UsernsMode", "host"},
+      {"NetworkMode", "none"}, {"IpcMode", "private"}, {"PidMode", ""}, {"UTSMode", ""},
+      {"CgroupnsMode", "private"}, {"PidsLimit", 4096}, {"ShmSize", 1073741824},
+      {"CapDrop", {"ALL"}}, {"SecurityOpt", {"no-new-privileges"}},
+      {"CapAdd", nullptr}, {"DeviceRequests", nullptr}, {"DeviceCgroupRules", nullptr},
+      {"VolumesFrom", nullptr}, {"Links", nullptr}, {"ExtraHosts", nullptr},
+      {"RestartPolicy", {{"Name", "no"}, {"MaximumRetryCount", 0}}},
+      {"LogConfig", {{"Type", "json-file"}, {"Config", {{"max-size", "8388608"}, {"max-file", "1"}}}}},
+      {"Tmpfs", {
+        {"/run", "rw,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000"},
+        {"/run/polaris", "rw,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000"},
+        {"/tmp", "rw,nosuid,nodev,size=1073741824,mode=1777,uid=1000,gid=1000"},
+        {"/var/tmp", "rw,nosuid,nodev,size=1073741824,mode=1777,uid=1000,gid=1000"},
+      }},
+      {"Mounts", json::array({{{"Type", "volume"}, {"Source", volume}, {"Target", "/var/lib/polaris-seat"},
+                              {"VolumeOptions", {{"NoCopy", true}}}}})},
+    });
+    record["Mounts"] = json::array({
+      {{"Type", "volume"}, {"Name", volume}, {"Driver", "local"}, {"RW", true},
+       {"Source", "/var/lib/docker/volumes/" + volume + "/_data"}, {"Destination", "/var/lib/polaris-seat"}},
+      {{"Type", "bind"}, {"RW", true}, {"Source", authority + "/ipc"}, {"Destination", "/run/polaris-ipc"}, {"Propagation", "rprivate"}},
+      {{"Type", "bind"}, {"RW", false}, {"Source", authority + "/auth"}, {"Destination", "/run/polaris-auth"}, {"Propagation", "rprivate"}},
+      {{"Type", "bind"}, {"RW", false}, {"Source", "/srv/Games Library"}, {"Destination", "/mnt/games/library-a"}, {"Propagation", "rprivate"}},
+    });
+    return record;
+  }
+
+  void queue_docker_inventory(fake_host_t &host, const std::vector<json> &records) {
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    queue_inventory(host, records);
+  }
+}
+
+TEST(MultiseatDockerBackend, DefaultsToDockerAndPinsTheLocalDaemonWithoutInheritedClientConfiguration) {
+  const options_t options;
+  EXPECT_EQ(options.engine, multiseat::container::engine_e::docker);
+  EXPECT_EQ(options.executable, "/usr/bin/docker");
+  EXPECT_EQ(options.runtime_executable, "/usr/bin/runc");
+  const std::vector<std::string> expected {
+    "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent", "/usr/bin/docker",
+    "--config=/nonexistent/polaris-docker-cli", "--host=unix:///var/run/docker.sock",
+  };
+  EXPECT_EQ(multiseat::container::command_prefix(options), expected);
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  auto bad = docker_options_for_tests();
+  bad.daemon_socket = "tcp://elsewhere:2375";
+  EXPECT_THROW((backend_t {host, inputs, bad}), std::invalid_argument);
+}
+
+TEST(MultiseatDockerBackend, LaunchUsesNonRootIdentityExactDevicesAndDockerSupportedOptions) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+  EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::applied);
+  ASSERT_EQ(host.calls.size(), 3U);
+  const auto &argv = host.calls.back();
+  const auto contains = [&](const std::string &arg) { return std::find(argv.begin(), argv.end(), arg) != argv.end(); };
+  for (const auto &arg : {"--user=1000:1000", "--userns=host", "--runtime=runc", "--network=none",
+                         "--group-add=39", "--group-add=104", "--group-add=105", "--read-only", "--cap-drop=all",
+                         "--security-opt=no-new-privileges", "--log-driver=json-file", "--pull=never",
+                         "--device=/dev/dri/renderD128:/dev/dri/renderD128:rw",
+                         "--mount=type=volume,src=pv-a9f0,dst=/var/lib/polaris-seat,volume-nocopy"}) EXPECT_TRUE(contains(arg)) << arg;
+  for (const auto &arg : {"--privileged", "--group-add=keep-groups", "--userns=keep-id", "--remote=false",
+                         "--read-only-tmpfs=true", "--pid=private", "--uts=private", "--image-volume=tmpfs"}) EXPECT_FALSE(contains(arg)) << arg;
+  for (const auto &arg : argv) {
+    EXPECT_EQ(arg.find("/var/run/docker.sock:"), std::string::npos);
+    EXPECT_EQ(arg.find("--device=/dev/uinput"), std::string::npos);
+    EXPECT_EQ(arg.find("--device=/dev/uhid"), std::string::npos);
+  }
+}
+
+TEST(MultiseatDockerBackend, AdmitsOnlyTheReviewedSelinuxTypeAndChecksItOnRecovery) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  auto options = docker_options_for_tests();
+  options.selinux_type = "unconfined_t";
+  EXPECT_THROW((backend_t {host, inputs, options}), std::invalid_argument);
+  options.selinux_type = "polaris_nvidia_worker_t";
+  backend_t backend {host, inputs, options};
+  auto record = docker_container_for(valid_spec(), first_id);
+  record["HostConfig"]["SecurityOpt"].push_back("label=type:polaris_nvidia_worker_t");
+  queue_docker_inventory(host, {record});
+  ASSERT_EQ(backend.inventory().size(), 1U);
+  record["HostConfig"]["SecurityOpt"] = {"no-new-privileges"};
+  queue_docker_inventory(host, {record});
+  EXPECT_THROW(backend.inventory(), std::runtime_error);
+}
+
+TEST(MultiseatDockerBackend, OfflineImageIdIsImmutableAndBoundToTheExecutedConfig) {
+  for (const bool wrong_image : {false, true}) {
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    auto options = docker_options_for_tests();
+    const auto image_id = std::string("sha256:") + std::string(64, 'a');
+    options.profiles.front().image_reference = image_id;
+    backend_t backend {host, inputs, options};
+    auto record = docker_container_for(valid_spec(), first_id);
+    record["Config"]["Labels"]["io.polaris.multiseat.runtime-image"] = image_id;
+    record["Config"]["Image"] = image_id;
+    record["Image"] = wrong_image ? std::string("sha256:") + std::string(64, 'b') : image_id;
+    queue_docker_inventory(host, {record});
+    if (wrong_image) EXPECT_THROW(backend.inventory(), std::runtime_error);
+    else ASSERT_EQ(backend.inventory().size(), 1U);
+  }
+  for (const auto image : {"worker:latest", "sha256:abc", "sha256:"}) {
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    auto options = docker_options_for_tests();
+    options.profiles.front().image_reference = image;
+    EXPECT_THROW((backend_t {host, inputs, options}), std::invalid_argument);
+  }
+}
+
+TEST(MultiseatDockerBackend, RejectsUnsupportedDaemonAndUnpreparedOrRedirectedVolumes) {
+  for (int variant = 0; variant < 7; ++variant) {
+    SCOPED_TRACE(variant);
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    auto info = docker_info_for_tests();
+    if (variant == 0) info["SecurityOptions"].push_back("name=rootless");
+    if (variant == 1) info["OSType"] = "windows";
+    if (variant == 2) info["Runtimes"]["runc"]["path"] = "/opt/untrusted-runtime";
+    host.push({.exit_status = 0, .output = info.dump()});
+    if (variant >= 3) {
+      auto volume = docker_volume_for_tests();
+      if (variant == 3) volume["Options"] = {{"device", "/"}, {"type", "none"}, {"o", "bind"}};
+      if (variant == 4) volume["Name"] = "pv-b8e1";
+      if (variant == 5) volume["Driver"] = "untrusted-plugin";
+      host.push({.exit_status = variant == 6 ? 1 : 0, .output = volume.dump()});
+    }
+    EXPECT_NE(backend.launch(valid_spec()), worker_command_result_e::applied);
+    EXPECT_EQ(host.calls.size(), variant < 3 ? 1U : 2U);
+  }
+}
+
+TEST(MultiseatDockerBackend, InventoryAuthenticatesTwoSeatsWithoutPodmanOciFiles) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  queue_docker_inventory(host, {docker_container_for(valid_spec(), first_id),
+    docker_container_for(valid_spec(1, 2, "polaris-worker-controller-a1b2-2", "profile beta", "heroic-game"), second_id)});
+  const auto records = backend.inventory();
+  ASSERT_EQ(records.size(), 2U);
+  EXPECT_EQ(records[0].state, worker_observed_state_e::ready);
+  EXPECT_EQ(records[1].state, worker_observed_state_e::ready);
+  EXPECT_NE(records[0].identity, records[1].identity);
+  EXPECT_EQ(host.owned_file_reads, 0U);
+}
+
+TEST(MultiseatDockerBackend, InventoryRejectsDeviceMountIdentityAndPrivilegeDrift) {
+  const std::vector<std::function<void(json &)>> mutations {
+    [](auto &r) { r["HostConfig"]["Privileged"] = true; },
+    [](auto &r) { r["HostConfig"]["CapAdd"] = {"SYS_ADMIN"}; },
+    [](auto &r) { r["HostConfig"]["CapDrop"] = nullptr; },
+    [](auto &r) { r["HostConfig"]["SecurityOpt"] = {"label=disable"}; },
+    [](auto &r) { r["HostConfig"]["UsernsMode"] = ""; },
+    [](auto &r) { r["HostConfig"]["Runtime"] = "nvidia"; },
+    [](auto &r) { r["HostConfig"]["NetworkMode"] = "host"; },
+    [](auto &r) { r["HostConfig"]["PidMode"] = "host"; },
+    [](auto &r) { r["HostConfig"]["IpcMode"] = "host"; },
+    [](auto &r) { r["HostConfig"]["UTSMode"] = "host"; },
+    [](auto &r) { r["HostConfig"]["CgroupnsMode"] = "host"; },
+    [](auto &r) { r["HostConfig"]["GroupAdd"] = {"39"}; },
+    [](auto &r) { r["HostConfig"]["GroupAdd"].push_back("39"); },
+    [](auto &r) { r["Config"]["User"] = "0"; },
+    [](auto &r) { r["Config"]["Image"] = "untrusted:latest"; },
+    [](auto &r) { r["Config"]["Cmd"] = {"run", "--workload-kind=steam", "--workload-id=other"}; },
+    [](auto &r) { r["Config"]["Env"].push_back("POLARIS_INPUT_SEAT=another-seat"); },
+    [](auto &r) { r["Config"]["Healthcheck"]["Test"] = {"CMD-SHELL", "true"}; },
+    [](auto &r) { r["HostConfig"]["DeviceRequests"] = json::array({{{"Count", -1}}}); },
+    [](auto &r) { r["HostConfig"]["DeviceCgroupRules"] = {"c 13:* rw"}; },
+    [](auto &r) { r["HostConfig"]["Devices"][0]["CgroupPermissions"] = "rwm"; },
+    [](auto &r) { r["HostConfig"]["Devices"][0].erase("CgroupPermissions"); },
+    [](auto &r) { r["HostConfig"]["Devices"][0]["PathOnHost"] = "/dev/dri/renderD129"; },
+    [](auto &r) { r["HostConfig"]["Devices"].push_back(r["HostConfig"]["Devices"][0]); },
+    [](auto &r) { r["Mounts"][0]["Name"] = "pv-b8e1"; },
+    [](auto &r) { r["Mounts"][1]["Source"] = "/var/run/docker.sock"; },
+    [](auto &r) { r["Mounts"][2]["RW"] = true; },
+    [](auto &r) { r["Mounts"][3]["RW"] = true; },
+    [](auto &r) { r["Mounts"][1]["Propagation"] = "rshared"; },
+    [](auto &r) { r["Mounts"].push_back({{"Type", "bind"}, {"Source", "/dev"}, {"Destination", "/host-dev"}}); },
+    [](auto &r) { r["HostConfig"]["Mounts"][0]["VolumeOptions"]["NoCopy"] = false; },
+    [](auto &r) { r["HostConfig"]["Tmpfs"]["/run/polaris"] = "rw,mode=0777"; },
+    [](auto &r) { r["HostConfig"]["LogConfig"]["Config"]["max-file"] = "100"; },
+  };
+  for (std::size_t i = 0; i < mutations.size(); ++i) {
+    SCOPED_TRACE(i);
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    auto record = docker_container_for(valid_spec(), first_id);
+    mutations[i](record);
+    queue_docker_inventory(host, {record});
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+  }
+}
+
+TEST(MultiseatDockerBackend, ChangedGroupsCancelLaunchAfterEngineAndVolumeChecks) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  host.groups_change_on_recheck = true;
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
+  EXPECT_EQ(host.calls.size(), 2U);
+}
+
+TEST(MultiseatDockerBackend, CleanupKeepsExactIdentityWhenDeviceAndGroupAccessAreLost) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  const auto first = valid_spec();
+  const auto second = valid_spec(1, 2, "polaris-worker-controller-a1b2-2", "profile beta", "heroic-game");
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  host.runtime_ready = false;
+  host.groups = std::nullopt;
+  host.accessible_devices.clear();
+  queue_docker_inventory(host, {docker_container_for(first, first_id), docker_container_for(second, second_id)});
+  host.push({.exit_status = 0});
+  EXPECT_EQ(backend.stop(first.identity, worker_stop_mode_e::force), worker_command_result_e::applied);
+  const auto &argv = host.calls.back();
+  ASSERT_GE(argv.size(), 3U);
+  EXPECT_EQ(argv[argv.size()-3], "rm");
+  EXPECT_EQ(argv[argv.size()-2], "--force");
+  EXPECT_EQ(argv.back(), first_id);
+  EXPECT_EQ(std::find(argv.begin(), argv.end(), second_id), argv.end());
+}
+
+TEST(MultiseatDockerBackend, FailedLaunchReconcilesOnlyTheMatchingVerifiedWorker) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  const auto spec = valid_spec();
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 125});
+  queue_docker_inventory(host, {docker_container_for(spec, first_id)});
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::already_applied);
 }
 
 #endif
