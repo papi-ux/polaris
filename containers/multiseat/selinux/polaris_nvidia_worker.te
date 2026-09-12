@@ -1,4 +1,4 @@
-policy_module(polaris_nvidia_worker, 1.0.0)
+policy_module(polaris_nvidia_worker, 1.0.1)
 
 gen_require(`
     type container_file_t;
@@ -10,6 +10,12 @@ gen_require(`
 # Opt-in physical worker domain. Preserve the reference policy's container
 # lifecycle and MCS constraints; never widen the generic container_t domain.
 container_domain_template(polaris_nvidia_worker, container)
+
+# The container template supplies sockets but not outbound TCP port access.
+# Steam downloads and game servers use the profile's admitted Docker bridge.
+# Grant only connection permission, without adding the broader container network
+# attribute's bind, raw socket, or network administration permissions.
+corenet_tcp_connect_all_ports(polaris_nvidia_worker_t)
 
 # Device admission still comes exclusively from the exact GPU catalog. This
 # standard container template retains file-management permissions; dropped Linux
