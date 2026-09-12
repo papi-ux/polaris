@@ -647,6 +647,26 @@ TEST_F(PairingAccessPresetTest, RepairingSameCertificateReplacesAuthorizationWit
   EXPECT_EQ(clients[0]["paired_at"].get<std::int64_t>(), original_paired_at);
 }
 
+TEST_F(PairingAccessPresetTest, RemembersTheControllerTypeAClientDeclared) {
+  // The pad is created before the app launches, which is before the client can say what it
+  // wants, so the only way to start the right one is to remember the last answer.
+  auto client = std::make_shared<crypto::named_cert_t>();
+  client->cert = PUBLIC_CERT;
+  client->name = "pad-memory";
+  client->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(client));
+
+  // Nothing observed yet is the honest state of a device that has never streamed.
+  EXPECT_FALSE(remember_client_controller_type(client->uuid, 0));
+
+  EXPECT_TRUE(remember_client_controller_type(client->uuid, LI_CTYPE_PS));
+  // Writing the same answer again must not churn the state file on every disconnect.
+  EXPECT_FALSE(remember_client_controller_type(client->uuid, LI_CTYPE_PS));
+  EXPECT_TRUE(remember_client_controller_type(client->uuid, LI_CTYPE_XBOX));
+
+  EXPECT_FALSE(remember_client_controller_type(uuid_util::uuid_t::generate().string(), LI_CTYPE_PS));
+}
+
 TEST_F(PairingAccessPresetTest, CanonicallyEquivalentCertificateReplacesAuthorization) {
   auto original = std::make_shared<crypto::named_cert_t>();
   original->cert = PUBLIC_CERT;

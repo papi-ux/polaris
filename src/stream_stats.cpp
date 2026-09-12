@@ -2676,6 +2676,16 @@ namespace stream_stats {
     current_stats.dynamic_range = dynamic_range;
   }
 
+  void update_client_declared_controller_type(int controller_type) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.client_declared_controller_type = controller_type;
+  }
+
+  int client_declared_controller_type() {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    return current_stats.client_declared_controller_type;
+  }
+
   void update_hdr_policy(bool hdr, const std::string &reason_code, const std::string &device) {
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.hdr_policy_hdr = hdr;

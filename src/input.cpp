@@ -251,7 +251,7 @@ namespace input {
     return true;
   }
 
-  void preallocate_gamepad() {
+  void preallocate_gamepad(int client_controller_type) {
     if (!config::input.controller) {
       return;
     }
@@ -272,7 +272,12 @@ namespace input {
     }
 
     constexpr int controller_number = 0;
-    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, {}, preallocated_gamepad_feedback_queue)) {
+    const platf::gamepad_arrival_t remembered {
+      static_cast<std::uint8_t>(client_controller_type),
+      0,
+      0
+    };
+    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, remembered, preallocated_gamepad_feedback_queue)) {
       free_id(gamepadMask, id);
       update_controller_diagnostics(false, controller_number, "ControllerNumber [0] could not be preallocated before app launch.");
       BOOST_LOG(warning) << "ControllerNumber [0] could not be preallocated before app launch"sv;
@@ -961,6 +966,11 @@ namespace input {
     }
 
     if (input->gamepads[packet->controllerNumber].id >= 0) {
+      // The pad was preallocated before the app launched, which is the only way a game sees a
+      // controller at startup, so this arrival is too late to change it. Remember what the
+      // client asked for instead, and say so, because silently emulating the wrong pad for a
+      // whole session used to leave nothing in the log at all.
+      stream_stats::update_client_declared_controller_type(packet->type);
       BOOST_LOG(debug) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }
