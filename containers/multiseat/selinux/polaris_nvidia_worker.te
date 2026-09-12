@@ -1,4 +1,4 @@
-policy_module(polaris_nvidia_worker, 1.0.3)
+policy_module(polaris_nvidia_worker, 1.0.4)
 
 gen_require(`
     type container_file_t;
@@ -14,8 +14,8 @@ container_domain_template(polaris_nvidia_worker, container)
 # The container template supplies sockets but not outbound TCP port access.
 # Steam downloads and game servers use the profile's admitted Docker bridge.
 # Steam also explicitly binds ephemeral client sockets before connecting.
-# Permit generic addresses within the private network namespace. Fixed server
-# ports still require name_bind; do not grant it or the broader container
+# Permit generic addresses within the private network namespace. Ports outside
+# the kernel's ephemeral range still require name_bind; do not grant it or the broader container
 # network attribute's raw socket and network administration permissions.
 corenet_tcp_connect_all_ports(polaris_nvidia_worker_t)
 corenet_tcp_bind_generic_node(polaris_nvidia_worker_t)
@@ -23,6 +23,10 @@ corenet_udp_bind_generic_node(polaris_nvidia_worker_t)
 # Steam's process helpers communicate through ephemeral TCP listeners too.
 # They remain inside the private bridge with no published worker ports.
 allow polaris_nvidia_worker_t self:tcp_socket { listen accept };
+
+# Bubblewrap remounts files read only in its new user namespace's tmpfs.
+# The outer worker drops all capabilities; this does not grant host mount authority.
+fs_remount_tmpfs(polaris_nvidia_worker_t)
 
 # Device admission still comes exclusively from the exact GPU catalog. This
 # standard container template retains file-management permissions; dropped Linux
@@ -33,5 +37,5 @@ allowxperm polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file ioc
 
 # Podman's --init binds only the mount-classifier-approved host catatonit.
 # Initial entry into this domain also requires entrypoint on that bin_t file.
-# Do not add this domain to broad sandbox execution attributes or grant new mounts.
+# Do not add this domain to broad sandbox execution attributes.
 allow polaris_nvidia_worker_t bin_t:file { getattr open read map execute execute_no_trans entrypoint };
