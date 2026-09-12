@@ -93,7 +93,7 @@ namespace platf::gamepad {
                                             // https://github.com/torvalds/linux/blob/master/drivers/hid/hid-ids.h#L981
                                             .vendor_id = 0x057e,
                                             .product_id = 0x2009,
-                                            .version = 0x8111,
+                                            .version = switch_pro_hid_version,
                                             .device_phys = identity.phys,
                                             .device_uniq = device_id});
   }
@@ -113,7 +113,7 @@ namespace platf::gamepad {
       device_mac
     );
 
-    return inputtino::PS5Joypad::create({.name = identity.name, .vendor_id = 0x054C, .product_id = 0x0CE6, .version = 0x8111, .device_phys = identity.phys, .device_uniq = device_mac});
+    return inputtino::PS5Joypad::create({.name = identity.name, .vendor_id = 0x054C, .product_id = 0x0CE6, .version = ds5_hid_version, .device_phys = identity.phys, .device_uniq = device_mac});
   }
 
   int alloc(input_raw_t *raw, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
