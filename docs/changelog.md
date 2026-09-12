@@ -7,6 +7,21 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.4.7 - 2026-09-12
+
+A controller and configuration update matched with Nova v1.4.7. The virtual DualSense maps the way a real one does, and the per-user configuration directory stops being created in a state Polaris then refuses to use. Existing configurations and paired devices remain valid.
+
+- Corrects the virtual DualSense's button and stick mapping. Polaris advertised the HID version a USB DualSense reports while creating the pad on the Bluetooth bus, and that combination matches no entry in the controller database clients read, so they fell back to a layout from before the kernel's PlayStation driver existed: face buttons rotated, and the triggers and the right stick swapped for each other. Clients that reach the pad directly were always correct, which is why the same pad could behave in one game and not the next (#660, #634)
+- Rests the virtual DualSense with its sticks centred and its triggers released. Of the report's six axes only three were given a starting value, so a pad nobody had touched reported both sticks pushed hard left and the right trigger half pulled until the first real input arrived (#660)
+- Repairs a per-user configuration directory that a privileged run left owned by root. `--setup-host` now hands it back to the account Polaris runs as, walking it without following symbolic links, and corrects its permissions as well as its owner (#654, #637)
+- Stops creating that directory in a state Polaris then refuses to use. It is narrowed to the owning account when it is created rather than inheriting whatever the account's umask allows, which on common desktop defaults left it writable by its group and made saving credentials fail from the first run (#659, #637)
+- Names the directory that actually refused, and the remedy that matches the fault. The message reported the directory above the one it had inspected, so it paired one directory's path with another's permissions, and it only ever offered to correct ownership even when ownership was already right (#663, #637)
+- Says which driver was running when the hardware encoder did not start, so a host that silently drops to software encoding names the driver version it found instead of leaving the reason in a discarded log line (#657, #650)
+- Explains that unreadable saved authorization state is not fatal: the host clears it, continues with a new identity, and says that any client paired before then has to pair again (#663)
+- Stops building two files without optimisation on compilers that no longer need the workaround, after measuring that the internal compiler error it existed for is gone (#656)
+- Continues the experimental multiseat foundation, still default off and unreachable in production: a negotiated media contract between worker and controller, and the DRM primary node a nested gamescope seat needs in its device catalog (#648, #662)
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
+
 ## v1.4.6 - 2026-09-11
 
 A correctness update for Linux hosts that stream a private display, and for three failures that used to happen in silence. A game's stored virtual-display preference no longer overrides a host that already provides the session's display, a paused session no longer changes what the host recommends to other clients, and an encoder, a driver reading and a refused directory now each say what went wrong. Existing configurations and paired devices remain valid.
