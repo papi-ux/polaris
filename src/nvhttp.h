@@ -200,6 +200,7 @@ namespace nvhttp {
   };
 
   enum class pairing_access_preset_t {
+    gamepad,
     standard,
     game_control,
     full

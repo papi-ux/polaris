@@ -94,7 +94,7 @@ let
   phase2VulkanCuda =
     if enablePortalDmabufLinear == null then enablePhase2VulkanCuda else enablePortalDmabufLinear;
 
-  buildDepsTag = "v2026.724.203728";
+  buildDepsTag = "v2026.713.132551";
   ffmpegArch =
     {
       x86_64-linux = "Linux-x86_64";
@@ -102,12 +102,15 @@ let
     }
     .${stdenv.hostPlatform.system}
       or (throw "polaris-stream: unsupported system ${stdenv.hostPlatform.system} for prebuilt ffmpeg");
+  # fetchzip hashes the unpacked tree, so these are NAR hashes and deliberately differ
+  # from the tarball digests cmake/dependencies/prepared_ffmpeg.cmake pins for the same
+  # archives. Copying the cmake value here is what broke the weekly nix build in #595.
   ffmpegPrebuilt = fetchzip {
     url = "https://github.com/LizardByte/build-deps/releases/download/${buildDepsTag}/${ffmpegArch}-ffmpeg.tar.gz";
     hash =
       {
-        x86_64-linux = "sha256-LCfUaUtO0Oc09JfUvWLxs2Ysu8Te0qafLcS3A0Qe67M=";
-        aarch64-linux = "sha256-/WSS9V15rheNuX5I1jlbTKwqLhCy8Vew1ANVz9fBYOg=";
+        x86_64-linux = "sha256-nHL+JxxMbR5fva/w1tt0BqcDowSAojuV8504he/wbsg=";
+        aarch64-linux = "sha256-/4EW4ZWZxIYbMjIS1XujoCbQTtLmOy4j2roPxJaAXrw=";
       }
       .${stdenv.hostPlatform.system};
   };

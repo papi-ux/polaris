@@ -610,6 +610,24 @@ TEST_F(PairingAccessPresetTest, ParsesAccessPresets) {
   );
   EXPECT_EQ(pairing_access_preset_name(*game_control), "game_control"sv);
 
+  const auto gamepad = pairing_access_preset_from_view("gamepad");
+  ASSERT_TRUE(gamepad);
+  EXPECT_EQ(pairing_access_preset_perm(*gamepad), crypto::PERM::_gamepad_only);
+  EXPECT_EQ(pairing_access_preset_name(*gamepad), "gamepad"sv);
+  // Watching and a controller, nothing else. This is the whole preset, so pin every half of it.
+  EXPECT_EQ(
+    static_cast<uint32_t>(pairing_access_preset_perm(*gamepad) & crypto::PERM::_all_inputs),
+    static_cast<uint32_t>(crypto::PERM::input_controller)
+  );
+  EXPECT_EQ(
+    static_cast<uint32_t>(pairing_access_preset_perm(*gamepad) & crypto::PERM::_all_actions),
+    static_cast<uint32_t>(crypto::PERM::view)
+  );
+  EXPECT_EQ(
+    static_cast<uint32_t>(pairing_access_preset_perm(*gamepad) & crypto::PERM::_all_opeiations),
+    0U
+  );
+
   const auto full = pairing_access_preset_from_view("full");
   ASSERT_TRUE(full);
   EXPECT_EQ(pairing_access_preset_perm(*full), crypto::PERM::_all);
