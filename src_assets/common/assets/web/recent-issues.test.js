@@ -24,6 +24,21 @@ describe('recent issue log grouping', () => {
     expect(grouped.some((entry) => entry.message === 'shader probe failed')).toBe(false)
   })
 
+  it('keeps a driver too old for this build visible inside a probe window', () => {
+    const grouped = groupRecentIssueLogs([
+      start,
+      '[2026-08-16 10:00:00.100]: Error: [h264_nvenc @ 0x1] Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0',
+      '[2026-08-16 10:00:00.110]: Error: [h264_nvenc @ 0x1] The minimum required Nvidia driver for nvenc is 610.00 or newer',
+      '[2026-08-16 10:00:00.120]: Error: Could not open codec [h264_nvenc]: Function not implemented',
+      end,
+    ].join('\n'))
+
+    expect(grouped.map((entry) => entry.message)).toEqual([
+      '[h264_nvenc @ 0x1] The minimum required Nvidia driver for nvenc is 610.00 or newer',
+      '[h264_nvenc @ 0x1] Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0',
+    ])
+  })
+
   it('recognizes a bounded tail that begins inside a probe window', () => {
     const grouped = groupRecentIssueLogs([
       '[2026-08-16 10:00:00.100]: Error: expected leading probe failure',
