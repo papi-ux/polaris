@@ -45,6 +45,7 @@ namespace multiseat {
    * input-manifest and kernel-probe dependencies without exposing them here.
    */
   struct controller_runtime_dependencies_t {
+    std::shared_ptr<void> profile_catalog_lease;
     std::unique_ptr<registry_t> registry;
     std::unique_ptr<worker_ipc::authority_store_t> worker_authority_store;
     std::unique_ptr<input::moonlight_session_runtime_t> moonlight_runtime;

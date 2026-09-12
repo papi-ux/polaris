@@ -107,6 +107,7 @@ namespace multiseat {
     };
 
     explicit impl_t(controller_runtime_dependencies_t dependencies, controller_runtime_options_t options) :
+        profile_catalog_lease(std::move(dependencies.profile_catalog_lease)),
         registry(std::move(dependencies.registry)),
         worker_authority_store(
           std::move(dependencies.worker_authority_store)
@@ -139,6 +140,7 @@ namespace multiseat {
     // Reverse destruction is deliberate: adapter, coordinator, worker
     // backend, its opaque dependencies, Moonlight input, authority store,
     // then the shared registry.
+    std::shared_ptr<void> profile_catalog_lease;
     std::unique_ptr<registry_t> registry;
     std::unique_ptr<worker_ipc::authority_store_t> worker_authority_store;
     std::unique_ptr<input::moonlight_session_runtime_t> moonlight_runtime;
@@ -825,6 +827,7 @@ namespace multiseat {
       impl_->input_expectations.clear();
       impl_->profile_launches.clear();
       impl_->closed = true;
+      impl_->profile_catalog_lease.reset();
       result.status = controller_shutdown_status_e::closed;
       return result;
     } catch (...) {

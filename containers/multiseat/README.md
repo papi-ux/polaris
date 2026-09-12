@@ -10,6 +10,9 @@ variants include the pinned nvcodec plugin; software capture retains OpenH264.
 Docker is the default build and worker engine. See
 [the Docker backend decision](../../docs/research/container-multiseat-docker.md)
 for the host trust boundary, image import, profile initialization, and acceptance.
+The [saved profile catalog](../../docs/research/container-multiseat-profile-storage.md)
+provides private Docker volume provisioning and paired device assignments through
+the administrative CLI while production activation remains off.
 
 This directory defines an offline-reviewable image recipe. It does not enable
 multiseat or make the current Polaris process a container controller.

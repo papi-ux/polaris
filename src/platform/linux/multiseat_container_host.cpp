@@ -59,7 +59,7 @@ namespace multiseat::container {
 
   bool local_host_t::trusted_runtime_file(const std::filesystem::path &path) const {
     if (!path.is_absolute() || path.lexically_normal() != path ||
-        (path.filename() != "crun" && path.filename() != "runc")) return false;
+        (path.filename() != "crun" && path.filename() != "runc" && path != "/usr/bin/docker")) return false;
     struct stat metadata {};
     if (lstat(path.c_str(), &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
         metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) != 0 ||

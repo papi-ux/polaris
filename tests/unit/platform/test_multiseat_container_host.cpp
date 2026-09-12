@@ -121,6 +121,8 @@ TEST(MultiseatContainerHost, RefusesUserControlledOrIndirectRuntime) {
   EXPECT_FALSE(host.trusted_runtime_file(root.path() / "bin-link/crun"));
   EXPECT_FALSE(host.trusted_runtime_file("crun"));
   EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/sh"));
+  EXPECT_FALSE(host.trusted_runtime_file(root.path() / "docker"));
+  EXPECT_FALSE(host.trusted_runtime_file("/usr/local/bin/docker"));
   EXPECT_EQ(host.effective_gid(), static_cast<std::uint64_t>(::getegid()));
   EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/../bin/crun"));
 }

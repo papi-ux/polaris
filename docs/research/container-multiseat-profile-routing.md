@@ -109,8 +109,12 @@ explicit physical harness may still use typed seat requests with a profile
 catalog and no routes. Routing with no entries, or with an unmapped client,
 leaves that launch's media requirement unchanged.
 
-Remaining integration work includes persistent profile provisioning, pairing
-assignments, public refusal fields, installing the controller's HTTP/RTSP
+The [saved profile catalog](container-multiseat-profile-storage.md) now provides
+private storage provisioning and administrative paired device assignments. Its
+controller lease prevents edits until authoritative shutdown completes.
+
+Remaining integration work includes pairing UI assignments, public refusal
+fields, installing the controller's HTTP/RTSP
 launch and reconciliation loop, concrete launcher adapters, and client playback acceptance.
 The single-user path and production activation remain unchanged.
 

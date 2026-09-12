@@ -41,6 +41,7 @@
   #include "platform/windows/virtual_display.h"
 #elif __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
+  #include "platform/linux/multiseat_profile_catalog.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
@@ -78,6 +79,9 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
      return args::version();
    }},
 #ifdef __linux__
+  {"multiseat-profiles"sv, [](const char *name, int argc, char **argv) {
+     return multiseat::profiles::command(argc, argv);
+   }},
   {"setup-host"sv, [](const char *name, int argc, char **argv) {
      return args::setup_host(name, argc, argv);
    }},
@@ -225,6 +229,12 @@ int main(int argc, char *argv[]) {
 #pragma GCC diagnostic pop
 
 #ifdef __linux__
+  // Profile administration must not start a streaming host or initialize its
+  // unrelated user configuration. Require the subcommand as the first argument.
+  if (argc > 1 && std::string_view(argv[1]) == "--multiseat-profiles") {
+    auto log_deinit_guard = logging::init(2, "");
+    return multiseat::profiles::command(argc - 2, argv + 2);
+  }
   if (const auto setup_host_result = dispatch_setup_host_before_user_state(argc, argv)) {
     return *setup_host_result;
   }

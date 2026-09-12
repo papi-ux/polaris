@@ -7,6 +7,7 @@
 #ifdef __linux__
 
   #include "multiseat_container_host.h"
+  #include "multiseat_profile_catalog.h"
   #include "src/uuid.h"
 
   #include <algorithm>
@@ -200,7 +201,34 @@ namespace multiseat {
     production_controller_options_t options,
     production_controller_factories_t factories
   ) {
-    if (!options.enabled || (options.container.profiles.empty() && options.profile_routes.empty())) {
+    if (!options.enabled) {
+      return controller_runtime_t::create({}, {});
+    }
+    std::shared_ptr<void> catalog_lease;
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> catalog_owner;
+    if (!options.profile_catalog.empty()) {
+      if (!options.container.profiles.empty() || !options.container.workloads.empty() ||
+          !options.profile_routes.empty() || options.container.engine != container::engine_e::docker ||
+          options.container.executable != "/usr/bin/docker" || options.container.runtime_executable != "/usr/bin/runc" ||
+          options.container.daemon_socket != "/var/run/docker.sock") {
+        return {.status = controller_runtime_create_status_e::invalid_dependencies};
+      }
+      auto loaded = profiles::load(options.profile_catalog);
+      if (!loaded) return {.status = controller_runtime_create_status_e::invalid_dependencies};
+      catalog_lease = std::move(loaded->lease);
+      catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
+      for (auto &entry : loaded->catalog.profiles) {
+        if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
+              entry.workload) == options.container.workloads.end()) {
+          options.container.workloads.push_back(entry.workload);
+        }
+        if (!entry.client_keys.empty()) {
+          options.profile_routes.push_back({entry.storage.profile_key, std::move(entry.client_keys), entry.workload});
+        }
+        options.container.profiles.push_back(std::move(entry.storage));
+      }
+    }
+    if (options.container.profiles.empty() && options.profile_routes.empty()) {
       return controller_runtime_t::create({}, {});
     }
     if (!valid_catalog_boundary(options)) {
@@ -240,7 +268,8 @@ namespace multiseat {
     }
     return controller_runtime_t::create(
       std::move(runtime_options),
-      [options = std::move(options), factories = std::move(factories)]()
+      [options = std::move(options), factories = std::move(factories),
+       catalog_lease = std::move(catalog_lease), catalog_owner]()
         mutable -> std::optional<controller_runtime_dependencies_t> {
         const auto epoch = factories.controller_epoch ?
                              factories.controller_epoch() :
@@ -252,6 +281,8 @@ namespace multiseat {
         auto host = factories.container_host ?
                       factories.container_host() :
                       std::make_unique<container::local_host_t>();
+        if (catalog_owner && (!host || host->effective_uid() != catalog_owner->first ||
+                              host->effective_gid() != catalog_owner->second)) return std::nullopt;
         auto admitted_gpus = host ?
                                admitted_container_gpus(options.gpus, *host) :
                                std::nullopt;
@@ -303,6 +334,7 @@ namespace multiseat {
         );
 
         return controller_runtime_dependencies_t {
+          .profile_catalog_lease = std::move(catalog_lease),
           .registry = std::move(registry),
           .worker_authority_store = std::move(authority),
           .moonlight_runtime = std::move(moonlight.runtime),

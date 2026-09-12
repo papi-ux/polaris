@@ -3,6 +3,7 @@
  * @brief Offline tests for default-off production multiseat composition.
  */
 #include "src/platform/linux/multiseat_controller_production.h"
+#include "src/platform/linux/multiseat_profile_catalog.h"
 #include "src/platform/linux/multiseat_moonlight_activation.h"
 #include "src/rtsp.h"
 
@@ -178,6 +179,7 @@ namespace {
     std::size_t probe_calls = 0;
     std::size_t device_identity_calls = 0;
     std::size_t runtime_spec_reads = 0;
+    bool docker_inventory_unavailable = false;
 
     /**
      * Opt-in offline Podman emulation: `run` records a container from its own
@@ -378,11 +380,11 @@ namespace {
     }
 
     bool executable_file(const std::filesystem::path &path) const override {
-      return path == "/usr/bin/podman" || path == "/usr/libexec/podman/catatonit";
+      return path == "/usr/bin/docker" || path == "/usr/bin/podman" || path == "/usr/libexec/podman/catatonit";
     }
 
     bool trusted_runtime_file(const std::filesystem::path &path) const override {
-      return path == "/usr/bin/crun";
+      return path == "/usr/bin/crun" || path == "/usr/bin/runc";
     }
 
     std::optional<std::vector<std::uint64_t>> supplementary_groups() const override {
@@ -440,6 +442,13 @@ namespace {
     ) override {
       std::scoped_lock lock {state_->mutex};
       state_->commands.push_back(argv);
+      if (std::find(argv.begin(), argv.end(), "/usr/bin/docker") != argv.end()) {
+        if (state_->docker_inventory_unavailable) return {.exit_status = 1};
+        if (std::find(argv.begin(), argv.end(), "info") != argv.end()) {
+          return {.exit_status = 0, .output = R"({"OSType":"linux","SecurityOptions":[],"Runtimes":{"runc":{"path":"runc"}}})"};
+        }
+        return {.exit_status = 0};  // Empty isolated deployment.
+      }
       if (!state_->simulate_containers || argv.size() < 3) {
         return {
           .exit_status = 0,
@@ -847,6 +856,100 @@ TEST(
     EXPECT_EQ(calls, 0U);
     EXPECT_FALSE(input::moonlight_session_runtime_installed());
     EXPECT_FALSE(input::moonlight_session_activation_gate_installed());
+  }
+
+  TEST(MultiseatControllerProduction, SavedCatalogDisabledEmptyMissingAndMixedAuthoritiesStayInert) {
+    temporary_production_root_t root;
+    const auto path = root.path() / "profiles.json";
+    unsigned calls = 0;
+    production_controller_factories_t factories;
+    factories.controller_epoch = [&]() -> std::optional<std::string> { ++calls; return std::nullopt; };
+    production_controller_options_t options;
+    options.profile_catalog = path;
+    EXPECT_EQ(create_production_controller_runtime(options, factories).status,
+      controller_runtime_create_status_e::ready_disabled);
+    EXPECT_FALSE(std::filesystem::exists(path.string() + ".lock"));
+    options.enabled = true;
+    EXPECT_EQ(create_production_controller_runtime(options, factories).status,
+      controller_runtime_create_status_e::invalid_dependencies);
+    ASSERT_TRUE(profiles::initialize(path, 1000, 1000));
+    EXPECT_EQ(create_production_controller_runtime(options, factories).status,
+      controller_runtime_create_status_e::ready_disabled);
+    EXPECT_TRUE(profiles::load(path));  // Empty controller did not retain a lease.
+    options.container.workloads = {{workload_kind_e::gamescope, "input-pong-v1"}};
+    EXPECT_EQ(create_production_controller_runtime(options, factories).status,
+      controller_runtime_create_status_e::invalid_dependencies);
+    EXPECT_EQ(calls, 0U);
+  }
+
+  TEST(MultiseatControllerProduction, SavedAssignmentsRemainLockedThroughIncompleteShutdown) {
+    temporary_production_root_t root;
+    temporary_production_root_t authority_root;
+    const auto path = root.path() / "profiles.json";
+    auto options = production_options(authority_root.path());
+    profiles::catalog_t catalog {1000, 1000, {{
+      .storage = options.container.profiles.front(), .name = "Private games",
+      .workload = options.container.workloads.front(), .client_keys = {"paired-client"},
+    }}};
+    catalog.profiles.front().storage.image_reference = "sha256:" + std::string(64, 'a');
+    ASSERT_TRUE(private_state_file::write_atomic(path, profiles::encode(catalog)));
+    options.profile_catalog = path;
+    options.container.profiles.clear();
+    options.container.workloads.clear();
+    options.container.engine = container::engine_e::docker;
+    options.container.executable = "/usr/bin/docker";
+    options.container.runtime_executable = "/usr/bin/runc";
+    options.container.media_enabled = true;
+    auto factory_state = std::make_shared<production_factory_state_t>();
+    auto input_state = std::make_shared<production_input_state_t>();
+    auto host_state = std::make_shared<production_host_state_t>();
+    auto created = create_production_controller_runtime(options,
+      production_factories(factory_state, input_state, host_state));
+    ASSERT_TRUE(created.runtime);
+    EXPECT_FALSE(profiles::unassign(path, "paired-client"));
+    ASSERT_TRUE(created.runtime->reconcile().ready());
+    auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+    launch->id = 901;
+    launch->lifecycle_generation = 902;
+    launch->unique_id = "paired-client";
+    launch->perm = crypto::PERM::_game_control;
+    auto routed = created.runtime->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(routed.admitted());
+    EXPECT_EQ(routed.admission.seat->runtime_profile, runtime_profile_e::steam);
+    EXPECT_EQ(routed.admission.seat->workload.target_id, "steam-production-game");
+    host_state->docker_inventory_unavailable = true;
+    EXPECT_FALSE(created.runtime->shutdown().closed());
+    EXPECT_FALSE(profiles::unassign(path, "paired-client"));
+    host_state->docker_inventory_unavailable = false;
+    ASSERT_TRUE(created.runtime->shutdown().closed());
+    EXPECT_TRUE(profiles::unassign(path, "paired-client"));
+  }
+
+  TEST(MultiseatControllerProduction, SavedOwnerMismatchReleasesLeaseBeforeInputFactories) {
+    temporary_production_root_t root;
+    const auto path = root.path() / "profiles.json";
+    auto options = production_options(root.path());
+    profiles::catalog_t catalog {1001, 1001, {{
+      .storage = options.container.profiles.front(), .name = "Private games",
+      .workload = options.container.workloads.front(), .client_keys = {},
+    }}};
+    catalog.profiles.front().storage.image_reference = "sha256:" + std::string(64, 'a');
+    ASSERT_TRUE(private_state_file::write_atomic(path, profiles::encode(catalog)));
+    options.profile_catalog = path;
+    options.container.profiles.clear();
+    options.container.workloads.clear();
+    options.container.engine = container::engine_e::docker;
+    options.container.executable = "/usr/bin/docker";
+    options.container.runtime_executable = "/usr/bin/runc";
+    auto factory_state = std::make_shared<production_factory_state_t>();
+    auto input_state = std::make_shared<production_input_state_t>();
+    auto host_state = std::make_shared<production_host_state_t>();
+    auto created = create_production_controller_runtime(options,
+      production_factories(factory_state, input_state, host_state));
+    EXPECT_EQ(created.status, controller_runtime_create_status_e::dependencies_unavailable);
+    EXPECT_EQ(factory_state->moonlight_calls, 0U);
+    EXPECT_EQ(factory_state->probe_calls, 0U);
+    EXPECT_TRUE(profiles::load(path));
   }
 
   TEST(MultiseatControllerProduction, ProfileRoutesRejectUnknownOrConflictingCatalogEntriesBeforeFactories) {

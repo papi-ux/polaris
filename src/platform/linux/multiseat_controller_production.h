@@ -42,6 +42,9 @@ namespace multiseat {
 
   struct production_controller_options_t {
     bool enabled = false;
+    // Optional saved Docker catalog. Mutually exclusive with inline profiles,
+    // workloads and routes. Its private file lease outlives all active seats.
+    std::filesystem::path profile_catalog;
     std::vector<production_controller_gpu_t> gpus;
     /**
      * The caller must leave container.gpus empty. It is derived from gpus above,
