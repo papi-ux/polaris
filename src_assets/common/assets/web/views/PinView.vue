@@ -15,6 +15,8 @@
       </div>
     </section>
 
+    <MultiseatAssignments :clients="clients" />
+
     <section id="pair_device" class="section-card">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div class="min-w-0">
@@ -963,6 +965,7 @@
 import { computed, inject, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
+import MultiseatAssignments from '../components/MultiseatAssignments.vue'
 import Skeleton from '../components/Skeleton.vue'
 import SelectableCard from '../components/SelectableCard.vue'
 import StatTile from '../components/StatTile.vue'

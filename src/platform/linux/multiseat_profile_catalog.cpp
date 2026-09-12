@@ -288,6 +288,22 @@ namespace multiseat::profiles {
     });
   }
 
+  change_result_t set_assignment(const std::filesystem::path &path,
+                               std::string_view profile_key, std::string_view client_key) {
+    return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
+      if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
+      auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
+        return entry.storage.profile_key == profile_key;
+      });
+      if (!profile_key.empty() && target == catalog.profiles.end()) {
+        result.error = "Unknown profile."; return std::nullopt;
+      }
+      for (auto &entry : catalog.profiles) std::erase(entry.client_keys, client_key);
+      if (target != catalog.profiles.end()) target->client_keys.emplace_back(client_key);
+      return encode(catalog);
+    });
+  }
+
   change_result_t create(const std::filesystem::path &path, std::string_view name,
                          std::string_view image, container::host_t &host, const workload_plan_t &workload) {
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {

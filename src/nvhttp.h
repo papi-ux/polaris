@@ -119,6 +119,12 @@ namespace nvhttp {
                                 const std::function<bool()> &publish);
 
 #ifdef __linux__
+  struct profile_api_response_t {
+    int status;
+    nlohmann::json body;
+  };
+  std::optional<profile_api_response_t> resolve_profile_request(
+    const crypto::p_named_cert_t &candidate, const args_t &args);
   struct profile_launch_response_t {
     int status;
     std::string message;

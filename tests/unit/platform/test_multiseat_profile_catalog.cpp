@@ -117,6 +117,43 @@ namespace {
     }
   };
 
+  TEST_F(MultiseatProfileCatalog, AtomicAssignmentMovesPreserveOtherDevicesAndRejectUnknownTargets) {
+    auto catalog = sample();
+    auto other = catalog.profiles.front();
+    other.storage.profile_key = "profile-b";
+    other.storage.opaque_volume_name = "pv-profile-b";
+    other.client_keys = {"client-b"};
+    catalog.profiles.push_back(other);
+    save(catalog);
+    EXPECT_FALSE(profiles::set_assignment(path, "missing", "client-a"));
+    ASSERT_TRUE(profiles::set_assignment(path, "profile-b", "client-a"));
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+    EXPECT_EQ(loaded->catalog.profiles[1].client_keys, (std::vector<std::string>{"client-b", "client-a"}));
+    EXPECT_FALSE(profiles::set_assignment(path, "", "client-a"));
+    loaded.reset();
+    ASSERT_TRUE(profiles::set_assignment(path, "", "client-a"));
+    loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].client_keys, std::vector<std::string>{"client-b"});
+  }
+
+  TEST_F(MultiseatProfileCatalog, AssignmentWriteFailuresReportTheActualCommitBoundary) {
+    save(sample());
+    psf::set_write_fault_for_tests(psf::write_fault_e::rename);
+    EXPECT_EQ(profiles::set_assignment(path, "", "client-a").status, psf::write_status_e::not_committed);
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    loaded.reset();
+    psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+    EXPECT_EQ(profiles::set_assignment(path, "", "client-a").status, psf::write_status_e::durability_uncertain);
+    loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+  }
+
   TEST_F(MultiseatProfileCatalog, RoundTripPreservesPrivateAssignmentsAndAllTypedFamilies) {
     auto catalog = sample();
     const std::array families {runtime_profile_e::steam, runtime_profile_e::heroic, runtime_profile_e::lutris};

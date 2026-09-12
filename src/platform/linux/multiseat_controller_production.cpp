@@ -205,6 +205,7 @@ namespace multiseat {
       return controller_runtime_t::create({}, {});
     }
     std::shared_ptr<void> catalog_lease;
+    std::vector<profile_summary_t> catalog_summary;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> catalog_owner;
     if (!options.profile_catalog.empty()) {
       if (!options.container.profiles.empty() || !options.container.workloads.empty() ||
@@ -218,6 +219,7 @@ namespace multiseat {
       catalog_lease = std::move(loaded->lease);
       catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
       for (auto &entry : loaded->catalog.profiles) {
+        catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
           options.container.workloads.push_back(entry.workload);
@@ -239,6 +241,7 @@ namespace multiseat {
 
     controller_runtime_options_t runtime_options {
       .enabled = true, .worker_media_enabled = options.container.media_enabled,
+      .profile_catalog = std::move(catalog_summary),
     };
     // Resolve profile storage/image and workload from the same trusted catalog
     // the backend will enforce. No second GPU or image allowlist is accepted.

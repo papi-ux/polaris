@@ -4347,7 +4347,12 @@ namespace nvhttp {
     if (profile_worker) {
       // Worker display and encoder ownership come from the saved profile. Do
       // not probe host capture or apply a host optimizer envelope to this seat.
-      if (get_arg(args, "resolvedProfile", "0") != "0" || get_arg(args, "hdrMode", "0") != "0" ||
+      const bool worker_contract = args.contains("workerProfile") &&
+        get_arg(args, "resolvedProfile", "0") == "1" &&
+        get_arg(args, "expectedTopology", "") == "gamescope_stream" &&
+        get_arg(args, "resolvedHdr", "") == "0" && get_arg(args, "bitrateKbps", "") == "8000";
+      if ((!worker_contract && get_arg(args, "resolvedProfile", "0") != "0") ||
+          (args.contains("workerProfile") && !worker_contract) || get_arg(args, "hdrMode", "0") != "0" ||
           get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder")) return nullptr;
       const auto requested = named_cert_p->display_mode.empty() ?
         get_arg(args, "mode", "1920x1080x60") : named_cert_p->display_mode;
@@ -4369,8 +4374,8 @@ namespace nvhttp {
       const auto width = integer(parts[0]);
       const auto height = integer(parts[1]);
       const auto rate = integer(parts[2]);
-      if (!width || !height || !rate || *width < 320 || *width > 4096 ||
-          *height < 240 || *height > 2160 || *rate <= 0 || *rate > 240000) return nullptr;
+      if (!width || !height || !rate || *width < 320 || *width > 4096 || *width % 2 ||
+          *height < 240 || *height > 2160 || *height % 2 || *rate <= 0 || *rate > 240000) return nullptr;
       const auto fps = *rate < 1000 ? *rate * 1000 : *rate;
       if (fps > 240000 || fps % 1000 != 0) return nullptr;
       const auto surround = integer(get_arg(args, "surroundAudioInfo", "196610"));
@@ -5008,6 +5013,103 @@ namespace nvhttp {
   }
 
 #ifdef __linux__
+  std::optional<profile_api_response_t> resolve_profile_request(
+    const crypto::p_named_cert_t &candidate, const args_t &args) {
+    auto reject = [](int status, const char *message) {
+      return profile_api_response_t {status, {{"status", false}, {"code", "worker_profile_rejected"}, {"error", message}}};
+    };
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return reject(401, "The client is no longer authorized");
+    const auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    if (candidate != current) return reject(409, "Client settings changed; reconnect to retry");
+    if (!(current->perm & PERM::launch) || current->temporary_authorization)
+      return reject(403, "A profile requires permanent launch permission");
+    const auto profile = service->profile_for_client(current->uuid);
+    if (!profile) return reject(503, "The assigned profile is unavailable");
+    try {
+      auto number = [&](const char *key, double fallback) {
+        if (!args.contains(key)) return fallback;
+        const auto value = get_arg(args, key);
+        if (args.count(key) != 1 || value.empty() || value.size() > 32 ||
+            value.find_first_not_of("0123456789.") != std::string::npos)
+          throw std::invalid_argument("numeric field");
+        std::size_t consumed = 0;
+        const auto parsed = std::stod(value, &consumed);
+        if (consumed != value.size() || !std::isfinite(parsed)) throw std::invalid_argument("numeric field");
+        return parsed;
+      };
+      for (const auto *key : {"game", "encoder", "mode", "preference", "mirrorDesktop",
+                              "closeDesktopSteamForPrivate", "launchMode"})
+        if (args.count(key) > 1) return reject(400, "Duplicate profile request field");
+      const auto game = get_arg(args, "game", "");
+      if (game != multiseat::profile_app_uuid && game != std::to_string(multiseat::profile_app_id))
+        return reject(400, "Select the assigned Polaris profile");
+      if (get_arg(args, "encoder", "auto") != "auto" ||
+          get_arg(args, "mirrorDesktop", "0") != "0" ||
+          get_arg(args, "closeDesktopSteamForPrivate", "0") != "0" ||
+          !get_arg(args, "launchMode", "").empty())
+        return reject(400, "Profile streams use their own display and allocated hardware encoder");
+      auto width = number("width", 1920), height = number("height", 1080);
+      auto fps = number("fps", 60);
+      const auto requested_width = width, requested_height = height, requested_fps = fps;
+      const auto ceiling = number("client_max_fps", 240);
+      const auto hdr = number("hdr", 0), display_locked = number("display_locked", 0),
+        bitrate_locked = number("bitrate_locked", 0), bitrate = number("bitrate_kbps", 8000);
+      if ((hdr != 0 && hdr != 1) || (display_locked != 0 && display_locked != 1) ||
+          (bitrate_locked != 0 && bitrate_locked != 1) || width != std::floor(width) ||
+          height != std::floor(height) || width < 320 || width > 4096 || height < 240 || height > 2160 ||
+          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < 1000 || bitrate > 300000)
+        return reject(400, "Unsupported profile stream limits");
+      if (!current->display_mode.empty()) {
+        std::istringstream input(current->display_mode);
+        std::string w, h, f;
+        if (!std::getline(input, w, 'x') || !std::getline(input, h, 'x') || !std::getline(input, f) ||
+            w.find_first_not_of("0123456789") != std::string::npos ||
+            h.find_first_not_of("0123456789") != std::string::npos ||
+            f.find_first_not_of("0123456789") != std::string::npos)
+          return reject(409, "The paired display override is unsupported for profile streams");
+        width = std::stod(w); height = std::stod(h); fps = std::stod(f);
+        if (fps >= 1000) fps /= 1000;
+        if (fps != std::floor(fps) || fps < 15 || fps > 240 || fps > ceiling + .5 ||
+            width < 320 || width > 4096 || height < 240 || height > 2160 ||
+            std::fmod(width, 2) != 0 || std::fmod(height, 2) != 0)
+          return reject(409, "The paired display override exceeds the profile or client limits");
+      } else {
+        width = std::floor(width / 2) * 2; height = std::floor(height / 2) * 2;
+        fps = std::min(std::floor(fps + .5), std::floor(ceiling + .5));
+      }
+      if ((display_locked && (width != requested_width || height != requested_height)) ||
+          (bitrate_locked && bitrate < 8000))
+        return reject(409, "This profile cannot honor the locked display or bitrate limit");
+      nlohmann::json fields;
+      auto field = [&](const char *key, nlohmann::json value, bool normalized = false) {
+        fields[key] = {{"value", std::move(value)}, {"source", "capability_validation"},
+          {"locked", true}, {"normalized", normalized}, {"reason_code", "worker_media_contract"}};
+      };
+      const auto display = std::to_string(static_cast<int>(width)) + "x" +
+        std::to_string(static_cast<int>(height)) + "x" + std::to_string(static_cast<int>(fps));
+      field("display_mode", display);
+      field("display_width", static_cast<int>(width), width != requested_width);
+      field("display_height", static_cast<int>(height), height != requested_height);
+      field("target_fps", static_cast<int>(fps), fps != requested_fps);
+      field("target_bitrate_kbps", 8000, bitrate != 8000);
+      field("hdr", false, hdr != 0);
+      field("preferred_codec", "h264");
+      nlohmann::json body {
+        {"status", true}, {"source", "worker_profile_v1"},
+        {"worker_profile", {{"version", 1}, {"id", *profile}, {"app_uuid", multiseat::profile_app_uuid},
+          {"app_id", multiseat::profile_app_id}, {"codec", "h264"}, {"audio_channels", 2}}},
+        {"resolved_profile", {{"policy_version", 1}, {"preset", "worker"}, {"fields", std::move(fields)}}},
+        {"topology_resolution", {{"resolved", "gamescope_stream"}}},
+        {"reasoning", "Your assigned profile uses H.264, SDR and stereo audio."}
+      };
+      return profile_api_response_t {200, std::move(body)};
+    } catch (const std::exception &) {
+      return reject(400, "Malformed profile stream limits");
+    }
+  }
+
   std::optional<profile_launch_response_t> launch_profile_request(
     const crypto::p_named_cert_t &candidate, const args_t &args, bool resume,
     const std::function<bool(const std::shared_ptr<rtsp_stream::launch_session_t> &)> &publish
@@ -5015,10 +5117,18 @@ namespace nvhttp {
     const auto current = resolve_authorized_client(candidate);
     if (!current) return profile_launch_response_t {401, "The client is no longer authorized", {}};
     auto service = multiseat::profile_service_for(current->uuid);
-    if (!service) return std::nullopt;
+    if (!service) {
+      if (args.contains("workerProfile"))
+        return profile_launch_response_t {409, "The profile assignment changed; refresh the library", {}};
+      return std::nullopt;
+    }
     if (candidate != current) return profile_launch_response_t {409, "Client settings changed; reconnect to retry", {}};
     if (!(current->perm & PERM::launch) || current->temporary_authorization || watch_requested(args))
       return profile_launch_response_t {403, "A profile requires permanent launch permission", {}};
+    if (args.contains("workerProfile") &&
+        (args.count("workerProfile") != 1 ||
+         service->profile_for_client(current->uuid) != std::optional<std::string>{get_arg(args, "workerProfile")}))
+      return profile_launch_response_t {409, "The profile assignment changed; refresh the library", {}};
     const auto appid = get_arg(args, "appid", "");
     const auto appuuid = get_arg(args, "appuuid", "");
     if (!resume && ((appid.empty() && appuuid.empty()) ||
@@ -5030,7 +5140,7 @@ namespace nvhttp {
     auto launch = make_launch_session(false, false, args, current.get(), true);
     if (!launch) return profile_launch_response_t {400, "Unsupported profile display or media options", {}};
     if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Encrypted RTSP is required for profile streaming", {}};
-    auto prepared = service->prepare(launch);
+    auto prepared = service->prepare(launch, get_arg(args, "workerProfile", ""));
     if (!prepared.prepared()) {
       launch->cancel();
       return profile_launch_response_t {prepared.status, std::string(prepared.message), std::move(launch)};
@@ -7948,10 +8058,36 @@ namespace nvhttp {
     // Game library — returns games with metadata, covers, categories
     auto polarisGames = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
-      if (!get_verified_cert(request)) {
+      const auto client = get_verified_cert(request);
+      if (!client) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+#ifdef __linux__
+      if (const auto service = multiseat::profile_service_for(client->uuid)) {
+        const auto query = request->parse_query_string();
+        const std::string name = "Polaris Profile";
+        auto search = get_arg(query, "search", "");
+        std::transform(search.begin(), search.end(), search.begin(), [](unsigned char c) { return std::tolower(c); });
+        const auto source = get_arg(query, "source", "");
+        const bool matches = std::string("polaris profile").find(search) != std::string::npos &&
+          (source.empty() || source == "other" || source == "polaris") &&
+          !!(client->perm & PERM::launch) && !client->temporary_authorization;
+        nlohmann::json games = nlohmann::json::array();
+        if (matches && get_arg(query, "offset", "0") == "0" && get_arg(query, "limit", "50") != "0") {
+          games.push_back({{"id", multiseat::profile_app_uuid}, {"app_id", multiseat::profile_app_id},
+            {"name", name}, {"source", "polaris"}, {"installed", true}, {"hdr_supported", false},
+            {"worker_profile", true}, {"launch_mode", {{"preferred_mode", "gamescope_stream"},
+              {"recommended_mode", "gamescope_stream"}, {"allowed_modes", {"gamescope_stream"}},
+              {"mode_reason", "Assigned profile with its own display and encoder"}}}, {"cover_url", ""}});
+        }
+        const nlohmann::json output {{"games", games}, {"total", matches ? 1 : 0}};
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+        return;
+      }
+#endif
       const auto advertised_codec_support = advertised_codec_support_for_http(true);
       // Per-host, not per-game: every game plans from the same host display,
       // so the planner is computed once and attached to each game unchanged.
@@ -9992,14 +10128,10 @@ namespace nvhttp {
       }
 
 #ifdef __linux__
-      if (multiseat::profile_service_for(named_cert_p->uuid)) {
-        const nlohmann::json output {
-          {"status", false}, {"code", "profile_optimizer_unavailable"},
-          {"error", "Profile streams currently require a manual SDR H.264 preset with stereo audio."}
-        };
+      if (const auto result = resolve_profile_request(named_cert_p, request->parse_query_string())) {
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
-        response->write(SimpleWeb::StatusCode::client_error_conflict, output.dump(), headers);
+        response->write(static_cast<SimpleWeb::StatusCode>(result->status), result->body.dump(), headers);
         return;
       }
 #endif

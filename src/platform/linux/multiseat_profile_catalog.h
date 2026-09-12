@@ -52,6 +52,9 @@ namespace multiseat::profiles {
     std::string_view profile_key, std::string_view client_key);
   [[nodiscard]] change_result_t unassign(const std::filesystem::path &path,
     std::string_view client_key);
+  // One atomic move between profiles, or unassignment with an empty profile.
+  [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
+    std::string_view profile_key, std::string_view client_key);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
   // private storage, and an owned bridge for Steam. No pulls or host binds.
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,

@@ -41,7 +41,8 @@ namespace {
     std::condition_variable changed;
     std::vector<std::thread::id> owners;
     std::atomic<unsigned> begins {0}, reconciles {0}, polls {0}, shutdowns {0};
-    std::atomic<bool> select {true}, close {true}, fail {false};
+    std::atomic<bool> select {true}, close {true}, fail {false}, idle {true};
+    std::atomic<unsigned> destroyed {0};
     void called() { std::lock_guard lock(mutex); owners.push_back(std::this_thread::get_id()); }
     bool await_begin() {
       std::unique_lock lock(mutex);
@@ -51,8 +52,18 @@ namespace {
 
   class controller_t final : public profile_controller_t {
   public:
-    explicit controller_t(std::shared_ptr<controller_state_t> state) : state_(std::move(state)) {}
-    bool routes_client(std::string_view client) const override { return client == "client-a" || client == "client-b"; }
+    explicit controller_t(std::shared_ptr<controller_state_t> state,
+      std::vector<profile_summary_t> catalog = {{"12345678-1234-4234-8234-123456789abc", "Primary", {"client-a", "client-b"}}}) :
+      state_(std::move(state)), catalog_(std::move(catalog)) {}
+    ~controller_t() override { ++state_->destroyed; }
+    bool routes_client(std::string_view client) const override { return profile_for_client(client).has_value(); }
+    std::optional<std::string> profile_for_client(std::string_view client) const override {
+      for (const auto &profile : catalog_)
+        if (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end()) return profile.id;
+      return std::nullopt;
+    }
+    std::vector<profile_summary_t> profile_catalog() const override { return catalog_; }
+    bool idle() const override { return state_->idle; }
     void reconcile() override { state_->called(); ++state_->reconciles; }
     profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
       state_->called();
@@ -69,6 +80,7 @@ namespace {
     bool shutdown() override { state_->called(); ++state_->shutdowns; return state_->close; }
   private:
     std::shared_ptr<controller_state_t> state_;
+    const std::vector<profile_summary_t> catalog_;
   };
 
   class MultiseatLaunchService : public ::testing::Test {
@@ -94,6 +106,134 @@ namespace {
       return value;
     }
   };
+
+  class MultiseatAssignments : public MultiseatLaunchService {
+  protected:
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}}, {"profile-b", "Sam", {"client-b"}}};
+    std::atomic<unsigned> writes {0}, reloads {0};
+    private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
+    bool reload_fails = false;
+    std::function<void()> before_write;
+    void SetUp() override {
+      service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s,
+        profile_admin_options_t {
+          .reload = [&]() -> std::unique_ptr<profile_controller_t> {
+            ++reloads;
+            if (reload_fails) return {};
+            return std::make_unique<controller_t>(state, catalog);
+          },
+          .persist = [&](std::string_view profile, std::string_view client) {
+            state->called();
+            ++writes;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            if (before_write) before_write();
+            if (write_status != private_state_file::write_status_e::not_committed) {
+              for (auto &entry : catalog) std::erase(entry.clients, client);
+              for (auto &entry : catalog) if (entry.id == profile) entry.clients.emplace_back(client);
+            }
+            return profiles::change_result_t {.status = write_status};
+          }
+        });
+    }
+  };
+
+  TEST_F(MultiseatAssignments, MovesAndUnassignsWithoutRetainingStaleLaunchAuthority) {
+    ASSERT_EQ(service->set_assignment("profile-b", "client-a").status, 200);
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-b");
+    EXPECT_EQ(service->profile_for_client("client-b"), "profile-b");
+    EXPECT_EQ(service->prepare(launch(), "profile-a").status, 409);
+    EXPECT_EQ(state->begins, 0U);
+    ASSERT_EQ(service->set_assignment("", "client-a").status, 200);
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->routes_client("client-b"));
+    EXPECT_EQ(service->admin_snapshot().profiles[1].clients, std::vector<std::string> {"client-b"});
+    EXPECT_EQ(writes, 2U);
+    EXPECT_EQ(reloads, 2U);
+  }
+
+  TEST_F(MultiseatAssignments, ActiveAndStartingLaunchesRejectChangesWithoutCancellation) {
+    const auto active = launch();
+    ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
+    EXPECT_EQ(service->set_assignment("profile-b", "client-a").status, 409);
+    EXPECT_FALSE(active->is_cancelled());
+    EXPECT_EQ(writes, 0U);
+    active->cancel();
+    state->select = false;
+    state->begins = 0;
+    const auto starting = launch();
+    auto pending = std::async(std::launch::async, [&] { return service->prepare(starting, "profile-a"); });
+    ASSERT_TRUE(state->await_begin());
+    EXPECT_EQ(service->set_assignment("profile-b", "client-a").status, 409);
+    EXPECT_FALSE(starting->is_cancelled());
+    starting->cancel();
+    EXPECT_EQ(pending.get().status, 409);
+    EXPECT_EQ(writes, 0U);
+  }
+
+  TEST_F(MultiseatAssignments, CleanupAndUnknownTargetsCannotMutateTheCatalog) {
+    EXPECT_EQ(service->set_assignment("missing", "client-a").status, 404);
+    state->idle = false;
+    EXPECT_EQ(service->set_assignment("profile-b", "new-client").status, 409);
+    EXPECT_FALSE(service->routes_client("new-client"));
+    EXPECT_EQ(writes, 0U);
+    EXPECT_EQ(state->shutdowns, 0U);
+  }
+
+  TEST_F(MultiseatAssignments, ConcurrentLaunchesAndEditsStayBlockedUntilReplacementIsPublished) {
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    before_write = [&] { entered.set_value(); released.wait(); };
+    auto change = std::async(std::launch::async, [&] { return service->set_assignment("profile-a", "new-client"); });
+    const auto reached = entered.get_future().wait_for(2s);
+    EXPECT_EQ(reached, std::future_status::ready);
+    EXPECT_TRUE(service->admin_snapshot().changing);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->routes_client("new-client"));
+    EXPECT_FALSE(service->profile_for_client("new-client"));
+    EXPECT_EQ(service->prepare(launch("new-client"), "profile-a").status, 503);
+    EXPECT_NE(service->set_assignment("profile-b", "client-a").status, 200);
+    release.set_value();
+    ASSERT_EQ(change.get().status, 200);
+    EXPECT_FALSE(service->admin_snapshot().changing);
+    EXPECT_EQ(service->profile_for_client("new-client"), "profile-a");
+  }
+
+  TEST_F(MultiseatAssignments, FailedWriteRestoresThePreviouslyConfirmedCatalog) {
+    write_status = private_state_file::write_status_e::not_committed;
+    EXPECT_EQ(service->set_assignment("profile-b", "client-a").status, 409);
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    EXPECT_FALSE(service->admin_snapshot().failed);
+    EXPECT_EQ(reloads, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, UncertainDurabilityRetainsOldAndNewRoutesWithoutHostFallback) {
+    write_status = private_state_file::write_status_e::durability_uncertain;
+    EXPECT_EQ(service->set_assignment("profile-a", "new-client").status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->routes_client("new-client"));
+    EXPECT_FALSE(service->profile_for_client("client-a"));
+    EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
+    EXPECT_EQ(reloads, 0U);
+  }
+
+  TEST_F(MultiseatAssignments, FailedReloadRetainsRoutesAndDisablesFurtherEdits) {
+    reload_fails = true;
+    EXPECT_EQ(service->set_assignment("", "client-a").status, 503);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_EQ(service->set_assignment("profile-b", "client-a").status, 503);
+    EXPECT_EQ(writes, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, UnprovenShutdownCannotWriteOrLoseTheRequestedDeviceRoute) {
+    state->close = false;
+    EXPECT_EQ(service->set_assignment("profile-b", "new-client").status, 503);
+    EXPECT_EQ(writes, 0U);
+    EXPECT_EQ(reloads, 0U);
+    EXPECT_TRUE(service->routes_client("new-client"));
+    EXPECT_TRUE(service->admin_snapshot().failed);
+  }
 
   TEST_F(MultiseatLaunchService, ResourceOperationsHaveOneOwnerAndIndependentLaunchIdentities) {
     const auto a = launch(), b = launch("client-b");
@@ -406,6 +546,71 @@ namespace {
     EXPECT_EQ(result->status, 200);
     EXPECT_EQ(published, 1U);
     EXPECT_EQ(state->begins, 1U);
+  }
+
+  TEST_F(MultiseatProfileHttp, ResolverReturnsOnlyTheAuthenticatedWorkerContractWithoutStartingResources) {
+    nvhttp::args_t request {{"game", std::string(profile_app_uuid)}, {"width", "1920"}, {"height", "1080"},
+      {"fps", "120.0"}, {"client_max_fps", "60"}, {"hdr", "1"}, {"device", "client-b"}};
+    const auto result = nvhttp::resolve_profile_request(client, request);
+    ASSERT_TRUE(result);
+    ASSERT_EQ(result->status, 200);
+    EXPECT_EQ(result->body["source"], "worker_profile_v1");
+    EXPECT_EQ(result->body["worker_profile"]["id"], *service->profile_for_client(client->uuid));
+    const auto &fields = result->body["resolved_profile"]["fields"];
+    EXPECT_EQ(fields["target_fps"]["value"], 60);
+    EXPECT_EQ(fields["target_fps"]["normalized"], true);
+    EXPECT_EQ(fields["hdr"]["value"], false);
+    EXPECT_EQ(fields["hdr"]["normalized"], true);
+    EXPECT_EQ(fields["target_bitrate_kbps"]["value"], 8000);
+    EXPECT_EQ(state->begins, 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, ResolverRejectsUnsupportedLocksAndMalformedRequests) {
+    for (const auto &[key, value] : std::vector<std::pair<std::string, std::string>> {
+      {"game", "host-game"}, {"encoder", "software"}, {"width", "1920.5"}, {"width", "nan"},
+      {"height", "0"}, {"fps", "0"}, {"fps", "inf"}, {"client_max_fps", "0"},
+      {"hdr", "2"}, {"mirrorDesktop", "1"}, {"closeDesktopSteamForPrivate", "1"},
+      {"bitrate_locked", "true"}}) {
+      nvhttp::args_t request {{"game", std::string(profile_app_uuid)}};
+      request.erase(key); request.emplace(key, value);
+      const auto result = nvhttp::resolve_profile_request(client, request);
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->status, 400) << key << "=" << value;
+    }
+    for (const auto &extra : std::vector<nvhttp::args_t> {
+      {{"bitrate_locked", "1"}, {"bitrate_kbps", "4000"}},
+      {{"display_locked", "1"}, {"width", "1921"}}}) {
+      auto request = extra; request.emplace("game", std::string(profile_app_uuid));
+      EXPECT_EQ(nvhttp::resolve_profile_request(client, request)->status, 409);
+    }
+    nvhttp::args_t duplicate {{"game", std::string(profile_app_uuid)}, {"fps", "60"}, {"fps", "120"}};
+    EXPECT_EQ(nvhttp::resolve_profile_request(client, duplicate)->status, 400);
+    EXPECT_EQ(nvhttp::resolve_profile_request({}, {})->status, 401);
+    EXPECT_EQ(state->begins, 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, WorkerAssertionMustMatchAssignmentAndMediaBeforeStartup) {
+    auto request = args();
+    request.emplace("workerProfile", *service->profile_for_client(client->uuid));
+    request.emplace("resolvedProfile", "1"); request.emplace("expectedTopology", "gamescope_stream");
+    request.emplace("resolvedHdr", "0"); request.emplace("bitrateKbps", "8000");
+    for (const auto &[key, value] : std::vector<std::pair<std::string, std::string>> {
+      {"workerProfile", "another-profile"}, {"expectedTopology", "desktop_display"},
+      {"bitrateKbps", "4000"}, {"resolvedHdr", "1"}}) {
+      auto bad = request; bad.erase(key); bad.emplace(key, value);
+      const auto result = nvhttp::launch_profile_request(client, bad, false, [](const auto &) { return true; });
+      ASSERT_TRUE(result);
+      EXPECT_NE(result->status, 200) << key;
+    }
+    EXPECT_EQ(state->begins, 0U);
+    const auto valid = nvhttp::launch_profile_request(client, request, false, [](const auto &) { return true; });
+    ASSERT_TRUE(valid);
+    EXPECT_EQ(valid->status, 200);
+    valid->launch->cancel();
+    uninstall_profile_launch_service(service);
+    const auto unassigned = nvhttp::launch_profile_request(client, request, false, [](const auto &) { return true; });
+    ASSERT_TRUE(unassigned);
+    EXPECT_EQ(unassigned->status, 409);
   }
 
   TEST_F(MultiseatProfileHttp, RevocationDuringStartupPreventsPublication) {

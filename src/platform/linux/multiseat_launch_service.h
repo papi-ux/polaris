@@ -4,6 +4,7 @@
 #pragma once
 #ifdef __linux__
 #include "multiseat_controller_production.h"
+#include "multiseat_profile_catalog.h"
 
 #include <chrono>
 #include <memory>
@@ -24,12 +25,15 @@ namespace multiseat {
   };
   enum class profile_poll_e { pending, selected, failed };
 
-  // Injectable ownership boundary. Only routes_client reads immutable state
-  // outside the owner thread. All resource operations run on that one thread.
+  // Injectable ownership boundary. Route and catalog queries read immutable
+  // snapshots outside the owner thread. All resource operations run on it.
   class profile_controller_t {
   public:
     virtual ~profile_controller_t() = default;
     virtual bool routes_client(std::string_view client) const = 0;
+    virtual std::optional<std::string> profile_for_client(std::string_view client) const { return std::nullopt; }
+    virtual std::vector<profile_summary_t> profile_catalog() const { return {}; }
+    virtual bool idle() const { return false; }
     virtual void reconcile() = 0;
     virtual profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) = 0;
     virtual profile_poll_e poll(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
@@ -40,15 +44,29 @@ namespace multiseat {
   std::unique_ptr<profile_controller_t> make_profile_controller(std::unique_ptr<controller_runtime_t> runtime);
   [[nodiscard]] std::optional<production_controller_options_t> load_controller_options(const std::filesystem::path &path);
 
+  struct profile_admin_options_t {
+    std::filesystem::path catalog;
+    std::function<std::unique_ptr<profile_controller_t>()> reload;
+    std::function<profiles::change_result_t(std::string_view, std::string_view)> persist;
+  };
+  struct profile_admin_snapshot_t {
+    bool available = false, changing = false, failed = false;
+    std::vector<profile_summary_t> profiles;
+  };
+
   class profile_launch_service_t final {
   public:
     explicit profile_launch_service_t(std::unique_ptr<profile_controller_t> controller,
-      std::chrono::milliseconds timeout = std::chrono::seconds(25));
+      std::chrono::milliseconds timeout = std::chrono::seconds(25), profile_admin_options_t admin = {});
     ~profile_launch_service_t();
     profile_launch_service_t(const profile_launch_service_t &) = delete;
     profile_launch_service_t &operator=(const profile_launch_service_t &) = delete;
     [[nodiscard]] bool routes_client(std::string_view client) const;
-    [[nodiscard]] profile_launch_result_t prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch);
+    [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client) const;
+    [[nodiscard]] profile_launch_result_t prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+      std::string_view expected_profile = {});
+    [[nodiscard]] profile_admin_snapshot_t admin_snapshot() const;
+    [[nodiscard]] profile_launch_result_t set_assignment(std::string profile, std::string client);
     // Cancellation only marks launches. Docker and input teardown remain on the
     // owner thread. Empty tokens allow an authenticated owner to cancel itself.
     [[nodiscard]] bool cancel_client(std::string_view client, std::string_view token = {});
@@ -63,5 +81,6 @@ namespace multiseat {
   [[nodiscard]] bool install_profile_launch_service(const std::shared_ptr<profile_launch_service_t> &service);
   void uninstall_profile_launch_service(const std::shared_ptr<profile_launch_service_t> &service);
   [[nodiscard]] std::shared_ptr<profile_launch_service_t> profile_service_for(std::string_view client);
+  [[nodiscard]] std::shared_ptr<profile_launch_service_t> installed_profile_service();
 }  // namespace multiseat
 #endif

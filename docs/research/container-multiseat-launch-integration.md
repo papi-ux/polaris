@@ -3,8 +3,9 @@
 Polaris can now own the Docker profile controller and route authenticated
 GameStream launches into saved profiles. `multiseat_enabled` defaults to `false`.
 An ordinary installation keeps its existing app list, host launch behavior,
-display handling, and input path. This implementation is experimental and has
-not yet passed two-client playback acceptance through the normal launch flow.
+display handling, and input path. This implementation is experimental.
+Two simultaneous Moonlight instances have passed loopback playback checks;
+independent physical clients and measured latency remain separate acceptance work.
 
 ## Explicit configuration
 
@@ -54,9 +55,10 @@ Enable only after creating the private catalog with the
 empty catalog remains inert. Invalid enabled configuration or unavailable
 authority stops startup with an error. Do not also enable the older
 `multiseat_moonlight_input` owner. Routes are a snapshot for the controller's
-lifetime, and its retained catalog lock prevents administrative reassignment
-until shutdown has proven cleanup complete. Restart the controller to load a
-changed catalog. The existing `max_sessions` host limit still applies; its
+lifetime, and its retained catalog lock prevents external administrative edits
+until shutdown has proven cleanup complete. The Devices page can now change
+assignments through the running controller while no profile session is active.
+The existing `max_sessions` host limit still applies; its
 default is two concurrent streams.
 
 ## Assigned device behavior
@@ -79,13 +81,19 @@ independent.
 
 The implemented media contract is SDR H.264 with 4:2:0 chroma, a whole frame
 rate, and stereo audio in 5 ms packets. The request parser bounds dimensions to 320 through 4096 by 240 through
-2160, and frame rate to 1 through 240 Hz; these are admission limits, not measured
+2160 with even dimensions, and frame rate to 1 through 240 Hz; these are admission limits, not measured
 performance guarantees. ANNOUNCE must agree with the prepared dimensions and
 frame rate. Host optimizer envelopes, HDR, HEVC, AV1, and surround audio are
-rejected. The Nova optimizer endpoint returns an explicit unsupported response
-for mapped devices. Nova currently requires a resolved profile even with a
-manual preset, so Nova profile launches remain a client integration task.
-Moonlight can request the supported contract through a manual stream preset.
+rejected. Mapped devices receive a dedicated `worker_profile_v1` response from
+the Nova optimizer endpoint. It resolves an SDR H.264 stream at 8000 kbps with
+stereo audio and a whole frame rate from 15 through 240 Hz. Explicit display
+and bitrate limits are checked before returning the contract.
+Nova validates the complete response and applies it only for the reserved
+profile app. Its launch includes `workerProfile` as an assertion against the
+current assignment, checked again at queue admission. A stale assertion is
+rejected even if the device has since become unassigned. It cannot select a
+different profile. Moonlight can request the supported contract through a
+manual stream preset without this Nova envelope.
 
 The worker H.264 stream uses one reference frame. The pinned NVIDIA plugin
 patch configures both the encoder's reference storage and prediction lists;
@@ -103,6 +111,28 @@ server commands. Server info reports only the requesting device's profile
 session. Unassigned devices retain the ordinary app list and launch path.
 
 ## Cancellation and shutdown
+
+The Devices page shows separate gaming profiles only when a profile controller
+is configured. Permanently paired devices with launch permission can be moved
+between provisioned profiles or returned to Standard streaming. Creating a
+profile remains an administrative command. Multiple devices may share its
+games and settings, with one active stream for that profile.
+
+The assignment API requires Web UI administrator authentication or the
+administrator API key. A paired streaming certificate alone is insufficient.
+Cookie based writes also require the existing CSRF token. The request supplies
+only a paired device UUID and an existing profile ID, never an image, path,
+volume or command.
+
+Assignments change on the same owner thread as resource operations. New profile
+launches are fenced while an edit is pending. Active or queued profile launches
+reject the edit without cancelling a stream. After cleanup is proven, the old
+controller closes and releases its catalog lease, one atomic catalog transaction
+moves the assignment, and a replacement controller loads the saved routes.
+Polaris itself does not restart. A failed write restores the prior catalog when
+possible. Uncertain durability or failed reconstruction preserves affected
+routes as unavailable, preventing fallback to host capture. The UI then requires
+configuration review and restart.
 
 Worker lifecycle generations are independent of host application generations.
 Worker startup and teardown do not resume, pause, terminate, or reconfigure the
@@ -145,8 +175,8 @@ independent physical client, LAN latency or reconnect acceptance.
 
 Available workloads are Gamescope `input-pong-v1` and the experimental
 [Steam launcher](container-multiseat-steam.md), with Big Picture or a typed game
-ID. Real Steam game acceptance, profile settings and assignment UI, Nova launch
-integration, AMD hardware and independent physical client acceptance remain
+ID. Real Steam game acceptance, profile creation UI, AMD hardware and
+independent physical client acceptance remain
 pending, including reconnect and measured latency.
 The UI must preserve the existing flow for one person with one device.
 Runtime images use Polaris builds from official Ubuntu. Required third party

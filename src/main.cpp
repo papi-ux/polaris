@@ -529,7 +529,15 @@ int main(int argc, char *argv[]) {
     auto created = multiseat::create_production_controller_runtime(*options);
     if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
       profile_service = std::make_shared<multiseat::profile_launch_service_t>(
-        multiseat::make_profile_controller(std::move(created.runtime)));
+        multiseat::make_profile_controller(std::move(created.runtime)), std::chrono::seconds(25),
+        multiseat::profile_admin_options_t {
+          .catalog = options->profile_catalog,
+          .reload = [settings = *options]() -> std::unique_ptr<multiseat::profile_controller_t> {
+            auto replacement = multiseat::create_production_controller_runtime(settings);
+            return replacement.status == multiseat::controller_runtime_create_status_e::ready_enabled ?
+              multiseat::make_profile_controller(std::move(replacement.runtime)) : nullptr;
+          }
+        });
       if (!multiseat::install_profile_launch_service(profile_service)) return 1;
       BOOST_LOG(info) << "Multiseat profile controller started"sv;
     } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {

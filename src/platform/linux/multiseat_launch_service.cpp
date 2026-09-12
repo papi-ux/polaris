@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <thread>
+#include <utility>
 
 namespace multiseat {
   namespace {
@@ -30,6 +31,14 @@ namespace multiseat {
     public:
       explicit production_profile_controller_t(std::unique_ptr<controller_runtime_t> runtime) : runtime_(std::move(runtime)) {}
       bool routes_client(std::string_view client) const override { return runtime_->routes_client(client); }
+      std::optional<std::string> profile_for_client(std::string_view client) const override {
+        return runtime_->profile_for_client(client);
+      }
+      std::vector<profile_summary_t> profile_catalog() const override { return runtime_->profile_catalog(); }
+      bool idle() const override {
+        return runtime_->seats() == 0 && runtime_->managed_workers() == 0 &&
+          runtime_->input_allocations() == 0 && runtime_->tracked_launches() == 0;
+      }
       void reconcile() override { (void) runtime_->reconcile(); }
       profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
         auto admitted = runtime_->admit_authenticated_profile_launch(launch, {
@@ -150,6 +159,10 @@ namespace multiseat {
   }
 
   struct profile_launch_service_t::impl_t {
+    struct admin_request_t {
+      std::string profile, client;
+      std::promise<profile_launch_result_t> promise;
+    };
     struct request_t {
       std::weak_ptr<rtsp_stream::launch_session_t> launch;
       std::promise<profile_launch_result_t> promise;
@@ -157,6 +170,11 @@ namespace multiseat {
       std::optional<seat_handle_t> seat;
     };
     std::unique_ptr<profile_controller_t> controller;
+    profile_admin_options_t admin;
+    std::shared_ptr<admin_request_t> queued_admin;
+    bool reconfiguring = false, admin_failed = false;
+    std::vector<profile_summary_t> fallback_catalog;
+    std::set<std::string> blocked_clients;
     const std::chrono::milliseconds timeout;
     std::mutex mutex;
     std::condition_variable wake, closed;
@@ -165,11 +183,55 @@ namespace multiseat {
     std::vector<std::weak_ptr<rtsp_stream::launch_session_t>> tracked;
     std::jthread thread;
 
-    impl_t(std::unique_ptr<profile_controller_t> value, std::chrono::milliseconds timeout_value) :
-        controller(std::move(value)), timeout(timeout_value) {
+    impl_t(std::unique_ptr<profile_controller_t> value, std::chrono::milliseconds timeout_value,
+           profile_admin_options_t admin_value) :
+        controller(std::move(value)), admin(std::move(admin_value)), timeout(timeout_value) {
       if (!controller || timeout <= std::chrono::milliseconds::zero() || timeout > std::chrono::seconds(25))
         throw std::invalid_argument("profile service options");
+      if (!admin.persist && !admin.catalog.empty())
+        admin.persist = [path = admin.catalog](auto profile, auto client) { return profiles::set_assignment(path, profile, client); };
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
+    }
+
+    void change_assignment(const std::shared_ptr<admin_request_t> &request, bool pending) noexcept {
+      profile_launch_result_t result {503, "Profile configuration could not be restored. Restart Polaris after reviewing the catalog."};
+      try {
+        if (pending || !controller || !controller->idle()) {
+          { std::lock_guard lock(mutex); blocked_clients.clear(); }
+          result = {409, "Stop profile sessions and wait for cleanup before changing assignments"};
+        } else {
+          {
+            std::lock_guard lock(mutex);
+            fallback_catalog = controller->profile_catalog();
+            blocked_clients.insert(request->client);
+          }
+          if (!controller->shutdown()) {
+            std::lock_guard lock(mutex);
+            admin_failed = true;
+          } else {
+            // Closing proves that no stream owns this catalog. Destruction
+            // releases the old global input owner before the replacement is built.
+            { std::lock_guard lock(mutex); controller.reset(); admin_failed = true; }
+            const auto persisted = admin.persist(request->profile, request->client);
+            if (persisted.status != private_state_file::write_status_e::durability_uncertain) {
+              auto replacement = admin.reload();
+              if (replacement) {
+                std::lock_guard lock(mutex);
+                controller = std::move(replacement);
+                admin_failed = false;
+                fallback_catalog.clear(); blocked_clients.clear();
+                result = persisted ? profile_launch_result_t {200, "Profile assignment saved"} :
+                  profile_launch_result_t {409, "Assignment was not saved; refresh before retrying"};
+              }
+            }
+          }
+        }
+      } catch (...) {
+        std::lock_guard lock(mutex);
+        admin_failed = true;
+      }
+      { std::lock_guard lock(mutex); reconfiguring = false; }
+      request->promise.set_value(result);
     }
 
     void run(std::stop_token stop) noexcept {
@@ -180,17 +242,20 @@ namespace multiseat {
       };
       for (;;) {
         bool drain;
+        std::shared_ptr<admin_request_t> change;
         {
           std::unique_lock lock(mutex);
           drain = stopping || stop.stop_requested();
+          change = std::exchange(queued_admin, {});
           while (!queued.empty()) { pending.push_back(std::move(queued.front())); queued.pop_front(); }
           std::erase_if(tracked, [](const auto &weak) { const auto launch = weak.lock(); return !launch || launch->is_cancelled(); });
         }
         if (drain) {
+          if (change) change->promise.set_value({503, "The profile controller is stopping"});
           for (const auto &request : pending) finish(request, {503, "The profile controller is stopping"});
           pending.clear();
           bool complete = false;
-          try { complete = controller->shutdown(); } catch (...) {}
+          try { complete = !controller || controller->shutdown(); } catch (...) {}
           if (complete || stop.stop_requested()) {
             std::lock_guard lock(mutex);
             stopped = complete;
@@ -198,8 +263,12 @@ namespace multiseat {
             return;
           }
         } else {
+          if (change) change_assignment(change, !pending.empty());
           bool reconciled = true;
-          try { controller->reconcile(); } catch (...) { reconciled = false; }
+          try {
+            if (controller && !admin_failed) controller->reconcile();
+            else reconciled = false;
+          } catch (...) { reconciled = false; }
           for (auto it = pending.begin(); it != pending.end();) {
             const auto &request = *it;
             const auto launch = request->launch.lock();
@@ -224,22 +293,36 @@ namespace multiseat {
           }
         }
         std::unique_lock lock(mutex);
-        wake.wait_for(lock, std::chrono::milliseconds(50), [&] { return !queued.empty() || stop.stop_requested(); });
+        wake.wait_for(lock, std::chrono::milliseconds(50), [&] { return !queued.empty() || queued_admin || stop.stop_requested(); });
       }
     }
   };
 
   profile_launch_service_t::profile_launch_service_t(std::unique_ptr<profile_controller_t> controller,
-    std::chrono::milliseconds timeout) : impl_(std::make_unique<impl_t>(std::move(controller), timeout)) {}
+    std::chrono::milliseconds timeout, profile_admin_options_t admin) :
+      impl_(std::make_unique<impl_t>(std::move(controller), timeout, std::move(admin))) {}
   profile_launch_service_t::~profile_launch_service_t() {
     stop_admission();
     impl_->thread.request_stop();
     impl_->wake.notify_all();
     impl_->thread.join();
   }
-  bool profile_launch_service_t::routes_client(std::string_view client) const { return impl_->controller->routes_client(client); }
+  bool profile_launch_service_t::routes_client(std::string_view client) const {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->blocked_clients.contains(std::string(client))) return true;
+    if (impl_->controller) return impl_->controller->routes_client(client);
+    for (const auto &profile : impl_->fallback_catalog)
+      if (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end()) return true;
+    return false;
+  }
+  std::optional<std::string> profile_launch_service_t::profile_for_client(std::string_view client) const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->controller && !impl_->admin_failed && !impl_->reconfiguring ?
+      impl_->controller->profile_for_client(client) : std::nullopt;
+  }
 
-  profile_launch_result_t profile_launch_service_t::prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
+  profile_launch_result_t profile_launch_service_t::prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+                                                         std::string_view expected_profile) {
     if (!launch || !routes_client(launch->unique_id)) return {404, "No profile is assigned to this device"};
     launch->require_worker_connection();
     if (launch->is_cancelled() || launch->lifecycle_generation || launch->watch_only || launch->input_only ||
@@ -253,8 +336,13 @@ namespace multiseat {
     auto future = request->promise.get_future();
     {
       std::lock_guard lock(impl_->mutex);
-      if (impl_->stopping || impl_->tracked.size() >= 64 || launch->lifecycle_generation)
+      if (impl_->stopping || impl_->reconfiguring || impl_->admin_failed || !impl_->controller ||
+          impl_->tracked.size() >= 64 || launch->lifecycle_generation)
         return {503, "Profile launch admission is unavailable"};
+      if (!impl_->controller->routes_client(launch->unique_id) ||
+          (!expected_profile.empty() && impl_->controller->profile_for_client(launch->unique_id) !=
+            std::optional<std::string>{expected_profile}))
+        return {409, "The profile assignment changed; refresh the library"};
       const auto generation = next_generation.fetch_add(1);
       if (generation < (1ULL << 63) || generation == std::numeric_limits<std::uint64_t>::max()) return {};
       launch->lifecycle_generation = generation;
@@ -270,6 +358,40 @@ namespace multiseat {
       impl_->wake.notify_all();
       return {504, "Profile startup timed out"};
     }
+    return future.get();
+  }
+
+  profile_admin_snapshot_t profile_launch_service_t::admin_snapshot() const {
+    std::lock_guard lock(impl_->mutex);
+    return {static_cast<bool>(impl_->admin.reload && impl_->admin.persist), impl_->reconfiguring,
+      impl_->admin_failed && !impl_->reconfiguring,
+      impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog};
+  }
+
+  profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
+    auto request = std::make_shared<impl_t::admin_request_t>();
+    request->profile = std::move(profile); request->client = std::move(client);
+    auto future = request->promise.get_future();
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (!impl_->admin.reload || !impl_->admin.persist || !impl_->controller || impl_->admin_failed || impl_->stopping)
+        return {503, "Profile administration is unavailable"};
+      if (request->client.empty() || request->client.size() > 256) return {400, "Invalid paired device"};
+      const auto catalog = impl_->controller->profile_catalog();
+      if (!request->profile.empty() && std::none_of(catalog.begin(), catalog.end(),
+          [&](const auto &entry) { return entry.id == request->profile; })) return {404, "Unknown profile"};
+      if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+          [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+        return {409, "Stop profile sessions and wait for cleanup before changing assignments"};
+      impl_->reconfiguring = true;
+      // Fence even a previously unassigned device before the owner thread
+      // starts the catalog transaction. It must not fall through to host apps.
+      impl_->blocked_clients.insert(request->client);
+      impl_->queued_admin = request;
+    }
+    impl_->wake.notify_all();
+    if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
+      return {202, "The assignment change is still running; refresh before retrying"};
     return future.get();
   }
 
@@ -320,6 +442,10 @@ namespace multiseat {
   std::shared_ptr<profile_launch_service_t> profile_service_for(std::string_view client) {
     std::lock_guard lock(installed_mutex);
     return installed && installed->routes_client(client) ? installed : nullptr;
+  }
+  std::shared_ptr<profile_launch_service_t> installed_profile_service() {
+    std::lock_guard lock(installed_mutex);
+    return installed;
   }
 }  // namespace multiseat
 #endif

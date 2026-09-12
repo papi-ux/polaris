@@ -121,6 +121,7 @@ namespace multiseat {
           std::move(dependencies.recovered_input_expectations)
         ), worker_media_enabled(options.worker_media_enabled),
         profile_routes(std::move(options.profile_routes)),
+        profile_catalog(std::move(options.profile_catalog)),
         profile_launch_timeout(options.profile_launch_timeout),
         now(dependencies.now) {
       if (!now) now = [] { return worker_broker_t::monotonic_clock_t::now(); };
@@ -153,6 +154,7 @@ namespace multiseat {
     std::vector<input::expectation_t> input_expectations;
     const bool worker_media_enabled;
     const std::vector<controller_profile_route_t> profile_routes;
+    const std::vector<profile_summary_t> profile_catalog;
     const std::chrono::milliseconds profile_launch_timeout;
     worker_broker_t::now_fn_t now;
     std::vector<owned_profile_launch_t> profile_launches;
@@ -841,6 +843,15 @@ namespace multiseat {
       return std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end();
     });
   }
+
+  std::optional<std::string> controller_runtime_t::profile_for_client(std::string_view client_key) const {
+    for (const auto &route : impl_->profile_routes)
+      if (std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end())
+        return route.profile_key;
+    return std::nullopt;
+  }
+
+  std::vector<profile_summary_t> controller_runtime_t::profile_catalog() const { return impl_->profile_catalog; }
 
   std::optional<seat_state_e> controller_runtime_t::seat_state(const seat_handle_t &handle) const {
     std::scoped_lock lock {impl_->state_mutex};

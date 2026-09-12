@@ -19,6 +19,12 @@
 
 namespace multiseat {
 
+  struct profile_summary_t {
+    std::string id;
+    std::string name;
+    std::vector<std::string> clients;
+  };
+
   /** Immutable operator routing for one persistent profile in this epoch. */
   struct controller_profile_route_t {
     std::string profile_key;
@@ -33,6 +39,7 @@ namespace multiseat {
     /** Selected launches require their exact worker's authenticated media lease. */
     bool worker_media_enabled = false;
     std::vector<controller_profile_route_t> profile_routes;
+    std::vector<profile_summary_t> profile_catalog;
     /** Deadline from profile reservation through successful RTSP setup. */
     std::chrono::milliseconds profile_launch_timeout {30000};
   };
@@ -257,6 +264,8 @@ namespace multiseat {
 
     [[nodiscard]] bool admission_ready() const;
     [[nodiscard]] bool routes_client(std::string_view client_key) const;
+    [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client_key) const;
+    [[nodiscard]] std::vector<profile_summary_t> profile_catalog() const;
     [[nodiscard]] std::optional<seat_state_e> seat_state(const seat_handle_t &handle) const;
     [[nodiscard]] bool shutting_down() const;
     [[nodiscard]] bool closed() const;
