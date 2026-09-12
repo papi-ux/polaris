@@ -74,6 +74,7 @@ namespace crypto {
     _all_actions     = list | view | launch,
 
     _default         = view | list,      // Browse and watch without launch or input
+    _gamepad_only    = view | input_controller, // Watch a stream and play, nothing else
     _game_control    = _all_inputs | _all_actions, // Game launch/control without operations
     _no              = 0,                // No permissions are granted
     _all             = _all_inputs | _all_opeiations | _all_actions, // All current permissions

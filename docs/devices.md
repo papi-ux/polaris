@@ -26,6 +26,7 @@ access until you edit it.
 | Preset | Can | Cannot |
 |---|---|---|
 | **Viewer Access** | Watch an existing stream | Browse the library, launch games, send input |
+| **Gamepad Access** | Watch an existing stream and play with a controller | Browse the library, launch games, send keyboard, mouse, touch, or pen input |
 | **Browse & Watch** | List the library and join an existing stream | Launch games, send input |
 | **Game Control** | Browse, launch, and control games with controller, keyboard, mouse, touch, and pen | Read or set the clipboard, transfer files, run server commands |
 | **Full Control** | Everything, including clipboard, file transfer, and server commands | Nothing withheld; use only for devices you fully trust |
@@ -34,6 +35,11 @@ access until you edit it.
 list apps, view streams, launch apps, clipboard read and set, server command, and the five input
 kinds. A device whose permissions match no preset shows as
 **Custom Access**.
+
+Gamepad Access exists for handing a controller to a guest: they can join a stream you started
+and play, and they cannot browse what you own, start anything, or reach your keyboard and
+mouse. Pair them with temporary authorization and both the access and the pairing end when
+they disconnect.
 
 A device with Browse & Watch that tries to start a stream gets a permission-denied answer; the
 [troubleshooting entry](troubleshooting.md#paired-client-gets-permission-denied-403-when-starting-a-stream)
