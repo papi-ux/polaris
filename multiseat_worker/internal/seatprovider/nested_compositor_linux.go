@@ -352,6 +352,20 @@ func createGamescopeReadyFIFO(
 	return file, identity, nil
 }
 
+// describeChildExit names how a child finished, so a helper that refused to
+// start says more than that it did not become ready. Gamescope reports the
+// reason itself on stderr, which the supervisor's diagnostic sink keeps.
+func describeChildExit(child *managedChild) string {
+	if child == nil || child.command == nil || child.command.ProcessState == nil {
+		return "an unreported status"
+	}
+	state := child.command.ProcessState
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return "signal " + strconv.Itoa(int(status.Signal()))
+	}
+	return "status " + strconv.Itoa(state.ExitCode())
+}
+
 func waitForGamescopeReadyRecord(
 	parent context.Context,
 	child *managedChild,
@@ -380,7 +394,9 @@ func waitForGamescopeReadyRecord(
 		return "", errors.New("runtime Gamescope startup was canceled")
 	case <-child.done:
 		_ = ready.Close()
-		return "", errors.New("runtime Gamescope exited before readiness")
+		return "", errors.New(
+			"runtime Gamescope exited before readiness with " + describeChildExit(child),
+		)
 	case received := <-result:
 		if received.err != nil {
 			return "", errors.New("runtime Gamescope readiness was invalid")
