@@ -545,6 +545,11 @@ configure_polaris_test_target(${PROJECT_NAME}
     ${TEST_FAST_SOURCES}
 )
 
+add_test(
+    NAME polaris_prepared_ffmpeg_cmake
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/tests/cmake/test_prepared_ffmpeg.cmake
+)
+
 if (UNIX AND NOT APPLE)
     add_test(
         NAME polaris_invalid_locale_startup
