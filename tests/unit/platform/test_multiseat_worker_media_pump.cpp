@@ -281,11 +281,11 @@ TEST(MultiseatWorkerMediaPump, AStoppingSessionEndsTheStreamAndClosesItsTranspor
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 
-TEST(MultiseatWorkerMediaPump, CarriesTheHostsKeyframeAndInvalidationAsks) {
+TEST(MultiseatWorkerMediaPump, DefersEarlyKeyframeAndInvalidationAsksUntilAcknowledgement) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x46)};
   auto authority = create_authority(store, identity_for(), "generation-pump-asks");
-  fake_worker_t worker {authority, fake_behavior_e::media_contract};
+  fake_worker_t worker {authority, fake_behavior_e::media_contract, true, {}, 100ms};
   controller_client_t client;
   ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
   ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
@@ -317,6 +317,8 @@ TEST(MultiseatWorkerMediaPump, CarriesTheHostsKeyframeAndInvalidationAsks) {
   EXPECT_EQ(report.idr_requests, 1U);
   EXPECT_EQ(report.invalidations, 1U);
   const auto seen = worker.contract_messages();
+  ASSERT_EQ(seen.size(), 3U);
+  EXPECT_EQ(seen.front(), message_e::media_config_ack);
   EXPECT_NE(std::find(seen.begin(), seen.end(), message_e::request_idr), seen.end());
   EXPECT_NE(std::find(seen.begin(), seen.end(), message_e::invalidate_ref_frames), seen.end());
   const auto invalidated = worker.invalidated();
@@ -325,6 +327,33 @@ TEST(MultiseatWorkerMediaPump, CarriesTheHostsKeyframeAndInvalidationAsks) {
   EXPECT_EQ(invalidated->last, 9U);
 
   worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerMediaPump, ShutdownDuringContractWaitDoesNotConsumeQueuedControls) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x47)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-wait");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract, true, {}, 150ms};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  std::atomic<bool> stopping {false};
+  std::atomic<unsigned> consumed {0};
+  auto host = quiet_host();
+  host.stop_requested = [&] { return stopping.load(); };
+  host.take_idr_request = [&] { ++consumed; return true; };
+  host.take_invalidation = [&]() -> std::optional<std::pair<std::int64_t, std::int64_t>> {
+    ++consumed;
+    return std::pair<std::int64_t, std::int64_t> {1, 2};
+  };
+  delivered_t delivered;
+  std::jthread stopper {[&] { std::this_thread::sleep_for(30ms); stopping = true; }};
+  const auto report = run(client.lease_connection(), matching_expectation(), delivered.sinks(), host);
+  EXPECT_EQ(report.status, pump_status_e::ended_on_shutdown);
+  EXPECT_EQ(report.video_frames, 0U);
+  EXPECT_EQ(consumed.load(), 0U);
+  worker.stop();
+  EXPECT_TRUE(worker.contract_messages().empty());
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 

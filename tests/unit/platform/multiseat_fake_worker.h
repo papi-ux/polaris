@@ -246,13 +246,15 @@ namespace multiseat_test {
       const authority_handle_t &authority,
       fake_behavior_e behavior = fake_behavior_e::healthy,
       bool include_media = true,
-      std::function<bool(int, channel_e)> script = {}
+      std::function<bool(int, channel_e)> script = {},
+      std::chrono::milliseconds contract_delay = {}
     ):
         identity_(authority.identity()),
         paths_(authority.paths()),
         behavior_(behavior),
         include_media_(include_media),
-        script_(std::move(script)) {
+        script_(std::move(script)),
+        contract_delay_(contract_delay) {
       std::copy(
         authority.capability().begin(),
         authority.capability().end(),
@@ -432,6 +434,9 @@ namespace multiseat_test {
             auto output_identity = identity_;
             if (behavior_ == fake_behavior_e::cross_routed_media) {
               ++output_identity.generation;
+            }
+            if (behavior_ == fake_behavior_e::media_contract) {
+              std::this_thread::sleep_for(contract_delay_);
             }
             if (behavior_ == fake_behavior_e::media_contract &&
                 !send_test_frame(connection, {
@@ -618,6 +623,7 @@ namespace multiseat_test {
     fake_behavior_e behavior_;
     bool include_media_ = true;
     std::function<bool(int, channel_e)> script_;
+    std::chrono::milliseconds contract_delay_;
     int control_listener_ = -1;
     int media_listener_ = -1;
     std::thread control_thread_;

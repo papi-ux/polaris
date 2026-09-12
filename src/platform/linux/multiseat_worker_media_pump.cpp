@@ -78,6 +78,10 @@ namespace multiseat::media {
         return stopped_.load();
       }
 
+      void enable_media_controls() {
+        media_controls_ready_.store(true);
+      }
+
     private:
       void join() {
         finished_.store(true);
@@ -95,6 +99,14 @@ namespace multiseat::media {
             // returns it, so a stopping session never waits for the worker.
             connection_.close();
             return;
+          }
+          // Clients can request their first keyframe as soon as control opens.
+          // Leave those requests queued until the worker accepts the contract;
+          // its encoder must reject controls before that acknowledgement.
+          // Shutdown remains observable while receive_media waits for it.
+          if (!media_controls_ready_.load()) {
+            std::this_thread::sleep_for(request_tick);
+            continue;
           }
           if (requests_.take_invalidation) {
             if (const auto span = requests_.take_invalidation()) {
@@ -122,6 +134,7 @@ namespace multiseat::media {
       std::uint64_t invalidations_ = 0;
       std::atomic<bool> finished_ {false};
       std::atomic<bool> stopped_ {false};
+      std::atomic<bool> media_controls_ready_ {false};
       std::thread thread_;
     };
 
@@ -226,6 +239,7 @@ namespace multiseat::media {
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
       return finish(pump_status_e::acknowledgement_refused);
     }
+    request_side.enable_media_controls();
 
     std::vector<std::uint8_t> bytes;
     while (true) {
