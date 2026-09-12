@@ -3,6 +3,7 @@
  * @brief Private profile catalog transactions and fresh Docker volume setup.
  */
 #include "multiseat_profile_catalog.h"
+#include "multiseat_profile_network.h"
 #ifdef __linux__
 
 #include "multiseat_container_host.h"
@@ -140,9 +141,10 @@ namespace multiseat::profiles {
       const auto images = docker(host, {"image", "inspect", entry.storage.image_reference});
       if (!images.is_array() || images.size() != 1 || images[0].at("Id") != entry.storage.image_reference ||
           images[0].at("Os") != "linux" ||
-          images[0].at("Config").at("Labels").at("io.polaris.multiseat.profile") != "gamescope" ||
-          (images[0].at("Config").contains("Volumes") && !images[0].at("Config").at("Volumes").empty())) {
-        throw std::runtime_error("image identity or implicit volumes rejected");
+          images[0].at("Config").at("Labels").at("io.polaris.multiseat.profile") != family(entry.storage.runtime_profile) ||
+          (images[0].at("Config").contains("Volumes") && !images[0].at("Config").at("Volumes").empty()) ||
+          (images[0].at("Config").contains("ExposedPorts") && !images[0].at("Config").at("ExposedPorts").empty())) {
+        throw std::runtime_error("image identity, implicit volumes, or exposed ports rejected");
       }
       result.volume_name = volume;
       result.initializer_name = "polaris-profile-init-" + entry.storage.profile_key;
@@ -180,6 +182,11 @@ namespace multiseat::profiles {
         "--mount=type=volume,src=" + volume + ",dst=/profile,volume-nocopy",
         "--entrypoint=/usr/bin/python3", entry.storage.image_reference, "-I", "-c", initialize_code}, false);
       inspect_volume();
+      if (entry.storage.runtime_profile == runtime_profile_e::steam) {
+        result.network_name = container::profile_network_name(entry.storage.profile_key);
+        if (!container::create_profile_network(host, entry.storage.profile_key))
+          throw std::runtime_error("Steam profile network could not be provisioned authoritatively");
+      }
     }
   }  // namespace
 
@@ -282,8 +289,14 @@ namespace multiseat::profiles {
   }
 
   change_result_t create(const std::filesystem::path &path, std::string_view name,
-                         std::string_view image, container::host_t &host) {
+                         std::string_view image, container::host_t &host, const workload_plan_t &workload) {
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
+      const auto runtime_profile = workload.kind == workload_kind_e::gamescope ? runtime_profile_e::gamescope :
+        workload.kind == workload_kind_e::steam ? runtime_profile_e::steam : runtime_profile_e::unknown;
+      if (!container::supported_streaming_workload(runtime_profile, workload)) {
+        result.error = "Unsupported profile workload. Steam requires Big Picture or a canonical positive game ID.";
+        return std::nullopt;
+      }
       if (catalog.owner_uid != host.effective_uid() || catalog.owner_gid != host.effective_gid()) {
         result.error = "Catalog owner does not match the runtime user."; return std::nullopt;
       }
@@ -292,8 +305,8 @@ namespace multiseat::profiles {
         return std::nullopt;
       }
       entry_t entry {
-        .storage = {uuid_util::uuid_t::generate().string(), {}, runtime_profile_e::gamescope, std::string(image)},
-        .name = std::string(name), .workload = {workload_kind_e::gamescope, "input-pong-v1"}, .client_keys = {},
+        .storage = {uuid_util::uuid_t::generate().string(), {}, runtime_profile, std::string(image)},
+        .name = std::string(name), .workload = workload, .client_keys = {},
       };
       entry.storage.opaque_volume_name = "pv-" + entry.storage.profile_key;
       catalog.profiles.push_back(entry);
@@ -308,6 +321,7 @@ namespace multiseat::profiles {
     if (argc < 2) {
       std::cerr << "Usage: polaris --multiseat-profiles init|list CATALOG\n"
                    "       polaris --multiseat-profiles create CATALOG NAME LOCAL_IMAGE_SHA256\n"
+                   "       polaris --multiseat-profiles create-steam CATALOG NAME LOCAL_IMAGE_SHA256 [GAME_ID]\n"
                    "       polaris --multiseat-profiles assign CATALOG PROFILE_ID PAIRED_DEVICE_ID\n"
                    "       polaris --multiseat-profiles unassign CATALOG PAIRED_DEVICE_ID\n";
       return 2;
@@ -328,6 +342,9 @@ namespace multiseat::profiles {
     } else if (action == "create" && argc == 4) {
       container::local_host_t host;
       result = create(path, argv[2], argv[3], host);
+    } else if (action == "create-steam" && (argc == 4 || argc == 5)) {
+      container::local_host_t host;
+      result = create(path, argv[2], argv[3], host, {workload_kind_e::steam, argc == 5 ? argv[4] : "big-picture-v1"});
     } else if (action == "assign" && argc == 4) result = assign(path, argv[2], argv[3]);
     else if (action == "unassign" && argc == 3) result = unassign(path, argv[2]);
     else { std::cerr << "Unknown profile operation or argument count.\n"; return 2; }
@@ -337,6 +354,7 @@ namespace multiseat::profiles {
       if (!result) std::cerr << "Retained volume=" << result.volume_name
         << "; initializer may remain: " << result.initializer_name << '\n';
     }
+    if (!result.network_name.empty()) std::cout << "network=" << result.network_name << '\n';
     return result ? 0 : 1;
   }
 }  // namespace multiseat::profiles

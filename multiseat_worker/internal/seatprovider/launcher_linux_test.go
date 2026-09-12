@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -96,14 +97,41 @@ func TestLauncherRechecksNestedProtocolsBeforeApplicationStart(t *testing.T) {
 
 func TestLauncherRejectsUnimplementedWorkloads(t *testing.T) {
 	request := seatruntime.Request{Stage: seatruntime.StageLauncher, RuntimeNamespace: "launcher-test", RuntimeProfile: "gamescope", WorkloadKind: seatruntime.WorkloadGamescope, WorkloadID: "input-pong-v1", WaylandSocket: "polaris-wayland-test", AudioSink: "audio-test", InputSeat: "input-test"}
-	path, err := launcherExecutable(request)
-	if err != nil || path != "/usr/libexec/polaris-seat/workloads/input-pong-v1" {
-		t.Fatal(path, err)
+	command, err := planLauncher(request)
+	if err != nil || command.executable != "/usr/libexec/polaris-seat/workloads/input-pong-v1" || len(command.arguments) != 0 || command.retainDescendants {
+		t.Fatal(command, err)
 	}
 	for _, id := range []string{"../input-pong-v1", "/bin/sh", "steam", "unknown", "input-pong-v1 --other"} {
 		request.WorkloadID = id
-		if _, err := launcherExecutable(request); err == nil {
+		if _, err := planLauncher(request); err == nil {
 			t.Fatal("unimplemented workload accepted")
+		}
+	}
+}
+
+func TestSteamLauncherUsesTypedTargetsAndCanonicalPackagePath(t *testing.T) {
+	request := seatruntime.Request{Stage: seatruntime.StageLauncher, RuntimeNamespace: "steam-test", RuntimeProfile: "steam", WorkloadKind: seatruntime.WorkloadSteam, WorkloadID: seatruntime.SteamBigPicture, WaylandSocket: "polaris-wayland-test", AudioSink: "audio-test", InputSeat: "input-test"}
+	for _, target := range []string{seatruntime.SteamBigPicture, "570"} {
+		request.WorkloadID = target
+		command, err := planLauncher(request)
+		if err != nil || command.executable != "/usr/bin/bash" || command.packageScript != "/usr/games/steam" || !command.retainDescendants {
+			t.Fatal(command, err)
+		}
+		want := []string{"/usr/games/steam", "-gamepadui"}
+		if target == "570" {
+			want = append(want, "-applaunch", "570")
+		}
+		if !reflect.DeepEqual(command.arguments, want) {
+			t.Fatal(command.arguments)
+		}
+		environment, err := launcherEnvironment(request, launcherSession{display: ":0", width: 1920, height: 1080, refresh: 60000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range []string{"DISPLAY=:0", "HOME=" + launcherHome, "XDG_RUNTIME_DIR=/run/polaris", "PULSE_SINK=audio-test"} {
+			if !strings.Contains(strings.Join(environment, "\n"), required+"\n") {
+				t.Fatalf("missing private environment %s", required)
+			}
 		}
 	}
 }
@@ -121,11 +149,15 @@ func TestWorkloadTreeHelper(t *testing.T) {
 	environment := func(next string) []string {
 		return []string{"POLARIS_WORKLOAD_TEST_MODE=" + next, "POLARIS_WORKLOAD_TEST_DIRECTORY=" + directory}
 	}
-	if mode == "supervise" {
+	if mode == "supervise" || mode == "supervise-exit" {
 		if err := enableWorkloadSubreaper(); err != nil {
 			t.Fatal(err)
 		}
-		child, err := startManagedChild(executable, uint32(os.Geteuid()), []string{"-test.run=^TestWorkloadTreeHelper$"}, environment("parent"), nil)
+		next := "parent"
+		if mode == "supervise-exit" {
+			next = "parent-exit"
+		}
+		child, err := startManagedChild(executable, uint32(os.Geteuid()), []string{"-test.run=^TestWorkloadTreeHelper$"}, environment(next), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -135,20 +167,36 @@ func TestWorkloadTreeHelper(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(directory, "leaf")); err == nil {
 				break
 			}
-			if time.Now().After(deadline) || child.exited() {
+			if time.Now().After(deadline) || (mode == "supervise" && child.exited()) {
 				t.Fatal("workload descendants did not start")
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
+		if mode == "supervise-exit" {
+			select {
+			case <-child.done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("primary did not exit")
+			}
+			if alive, err := launcherDescendantsAlive(true); err != nil || !alive {
+				t.Fatal("detached Steam lifetime lost", err)
+			}
+			if alive, err := launcherDescendantsAlive(false); err != nil || alive {
+				t.Fatal("ordinary workload retained descendants", err)
+			}
+		}
 		if err := stopWorkload(child, 4*time.Second); err != nil {
 			t.Fatal(err)
+		}
+		if alive, err := launcherDescendantsAlive(true); err != nil || alive {
+			t.Fatal("retired descendants keep session alive", err)
 		}
 		return
 	}
 	signal.Ignore(syscall.SIGTERM)
-	if mode == "parent" || mode == "middle" {
+	if mode == "parent" || mode == "middle" || mode == "parent-exit" {
 		next := "middle"
-		if mode == "middle" {
+		if mode == "middle" || mode == "parent-exit" {
 			next = "leaf"
 		}
 		command := exec.Command(executable, "-test.run=^TestWorkloadTreeHelper$")
@@ -163,7 +211,33 @@ func TestWorkloadTreeHelper(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, mode), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if mode == "parent-exit" {
+		return
+	}
 	time.Sleep(30 * time.Second)
+}
+
+func TestSteamLauncherRetainsDetachedClientAfterInitialScriptExits(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(parent, executable, "-test.run=^TestWorkloadTreeHelper$")
+	command.Env = []string{"POLARIS_WORKLOAD_TEST_MODE=supervise-exit", "POLARIS_WORKLOAD_TEST_DIRECTORY=" + directory}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("detached client supervision failed: %v\n%s", err, output)
+	}
+	content, err := os.ReadFile(filepath.Join(directory, "leaf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(string(content))
+	if err != nil || syscall.Kill(pid, 0) != syscall.ESRCH {
+		t.Fatal("detached client remains", err)
+	}
 }
 
 func TestWorkloadStopReapsEscapedDescendantsAndPreservesOtherProcesses(t *testing.T) {

@@ -37,9 +37,11 @@ Existing source history and required copyright notices remain intact.
 The images install launcher packages without signing into accounts, accepting
 user agreements, downloading a game or executing its first launch. Steam's
 installer downloads the client on first use. Heroic and Lutris may download
-runners. The current worker denies network access, so provisioning and network
-policy need explicit implementation before those launcher profiles can be used.
-Concrete launcher process adapters and profile/client activation remain pending.
+runners. The [Steam adapter](../../docs/research/container-multiseat-steam.md)
+now provisions a dedicated profile bridge and supervises Big Picture or a typed
+game ID. The validation workload retains networking disabled. Host profile
+activation is implemented behind an explicit setting; real launcher acceptance,
+Heroic and Lutris adapters, and assignment UI remain pending.
 The NVIDIA layer currently provides amd64 userspace; 32 bit NVIDIA games require
 a separately packaged and validated matching i386 driver closure.
 

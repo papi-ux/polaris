@@ -125,8 +125,9 @@ RTSP rollback, worker input allocation, and host versus worker exit behavior.
 Injected controller tests do not prove Docker startup, media delivery, controller
 latency, or client playback on this revision.
 
-The available profile workload is still Gamescope `input-pong-v1`. Steam game
-launching, profile settings and assignment UI, Nova launch integration, and
+Available workloads are Gamescope `input-pong-v1` and the experimental
+[Steam launcher](container-multiseat-steam.md), with Big Picture or a typed game
+ID. Real Steam game acceptance, profile settings and assignment UI, Nova launch integration, and
 two-client audio, video, input, reconnect, and cleanup acceptance remain pending.
 The UI must preserve the existing flow for one person with one device.
 Runtime images use Polaris builds from official Ubuntu. Required third party

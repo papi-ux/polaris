@@ -16,6 +16,36 @@ import (
 
 const maximumWorkloadChildren = 256
 
+// Call only after the primary command's Wait has completed. Steam can replace
+// its initial script with detached descendants during bootstrap or an update.
+// Reap exited descendants so zombies cannot keep a profile session alive.
+func launcherDescendantsAlive(retain bool) (bool, error) {
+	if !retain {
+		return false, nil
+	}
+	for reaped := 0; ; reaped++ {
+		if reaped > maximumWorkloadChildren {
+			return false, errors.New("launcher descendant reap bound exceeded")
+		}
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.ECHILD {
+			return false, nil
+		}
+		if err != nil {
+			return false, errors.New("launcher descendant state is unavailable")
+		}
+		if pid == 0 {
+			break
+		}
+	}
+	children, err := ownWorkloadChildren()
+	return len(children) != 0, err
+}
+
 // Called only by the dedicated launcher process. Adopted game descendants,
 // including helpers that call setsid, remain owned by this provider on exit.
 func enableWorkloadSubreaper() error {

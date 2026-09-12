@@ -9,6 +9,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+
+	"github.com/papi-ux/polaris/multiseat_worker/internal/seatruntime"
 )
 
 // The literal final option is controller-owned. Environment variables cannot
@@ -24,8 +26,8 @@ func parseWorkerRunMode(arguments []string) (workloadPlan, bool, error) {
 }
 
 func runProductionSeatWorker(parent context.Context, config workerConfig, paths workerPaths, uid uint32) error {
-	if parent == nil || uid == 0 || config.DisplayHDR || config.RuntimeProfile != "gamescope" ||
-		config.Compositor != "gamescope" || config.Workload.Kind != workloadKindGamescope || config.Workload.TargetID != "input-pong-v1" {
+	if parent == nil || uid == 0 || config.DisplayHDR || config.Compositor != "gamescope" ||
+		!seatruntime.StreamingWorkloadSupported(config.RuntimeProfile, seatruntime.WorkloadKind(config.Workload.Kind), config.Workload.TargetID) {
 		return errors.New("streaming worker allocation is not supported")
 	}
 	// D-Bus requires an NSS entry even with numeric EXTERNAL authentication.

@@ -20,14 +20,17 @@ directory, which admits only worker authority records.
 polaris --multiseat-profiles init "$catalog_path"
 polaris --multiseat-profiles list "$catalog_path"
 polaris --multiseat-profiles create "$catalog_path" "Living room" "$worker_image_id"
+polaris --multiseat-profiles create-steam "$catalog_path" "Steam room" "$steam_worker_image_id"
 polaris --multiseat-profiles assign "$catalog_path" "$profile_id" "$paired_device_id"
 polaris --multiseat-profiles unassign "$catalog_path" "$paired_device_id"
 ```
 
 `worker_image_id` is a locally built immutable `sha256:` image ID with 64 lowercase
-hex digits. Create currently provisions the implemented Gamescope
-`input-pong-v1` validation workload. The image must identify itself as the
-Gamescope runtime and must not declare implicit volumes. No image is pulled.
+hex digits. `create` provisions the Gamescope `input-pong-v1` validation workload.
+`create-steam` provisions Big Picture and accepts an optional canonical numeric
+game ID after the image ID. See the [Steam profile document](container-multiseat-steam.md)
+for its launcher and network boundary. The image must identify itself as the
+selected runtime and must not declare implicit volumes or exposed ports. No image is pulled.
 Current images require the service user's UID and GID to both be 1000; other
 identities fail before provisioning.
 
@@ -76,11 +79,13 @@ user namespace, a read only root filesystem, no new privileges, bounded resource
 and only CHOWN and FOWNER capabilities. Fixed Python code requires an empty,
 root owned directory, changes only its root ownership to 1000:1000 and mode 0700,
 syncs the directory, and verifies the result. It never recursively changes or
-adopts an existing home. The catalog is published only after successful completion.
+adopts an existing home. Steam provisioning then creates and verifies its
+dedicated profile bridge. The catalog is published only after all resources
+have been verified.
 
-A failure or crash after volume creation can leave a labeled orphan volume or an
-initializer container. No automatic deletion occurs. A returned error reports
-the opaque volume and initializer names when available. After a crash, inspect
+A failure or crash after volume creation can leave a labeled orphan volume,
+initializer container, or Steam profile network. No automatic deletion occurs.
+A returned error reports the opaque resource names when available. After a crash, inspect
 resources labeled `io.polaris.multiseat.profile`; compare their opaque IDs with
 the catalog before any manual recovery. If persistence reports uncertain
 durability, the replacement may already be visible: read the catalog back before
@@ -92,8 +97,8 @@ This provides administrative storage and controller ingestion. Explicit host
 configuration, controller ownership, reconciliation, and HTTP launch activation
 are implemented behind the default-off profile launch setting. Settings UI and
 pairing UI assignments remain separate work.
-Steam, Heroic, and Lutris have typed catalog families and built runtime images,
-but their game launch adapters and provisioning network policies remain pending.
+Steam has a typed launcher and dedicated network policy. Heroic and Lutris have
+typed catalog families and built runtime images; their launch adapters remain pending.
 The catalog does not claim real game or client playback acceptance.
 
 The runtime images use Polaris builds from official Ubuntu. Required notices and

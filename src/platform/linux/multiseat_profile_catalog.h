@@ -42,6 +42,7 @@ namespace multiseat::profiles {
     // adopt, reinitialize, or delete a volume after an uncertain transaction.
     std::string volume_name;
     std::string initializer_name;
+    std::string network_name;
     explicit operator bool() const { return status == private_state_file::write_status_e::committed; }
   };
 
@@ -51,10 +52,11 @@ namespace multiseat::profiles {
     std::string_view profile_key, std::string_view client_key);
   [[nodiscard]] change_result_t unassign(const std::filesystem::path &path,
     std::string_view client_key);
-  // Only the implemented Gamescope validation workload is provisioned here.
-  // Image IDs are local immutable sha256 values. No pulls or host bind mounts.
+  // Supported Gamescope or Steam workloads only. Immutable local images, fresh
+  // private storage, and an owned bridge for Steam. No pulls or host binds.
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,
-    std::string_view name, std::string_view image, container::host_t &host);
+    std::string_view name, std::string_view image, container::host_t &host,
+    const workload_plan_t &workload = {workload_kind_e::gamescope, "input-pong-v1"});
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif

@@ -3,6 +3,7 @@
  * @brief Offline contract tests for the rootless Podman worker backend.
  */
 #include "src/platform/linux/multiseat_container_backend.h"
+#include "src/platform/linux/multiseat_profile_network.h"
 
 #ifdef __linux__
 
@@ -2757,6 +2758,151 @@ TEST(MultiseatDockerBackend, MediaRequiresAnExplicitSupportedWorkerAllocation) {
   EXPECT_THROW(backend.inventory(), std::runtime_error);
   spec.display_mode.hdr = true;
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+}
+
+namespace {
+  json steam_network(std::string profile, std::string id = std::string(64, 'e'), std::string container = {}) {
+    json members = json::object();
+    if (!container.empty()) members[container] = {{"Name", "worker-test"}};
+    return json::array({{{"Name", multiseat::container::profile_network_name(profile)}, {"Id", id},
+      {"Driver", "bridge"}, {"Scope", "local"}, {"Internal", false}, {"Attachable", false}, {"Ingress", false},
+      {"EnableIPv6", false}, {"Labels", {{"io.polaris.multiseat.profile", profile}}},
+      {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
+      {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}}, {"Containers", members}}});
+  }
+}
+
+TEST(MultiseatProfileNetwork, CreatesOnlyAfterAuthoritativeAbsenceAndVerifiesIdentity) {
+  fake_host_t host;
+  host.push({.exit_status = 0, .output = "\"bridge\"\n\"host\"\n\"none\"\n"});
+  host.push({.exit_status = 0, .output = std::string(64, 'e') + "\n"});
+  host.push({.exit_status = 0, .output = steam_network("profile-a").dump()});
+  ASSERT_TRUE(multiseat::container::create_profile_network(host, "profile-a"));
+  ASSERT_EQ(host.calls.size(), 3U);
+  EXPECT_TRUE(has_argument(host.calls[1], "--driver=bridge"));
+  EXPECT_TRUE(has_argument(host.calls[1], "--opt=com.docker.network.bridge.enable_icc=false"));
+  EXPECT_TRUE(has_argument(host.calls[1], "--label=io.polaris.multiseat.profile=profile-a"));
+  EXPECT_EQ(host.calls[1].back(), "pn-profile-a");
+}
+
+TEST(MultiseatProfileNetwork, FailedOrConflictingInventoryCannotCreateANetwork) {
+  for (const auto &result : std::vector<command_result_t> {
+    {.exit_status = 1}, {.exit_status = 0, .timed_out = true}, {.exit_status = 0, .output_truncated = true},
+    {.exit_status = 0, .output = "broken"}, {.exit_status = 0, .output = "\"pn-profile-a\"\n"}}) {
+    fake_host_t host; host.push(result);
+    EXPECT_FALSE(multiseat::container::create_profile_network(host, "profile-a"));
+    EXPECT_EQ(host.calls.size(), 1U);
+  }
+}
+
+TEST(MultiseatProfileNetwork, RejectsChangedPolicyOwnershipAndUnexpectedMembers) {
+  for (unsigned kind = 0; kind != 13; ++kind) {
+    auto record = steam_network("profile-a");
+    auto &network = record[0];
+    switch (kind) {
+      case 0: network["Name"] = "pn-other"; break;
+      case 1: network["Driver"] = "host"; break;
+      case 2: network["Scope"] = "swarm"; break;
+      case 3: network["Labels"]["io.polaris.multiseat.profile"] = "other"; break;
+      case 4: network["Options"]["com.docker.network.bridge.enable_icc"] = "true"; break;
+      case 5: network["Options"]["com.docker.network.bridge.name"] = "host-interface"; break;
+      case 6: network["Internal"] = true; break;
+      case 7: network["EnableIPv6"] = true; break;
+      case 8: network["Id"] = "not-an-id"; break;
+      case 9: network["Containers"][std::string(64, 'a')] = json::object(); break;
+      case 10: network["IPAM"]["Driver"] = "plugin"; break;
+      case 11: network["IPAM"]["Options"] = json::array(); break;
+      case 12: network["IPAM"]["Options"] = ""; break;
+    }
+    fake_host_t host; host.push({.exit_status = 0, .output = record.dump()});
+    EXPECT_FALSE(multiseat::container::profile_network_id(host, "profile-a", true)) << kind;
+  }
+  fake_host_t host;
+  host.push({.exit_status = 0, .output = steam_network("profile-a", std::string(64, 'e'), std::string(first_id)).dump()});
+  EXPECT_FALSE(multiseat::container::profile_network_id(host, "profile-a", false, std::string(second_id)));
+}
+
+TEST(MultiseatProfileNetwork, SteamTargetsCannotCarryArbitraryCommands) {
+  for (const auto target : {"big-picture-v1", "1", "570", "4294967295"}) EXPECT_TRUE(multiseat::container::valid_steam_target(target));
+  for (const auto target : {"", "0", "01", "+1", "-1", "4294967296", "1 --login user", "steam://rungameid/1", "/bin/sh", "$(id)", "1\n"})
+    EXPECT_FALSE(multiseat::container::valid_steam_target(target)) << target;
+}
+
+TEST(MultiseatDockerBackend, SteamLaunchPinsPrivateBridgeAndRejectsReplacementBeforeRun) {
+  for (const bool replaced : {false, true}) {
+    auto options = docker_options_for_tests(); options.media_enabled = true;
+    options.profiles.front().profile_key = "profile-alpha";
+    options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+    auto spec = valid_spec(); spec.workload = options.workloads.front();
+    spec.profile_key = options.profiles.front().profile_key;
+    spec.display_mode.hdr = false;
+    fake_host_t host; fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options};
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    host.push({.exit_status = 0, .output = steam_network(spec.profile_key).dump()});
+    host.push({.exit_status = 0, .output = steam_network(spec.profile_key, std::string(64, replaced ? 'f' : 'e')).dump()});
+    if (!replaced) host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+    EXPECT_EQ(backend.launch(spec), replaced ? worker_command_result_e::rejected : worker_command_result_e::applied);
+    ASSERT_EQ(host.calls.size(), replaced ? 4U : 5U);
+    if (!replaced) {
+      EXPECT_TRUE(has_argument(host.calls.back(), "--network=" + std::string(64, 'e')));
+      EXPECT_FALSE(has_argument(host.calls.back(), "--network=host"));
+      EXPECT_EQ(host.calls.back().back(), "--media=enabled");
+    }
+  }
+}
+
+TEST(MultiseatDockerBackend, SteamRecoveryChecksExactNetworkAndDeniesPublishedPorts) {
+  for (unsigned kind = 0; kind != 5; ++kind) {
+    auto options = docker_options_for_tests(); options.media_enabled = true;
+    options.profiles.front().profile_key = "profile-alpha";
+    options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+    auto spec = valid_spec(); spec.workload = options.workloads.front();
+    spec.profile_key = options.profiles.front().profile_key;
+    spec.display_mode.hdr = false;
+    fake_host_t host; fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options};
+    auto record = docker_container_for(spec, first_id);
+    record["Config"]["Cmd"].push_back("--media=enabled");
+    record["HostConfig"].update({{"NetworkMode", std::string(64, 'e')}, {"PublishAllPorts", false},
+      {"PortBindings", nullptr}, {"Dns", nullptr}, {"DnsOptions", nullptr}, {"DnsSearch", nullptr}});
+    record["NetworkSettings"] = {{"Ports", nullptr}, {"Networks", {
+      {multiseat::container::profile_network_name(spec.profile_key), {{"NetworkID", std::string(64, 'e')}}}}}};
+    if (kind == 1) record["HostConfig"]["NetworkMode"] = "host";
+    if (kind == 2) record["HostConfig"]["PortBindings"] = {{"22/tcp", {{{"HostPort", "2222"}}}}};
+    if (kind == 3) record["NetworkSettings"]["Networks"]["other"] = {{"NetworkID", std::string(64, 'f')}};
+    if (kind == 4) record["HostConfig"]["Dns"] = {"192.0.2.53"};
+    queue_docker_inventory(host, {record});
+    host.push({.exit_status = 0, .output = steam_network(spec.profile_key, std::string(64, 'e'), std::string(first_id)).dump()});
+    if (kind == 0) EXPECT_EQ(backend.inventory().size(), 1U);
+    else EXPECT_THROW(backend.inventory(), std::runtime_error) << kind;
+  }
+}
+
+TEST(MultiseatDockerBackend, SteamStopSurvivesMissingNetworkAuthority) {
+  auto options = docker_options_for_tests(); options.media_enabled = true;
+  options.profiles.front().profile_key = "profile-alpha";
+  options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+  auto spec = valid_spec(); spec.workload = options.workloads.front();
+  spec.profile_key = options.profiles.front().profile_key;
+  spec.display_mode.hdr = false;
+  fake_host_t host; fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  auto record = docker_container_for(spec, first_id);
+  record["Config"]["Cmd"].push_back("--media=enabled");
+  // A missing bridge makes normal recovery fail closed. Cleanup must still
+  // use the exact inspected container ID without depending on that bridge.
+  queue_docker_inventory(host, {record});
+  host.push({.exit_status = 1});
+  EXPECT_THROW(backend.inventory(), std::runtime_error);
+  const auto previous_calls = host.calls.size();
+  queue_docker_inventory(host, {record});
+  host.push({.exit_status = 0});
+  ASSERT_EQ(backend.stop(spec.identity, worker_stop_mode_e::force), worker_command_result_e::applied);
+  ASSERT_EQ(host.calls.size(), previous_calls + 4U);
+  EXPECT_TRUE(has_argument(host.calls.back(), "--force"));
+  EXPECT_EQ(host.calls.back().back(), first_id);
 }
 
 TEST(MultiseatDockerBackend, AdmitsOnlyTheReviewedSelinuxTypeAndChecksItOnRecovery) {

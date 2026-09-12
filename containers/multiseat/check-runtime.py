@@ -27,6 +27,8 @@ if launcher:
     if not os.access(path, os.X_OK):
         raise ValueError('launcher executable is missing')
     files.append(path)
+    if profile == 'steam':
+        files.append(pathlib.Path('/usr/bin/bash'))
 
 files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf', 'pipewire-pulse.conf']]
 files += [pathlib.Path(path) for path in [

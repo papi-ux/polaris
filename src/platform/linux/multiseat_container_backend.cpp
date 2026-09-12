@@ -1,8 +1,9 @@
 /**
  * @file src/platform/linux/multiseat_container_backend.cpp
- * @brief Rootless Podman worker backend for isolated multiseat workers.
+ * @brief Docker worker backend with retained Podman lifecycle support.
  */
 #include "multiseat_container_backend.h"
+#include "multiseat_profile_network.h"
 #include "multiseat_worker_authority.h"
 
 #ifdef __linux__
@@ -838,12 +839,18 @@ namespace multiseat::container {
     const std::vector<std::uint64_t> &groups
   ) const {
     auto argv = command_prefix(options_);
+    std::string network = "none";
+    if (options_.media_enabled && profile.runtime_profile == runtime_profile_e::steam) {
+      const auto id = profile_network_id(host_, profile.profile_key, true);
+      if (!id) throw std::runtime_error {"Steam profile network is unavailable or occupied"};
+      network = *id;
+    }
     const std::vector<std::string> arguments {
       "run", "--detach", "--rm", "--pull=never", "--restart=no",
       "--runtime=runc", "--name=" + spec.identity.worker_name,
       "--hostname=" + spec.identity.worker_name,
       "--user=" + std::to_string(host_.effective_uid()) + ":" + std::to_string(host_.effective_gid()),
-      "--userns=host", "--network=none", "--ipc=private", "--cgroupns=private",
+      "--userns=host", "--network=" + network, "--ipc=private", "--cgroupns=private",
       "--cap-drop=all", "--security-opt=no-new-privileges", "--read-only", "--init",
       "--pids-limit=" + std::to_string(options_.pids_limit),
       "--shm-size=" + std::to_string(options_.shared_memory_bytes),
@@ -904,7 +911,6 @@ namespace multiseat::container {
     exact(host, "Init", true);
     exact(host, "Runtime", "runc");
     exact(host, "UsernsMode", "host");
-    exact(host, "NetworkMode", "none");
     exact(host, "IpcMode", "private");
     exact(host, "PidMode", "");
     exact(host, "UTSMode", "");
@@ -936,6 +942,23 @@ namespace multiseat::container {
     if (profile == options_.profiles.end() ||
         profile->image_reference != label_value(labels, label_runtime_image) ||
         runtime_profile_name(profile->runtime_profile) != label_value(labels, label_runtime_profile)) fail();
+
+    if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+      const auto id = profile_network_id(host_, profile->profile_key, false, record.at("Id").get<std::string>());
+      if (!id) fail();
+      exact(host, "NetworkMode", *id);
+      exact(host, "PublishAllPorts", false);
+      const auto &networks = record.at("NetworkSettings").at("Networks");
+      if (!networks.is_object() || networks.size() != 1) fail();
+      exact(networks.at(profile_network_name(profile->profile_key)), "NetworkID", *id);
+      for (const auto key : {"Dns", "DnsOptions", "DnsSearch"}) if (!empty_array_or_null(host, key)) fail();
+      for (const auto *object : {object_member(host, "PortBindings"), object_member(config, "ExposedPorts"),
+                                object_member(record.at("NetworkSettings"), "Ports")}) {
+        if (object && !object->is_null() && (!object->is_object() || !object->empty())) fail();
+      }
+    } else {
+      exact(host, "NetworkMode", "none");
+    }
 
     const auto groups = host_.supplementary_groups();
     if (!groups) fail();
@@ -1417,8 +1440,8 @@ namespace multiseat::container {
 
   bool backend_t::valid_spec(const worker_launch_spec_t &spec) const {
     if (options_.media_enabled &&
-        (options_.engine != engine_e::docker || spec.runtime_profile != runtime_profile_e::gamescope ||
-         spec.workload.target_id != "input-pong-v1" || spec.display_mode.hdr)) {
+        (options_.engine != engine_e::docker ||
+         !supported_streaming_workload(spec.runtime_profile, spec.workload) || spec.display_mode.hdr)) {
       return false;
     }
     if (!spec.identity.seat.valid() ||
@@ -1660,6 +1683,11 @@ namespace multiseat::container {
           host_.supplementary_groups() != launching_groups ||
           !gpu_catalog_current() || !input_allocation_current(*input_allocation)) {
         return worker_command_result_e::rejected;
+      }
+      if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+        const auto network = profile_network_id(host_, profile->profile_key, true);
+        if (!network || std::find(argv.begin(), argv.end(), "--network=" + *network) == argv.end())
+          return worker_command_result_e::rejected;
       }
       result = host_.run(
         argv,

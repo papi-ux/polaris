@@ -2,7 +2,9 @@
 
 Continuous H.264/Opus media is packaged with an explicit worker opt-in. See
 [`container-multiseat-encoder-provider.md`](../../docs/research/container-multiseat-encoder-provider.md)
-for its contract, current Gamescope workload scope and remaining acceptance.
+for its media contract and remaining acceptance. The
+[Steam profile adapter](../../docs/research/container-multiseat-steam.md) adds
+Big Picture or a typed game ID, private storage, and a dedicated Docker bridge.
 GPU seats select NVENC or VA-API on their allocated render device. NVIDIA
 variants include the pinned nvcodec plugin; software capture retains OpenH264.
 
@@ -12,10 +14,11 @@ Docker is the default build and worker engine. See
 for the host trust boundary, image import, profile initialization, and acceptance.
 The [saved profile catalog](../../docs/research/container-multiseat-profile-storage.md)
 provides private Docker volume provisioning and paired device assignments through
-the administrative CLI while production activation remains off.
+the administrative CLI. The
+[host launch integration](../../docs/research/container-multiseat-launch-integration.md)
+owns the controller when explicitly enabled; production activation defaults off.
 
-This directory defines an offline-reviewable image recipe. It does not enable
-multiseat or make the current Polaris process a container controller.
+Building these images does not enable multiseat in the running Polaris service.
 
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
@@ -44,7 +47,7 @@ signature, attestation, vulnerability policy, or complete license bundle is
 claimed by this milestone. A publishable image must add those gates and retain the
 resolved upstream manifests as provenance evidence before any lock refresh.
 
-The current entrypoint is intentionally a supervisor and IPC proof. It owns
+The entrypoint owns
 private control and media sockets, mutual authentication, explicit data-plane
 attachment, health state, and shutdown. The worker has an injectable lifecycle
 contract for a session bus, audio, capture-producing outer display, nested
@@ -58,8 +61,9 @@ and escalates to KILL at the component deadline.
 
 The image carries the dispatcher and private session-bus, audio, outer capture,
 nested Gamescope, verified input-reader, and experimental launcher providers.
-The launcher currently accepts only the image-owned `input-pong-v1` workload
-with the Gamescope profile. This small offline X11 game exercises keyboard,
+The launcher accepts the image-owned `input-pong-v1` workload
+with the Gamescope profile, and Steam Big Picture or a canonical numeric game
+ID with the Steam profile. The small offline X11 game exercises keyboard,
 pointer, optional gamepad, and private Pulse audio without launcher accounts.
 Its executable is compiled against each profile's locked X11/GStreamer ABI;
 image checks resolve its ELF dependencies and the SBOM records its source hash.
@@ -78,22 +82,19 @@ surviving seat after its peer's container is removed. These observations prove
 worker-local codec roundtrips; continuous media transport and client playback
 remain separate acceptance gates.
 
-The production `run` command still injects no adapters, so no worker announces
-a media contract yet. The experimental encoder provider is not wired into
-continuous worker media delivery, and the Steam,
-Heroic, and Lutris launcher implementations remain outstanding. The controller
-side of the media path is now complete: a worker that announces a contract on
+The production `run --media=enabled` path supplies the implemented providers
+and continuous encoder media source for Gamescope and Steam allocations.
+Heroic and Lutris launcher implementations remain outstanding. A worker that announces a contract on
 its media channel has it held against what the client negotiated, acknowledged,
 and its frames carried to that client's own packet destination, with keyframe
-requests and reference invalidations travelling back on control. What is left
-between here and a streaming worker is the producer. Provider readiness proves a resource or
+requests and reference invalidations travelling back on control. Provider readiness proves a resource or
 supervised process is available; it does not prove game frames reached a client.
 Unit tests and isolated physical input receipts likewise do not establish
 compositor input delivery or successful game streaming.
 
-The controller now also has an injected host-brokered input authority and a
-Linux inputtino lifecycle backend, but neither is wired to this image or the
-singleton runtime. The backend creates virtual devices outside the untrusted
+The controller has a host-brokered input authority and a
+Linux inputtino lifecycle backend connected through the profile launch owner.
+The backend creates virtual devices outside the untrusted
 launcher boundary and derives the exact generation's event-node identity from
 `fstat`, sysfs, and udev before returning fixed worker-local paths. The container
 adapter consumes that allocation through a separate injected source, verifies
@@ -166,8 +167,7 @@ synchronously detaches feedback publication, waits for already-admitted work,
 clears queued feedback, and only then releases the authenticated lease. A
 closed or throwing sender fails the session closed.
 
-The first production ownership adapters remain inert but replace those three
-test doubles with bounded process-local implementations. An authenticated
+The production ownership adapters provide bounded process-local implementations. An authenticated
 session registry accepts at most 256 immutable bindings, rejects duplicate
 keys and any reuse of the same GPU seat slot, grants one exclusive bridge
 claim, and lets the session owner retire a registration while synchronously
@@ -179,15 +179,11 @@ flight, including a detach racing global shutdown.
 The matching concrete sender verifies the complete authenticated binding and
 bounded rumble shape before submitting to a typed, session-owned mailbox.
 Mailbox retry and close results map directly to the bridge without exposing an
-ENet peer or session secret. The actual `stream::session_t` mailbox endpoint
-and registration call site are intentionally still absent, so constructing
-these adapters opens no stream and changes no singleton behavior.
+ENet peer or session secret. The `stream::session_t` mailbox endpoint and
+profile launch owner connect this route only for an authenticated worker binding.
 
-This is still not a usable production input data plane. Nothing invokes this
-bridge from a live control stream, implements its trusted binding source from a
-real stream session, constructs the hub as the inputtino sink, or supplies the
-mailbox endpoint which reaches a client's control thread. The singleton runtime
-constructs none of these classes. The worker's older opaque input/feedback test adapter is
+These paths still need acceptance through simultaneous client playback.
+The worker's older opaque input/feedback test adapter is
 deliberately not treated as injection authority. Mediated Steam Input also
 remains missing. Rootless launches now require trusted crun, the actual launching UID and
 `keep-groups`. The optional policy under `selinux/` labels only reserved

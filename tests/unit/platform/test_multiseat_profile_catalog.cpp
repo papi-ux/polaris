@@ -1,4 +1,5 @@
 #include "src/platform/linux/multiseat_profile_catalog.h"
+#include "src/platform/linux/multiseat_profile_network.h"
 
 #include <algorithm>
 #include <array>
@@ -48,6 +49,8 @@ namespace {
     bool timeout = false, truncated = false, wrong_label = false, rootless = false, implicit_volume = false;
     std::uint64_t uid = 1000;
     std::string volume, profile, image;
+    std::string image_family = "gamescope";
+    bool wrong_network = false;
     std::uint64_t effective_uid() const override { return uid; }
     bool executable_file(const std::filesystem::path &) const override { return true; }
     bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
@@ -73,7 +76,7 @@ namespace {
       } else if (args[0] == "image") {
         image = args.back();
         result = json::array({{{"Id", image}, {"Os", "linux"},
-          {"Config", {{"Labels", {{"io.polaris.multiseat.profile", "gamescope"}}},
+          {"Config", {{"Labels", {{"io.polaris.multiseat.profile", image_family}}},
             {"Volumes", implicit_volume ? json {{"/extra", json::object()}} : json(nullptr)}}}}});
       } else if (args[0] == "volume" && args[1] == "create") {
         volume = args.back();
@@ -84,6 +87,17 @@ namespace {
           {"Options", nullptr}, {"Labels", {{"io.polaris.multiseat.profile", wrong_label ? "someone-else" : profile}}}}});
       } else if (args[0] == "volume" && args[1] == "ls") {
         return {.exit_status = 0, .output = "\"unrelated-volume\"\n"};
+      } else if (args[0] == "network" && args[1] == "ls") {
+        return {.exit_status = 0, .output = "\"bridge\"\n\"none\"\n"};
+      } else if (args[0] == "network" && args[1] == "create") {
+        EXPECT_EQ(args.back(), container::profile_network_name(profile));
+        return {.exit_status = 0, .output = std::string(64, 'e') + "\n"};
+      } else if (args[0] == "network" && args[1] == "inspect") {
+        result = json::array({{{"Id", std::string(64, wrong_network ? 'f' : 'e')}, {"Name", container::profile_network_name(profile)},
+          {"Driver", "bridge"}, {"Scope", "local"}, {"Internal", false}, {"Ingress", false}, {"Attachable", false},
+          {"EnableIPv6", false}, {"Labels", {{"io.polaris.multiseat.profile", profile}}},
+          {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
+          {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}}, {"Containers", json::object()}}});
       } else if (args[0] == "run") {
         for (const auto *required : {"--network=none", "--userns=host", "--read-only", "--cap-drop=ALL",
               "--cap-add=CHOWN", "--cap-add=FOWNER", "--security-opt=no-new-privileges", "--pull=never",
@@ -222,6 +236,47 @@ namespace {
     ASSERT_EQ(loaded->catalog.profiles.size(), 1);
     EXPECT_EQ(loaded->catalog.profiles[0].storage.opaque_volume_name, result.volume_name);
     EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalog, SteamProfilePublishesOnlyAfterStorageAndNetworkAreVerified) {
+    ASSERT_TRUE(profiles::initialize(path, 1000, 1000));
+    provisioning_host_t host; host.image_family = "steam";
+    const auto result = profiles::create(path, "Private Steam", sample().profiles[0].storage.image_reference,
+      host, {workload_kind_e::steam, "big-picture-v1"});
+    ASSERT_TRUE(result) << result.error;
+    EXPECT_EQ(host.calls.size(), 10U);
+    EXPECT_EQ(result.network_name, container::profile_network_name(result.profile_key));
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 1U);
+    EXPECT_EQ(loaded->catalog.profiles[0].storage.runtime_profile, runtime_profile_e::steam);
+    EXPECT_EQ(loaded->catalog.profiles[0].workload.target_id, "big-picture-v1");
+    EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalog, SteamNetworkFailureRetainsResourcesWithoutPublishingProfile) {
+    ASSERT_TRUE(profiles::initialize(path, 1000, 1000));
+    for (unsigned failure = 8; failure <= 11; ++failure) {
+      provisioning_host_t host; host.image_family = "steam";
+      host.fail_call = failure; host.wrong_network = failure == 11;
+      const auto result = profiles::create(path, "Steam", sample().profiles[0].storage.image_reference,
+        host, {workload_kind_e::steam, "570"});
+      EXPECT_FALSE(result);
+      EXPECT_FALSE(result.volume_name.empty());
+      EXPECT_FALSE(result.network_name.empty());
+      auto loaded = profiles::load(path);
+      ASSERT_TRUE(loaded);
+      EXPECT_TRUE(loaded->catalog.profiles.empty());
+      for (const auto &call : host.calls) EXPECT_EQ(std::find(call.begin(), call.end(), "rm"), call.end());
+    }
+  }
+
+  TEST_F(MultiseatProfileCatalog, InvalidSteamTargetFailsBeforeAnyDockerOperation) {
+    ASSERT_TRUE(profiles::initialize(path, 1000, 1000));
+    provisioning_host_t host; host.image_family = "steam";
+    EXPECT_FALSE(profiles::create(path, "Steam", sample().profiles[0].storage.image_reference,
+      host, {workload_kind_e::steam, "570 --other"}));
+    EXPECT_TRUE(host.calls.empty());
   }
 
   TEST_F(MultiseatProfileCatalog, EveryDockerFailureLeavesCatalogUnchangedAndNeverDeletesResources) {
