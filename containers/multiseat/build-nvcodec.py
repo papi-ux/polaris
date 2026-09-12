@@ -14,6 +14,9 @@ with archive.open('rb') as stream:
 source = pathlib.Path('/nvcodec-src')
 source.mkdir()
 subprocess.run(['tar', '-xf', str(archive), '-C', str(source), '--strip-components=1'], check=True)
+for patch in lock['patches']:
+    subprocess.run(['patch', '-d', str(source), '-p1', '--batch', '--forward', '--fuzz=0',
+                    '-i', '/' + patch], check=True)
 build = source / 'build'
 subprocess.run(['meson', 'setup', str(build), str(source), '--prefix=/usr',
                 '--libdir=lib/x86_64-linux-gnu', '--buildtype=release', '--wrap-mode=nodownload',

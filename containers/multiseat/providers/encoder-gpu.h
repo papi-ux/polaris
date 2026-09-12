@@ -129,6 +129,8 @@ static gchar *encoder_description(const struct encoder_choice *choice, unsigned 
    * while returning success from the pipeline. A QP floor of 10 keeps the
    * constrained-baseline stream decodable by that client decoder as well as
    * FFmpeg. This is an explicit quality/compatibility tradeoff. */
+  /* The locked worker nvcodec patch also fixes DPB and prediction to one
+   * reference. Moonlight clients without reference invalidation require it. */
   if (choice->kind == ENCODER_NVENC)
     return g_strdup_printf("%s name=encoder bitrate=%u max-bitrate=%u rc-mode=cbr "
       "gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true preset=p1 tune=ultra-low-latency "

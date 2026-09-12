@@ -252,7 +252,9 @@ def build_artifact(args, revision, epoch, context):
         bill['components'].append({'type': 'library', 'name': 'gstreamer-nvcodec',
                                    'version': codec['version'], 'bom-ref': 'gstreamer-nvcodec',
                                    'externalReferences': [{'type': 'distribution', 'url': codec['url']}],
-                                   'properties': [{'name': 'polaris:source-archive-sha256', 'value': codec['sha256']}]})
+                                   'properties': [{'name': 'polaris:source-archive-sha256', 'value': codec['sha256']}] +
+                                                 [{'name': 'polaris:patch:' + path, 'value': digest(here / path)}
+                                                  for path in codec.get('patches', [])]})
         nvidia = json.loads((here / 'locks/nvidia.json').read_text())
         records = {}
         for filename in ['nvidia-files.json', 'nvidia-runtime.json']:
@@ -285,7 +287,7 @@ def build_artifact(args, revision, epoch, context):
     worker_digest = verify_archive(artifact / 'worker.oci.tar', config_digest)
     lock_files = [here / 'images.lock.json', here / profile['dependency_lock']]
     lock_files += [here / path for name, path in images['dependency_locks'].items() if args.nvidia or name not in ('nvidia', 'nvcodec')]
-    for name in ['plugin', 'gamescope']:
+    for name in ['plugin', 'gamescope'] + (['nvcodec'] if args.nvidia else []):
         lock_files += [here / path for path in json.loads((here / ('locks/' + name + '.json')).read_text()).get('patches', [])]
     write_json(artifact / 'artifact.json', {
         'schema': 1, 'source_revision': revision, 'profile': args.profile,

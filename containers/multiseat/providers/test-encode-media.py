@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import os
+import re
 import select
 import signal
 import struct
@@ -10,6 +11,49 @@ import subprocess
 import sys
 import time
 import threading
+
+
+def check_reference_limit(encoded):
+    """Inspect baseline SPS RBSPs, including headers repeated on recovery IDRs."""
+    headers = 0
+    for nal in re.split(b'\x00\x00\x00?\x01', encoded):
+        if not nal or nal[0] & 31 != 7:
+            continue
+        rbsp = nal[1:].replace(b'\x00\x00\x03', b'\x00\x00')
+        assert len(rbsp) >= 4 and rbsp[0] == 66, 'expected baseline SPS'
+        bits = ''.join(f'{byte:08b}' for byte in rbsp)
+        position = 24
+
+        def ue():
+            nonlocal position
+            zeroes = 0
+            while position < len(bits) and bits[position] == '0':
+                zeroes += 1
+                position += 1
+                assert zeroes <= 31, 'invalid SPS Exp-Golomb value'
+            assert position + zeroes < len(bits), 'truncated SPS'
+            value = int(bits[position:position + zeroes + 1], 2) - 1
+            position += zeroes + 1
+            return value
+
+        ue()  # seq_parameter_set_id
+        ue()  # log2_max_frame_num_minus4
+        order = ue()
+        if order == 0:
+            ue()  # log2_max_pic_order_cnt_lsb_minus4
+        elif order == 1:
+            position += 1  # delta_pic_order_always_zero_flag
+            ue(); ue()  # signed offsets use the same bit length as ue(v)
+            cycle = ue()
+            assert cycle <= 255, 'invalid picture order cycle'
+            for _ in range(cycle):
+                ue()
+        else:
+            assert order == 2, 'invalid picture order type'
+        references = ue()
+        assert references == 1, f'client requires one H.264 reference, encoder announced {references}'
+        headers += 1
+    assert headers >= 2, 'initial and recovery SPS were not both inspected'
 
 
 def check(executable, invalid=False, render_node=None, peers=None, survivor=False):
@@ -94,6 +138,7 @@ def check(executable, invalid=False, render_node=None, peers=None, survivor=Fals
         assert child.wait(timeout=3) == 0
         if peers and not survivor:
             peers['stopped'].set()
+        check_reference_limit(encoded_video)
         decoded = subprocess.run(['gst-launch-1.0', '-q', 'fdsrc', 'fd=0', '!', 'h264parse', '!',
                                   'openh264dec', '!', 'videoconvert', '!',
                                   'video/x-raw,format=I420,width=640,height=480', '!',

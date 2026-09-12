@@ -87,6 +87,12 @@ for mapped devices. Nova currently requires a resolved profile even with a
 manual preset, so Nova profile launches remain a client integration task.
 Moonlight can request the supported contract through a manual stream preset.
 
+The worker H.264 stream uses one reference frame. The pinned NVIDIA plugin
+patch configures both the encoder's reference storage and prediction lists;
+changing only an already encoded SPS would leave invalid slice dependencies.
+The real provider check inspects initial and recovery SPS headers before
+decoding. The patch remains recorded in the source lock, SBOM and image receipt.
+
 The input plan provides keyboard and pointer devices and one gamepad when
 controller input is authorized. The current compositor has no native touch or
 pen mapping, so profile launches omit those devices and the corresponding RTSP

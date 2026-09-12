@@ -4,5 +4,8 @@
   "url": "https://gstreamer.freedesktop.org/src/gst-plugins-bad/gst-plugins-bad-1.26.0.tar.xz",
   "sha256": "f8287a84c5f66368a5a50da5f969994a02c47f20220ffe1ca3154193e65af216",
   "checksum_url": "https://gstreamer.freedesktop.org/src/gst-plugins-bad/gst-plugins-bad-1.26.0.tar.xz.sha256sum",
-  "scope": "nvcodec plugin and CUDA support library; no CUDA toolkit or host installation"
+  "scope": "nvcodec plugin and CUDA support library; no CUDA toolkit or host installation",
+  "patches": [
+    "patches/nvcodec-single-reference.patch"
+  ]
 }

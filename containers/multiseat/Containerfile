@@ -260,6 +260,7 @@ CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
 FROM runtime-root-build AS nvcodec-build
 COPY containers/multiseat/locks/nvcodec.json /nvcodec.lock.json
 COPY containers/multiseat/build-nvcodec.py /build-nvcodec.py
+COPY containers/multiseat/patches/nvcodec-single-reference.patch /patches/nvcodec-single-reference.patch
 COPY build/runtime-inputs/gst-plugins-bad-1.26.0.tar.xz /nvcodec.tar.xz
 RUN python3 /build-nvcodec.py
 
