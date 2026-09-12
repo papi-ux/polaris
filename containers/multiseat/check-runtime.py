@@ -13,7 +13,7 @@ files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf
 files += [pathlib.Path(path) for path in [
     '/usr/share/wireplumber/wireplumber.conf',
     '/usr/share/wireplumber/wireplumber.conf.d/99-polaris-seat.conf',
-    '/usr/share/polaris/wireplumber/allocated-target.lua']]
+    '/usr/share/wireplumber/scripts/polaris/allocated-target.lua']]
 plugin = pathlib.Path('/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so')
 gl_plugin = pathlib.Path('/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstopengl.so')
 files += [plugin, gl_plugin]
