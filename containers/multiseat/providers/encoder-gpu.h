@@ -125,10 +125,14 @@ static gchar *encoder_description(const struct encoder_choice *choice, unsigned 
   /* One frame of VBV/CPB capacity, in kbits. Capture still downloads through
    * the verified GL path; hardware encoding does not imply zero-copy capture. */
   const unsigned buffer = (bitrate * 1000u + refresh - 1) / refresh;
+  /* OpenH264 2.6 drops NVENC recovery IDRs with very low-QP CAVLC residuals
+   * while returning success from the pipeline. A QP floor of 10 keeps the
+   * constrained-baseline stream decodable by that client decoder as well as
+   * FFmpeg. This is an explicit quality/compatibility tradeoff. */
   if (choice->kind == ENCODER_NVENC)
     return g_strdup_printf("%s name=encoder bitrate=%u max-bitrate=%u rc-mode=cbr "
       "gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true preset=p1 tune=ultra-low-latency "
-      "cabac=false repeat-sequence-header=true vbv-buffer-size=%u", choice->factory, bitrate, bitrate, buffer);
+      "cabac=false qp-min-i=10 qp-min-p=10 repeat-sequence-header=true vbv-buffer-size=%u", choice->factory, bitrate, bitrate, buffer);
   if (choice->kind == ENCODER_VA)
     return g_strdup_printf("%s name=encoder bitrate=%u rate-control=cbr key-int-max=60 "
       "b-frames=0 ref-frames=1 cabac=false dct8x8=false aud=true cpb-size=%u", choice->factory, bitrate, buffer);

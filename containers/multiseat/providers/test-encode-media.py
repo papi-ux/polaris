@@ -99,7 +99,8 @@ def check(executable, invalid=False, render_node=None, peers=None, survivor=Fals
                                   'video/x-raw,format=I420,width=640,height=480', '!',
                                   'fdsink', 'fd=1', 'sync=false'], input=encoded_video,
                                  stdout=subprocess.PIPE, timeout=10, check=True)
-        assert len(decoded.stdout) == counts[2] * 640 * 480 * 3 // 2, 'decoded frame count differs'
+        expected = counts[2] * 640 * 480 * 3 // 2
+        assert len(decoded.stdout) == expected, f'decoded bytes {len(decoded.stdout)} expected {expected} for {counts[2]} frames'
 
         print('synthetic H.264 decode, Opus packets, ack gate, IDR and clean stop passed', flush=True)
     except BaseException:

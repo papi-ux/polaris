@@ -27,7 +27,12 @@ identity as the admitted render node. Selection is checked again on the running
 encoder before publishing readiness.
 
 Both hardware paths use CBR, no B frames and one frame of VBV/CPB capacity.
-NVIDIA also disables lookahead and selects the ultra-low-latency tune. These
+NVIDIA also disables lookahead and selects the ultra-low-latency tune. Its
+minimum I/P quantizer is 10: OpenH264 2.6 silently dropped recovery IDRs from
+our lower-QP constrained-baseline streams, while FFmpeg decoded every frame.
+The floor made the exact-frame-count and concurrent-stop tests pass with
+OpenH264. It deliberately trades the lowest quantizer values for compatibility;
+it is not a claim of optimal visual quality for every workload. These
 settings follow the [NVENC](https://gstreamer.freedesktop.org/documentation/nvcodec/nvh264enc.html)
 and [VA-API](https://gstreamer.freedesktop.org/documentation/va/vah264enc.html)
 plugin interfaces. They are configuration choices, not measured latency claims.
