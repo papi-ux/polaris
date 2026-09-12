@@ -2,6 +2,18 @@
 
 add_compile_definitions(POLARIS_PLATFORM="linux")
 
+# Bind the installed policy and recovery checks to the exact compiled bytes.
+set(POLARIS_STEAM_SECCOMP_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/seccomp/steam.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_STEAM_SECCOMP_SOURCE}")
+file(READ "${POLARIS_STEAM_SECCOMP_SOURCE}" POLARIS_STEAM_SECCOMP_JSON)
+file(SHA256 "${POLARIS_STEAM_SECCOMP_SOURCE}" POLARIS_STEAM_SECCOMP_SHA256)
+set(POLARIS_STEAM_SECCOMP_NAME "steam-seccomp-${POLARIS_STEAM_SECCOMP_SHA256}.json")
+set(POLARIS_STEAM_SECCOMP_PATH "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polaris/multiseat/${POLARIS_STEAM_SECCOMP_NAME}")
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_steam_seccomp.h.in"
+               "${CMAKE_BINARY_DIR}/generated/multiseat_steam_seccomp.h" @ONLY)
+include_directories("${CMAKE_BINARY_DIR}/generated")
+
+
 if(POLARIS_ENABLE_BROWSER_STREAM)
     list(APPEND POLARIS_DEFINITIONS POLARIS_ENABLE_BROWSER_STREAM=1)
 endif()

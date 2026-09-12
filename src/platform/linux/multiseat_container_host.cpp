@@ -72,6 +72,40 @@ namespace multiseat::container {
     return true;
   }
 
+  bool local_host_t::trusted_data_file(
+    const std::filesystem::path &path, std::string_view expected
+  ) const {
+    if (!path.is_absolute() || path.lexically_normal() != path ||
+        expected.empty() || expected.size() > 65536) return false;
+    struct stat metadata {};
+    for (auto directory = path.parent_path();; directory = directory.parent_path()) {
+      if (lstat(directory.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+          metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) return false;
+      if (directory == directory.root_path()) break;
+    }
+    const auto fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    const auto matches = [&] {
+      if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_uid != 0 ||
+          (metadata.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) != 0 ||
+          metadata.st_size != static_cast<off_t>(expected.size())) return false;
+      std::array<char, 4096> buffer {};
+      std::size_t offset = 0;
+      while (offset < expected.size()) {
+        const auto count = read(fd, buffer.data(), std::min(buffer.size(), expected.size() - offset));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0 || std::string_view(buffer.data(), static_cast<std::size_t>(count)) !=
+                          expected.substr(offset, static_cast<std::size_t>(count))) return false;
+        offset += static_cast<std::size_t>(count);
+      }
+      ssize_t count;
+      do { count = read(fd, buffer.data(), 1); } while (count < 0 && errno == EINTR);
+      return count == 0;
+    }();
+    close(fd);
+    return matches;
+  }
+
   std::optional<std::vector<std::uint64_t>> local_host_t::supplementary_groups() const {
     const auto count = getgroups(0, nullptr);
     if (count < 0 || count > 65536) return std::nullopt;

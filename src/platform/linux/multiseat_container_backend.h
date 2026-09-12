@@ -53,6 +53,10 @@ namespace multiseat::container {
     [[nodiscard]] virtual bool executable_file(const std::filesystem::path &path) const = 0;
     /** Root-owned regular executable under root-owned, non-writable directories. */
     [[nodiscard]] virtual bool trusted_runtime_file(const std::filesystem::path &path) const = 0;
+    /** Exact contents of a root-owned regular file under protected directories. */
+    [[nodiscard]] virtual bool trusted_data_file(
+      const std::filesystem::path &path, std::string_view expected
+    ) const { return false; }
     /** Actual calling process groups; absence means the snapshot failed. */
     [[nodiscard]] virtual std::optional<std::vector<std::uint64_t>> supplementary_groups() const = 0;
     [[nodiscard]] virtual bool readable_directory(const std::filesystem::path &path) const = 0;

@@ -127,4 +127,25 @@ TEST(MultiseatContainerHost, RefusesUserControlledOrIndirectRuntime) {
   EXPECT_FALSE(host.trusted_runtime_file("/usr/bin/../bin/crun"));
 }
 
+TEST(MultiseatContainerHost, TrustedDataRequiresExactBytesAndProtectedRootOwnership) {
+  temporary_directory_t root;
+  multiseat::container::local_host_t host;
+  write_file(root.path() / "policy.json", "{}");
+  std::filesystem::create_symlink(root.path() / "policy.json", root.path() / "link.json");
+  EXPECT_FALSE(host.trusted_data_file(root.path() / "policy.json", "{}"));
+  EXPECT_FALSE(host.trusted_data_file(root.path() / "link.json", "{}"));
+  EXPECT_FALSE(host.trusted_data_file("policy.json", "{}"));
+  EXPECT_FALSE(host.trusted_data_file("/etc/../etc/passwd", "{}"));
+  EXPECT_FALSE(host.trusted_data_file("/dev/null", "{}"));
+  EXPECT_FALSE(host.trusted_data_file("/etc/passwd", ""));
+  std::ifstream input("/etc/passwd", std::ios::binary);
+  ASSERT_TRUE(input.good());
+  const std::string content(std::istreambuf_iterator<char>(input), {});
+  ASSERT_FALSE(content.empty());
+  EXPECT_TRUE(host.trusted_data_file("/etc/passwd", content));
+  EXPECT_FALSE(host.trusted_data_file("/etc/passwd", content + "x"));
+  auto changed = content; changed[0] ^= 1;
+  EXPECT_FALSE(host.trusted_data_file("/etc/passwd", changed));
+}
+
 #endif

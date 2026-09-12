@@ -1,5 +1,12 @@
 # linux specific packaging
 
+install(FILES "${POLARIS_STEAM_SECCOMP_SOURCE}"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polaris/multiseat"
+        RENAME "${POLARIS_STEAM_SECCOMP_NAME}")
+install(FILES "${CMAKE_SOURCE_DIR}/containers/multiseat/seccomp/LICENSE.moby"
+              "${CMAKE_SOURCE_DIR}/containers/multiseat/seccomp/upstream.json"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polaris/multiseat/seccomp-provenance")
+
 install(DIRECTORY "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/"
         DESTINATION "${POLARIS_ASSETS_DIR}")
 

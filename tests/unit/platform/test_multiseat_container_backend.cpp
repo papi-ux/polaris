@@ -7,6 +7,7 @@
 
 #ifdef __linux__
 
+#include "multiseat_steam_seccomp.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -87,6 +88,12 @@ namespace {
 
     bool trusted_runtime_file(const std::filesystem::path &path) const override {
       return runtime_ready && (path == "/usr/bin/crun" || path == "/usr/bin/runc");
+    }
+
+    bool seccomp_ready = true;
+    bool trusted_data_file(const std::filesystem::path &path, std::string_view expected) const override {
+      return seccomp_ready && path == multiseat::container::steam_seccomp_path &&
+             expected == multiseat::container::steam_seccomp_data;
     }
 
     std::optional<std::vector<std::uint64_t>> supplementary_groups() const override {
@@ -2848,13 +2855,34 @@ TEST(MultiseatDockerBackend, SteamLaunchPinsPrivateBridgeAndRejectsReplacementBe
     if (!replaced) {
       EXPECT_TRUE(has_argument(host.calls.back(), "--network=" + std::string(64, 'e')));
       EXPECT_FALSE(has_argument(host.calls.back(), "--network=host"));
+      EXPECT_TRUE(has_argument(host.calls.back(), "--security-opt=seccomp=" +
+        std::string(multiseat::container::steam_seccomp_path)));
+      EXPECT_FALSE(has_argument(host.calls.back(), "--security-opt=seccomp=unconfined"));
       EXPECT_EQ(host.calls.back().back(), "--media=enabled");
     }
   }
 }
 
+TEST(MultiseatDockerBackend, SteamLaunchRequiresTheInstalledExactSeccompPolicy) {
+  auto options = docker_options_for_tests(); options.media_enabled = true;
+  options.profiles.front().profile_key = "profile-alpha";
+  options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+  auto spec = valid_spec(); spec.workload = options.workloads.front();
+  spec.profile_key = options.profiles.front().profile_key; spec.display_mode.hdr = false;
+  fake_host_t host; host.seccomp_ready = false;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = steam_network(spec.profile_key).dump()});
+  host.push({.exit_status = 0, .output = steam_network(spec.profile_key).dump()});
+  host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  for (const auto &call : host.calls) EXPECT_FALSE(has_argument(call, "run"));
+}
+
 TEST(MultiseatDockerBackend, SteamRecoveryChecksExactNetworkAndDeniesPublishedPorts) {
-  for (unsigned kind = 0; kind != 5; ++kind) {
+  for (unsigned kind = 0; kind != 9; ++kind) {
     auto options = docker_options_for_tests(); options.media_enabled = true;
     options.profiles.front().profile_key = "profile-alpha";
     options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
@@ -2865,6 +2893,8 @@ TEST(MultiseatDockerBackend, SteamRecoveryChecksExactNetworkAndDeniesPublishedPo
     backend_t backend {host, inputs, options};
     auto record = docker_container_for(spec, first_id);
     record["Config"]["Cmd"].push_back("--media=enabled");
+    record["HostConfig"]["SecurityOpt"].push_back("seccomp=" +
+      json::parse(multiseat::container::steam_seccomp_data).dump());
     record["HostConfig"].update({{"NetworkMode", std::string(64, 'e')}, {"PublishAllPorts", false},
       {"PortBindings", nullptr}, {"Dns", nullptr}, {"DnsOptions", nullptr}, {"DnsSearch", nullptr}});
     record["NetworkSettings"] = {{"Ports", nullptr}, {"Networks", {
@@ -2873,6 +2903,14 @@ TEST(MultiseatDockerBackend, SteamRecoveryChecksExactNetworkAndDeniesPublishedPo
     if (kind == 2) record["HostConfig"]["PortBindings"] = {{"22/tcp", {{{"HostPort", "2222"}}}}};
     if (kind == 3) record["NetworkSettings"]["Networks"]["other"] = {{"NetworkID", std::string(64, 'f')}};
     if (kind == 4) record["HostConfig"]["Dns"] = {"192.0.2.53"};
+    if (kind == 5) record["HostConfig"]["SecurityOpt"].erase(1);
+    if (kind == 6) record["HostConfig"]["SecurityOpt"][1] = "seccomp=unconfined";
+    if (kind == 7) record["HostConfig"]["SecurityOpt"].push_back("seccomp=unconfined");
+    if (kind == 8) {
+      auto changed = json::parse(multiseat::container::steam_seccomp_data);
+      changed["defaultAction"] = "SCMP_ACT_ALLOW";
+      record["HostConfig"]["SecurityOpt"][1] = "seccomp=" + changed.dump();
+    }
     queue_docker_inventory(host, {record});
     host.push({.exit_status = 0, .output = steam_network(spec.profile_key, std::string(64, 'e'), std::string(first_id)).dump()});
     if (kind == 0) EXPECT_EQ(backend.inventory().size(), 1U);
@@ -2891,6 +2929,8 @@ TEST(MultiseatDockerBackend, SteamStopSurvivesMissingNetworkAuthority) {
   backend_t backend {host, inputs, options};
   auto record = docker_container_for(spec, first_id);
   record["Config"]["Cmd"].push_back("--media=enabled");
+  record["HostConfig"]["SecurityOpt"].push_back("seccomp=" +
+    json::parse(multiseat::container::steam_seccomp_data).dump());
   // A missing bridge makes normal recovery fail closed. Cleanup must still
   // use the exact inspected container ID without depending on that bridge.
   queue_docker_inventory(host, {record});

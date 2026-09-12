@@ -81,21 +81,36 @@ Seat cancellation stops and reaps that tree, including detached helpers, while
 other seats retain their own process and resource lifetimes. Readiness proves
 supervision has started, not successful login or rendered game frames.
 
+## Steam sandbox requirements
+
+Steam workers require the matching installed
+[Polaris seccomp policy](../../containers/multiseat/seccomp/README.md). It adds
+the nested user namespace and mount operations used by Steam's runtime to a
+pinned Docker default policy. The outer worker still drops all capabilities
+and uses no new privileges. Missing, writable, or changed policy files refuse
+launch; recovery also verifies the exact policy reported by Docker.
+
+The optional NVIDIA SELinux domain permits outbound TCP connections for Steam
+downloads and sign-in over the profile's existing bridge. It retains enforcing
+SELinux and does not require the broad container networking domain attribute
+or a host networking change.
+
 ## Acceptance still required
 
 The current stream contract requires a compatible manual SDR H.264 4:2:0 preset,
 whole frame rate, and stereo audio with 5 ms packets. Moonlight can request this
-contract. Nova still requires resolved-profile integration even with a manual
+contract. Nova can resolve an assigned profile and use its supported stream
 preset. See the
 [launch integration](container-multiseat-launch-integration.md) for device
 permissions, revocation, cancellation, and host configuration.
 
 Real Steam bootstrap, Big Picture focus and input, game installation, Proton's
-runtime sandbox under the unchanged Docker security policy, game audio, and
+runtime sandbox under the fixed Steam security policy, game audio, and
 two simultaneous clients still require acceptance using the exact produced
 image. The NVIDIA Steam layer supplies and checks amd64 and i386 vendor
 libraries, generic graphics loaders, and their dynamic dependencies. Real
 32 bit rendering remains part of game acceptance. Image checks and
 process tests do not establish game compatibility or latency. Heroic and Lutris
-launch adapters, profile assignment UI, and Nova optimizer integration remain
-separate work. The ordinary one-person, one-device flow remains unchanged.
+launch adapters and Nova optimizer integration remain separate work. Profile
+assignment is available in the host UI. The ordinary one-person, one-device
+flow remains unchanged.

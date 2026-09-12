@@ -3,6 +3,7 @@
  * @brief Docker worker backend with retained Podman lifecycle support.
  */
 #include "multiseat_container_backend.h"
+#include "multiseat_steam_seccomp.h"
 #include "multiseat_profile_network.h"
 #include "multiseat_worker_authority.h"
 
@@ -874,6 +875,9 @@ namespace multiseat::container {
     if (!options_.selinux_type.empty()) {
       argv.push_back("--security-opt=label=type:" + options_.selinux_type);
     }
+    if (options_.media_enabled && profile.runtime_profile == runtime_profile_e::steam) {
+      argv.push_back("--security-opt=seccomp=" + std::string(steam_seccomp_path));
+    }
     for (const auto group : groups) argv.push_back("--group-add=" + std::to_string(group));
     const auto tmpfs = docker_tmpfs(options_, host_);
     for (const auto &[path, options] : tmpfs.items()) {
@@ -920,6 +924,9 @@ namespace multiseat::container {
     exact(host, "CapDrop", json::array({"ALL"}));
     auto security = json::array({"no-new-privileges"});
     if (!options_.selinux_type.empty()) security.push_back("label=type:" + options_.selinux_type);
+    if (options_.media_enabled && label_value(labels, label_runtime_profile) == "steam") {
+      security.push_back("seccomp=" + json::parse(steam_seccomp_data).dump());
+    }
     exact(host, "SecurityOpt", security);
     exact(host, "Tmpfs", docker_tmpfs(options_, host_));
     for (const auto key : {"CapAdd", "DeviceRequests", "DeviceCgroupRules", "VolumesFrom", "Links", "ExtraHosts"}) {
@@ -1671,6 +1678,12 @@ namespace multiseat::container {
 
     command_result_t result;
     try {
+      // A missing or changed policy is a definite refusal before Docker run.
+      // Do not quarantine this as an uncertain container creation outcome.
+      if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam &&
+          !host_.trusted_data_file(std::filesystem::path(steam_seccomp_path), steam_seccomp_data)) {
+        return worker_command_result_e::rejected;
+      }
       const auto argv = launch_argv(
         spec,
         *gpu,
