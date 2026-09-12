@@ -423,6 +423,15 @@ steam, heroic, or lutris. The image must contain the separately packaged
 `polaris-seat-input-probe` acceptance helper. GPU device paths must belong to
 the explicit catalog supplied through the physical harness environment.
 
+That catalog must include the GPU's DRM primary node, not only its render node.
+Gamescope's Vulkan backend checks `VkPhysicalDeviceDrmPropertiesEXT::hasPrimary`
+whenever the backend does not present through a Vulkan swapchain, which is the
+case for the Wayland backend this provider uses, and exits with `physical device
+has no primary node` when the node is absent from the container. The harness
+derives the default from the render node's sysfs sibling and refuses a catalog
+without one, because the symptom otherwise arrives as a nested compositor whose
+runtime helper never became ready.
+
 The harness creates a unique deployment and authority root, opens every
 allocated event alias inside both workers, checks major/minor identity and
 absence of other input nodes, and sends bounded synthetic input through the

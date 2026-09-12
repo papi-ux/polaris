@@ -53,6 +53,64 @@ namespace {
     while (std::getline(stream, item, ',')) if (!item.empty()) paths.emplace_back(item);
     return paths;
   }
+  // Gamescope's Vulkan backend refuses to start unless the DRM primary node of
+  // the device it selects is visible to it, so a seat needs more than a render
+  // node. The primary node is the render node's sibling in sysfs.
+  std::string drm_primary_node_for(const std::string &render) {
+    std::error_code error;
+    const auto siblings =
+      std::filesystem::path {"/sys/class/drm"} / std::filesystem::path {render}.filename() / "device/drm";
+    std::filesystem::directory_iterator entries {siblings, error};
+    if (error) return {};
+    for (const auto &entry : entries) {
+      const auto name = entry.path().filename().native();
+      if (name.starts_with("card")) return (std::filesystem::path {"/dev/dri"} / name).native();
+    }
+    return {};
+  }
+  std::string drm_driver_for(const std::string &render) {
+    const auto uevent =
+      std::filesystem::path {"/sys/class/drm"} / std::filesystem::path {render}.filename() / "device/uevent";
+    std::ifstream input {uevent};
+    std::string line;
+    while (std::getline(input, line)) {
+      constexpr std::string_view key = "DRIVER=";
+      if (line.starts_with(key)) return line.substr(key.size());
+    }
+    return {};
+  }
+  // NVIDIA's EGL needs its own character devices as well as the DRM nodes.
+  // Without them the nested compositor fails at eglQueryDevicesEXT rather than
+  // reporting a missing device. The per-GPU node comes from the driver's own
+  // record for this exact PCI address, so a second GPU's node is never claimed
+  // by mistake. The control nodes below are process-wide rather than per-GPU,
+  // which is why a host with more than one GPU supplies its own catalog through
+  // the environment instead of taking this default.
+  std::vector<std::string> nvidia_nodes(const std::string &render) {
+    std::vector<std::string> nodes;
+    for (const auto *shared : {"/dev/nvidiactl", "/dev/nvidia-modeset", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools"}) {
+      std::error_code error;
+      if (std::filesystem::exists(shared, error)) nodes.emplace_back(shared);
+    }
+    std::error_code error;
+    const auto device = std::filesystem::canonical(
+      std::filesystem::path {"/sys/class/drm"} / std::filesystem::path {render}.filename() / "device", error);
+    if (error) return nodes;
+    std::ifstream information {
+      std::filesystem::path {"/proc/driver/nvidia/gpus"} / device.filename() / "information"};
+    std::string line;
+    while (std::getline(information, line)) {
+      constexpr std::string_view key = "Device Minor:";
+      if (!line.starts_with(key)) continue;
+      const auto first = line.find_first_of("0123456789", key.size());
+      if (first == std::string::npos) break;
+      auto last = first;
+      while (last < line.size() && std::isdigit(static_cast<unsigned char>(line[last]))) ++last;
+      nodes.push_back("/dev/nvidia" + line.substr(first, last - first));
+      break;
+    }
+    return nodes;
+  }
   std::string nonce() { return crypto::rand_alphabet(32, "0123456789abcdef"); }
 
   // Own one unique directory. Only remove it when it is still the same inode
@@ -204,7 +262,21 @@ namespace {
     RecordProperty("physical_game_requested", game ? "true" : "false");
     const auto [profile, kind] = profiles.at(profile_name);
     const auto render = env_or("POLARIS_PHYSICAL_RENDER_NODE", "/dev/dri/renderD128");
-    const auto devices = split_paths(env_or("POLARIS_PHYSICAL_GPU_DEVICES", render));
+    const auto primary_node = drm_primary_node_for(render);
+    auto default_devices = render;
+    if (!primary_node.empty()) default_devices += "," + primary_node;
+    if (drm_driver_for(render) == "nvidia") {
+      for (const auto &node : nvidia_nodes(render)) default_devices += "," + node;
+    }
+    const auto devices = split_paths(env_or("POLARIS_PHYSICAL_GPU_DEVICES", default_devices));
+    // Without this the seat starts, smithay initialises EGL, and gamescope then
+    // exits with "physical device has no primary node" while the only reported
+    // failure is that the runtime helper never became ready.
+    ASSERT_TRUE(std::any_of(devices.begin(), devices.end(), [](const auto &device) {
+      return device.native().starts_with("/dev/dri/card");
+    })) << "a gamescope seat needs the GPU's DRM primary node in its device catalog, not only "
+           "its render node; for " << render << " that is "
+        << (primary_node.empty() ? std::string {"a /dev/dri/card node"} : primary_node);
     const auto executable = env_or("POLARIS_PHYSICAL_PODMAN", "/usr/bin/podman");
     const auto deployment = "physical-" + nonce();
     private_root_t root {parent};
