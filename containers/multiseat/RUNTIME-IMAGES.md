@@ -41,6 +41,12 @@ Each `build/worker-artifacts/<profile>/<default|nvidia>/` contains:
   Rust dependency closure (including build/dev dependencies);
 - `providers.json`, sanitized names and scope of completed real-provider tests.
 
+NVIDIA variants also export `nvidia-files.json` and `nvidia-runtime.json`. The
+first records every selected vendor file's hash, ELF ABI and SONAME, plus
+configuration files, notices and symbolic links. The second records the ABIs
+that passed loader checks and binds the file manifest by SHA-256. The artifact
+manifest hashes both records, and the SBOM records their architecture scope.
+
 The private `providers.log` is retained locally and is excluded from uploads.
 `worker_digest` is the exported OCI manifest digest. An engine's local storage
 manifest may differ. Docker's `worker_reference` is its full configuration image
@@ -119,6 +125,22 @@ explicit set of vendor graphics, CUDA, and codec userspace libraries, SONAME
 links, EGL/Vulkan configuration, license, and per-file hashes. Generic GLVND
 frontends remain from the root. Kernel modules, firmware, host configuration,
 and host installer execution are absent. The host driver must match this version.
+
+Steam, Heroic and Lutris variants include both amd64 and i386 vendor libraries.
+Their Ubuntu closures explicitly supply i386 GLVND OpenGL, EGL and GLES2
+frontends and the Wayland server library used by NVIDIA's EGL platform plugin.
+The Gamescope validation workload uses amd64 only, so its NVIDIA layer omits
+unused i386 files.
+
+Packaging rejects a library whose ELF class, byte order, machine, object type or
+SONAME does not match its destination. The final image verifies file hashes,
+trusted directories, SONAME and GBM aliases, and EGL/Vulkan vendor selection.
+It runs `ldd -r` on every packaged vendor library and the generic OpenGL, GLX,
+EGL, GLES2 and Vulkan frontends for each required ABI. Missing dependencies and
+unresolved symbols fail the image even when `ldd` returns exit status zero.
+These checks open no GPU devices and establish loader compatibility only.
+They do not establish real 32 bit game rendering, Proton compatibility, optional
+driver feature support, or latency.
 
 Physical provider tests require an explicitly admitted render node and the
 matching GPU catalog's device set. Resolve DRM primary/render nodes by their

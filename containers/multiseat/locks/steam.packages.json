@@ -871,12 +871,28 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/m/mesa/libegl-mesa0_26.0.8-1ubuntu0.3_amd64.deb"
     },
     {
+      "name": "libegl-mesa0",
+      "version": "26.0.8-1ubuntu0.3",
+      "architecture": "i386",
+      "filename": "libegl-mesa0_26.0.8-1ubuntu0.3_i386.deb",
+      "sha256": "222abc06ef7eee46ba9241c4b0cb5f0b702035aeafc3e83294aff564350b9e22",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/m/mesa/libegl-mesa0_26.0.8-1ubuntu0.3_i386.deb"
+    },
+    {
       "name": "libegl1",
       "version": "1.7.0-3",
       "architecture": "amd64",
       "filename": "libegl1_1.7.0-3_amd64.deb",
       "sha256": "cf2a6549bbc4339671901bde97c0ca41c380c5783179ef68977bf86151f03766",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libegl1_1.7.0-3_amd64.deb"
+    },
+    {
+      "name": "libegl1",
+      "version": "1.7.0-3",
+      "architecture": "i386",
+      "filename": "libegl1_1.7.0-3_i386.deb",
+      "sha256": "59a77e086be9af07ca0d5fa21fd290d0ec1b99166270ec746db9a31594bedbf7",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libegl1_1.7.0-3_i386.deb"
     },
     {
       "name": "libei1",
@@ -1125,6 +1141,14 @@
       "filename": "libgles2_1.7.0-3_amd64.deb",
       "sha256": "60113d7ec92c7ccdbd09e90b379bb9041581af3b85e28b3f250374025bb6440e",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-3_amd64.deb"
+    },
+    {
+      "name": "libgles2",
+      "version": "1.7.0-3",
+      "architecture": "i386",
+      "filename": "libgles2_1.7.0-3_i386.deb",
+      "sha256": "c085556adc498ee28054d1884cfb61a32c4ab97d1b9f4feb90448f621f43f7d2",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-3_i386.deb"
     },
     {
       "name": "libglib2.0-0t64",
@@ -2925,6 +2949,14 @@
       "filename": "libwayland-server0_1.24.0-2_amd64.deb",
       "sha256": "9f0278d02d401c9fd0f2b4b06d37ea0b1e7cecbb6a8d2539427f810d80c409dc",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/w/wayland/libwayland-server0_1.24.0-2_amd64.deb"
+    },
+    {
+      "name": "libwayland-server0",
+      "version": "1.24.0-2",
+      "architecture": "i386",
+      "filename": "libwayland-server0_1.24.0-2_i386.deb",
+      "sha256": "05d57ae13405807e26346459145f8784d9bf765d895123c4476bde7a36738a1f",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/w/wayland/libwayland-server0_1.24.0-2_i386.deb"
     },
     {
       "name": "libwebp7",
@@ -5177,12 +5209,28 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/m/mesa/libegl-mesa0_26.0.8-1ubuntu0.3_amd64.deb"
     },
     {
+      "name": "libegl-mesa0",
+      "version": "26.0.8-1ubuntu0.3",
+      "architecture": "i386",
+      "filename": "libegl-mesa0_26.0.8-1ubuntu0.3_i386.deb",
+      "sha256": "222abc06ef7eee46ba9241c4b0cb5f0b702035aeafc3e83294aff564350b9e22",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/m/mesa/libegl-mesa0_26.0.8-1ubuntu0.3_i386.deb"
+    },
+    {
       "name": "libegl1",
       "version": "1.7.0-3",
       "architecture": "amd64",
       "filename": "libegl1_1.7.0-3_amd64.deb",
       "sha256": "cf2a6549bbc4339671901bde97c0ca41c380c5783179ef68977bf86151f03766",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libegl1_1.7.0-3_amd64.deb"
+    },
+    {
+      "name": "libegl1",
+      "version": "1.7.0-3",
+      "architecture": "i386",
+      "filename": "libegl1_1.7.0-3_i386.deb",
+      "sha256": "59a77e086be9af07ca0d5fa21fd290d0ec1b99166270ec746db9a31594bedbf7",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libegl1_1.7.0-3_i386.deb"
     },
     {
       "name": "libei1",
@@ -5543,6 +5591,14 @@
       "filename": "libgles2_1.7.0-3_amd64.deb",
       "sha256": "60113d7ec92c7ccdbd09e90b379bb9041581af3b85e28b3f250374025bb6440e",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-3_amd64.deb"
+    },
+    {
+      "name": "libgles2",
+      "version": "1.7.0-3",
+      "architecture": "i386",
+      "filename": "libgles2_1.7.0-3_i386.deb",
+      "sha256": "c085556adc498ee28054d1884cfb61a32c4ab97d1b9f4feb90448f621f43f7d2",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-3_i386.deb"
     },
     {
       "name": "libglib2.0-0t64",
@@ -7735,6 +7791,14 @@
       "filename": "libwayland-server0_1.24.0-2_amd64.deb",
       "sha256": "9f0278d02d401c9fd0f2b4b06d37ea0b1e7cecbb6a8d2539427f810d80c409dc",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/w/wayland/libwayland-server0_1.24.0-2_amd64.deb"
+    },
+    {
+      "name": "libwayland-server0",
+      "version": "1.24.0-2",
+      "architecture": "i386",
+      "filename": "libwayland-server0_1.24.0-2_i386.deb",
+      "sha256": "05d57ae13405807e26346459145f8784d9bf765d895123c4476bde7a36738a1f",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/w/wayland/libwayland-server0_1.24.0-2_i386.deb"
     },
     {
       "name": "libwebp7",

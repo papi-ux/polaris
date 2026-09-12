@@ -14,6 +14,7 @@ import tomllib
 import urllib.parse
 
 from oci_archive import docker_to_oci, verify_archive
+from nvidia_runtime import architectures
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -245,6 +246,7 @@ def build_artifact(args, revision, epoch, context):
                                '--entrypoint=/usr/bin/cat', image, '/usr/share/polaris/build/packages.tsv'])
     (artifact / 'packages.tsv').write_text(package_manifest)
     bill = sbom(package_manifest, args.profile, revision, context)
+    extra_files = []
     if args.nvidia:
         codec = json.loads((here / 'locks/nvcodec.json').read_text())
         bill['components'].append({'type': 'library', 'name': 'gstreamer-nvcodec',
@@ -252,11 +254,26 @@ def build_artifact(args, revision, epoch, context):
                                    'externalReferences': [{'type': 'distribution', 'url': codec['url']}],
                                    'properties': [{'name': 'polaris:source-archive-sha256', 'value': codec['sha256']}]})
         nvidia = json.loads((here / 'locks/nvidia.json').read_text())
+        records = {}
+        for filename in ['nvidia-files.json', 'nvidia-runtime.json']:
+            content = output(engine + ['run', '--rm', '--network=none', '--read-only',
+                             '--cap-drop=all', '--security-opt=no-new-privileges',
+                             '--entrypoint=/usr/bin/cat', image, '/usr/share/polaris/build/' + filename])
+            (artifact / filename).write_text(content)
+            records[filename] = json.loads(content)
+            extra_files.append(filename)
+        report = records['nvidia-runtime.json']
+        if (report['result'] != 'passed' or report['driver_version'] != nvidia['version'] or
+                report['architectures'] != architectures(args.profile) or
+                records['nvidia-files.json']['architectures'] != report['architectures'] or
+                report['manifest_sha256'] != digest(artifact / 'nvidia-files.json')):
+            raise ValueError('NVIDIA runtime receipt does not match the produced image')
         bill['components'].append({'type': 'library', 'name': 'nvidia-graphics-userspace',
                                    'version': nvidia['version'], 'bom-ref': 'nvidia-userspace',
-                                   'properties': [{'name': 'polaris:source-archive-sha256', 'value': nvidia['sha256']}]})
+                                   'properties': [{'name': 'polaris:source-archive-sha256', 'value': nvidia['sha256']},
+                                                  {'name': 'polaris:architectures', 'value': ','.join(report['architectures'])},
+                                                  {'name': 'polaris:file-manifest-sha256', 'value': report['manifest_sha256']}]})
     write_json(artifact / 'sbom.cdx.json', bill)
-    extra_files = []
     if args.engine == 'docker':
         run(engine + ['image', 'save', '-o', str(artifact / 'worker.docker.tar'), image])
         docker_to_oci(artifact / 'worker.docker.tar', artifact / 'worker.oci.tar', config_digest, int(epoch))

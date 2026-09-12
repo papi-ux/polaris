@@ -91,8 +91,9 @@ permissions, revocation, cancellation, and host configuration.
 Real Steam bootstrap, Big Picture focus and input, game installation, Proton's
 runtime sandbox under the unchanged Docker security policy, game audio, and
 two simultaneous clients still require acceptance using the exact produced
-image. The NVIDIA layer currently supplies amd64 userspace; matching i386 NVIDIA
-libraries remain required work for 32 bit NVIDIA games. Image checks and
+image. The NVIDIA Steam layer supplies and checks amd64 and i386 vendor
+libraries, generic graphics loaders, and their dynamic dependencies. Real
+32 bit rendering remains part of game acceptance. Image checks and
 process tests do not establish game compatibility or latency. Heroic and Lutris
 launch adapters, profile assignment UI, and Nova optimizer integration remain
 separate work. The ordinary one-person, one-device flow remains unchanged.

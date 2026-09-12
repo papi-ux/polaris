@@ -25,6 +25,9 @@ case "$profile" in
   heroic) runtime="$runtime /launchers/heroic.deb mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386" ;;
   lutris) runtime="$runtime lutris wine winetricks mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386" ;;
 esac
+if [ "$profile" != gamescope ]; then
+  runtime="$runtime libegl1:i386 libgles2:i386 libgl1:i386 libwayland-server0:i386"
+fi
 for role in runtime build; do
   mkdir -p "/out/$role/partial"
   requested="$runtime"

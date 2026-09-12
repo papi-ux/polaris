@@ -42,8 +42,10 @@ now provisions a dedicated profile bridge and supervises Big Picture or a typed
 game ID. The validation workload retains networking disabled. Host profile
 activation is implemented behind an explicit setting; real launcher acceptance,
 Heroic and Lutris adapters, and assignment UI remain pending.
-The NVIDIA layer currently provides amd64 userspace; 32 bit NVIDIA games require
-a separately packaged and validated matching i386 driver closure.
+The NVIDIA launcher images package amd64 and i386 vendor libraries with the
+matching generic graphics dependencies. Build checks verify both ELF ABIs,
+file hashes, SONAME links and dynamic dependencies. The Gamescope validation
+image uses only amd64. Real 32 bit game execution remains an acceptance gate.
 
 Passing image/provider checks proves dependency presence and isolated provider
 behavior. Physical GPU testing must use the exact produced image. Client

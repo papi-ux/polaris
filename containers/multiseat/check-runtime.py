@@ -75,6 +75,9 @@ for element in ['waylanddisplaysrc', 'unixfdsink', 'unixfdsrc', 'fakesink', 'vid
                 'glupload', 'glcolorconvert', 'gldownload']:
     subprocess.run(['/usr/bin/gst-inspect-1.0', element], check=True, stdout=subprocess.DEVNULL)
 if hardware_libraries:
+    from nvidia_runtime import verify
+    report = verify(pathlib.Path('/'), profile)
+    pathlib.Path('/usr/share/polaris/build/nvidia-runtime.json').write_text(json.dumps(report, indent=2) + '\n')
     # Registration can legitimately expose no encoders on a build machine with
     # no GPU devices. Physical codec acceptance must require actual frames.
     subprocess.run(['/usr/bin/gst-inspect-1.0', 'nvcodec'], check=True, stdout=subprocess.DEVNULL)
