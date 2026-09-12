@@ -5,6 +5,7 @@ function(polaris_prepare_inputtino source output)
         include/inputtino/input.hpp
         src/uhid/include/uhid/protected_types.hpp
         src/uhid/include/uhid/uhid.hpp
+        src/uhid/include/uhid/ps5.hpp
         src/uhid/joypad_ps5.cpp
         src/uinput/include/inputtino/protected_types.hpp
         src/uinput/keyboard.cpp
@@ -19,6 +20,7 @@ function(polaris_prepare_inputtino source output)
         6643a5fd9ff101e9451398bf9cd0f7eb051bd2f10f294e1060a93fa6f3d0ca08
         2f8de358a4c0f353d97b165afc7f902d10c2ed01929f09e7a21dd2b2c8fd0f22
         95e6c94c1343e804866a49c9ef666f3c111b75144eecc02c378c1b88efc1fda5
+        39bc96b1b30ee96c463403a006d954658277abdfcd3bca8f28893ae5426b96d1
         1a4445915d5ef58115a588f013472e42fcdbc91eb70e08fb22adbb93db316d52
         f8cfbea8d3e46a596edb28431ef159b2f9d4077685a47f912b727ac4ea24a4d2
         f91735f3c5071cee64a2ca0013f650f54c1011270b5d5af97542d644330da802
@@ -44,7 +46,8 @@ function(polaris_prepare_inputtino source output)
     file(COPY "${source}/" DESTINATION "${output}" PATTERN ".git" EXCLUDE)
     foreach(name
             0001-serialize-dualsense-reports-and-own-threads.patch
-            0002-propagate-uinput-physical-identity.patch)
+            0002-propagate-uinput-physical-identity.patch
+            0003-neutral-dualsense-resting-axes.patch)
         set(backport "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../packaging/linux/patches/inputtino/${name}")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${backport}")
         execute_process(

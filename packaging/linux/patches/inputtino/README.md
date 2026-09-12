@@ -54,3 +54,23 @@ this patch supplies their requested kernel metadata. It does not change device
 mount admission or establish separation from other processes with the same UID
 or input-group authority. Actual Linux sysfs/udev and desktop input behavior
 remain physical acceptance gates.
+
+## DualSense resting axes (#634)
+
+The third patch gives every axis in `dualsense_input_report` its own
+initializer. A comma-separated declaration binds the initializer only to the
+member it follows, so `x`, `rx` and `z` had none: a freshly created pad reported
+both sticks hard left, and `rz` took the centre value, which for a trigger means
+half pulled. Nothing corrected any of it until the client sent its first stick
+or trigger update, because the periodic sender starts as soon as the pad exists.
+
+Triggers rest at `PS5_AXIS_MIN` rather than `PS5_AXIS_NEUTRAL`, matching what
+`set_triggers(0, 0)` scales to. The Xbox and Switch pads were measured resting
+at zero on every axis and are unchanged; only the UHID DualSense was affected.
+
+`src/uhid/include/uhid/ps5.hpp` joins the hashed inputs with this patch. The
+first patch already edits that header, so an upstream change to it was only
+caught as a patch failure rather than as a named review prompt.
+
+`report_order.cpp` asserts the resting report directly: it creates a pad,
+submits nothing, and reads the first report the periodic sender emits.
