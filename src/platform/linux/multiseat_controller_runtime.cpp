@@ -835,6 +835,19 @@ namespace multiseat {
     }
   }
 
+  bool controller_runtime_t::routes_client(std::string_view client_key) const {
+    // Routes are immutable for this owner's entire lifetime, including drain.
+    return std::any_of(impl_->profile_routes.begin(), impl_->profile_routes.end(), [&](const auto &route) {
+      return std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end();
+    });
+  }
+
+  std::optional<seat_state_e> controller_runtime_t::seat_state(const seat_handle_t &handle) const {
+    std::scoped_lock lock {impl_->state_mutex};
+    const auto seat = impl_->registry->snapshot(handle);
+    return seat ? std::optional {seat->state} : std::nullopt;
+  }
+
   bool controller_runtime_t::admission_ready() const {
     std::scoped_lock lock {impl_->state_mutex};
     return impl_->admission_ready && !impl_->shutting_down && !impl_->closed;

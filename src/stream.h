@@ -90,6 +90,8 @@ namespace stream {
     };
 
     std::shared_ptr<session_t> alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
+    bool uses_host_process(const session_t &session);
+    bool stops_when_host_exits(const session_t &session, bool host_running, bool peer_connected);
     session_profile_t profile(const session_t& session);
     std::string uuid(const session_t& session);
     std::string session_token(const session_t& session);

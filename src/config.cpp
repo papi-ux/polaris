@@ -672,6 +672,8 @@ namespace config {
     false,  // trusted_subnet_auto_pairing
   };
 
+  multiseat_t multiseat;
+
   input_t input {
     {
       {0x10, 0xA0},
@@ -1558,6 +1560,8 @@ namespace config {
     bool_f(vars, "client_gamepad_seat_isolation", input.client_gamepad_seat_isolation);
     bool_f(vars, "client_keyboard_mouse_seat_isolation", input.client_keyboard_mouse_seat_isolation);
     bool_f(vars, "multiseat_moonlight_input", input.multiseat_moonlight_input);
+    bool_f(vars, "multiseat_enabled", multiseat.enabled);
+    string_f(vars, "multiseat_config", multiseat.config_file);
 
     bool_f(vars, "mouse", input.mouse);
     bool_f(vars, "mouse_cursor_visible", input.mouse_cursor_visible);

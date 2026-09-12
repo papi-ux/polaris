@@ -376,6 +376,11 @@ namespace config {
     int replay_buffer_minutes = 5;       ///< How many minutes to keep in replay buffer
   };
 
+  struct multiseat_t {
+    bool enabled = false;
+    std::string config_file;
+  };
+  extern multiseat_t multiseat;
   extern video_t video;
   extern audio_t audio;
   extern stream_t stream;

@@ -3,8 +3,10 @@
 The private profile catalog joins persistent Docker storage, a pinned runtime
 image, a typed workload, and paired device assignments. It supplies the existing
 controller factory through `production_controller_options_t::profile_catalog`.
-Production activation remains off. The ordinary streaming path does not read this
-file, and an explicitly enabled controller with an empty catalog remains inert.
+Production activation remains off by default. The
+[profile launch integration](container-multiseat-launch-integration.md) connects
+an explicitly configured host to this catalog. The ordinary streaming path does
+not read it, and an enabled controller with an empty catalog remains inert.
 
 ## Administrative command
 
@@ -86,9 +88,10 @@ retrying. Do not delete storage based only on the command's failure status.
 
 ## Remaining integration
 
-This provides administrative storage and controller ingestion. Settings UI,
-pairing UI assignments, normal host configuration and controller ownership,
-automatic reconciliation, and HTTP launch activation remain separate work.
+This provides administrative storage and controller ingestion. Explicit host
+configuration, controller ownership, reconciliation, and HTTP launch activation
+are implemented behind the default-off profile launch setting. Settings UI and
+pairing UI assignments remain separate work.
 Steam, Heroic, and Lutris have typed catalog families and built runtime images,
 but their game launch adapters and provisioning network policies remain pending.
 The catalog does not claim real game or client playback acceptance.

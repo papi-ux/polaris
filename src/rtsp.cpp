@@ -41,6 +41,7 @@ extern "C" {
 
 #ifdef __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
+  #include "platform/linux/multiseat_launch_service.h"
 #endif
 
 namespace asio = boost::asio;
@@ -58,6 +59,18 @@ namespace rtsp_stream {
   }
 
   namespace {
+    bool worker_media_matches_launch(const launch_session_t &launch, const stream::config_t &config) {
+      const auto fps = launch.fps / 1000;
+      return launch.fps > 0 && launch.fps % 1000 == 0 &&
+        config.monitor.videoFormat == 0 && config.monitor.dynamicRange == 0 &&
+        config.monitor.chromaSamplingType == 0 && config.monitor.enableIntraRefresh == 0 &&
+        config.audio.channels == 2 && config.audio.packetDuration == 5 &&
+        config.monitor.width == launch.width && config.monitor.height == launch.height &&
+        config.monitor.framerate == fps &&
+        av_cmp_q(video::framerate_to_rational(config.monitor), AVRational {fps, 1}) == 0 &&
+        av_cmp_q(video::encoding_framerate_to_rational(config.monitor), AVRational {fps, 1}) == 0;
+    }
+
     std::int64_t bound_session_bitrate(
         std::int64_t requested_bitrate_kbps,
         std::size_t warp_factor,
@@ -539,6 +552,10 @@ namespace rtsp_stream {
   };
 
 #ifdef POLARIS_TESTS
+  bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config) {
+    return worker_media_matches_launch(launch, config);
+  }
+
   std::int64_t bound_session_bitrate_for_tests(
       std::int64_t requested_bitrate_kbps,
       std::size_t warp_factor,
@@ -725,12 +742,13 @@ namespace rtsp_stream {
       return cancelled && static_cast<bool>(discarded);
     }
 
-    std::shared_ptr<launch_session_t> take_pending_client(std::string_view unique_id) {
+    std::shared_ptr<launch_session_t> take_pending_client(std::string_view unique_id, std::string_view token = {}) {
       std::shared_ptr<launch_session_t> discarded;
       {
         std::lock_guard timer_lock(_launch_timer_mutex);
         const auto pending = launch_event.view(0s);
-        if (!pending || pending->unique_id != unique_id || !pending->is_pending_or_handoff()) {
+        if (!pending || pending->unique_id != unique_id || !pending->is_pending_or_handoff() ||
+            (!token.empty() && pending->session_token != token)) {
           return {};
         }
         pending->cancel();
@@ -927,13 +945,14 @@ namespace rtsp_stream {
       , const std::function<int()> &start_override = {}
 #endif
     ) {
+      const bool worker_owned = launch_session.worker_connection_requirement()->load();
       if (!launch_session.lifecycle_generation ||
-          !proc::proc.try_begin_rtsp_setup(*launch_session.lifecycle_generation)) {
+          (!worker_owned && !proc::proc.try_begin_rtsp_setup(*launch_session.lifecycle_generation))) {
         launch_session.cancel();
         return insert_start_result_e::cancelled;
       }
-      auto finish_rtsp_setup = util::fail_guard([]() {
-        proc::proc.finish_rtsp_setup();
+      auto finish_rtsp_setup = util::fail_guard([worker_owned]() {
+        if (!worker_owned) proc::proc.finish_rtsp_setup();
       });
 
       if (!launch_session.try_begin_setup_handoff()) {
@@ -1103,12 +1122,15 @@ namespace rtsp_stream {
     server.session_clear(launch_session_id);
   }
 
-  void cancel_pending_launch_for_client(std::string_view unique_id) {
-    finish_cancelled_launch(take_pending_launch_for_client(unique_id));
+  void cancel_pending_launch_for_client(std::string_view unique_id, std::string_view token) {
+    finish_cancelled_launch(take_pending_launch_for_client(unique_id, token));
   }
 
-  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id) {
-    return server.take_pending_client(unique_id);
+  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id, std::string_view token) {
+#ifdef __linux__
+    if (auto service = multiseat::profile_service_for(unique_id)) (void) service->cancel_client(unique_id, token);
+#endif
+    return server.take_pending_client(unique_id, token);
   }
 
   void finish_cancelled_launch(const std::shared_ptr<launch_session_t> &launch) {
@@ -1403,15 +1425,16 @@ namespace rtsp_stream {
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
 
-    if (video::last_encoder_probe_supported_ref_frames_invalidation) {
+    const bool worker_owned = session.worker_connection_requirement()->load();
+    if (!worker_owned && video::last_encoder_probe_supported_ref_frames_invalidation) {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
     }
 
-    if (video::active_hevc_mode != 1) {
+    if (!worker_owned && video::active_hevc_mode != 1) {
       ss << "sprop-parameter-sets=AAAAAU"sv << std::endl;
     }
 
-    if (video::active_av1_mode != 1) {
+    if (!worker_owned && video::active_av1_mode != 1) {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
 
@@ -1421,7 +1444,7 @@ namespace rtsp_stream {
       ss << "a=fmtp:97 surround-params="sv << session.surround_params << std::endl;
     }
 
-    for (int x = 0; x < audio::MAX_STREAM_CONFIG; ++x) {
+    for (int x = 0; x < (worker_owned ? 2 : audio::MAX_STREAM_CONFIG); ++x) {
       auto &stream_config = audio::stream_configs[x];
       std::uint8_t mapping[platf::speaker::MAX_SPEAKERS];
 
@@ -1672,6 +1695,11 @@ namespace rtsp_stream {
       BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
 
     } catch (std::out_of_range &) {
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+
+    if (session.worker_connection_requirement()->load() && !worker_media_matches_launch(session, config)) {
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
     }

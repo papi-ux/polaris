@@ -82,6 +82,9 @@
 #include "private_state_file.h"
 #include "rtsp.h"
 #include "stream.h"
+#ifdef __linux__
+  #include "platform/linux/multiseat_launch_service.h"
+#endif
 #include "system_tray.h"
 #include "utility.h"
 #include "adaptive_bitrate.h"
@@ -4298,7 +4301,7 @@ namespace nvhttp {
     return true;
   }
 
-  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
@@ -4339,6 +4342,52 @@ namespace nvhttp {
       uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
       auto prepend_iv_p = (uint8_t *) &prepend_iv;
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
+    }
+
+    if (profile_worker) {
+      // Worker display and encoder ownership come from the saved profile. Do
+      // not probe host capture or apply a host optimizer envelope to this seat.
+      if (get_arg(args, "resolvedProfile", "0") != "0" || get_arg(args, "hdrMode", "0") != "0" ||
+          get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder")) return nullptr;
+      const auto requested = named_cert_p->display_mode.empty() ?
+        get_arg(args, "mode", "1920x1080x60") : named_cert_p->display_mode;
+      if (requested.size() > 64 || std::count(requested.begin(), requested.end(), 'x') != 2) return nullptr;
+      std::istringstream mode(requested);
+      std::array<std::string, 3> parts;
+      for (auto &part : parts) if (!std::getline(mode, part, 'x')) return nullptr;
+      if (mode.peek() != std::char_traits<char>::eof()) return nullptr;
+      auto integer = [](std::string_view text) -> std::optional<unsigned> {
+        if (text.empty()) return std::nullopt;
+        unsigned value = 0;
+        for (const auto ch : text) {
+          if (ch < '0' || ch > '9' || value > (std::numeric_limits<unsigned>::max() - (ch - '0')) / 10)
+            return std::nullopt;
+          value = value * 10 + (ch - '0');
+        }
+        return value;
+      };
+      const auto width = integer(parts[0]);
+      const auto height = integer(parts[1]);
+      const auto rate = integer(parts[2]);
+      if (!width || !height || !rate || *width < 320 || *width > 4096 ||
+          *height < 240 || *height > 2160 || *rate <= 0 || *rate > 240000) return nullptr;
+      const auto fps = *rate < 1000 ? *rate * 1000 : *rate;
+      if (fps > 240000 || fps % 1000 != 0) return nullptr;
+      const auto surround = integer(get_arg(args, "surroundAudioInfo", "196610"));
+      if (!surround || (*surround & 0xffff) != 2 || !get_arg(args, "surroundParams", "").empty()) return nullptr;
+      launch_session->width = launch_session->requested_width = *width;
+      launch_session->height = launch_session->requested_height = *height;
+      launch_session->fps = launch_session->requested_fps = fps;
+      launch_session->device_name = named_cert_p->name;
+      launch_session->unique_id = named_cert_p->uuid;
+      launch_session->temporary_authorization = named_cert_p->temporary_authorization;
+      launch_session->watch_only = watch_requested(args);
+      launch_session->perm = named_cert_p->perm & PERM::_game_control;
+      launch_session->host_audio = false;
+      launch_session->input_only = false;
+      launch_session->surround_info = *surround;
+      launch_session->require_worker_connection();
+      return launch_session;
     }
 
     launch_session->resolved_profile_from_client =
@@ -4958,6 +5007,45 @@ namespace nvhttp {
     return publish() ? 0 : 409;
   }
 
+#ifdef __linux__
+  std::optional<profile_launch_response_t> launch_profile_request(
+    const crypto::p_named_cert_t &candidate, const args_t &args, bool resume,
+    const std::function<bool(const std::shared_ptr<rtsp_stream::launch_session_t> &)> &publish
+  ) {
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return profile_launch_response_t {401, "The client is no longer authorized", {}};
+    auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    if (candidate != current) return profile_launch_response_t {409, "Client settings changed; reconnect to retry", {}};
+    if (!(current->perm & PERM::launch) || current->temporary_authorization || watch_requested(args))
+      return profile_launch_response_t {403, "A profile requires permanent launch permission", {}};
+    const auto appid = get_arg(args, "appid", "");
+    const auto appuuid = get_arg(args, "appuuid", "");
+    if (!resume && ((appid.empty() && appuuid.empty()) ||
+        (!appid.empty() && appid != std::to_string(multiseat::profile_app_id)) ||
+        (!appuuid.empty() && appuuid != multiseat::profile_app_uuid)))
+      return profile_launch_response_t {400, "Launch the assigned Polaris profile from the app list", {}};
+    if (!args.contains("rikey") || !args.contains("rikeyid"))
+      return profile_launch_response_t {400, "Missing profile launch key material", {}};
+    auto launch = make_launch_session(false, false, args, current.get(), true);
+    if (!launch) return profile_launch_response_t {400, "Unsupported profile display or media options", {}};
+    if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Encrypted RTSP is required for profile streaming", {}};
+    auto prepared = service->prepare(launch);
+    if (!prepared.prepared()) {
+      launch->cancel();
+      return profile_launch_response_t {prepared.status, std::string(prepared.message), std::move(launch)};
+    }
+    const auto status = publish_authorized_launch(current, PERM::launch, [&] {
+      return !launch->is_cancelled() && publish && publish(launch);
+    });
+    if (status) {
+      launch->cancel();
+      return profile_launch_response_t {status, "Authorization or launch state changed; reconnect to retry", std::move(launch)};
+    }
+    return profile_launch_response_t {200, "Profile launch accepted", std::move(launch)};
+  }
+#endif
+
   inline crypto::p_named_cert_t get_verified_cert(
     const crypto::p_named_cert_t &candidate,
     std::string_view request_path
@@ -5394,8 +5482,14 @@ namespace nvhttp {
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       named_cert_p = get_verified_cert(request);
     }
+    bool profile_client = false;
+#ifdef __linux__
+    const auto profile_service = named_cert_p ? multiseat::profile_service_for(named_cert_p->uuid) : nullptr;
+    profile_client = static_cast<bool>(profile_service);
+#endif
     const int pair_status = named_cert_p ? 1 : 0;
-    const auto advertised_codec_support = advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
+    const auto advertised_codec_support = profile_client ? video::codec_capability_state_t {1, 1, {}} :
+      advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
 
     pt::ptree tree;
 
@@ -5413,7 +5507,7 @@ namespace nvhttp {
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
-      if (named_cert_p && !!(named_cert_p->perm & PERM::server_cmd)) {
+      if (named_cert_p && !profile_client && !!(named_cert_p->perm & PERM::server_cmd)) {
         pt::ptree& root_node = tree.get_child("root");
 
         if (config::sunshine.server_cmds.size() > 0) {
@@ -5428,7 +5522,8 @@ namespace nvhttp {
         BOOST_LOG(debug) << "Permission Get ServerCommand denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
       }
 
-      tree.put("root.Permission", std::to_string(named_cert_p ? (uint32_t) named_cert_p->perm : 0U));
+      tree.put("root.Permission", std::to_string(named_cert_p ? static_cast<uint32_t>(
+        profile_client ? named_cert_p->perm & PERM::_game_control : named_cert_p->perm) : 0U));
 
     #ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
@@ -5492,11 +5587,24 @@ namespace nvhttp {
       }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
-    tree.put("root.ServerMaxLaunchRefreshRate", advertised_max_launch_refresh_rate_for_http());
+    tree.put("root.ServerMaxLaunchRefreshRate", profile_client ? 240 : advertised_max_launch_refresh_rate_for_http());
 
     tree.put("root.PairStatus", pair_status);
 
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
+#ifdef __linux__
+      if (profile_service) {
+        const auto token = profile_service->session_token(named_cert_p->uuid);
+        tree.put("root.currentgame", token ? multiseat::profile_app_id : 0);
+        tree.put("root.currentgameuuid", token ? std::string(multiseat::profile_app_uuid) : "");
+        tree.put("root.state", token ? "POLARIS_SERVER_BUSY" : "POLARIS_SERVER_FREE");
+        tree.put("root.currentgamesessiontoken", token.value_or(""));
+        tree.put("root.currentgameowner", token ? named_cert_p->name : "");
+        tree.put("root.currentgameviewercount", 0);
+        tree.put("root.currentgameowned", token ? 1 : 0);
+      } else
+#endif
+      {
       int current_appid = proc::proc.running();
       // When input only mode is enabled, the only resume method should be launching the same app again.
       if (config::input.enable_input_only_mode && current_appid != proc::input_only_app_id) {
@@ -5506,6 +5614,7 @@ namespace nvhttp {
       tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
       tree.put("root.state", current_appid > 0 ? "POLARIS_SERVER_BUSY" : "POLARIS_SERVER_FREE");
       append_current_game_session_fields(tree, named_cert_p.get());
+      }
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
@@ -5668,7 +5777,6 @@ namespace nvhttp {
 
   void applist(resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
-    const auto advertised_codec_support = advertised_codec_support_for_http(true);
 
     pt::ptree tree;
 
@@ -5690,6 +5798,22 @@ namespace nvhttp {
     }
 
     apps.put("<xmlattr>.status_code", 200);
+
+#ifdef __linux__
+    if (multiseat::profile_service_for(named_cert_p->uuid)) {
+      if (!!(named_cert_p->perm & PERM::_all_actions)) {
+        pt::ptree app;
+        app.put("IsHdrSupported", 0);
+        app.put("AppTitle", "Polaris Profile");
+        app.put("UUID", std::string(multiseat::profile_app_uuid));
+        app.put("IDX", 0);
+        app.put("ID", multiseat::profile_app_id);
+        apps.push_back({"App", std::move(app)});
+      }
+      return;
+    }
+#endif
+    const auto advertised_codec_support = advertised_codec_support_for_http(true);
 
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
       auto current_appid = proc::proc.running();
@@ -5755,6 +5879,26 @@ namespace nvhttp {
 
   }
 
+#ifdef __linux__
+  bool handle_profile_launch(pt::ptree &tree, req_https_t request,
+                            const crypto::p_named_cert_t &client, const args_t &args, bool resume) {
+    auto result = launch_profile_request(client, args, resume, [](const auto &launch) {
+      return rtsp_stream::launch_session_raise(launch);
+    });
+    if (!result) return false;
+    tree.put("root.<xmlattr>.status_code", result->status);
+    tree.put("root.<xmlattr>.status_message", result->message);
+    tree.put(resume ? "root.resume" : "root.gamesession", result->status == 200 ? 1 : 0);
+    if (result->status == 200) {
+      tree.put("root.sessionToken", result->launch->session_token);
+      tree.put("root.sessionUrl0", std::format("{}{}:{}", result->launch->rtsp_url_scheme,
+        net::addr_to_url_escaped_string(request->local_endpoint().address()),
+        static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))));
+    }
+    return true;
+  }
+#endif
+
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
 
@@ -5783,6 +5927,9 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    if (handle_profile_launch(tree, request, named_cert_p, args, false)) return;
+#endif
     const auto launch_generation = proc::proc.capture_session_launch_generation();
     if (!launch_generation || !proc::proc.try_begin_session_launch(*launch_generation)) {
       tree.put("root.resume", 0);
@@ -6242,6 +6389,9 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    if (handle_profile_launch(tree, request, named_cert_p, request->parse_query_string(), true)) return;
+#endif
     const auto launch_generation = proc::proc.capture_session_launch_generation();
     if (!launch_generation || !proc::proc.try_begin_session_launch(*launch_generation)) {
       tree.put("root.resume", 0);
@@ -6514,6 +6664,24 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    if (auto service = multiseat::profile_service_for(named_cert_p->uuid)) {
+      const auto token = get_arg(args, "sessiontoken", "");
+      const auto status = publish_authorized_launch(named_cert_p, PERM::launch, [&] {
+        return service->cancel_client(named_cert_p->uuid, token);
+      });
+      tree.put("root.cancel", status == 0 ? 1 : 0);
+      tree.put("root.<xmlattr>.status_code", status == 0 ? 200 : status);
+      if (status == 0) {
+        rtsp_stream::cancel_pending_launch_for_client(named_cert_p->uuid, token);
+        if (auto session = rtsp_stream::find_session(named_cert_p->uuid);
+            session && (token.empty() || stream::session::session_token(*session) == token))
+          stream::session::graceful_stop(*session);
+      }
+      return;
+    }
+#endif
+
     const auto session_token = get_arg(args, "sessiontoken", "");
     auto pending_capture_cancel = proc::proc.cancel_capture_preparation_for_shutdown(
       named_cert_p->uuid, session_token, true, false);
@@ -6643,6 +6811,14 @@ namespace nvhttp {
       response->close_connection_after_response = true;
       return;
     }
+
+#ifdef __linux__
+    if (multiseat::profile_service_for(named_cert_p->uuid)) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+#endif
 
     if (
       !(named_cert_p->perm & PERM::_allow_view)
@@ -9814,6 +9990,19 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+
+#ifdef __linux__
+      if (multiseat::profile_service_for(named_cert_p->uuid)) {
+        const nlohmann::json output {
+          {"status", false}, {"code", "profile_optimizer_unavailable"},
+          {"error", "Profile streams currently require a manual SDR H.264 preset with stereo audio."}
+        };
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(SimpleWeb::StatusCode::client_error_conflict, output.dump(), headers);
+        return;
+      }
+#endif
 
       auto args = request->parse_query_string();
       std::string device = args.count("device") ? args.find("device")->second : "";

@@ -256,6 +256,8 @@ namespace multiseat {
     [[nodiscard]] controller_shutdown_report_t shutdown() noexcept;
 
     [[nodiscard]] bool admission_ready() const;
+    [[nodiscard]] bool routes_client(std::string_view client_key) const;
+    [[nodiscard]] std::optional<seat_state_e> seat_state(const seat_handle_t &handle) const;
     [[nodiscard]] bool shutting_down() const;
     [[nodiscard]] bool closed() const;
     [[nodiscard]] std::size_t seats() const;

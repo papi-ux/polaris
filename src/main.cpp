@@ -42,6 +42,7 @@
 #elif __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
   #include "platform/linux/multiseat_profile_catalog.h"
+  #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
@@ -512,6 +513,30 @@ int main(int argc, char *argv[]) {
   auto input_deinit_guard = input::init();
 
 #ifdef __linux__
+  std::shared_ptr<multiseat::profile_launch_service_t> profile_service;
+  auto profile_service_guard = util::fail_guard([&] {
+    if (profile_service) {
+      profile_service->stop_admission();
+      multiseat::uninstall_profile_launch_service(profile_service);
+    }
+  });
+  if (config::multiseat.enabled) {
+    const auto options = multiseat::load_controller_options(config::multiseat.config_file);
+    if (!options || config::input.multiseat_moonlight_input) {
+      BOOST_LOG(error) << "Multiseat configuration is invalid or conflicts with the separate input owner"sv;
+      return 1;
+    }
+    auto created = multiseat::create_production_controller_runtime(*options);
+    if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
+      profile_service = std::make_shared<multiseat::profile_launch_service_t>(
+        multiseat::make_profile_controller(std::move(created.runtime)));
+      if (!multiseat::install_profile_launch_service(profile_service)) return 1;
+      BOOST_LOG(info) << "Multiseat profile controller started"sv;
+    } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {
+      BOOST_LOG(error) << "Multiseat controller could not establish its configured authority"sv;
+      return 1;
+    }
+  }
   auto multiseat_runtime_created =
     multiseat::input::create_production_moonlight_session_runtime({
       .enabled = config::input.multiseat_moonlight_input,
@@ -651,11 +676,20 @@ int main(int argc, char *argv[]) {
   // Wait for shutdown, this is not necessary when we're using the main event loop
   shutdown_event->view();
 
+#ifdef __linux__
+  if (profile_service) profile_service->stop_admission();
+#endif
+
   httpThread.join();
   configThread.join();
   rtspThread.join();
 
 #ifdef __linux__
+  if (profile_service && !profile_service->shutdown(5s)) {
+    BOOST_LOG(error) << "Multiseat cleanup remains incomplete; retaining fenced authority until process exit"sv;
+  }
+  multiseat::uninstall_profile_launch_service(profile_service);
+  profile_service.reset();
   if (multiseat_runtime) {
     const auto report = multiseat_runtime->shutdown();
     if (report.status !=

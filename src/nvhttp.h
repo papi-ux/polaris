@@ -118,6 +118,19 @@ namespace nvhttp {
                                 crypto::PERM required_permission,
                                 const std::function<bool()> &publish);
 
+#ifdef __linux__
+  struct profile_launch_response_t {
+    int status;
+    std::string message;
+    std::shared_ptr<rtsp_stream::launch_session_t> launch;
+  };
+  // Empty only for an authenticated client with no assigned profile. Publication
+  // is reauthorized after bounded worker startup and never calls the host proc.
+  std::optional<profile_launch_response_t> launch_profile_request(
+    const crypto::p_named_cert_t &candidate, const args_t &args, bool resume,
+    const std::function<bool(const std::shared_ptr<rtsp_stream::launch_session_t> &)> &publish);
+#endif
+
   /**
    * @brief Atomically mutate the shared authorization/credentials state file.
    *
@@ -169,7 +182,7 @@ namespace nvhttp {
    * carry client key material.
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
-  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p);
+  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false);
 
   /**
    * @brief Setup the nvhttp server.

@@ -547,6 +547,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_production.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_catalog.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_catalog.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_launch_service.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_launch_service.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

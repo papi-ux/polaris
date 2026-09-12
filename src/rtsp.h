@@ -24,6 +24,7 @@
 // Resolve circular dependencies
 namespace stream {
   struct session_t;
+  struct config_t;
 }
 
 namespace rtsp_stream {
@@ -201,8 +202,8 @@ namespace rtsp_stream {
   };
 
   bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
-  void cancel_pending_launch_for_client(std::string_view unique_id);
-  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id);
+  void cancel_pending_launch_for_client(std::string_view unique_id, std::string_view token = {});
+  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id, std::string_view token = {});
   void finish_cancelled_launch(const std::shared_ptr<launch_session_t> &launch);
 
   /**
@@ -234,6 +235,7 @@ namespace rtsp_stream {
   session_snapshot_t session_snapshot(const std::string_view& uuid);
 
 #ifdef POLARIS_TESTS
+  bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config);
   std::int64_t bound_session_bitrate_for_tests(
     std::int64_t requested_bitrate_kbps,
     std::size_t warp_factor,

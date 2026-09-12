@@ -3,6 +3,7 @@
  * @brief Offline composition tests for the trusted multiseat controller owner.
  */
 #include "src/platform/linux/multiseat_controller_runtime.h"
+#include "src/platform/linux/multiseat_launch_service.h"
 #include "src/platform/linux/multiseat_moonlight_activation.h"
 #include "src/rtsp.h"
 #include "src/stream.h"
@@ -1113,6 +1114,43 @@ namespace {
     stream::session::stop(*session);
   }
 
+  TEST_F(MultiseatControllerRuntimeTest, ProductionLaunchDriverAllocatesAuthorizedInputsAndRequiresMediaLease) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto *runtime = controller_.get();
+    auto driver = make_profile_controller(std::move(controller_));
+    auto cleanup = util::fail_guard([&] { state_->allow_cleanup(); EXPECT_TRUE(driver->shutdown()); });
+    auto launch = controller_launch(2201, 3201);
+    launch->width = 1920; launch->height = 1080; launch->fps = 60000;
+    EXPECT_TRUE(driver->routes_client(launch->unique_id));
+    EXPECT_FALSE(driver->routes_client("unassigned"));
+    driver->reconcile();
+    const auto started = driver->begin(launch);
+    ASSERT_TRUE(started.seat);
+    ASSERT_EQ(started.result.status, 200);
+    worker_identity_t identity;
+    {
+      std::lock_guard lock(state_->mutex);
+      ASSERT_EQ(state_->input_allocations.size(), 1U);
+      const auto &plan = state_->input_allocations.front().plan;
+      EXPECT_TRUE(plan.touch);
+      EXPECT_TRUE(plan.pen);
+      EXPECT_EQ(plan.gamepad_slots, 1U);
+      ASSERT_EQ(state_->workers.size(), 1U);
+      identity = state_->workers.front().identity;
+    }
+    EXPECT_EQ(driver->poll(launch, *started.seat), profile_poll_e::pending);
+    ASSERT_TRUE(state_->mark_worker_ready(identity));
+    driver->reconcile();
+    // This metadata fixture cannot issue a socket lease. The real driver must
+    // refuse publication and let the runtime reclaim its exact reservation.
+    EXPECT_EQ(driver->poll(launch, *started.seat), profile_poll_e::failed);
+    driver->reconcile();
+    EXPECT_TRUE(launch->worker_connection_requirement()->load());
+    EXPECT_EQ(runtime->managed_workers(), 0U);
+    EXPECT_EQ(runtime->input_allocations(), 0U);
+    EXPECT_EQ(runtime->seats(), 0U);
+  }
+
   TEST_F(
     MultiseatControllerRuntimeTest,
     InputFailureNeverLaunchesWorker
@@ -1472,7 +1510,7 @@ namespace {
 
   TEST_F(
     MultiseatControllerRuntimeTest,
-    CompositionRootRemainsOutsideCompleteProductionSourceTree
+    CompositionRootHasOnlyTheExplicitMainEntrypoint
   ) {
     const auto factory = controller_source(
       "src/platform/linux/multiseat_controller_production.cpp"
@@ -1507,8 +1545,7 @@ namespace {
         unexpected_callers.push_back(relative);
       }
     }
-    EXPECT_TRUE(unexpected_callers.empty())
-      << testing::PrintToString(unexpected_callers);
+    EXPECT_EQ(unexpected_callers, std::vector<std::string> {"src/main.cpp"});
   }
 }  // namespace
 
