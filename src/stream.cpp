@@ -2911,6 +2911,13 @@ namespace stream {
       auto remaining = --running_sessions;
       BOOST_LOG(info) << "Session ended for ["sv << session.device_name << "] [active sessions: "sv << remaining << "]"sv;
 
+      // The client told us which pad it wanted, after the pad it got had already been
+      // created. Keep it, so the next launch from this device starts the right one.
+      nvhttp::remember_client_controller_type(
+        session.device_uuid,
+        stream_stats::client_declared_controller_type()
+      );
+
       bool temporary_authorization_expired = false;
       if (session.temporary_authorization ||
           nvhttp::is_temporary_client_authorization(session.device_uuid)) {

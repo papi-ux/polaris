@@ -54,6 +54,9 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    /// Controller type this client declared last time it streamed, so the pad created
+    /// before the app starts can match. Zero when nothing has been observed yet.
+    int controller_type = 0;
     // Explicit deterministic launch preset. This is never populated from
     // Doctor history or AI output.
     std::string profile_preference = "auto";
