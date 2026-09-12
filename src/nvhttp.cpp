@@ -3018,6 +3018,9 @@ namespace nvhttp {
   using PERM = crypto::PERM;
 
   std::optional<pairing_access_preset_t> pairing_access_preset_from_view(std::string_view preset) {
+    if (preset == "gamepad"sv) {
+      return pairing_access_preset_t::gamepad;
+    }
     if (preset == "standard"sv) {
       return pairing_access_preset_t::standard;
     }
@@ -3032,6 +3035,8 @@ namespace nvhttp {
 
   PERM pairing_access_preset_perm(pairing_access_preset_t preset) {
     switch (preset) {
+      case pairing_access_preset_t::gamepad:
+        return PERM::_gamepad_only;
       case pairing_access_preset_t::standard:
         return PERM::_default;
       case pairing_access_preset_t::game_control:
@@ -3044,6 +3049,8 @@ namespace nvhttp {
 
   std::string_view pairing_access_preset_name(pairing_access_preset_t preset) {
     switch (preset) {
+      case pairing_access_preset_t::gamepad:
+        return "gamepad"sv;
       case pairing_access_preset_t::standard:
         return "standard"sv;
       case pairing_access_preset_t::game_control:
