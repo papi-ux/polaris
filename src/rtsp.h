@@ -57,6 +57,8 @@ namespace rtsp_stream {
     /// Controller type this client declared last time it streamed, so the pad created
     /// before the app starts can match. Zero when nothing has been observed yet.
     int controller_type = 0;
+    /// Whether this client has reported an HDR10-capable display of its own.
+    bool client_reports_hdr10_display = false;
     // Explicit deterministic launch preset. This is never populated from
     // Doctor history or AI output.
     std::string profile_preference = "auto";

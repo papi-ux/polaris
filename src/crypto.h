@@ -112,6 +112,10 @@ namespace crypto {
     /// pad preallocated before the app launches can be the one it actually asked for.
     /// Zero means never observed, which is what a first session from a new device looks like.
     int controller_type = 0;
+    /// Whether this client reported its own display can do HDR10. A device record's
+    /// hdr_capable is a curated default that is false until somebody edits it; the client
+    /// measured the actual panel, so it outranks the record.
+    bool client_reports_hdr10_display = false;
     std::string display_mode;
     int target_bitrate_kbps = 0;
     std::int64_t paired_at = 0;
