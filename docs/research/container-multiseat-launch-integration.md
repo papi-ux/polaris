@@ -178,14 +178,29 @@ video, decoded audio, isolated keyboard, pointer and controller input, and
 independent teardown. Two Moonlight instances with separate paired identities
 also launched assigned profiles through the normal protocol, decoded and
 rendered approximately 60 frames per second, and cancelled independently. That
-client check used one host and loopback networking. It does not establish
-independent physical client, LAN latency or reconnect acceptance.
+client check used one host and loopback networking.
+
+A physical Android client also launched its assigned profile through Nova over
+LAN Wi-Fi at 1920x1080 and 60 FPS, using hardware H.264 decoding and stereo audio
+transport. Changing Pong video and touch mouse input were observed while a
+separate Moonlight client streamed another profile over loopback. Disconnecting
+Android left the second stream running; its authenticated session stop then
+removed the remaining worker. The Android menu displayed the profile identity
+without desktop diagnostics. Session status hid the active session from another
+paired device sharing the occupied profile.
+
+Administrator assignment checks covered live catalog reload, rejected changes
+while streams remained active, reassignment after cleanup, and rejection of
+stale launch assertions after moving or unassigning a device. These checks used
+temporary hosts and profiles with SELinux enforcing and verified worker, volume
+and IPC cleanup. They do not establish audible playback, controller latency,
+or acceptance with two independent physical client devices.
 
 Available workloads are Gamescope `input-pong-v1` and the experimental
 [Steam launcher](container-multiseat-steam.md), with Big Picture or a typed game
-ID. Real Steam game acceptance, profile creation UI, AMD hardware and
-independent physical client acceptance remain
-pending, including reconnect and measured latency.
+ID. Real Steam game acceptance, profile creation UI, AMD hardware and two
+independent physical clients remain pending, including reconnect and measured
+latency.
 The UI must preserve the existing flow for one person with one device.
 Runtime images use Polaris builds from official Ubuntu. Required third party
 source and license notices remain intact until those dependencies are replaced.
