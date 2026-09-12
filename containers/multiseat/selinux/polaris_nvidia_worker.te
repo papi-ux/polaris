@@ -1,4 +1,4 @@
-policy_module(polaris_nvidia_worker, 1.0.2)
+policy_module(polaris_nvidia_worker, 1.0.3)
 
 gen_require(`
     type container_file_t;
@@ -20,6 +20,9 @@ container_domain_template(polaris_nvidia_worker, container)
 corenet_tcp_connect_all_ports(polaris_nvidia_worker_t)
 corenet_tcp_bind_generic_node(polaris_nvidia_worker_t)
 corenet_udp_bind_generic_node(polaris_nvidia_worker_t)
+# Steam's process helpers communicate through ephemeral TCP listeners too.
+# They remain inside the private bridge with no published worker ports.
+allow polaris_nvidia_worker_t self:tcp_socket { listen accept };
 
 # Device admission still comes exclusively from the exact GPU catalog. This
 # standard container template retains file-management permissions; dropped Linux
