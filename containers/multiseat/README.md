@@ -415,6 +415,18 @@ digest reference, `name@sha256:<64 hex>`, or a full Docker image ID
 Always add `--gtest_output=xml:<private receipt path>` to retain RecordProperty
 diagnostics.
 
+Set `POLARIS_PHYSICAL_LIVE_MEDIA=1` to exercise continuous worker media on
+Docker with the Gamescope input game. Leave `POLARIS_PHYSICAL_ENCODED_GAME`
+and `POLARIS_PHYSICAL_ENCODED_AUDIO` unset: those flags run separate probes.
+The live mode starts the controller-owned worker runtime, obtains each launch's
+authenticated connection, and consumes its H.264 and Opus through the real host
+media pump. It decodes every video packet to 1080p SDR and every audio packet to
+5 ms stereo, checks changing frames and audible samples, requests keyframes,
+and repeats input isolation and continued decoding after the first seat stops.
+Decoder errors and missing frames fail acceptance. XML properties retain the
+counts and exact image identity. This isolated harness opens no network listener
+and does not establish client playback, latency, or production activation.
+
 Each profile volume must be mode 0700 and owned by the controller UID. See the
 [Docker profile initialization recipe](../../docs/research/container-multiseat-docker.md#images-and-profile-state).
 Missing volumes and driver redirection are refused by admission; private root

@@ -99,8 +99,12 @@ Unit tests establish command and reconciliation behavior. A temporary Docker
 create/inspect check and a device-free container check establish CLI field
 shapes and writable private runtime ownership. They do not establish AMD or
 NVIDIA game streaming, hardware encoding, latency, or Unraid compatibility.
-The physical game probe still skips the new encoder provider. Its bounded
-codec observation is separate from continuous worker media and client playback.
+The original physical game probe skips the continuous encoder provider. Its
+bounded codec observation is separate from worker media and client playback.
+The opt-in `POLARIS_PHYSICAL_LIVE_MEDIA=1` harness instead decodes packets from
+both authenticated worker connections and checks continued media and isolated
+input after one seat stops. It still opens no client-facing network transport;
+retain the exact image and XML receipt before claiming a physical result.
 
 Polaris still runs on the host in this design. Choosing Docker for seat workers
 does not yet provide an Unraid application template or a supported Polaris

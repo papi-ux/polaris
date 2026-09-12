@@ -12,6 +12,7 @@
 #include "src/platform/linux/multiseat_moonlight_activation.h"
 #include "src/rtsp.h"
 #include "src/stream.h"
+#include "multiseat_physical_media.h"
 
 #ifdef __linux__
 extern "C" {
@@ -23,6 +24,7 @@ extern "C" {
 #include <cerrno>
 #include <cctype>
 #include <fstream>
+#include <future>
 #include <map>
 #include <chrono>
 #include <cstdlib>
@@ -250,7 +252,7 @@ namespace {
     const std::array volumes {env_or("POLARIS_PHYSICAL_VOLUME"), env_or("POLARIS_PHYSICAL_VOLUME_B")};
     ASSERT_FALSE(image.empty()); ASSERT_FALSE(parent.empty());
     RecordProperty("worker_image", image);
-    RecordProperty("access_policy", "crun-keep-groups-explicit-uid");
+
     ASSERT_FALSE(volumes[0].empty()); ASSERT_FALSE(volumes[1].empty()); ASSERT_NE(volumes[0], volumes[1]);
     const auto profile_name = env_or("POLARIS_PHYSICAL_PROFILE", "gamescope");
     const std::map<std::string, std::pair<runtime_profile_e, workload_kind_e>> profiles {
@@ -261,10 +263,12 @@ namespace {
     };
     ASSERT_TRUE(profiles.contains(profile_name));
     RecordProperty("runtime_profile", profile_name);
-    const bool game = env_or("POLARIS_PHYSICAL_GAME") == "1";
+    const bool live_media = env_or("POLARIS_PHYSICAL_LIVE_MEDIA") == "1";
+    const bool game = live_media || env_or("POLARIS_PHYSICAL_GAME") == "1";
     const bool encoded_game = env_or("POLARIS_PHYSICAL_ENCODED_GAME") == "1";
     ASSERT_FALSE(encoded_game && !game) << "encoded game probe requires the game lifecycle fixture";
     const bool encoded_audio = env_or("POLARIS_PHYSICAL_ENCODED_AUDIO") == "1";
+    ASSERT_FALSE(live_media && (encoded_game || encoded_audio)) << "live media consumes the actual worker; standalone media probes must be off";
     ASSERT_FALSE(encoded_audio && !game) << "encoded audio probe requires the game lifecycle fixture";
     ASSERT_TRUE(!game || profile_name == "gamescope");
     const std::string workload = game ? "input-pong-v1" : "physical-input-proof";
@@ -289,6 +293,9 @@ namespace {
         << (primary_node.empty() ? std::string {"a /dev/dri/card node"} : primary_node);
     const auto engine = env_or("POLARIS_PHYSICAL_ENGINE", "docker");
     ASSERT_TRUE(engine == "docker" || engine == "podman");
+    ASSERT_FALSE(live_media && engine != "docker");
+    RecordProperty("access_policy", engine == "docker" ? "docker-explicit-uid-groups-devices" : "crun-keep-groups-explicit-uid");
+    RecordProperty("live_worker_media_requested", live_media ? "true" : "false");
     container::options_t engine_options;
     engine_options.engine = engine == "docker" ? container::engine_e::docker : container::engine_e::podman;
     engine_options.executable = engine == "docker" ? env_or("POLARIS_PHYSICAL_DOCKER", "/usr/bin/docker") : env_or("POLARIS_PHYSICAL_PODMAN", "/usr/bin/podman");
@@ -307,6 +314,7 @@ namespace {
     options.enabled = true;
     options.gpus = {{.logical_gpu_id="physical-gpu", .render_node=render, .devices=devices, .max_seats=2, .max_encoder_sessions=2}};
     options.container = engine_options;
+    options.container.media_enabled = live_media;
     options.container.deployment_id = deployment;
     options.container.ipc_root = root.path;
     for (int index = 0; index < 2; ++index) options.container.profiles.push_back({
@@ -314,6 +322,22 @@ namespace {
     options.container.workloads = {{.kind=kind, .target_id=workload}};
     ASSERT_TRUE(host.trusted_runtime_file(options.container.runtime_executable));
     std::string command_failure, worker_diagnostics;
+    // Follow logs as soon as launch returns its exact ID. Docker's --rm may
+    // erase a worker before the next readiness check; reading logs only during
+    // controller cleanup loses precisely those startup failures.
+    std::vector<std::future<container::command_result_t>> startup_logs;
+    const auto follow_startup = [&](std::string id) {
+      if (game && engine == "docker") startup_logs.emplace_back(
+        std::async(std::launch::async, [&, id=std::move(id)] {
+          // The production command runner captures stdout only. Docker sends
+          // the worker's stderr back on stderr, so explicitly merge it for this
+          // private receipt. Arguments remain positional, never shell text.
+          std::vector<std::string> logs {"/bin/sh", "-c", "exec \"$@\" 2>&1", "physical-worker-logs"};
+          logs.insert(logs.end(), prefix.begin(), prefix.end());
+          logs.insert(logs.end(), {"logs", "--follow", "--tail=100", id});
+          return host.run(logs, 180s, 1024 * 1024);
+        }));
+    };
     production_controller_factories_t factories;
     factories.container_host = [&] { return std::make_unique<observed_host_t>(command_failure, worker_diagnostics, game, engine_options); };
     auto created = create_production_controller_runtime(std::move(options), std::move(factories));
@@ -321,6 +345,7 @@ namespace {
     auto controller = std::move(created.runtime);
     ASSERT_TRUE(controller);
     std::array<seat_t, 2> seats;
+    std::array<std::unique_ptr<physical::media_observer_t>, 2> media_observers;
     std::array<std::jthread, 2> games;
     std::array<container::command_result_t, 2> game_results;
     std::array<std::atomic<bool>, 2> game_done {};
@@ -344,6 +369,11 @@ namespace {
     // Scoped failure recovery never scans another deployment or recursively
     // removes authority. A fallback is test failure, followed by exact-ID reap.
     auto cleanup = util::fail_guard([&] {
+      for (int index = 0; index < 2; ++index) if (media_observers[index]) {
+        media_observers[index]->stop();
+        if (!media_observers[index]->error.empty())
+          RecordProperty("live_media_failure_" + std::to_string(index), media_observers[index]->error);
+      }
       for (auto &seat : seats) if (seat.stream) { stream::session::stop(*seat.stream); seat.stream.reset(); }
       for (int attempt = 0; attempt < 5 && !controller->closed(); ++attempt) {
         (void) controller->shutdown();
@@ -359,6 +389,11 @@ namespace {
         for (int index = 0; index < 2; ++index) remove_retained_game_worker(index);
         const auto remaining = command({"ps", "--all", "--no-trunc", "--filter=label=io.polaris.multiseat.deployment="+deployment, "--format={{.ID}}"});
         EXPECT_EQ(remaining.exit_status, 0); EXPECT_TRUE(remaining.output.empty());
+      }
+      for (std::size_t index = 0; index < startup_logs.size(); ++index) {
+        const auto result = startup_logs[index].get();
+        RecordProperty("worker_startup_" + std::to_string(index), result.output);
+        RecordProperty("worker_log_exit_" + std::to_string(index), std::to_string(result.exit_status));
       }
       if (!worker_diagnostics.empty()) RecordProperty("worker_diagnostics", worker_diagnostics);
       // Destroying these exact workers interrupts failed probe execs. Join only
@@ -390,6 +425,7 @@ namespace {
       while (!candidate_id.empty() && std::isspace(static_cast<unsigned char>(candidate_id.back()))) candidate_id.pop_back();
       ASSERT_TRUE(container_id_valid(candidate_id));
       seat.container_id = std::move(candidate_id);
+      follow_startup(seat.container_id);
       if (game) {
         const auto state = command({"inspect", "--format={{.State.Status}}", seat.container_id});
         ASSERT_EQ(state.exit_status, 0);
@@ -403,6 +439,7 @@ namespace {
     bool selected = false;
     while (std::chrono::steady_clock::now()<deadline) {
       (void) controller->reconcile(); selected = true;
+      if (controller->seats() != 2U) { selected = false; break; }
       for (int index=0; index<2; ++index) {
         auto &seat=seats[index];
         if (seat.stream) continue;
@@ -424,7 +461,10 @@ namespace {
     }
     ASSERT_TRUE(selected) << "workers did not reach authenticated input readiness";
     const auto game_state = [&](int index) -> std::optional<json> {
-      auto result = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "state", game_tokens[index]}, 2s);
+      auto result = live_media ?
+        command({"exec", "--env=DISPLAY=:0", "--env=XDG_RUNTIME_DIR=/run/polaris",
+          seats[index].container_id, "/usr/libexec/polaris-seat/game-status"}, 2s) :
+        command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "state", game_tokens[index]}, 2s);
       if (result.exit_status != 0 || result.timed_out) return std::nullopt;
       auto state = json::parse(result.output, nullptr, false);
       if (!state.is_object() || state.size() != 5) return std::nullopt;
@@ -439,7 +479,7 @@ namespace {
       EXPECT_FALSE(game_results[index].timed_out);
       EXPECT_EQ(game_results[index].exit_status, 0) << game_results[index].output;
     };
-    if (game) {
+    if (game && !live_media) {
       for (int index = 0; index < 2; ++index) games[index] = std::jthread([&, index] {
         game_results[index] = command({"exec", "--tty", seats[index].container_id, game_probe, "physical-game-probe", "start", game_tokens[index]}, 190s);
         game_done[index] = true;
@@ -453,6 +493,54 @@ namespace {
       }
       ASSERT_TRUE(ready) << "two private games did not become observable";
       std::this_thread::sleep_for(200ms);
+    }
+    const auto wait_media = [&](int index, std::uint64_t frames, std::uint64_t audio_frames,
+                                 std::uint64_t keyframes) {
+      const auto deadline = std::chrono::steady_clock::now() + 10s;
+      while (std::chrono::steady_clock::now() < deadline && !media_observers[index]->done) {
+        if (media_observers[index]->video >= frames && media_observers[index]->audio >= audio_frames &&
+            media_observers[index]->idrs >= keyframes) return true;
+        std::this_thread::sleep_for(10ms);
+      }
+      return false;
+    };
+    const auto finish_media = [&](int index) {
+      if (!live_media) return;
+      auto &observer = *media_observers[index];
+      observer.stop();
+      EXPECT_TRUE(observer.error.empty()) << observer.error;
+      EXPECT_EQ(observer.report.status, media::pump_status_e::ended_on_shutdown)
+        << observer.report.detail;
+      EXPECT_EQ(observer.submitted_video, observer.video.load());
+      EXPECT_EQ(observer.report.video_frames, observer.video.load());
+      EXPECT_EQ(observer.report.audio_frames, observer.audio.load());
+      EXPECT_GE(observer.report.idr_requests, 1U);
+      EXPECT_GE(observer.motion.load(), 10U);
+      EXPECT_GE(observer.audible.load(), 10U);
+      RecordProperty("live_media_seat_" + std::to_string(index), json {
+        {"video_packets", observer.report.video_frames}, {"decoded_frames", observer.video.load()},
+        {"audio_packets", observer.report.audio_frames}, {"decoded_audio_packets", observer.audio.load()},
+        {"changing_frames", observer.motion.load()}, {"audible_packets", observer.audible.load()},
+        {"idr_requests", observer.report.idr_requests}, {"idrs", observer.idrs.load()},
+        {"status", std::string {media::describe(observer.report.status)}}, {"error", observer.error}
+      }.dump());
+    };
+    if (live_media) {
+      for (int index = 0; index < 2; ++index) {
+        const auto owner = stream::session::worker_connection_for_tests(*seats[index].stream);
+        ASSERT_TRUE(owner);
+        const auto connection = owner->stream_connection(stream::session::generation(*seats[index].stream));
+        ASSERT_TRUE(connection.connected());
+        media_observers[index] = std::make_unique<physical::media_observer_t>(connection);
+      }
+      for (int index = 0; index < 2; ++index) {
+        ASSERT_TRUE(wait_media(index, 60, 100, 1)) << "worker media never became decodable";
+        const auto before = media_observers[index]->idrs.load();
+        media_observers[index]->request_idr = true;
+        ASSERT_TRUE(wait_media(index, media_observers[index]->video.load() + 8,
+          media_observers[index]->audio.load() + 20, before + 1)) << "worker IDR recovery failed";
+      }
+      ASSERT_TRUE(game_state(0)); ASSERT_TRUE(game_state(1));
     }
     const auto observe_encoded_game = [&](int index, bool peer_stopped = false) {
       auto result = command({"exec", seats[index].container_id, game_probe, "physical-game-probe", "media", game_tokens[index]}, 15s);
@@ -563,7 +651,8 @@ namespace {
     };
     observe(0,true);
     observe(1,true);
-    if (game) finish_game(0);
+    if (game && !live_media) finish_game(0);
+    finish_media(0);
     stream::session::stop(*seats[0].stream); seats[0].stream.reset();
     (void) controller->stop_seat(seats[0].snapshot.handle);
     const auto stop_deadline=std::chrono::steady_clock::now()+30s;
@@ -573,9 +662,16 @@ namespace {
     ASSERT_EQ(controller->seats(),1U);
     remove_retained_game_worker(0);
     observe(1,false);
+    if (live_media) {
+      const auto before = media_observers[1]->video.load();
+      ASSERT_TRUE(wait_media(1, before + 60, media_observers[1]->audio.load() + 100, media_observers[1]->idrs.load()))
+        << "surviving worker stopped producing decoded media after peer retirement";
+      RecordProperty("live_media_survivor_frames", std::to_string(media_observers[1]->video.load() - before));
+    }
     if (encoded_game) observe_encoded_game(1, true);
     if (encoded_audio) observe_encoded_audio(1, true);
-    if (game) finish_game(1);
+    if (game && !live_media) finish_game(1);
+    finish_media(1);
     stream::session::stop(*seats[1].stream); seats[1].stream.reset();
     (void) controller->stop_seat(seats[1].snapshot.handle);
     for (int attempt=0;attempt<300 && controller->seats()!=0;++attempt) {
