@@ -354,6 +354,14 @@ namespace nvhttp {
   bool is_temporary_client_authorization(std::string_view uuid);
 
   /**
+   * @brief Remember the controller type a paired client declared, for its next launch.
+   * @param uuid The paired client.
+   * @param controller_type An LI_CTYPE_* value.
+   * @return True when the stored value changed and was persisted.
+   */
+  bool remember_client_controller_type(std::string_view uuid, int controller_type);
+
+  /**
    * @brief Remove single client.
    * @param uuid The UUID of the client to remove.
    * @examples
