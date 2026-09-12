@@ -1081,6 +1081,14 @@
     {
       "name": "libgles2",
       "version": "1.7.0-3",
+      "architecture": "amd64",
+      "filename": "libgles2_1.7.0-3_amd64.deb",
+      "sha256": "60113d7ec92c7ccdbd09e90b379bb9041581af3b85e28b3f250374025bb6440e",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-3_amd64.deb"
+    },
+    {
+      "name": "libgles2",
+      "version": "1.7.0-3",
       "architecture": "i386",
       "filename": "libgles2_1.7.0-3_i386.deb",
       "sha256": "c085556adc498ee28054d1884cfb61a32c4ab97d1b9f4feb90448f621f43f7d2",

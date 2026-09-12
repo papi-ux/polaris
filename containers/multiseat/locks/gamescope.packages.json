@@ -919,6 +919,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/m/mesa/libgl1-mesa-dri_26.0.8-1ubuntu0.3_amd64.deb"
     },
     {
+      "name": "libgles2",
+      "version": "1.7.0-3",
+      "architecture": "amd64",
+      "filename": "libgles2_1.7.0-3_amd64.deb",
+      "sha256": "60113d7ec92c7ccdbd09e90b379bb9041581af3b85e28b3f250374025bb6440e",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-3_amd64.deb"
+    },
+    {
       "name": "libglib2.0-0t64",
       "version": "2.88.0-1",
       "architecture": "amd64",
