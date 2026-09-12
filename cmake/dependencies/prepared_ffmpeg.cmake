@@ -1,4 +1,4 @@
-set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG "v2026.724.203728" CACHE STRING
+set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG "v2026.713.132551" CACHE STRING
     "LizardByte/build-deps release tag used for prepared FFmpeg archives")
 set(POLARIS_PREPARED_FFMPEG_BASE_URL
     "https://github.com/LizardByte/build-deps/releases/download/${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}"
@@ -8,6 +8,18 @@ set(POLARIS_PREPARED_FFMPEG_CACHE_DIR
     CACHE PATH "Directory for downloaded prepared FFmpeg archives")
 option(POLARIS_DOWNLOAD_PREPARED_FFMPEG
     "Download pinned prepared FFmpeg archives when available for this platform" ON)
+
+# The highest NVENC API version Polaris is willing to ship.
+#
+# libavcodec compiles this version in from the ffnvcodec headers it is built against, then
+# refuses at runtime to talk to any driver that reports an older one. Raising this therefore
+# raises the minimum NVIDIA driver every Polaris host needs for hardware encoding, and a host
+# below it loses NVENC entirely and falls back to VAAPI or software.
+#
+# 13.0 needs driver 570 or newer. 13.1 needs 610, which Maxwell, Pascal and Volta can never
+# reach because 580 is the last branch NVIDIA ships for them.
+set(POLARIS_MAX_SUPPORTED_FFNVCODEC_VERSION "13.0" CACHE STRING
+    "Highest NVENC API version a prepared FFmpeg archive may be built against")
 
 function(polaris_prepared_ffmpeg_asset_name out_var system_name system_processor)
   string(TOLOWER "${system_processor}" processor)
@@ -60,26 +72,65 @@ function(polaris_prepared_ffmpeg_asset_hash out_var asset_name)
 
   set(hash "")
   if(asset_name STREQUAL "Darwin-arm64-ffmpeg.tar.gz")
-    set(hash "f4f72fcef4180f18329351cc1080e3fa1a5a7d084fa1c52defa93586aac88f0f")
+    set(hash "056122301edcdec74e00cfa9a3091bf3135d5fe1472234ce7f46426325081bca")
   elseif(asset_name STREQUAL "Darwin-x86_64-ffmpeg.tar.gz")
-    set(hash "da45523c20c0dd44ef3f54ffc41a16f363da2e2298bd0539e3b502b3e750eef7")
+    set(hash "5b15f4283a2aa94d42abfd55e361cd4520021a7499fcbd693d3533f3ecb0904e")
   elseif(asset_name STREQUAL "FreeBSD-aarch64-ffmpeg.tar.gz")
-    set(hash "3a3527675b09b8537b6997622001df21be61d8d280671dd11a388662699d7ad8")
+    set(hash "0adc7baead743be37ae66ff92c634764f5418fae3d5c5ea2ad4ec962cd45c3ce")
   elseif(asset_name STREQUAL "FreeBSD-amd64-ffmpeg.tar.gz")
-    set(hash "3ca1b26feaa0402b7e89124b0c55ba4013cee31cec8d6ec0ac5e5b846afa0cb0")
+    set(hash "a4dee66179bd72221f83874beb95afd79ea70159782a53adff0579d494c9f0b3")
   elseif(asset_name STREQUAL "Linux-aarch64-ffmpeg.tar.gz")
-    set(hash "fd6492f55d79ae178db97e48d6395b4cac2a2e10b2f157b0d40355cfd7c160e8")
+    set(hash "2bdcfa663bb7a1b241a47665c94aa288ef2ec40c6a212cc0a8ec63904b886c6d")
   elseif(asset_name STREQUAL "Linux-ppc64le-ffmpeg.tar.gz")
-    set(hash "30583f89fc82816872ed4b9ac044e04c2c2f2a79aa63ca3a9facb5a20e15fcec")
+    set(hash "61522f3424311154c6902fc1f427336eff084ff338c7b2d960cfa010183970f7")
   elseif(asset_name STREQUAL "Linux-x86_64-ffmpeg.tar.gz")
-    set(hash "2c27d4694b4ed0e734f497d4bd62f1b3662cbbc4ded2a69f2dc4b703441eebb3")
+    set(hash "66512409857d7c11c18875193c098a5131baec060169c8f8e6397387e7a1af7d")
   elseif(asset_name STREQUAL "Windows-AMD64-ffmpeg.tar.gz")
-    set(hash "b293d7f6bd3f032ea01c7e4451b7db540622f2d603e8b98d336513895842c506")
+    set(hash "6bf702af027d849f326823b9cfe058ddc3eff05d5e424624552bcb71c2415c68")
   elseif(asset_name STREQUAL "Windows-ARM64-ffmpeg.tar.gz")
-    set(hash "53e0dee93a2185fc619425da14cf10a7a328d016ff9cc50c2c52e051bb3895d1")
+    set(hash "8cc219946f6bf45512612785e518814c22d0e73c8fa1235d7e84a795056c76c1")
   endif()
 
   set("${out_var}" "${hash}" PARENT_SCOPE)
+endfunction()
+
+function(polaris_prepared_ffmpeg_nvenc_api_version out_var prepared_dir)
+  set(header "${prepared_dir}/include/ffnvcodec/nvEncodeAPI.h")
+  if(NOT EXISTS "${header}")
+    # Archives for platforms without NVENC ship no ffnvcodec headers at all.
+    set("${out_var}" "" PARENT_SCOPE)
+    return()
+  endif()
+
+  file(READ "${header}" header_text)
+  string(REGEX MATCH "NVENCAPI_MAJOR_VERSION[ \t]+([0-9]+)" _major_match "${header_text}")
+  set(major "${CMAKE_MATCH_1}")
+  string(REGEX MATCH "NVENCAPI_MINOR_VERSION[ \t]+([0-9]+)" _minor_match "${header_text}")
+  set(minor "${CMAKE_MATCH_1}")
+
+  if(major STREQUAL "" OR minor STREQUAL "")
+    set("${out_var}" "" PARENT_SCOPE)
+    return()
+  endif()
+
+  set("${out_var}" "${major}.${minor}" PARENT_SCOPE)
+endfunction()
+
+function(polaris_prepared_ffmpeg_nvenc_floor_violation out_var prepared_dir)
+  polaris_prepared_ffmpeg_nvenc_api_version(bundled "${prepared_dir}")
+  if(bundled STREQUAL "" OR NOT bundled VERSION_GREATER "${POLARIS_MAX_SUPPORTED_FFNVCODEC_VERSION}")
+    set("${out_var}" "" PARENT_SCOPE)
+    return()
+  endif()
+
+  string(CONCAT message
+      "Prepared FFmpeg ${POLARIS_PREPARED_FFMPEG_RELEASE_TAG} is built against NVENC API "
+      "${bundled}, above the ${POLARIS_MAX_SUPPORTED_FFNVCODEC_VERSION} Polaris supports. "
+      "Every host on an NVIDIA driver older than the one that version requires would lose "
+      "hardware encoding silently. Pin an archive built against "
+      "${POLARIS_MAX_SUPPORTED_FFNVCODEC_VERSION} or older, or raise "
+      "POLARIS_MAX_SUPPORTED_FFNVCODEC_VERSION deliberately and say which drivers that drops.")
+  set("${out_var}" "${message}" PARENT_SCOPE)
 endfunction()
 
 function(polaris_validate_prepared_ffmpeg_dir prepared_dir)
@@ -95,6 +146,11 @@ function(polaris_validate_prepared_ffmpeg_dir prepared_dir)
           "Set FFMPEG_PREPARED_BINARIES to a complete prepared FFmpeg directory.")
     endif()
   endforeach()
+
+  polaris_prepared_ffmpeg_nvenc_floor_violation(violation "${prepared_dir}")
+  if(NOT violation STREQUAL "")
+    message(FATAL_ERROR ${violation})
+  endif()
 endfunction()
 
 function(polaris_resolve_prepared_ffmpeg out_var)
