@@ -107,6 +107,10 @@ namespace crypto {
     std::string uuid;
     std::string cert;
     std::string client_family;
+    /// Last controller type this client declared on arrival (an LI_CTYPE_* value), so the
+    /// pad preallocated before the app launches can be the one it actually asked for.
+    /// Zero means never observed, which is what a first session from a new device looks like.
+    int controller_type = 0;
     std::string display_mode;
     int target_bitrate_kbps = 0;
     std::int64_t paired_at = 0;

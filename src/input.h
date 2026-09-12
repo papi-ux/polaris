@@ -25,7 +25,14 @@ namespace input {
 
   bool probe_gamepads();
 
-  void preallocate_gamepad();
+  /**
+   * @brief Create controller 0 before the app launches.
+   * @param client_controller_type An LI_CTYPE_* the client declared on a previous session,
+   *        or 0 when nothing is known. The pad has to exist before the app starts so the
+   *        game sees it at startup, which is earlier than the client's own arrival packet,
+   *        so the only way to get the right pad is to remember the last one.
+   */
+  void preallocate_gamepad(int client_controller_type = 0);
   std::shared_ptr<input_t> alloc(safe::mail_t mail);
 
 #ifdef POLARIS_TESTS

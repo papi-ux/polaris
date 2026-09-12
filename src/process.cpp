@@ -8974,7 +8974,7 @@ namespace proc {
     start_steam_big_picture_input_guard(_env, steam_guard_snapshot);
 
     if (has_launch_commands) {
-      input::preallocate_gamepad();
+      input::preallocate_gamepad(launch_session ? launch_session->controller_type : 0);
     }
 
     // Start private runtime, then launch detached app commands into it.
