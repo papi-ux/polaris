@@ -10,6 +10,7 @@
   #include "multiseat_worker_coordinator.h"
 
   #include <cstddef>
+  #include <chrono>
   #include <functional>
   #include <memory>
   #include <optional>
@@ -32,6 +33,8 @@ namespace multiseat {
     /** Selected launches require their exact worker's authenticated media lease. */
     bool worker_media_enabled = false;
     std::vector<controller_profile_route_t> profile_routes;
+    /** Deadline from profile reservation through successful RTSP setup. */
+    std::chrono::milliseconds profile_launch_timeout {30000};
   };
 
   /**
@@ -97,6 +100,7 @@ namespace multiseat {
     worker_rejected,
     worker_indeterminate,
     input_cleanup_incomplete,
+    launch_cancelled,
   };
 
   enum class controller_profile_admission_status_e {
@@ -144,6 +148,7 @@ namespace multiseat {
     cleanup_pending,
     invalid_request,
     controller_shutting_down,
+    streams_pending,
   };
 
   struct controller_stop_result_t {
@@ -221,8 +226,9 @@ namespace multiseat {
     /**
      * Resolve only the paired UUID retained by an authenticated pending launch.
      * Profile, workload, image family and GPU order come from immutable trusted
-     * routing. The caller must start or stop the returned reservation, including
-     * when that launch is subsequently cancelled. No worker is started here.
+     * routing. The controller retains ownership until reconciliation proves
+     * cleanup. Cancellation, abandonment and setup timeout queue automatic
+     * teardown; callers must keep polling reconcile(). No worker starts here.
      */
     [[nodiscard]] controller_profile_admission_result_t
     admit_authenticated_profile_launch(
@@ -255,11 +261,15 @@ namespace multiseat {
     [[nodiscard]] std::size_t managed_workers() const;
     [[nodiscard]] std::size_t input_allocations() const;
     [[nodiscard]] std::size_t tracked_launches() const;
+    [[nodiscard]] std::size_t owned_profile_launches() const;
 
   private:
     struct impl_t;
 
     explicit controller_runtime_t(std::unique_ptr<impl_t> impl);
+    [[nodiscard]] controller_start_result_t start_seat_locked(
+      const seat_handle_t &handle, input::plan_t input_plan
+    );
 
     std::unique_ptr<impl_t> impl_;
   };

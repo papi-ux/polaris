@@ -29,6 +29,10 @@ namespace multiseat {
       if (!options.worker_media_enabled || options.profile_routes.size() > 4096) {
         return false;
       }
+      if (options.profile_launch_timeout <= std::chrono::milliseconds::zero() ||
+          options.profile_launch_timeout > std::chrono::minutes {5}) {
+        return false;
+      }
       std::unordered_set<std::string> profiles;
       std::unordered_set<std::string> clients;
       for (const auto &route : options.profile_routes) {
@@ -92,6 +96,16 @@ namespace multiseat {
   }  // namespace
 
   struct controller_runtime_t::impl_t {
+    struct owned_profile_launch_t {
+      std::weak_ptr<rtsp_stream::launch_session_t> launch;
+      input::moonlight_launch_selection_key_t key;
+      std::string client_key;
+      seat_handle_t handle;
+      worker_broker_t::time_point_t deadline;
+      bool cleanup_requested = false;
+      bool selection_registered = false;
+    };
+
     explicit impl_t(controller_runtime_dependencies_t dependencies, controller_runtime_options_t options) :
         registry(std::move(dependencies.registry)),
         worker_authority_store(
@@ -105,7 +119,11 @@ namespace multiseat {
         input_expectations(
           std::move(dependencies.recovered_input_expectations)
         ), worker_media_enabled(options.worker_media_enabled),
-        profile_routes(std::move(options.profile_routes)) {
+        profile_routes(std::move(options.profile_routes)),
+        profile_launch_timeout(options.profile_launch_timeout),
+        now(dependencies.now) {
+      if (!now) now = [] { return worker_broker_t::monotonic_clock_t::now(); };
+      profile_launches.reserve(input::maximum_input_allocations);
       workers = std::make_unique<worker_coordinator_t>(
         *registry,
         *worker_backend,
@@ -133,9 +151,34 @@ namespace multiseat {
     std::vector<input::expectation_t> input_expectations;
     const bool worker_media_enabled;
     const std::vector<controller_profile_route_t> profile_routes;
+    const std::chrono::milliseconds profile_launch_timeout;
+    worker_broker_t::now_fn_t now;
+    std::vector<owned_profile_launch_t> profile_launches;
     bool admission_ready = false;
     bool shutting_down = false;
     bool closed = false;
+
+    auto profile_launch(const seat_handle_t &handle) {
+      return std::find_if(profile_launches.begin(), profile_launches.end(),
+        [&handle](const auto &entry) { return entry.handle == handle; });
+    }
+
+    bool cleanup_needed(owned_profile_launch_t &entry) {
+      const auto launch = entry.launch.lock();
+      entry.cleanup_requested = entry.cleanup_requested || !launch ||
+        launch->is_cancelled() || launch->id != entry.key.launch_session_id ||
+        launch->lifecycle_generation != entry.key.lifecycle_generation ||
+        launch->unique_id != entry.client_key ||
+        ((!entry.selection_registered ||
+           launch->setup_state.load() != rtsp_stream::launch_session_t::setup_state_e::started) &&
+          now() >= entry.deadline);
+      return entry.cleanup_requested;
+    }
+
+    bool profile_cancelled(const seat_handle_t &handle) {
+      const auto entry = profile_launch(handle);
+      return entry != profile_launches.end() && cleanup_needed(*entry);
+    }
   };
 
   controller_runtime_t::controller_runtime_t(std::unique_ptr<impl_t> impl) :
@@ -235,6 +278,22 @@ namespace multiseat {
     }
 
     try {
+      // Network cancellation only marks the retained launch. Worker commands
+      // run here under the controller owner, never on an HTTP/RTSP timer thread.
+      for (auto &entry : impl_->profile_launches) {
+        if (!impl_->cleanup_needed(entry)) continue;
+        if (auto launch = entry.launch.lock()) launch->cancel();
+        const auto quiesced = impl_->moonlight_runtime->quiesce_seat(entry.handle);
+        if (quiesced == input::moonlight_runtime_lifecycle_status_e::retained_until_streams_close) {
+          continue;
+        }
+        if (quiesced != input::moonlight_runtime_lifecycle_status_e::retired &&
+            quiesced != input::moonlight_runtime_lifecycle_status_e::not_selected) {
+          result.status = controller_reconcile_status_e::input_reconciliation_required;
+          return result;
+        }
+        (void) impl_->workers->stop_seat(entry.handle);
+      }
       result.worker = impl_->workers->reconcile();
     } catch (...) {
       result.status =
@@ -310,6 +369,11 @@ namespace multiseat {
       return result;
     }
 
+    std::erase_if(impl_->profile_launches, [&](const auto &entry) {
+      return !impl_->registry->snapshot(entry.handle) &&
+        std::none_of(impl_->input_expectations.begin(), impl_->input_expectations.end(),
+          [&](const auto &expectation) { return expectation.handle == entry.handle; });
+    });
     impl_->admission_ready = true;
     result.status = controller_reconcile_status_e::ready;
     return result;
@@ -380,7 +444,27 @@ namespace multiseat {
       .encoder_sessions = 1,
     };
     try {
+      if (impl_->profile_launches.size() >= input::maximum_input_allocations) {
+        return {.status = status_e::controller_not_ready};
+      }
+      impl_t::owned_profile_launch_t owned {
+        .launch = launch,
+        .key = {launch->id, *launch->lifecycle_generation},
+        .client_key = launch->unique_id,
+        .deadline = impl_->now() + impl_->profile_launch_timeout,
+      };
       auto admission = impl_->registry->admit_first_available(request, route->logical_gpu_ids);
+      if (admission.accepted()) {
+        try {
+          owned.handle = admission.seat->handle;
+          impl_->profile_launches.push_back(std::move(owned));
+        } catch (...) {
+          // No worker/input exists yet. A bookkeeping allocation failure must
+          // not strand an unowned reservation in the registry.
+          (void) impl_->workers->stop_seat(admission.seat->handle);
+          throw;
+        }
+      }
       const auto status = admission.accepted() ? status_e::admitted : status_e::rejected;
       return {.status = status, .admission = std::move(admission)};
     } catch (...) {
@@ -416,6 +500,36 @@ namespace multiseat {
   ) {
     std::scoped_lock lock {impl_->state_mutex};
     controller_start_result_t result;
+    const auto prior = impl_->profile_launch(handle);
+    if (prior != impl_->profile_launches.end() && !impl_->cleanup_needed(*prior)) {
+      const auto seat = impl_->registry->snapshot(handle);
+      if (seat && seat->state != seat_state_e::reserved) {
+        // A duplicate start is not a failure of the already running launch.
+        return result;
+      }
+    }
+    try {
+      result = start_seat_locked(handle, input_plan);
+    } catch (...) {
+      impl_->admission_ready = false;
+      result.status = controller_start_status_e::worker_indeterminate;
+    }
+    const auto entry = impl_->profile_launch(handle);
+    if (entry != impl_->profile_launches.end()) {
+      if (impl_->cleanup_needed(*entry)) result.status = controller_start_status_e::launch_cancelled;
+      if (!result.started()) entry->cleanup_requested = true;
+    }
+    return result;
+  }
+
+  controller_start_result_t controller_runtime_t::start_seat_locked(
+    const seat_handle_t &handle, input::plan_t input_plan
+  ) {
+    controller_start_result_t result;
+    if (impl_->profile_cancelled(handle)) {
+      result.status = controller_start_status_e::launch_cancelled;
+      return result;
+    }
     if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
       result.status = controller_start_status_e::controller_not_ready;
       return result;
@@ -481,6 +595,10 @@ namespace multiseat {
       }
     }
 
+    if (impl_->profile_cancelled(handle)) {
+      result.status = controller_start_status_e::launch_cancelled;
+      return result;
+    }
     try {
       result.worker = impl_->workers->start_seat(handle);
     } catch (...) {
@@ -528,6 +646,14 @@ namespace multiseat {
   ) {
     std::scoped_lock lock {impl_->state_mutex};
     input::moonlight_worker_selection_result_t rejected;
+    const auto owned = impl_->profile_launch(handle);
+    if (owned != impl_->profile_launches.end()) {
+      // The original retained launch owns this profile reservation. A second
+      // object, even with identical fields, cannot replace or cancel it.
+      if (owned->launch.lock() != launch) return rejected;
+      if (impl_->cleanup_needed(*owned)) return rejected;
+      if (owned->selection_registered) return rejected;
+    }
     // A failed selected-media launch must retain its requirement so a caller
     // cannot accidentally start ordinary host capture after selection failed.
     if (impl_->worker_media_enabled && launch) launch->require_worker_connection();
@@ -551,14 +677,20 @@ namespace multiseat {
       return rejected;
     }
     try {
-      return impl_->worker_media_enabled ?
+      auto selected = impl_->worker_media_enabled ?
         impl_->launch_adapter->select_with_connection(launch, handle) :
         impl_->launch_adapter->select(launch, handle);
+      if (owned != impl_->profile_launches.end()) {
+        owned->selection_registered = selected.selected();
+        owned->cleanup_requested = !selected.selected();
+      }
+      return selected;
     } catch (...) {
       rejected.status =
         input::moonlight_worker_selection_status_e::worker_not_authorized;
       rejected.authority_status =
         worker_seat_authorization_status_e::action_failed;
+      if (owned != impl_->profile_launches.end()) owned->cleanup_requested = true;
       return rejected;
     }
   }
@@ -576,8 +708,23 @@ namespace multiseat {
       return result;
     }
 
-    impl_->admission_ready = false;
+    const auto owned = impl_->profile_launch(handle);
+    if (owned != impl_->profile_launches.end()) {
+      owned->cleanup_requested = true;
+      if (auto launch = owned->launch.lock()) launch->cancel();
+    }
     try {
+      const auto quiesced = impl_->moonlight_runtime->quiesce_seat(handle);
+      if (quiesced == input::moonlight_runtime_lifecycle_status_e::retained_until_streams_close) {
+        result.status = controller_stop_status_e::streams_pending;
+        return result;
+      }
+      if (quiesced != input::moonlight_runtime_lifecycle_status_e::retired &&
+          quiesced != input::moonlight_runtime_lifecycle_status_e::not_selected) {
+        result.status = controller_stop_status_e::cleanup_pending;
+        return result;
+      }
+      impl_->admission_ready = false;
       result.worker = impl_->workers->stop_seat(handle);
     } catch (...) {
       result.status = controller_stop_status_e::stopping;
@@ -676,6 +823,7 @@ namespace multiseat {
         return result;
       }
       impl_->input_expectations.clear();
+      impl_->profile_launches.clear();
       impl_->closed = true;
       result.status = controller_shutdown_status_e::closed;
       return result;
@@ -717,6 +865,11 @@ namespace multiseat {
   std::size_t controller_runtime_t::tracked_launches() const {
     std::scoped_lock lock {impl_->state_mutex};
     return impl_->moonlight_runtime->tracked_launches();
+  }
+
+  std::size_t controller_runtime_t::owned_profile_launches() const {
+    std::scoped_lock lock {impl_->state_mutex};
+    return impl_->profile_launches.size();
   }
 
 }  // namespace multiseat

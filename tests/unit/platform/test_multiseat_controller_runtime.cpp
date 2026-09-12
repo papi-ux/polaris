@@ -212,6 +212,9 @@ namespace {
     std::size_t worker_inventory_calls = 0;
     std::size_t session_connects = 0;
     std::size_t session_shutdowns = 0;
+    std::function<void()> after_input_create;
+    std::function<void()> after_worker_launch;
+    std::size_t worker_stop_calls = 0;
 
     void allow_cleanup() {
       std::scoped_lock lock {mutex};
@@ -319,6 +322,7 @@ namespace {
       }
       auto allocation = controller_allocation(expectation);
       state_->input_allocations.push_back(allocation);
+      if (state_->after_input_create) state_->after_input_create();
       return {
         .result = result,
         .allocation = std::move(allocation),
@@ -408,6 +412,7 @@ namespace {
         .identity = spec.identity,
         .state = worker_observed_state_e::starting,
       });
+      if (state_->after_worker_launch) state_->after_worker_launch();
       return result;
     }
 
@@ -416,6 +421,7 @@ namespace {
       worker_stop_mode_e mode
     ) override {
       std::scoped_lock lock {state_->mutex};
+      ++state_->worker_stop_calls;
       const auto found = std::find_if(
         state_->workers.begin(),
         state_->workers.end(),
@@ -514,11 +520,12 @@ namespace {
     const std::shared_ptr<controller_test_state_t> &state,
     std::vector<input::expectation_t> recovered = {},
     bool media_enabled = false,
-    std::vector<controller_profile_route_t> routes = {}
+    std::vector<controller_profile_route_t> routes = {},
+    worker_broker_t::now_fn_t now = {}
   ) {
     return controller_runtime_t::create(
       {.enabled = true, .worker_media_enabled = media_enabled, .profile_routes = std::move(routes)},
-      [root, state, recovered = std::move(recovered)]() mutable
+      [root, state, recovered = std::move(recovered), now = std::move(now)]() mutable
         -> std::optional<controller_runtime_dependencies_t> {
         auto store = std::make_unique<authority_store_t>(
           root,
@@ -551,7 +558,7 @@ namespace {
             std::make_unique<controller_worker_backend_t>(state),
           .recovered_input_expectations = std::move(recovered),
           .worker_options = controller_worker_options(),
-          .now = {},
+          .now = std::move(now),
           .session_factory = [state]() {
             return std::make_unique<controller_control_session_t>(state);
           },
@@ -657,8 +664,9 @@ namespace {
 
   class MultiseatControllerRuntimeTest : public testing::Test {
   protected:
-    void create_ready_controller(bool media_enabled = false, std::vector<controller_profile_route_t> routes = {}) {
-      auto created = create_controller(root_.path(), state_, {}, media_enabled, std::move(routes));
+    void create_ready_controller(bool media_enabled = false, std::vector<controller_profile_route_t> routes = {},
+      worker_broker_t::now_fn_t now = {}) {
+      auto created = create_controller(root_.path(), state_, {}, media_enabled, std::move(routes), std::move(now));
       ASSERT_EQ(
         created.status,
         controller_runtime_create_status_e::ready_enabled
@@ -939,6 +947,146 @@ namespace {
     EXPECT_EQ(result.status, controller_runtime_create_status_e::invalid_dependencies);
   }
 
+  TEST_F(MultiseatControllerRuntimeTest, CancelledAndAbandonedProfileReservationsAreReconciled) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2101, 3101);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    EXPECT_EQ(controller_->owned_profile_launches(), 1U);
+    // The existing HTTP/RTSP timeout edge marks cancellation, without issuing
+    // container commands from its thread. Reconciliation owns the teardown.
+    ASSERT_TRUE(launch->cancel_for_timeout());
+    EXPECT_EQ(controller_->seats(), 1U);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 0U);
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+    auto next = controller_launch(2102, 3102, "paired-television");
+    auto replacement = controller_->admit_authenticated_profile_launch(next, {1920, 1080, 60000, false});
+    ASSERT_TRUE(replacement.admitted());
+    EXPECT_GT(replacement.admission.seat->handle.generation, admitted.admission.seat->handle.generation);
+    // Destruction before RTSP publication is also an abandoned reservation.
+    next.reset();
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+    EXPECT_EQ(controller_->seats(), 0U);
+    EXPECT_EQ(state_->worker_launch_count(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, ProfileSetupDeadlineCannotBeBypassedWithoutWorkerSelection) {
+    auto now = worker_broker_t::time_point_t {};
+    create_ready_controller(true, {shared_profile_route()}, [&] { return now; });
+    auto launch = controller_launch(2103, 3103);
+    ASSERT_TRUE(controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false}).admitted());
+    now += std::chrono::milliseconds {29999};
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 1U);
+    EXPECT_FALSE(launch->is_cancelled());
+    // A caller advancing RTSP state out of order cannot turn an unselected
+    // reservation into an indefinitely retained running seat.
+    ASSERT_TRUE(launch->try_begin_setup_handoff());
+    ASSERT_TRUE(launch->commit_setup_start());
+    now += std::chrono::milliseconds {1};
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_TRUE(launch->is_cancelled());
+    EXPECT_TRUE(launch->worker_connection_requirement()->load());
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+    EXPECT_EQ(controller_->seats(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, CancelledProfileCannotCreateInputOrStartAWorker) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2104, 3104);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    launch->cancel();
+    auto start = controller_->start_seat(admitted.admission.seat->handle, controller_input_plan());
+    EXPECT_EQ(start.status, controller_start_status_e::launch_cancelled);
+    EXPECT_EQ(state_->input_count(), 0U);
+    EXPECT_EQ(state_->worker_launch_count(), 0U);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, CancellationDuringInputPreparationPreventsWorkerLaunch) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2105, 3105);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    const auto &handle = admitted.admission.seat->handle;
+    ASSERT_EQ(controller_->bind_runtime(handle, compositor_e::gamescope, "profile lifecycle test"), mutation_result_e::applied);
+    state_->after_input_create = [launch] { launch->cancel(); };
+    auto start = controller_->start_seat(handle, controller_input_plan());
+    EXPECT_EQ(start.status, controller_start_status_e::launch_cancelled);
+    EXPECT_EQ(state_->worker_launch_count(), 0U);
+    EXPECT_EQ(controller_->input_allocations(), 1U);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->input_allocations(), 0U);
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, CancellationDuringWorkerLaunchRetainsInputUntilProvenAbsent) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2106, 3106);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    const auto &seat = *admitted.admission.seat;
+    ASSERT_EQ(controller_->bind_runtime(seat.handle, compositor_e::gamescope, "profile lifecycle test"), mutation_result_e::applied);
+    state_->set_complete_worker_on_stop(false);
+    state_->after_worker_launch = [launch] { launch->cancel(); };
+    auto start = controller_->start_seat(seat.handle, controller_input_plan());
+    EXPECT_EQ(start.status, controller_start_status_e::launch_cancelled);
+    EXPECT_EQ(state_->worker_launch_count(), 1U);
+    state_->set_worker_inventory_failure(true);
+    EXPECT_FALSE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->input_allocations(), 1U);
+    EXPECT_EQ(controller_->owned_profile_launches(), 1U);
+    state_->set_worker_inventory_failure(false);
+    ASSERT_TRUE(state_->complete_worker(controller_worker_identity(seat)));
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->input_allocations(), 0U);
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+    EXPECT_EQ(controller_->seats(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, FailedProfileStartupAutomaticallyCleansItsReservation) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2107, 3107);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    state_->set_next_input_create(input::backend_result_e::rejected);
+    EXPECT_EQ(controller_->start_seat(admitted.admission.seat->handle, controller_input_plan()).status,
+      controller_start_status_e::input_rejected);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 0U);
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+    EXPECT_TRUE(launch->is_cancelled());
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, DuplicateStartAndLookalikeSelectionCannotCancelTheOwningLaunch) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2108, 3108);
+    auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    const auto &seat = *admitted.admission.seat;
+    ASSERT_EQ(controller_->bind_runtime(seat.handle, compositor_e::gamescope, "profile lifecycle test"), mutation_result_e::applied);
+    ASSERT_TRUE(controller_->start_seat(seat.handle, controller_input_plan()).started());
+    EXPECT_EQ(controller_->start_seat(seat.handle, controller_input_plan()).status, controller_start_status_e::invalid_request);
+    ASSERT_TRUE(state_->mark_worker_ready(controller_worker_identity(seat)));
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_FALSE(controller_->select_authenticated_launch(controller_launch(2108, 3108), seat.handle).selected());
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_FALSE(launch->is_cancelled());
+    EXPECT_EQ(controller_->owned_profile_launches(), 1U);
+    EXPECT_EQ(controller_->managed_workers(), 1U);
+    // The original object reaches actual authority validation. This metadata
+    // fixture cannot issue a socket lease, so failure queues its exact cleanup.
+    EXPECT_FALSE(controller_->select_authenticated_launch(launch, seat.handle).selected());
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->owned_profile_launches(), 0U);
+    EXPECT_EQ(controller_->managed_workers(), 0U);
+    EXPECT_EQ(controller_->input_allocations(), 0U);
+  }
+
   TEST_F(MultiseatControllerRuntimeTest, MediaSelectionRequiresARealLeaseAndCannotFallBackToHostCapture) {
     create_ready_controller(true);
     const auto seat = admit_and_bind();
@@ -1093,16 +1241,13 @@ namespace {
 
     EXPECT_EQ(
       controller_->stop_seat(seat.handle).status,
-      controller_stop_status_e::stopping
+      controller_stop_status_e::streams_pending
     );
-    ASSERT_TRUE(state_->complete_worker(identity));
-    EXPECT_EQ(
-      controller_->reconcile().status,
-      controller_reconcile_status_e::input_reconciliation_required
-    );
-    EXPECT_EQ(controller_->seats(), 0U);
-    EXPECT_EQ(controller_->managed_workers(), 0U);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 1U);
+    EXPECT_EQ(controller_->managed_workers(), 1U);
     EXPECT_EQ(controller_->input_allocations(), 1U);
+    EXPECT_EQ(state_->worker_stop_calls, 0U);
 
     EXPECT_EQ(
       controller_->shutdown().status,
@@ -1111,11 +1256,93 @@ namespace {
     EXPECT_TRUE(controller_->shutting_down());
     EXPECT_FALSE(controller_->closed());
     stream::session::stop(*stream);
+    EXPECT_EQ(controller_->shutdown().status, controller_shutdown_status_e::workers_pending);
+    ASSERT_TRUE(state_->complete_worker(identity));
     EXPECT_EQ(
       controller_->shutdown().status,
       controller_shutdown_status_e::closed
     );
     EXPECT_TRUE(launch->is_cancelled());
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, StopRetiresOnlyItsSeatWhileAnotherStreamKeepsInput) {
+    create_ready_controller();
+    const auto a = admit_and_bind(controller_request("client-a", "profile-a"));
+    const auto b = admit_and_bind(controller_request("client-b", "profile-b"));
+    ASSERT_TRUE(controller_->start_seat(a.handle, controller_input_plan()).started());
+    ASSERT_TRUE(controller_->start_seat(b.handle, controller_input_plan()).started());
+    ASSERT_TRUE(state_->mark_worker_ready(controller_worker_identity(a)));
+    ASSERT_TRUE(state_->mark_worker_ready(controller_worker_identity(b)));
+    ASSERT_TRUE(controller_->reconcile().ready());
+    auto launch_a = controller_launch(2110, 3110, "client-a");
+    auto launch_b = controller_launch(2111, 3111, "client-b");
+    ASSERT_TRUE(controller_->select_authenticated_launch(launch_a, a.handle).selected());
+    ASSERT_TRUE(controller_->select_authenticated_launch(launch_b, b.handle).selected());
+    auto stream_a = controller_stream(*launch_a);
+    auto stream_b = controller_stream(*launch_b);
+    ASSERT_EQ(input::activate_registered_moonlight_session(*stream_a), input::moonlight_session_activation_status_e::bound);
+    ASSERT_EQ(input::activate_registered_moonlight_session(*stream_b), input::moonlight_session_activation_status_e::bound);
+    auto stale = a.handle;
+    ++stale.generation;
+    (void) controller_->stop_seat(stale);
+    EXPECT_FALSE(launch_a->is_cancelled());
+    EXPECT_FALSE(launch_b->is_cancelled());
+    EXPECT_EQ(state_->worker_stop_calls, 0U);
+    EXPECT_EQ(controller_->stop_seat(a.handle).status, controller_stop_status_e::streams_pending);
+    EXPECT_EQ(state_->worker_stop_calls, 0U);
+    EXPECT_FALSE(launch_b->is_cancelled());
+    stream::session::stop(*stream_a);
+    EXPECT_EQ(controller_->stop_seat(a.handle).status, controller_stop_status_e::stopping);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 1U);
+    EXPECT_EQ(controller_->managed_workers(), 1U);
+    EXPECT_EQ(controller_->input_allocations(), 1U);
+    EXPECT_EQ(controller_->tracked_launches(), 1U);
+    EXPECT_TRUE(stream::session::multiseat_input_bound(*stream_b));
+    EXPECT_FALSE(launch_b->is_cancelled());
+    const auto routed_before = state_->input_route_count();
+    EXPECT_TRUE(stream::session::route_multiseat_input_for_tests(*stream_b,
+      controller_keyboard_packet(0x41)));
+    EXPECT_EQ(state_->input_route_count(), routed_before + 1);
+    stream::session::stop(*stream_b);
+    (void) controller_->stop_seat(b.handle);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 0U);
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, SeatStopQuiescesAnInFlightActivationWithoutBlockingOrStoppingWorker) {
+    create_ready_controller();
+    const auto seat = admit_and_bind();
+    ASSERT_TRUE(controller_->start_seat(seat.handle, controller_input_plan()).started());
+    ASSERT_TRUE(state_->mark_worker_ready(controller_worker_identity(seat)));
+    ASSERT_TRUE(controller_->reconcile().ready());
+    auto launch = controller_launch(2112, 3112);
+    ASSERT_TRUE(controller_->select_authenticated_launch(launch, seat.handle).selected());
+    auto stream = controller_stream(*launch);
+    auto pause = std::make_shared<activation_pause_t>();
+    activation_hook_guard_t hook_guard {[pause] { pause->pause(); }};
+    auto activation = std::async(std::launch::async, [&] {
+      return input::activate_registered_moonlight_session(*stream);
+    });
+    const auto entered = pause->wait_until_entered(std::chrono::seconds {2});
+    if (!entered) pause->release();
+    ASSERT_TRUE(entered);
+    auto stopping = std::async(std::launch::async, [&] { return controller_->stop_seat(seat.handle); });
+    const auto bounded = stopping.wait_for(std::chrono::seconds {2}) == std::future_status::ready;
+    if (!bounded) pause->release();
+    const auto result = stopping.get();
+    EXPECT_TRUE(bounded);
+    EXPECT_EQ(result.status, controller_stop_status_e::streams_pending);
+    EXPECT_EQ(state_->worker_stop_calls, 0U);
+    EXPECT_EQ(controller_->managed_workers(), 1U);
+    EXPECT_EQ(controller_->input_allocations(), 1U);
+    pause->release();
+    EXPECT_EQ(activation.get(), input::moonlight_session_activation_status_e::selection_cancelled);
+    stream::session::stop(*stream);
+    (void) controller_->stop_seat(seat.handle);
+    ASSERT_TRUE(controller_->reconcile().ready());
+    EXPECT_EQ(controller_->seats(), 0U);
+    EXPECT_EQ(controller_->input_allocations(), 0U);
   }
 
   TEST_F(

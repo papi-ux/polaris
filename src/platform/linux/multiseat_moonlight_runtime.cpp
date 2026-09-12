@@ -124,6 +124,7 @@ namespace multiseat::input {
     struct tracked_launch_t {
       moonlight_launch_selection_key_t key;
       std::shared_ptr<rtsp_stream::launch_session_t> launch;
+      seat_handle_t handle;
       bool cancelled = false;
     };
 
@@ -150,12 +151,8 @@ namespace multiseat::input {
     template<class Impl>
     moonlight_runtime_lifecycle_status_e sweep_cancelled_launches(
       Impl &impl,
-      const std::shared_ptr<rtsp_stream::launch_session_t> &target
+      std::shared_ptr<rtsp_stream::launch_session_t> target
     ) {
-      if (impl.coordinator->claimed_sessions() != 0) {
-        return moonlight_runtime_lifecycle_status_e::retained_until_streams_close;
-      }
-
       bool target_retired = false;
       for (auto entry = impl.launches.begin(); entry != impl.launches.end();) {
         if (!entry->cancelled) {
@@ -359,7 +356,7 @@ namespace multiseat::input {
     }
     const auto selected = impl_->coordinator->select_launch(
       launch,
-      std::move(handle),
+      handle,
       expected_input_seat,
       controller_feedback,
       std::move(worker_connection)
@@ -368,6 +365,7 @@ namespace multiseat::input {
       impl_->launches.push_back({
         .key = *key,
         .launch = launch,
+        .handle = std::move(handle),
       });
     }
     return selected;
@@ -403,6 +401,29 @@ namespace multiseat::input {
       return moonlight_runtime_lifecycle_status_e::not_selected;
     }
     return cancel_tracked_launch(*impl_, found->launch);
+  }
+
+  moonlight_runtime_lifecycle_status_e moonlight_session_runtime_t::quiesce_seat(
+    const seat_handle_t &handle
+  ) {
+    std::scoped_lock lock {impl_->state_mutex};
+    if (impl_->shutting_down || impl_->closed) {
+      return moonlight_runtime_lifecycle_status_e::runtime_shutting_down;
+    }
+    bool selected = false;
+    for (auto &entry : impl_->launches) {
+      if (entry.handle == handle) {
+        entry.launch->cancel();
+        entry.cancelled = true;
+        selected = true;
+      }
+    }
+    if (!selected) return moonlight_runtime_lifecycle_status_e::not_selected;
+    (void) sweep_cancelled_launches(*impl_, {});
+    const auto retained = std::any_of(impl_->launches.begin(), impl_->launches.end(),
+      [&handle](const auto &entry) { return entry.handle == handle; });
+    return retained ? moonlight_runtime_lifecycle_status_e::retained_until_streams_close :
+      moonlight_runtime_lifecycle_status_e::retired;
   }
 
   moonlight_coordinator_shutdown_report_t
