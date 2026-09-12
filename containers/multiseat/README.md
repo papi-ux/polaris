@@ -423,8 +423,9 @@ authenticated connection, and consumes its H.264 and Opus through the real host
 media pump. It decodes every video packet to 1080p SDR and every audio packet to
 5 ms stereo, checks changing frames and audible samples, requests keyframes,
 and repeats input isolation and continued decoding after the first seat stops.
-Decoder errors and missing frames fail acceptance. XML properties retain the
-counts and exact image identity. This isolated harness opens no network listener
+Missing frames fail acceptance. Opus is decoded continuously; bounded video
+receipts are decoded at stop using the system OpenH264 GStreamer plugin and
+Python 3. XML properties retain the counts and exact image identity. This isolated harness opens no network listener
 and does not establish client playback, latency, or production activation.
 
 Each profile volume must be mode 0700 and owned by the controller UID. See the

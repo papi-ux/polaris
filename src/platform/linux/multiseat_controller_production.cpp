@@ -208,8 +208,11 @@ namespace multiseat {
       };
     }
 
+    const controller_runtime_options_t runtime_options {
+      .enabled = true, .worker_media_enabled = options.container.media_enabled,
+    };
     return controller_runtime_t::create(
-      {.enabled = true},
+      runtime_options,
       [options = std::move(options), factories = std::move(factories)]()
         mutable -> std::optional<controller_runtime_dependencies_t> {
         const auto epoch = factories.controller_epoch ?

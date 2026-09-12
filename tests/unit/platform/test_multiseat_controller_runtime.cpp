@@ -511,10 +511,11 @@ namespace {
   controller_runtime_create_result_t create_controller(
     const std::filesystem::path &root,
     const std::shared_ptr<controller_test_state_t> &state,
-    std::vector<input::expectation_t> recovered = {}
+    std::vector<input::expectation_t> recovered = {},
+    bool media_enabled = false
   ) {
     return controller_runtime_t::create(
-      {.enabled = true},
+      {.enabled = true, .worker_media_enabled = media_enabled},
       [root, state, recovered = std::move(recovered)]() mutable
         -> std::optional<controller_runtime_dependencies_t> {
         auto store = std::make_unique<authority_store_t>(
@@ -653,8 +654,8 @@ namespace {
 
   class MultiseatControllerRuntimeTest : public testing::Test {
   protected:
-    void create_ready_controller() {
-      auto created = create_controller(root_.path(), state_);
+    void create_ready_controller(bool media_enabled = false) {
+      auto created = create_controller(root_.path(), state_, {}, media_enabled);
       ASSERT_EQ(
         created.status,
         controller_runtime_create_status_e::ready_enabled
@@ -787,6 +788,32 @@ namespace {
       controller_->shutdown().status,
       controller_shutdown_status_e::closed
     );
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, MediaSelectionRequiresARealLeaseAndCannotFallBackToHostCapture) {
+    create_ready_controller(true);
+    const auto seat = admit_and_bind();
+    ASSERT_TRUE(seat.handle.valid());
+    ASSERT_TRUE(controller_->start_seat(seat.handle, controller_input_plan()).started());
+    ASSERT_TRUE(state_->mark_worker_ready(controller_worker_identity(seat)));
+    ASSERT_TRUE(controller_->reconcile().ready());
+
+    // This fixture authenticates metadata but deliberately cannot issue a real
+    // socket lease. Enabling media must reject it rather than select input only.
+    auto launch = controller_launch(1902, 2902);
+    const auto selection = controller_->select_authenticated_launch(launch, seat.handle);
+    EXPECT_FALSE(selection.selected());
+    EXPECT_EQ(selection.authority_status, worker_seat_authorization_status_e::endpoint_not_authenticated);
+    EXPECT_TRUE(launch->worker_connection_requirement()->load());
+    EXPECT_EQ(controller_->tracked_launches(), 0U);
+    auto session = controller_stream(*launch);
+    ASSERT_TRUE(session);
+    unsigned host_starts = 0;
+    stream::session::set_host_start_abort_hook_for_tests([&] { ++host_starts; });
+    auto restore = util::fail_guard([] { stream::session::set_host_start_abort_hook_for_tests({}); });
+    EXPECT_EQ(stream::session::start(*session, "127.0.0.1"), -1);
+    EXPECT_EQ(host_starts, 0U);
+    stream::session::stop(*session);
   }
 
   TEST_F(

@@ -20,6 +20,8 @@ namespace multiseat {
 
   struct controller_runtime_options_t {
     bool enabled = false;
+    /** Selected launches require their exact worker's authenticated media lease. */
+    bool worker_media_enabled = false;
   };
 
   /**

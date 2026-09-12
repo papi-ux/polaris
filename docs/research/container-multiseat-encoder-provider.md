@@ -1,9 +1,9 @@
 # Continuous seat media
 
-The worker now has a continuous encoder and a concrete source for its existing
-`seatDataPlane`. The earlier fake-only diagnosis was incorrect: the missing
-piece was the connection to a real encoder. This document describes the local
-implementation, not acceptance of a client game stream.
+The worker has a continuous encoder and a concrete source for its existing
+`seatDataPlane`. Two isolated Docker workers have now passed local physical
+acceptance through that channel. This document describes the implementation
+and that evidence; client network playback remains unvalidated.
 
 ## Process and media ownership
 
@@ -49,6 +49,12 @@ CPU download and upload path; zero-copy capture is not established.
 
 ## Readiness and transport
 
+Capture and audio sockets are opened relative to retained directory descriptors.
+The runtime root and Pulse directory must both belong to the worker UID and
+have mode 0700; symlinks are refused. Pulse's native socket may have mode 0777
+inside those private parents. Capture socket permissions remain private. The
+retained socket descriptor cannot be redirected by replacing its pathname.
+
 The helper publishes a contract only after observing a real H.264 IDR/SPS and
 a valid encoded Opus packet. The supervisor verifies that contract against the
 allocation before signaling readiness. It creates a mode-0600 encoded Unix
@@ -78,6 +84,11 @@ pipes and removes only the endpoint whose inode it still owns.
 The Docker backend has an internal `media_enabled` option, defaulting to false.
 Only that option appends the final literal `--media=enabled` worker argument.
 Container inventory verifies the executed argument as part of recovery.
+
+The production dependency factory propagates that same option to the controller.
+A selected media launch reserves its exact authenticated worker connection.
+Missing connections fail selection and leave a sticky media requirement on the
+launch, preventing an accidental return to host capture.
 
 The enabled path authenticates the seat's private authority before starting
 providers and installs the real process adapters and encoder source. It
@@ -110,15 +121,30 @@ and continued audio from its peer. This generated-media test does not capture
 a game or establish two-client streaming. Use only the allocated GPU devices
 and the exact NVIDIA image matching the host driver, or the matching VA image.
 
-These checks do not validate GPU game capture or client playback. The existing
-physical encoded-game probe still skips the continuous encoder and runs its
-own bounded native codec observation. Its `RecordProperty` receipts require
-`--gtest_output=xml`; they cannot substitute for exercising this data plane.
+The separate physical encoded-game probe still skips the continuous encoder.
+Use `POLARIS_PHYSICAL_LIVE_MEDIA=1` for the actual worker channel, with the
+standalone encoded-game/audio flags unset. The harness starts two private games,
+claims each launch's authenticated connection, checks IDR recovery and input
+isolation, stops one seat, and requires at least 60 further video frames and
+continued audio from its peer. Video receipts retain at most 64 MiB per seat and
+use the system OpenH264 decoder at stop because the prepared host FFmpeg omits
+H.264 decoding. Opus is decoded continuously. Every retained video packet must
+produce a decoded frame; missing frames fail the test.
 
-The next acceptance lane must exercise two exact-image Docker workers through
-the continuous media channel, decode both streams, verify input isolation and
-IDR recovery, stop either seat, and demonstrate uninterrupted output from its
-peer. Hardware encoding must then receive its own AMD and NVIDIA measurements
-before any performance or latency claim. Host activation and profile routing
-follow that evidence, with enabling multiseat and no configured profiles leaving
-ordinary streaming unchanged.
+On 2026-09-12 the NVIDIA lane passed with worker source `33d7d062c8e4`:
+168/168 and 315/315 H.264 frames decoded at 1920x1080, with 558 and 1052
+decoded five-millisecond Opus packets. Both seats serviced an IDR request.
+Keyboard, relative and absolute mouse, and controller input remained isolated,
+including a further input round after the first seat stopped. The survivor
+produced 60 more frames after peer retirement. Both workers, their input
+allocations and private authority root retired without forced cleanup. These
+are local physical receipts, not client playback or latency measurements.
+
+Retain `--gtest_output=xml:<private receipt path>`: properties contain the
+image identity, packet/decoded counts, input/game observations and worker logs.
+The harness follows Docker logs at launch and captures both output streams,
+since automatic container removal otherwise erases startup failure evidence.
+
+AMD hardware acceptance, longer streaming runs and actual client playback remain.
+Host activation and profile routing follow that evidence, with enabling
+multiseat and no configured profiles leaving ordinary streaming unchanged.

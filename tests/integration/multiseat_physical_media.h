@@ -1,23 +1,25 @@
 /**
- * Private physical acceptance consumer. Decodes the actual authenticated worker
- * packets; it never creates a substitute capture source or a network listener.
+ * Private physical acceptance consumer of authenticated worker packets.
+ * Video is retained within a fixed bound and decoded with system OpenH264 at
+ * stop; the prepared host FFmpeg library intentionally omits H.264 decoding.
  */
 #pragma once
 
 #include "src/platform/linux/multiseat_worker_media_pump.h"
+#include "src/platform/linux/multiseat_container_host.h"
+#include "src/utility.h"
 
-extern "C" {
-#include <libavcodec/avcodec.h>
 #include <opus/opus.h>
-}
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <unistd.h>
 
 namespace multiseat::physical {
   class media_observer_t {
@@ -25,7 +27,7 @@ namespace multiseat::physical {
     explicit media_observer_t(worker_ipc::controller_connection_t connection):
         thread_([this, connection](std::stop_token stop) {
       try {
-        decode(connection, stop);
+        consume(connection, stop);
       } catch (const std::exception &failure) {
         error = failure.what();
         connection.close();
@@ -36,70 +38,65 @@ namespace multiseat::physical {
     void stop() {
       thread_.request_stop();
       if (thread_.joinable()) thread_.join();
+      if (!decoded_) {
+        decoded_ = true;
+        if (error.empty() && video.load()) {
+          try { decode_video(); }
+          catch (const std::exception &failure) { error = failure.what(); }
+        }
+      }
     }
 
-    std::atomic_uint64_t video {0}, audio {0}, idrs {0}, motion {0}, audible {0};
+    // Video counts packets while running. decoded_video is final proof at stop.
+    std::atomic_uint64_t video {0}, audio {0}, idrs {0}, audible {0};
     std::atomic_bool request_idr {false}, done {false};
-    // Read these only after stop() has joined the consumer.
+    // Read these only after stop() has joined the consumer and decoder.
     media::pump_report_t report;
     std::string error;
-    std::uint64_t submitted_video = 0;
+    std::uint64_t decoded_video = 0, motion = 0;
 
   private:
-    void decode(const worker_ipc::controller_connection_t &connection, std::stop_token stop) {
+    void decode_video() {
+      char path[] = "/tmp/polaris-physical-video-XXXXXX";
+      const int descriptor = mkostemp(path, O_CLOEXEC);
+      if (descriptor < 0) throw std::runtime_error {"physical decoder file unavailable"};
+      auto cleanup = util::fail_guard([&] { close(descriptor); unlink(path); });
+      std::size_t offset = 0;
+      while (offset < encoded_.size()) {
+        const auto written = write(descriptor, encoded_.data() + offset, encoded_.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) throw std::runtime_error {"physical decoder file write failed"};
+        offset += static_cast<std::size_t>(written);
+      }
+      container::local_host_t host;
+      const auto result = host.run({"/usr/bin/python3",
+        std::string {POLARIS_SOURCE_DIR} + "/tests/integration/multiseat_decode_media.py",
+        path, std::to_string(video.load())}, std::chrono::seconds {25}, 1024);
+      if (result.exit_status != 0 || result.timed_out || result.output_truncated)
+        throw std::runtime_error {"worker H.264 failed full OpenH264 decoding or frame count"};
+      const auto decoded = nlohmann::json::parse(result.output);
+      decoded_video = decoded.at("decoded_frames").get<std::uint64_t>();
+      motion = decoded.at("changing_frames").get<std::uint64_t>();
+      if (decoded_video != video.load())
+        throw std::runtime_error {"worker H.264 decoded frame count differs from packets"};
+      encoded_.clear();
+    }
+    void consume(const worker_ipc::controller_connection_t &connection, std::stop_token stop) {
       using namespace std::chrono_literals;
-      const auto *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-      if (!codec) throw std::runtime_error {"physical H.264 decoder unavailable"};
-      auto delete_context = [](AVCodecContext *context) { avcodec_free_context(&context); };
-      std::unique_ptr<AVCodecContext, decltype(delete_context)> context {avcodec_alloc_context3(codec)};
-      if (!context) throw std::runtime_error {"physical decoder allocation failed"};
-      context->thread_count = 1;
-      context->err_recognition = AV_EF_EXPLODE;
-      if (avcodec_open2(context.get(), codec, nullptr) < 0)
-        throw std::runtime_error {"physical decoder initialization failed"};
-      auto delete_frame = [](AVFrame *frame) { av_frame_free(&frame); };
-      auto delete_packet = [](AVPacket *packet) { av_packet_free(&packet); };
-      std::unique_ptr<AVFrame, decltype(delete_frame)> frame {av_frame_alloc()};
-      std::unique_ptr<AVPacket, decltype(delete_packet)> packet {av_packet_alloc()};
       int opus_error = 0;
       std::unique_ptr<OpusDecoder, decltype(&opus_decoder_destroy)> opus {
         opus_decoder_create(48000, 2, &opus_error), opus_decoder_destroy};
-      if (!frame || !packet || !opus || opus_error != OPUS_OK)
-        throw std::runtime_error {"physical media allocation failed"};
-      std::uint64_t previous_hash = 0;
-      const auto receive = [&] {
-        for (;;) {
-          const auto result = avcodec_receive_frame(context.get(), frame.get());
-          if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
-          if (result < 0 || frame->decode_error_flags || frame->width != 1920 ||
-              frame->height != 1080 || frame->format != AV_PIX_FMT_YUV420P)
-            throw std::runtime_error {"worker H.264 did not decode to clean 1080p SDR frames"};
-          // Sample decoded luma to prove the private game keeps changing. This
-          // does not measure visual quality or client presentation latency.
-          std::uint64_t hash = 14695981039346656037ULL;
-          for (int y = 0; y < frame->height; y += 8)
-            for (int x = 0; x < frame->width; x += 8)
-              hash = (hash ^ frame->data[0][y * frame->linesize[0] + x]) * 1099511628211ULL;
-          if (video.load() && hash != previous_hash) ++motion;
-          previous_hash = hash;
-          av_frame_unref(frame.get());
-          ++video;
-        }
-      };
+      if (!opus || opus_error != OPUS_OK)
+        throw std::runtime_error {"physical Opus decoder allocation failed"};
       const auto deadline = std::chrono::steady_clock::now() + 180s;
       report = media::run(connection, {.width=1920, .height=1080, .fps=60, .video_format=0, .audio_channels=2},
         {
           .video = [&](std::vector<std::uint8_t> &&bytes, std::int64_t, bool idr) {
             if (bytes.empty() || bytes.size() > 4 * 1024 * 1024 ||
-                av_new_packet(packet.get(), static_cast<int>(bytes.size())) < 0)
-              throw std::runtime_error {"worker video packet exceeds decoder bound"};
-            std::memcpy(packet->data, bytes.data(), bytes.size());
-            if (idr) packet->flags |= AV_PKT_FLAG_KEY;
-            const auto result = avcodec_send_packet(context.get(), packet.get());
-            av_packet_unref(packet.get());
-            if (result < 0) throw std::runtime_error {"worker H.264 packet refused by decoder"};
-            ++submitted_video;
-            receive();
+                bytes.size() > 64 * 1024 * 1024 - encoded_.size())
+              throw std::runtime_error {"physical encoded video exceeds receipt bound"};
+            encoded_.insert(encoded_.end(), bytes.begin(), bytes.end());
+            ++video;
             if (idr) ++idrs;
           },
           .audio = [&](std::vector<std::uint8_t> &&bytes) {
@@ -121,12 +118,9 @@ namespace multiseat::physical {
           },
           .take_idr_request = [&] { return request_idr.exchange(false); },
         });
-      if (avcodec_send_packet(context.get(), nullptr) < 0)
-        throw std::runtime_error {"worker H.264 decoder could not flush"};
-      receive();
-      if (submitted_video != video.load())
-        throw std::runtime_error {"worker H.264 decoded frame count differs from packets"};
     }
+    bool decoded_ = false;
+    std::vector<std::uint8_t> encoded_;
     // Construct this last so every value accessed by the consumer already exists.
     std::jthread thread_;
   };

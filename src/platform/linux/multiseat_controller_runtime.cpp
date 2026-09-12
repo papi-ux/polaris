@@ -3,6 +3,7 @@
  * @brief Default-off owner for trusted multiseat launch composition.
  */
 #include "multiseat_controller_runtime.h"
+#include "src/rtsp.h"
 
 #ifdef __linux__
 
@@ -49,7 +50,7 @@ namespace multiseat {
   }  // namespace
 
   struct controller_runtime_t::impl_t {
-    explicit impl_t(controller_runtime_dependencies_t dependencies) :
+    explicit impl_t(controller_runtime_dependencies_t dependencies, bool media_enabled) :
         registry(std::move(dependencies.registry)),
         worker_authority_store(
           std::move(dependencies.worker_authority_store)
@@ -61,7 +62,7 @@ namespace multiseat {
         worker_backend(std::move(dependencies.worker_backend)),
         input_expectations(
           std::move(dependencies.recovered_input_expectations)
-        ) {
+        ), worker_media_enabled(media_enabled) {
       workers = std::make_unique<worker_coordinator_t>(
         *registry,
         *worker_backend,
@@ -87,6 +88,7 @@ namespace multiseat {
     mutable std::mutex state_mutex;
     std::mutex shutdown_mutex;
     std::vector<input::expectation_t> input_expectations;
+    const bool worker_media_enabled;
     bool admission_ready = false;
     bool shutting_down = false;
     bool closed = false;
@@ -160,7 +162,7 @@ namespace multiseat {
         .status = controller_runtime_create_status_e::ready_enabled,
         .runtime = std::unique_ptr<controller_runtime_t> {
           new controller_runtime_t(
-            std::make_unique<impl_t>(std::move(*dependencies))
+            std::make_unique<impl_t>(std::move(*dependencies), options.worker_media_enabled)
           )
         },
       };
@@ -420,6 +422,9 @@ namespace multiseat {
   ) {
     std::scoped_lock lock {impl_->state_mutex};
     input::moonlight_worker_selection_result_t rejected;
+    // A failed selected-media launch must retain its requirement so a caller
+    // cannot accidentally start ordinary host capture after selection failed.
+    if (impl_->worker_media_enabled && launch) launch->require_worker_connection();
     if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
       rejected.status =
         input::moonlight_worker_selection_status_e::worker_not_authorized;
@@ -440,7 +445,9 @@ namespace multiseat {
       return rejected;
     }
     try {
-      return impl_->launch_adapter->select(launch, handle);
+      return impl_->worker_media_enabled ?
+        impl_->launch_adapter->select_with_connection(launch, handle) :
+        impl_->launch_adapter->select(launch, handle);
     } catch (...) {
       rejected.status =
         input::moonlight_worker_selection_status_e::worker_not_authorized;

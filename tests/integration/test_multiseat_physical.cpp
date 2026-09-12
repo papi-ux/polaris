@@ -375,7 +375,9 @@ namespace {
           RecordProperty("live_media_failure_" + std::to_string(index), media_observers[index]->error);
       }
       for (auto &seat : seats) if (seat.stream) { stream::session::stop(*seat.stream); seat.stream.reset(); }
-      for (int attempt = 0; attempt < 5 && !controller->closed(); ++attempt) {
+      const auto cleanup_deadline = std::chrono::steady_clock::now() +
+        worker_runtime_graceful_stop_timeout + 5s;
+      while (!controller->closed() && std::chrono::steady_clock::now() < cleanup_deadline) {
         (void) controller->shutdown();
         if (!controller->closed()) std::this_thread::sleep_for(100ms);
       }
@@ -451,6 +453,8 @@ namespace {
           seat.launch->gcm_key.resize(16); seat.launch->iv.resize(16);
           seat.launch->perm=static_cast<crypto::PERM>(static_cast<std::uint32_t>(crypto::PERM::input_kbd) | static_cast<std::uint32_t>(crypto::PERM::input_mouse) | static_cast<std::uint32_t>(crypto::PERM::input_controller)); seat.launch->watch_only=false;
         }
+        if (live_media) seat.launch->perm = static_cast<crypto::PERM>(
+          static_cast<std::uint32_t>(seat.launch->perm) | static_cast<std::uint32_t>(crypto::PERM::view));
         if (!controller->select_authenticated_launch(seat.launch,seat.snapshot.handle).selected()) { selected=false; continue; }
         stream::config_t stream_config {};
         seat.stream=stream::session::alloc(stream_config,*seat.launch); ASSERT_TRUE(seat.stream);
@@ -511,16 +515,16 @@ namespace {
       EXPECT_TRUE(observer.error.empty()) << observer.error;
       EXPECT_EQ(observer.report.status, media::pump_status_e::ended_on_shutdown)
         << observer.report.detail;
-      EXPECT_EQ(observer.submitted_video, observer.video.load());
+      EXPECT_EQ(observer.decoded_video, observer.video.load());
       EXPECT_EQ(observer.report.video_frames, observer.video.load());
       EXPECT_EQ(observer.report.audio_frames, observer.audio.load());
       EXPECT_GE(observer.report.idr_requests, 1U);
-      EXPECT_GE(observer.motion.load(), 10U);
+      EXPECT_GE(observer.motion, 10U);
       EXPECT_GE(observer.audible.load(), 10U);
       RecordProperty("live_media_seat_" + std::to_string(index), json {
-        {"video_packets", observer.report.video_frames}, {"decoded_frames", observer.video.load()},
+        {"video_packets", observer.report.video_frames}, {"decoded_frames", observer.decoded_video},
         {"audio_packets", observer.report.audio_frames}, {"decoded_audio_packets", observer.audio.load()},
-        {"changing_frames", observer.motion.load()}, {"audible_packets", observer.audible.load()},
+        {"changing_frames", observer.motion}, {"audible_packets", observer.audible.load()},
         {"idr_requests", observer.report.idr_requests}, {"idrs", observer.idrs.load()},
         {"status", std::string {media::describe(observer.report.status)}}, {"error", observer.error}
       }.dump());
@@ -534,7 +538,7 @@ namespace {
         media_observers[index] = std::make_unique<physical::media_observer_t>(connection);
       }
       for (int index = 0; index < 2; ++index) {
-        ASSERT_TRUE(wait_media(index, 60, 100, 1)) << "worker media never became decodable";
+        ASSERT_TRUE(wait_media(index, 60, 100, 1)) << "worker media never arrived";
         const auto before = media_observers[index]->idrs.load();
         media_observers[index]->request_idr = true;
         ASSERT_TRUE(wait_media(index, media_observers[index]->video.load() + 8,
