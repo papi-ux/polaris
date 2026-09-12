@@ -985,3 +985,34 @@ func TestNestedProviderErrorsDoNotEchoPrivatePaths(t *testing.T) {
 		t.Fatalf("private path leaked through provider error: %v", err)
 	}
 }
+
+// A helper that refuses to start must say how it finished. Gamescope reports the
+// reason on its own stderr, but the provider error carried nothing at all, so a
+// missing DRM primary node read only as a readiness timeout.
+func TestChildExitDescriptionNamesHowAHelperFinished(t *testing.T) {
+	if got := describeChildExit(nil); got != "an unreported status" {
+		t.Fatalf("nil child described as %q", got)
+	}
+	for _, testCase := range []struct {
+		path     string
+		expected string
+	}{
+		{path: "/bin/true", expected: "status 0"},
+		{path: "/bin/false", expected: "status 1"},
+	} {
+		child, err := startManagedChild(testCase.path, 0, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("%s did not start: %v", testCase.path, err)
+		}
+		select {
+		case <-child.done:
+		case <-time.After(10 * time.Second):
+			_ = child.stop(time.Second)
+			t.Fatalf("%s did not exit", testCase.path)
+		}
+		if got := describeChildExit(child); got != testCase.expected {
+			t.Fatalf("%s described as %q, wanted %q", testCase.path, got, testCase.expected)
+		}
+		_ = child.stop(time.Second)
+	}
+}
