@@ -426,15 +426,25 @@ TEST(SourceSafetyContracts, RefusingToKeepPrivateStateSaysWhichDirectoryAndWhy) 
 
   const auto guard = source.find("bool secure_directory_descriptor(");
   ASSERT_NE(guard, std::string::npos);
-  EXPECT_NE(source.find("std::string *reason", guard), std::string::npos)
-    << "the guard must report why it refused, not just that it did";
+  EXPECT_NE(source.find("directory_refusal_t *refusal", guard), std::string::npos)
+    << "the guard must report why it refused and which remedy applies, not just that it did; "
+       "the two faults it detects are fixed by different commands";
 
   EXPECT_NE(source.find("Refusing to keep private state in ["), std::string::npos)
     << "the rejection must name the directory it refused";
   EXPECT_NE(source.find("owner uid "), std::string::npos)
-    << "the rejection must name the owner, which is the thing that is wrong";
+    << "the rejection must name the owner and the mode, which is what is wrong";
   EXPECT_NE(source.find("without sudo"), std::string::npos)
-    << "the rejection must name the remedy";
+    << "a directory owned by another user must still point at running without sudo";
+  EXPECT_NE(source.find("chmod 700 "), std::string::npos)
+    << "a group-writable directory is fixed by chmod, not chown; offering only chown sent a "
+       "reporter on discussion #637 looking for an ownership problem they did not have";
+  // Which directory the message names is pinned behaviourally by
+  // PrivateStateFileTest.RefusalNamesTheDirectoryThatFailedAndItsOwnRemedy,
+  // because naming the state file's parent instead of the refused component is
+  // exactly the defect that shipped.
+  EXPECT_EQ(source.find("path_.parent_path().string() << \"] because\""), std::string::npos)
+    << "the refused directory is the one the walk stopped on, not the state file's parent";
 }
 
 TEST(SourceSafetyContracts, EveryLaunchTopologyResolverCallPassesTheHostPrivateDisplayAnswer) {
