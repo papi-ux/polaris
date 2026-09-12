@@ -147,6 +147,7 @@ RUN go test -trimpath ./... && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-nested-compositor ./cmd/polaris-seat-nested-compositor && \
+      -o /out/polaris-seat-encoder ./cmd/polaris-seat-encoder && \
     go build -trimpath -buildvcs=false -ldflags='-buildid= -s -w' \
       -o /out/polaris-seat-input-probe ./cmd/polaris-seat-input-probe && \
     go test -c -trimpath -o /out/provider-tests ./internal/seatprovider
@@ -199,6 +200,7 @@ COPY --from=worker-build --chmod=0555 /out/polaris-seat-session-bus /usr/libexec
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-display-capture /usr/libexec/polaris-seat/display-capture
 COPY --from=worker-build --chmod=0555 /out/polaris-seat-nested-compositor /usr/libexec/polaris-seat/nested-compositor
+COPY --from=worker-build --chmod=0555 /out/polaris-seat-encoder /usr/libexec/polaris-seat/encoder
 COPY containers/multiseat/check-runtime.py /check-worker-runtime.py
 RUN python3 /check-worker-runtime.py --worker && rm /check-worker-runtime.py
 RUN test -x /usr/bin/dbus-daemon && \

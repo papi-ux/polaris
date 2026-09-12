@@ -41,7 +41,9 @@ const (
 	DisplayTopologyCaptureHostNested = "capture-host-with-nested-compositor"
 	MediaPipelineWorkerLocal         = "worker-local-capture-encode"
 	captureMediaSocketDomain         = "polaris-capture-media-v1\x00"
+	encodedMediaSocketDomain         = "polaris-encoded-media-v1\x00"
 	captureMediaSocketPrefix         = "polaris-frames-"
+	encodedMediaSocketPrefix         = "polaris-encoded-"
 )
 
 // CaptureMediaSocketName derives the fixed worker-local raw-frame endpoint
@@ -54,6 +56,18 @@ func CaptureMediaSocketName(runtimeNamespace string) (string, error) {
 	}
 	digest := sha256.Sum256([]byte(captureMediaSocketDomain + runtimeNamespace))
 	return captureMediaSocketPrefix + hex.EncodeToString(digest[:]), nil
+}
+
+// EncodedMediaSocketName derives the fixed worker-local encoded-packet endpoint
+// the encoder provider publishes and the worker's data plane reads. Raw frames
+// never cross it; only encoded packets do, which is what keeps a seat's capture
+// inside its own worker.
+func EncodedMediaSocketName(runtimeNamespace string) (string, error) {
+	if !validNameToken(runtimeNamespace, 128) {
+		return "", errors.New("runtime namespace is invalid")
+	}
+	digest := sha256.Sum256([]byte(encodedMediaSocketDomain + runtimeNamespace))
+	return encodedMediaSocketPrefix + hex.EncodeToString(digest[:]), nil
 }
 
 // Request is the complete least-authority contract for exactly one runtime

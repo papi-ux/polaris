@@ -114,6 +114,7 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-audio /usr/libexec/polaris-seat/audio",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-display-capture /usr/libexec/polaris-seat/display-capture",
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-nested-compositor /usr/libexec/polaris-seat/nested-compositor",
+		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-encoder /usr/libexec/polaris-seat/encoder",
 		"test -x /usr/bin/dbus-daemon",
 		"test -x /usr/bin/pipewire",
 		"test -x /usr/bin/pw-cli",
@@ -172,6 +173,7 @@ func TestRuntimeProvidersArePackagedButProcessAdaptersRemainUnwired(t *testing.T
 		"/usr/libexec/polaris-seat/audio",
 		"/usr/libexec/polaris-seat/display-capture",
 		"/usr/libexec/polaris-seat/nested-compositor",
+		"/usr/libexec/polaris-seat/encoder",
 	} {
 		if !strings.Contains(containerfile, provider) {
 			t.Fatalf("implemented but inert provider %q is absent from the worker image", provider)
