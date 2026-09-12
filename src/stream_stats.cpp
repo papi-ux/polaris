@@ -568,6 +568,8 @@ namespace stream_stats {
     j["convert_path"] = encode_target_device.empty() ? "unknown" : encode_target_device;
     j["dynamic_range"] = dynamic_range;
     j["display_hdr"] = display_hdr;
+    j["hdr_policy_reason"] = hdr_policy_reason;
+    j["hdr_policy_hdr"] = hdr_policy_hdr;
     j["hdr_metadata_available"] = hdr_metadata_available;
     j["stream_hdr_enabled"] = stream_hdr_enabled;
     j["color_coding"] = color_coding;
@@ -789,6 +791,67 @@ namespace stream_stats {
     }
   #endif
 #endif
+    // A client asked for HDR and did not get it. hdr_downgrade_message already says why, but
+    // only over the session status route, and only while a stream is live. Put it where someone
+    // looking for a reason will actually stand. The wlroots capture classes never override
+    // is_hdr(), so on that path the answer is permanent and worth saying out loud rather than
+    // leaving the user to re-toggle a switch that cannot work.
+    // HDR turned off by something the user saved, rather than by what the hardware can do.
+    // This one has to speak without a client ever asking for HDR, because that is the whole
+    // shape of it: the saved setting stops the request being made at all, so dynamic_range stays
+    // zero and every capability-based check below stays quiet. Name the file, because nothing in
+    // a normal log does.
+    if (!stats.hdr_policy_hdr && !stats.hdr_policy_reason.empty()) {
+      const auto &reason = stats.hdr_policy_reason;
+      const auto device = stats.hdr_policy_device.empty() ? std::string {"this device"} : stats.hdr_policy_device;
+      std::string message;
+      std::string action;
+      if (reason == "paired_device_hdr_unsupported") {
+        message = "HDR is switched off for " + device + " in device_db.json, where hdr_capable is "
+                  "false. Polaris will not ask for HDR for that device however the client is set.";
+        action = "If the device's display really does support HDR, set hdr_capable for it in "
+                 "device_db.json, restart Polaris, and check the HDR row again.";
+      } else if (reason == "client_profile_hdr_lock") {
+        message = "HDR is switched off for " + device + " in its saved client profile, which "
+                  "overrides what the client asks for.";
+        action = "Turn Enable HDR back on for that device on the Devices page, or delete its "
+                 "saved profile, then start a stream and check the HDR row again.";
+      } else if (reason == "host_encoder_hdr_unsupported") {
+        message = "HDR was refused because this host's encoder did not advertise a 10-bit "
+                  "profile when the stream was resolved.";
+        action = "Check the encoder row. If NVENC or VA-API fell back, fix that first; HDR "
+                 "follows the encoder.";
+      }
+      if (!message.empty()) {
+        configuration_warnings.push_back({
+          {"id", "hdr_disabled_by_saved_setting"},
+          {"severity", "info"},
+          {"message", message},
+          {"action", action}
+        });
+      }
+    }
+
+    if (const auto hdr_reason = hdr_downgrade_reason(stats);
+        hdr_reason == "headless_hdr_unavailable" || hdr_reason == "display_not_hdr") {
+      const bool wlroots_capture =
+        config::video.capture == "wlr" ||
+        (config::video.capture.empty() && linux_display.use_cage_compositor);
+      configuration_warnings.push_back({
+        {"id", "hdr_capture_path_cannot_report_hdr"},
+        {"severity", "info"},
+        {"message", wlroots_capture ?
+           "A client asked for HDR and Polaris streamed 10-bit SDR instead. The wlroots capture "
+           "path this host is using does not report display HDR at all, so HDR cannot engage on "
+           "it whatever the monitor, GPU or client can do." :
+           "A client asked for HDR and Polaris streamed 10-bit SDR instead, because the active "
+           "capture display did not report HDR."},
+        {"action", "True HDR needs a capture path that reads the display's HDR metadata, which "
+                   "today means a KMS/DRM path on an HDR-capable output. Private Stream on "
+                   "headless labwc is always SDR. See docs/runtime.md."}
+      });
+    }
+
     if (adapter_pairing_status == "mismatched") {
       configuration_warnings.push_back({
         {"id", "linux_gpu_adapter_mismatch"},
@@ -1658,6 +1721,22 @@ namespace stream_stats {
         stats.input_steam_input_detail
     );
 
+    const auto hdr_reason = hdr_downgrade_reason(stats);
+    append_doctor_evidence(
+      evidence,
+      "hdr",
+      "HDR",
+      hdr_effective_mode(stats),
+      "",
+      stats.stream_hdr_enabled ? "pass" : stats.dynamic_range > 0 ? "watch" : "info",
+      "capture_display",
+      hdr_reason == "none" ?
+        (stats.stream_hdr_enabled ?
+           "Streaming HDR10." :
+           "No client has asked for HDR on this host.") :
+        hdr_downgrade_message(stats)
+    );
+
     auto advanced = nlohmann::json::object();
     advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak", "fec_protection"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
@@ -1829,6 +1908,17 @@ namespace stream_stats {
       const auto steam_opt_in = current_stats.input_steam_profiles_with_xbox_support;
       const auto steam_forced = current_stats.input_steam_forced_app_count;
       const auto steam_detail = current_stats.input_steam_input_detail;
+      // The HDR facts describe the host's capture path, not the stream that just ended, and the
+      // person who wants to know why HDR did not engage goes looking for the answer after
+      // disconnecting, not during. Same reasoning as the controller-input fields above.
+      const auto hdr_dynamic_range = current_stats.dynamic_range;
+      const auto hdr_display = current_stats.display_hdr;
+      const auto hdr_metadata = current_stats.hdr_metadata_available;
+      const auto hdr_stream_enabled = current_stats.stream_hdr_enabled;
+      const auto hdr_effective_headless = current_stats.runtime_effective_headless;
+      const auto hdr_policy_reason = current_stats.hdr_policy_reason;
+      const auto hdr_policy_hdr = current_stats.hdr_policy_hdr;
+      const auto hdr_policy_device = current_stats.hdr_policy_device;
 
       current_stats = stats_t {};
       clear_capture_profile_buckets();
@@ -1841,6 +1931,15 @@ namespace stream_stats {
       current_stats.input_steam_profiles_with_xbox_support = steam_opt_in;
       current_stats.input_steam_forced_app_count = steam_forced;
       current_stats.input_steam_input_detail = steam_detail;
+
+      current_stats.dynamic_range = hdr_dynamic_range;
+      current_stats.display_hdr = hdr_display;
+      current_stats.hdr_metadata_available = hdr_metadata;
+      current_stats.stream_hdr_enabled = hdr_stream_enabled;
+      current_stats.runtime_effective_headless = hdr_effective_headless;
+      current_stats.hdr_policy_reason = hdr_policy_reason;
+      current_stats.hdr_policy_hdr = hdr_policy_hdr;
+      current_stats.hdr_policy_device = hdr_policy_device;
     }
   }
 
@@ -2575,6 +2674,13 @@ namespace stream_stats {
   void update_dynamic_range(int dynamic_range) {
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.dynamic_range = dynamic_range;
+  }
+
+  void update_hdr_policy(bool hdr, const std::string &reason_code, const std::string &device) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.hdr_policy_hdr = hdr;
+    current_stats.hdr_policy_reason = reason_code;
+    current_stats.hdr_policy_device = device;
   }
 
   void update_hdr_state(bool display_hdr,
