@@ -685,6 +685,24 @@ TEST_F(PairingAccessPresetTest, RemembersTheControllerTypeAClientDeclared) {
   EXPECT_FALSE(remember_client_controller_type(uuid_util::uuid_t::generate().string(), LI_CTYPE_PS));
 }
 
+TEST_F(PairingAccessPresetTest, RemembersThatAClientReportedAnHdr10Display) {
+  auto client = std::make_shared<crypto::named_cert_t>();
+  client->cert = PUBLIC_CERT;
+  client->name = "hdr-memory";
+  client->uuid = uuid_util::uuid_t::generate().string();
+  ASSERT_TRUE(add_authorized_client_for_tests(client));
+
+  EXPECT_TRUE(remember_client_hdr10_display(client->uuid, true));
+  // Writing the same answer again must not churn the state file on every report.
+  EXPECT_FALSE(remember_client_hdr10_display(client->uuid, true));
+  // A later false must not erase what was already observed: Nova reports false for an external
+  // display it cannot inspect, and that is not evidence the panel lost HDR.
+  EXPECT_FALSE(remember_client_hdr10_display(client->uuid, false));
+  EXPECT_FALSE(remember_client_hdr10_display(client->uuid, true));
+
+  EXPECT_FALSE(remember_client_hdr10_display(uuid_util::uuid_t::generate().string(), true));
+}
+
 TEST_F(PairingAccessPresetTest, CanonicallyEquivalentCertificateReplacesAuthorization) {
   auto original = std::make_shared<crypto::named_cert_t>();
   original->cert = PUBLIC_CERT;
