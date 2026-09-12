@@ -152,6 +152,12 @@ namespace stream_stats {
     platf::frame_format_e encode_target_format = platf::frame_format_e::unknown;
     int dynamic_range = 0;
     bool display_hdr = false;
+    /// Why the resolved launch profile turned HDR off, when it did. Empty when policy did
+    /// not decide it. Survives the end of the stream: it describes the host's saved
+    /// settings for a device, not the session that just ended.
+    std::string hdr_policy_reason;
+    bool hdr_policy_hdr = false;
+    std::string hdr_policy_device;
     bool hdr_metadata_available = false;
     bool stream_hdr_enabled = false;
     std::string color_coding;
@@ -736,6 +742,14 @@ namespace stream_stats {
    * @param stream_hdr_enabled Whether Polaris is advertising true HDR for the stream.
    * @param color_coding Human-readable color coding label.
    */
+  /**
+   * @brief Record what the resolved launch profile decided about HDR, and why.
+   * @param hdr Whether the resolved profile enabled HDR.
+   * @param reason_code The launch-profile reason code behind that value.
+   * @param device The paired device the decision was made for.
+   */
+  void update_hdr_policy(bool hdr, const std::string &reason_code, const std::string &device);
+
   void update_hdr_state(bool display_hdr,
                         bool hdr_metadata_available,
                         bool stream_hdr_enabled,

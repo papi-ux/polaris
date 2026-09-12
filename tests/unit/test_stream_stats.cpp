@@ -30,6 +30,7 @@ namespace {
   struct LinuxDisplayConfigGuard {
     LinuxDisplayConfigGuard():
         adapter_name {config::video.adapter_name},
+        capture {config::video.capture},
         encoder {config::video.encoder},
         headless_mode {config::video.linux_display.headless_mode},
         use_cage_compositor {config::video.linux_display.use_cage_compositor},
@@ -38,6 +39,7 @@ namespace {
 
     ~LinuxDisplayConfigGuard() {
       config::video.adapter_name = adapter_name;
+      config::video.capture = capture;
       config::video.encoder = encoder;
       config::video.linux_display.headless_mode = headless_mode;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
@@ -45,6 +47,7 @@ namespace {
     }
 
     std::string adapter_name;
+    std::string capture;
     std::string encoder;
     bool headless_mode;
     bool use_cage_compositor;
@@ -880,6 +883,147 @@ TEST(StreamStatsFecProtectionTests, RoutesEvidenceBySessionGeneration) {
     stream_stats::get_current().fec_protection.oversized_frames_total,
     0
   );
+}
+
+TEST(StreamStatsDoctorTests, NamesTheCapturePathWhenHdrWasAskedForAndNotDelivered) {
+  // The host already knew why and only ever said so over the session-status route, while a
+  // stream was live. A person who ticks "request HDR", sees SDR and goes looking for a reason
+  // is standing in front of the console with nothing streaming.
+  LinuxDisplayConfigGuard guard;
+  config::video.capture = "wlr";
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 1;
+  stats.runtime_effective_headless = true;
+  stats.display_hdr = false;
+  stats.hdr_metadata_available = false;
+  stats.stream_hdr_enabled = false;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_hdr_evidence = false;
+  for (const auto &entry : doctor.at("evidence")) {
+    if (entry.at("id") != "hdr") {
+      continue;
+    }
+    saw_hdr_evidence = true;
+    EXPECT_EQ(entry.at("status"), "watch");
+    EXPECT_EQ(entry.at("value"), "sdr_10bit");
+    EXPECT_NE(entry.at("detail").get<std::string>().find("10-bit SDR, not HDR"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_hdr_evidence);
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "hdr_capture_path_cannot_report_hdr") {
+      continue;
+    }
+    saw_warning = true;
+    EXPECT_EQ(warning.at("severity"), "info");
+    // The wlroots path never overrides is_hdr(), so this is permanent, not a bad moment.
+    EXPECT_NE(warning.at("message").get<std::string>().find("wlroots"), std::string::npos);
+    EXPECT_NE(warning.at("action").get<std::string>().find("KMS/DRM"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+}
+
+TEST(StreamStatsDoctorTests, HdrEvidenceStaysInformationalWhenNobodyAskedForHdr) {
+  // Most hosts never ask for HDR. The row still reports, but it must not nag, and it must not
+  // accuse a capture path of failing at something nobody requested.
+  LinuxDisplayConfigGuard guard;
+  config::video.capture = "wlr";
+  config::video.linux_display.use_cage_compositor = true;
+
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 0;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_hdr_evidence = false;
+  for (const auto &entry : doctor.at("evidence")) {
+    if (entry.at("id") != "hdr") {
+      continue;
+    }
+    saw_hdr_evidence = true;
+    EXPECT_EQ(entry.at("status"), "info");
+    EXPECT_EQ(entry.at("value"), "sdr_8bit");
+  }
+  EXPECT_TRUE(saw_hdr_evidence);
+
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "hdr_capture_path_cannot_report_hdr");
+  }
+}
+
+TEST(StreamStatsDoctorTests, NamesTheSavedSettingThatSwitchedHdrOff) {
+  // This is the shape that leaves someone with nothing to go on. A saved setting stops HDR being
+  // requested at all, so dynamic_range never leaves zero, hdr_downgrade_reason answers "none",
+  // and every capability-based check stays quiet while the user re-toggles a client switch that
+  // was never the problem. It has to speak without a request having been made.
+  LinuxDisplayConfigGuard guard;
+
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 0;
+  stats.hdr_policy_hdr = false;
+  stats.hdr_policy_reason = "paired_device_hdr_unsupported";
+  stats.hdr_policy_device = "RetroidPocket6";
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "hdr_disabled_by_saved_setting") {
+      continue;
+    }
+    saw_warning = true;
+    const auto message = warning.at("message").get<std::string>();
+    EXPECT_NE(message.find("device_db.json"), std::string::npos);
+    EXPECT_NE(message.find("RetroidPocket6"), std::string::npos);
+    EXPECT_NE(warning.at("action").get<std::string>().find("hdr_capable"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingAboutSavedSettingsWhenHdrWasAllowed) {
+  LinuxDisplayConfigGuard guard;
+
+  stream_stats::stats_t stats {};
+  stats.hdr_policy_hdr = true;
+  stats.hdr_policy_reason = "requested_hdr_setting";
+  stats.hdr_policy_device = "RetroidPocket6";
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "hdr_disabled_by_saved_setting");
+  }
+}
+
+TEST(StreamStatsDoctorTests, HdrVerdictSurvivesTheEndOfTheStream) {
+  // Same reasoning as the Steam Input finding above: the answer describes the host's capture
+  // path, and the person asking the question has already disconnected.
+  stream_stats::update_stream_active(true, "client", "10.0.0.5");
+  stream_stats::update_dynamic_range(1);
+  stream_stats::update_hdr_state(false, false, false, "SDR (Rec. 709)");
+  stream_stats::update_hdr_policy(false, "paired_device_hdr_unsupported", "RetroidPocket6");
+
+  stream_stats::update_stream_active(false, "", "");
+
+  const auto after = stream_stats::get_current();
+  EXPECT_FALSE(after.streaming);
+  EXPECT_EQ(after.dynamic_range, 1);
+  EXPECT_FALSE(after.stream_hdr_enabled);
+  EXPECT_EQ(stream_stats::hdr_effective_mode(after), "sdr_10bit");
+  EXPECT_NE(stream_stats::hdr_downgrade_reason(after), "none");
+  EXPECT_EQ(after.hdr_policy_reason, "paired_device_hdr_unsupported");
+  EXPECT_EQ(after.hdr_policy_device, "RetroidPocket6");
+
+  stream_stats::update_stream_active(false, "", "");
 }
 
 TEST(StreamStatsDoctorTests, SteamInputFindingSurvivesTheEndOfTheStream) {
