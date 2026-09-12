@@ -188,7 +188,7 @@ def build_artifact(args, revision, epoch, context):
     worker_layers = inspected['RootFS']['Layers']
     if provider_inspected['RootFS']['Layers'][:len(worker_layers)] != worker_layers:
         raise ValueError('provider test image does not extend the produced worker filesystem')
-    test_command = engine + ['run', '--rm', '--network=none', '--cap-drop=all',
+    test_command = engine + ['run', '--rm', '--network=none', '--user=1000:1000', '--cap-drop=all',
                     '--security-opt=no-new-privileges', provider_image, '-test.v',
                     '-test.run=^TestReal(SessionBus|PrivateAudio|AudioReadiness|Display|Encoder)', '-test.timeout=2m']
     with (artifact / 'providers.log').open('w') as log:

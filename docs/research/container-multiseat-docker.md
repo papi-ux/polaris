@@ -54,6 +54,13 @@ For an offline Docker import, use the full `sha256:<64 hex>` value recorded as
 An image ID is checked against the actual inspected container image, not only
 its labels. Loading an archive does not promote it into the production catalog.
 
+The current worker image includes UID/GID 1000, and the required provider image
+checks run as `1000:1000` with no capabilities. Docker does not add a passwd
+entry for an arbitrary numeric `--user`. The streaming worker rejects a UID
+missing from its image before starting providers because D-Bus requires that
+account. General UID provisioning remains a deployment prerequisite for other
+host users; the tests do not establish that support.
+
 Profile volumes must be precreated with Docker's local driver and no driver
 options. The worker requires their root to be mode 0700 and owned by its UID.
 The operator must initialize a new volume before acceptance; a missing or

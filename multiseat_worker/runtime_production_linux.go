@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 )
 
 // The literal final option is controller-owned. Environment variables cannot
@@ -25,6 +27,12 @@ func runProductionSeatWorker(parent context.Context, config workerConfig, paths 
 	if parent == nil || uid == 0 || config.DisplayHDR || config.RuntimeProfile != "gamescope" ||
 		config.Compositor != "gamescope" || config.Workload.Kind != workloadKindGamescope || config.Workload.TargetID != "input-pong-v1" {
 		return errors.New("streaming worker allocation is not supported")
+	}
+	// D-Bus requires an NSS entry even with numeric EXTERNAL authentication.
+	// Docker does not synthesize /etc/passwd entries for --user as Podman can.
+	// Reject before creating any runtime resources when the image lacks it.
+	if _, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err != nil {
+		return errors.New("worker UID has no account in the runtime image")
 	}
 	// Authenticate the local authority before any provider can touch resources.
 	for _, directory := range []string{paths.IPC, paths.Auth, paths.State} {
