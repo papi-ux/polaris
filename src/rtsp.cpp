@@ -1390,6 +1390,13 @@ namespace rtsp_stream {
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
+  std::uint32_t session_feature_flags(const launch_session_t &launch, std::uint32_t host_flags) {
+    // A host tablet device does not imply support in the worker's compositor.
+    // Keep controller touch support, which uses the allocated gamepad directly.
+    return launch.worker_connection_requirement()->load() ?
+      host_flags & ~platf::platform_caps::pen_touch : host_flags;
+  }
+
   void cmd_describe(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
 
@@ -1402,7 +1409,7 @@ namespace rtsp_stream {
     std::stringstream ss;
 
     // Tell the client about our supported features
-    ss << "a=x-ss-general.featureFlags:" << (uint32_t) platf::get_capabilities() << std::endl;
+    ss << "a=x-ss-general.featureFlags:" << session_feature_flags(session, platf::get_capabilities()) << std::endl;
 
     // Always request new control stream encryption if the client supports it
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO;

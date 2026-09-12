@@ -83,11 +83,15 @@ rate, and stereo audio in 5 ms packets. The request parser bounds dimensions to 
 performance guarantees. ANNOUNCE must agree with the prepared dimensions and
 frame rate. Host optimizer envelopes, HDR, HEVC, AV1, and surround audio are
 rejected. The Nova optimizer endpoint returns an explicit unsupported response
-for mapped devices, so optimizer-driven profile launches remain a client
-integration task. Use a compatible manual stream preset for later acceptance.
+for mapped devices. Nova currently requires a resolved profile even with a
+manual preset, so Nova profile launches remain a client integration task.
+Moonlight can request the supported contract through a manual stream preset.
 
-The input plan provides keyboard and pointer devices, touch and pen when
-authorized, and one gamepad when controller input is authorized. Profile
+The input plan provides keyboard and pointer devices and one gamepad when
+controller input is authorized. The current compositor has no native touch or
+pen mapping, so profile launches omit those devices and the corresponding RTSP
+capability. Clients can use mouse emulation for a touch screen. Pairing
+permissions stay unchanged; native touch and pen remain future provider work. Profile
 launches clear host client commands and suppress host clipboard reads and
 server commands. Server info reports only the requesting device's profile
 session. Unassigned devices retain the ordinary app list and launch path.

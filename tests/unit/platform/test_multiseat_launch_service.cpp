@@ -1,6 +1,7 @@
 #include "src/platform/linux/multiseat_launch_service.h"
 #include "src/config.h"
 #include "src/nvhttp.h"
+#include "src/platform/common.h"
 #include "src/private_state_file.h"
 #include "src/rtsp.h"
 #include "src/stream.h"
@@ -19,6 +20,21 @@
 namespace {
   using namespace multiseat;
   using namespace std::chrono_literals;
+
+  TEST(MultiseatLaunchCapabilities, NativeTabletSupportFollowsTheSelectedConsumer) {
+    rtsp_stream::launch_session_t launch;
+    launch.perm = crypto::PERM::_all;
+    constexpr auto tablet = platf::platform_caps::pen_touch;
+    constexpr auto controller_touch = platf::platform_caps::controller_touch;
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, tablet | controller_touch), tablet | controller_touch);
+    launch.require_worker_connection();
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, tablet | controller_touch), controller_touch);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, tablet), 0U);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, 0), 0U);
+    launch.cancel();
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, tablet | controller_touch), controller_touch);
+    EXPECT_EQ(launch.perm, crypto::PERM::_all);
+  }
 
   struct controller_state_t {
     std::mutex mutex;

@@ -234,6 +234,9 @@ namespace rtsp_stream {
 
   session_snapshot_t session_snapshot(const std::string_view& uuid);
 
+  /** Advertise the input features implemented by this launch's consumer. */
+  std::uint32_t session_feature_flags(const launch_session_t &launch, std::uint32_t host_flags);
+
 #ifdef POLARIS_TESTS
   bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config);
   std::int64_t bound_session_bitrate_for_tests(

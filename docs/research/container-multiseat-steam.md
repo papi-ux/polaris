@@ -84,7 +84,9 @@ supervision has started, not successful login or rendered game frames.
 ## Acceptance still required
 
 The current stream contract requires a compatible manual SDR H.264 4:2:0 preset,
-whole frame rate, and stereo audio with 5 ms packets. See the
+whole frame rate, and stereo audio with 5 ms packets. Moonlight can request this
+contract. Nova still requires resolved-profile integration even with a manual
+preset. See the
 [launch integration](container-multiseat-launch-integration.md) for device
 permissions, revocation, cancellation, and host configuration.
 

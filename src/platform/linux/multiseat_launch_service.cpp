@@ -48,8 +48,11 @@ namespace multiseat {
         }
         const auto handle = admitted.admission.seat->handle;
         const input::plan_t plan {
-          .touch = !!(launch->perm & crypto::PERM::input_touch),
-          .pen = !!(launch->perm & crypto::PERM::input_pen),
+          // The image-owned compositor currently consumes keyboard and mouse
+          // descriptors only. Permissions do not establish provider support.
+          // RTSP omits native pen/touch so clients can use mouse emulation.
+          .touch = false,
+          .pen = false,
           .gamepad_slots = (launch->perm & crypto::PERM::input_controller) == crypto::PERM::_no ? 0U : 1U,
         };
         if (runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch") != mutation_result_e::applied ||

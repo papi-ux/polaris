@@ -1114,12 +1114,15 @@ namespace {
     stream::session::stop(*session);
   }
 
-  TEST_F(MultiseatControllerRuntimeTest, ProductionLaunchDriverAllocatesAuthorizedInputsAndRequiresMediaLease) {
+  TEST_F(MultiseatControllerRuntimeTest, ProductionLaunchDriverAllocatesSupportedInputsAndRequiresMediaLease) {
     create_ready_controller(true, {shared_profile_route()});
     auto *runtime = controller_.get();
     auto driver = make_profile_controller(std::move(controller_));
     auto cleanup = util::fail_guard([&] { state_->allow_cleanup(); EXPECT_TRUE(driver->shutdown()); });
     auto launch = controller_launch(2201, 3201);
+    ASSERT_TRUE(!!(launch->perm & crypto::PERM::input_touch));
+    ASSERT_TRUE(!!(launch->perm & crypto::PERM::input_pen));
+    const auto authorized_permissions = launch->perm;
     launch->width = 1920; launch->height = 1080; launch->fps = 60000;
     EXPECT_TRUE(driver->routes_client(launch->unique_id));
     EXPECT_FALSE(driver->routes_client("unassigned"));
@@ -1132,12 +1135,13 @@ namespace {
       std::lock_guard lock(state_->mutex);
       ASSERT_EQ(state_->input_allocations.size(), 1U);
       const auto &plan = state_->input_allocations.front().plan;
-      EXPECT_TRUE(plan.touch);
-      EXPECT_TRUE(plan.pen);
+      EXPECT_FALSE(plan.touch);
+      EXPECT_FALSE(plan.pen);
       EXPECT_EQ(plan.gamepad_slots, 1U);
       ASSERT_EQ(state_->workers.size(), 1U);
       identity = state_->workers.front().identity;
     }
+    EXPECT_EQ(launch->perm, authorized_permissions);
     EXPECT_EQ(driver->poll(launch, *started.seat), profile_poll_e::pending);
     ASSERT_TRUE(state_->mark_worker_ready(identity));
     driver->reconcile();
