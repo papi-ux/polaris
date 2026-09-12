@@ -120,7 +120,7 @@ func parseAudioPolicyClient(output []byte, pid uint32, uid uint32) error {
 	if err != nil || pid == 0 {
 		return errors.New("runtime audio policy client is invalid")
 	}
-	matches := 0
+	matches, exports := 0, 0
 	for _, client := range objects {
 		if client.Type != "PipeWire:Interface:Client" {
 			return errors.New("runtime audio client type is invalid")
@@ -131,14 +131,29 @@ func parseAudioPolicyClient(output []byte, pid uint32, uid uint32) error {
 		// These credentials are supplied by the private PipeWire server, unlike
 		// client-controlled application.process.id or an executable name alone.
 		if !audioPropertyEquals(client, "pipewire.sec.uid", uid) ||
-			!audioPropertyEquals(client, "application.name", "WirePlumber (polaris)") ||
 			!audioPropertyEquals(client, "wireplumber.profile", "polaris") ||
 			!audioPropertyEquals(client, "wireplumber.daemon", true) {
 			return errors.New("runtime audio policy client identity changed")
 		}
-		matches++
+		// The pinned WirePlumber also opens an export connection. It shares
+		// the server-authenticated PID/UID but cannot replace the primary.
+		exportCore, validExport := audioProperty[bool](client, "wireplumber.export-core")
+		if _, present := client.Info.Properties["wireplumber.export-core"]; present && !validExport {
+			return errors.New("runtime audio policy export identity is invalid")
+		}
+		if exportCore {
+			if !audioPropertyEquals(client, "application.name", "WirePlumber (polaris) [export]") {
+				return errors.New("runtime audio policy export identity changed")
+			}
+			exports++
+		} else {
+			if !audioPropertyEquals(client, "application.name", "WirePlumber (polaris)") {
+				return errors.New("runtime audio policy client identity changed")
+			}
+			matches++
+		}
 	}
-	if matches != 1 {
+	if matches != 1 || exports > 1 {
 		return errors.New("runtime audio policy is not attached")
 	}
 	return nil

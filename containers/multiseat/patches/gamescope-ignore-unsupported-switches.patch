@@ -1,0 +1,13 @@
+--- a/subprojects/wlroots/backend/libinput/switch.c
++++ b/subprojects/wlroots/backend/libinput/switch.c
+@@ -36,6 +36,10 @@
+ 	case LIBINPUT_SWITCH_TABLET_MODE:
+ 		wlr_event.switch_type = WLR_SWITCH_TYPE_TABLET_MODE;
+ 		break;
++	default:
++		// New libinput switches have no representation in this wlroots ABI.
++		// Do not report an unknown switch as a zero-initialized lid event.
++		return;
+ 	}
+ 	switch (libinput_event_switch_get_switch_state(sevent)) {
+ 	case LIBINPUT_SWITCH_STATE_OFF:

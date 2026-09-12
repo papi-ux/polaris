@@ -320,12 +320,10 @@ generation: 35 seconds for seven serial five-second component bounds, plus the
 existing five-second authenticated-shutdown I/O budget and five-second
 backend-command budget.
 
-The locked Games on Whales images remain useful application roots, but their
-launcher scripts couple compositor and application startup and do not provide
-one uniform private session-bus, PipeWire, capture, encode, and virtual-input
-service contract. The Polaris helper must own those boundaries explicitly; the
-worker must not infer readiness from a GoW entrypoint or from the existence of
-a Wayland socket alone. The controller binds each opaque profile to one typed
+Polaris builds each application runtime from a pinned official Ubuntu base and
+owns session-bus, PipeWire, capture, encoding and input supervision. Readiness
+requires each provider's authenticated contract and live artifacts.
+The controller binds each opaque profile to one typed
 runtime and one exact final image digest, carries the requested display and
 data-plane topology through admission and reconciliation, and gives the worker
 canonical width, height, refresh, and HDR values. It also supplies an exact
@@ -335,17 +333,17 @@ shell fragment crosses that boundary. The dispatcher resolves the exact
 runtime kind and target through its trusted provider catalog and rejects any
 plan that does not match the selected runtime profile.
 
-Wolf's working data plane uses a capture-producing outer Wayland compositor
-with Gamescope nested beneath it, plus separate audio, virtual-input, and
-GStreamer services. This contract makes the same ownership edge explicit:
+The display provider owns the outer headless compositor and nests Gamescope
+beneath it. Audio, input and encoding have separate lifetimes. In this contract,
 applications use the nested compositor's inner Wayland socket, while capture
 uses the outer socket and raw frames remain worker-local through encoding.
 Only encoded video/audio and stream markers may cross the authenticated media
 channel. Controller input crosses the attached control channel and feedback
 returns there; every routed item repeats the exact seat generation and
-cross-seat output is rejected. This is still a supervision and routing proof.
-A placeholder helper that only creates socket nodes and reports ready would
-not make this image streaming-capable.
+cross-seat output is rejected. The concrete encoder emits H.264 and Opus only
+after both codecs produce valid media, and the controller binds that media to
+the exact selected worker connection. Production activation remains default-off;
+client playback and launcher integration still need their acceptance gates.
 
 Authentication does not attach either data channel. Health probes authenticate
 and heartbeat without consuming media. A streaming controller explicitly

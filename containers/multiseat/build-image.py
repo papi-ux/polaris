@@ -67,7 +67,7 @@ def materialized_context(revision, profile_id, nvidia):
         for role in ['runtime', 'build']:
             for package in packages[role]:
                 filename = package['filename']
-                if pathlib.Path(filename).name != filename:
+                if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+%:~\-]*\.deb', filename):
                     raise ValueError('unsafe locked input filename')
                 inputs.append((pathlib.Path(profile_id) / role / filename, package['sha256']))
         for name in ['rust', 'plugin', 'gamescope'] + (['nvidia', 'nvcodec'] if nvidia else []):
@@ -87,6 +87,24 @@ def materialized_context(revision, profile_id, nvidia):
             shutil.copyfile(source, destination)
             if digest(destination) != expected:
                 raise ValueError('copied input differs from committed lock: ' + str(filename))
+        # The minimal distribution has no Python. Bootstrap verification uses
+        # only coreutils and a manifest generated from these committed locks.
+        for role in ['runtime', 'build']:
+            checksums = []
+            seen = set()
+            for package in packages[role]:
+                filename, checksum = package['filename'], package['sha256']
+                if filename in seen or not re.fullmatch(r'[0-9a-f]{64}', checksum):
+                    raise ValueError('duplicate filename or invalid package checksum')
+                seen.add(filename)
+                checksums.append(checksum + '  packages/' + filename + '\n')
+            if role == 'build':
+                for name, filename in [('rust', 'rust.tar.xz'), ('plugin', 'plugin.tar'), ('gamescope', 'gamescope.tar')]:
+                    lock = json.loads((here / images['dependency_locks'][name]).read_text())
+                    if not re.fullmatch(r'[0-9a-f]{64}', lock['sha256']):
+                        raise ValueError('invalid source checksum')
+                    checksums.append(lock['sha256'] + '  ' + filename + '\n')
+            (context / 'build/runtime-inputs' / profile_id / (role + '.sha256')).write_text(''.join(checksums))
         yield context
 
 
@@ -105,13 +123,23 @@ def sbom(packages, profile, revision, context):
     for line in packages.splitlines():
         name, version, architecture = line.split('\t')
         purl = 'pkg:deb/ubuntu/' + urllib.parse.quote(name, safe='') + '@' + urllib.parse.quote(version, safe='') + '?arch=' + architecture
-        components.append({'type': 'library', 'name': name, 'version': version, 'purl': purl, 'bom-ref': purl})
+        component = {'type': 'library', 'name': name, 'version': version, 'purl': purl, 'bom-ref': purl}
+        if name == 'heroic':
+            launcher = json.loads((here / 'locks/launchers.json').read_text())['heroic']
+            purl = 'pkg:generic/heroic@' + urllib.parse.quote(version, safe='') + '?arch=' + architecture
+            component.update(type='application', purl=purl, **{'bom-ref': purl})
+            component['externalReferences'] = [{'type': 'distribution', 'url': launcher['url']},
+                                               {'type': 'vcs', 'url': launcher['source']}]
+            component['hashes'] = [{'alg': 'SHA-256', 'content': launcher['sha256']}]
+        components.append(component)
     for name in ['plugin', 'gamescope']:
         lock = json.loads((here / 'locks' / (name + '.json')).read_text())
         components.append({'type': 'application' if name == 'gamescope' else 'library',
                            'name': name, 'version': lock['revision'], 'bom-ref': name,
                            'externalReferences': [{'type': 'vcs', 'url': lock['url'] + '/tree/' + lock['revision']}],
-                           'properties': [{'name': 'polaris:source-archive-sha256', 'value': lock['sha256']}]})
+                           'properties': [{'name': 'polaris:source-archive-sha256', 'value': lock['sha256']}] +
+                                         [{'name': 'polaris:patch-sha256:' + path, 'value': digest(here / path)}
+                                          for path in lock.get('patches', [])]})
     # Retain the complete reviewed Rust closure, including declared build/dev
     # inputs; this is dependency provenance, not a claim that every crate links.
     with tarfile.open(context / 'build/runtime-inputs/plugin.tar') as archive:
@@ -240,6 +268,8 @@ def build_artifact(args, revision, epoch, context):
     worker_digest = verify_archive(artifact / 'worker.oci.tar', config_digest)
     lock_files = [here / 'images.lock.json', here / profile['dependency_lock']]
     lock_files += [here / path for name, path in images['dependency_locks'].items() if args.nvidia or name not in ('nvidia', 'nvcodec')]
+    for name in ['plugin', 'gamescope']:
+        lock_files += [here / path for path in json.loads((here / ('locks/' + name + '.json')).read_text()).get('patches', [])]
     write_json(artifact / 'artifact.json', {
         'schema': 1, 'source_revision': revision, 'profile': args.profile,
         'platform': 'linux/amd64', 'variant': variant, 'source_root': profile['reference'],

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fail image construction if a fixed provider dependency is unsafe or missing."""
+import json
 import os
 import pathlib
 import stat
@@ -9,6 +10,24 @@ import sys
 executables = ['dbus-daemon', 'pipewire', 'pw-cli', 'pw-dump', 'wireplumber', 'pactl', 'gst-launch-1.0',
                'gst-inspect-1.0', 'gamescope', 'Xwayland']
 files = [pathlib.Path('/usr/bin') / name for name in executables]
+package_lock = json.loads(pathlib.Path('/usr/share/polaris/build/packages.lock.json').read_text())
+profile = package_lock['profile']
+launchers = {'gamescope': None, 'steam': ('steam-installer', '/usr/games/steam'),
+             'heroic': ('heroic', '/opt/Heroic/heroic'), 'lutris': ('lutris', '/usr/games/lutris')}
+if profile not in launchers:
+    raise ValueError('unknown runtime profile')
+launcher = launchers[profile]
+if launcher:
+    package, executable = launcher
+    locked = next(p for p in package_lock['runtime'] if p['name'] == package and p['architecture'] in ('amd64', 'all'))
+    installed = subprocess.check_output(['dpkg-query', '-W', '-f=${Version}', package], text=True)
+    if installed != locked['version']:
+        raise ValueError('launcher package version differs from its lock')
+    path = pathlib.Path(executable)
+    if not os.access(path, os.X_OK):
+        raise ValueError('launcher executable is missing')
+    files.append(path)
+
 files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf', 'pipewire-pulse.conf']]
 files += [pathlib.Path(path) for path in [
     '/usr/share/wireplumber/wireplumber.conf',
@@ -47,7 +66,7 @@ for path in files:
 for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if any(arg in sys.argv for arg in ('--worker', '--nvidia')) else []) + hardware_libraries:
     linked = subprocess.check_output(['ldd', '-r', str(path)], text=True, stderr=subprocess.STDOUT)
     if 'not found' in linked or 'undefined symbol:' in linked:
-        raise ValueError('unresolved ELF dependency: ' + str(path))
+        raise ValueError('unresolved ELF dependency: ' + str(path) + '\n' + linked)
 for element in ['waylanddisplaysrc', 'unixfdsink', 'unixfdsrc', 'fakesink', 'videoconvert',
                 'audiotestsrc', 'audioconvert', 'audioresample', 'pulsesink', 'pulsesrc',
                 'openh264enc', 'openh264dec', 'h264parse', 'opusenc', 'opusdec', 'appsink',
@@ -60,4 +79,4 @@ if hardware_libraries:
 help_text = subprocess.check_output(['/usr/bin/gamescope', '--help'], stderr=subprocess.STDOUT, text=True)
 if '--keep-alive' not in help_text or '--expose-wayland' not in help_text:
     raise ValueError('Gamescope lacks the provider lifecycle interface')
-print('All fixed provider dependencies and ELF links passed')
+print('All fixed provider dependencies, launcher package files and ELF links passed')

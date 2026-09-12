@@ -1,7 +1,9 @@
 # Locked runtime images
 
-The four `linux/amd64` profiles retain their existing Games on Whales launcher
-roots. A source-root digest is never a produced-worker digest. Schema 2 in
+The four `linux/amd64` profiles are Polaris builds from one pinned official
+Ubuntu 26.04 LTS base. Steam and Lutris come from the signed Ubuntu snapshot;
+Heroic comes from its publisher release with a pinned asset checksum. No launcher
+image or startup script is inherited from another streaming project. A source-root digest is never a produced-worker digest. Schema 2 in
 `images.lock.json` binds each source root to its package lock and names the
 location of its produced artifact manifest. Production catalog promotion and
 registry publication require separate review and are absent from this job.
@@ -54,10 +56,16 @@ artifact; no source root or cached local tag establishes its identity.
 
 Package locks include exact versions, architecture, HTTPS URLs, SHA-256 values,
 and full added runtime/build dependency closures resolved inside each immutable
-source root. Resolution uses Ubuntu's signed 2026-01-20 snapshot. Historical
+source root. Resolution uses Ubuntu's signed 2026-09-11 snapshot. Historical
 snapshot expiry is disabled only during this explicit resolution step; final
 builds neither resolve packages nor contact repositories. Every `.deb` is
-verified before installation, and `dpkg --audit` must be empty afterward.
+verified before installation, and `dpkg --audit` must be empty afterward. The
+private build context generates coreutils checksum manifests from committed
+JSON locks, allowing verification before Python is installed. The resolver
+requires a public CA bundle mounted read-only at `/resolver-ca.crt`; TLS and
+Ubuntu archive-signature checks remain enabled. An index download failure
+terminates resolution. The installer uses only verified local files with
+`--no-download --no-remove --no-install-recommends`.
 
 `locks/rust.json` pins the compiler archive. `locks/plugin.json` pins the
 Wayland plugin revision, Cargo.lock, Rust version, and canonical vendored archive.
@@ -74,14 +82,17 @@ The installed system plugin directory also supplies `unixfdsink`, `unixfdsrc`,
 H.264/Opus encoders and decoders, Pulse capture, appsink, and the GL import,
 conversion, and download elements. Their presence does not establish that a
 particular GPU's DMA-BUF format can be imported or that game frames encode.
-The GL plugin and its dependencies use the same signed snapshot and each root's
-GStreamer ABI; Steam already includes that package in its pinned source root.
+The GL plugin and its dependencies use the same signed snapshot and GStreamer ABI
+in every profile. Launcher profiles explicitly include i386 Mesa/Vulkan support.
 Fixed provider executables, plugin files, and
 PipeWire configurations must be trusted regular files; dynamic library checks
-must resolve. The custom Gamescope executable is `/usr/bin/gamescope`; the
-source root's packaged `/usr/games/gamescope` remains recorded in the package
-manifest but is not selected by the provider. The custom source lock and SBOM
-identify the executable that the provider uses.
+must resolve. The custom Gamescope executable is `/usr/bin/gamescope`. Its source lock,
+license and SBOM identify the executable selected by the provider. A recorded source patch
+ignores libinput switch types that the pinned wlroots ABI cannot represent;
+compiler warnings remain errors and patch application uses no fuzz. The image
+checks each launcher package version and executable separately from provider
+readiness. The default account is locked, named `polaris`, and has no inherited
+supplementary groups; the controller supplies the admitted UID/GID and groups.
 
 The NVIDIA variant adds `locks/nvcodec.json`, the upstream GStreamer 1.26.0
 archive and its published SHA-256 checksum. The build installs only the nvcodec
@@ -160,13 +171,13 @@ aliases, reject symlinks, and fail closed at their descriptor limit. Private
 runtime directories remain part of the trust boundary: inode retention does not
 make a pathname check followed by unlink atomic against a concurrent writer.
 
-None of these receipts proves successful game streaming. Production `run` still
-injects no lifecycle adapters, so no worker announces a media contract. The
-controller now carries an announced contract's frames to the client that
-negotiated it, which leaves worker-local encoding, launcher process management,
-seat-aware status, and real concurrent game streams as the next milestone. Runtime
-startup must also establish the private X11 directory ownership expected by the
-provider before production wiring; the isolated tests provide their own fixture.
+Worker-local H.264/Opus encoding and authenticated continuous media routing are
+implemented behind explicit `--media=enabled` selection. Production profile and
+client activation remain default-off. The physical live-media harness exercises
+two workers, decoded frames/audio, input isolation, requested IDRs and survivor
+teardown. It must be repeated for a changed image before carrying forward any
+physical receipt. Actual client playback, AMD execution and launcher process
+integration are separate acceptance requirements. See [runtime ownership](OWNERSHIP.md).
 
 ### Isolated physical game probe
 

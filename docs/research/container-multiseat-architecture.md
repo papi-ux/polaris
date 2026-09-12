@@ -854,18 +854,14 @@ required.
 Steam Input also needs a separately mediated creation path; granting its
 container raw uinput would reintroduce the authority this contract removes.
 
-The upstream Wolf data plane informed, but does not dictate, this contract.
-Wolf uses `gst-wayland-display` as an outer headless
-compositor that exposes a framebuffer, nests Gamescope as a Wayland client for
-its Xwayland boundary, creates virtual audio sinks through a standalone audio
-service, uses inputtino plus fake udev for virtual-device lifecycle, and sends
-the captured frames through GStreamer. Gamescope compatibility therefore does
-not imply that Gamescope itself should own the capture boundary. Polaris now
-uses that upstream compositor for the outer display and GStreamer's Unix-FD
-transport for the handoff, preserving DMA-BUF-capable frames between separate
-provider processes. The later encoder remains a distinct policy boundary. A
-process that merely opens expected sockets and reports ready still does not
-satisfy the contract.
+Polaris owns admission, authenticated IPC, per-seat lifecycle and media routing.
+The display provider currently uses the separately locked `gst-wayland-display`
+plugin as its outer compositor and GStreamer's Unix-FD transport for raw frames.
+Gamescope runs inside that display as a Wayland client. Encoding remains a
+separate provider with an explicitly admitted GPU and an authenticated output
+contract. A process that merely opens sockets and reports ready does not satisfy
+that contract. See the [runtime ownership notes](../../containers/multiseat/OWNERSHIP.md)
+for retained dependencies and the requirements for replacing them.
 
 The broker's default graceful-stop deadline is now 45 seconds. It covers the
 worker's 35-second worst-case serial reverse teardown plus the controller's
@@ -1153,22 +1149,10 @@ acceptance boundary.
 
 ## Upstream references
 
-- Wolf architecture:
-  https://games-on-whales.github.io/wolf/stable/dev/how-it-works.html
-- Wolf custom Wayland compositor and framebuffer boundary:
-  https://games-on-whales.github.io/wolf/stable/dev/wayland.html
-- Wolf GStreamer pipeline:
-  https://games-on-whales.github.io/wolf/stable/dev/gstreamer.html
 - Validated `gst-wayland-display` revision:
   https://github.com/games-on-whales/gst-wayland-display/tree/081feb5ab8057937b78104668bb1f507ce42e18d
 - GStreamer Unix-FD frame transport:
   https://gstreamer.freedesktop.org/documentation/unixfd/index.html
-- Wolf fake-udev input isolation:
-  https://games-on-whales.github.io/wolf/stable/dev/fake-udev.html
-- Wolf configuration and per-profile storage:
-  https://games-on-whales.github.io/wolf/stable/user/configuration.html
-- Games on Whales application images:
-  https://github.com/games-on-whales/gow
 - Headless Sunshine/Steam Docker proof of host plumbing:
   https://github.com/numsu/headless-sunshine-steam-docker
 - Podman rootless container and device model:

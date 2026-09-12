@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 import pathlib
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -18,6 +20,10 @@ spec.loader.exec_module(inputs)
 spec = importlib.util.spec_from_file_location('build_image', pathlib.Path(__file__).with_name('build-image.py'))
 build = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(build)
+
+spec = importlib.util.spec_from_file_location('package_lock', pathlib.Path(__file__).with_name('write-package-lock.py'))
+package_locks = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(package_locks)
 
 
 class ArtifactIntegrity(unittest.TestCase):
@@ -93,6 +99,8 @@ class ArtifactIntegrity(unittest.TestCase):
             source.write_text('edited during build')
             (here / 'locks/plugin.json').write_text('{}')
             with build.materialized_context(revision, 'gamescope', False) as context:
+                self.assertEqual((context / 'build/runtime-inputs/gamescope/runtime.sha256').read_text(),
+                                 checksum + '  packages/pkg.deb\n')
                 self.assertFalse((context / 'multiseat_worker/extra.sync-conflict-local.go').exists())
                 self.assertEqual((context / 'multiseat_worker/main.go').read_text(), original)
                 self.assertEqual(json.loads((context / 'containers/multiseat/locks/plugin.json').read_text())['sha256'], checksum)
@@ -109,6 +117,58 @@ class ArtifactIntegrity(unittest.TestCase):
             with build.materialized_context(revision, 'gamescope', False) as context:
                 self.assertFalse((context / 'build/runtime-inputs/nvcodec.tar.xz').exists())
 
+
+    def test_package_lock_records_exact_resolved_closure(self):
+        for mutation in ['valid', 'missing', 'leftover', 'duplicate', 'duplicate-uri']:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                (root / 'runtime').mkdir()
+                checksum = hashlib.sha256(b'package').hexdigest()
+                uri = "'https://example.invalid/pkg.deb' pkg.deb 7 SHA256:" + checksum + '\n'
+                manifest = 'pkg.deb\npkg\t1.0\tamd64\n' + checksum + '  pkg.deb\n'
+                (root / 'runtime/pkg.deb').write_bytes(b'package')
+                if mutation == 'missing':
+                    manifest = ''
+                elif mutation == 'leftover':
+                    manifest += manifest.replace('pkg.deb', 'leftover.deb')
+                    (root / 'runtime/leftover.deb').write_bytes(b'package')
+                elif mutation == 'duplicate':
+                    manifest *= 2
+                elif mutation == 'duplicate-uri':
+                    uri *= 2
+                (root / 'runtime.uris').write_text(uri)
+                (root / 'runtime.manifest').write_text(manifest)
+                if mutation == 'valid':
+                    self.assertEqual([p['filename'] for p in package_locks.package_lock(root, 'runtime')], ['pkg.deb'])
+                else:
+                    with self.assertRaises(ValueError):
+                        package_locks.package_lock(root, 'runtime')
+
+    @unittest.skipUnless(shutil.which('sha256sum'), 'bootstrap requires GNU coreutils')
+    def test_minimal_root_verifies_inputs_before_installation(self):
+        script = pathlib.Path(__file__).with_name('verify-offline.sh')
+        for mutation in ['valid', 'modified', 'extra', 'missing', 'symlink', 'missing-source']:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                (root / 'packages').mkdir()
+                package = root / 'packages/pkg.deb'
+                package.write_bytes(b'locked')
+                (root / 'plugin.tar').write_bytes(b'locked')
+                checksum = hashlib.sha256(b'locked').hexdigest()
+                (root / 'checksums.sha256').write_text(checksum + '  packages/pkg.deb\n' + checksum + '  plugin.tar\n')
+                if mutation == 'modified':
+                    package.write_bytes(b'changed')
+                elif mutation == 'extra':
+                    (root / 'packages/extra.deb').write_bytes(b'locked')
+                elif mutation == 'missing':
+                    package.unlink()
+                elif mutation == 'symlink':
+                    package.unlink()
+                    package.symlink_to(root / 'plugin.tar')
+                elif mutation == 'missing-source':
+                    (root / 'plugin.tar').unlink()
+                result = subprocess.run(['sh', str(script), str(root)], capture_output=True)
+                self.assertEqual(result.returncode == 0, mutation == 'valid', result.stderr)
 
     def test_offline_packages_reject_substitution(self):
         for mutation in ['valid', 'modified', 'missing', 'extra', 'symlink', 'traversal', 'duplicate']:

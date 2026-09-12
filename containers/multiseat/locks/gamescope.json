@@ -29,5 +29,8 @@
   "wraps": {
     "glm": "0af55ccecd98d4e5a8d1fad7de25ba429d60e863",
     "stb": "5736b15f7ea0ffb08dd38af21067c314d6a3aae9"
-  }
+  },
+  "patches": [
+    "patches/gamescope-ignore-unsupported-switches.patch"
+  ]
 }

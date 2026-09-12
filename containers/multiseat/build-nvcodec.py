@@ -24,8 +24,8 @@ subprocess.run(['meson', 'compile', '-C', str(build), '-j', '4'], check=True)
 subprocess.run(['meson', 'install', '-C', str(build), '--no-rebuild', '--destdir=/nvcodec-install'], check=True)
 installed = pathlib.Path('/nvcodec-install/usr/lib/x86_64-linux-gnu')
 # Preserve the runtime root's GStreamer ABI libraries and plugins. The source
-# release matches the locked 1.26.0 package roots; check-runtime resolves every
-# symbol against those installed dependencies in the final NVIDIA image.
+# release is 1.26.0; check-runtime resolves every symbol against the pinned
+# distribution ABI in the final NVIDIA image. A physical receipt is still required.
 root = pathlib.Path('/nvcodec-root')
 lib = root / 'usr/lib/x86_64-linux-gnu'
 manifest = []

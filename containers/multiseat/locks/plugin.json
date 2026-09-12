@@ -6,5 +6,8 @@
   "sha256": "96da8c6b366147351f86547ddb40b559cf70402535c9797ca17024f6af5b8ffc",
   "archive_epoch": 1754524800,
   "rust_version": "1.89.0",
-  "vendor_mode": "cargo vendor --locked --versioned-dirs vendor"
+  "vendor_mode": "cargo vendor --locked --versioned-dirs vendor",
+  "patches": [
+    "patches/display-polaris-model.patch"
+  ]
 }

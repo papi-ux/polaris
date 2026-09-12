@@ -49,17 +49,18 @@ func TestImageInputsAreDigestPinnedAndComplete(t *testing.T) {
 	}
 	digestReference := regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[a-z0-9._-]+)?@sha256:[0-9a-f]{64}$`)
 	all := append([]lockedImage{lock.Builder}, lock.RuntimeProfiles...)
-	seenReferences := map[string]bool{}
 	seenIDs := map[string]bool{}
 	for _, image := range all {
 		if image.ID == "" || seenIDs[image.ID] || image.Source == "" ||
-			!digestReference.MatchString(image.Reference) || seenReferences[image.Reference] {
-			t.Fatalf("invalid or duplicate locked image: %+v", image)
+			!digestReference.MatchString(image.Reference) {
+			t.Fatalf("invalid locked image or duplicate profile ID: %+v", image)
 		}
 		seenIDs[image.ID] = true
-		seenReferences[image.Reference] = true
 	}
 	for _, profile := range lock.RuntimeProfiles {
+		if !strings.HasPrefix(profile.Reference, "docker.io/library/ubuntu@sha256:") {
+			t.Fatalf("runtime profile must use the reviewed distribution root: %s", profile.ID)
+		}
 		if profile.Role != "source_root" || profile.DependencyLock != "locks/"+profile.ID+".packages.json" ||
 			profile.ProducedWorkerManifest != profile.ID+"/<variant>/artifact.json" {
 			t.Fatalf("source inputs and produced worker artifact are not distinguished: %+v", profile)
@@ -100,7 +101,7 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 	lockContent := string(repositoryFile(t, "containers", "multiseat", "images.lock.json"))
 	for _, required := range []string{
 		"docker.io/library/golang@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514",
-		"ghcr.io/games-on-whales/base-app@sha256:1d7b61da242e767bc5c80c5fe897392b6a9e6854345d3dea6d2f799e7ea98a14",
+		"docker.io/library/ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d",
 		"GOPROXY=off",
 		"CGO_ENABLED=0",
 		"go test -trimpath ./...",

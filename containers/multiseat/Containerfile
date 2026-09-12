@@ -1,7 +1,7 @@
 # Both defaults are immutable OCI index digests mirrored in images.lock.json.
 # The runtime can be replaced only with another digest from that lock file.
 ARG GO_BUILDER_IMAGE=docker.io/library/golang@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514
-ARG RUNTIME_IMAGE=ghcr.io/games-on-whales/base-app@sha256:1d7b61da242e767bc5c80c5fe897392b6a9e6854345d3dea6d2f799e7ea98a14
+ARG RUNTIME_IMAGE=docker.io/library/ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d
 
 # Each profile compiles its Wayland plugin against its own locked source root.
 # All inputs below have already been fetched and are checked against repo locks.
@@ -14,7 +14,9 @@ COPY containers/multiseat/locks/plugin.json /locks/plugin.json
 COPY containers/multiseat/locks/gamescope.json /locks/gamescope.json
 COPY containers/multiseat/verify-inputs.py /verify-inputs.py
 COPY containers/multiseat/install-packages.sh /install-packages.sh
+COPY containers/multiseat/verify-offline.sh /verify-offline.sh
 COPY build/runtime-inputs/${RUNTIME_PROFILE}/build /inputs/packages
+COPY build/runtime-inputs/${RUNTIME_PROFILE}/build.sha256 /inputs/checksums.sha256
 COPY build/runtime-inputs/toolchains/rust-1.89.0-x86_64-unknown-linux-gnu.tar.xz /inputs/rust.tar.xz
 COPY build/runtime-inputs/plugin.tar /inputs/plugin.tar
 COPY build/runtime-inputs/gamescope.tar /inputs/gamescope.tar
@@ -27,9 +29,12 @@ ENV PATH=/opt/rust/bin:$PATH \
     CARGO_NET_OFFLINE=true \
     SOURCE_DATE_EPOCH=1754524800
 WORKDIR /src
-RUN cargo build --frozen --release -p gst-plugin-wayland-display && \
+COPY containers/multiseat/patches /patches
+RUN patch -d /src -p1 --batch --forward --fuzz=0 < /patches/display-polaris-model.patch && \
+    cargo build --frozen --release -p gst-plugin-wayland-display && \
     test -f target/release/libgstwaylanddisplaysrc.so
 RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
+    patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-ignore-unsupported-switches.patch && \
     meson setup /gamescope-src/build /gamescope-src --prefix=/usr --buildtype=release --wrap-mode=nodownload \
       -Ddefault_library=static -Denable_openvr_support=false -Denable_gamescope_wsi_layer=false \
       -Dpipewire=enabled -Ddrm_backend=enabled -Dsdl2_backend=disabled -Davif_screenshots=disabled \
@@ -171,7 +176,9 @@ USER 0
 COPY containers/multiseat/locks/${RUNTIME_PROFILE}.packages.json /locks/packages.json
 COPY containers/multiseat/verify-inputs.py /verify-inputs.py
 COPY containers/multiseat/install-packages.sh /install-packages.sh
+COPY containers/multiseat/verify-offline.sh /verify-offline.sh
 COPY build/runtime-inputs/${RUNTIME_PROFILE}/runtime /inputs/packages
+COPY build/runtime-inputs/${RUNTIME_PROFILE}/runtime.sha256 /inputs/checksums.sha256
 RUN sh /install-packages.sh runtime && \
     mkdir -p /usr/share/polaris/build && \
     cp /locks/packages.json /usr/share/polaris/build/packages.lock.json && \
@@ -179,12 +186,17 @@ RUN sh /install-packages.sh runtime && \
     cp -L /usr/bin/Xwayland /tmp/polaris-Xwayland && \
     rm /usr/bin/Xwayland && \
     install -m 0755 /tmp/polaris-Xwayland /usr/bin/Xwayland && \
-    rm -rf /inputs /locks /verify-inputs.py /install-packages.sh /tmp/polaris-Xwayland
+    rm -rf /inputs /locks /verify-inputs.py /verify-offline.sh /install-packages.sh /tmp/polaris-Xwayland
+COPY containers/multiseat/initialize-root.py /initialize-root.py
+RUN python3 /initialize-root.py && rm /initialize-root.py
 COPY --from=runtime-root-build --chmod=0644 /src/target/release/libgstwaylanddisplaysrc.so /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
 COPY --from=runtime-root-build --chmod=0755 /gamescope-root/usr/bin/gamescope /usr/bin/gamescope
 COPY --from=runtime-root-build /gamescope-root/usr/share/gamescope /usr/share/gamescope
 COPY containers/multiseat/locks/gamescope.json /usr/share/polaris/build/gamescope.lock.json
+COPY containers/multiseat/patches /usr/share/polaris/build/patches
 COPY containers/multiseat/locks/plugin.json /usr/share/polaris/build/plugin.lock.json
+COPY --from=runtime-root-build /src/LICENSE /usr/share/licenses/polaris-seat-display/LICENSE
+COPY --from=runtime-root-build /gamescope-src/LICENSE /usr/share/licenses/polaris-gamescope/LICENSE
 COPY --chmod=0644 containers/multiseat/providers/polaris-audio-policy.conf /usr/share/wireplumber/wireplumber.conf.d/99-polaris-seat.conf
 COPY --chmod=0644 containers/multiseat/providers/polaris-audio-target.lua /usr/share/wireplumber/scripts/polaris-allocated-target.lua
 COPY containers/multiseat/check-runtime.py /check-runtime.py
@@ -273,5 +285,5 @@ ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \
 ENTRYPOINT ["/usr/bin/provider-tests"]
 CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
 
-# Default artifacts preserve the existing launcher roots and automatic drivers.
+# Default artifacts use the Polaris package closure and distribution drivers.
 FROM worker-base AS worker
