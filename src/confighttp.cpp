@@ -132,6 +132,10 @@ namespace confighttp {
       context.set_options(boost::asio::ssl::context::no_tlsv1_1);
       context.use_certificate_chain_file(certification_file);
       context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
+      // Requesting client certificates requires a session id context for TLS
+      // resumption, including browser connections without a client certificate.
+      static constexpr unsigned char session_id_context[] = "polaris-config";
+      SSL_CTX_set_session_id_context(context.native_handle(), session_id_context, sizeof(session_id_context) - 1);
     }
 
     std::function<void(std::shared_ptr<Request>, SSL*)> verify;
