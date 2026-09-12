@@ -1,5 +1,11 @@
 # Container multiseat architecture spike
 
+Current implementation notes: `container-multiseat-docker.md` covers the default
+Docker engine, and `container-multiseat-encoder-provider.md` covers continuous
+media and its explicit worker gate. Those notes supersede the historical
+Podman-only and missing-encoder status below. Host activation remains off.
+
+
 Status: architecture, a Docker backend with retained Podman checks, locked image inputs,
 immutable per-seat runtime/data-plane bindings, typed workload plans, a
 supervisor/IPC routing proof, four isolated runtime providers, and a

@@ -23,8 +23,8 @@ game_status = pathlib.Path('/usr/libexec/polaris-seat/game-status')
 capture_input = pathlib.Path('/usr/libexec/polaris-seat/capture-input')
 workload = pathlib.Path('/usr/libexec/polaris-seat/workloads/input-pong-v1')
 if sys.argv[1:] == ['--worker']:
-    files += [workload, capture_input, game_status, encoded_game, encoded_audio] + [pathlib.Path('/usr/libexec/polaris-seat') / name for name in
-                          ['session-bus', 'audio', 'display-capture', 'nested-compositor', 'virtual-input', 'launcher']]
+    files += [workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] + [pathlib.Path('/usr/libexec/polaris-seat') / name for name in
+                          ['session-bus', 'audio', 'display-capture', 'nested-compositor', 'virtual-input', 'launcher', 'encoder', 'encode-media']]
 elif sys.argv[1:]:
     raise ValueError('unknown dependency check scope')
 for path in files:
@@ -33,7 +33,7 @@ for path in files:
         raise ValueError('untrusted provider dependency: ' + str(path))
     if (path.parent == pathlib.Path('/usr/bin') or path.is_relative_to('/usr/libexec/polaris-seat')) and not os.access(path, os.X_OK):
         raise ValueError('non-executable provider dependency: ' + str(path))
-for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio] if '--worker' in sys.argv else []):
+for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if '--worker' in sys.argv else []):
     linked = subprocess.check_output(['ldd', str(path)], text=True, stderr=subprocess.STDOUT)
     if 'not found' in linked:
         raise ValueError('unresolved ELF dependency: ' + str(path))

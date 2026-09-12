@@ -50,6 +50,7 @@ type seatDataPlane struct {
 
 	mutex        sync.Mutex
 	announced    bool
+	announcing   bool
 	acknowledged chan struct{}
 	released     bool
 }
@@ -77,10 +78,19 @@ func (plane *seatDataPlane) RouteMediaControl(ctx context.Context, control route
 	if control.Identity != plane.identity {
 		return errors.New("worker media control arrived for another seat")
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if nilRuntimeInterface(plane.source) {
+		return errors.New("seat encoder source is missing")
+	}
 	switch control.Message {
 	case messageMediaConfigAck:
 		plane.mutex.Lock()
 		defer plane.mutex.Unlock()
+		if !plane.announced {
+			return errors.New("worker contract acknowledged before announcement")
+		}
 		if plane.released {
 			// One contract, one acknowledgement. A second one would mean the
 			// controller believes it negotiated something else.
@@ -89,9 +99,19 @@ func (plane *seatDataPlane) RouteMediaControl(ctx context.Context, control route
 		plane.released = true
 		close(plane.acknowledged)
 		return nil
-	case messageRequestIDR:
-		return plane.source.Keyframe(ctx)
-	case messageInvalidateReferenceFrames:
+	case messageRequestIDR, messageInvalidateReferenceFrames:
+		plane.mutex.Lock()
+		released := plane.released
+		plane.mutex.Unlock()
+		if !released {
+			return errors.New("encoder control arrived before contract acknowledgement")
+		}
+		if control.Message == messageRequestIDR {
+			return plane.source.Keyframe(ctx)
+		}
+		if control.Range.First > control.Range.Last {
+			return errors.New("invalid encoder reference range")
+		}
 		return plane.source.Invalidate(ctx, control.Range)
 	default:
 		return errUnexpectedMediaControl
@@ -107,9 +127,18 @@ func (plane *seatDataPlane) NextFeedback(ctx context.Context) (routedOutput, err
 }
 
 func (plane *seatDataPlane) NextMedia(ctx context.Context) (routedOutput, error) {
+	if nilRuntimeInterface(plane.source) {
+		return routedOutput{}, errors.New("seat encoder source is missing")
+	}
 	plane.mutex.Lock()
 	announced := plane.announced
-	plane.announced = true
+	if !announced && plane.announcing {
+		plane.mutex.Unlock()
+		return routedOutput{}, errors.New("encoder contract announcement already in progress")
+	}
+	if !announced {
+		plane.announcing = true
+	}
 	plane.mutex.Unlock()
 
 	if !announced {
@@ -121,6 +150,9 @@ func (plane *seatDataPlane) NextMedia(ctx context.Context) (routedOutput, error)
 		if err != nil {
 			return routedOutput{}, errUnrepresentableContract
 		}
+		plane.mutex.Lock()
+		plane.announced = true
+		plane.mutex.Unlock()
 		return routedOutput{
 			Identity: plane.identity,
 			Message:  messageMediaConfig,

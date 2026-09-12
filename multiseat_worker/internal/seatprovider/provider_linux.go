@@ -41,6 +41,7 @@ const (
 )
 
 type providerOptions struct {
+	encoderPath           string
 	runtimeDirectory      string
 	runtimeOwnerUID       uint32
 	executableOwnerUID    uint32
@@ -73,6 +74,7 @@ type providerOptions struct {
 
 func defaultProviderOptions() providerOptions {
 	return providerOptions{
+		encoderPath:          "/usr/libexec/polaris-seat/encode-media",
 		runtimeDirectory:     defaultRuntimeDirectory,
 		runtimeOwnerUID:      uint32(os.Geteuid()),
 		executableOwnerUID:   0,

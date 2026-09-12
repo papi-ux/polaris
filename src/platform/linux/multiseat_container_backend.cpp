@@ -821,7 +821,7 @@ namespace multiseat::container {
       return {
         {"/run", bounded(options.runtime_tmpfs_bytes, "0700")},
         {"/run/polaris", bounded(options.runtime_tmpfs_bytes, "0700")},
-        {"/tmp", bounded(options.temporary_tmpfs_bytes, "1777")},
+        {"/tmp", bounded(options.temporary_tmpfs_bytes, "0700")},
         {"/var/tmp", bounded(options.temporary_tmpfs_bytes, "1777")},
       };
     }
@@ -892,9 +892,11 @@ namespace multiseat::container {
     const auto image_reference = label_value(labels, label_runtime_image).value();
     if (image_reference.starts_with("sha256:")) exact(record, "Image", image_reference);
     exact(config, "Entrypoint", json::array({options_.worker_entrypoint.native()}));
-    exact(config, "Cmd", json::array({"run",
+    auto expected_command = json::array({"run",
       "--workload-kind=" + label_value(labels, label_workload_kind).value(),
-      "--workload-id=" + label_value(labels, label_workload_target).value()}));
+      "--workload-id=" + label_value(labels, label_workload_target).value()});
+    if (options_.media_enabled) expected_command.push_back("--media=enabled");
+    exact(config, "Cmd", expected_command);
     exact(config, "WorkingDir", std::string(profile_volume_destination));
     exact(host, "Privileged", false);
     exact(host, "ReadonlyRootfs", true);
@@ -1414,6 +1416,11 @@ namespace multiseat::container {
   }
 
   bool backend_t::valid_spec(const worker_launch_spec_t &spec) const {
+    if (options_.media_enabled &&
+        (options_.engine != engine_e::docker || spec.runtime_profile != runtime_profile_e::gamescope ||
+         spec.workload.target_id != "input-pong-v1" || spec.display_mode.hdr)) {
+      return false;
+    }
     if (!spec.identity.seat.valid() ||
         spec.identity.seat.logical_gpu_id.empty() ||
         spec.identity.worker_name != spec.resources.worker_name ||
@@ -1584,6 +1591,7 @@ namespace multiseat::container {
     argv.push_back("run");
     argv.push_back("--workload-kind=" + workload_kind_name(spec.workload.kind));
     argv.push_back("--workload-id=" + spec.workload.target_id);
+    if (options_.media_enabled) argv.push_back("--media=enabled");
     return argv;
   }
 

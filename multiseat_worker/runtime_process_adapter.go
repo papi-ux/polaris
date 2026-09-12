@@ -157,6 +157,11 @@ func seatRuntimeRequest(
 		request.RenderNode = allocation.RenderNode
 		request.EncoderSessions = allocation.EncoderSessions
 		request.MediaPipeline = string(allocation.MediaPipeline)
+		request.AudioSink = allocation.AudioSink
+		request.DisplayWidth = allocation.DisplayWidth
+		request.DisplayHeight = allocation.DisplayHeight
+		request.DisplayRefreshMillihertz = allocation.RefreshMillihz
+		request.DisplayHDR = allocation.DisplayHDR
 	case runtimeStageLauncherProcessTree:
 		request.RuntimeProfile = allocation.RuntimeProfile
 		request.WorkloadKind = seatruntime.WorkloadKind(allocation.Workload.Kind)

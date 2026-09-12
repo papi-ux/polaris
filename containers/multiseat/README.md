@@ -1,5 +1,10 @@
 # Multiseat worker image inputs
 
+Continuous H.264/Opus media is packaged with an explicit worker opt-in. See
+[`container-multiseat-encoder-provider.md`](../../docs/research/container-multiseat-encoder-provider.md)
+for its contract, current Gamescope workload scope and remaining acceptance.
+
+
 Docker is the default build and worker engine. See
 [the Docker backend decision](../../docs/research/container-multiseat-docker.md)
 for the host trust boundary, image import, profile initialization, and acceptance.

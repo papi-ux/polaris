@@ -103,6 +103,11 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
     timeout 40s /out/test-encoded-game-check
 
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+      /providers/encode-media.c -o /out/encode-media \
+      $(pkg-config --cflags --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-gl-egl-1.0 egl gbm) && \
+    python3 /providers/test-encode-media.py /out/encode-media
+
 FROM ${GO_BUILDER_IMAGE} AS worker-build
 WORKDIR /src
 ENV CGO_ENABLED=0 \
@@ -118,10 +123,11 @@ COPY multiseat_worker/cmd ./cmd
 COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile
 COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json
 COPY containers/multiseat/locks /containers/multiseat/locks
-# The image contract tests read these two production sources through the same
+# The image contract tests read the production sources through the same
 # repository-relative path they use for the Containerfile and lock above.
 COPY multiseat_worker/main.go /multiseat_worker/main.go
 COPY multiseat_worker/server.go /multiseat_worker/server.go
+COPY multiseat_worker/runtime_production_linux.go /multiseat_worker/runtime_production_linux.go
 RUN go test -trimpath ./... && \
     go build -trimpath -buildvcs=false \
       -ldflags='-buildid= -s -w' \
@@ -188,6 +194,7 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.description="Isolated Polaris multiseat worker" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
       io.polaris.multiseat.architecture="linux/amd64"
+COPY --from=workload-build --chmod=0555 /out/encode-media /usr/libexec/polaris-seat/encode-media
 COPY --from=workload-build --chmod=0555 /out/encoded-game-check /usr/libexec/polaris-seat/encoded-game-check
 COPY --from=workload-build --chmod=0555 /out/encoded-audio-check /usr/libexec/polaris-seat/encoded-audio-check
 COPY --from=workload-build --chmod=0555 /out/game-status /usr/libexec/polaris-seat/game-status
@@ -228,7 +235,8 @@ CMD ["run"]
 FROM worker-base AS provider-test
 RUN install -d -m 1777 /tmp/.X11-unix
 COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
-ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1
+ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \
+    POLARIS_ENCODER_TEST_HELPER=/usr/libexec/polaris-seat/encode-media
 ENTRYPOINT ["/usr/bin/provider-tests"]
 CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
 
@@ -247,7 +255,8 @@ LABEL io.polaris.multiseat.nvidia.driver="610.57.04"
 FROM worker-nvidia AS provider-nvidia-test
 RUN install -d -m 1777 /tmp/.X11-unix
 COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
-ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1
+ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \
+    POLARIS_ENCODER_TEST_HELPER=/usr/libexec/polaris-seat/encode-media
 ENTRYPOINT ["/usr/bin/provider-tests"]
 CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
 

@@ -151,22 +151,26 @@ func TestContainerfileUsesLockedOfflineBuildInputs(t *testing.T) {
 	}
 }
 
-func TestRuntimeProvidersArePackagedButProcessAdaptersRemainUnwired(t *testing.T) {
+func TestRuntimeProvidersRequireExplicitWorkerMediaOptIn(t *testing.T) {
 	server := string(repositoryFile(t, "multiseat_worker", "server.go"))
 	main := string(repositoryFile(t, "multiseat_worker", "main.go"))
 	containerfile := string(repositoryFile(t, "containers", "multiseat", "Containerfile"))
 	if !strings.Contains(server, "expectedUID,\n\t\tnil,\n\t\truntimeOptions{}") {
-		t.Fatal("production worker no longer injects an explicit nil runtime adapter set")
+		t.Fatal("default worker no longer injects an explicit nil runtime adapter set")
 	}
-	for _, productionSource := range []string{main, server} {
-		if strings.Contains(productionSource, "newProcessRuntimeAdapters") ||
-			strings.Contains(productionSource, "polaris-seat-runtime") {
-			t.Fatal("process-backed runtime helper was activated by the production worker")
-		}
+	production := string(repositoryFile(t, "multiseat_worker", "runtime_production_linux.go"))
+	if !strings.Contains(main, "parseWorkerRunMode") || !strings.Contains(main, "if mediaEnabled {") ||
+		!strings.Contains(main, "runProductionSeatWorker") ||
+		!strings.Contains(production, `arguments[len(arguments)-1] == "--media=enabled"`) ||
+		!strings.Contains(production, "newProcessRuntimeAdapters") ||
+		!strings.Contains(production, "newEncoderMediaSource") ||
+		strings.Contains(server, "newProcessRuntimeAdapters") {
+		t.Fatal("runtime providers lost their explicit worker media gate")
 	}
+
 	if !strings.Contains(containerfile,
 		"COPY --from=worker-build --chmod=0555 /out/polaris-seat-runtime /usr/bin/polaris-seat-runtime") {
-		t.Fatal("inert runtime helper is absent from the worker image")
+		t.Fatal("runtime helper is absent from the worker image")
 	}
 	for _, provider := range []string{
 		"/usr/libexec/polaris-seat/session-bus",
@@ -174,9 +178,10 @@ func TestRuntimeProvidersArePackagedButProcessAdaptersRemainUnwired(t *testing.T
 		"/usr/libexec/polaris-seat/display-capture",
 		"/usr/libexec/polaris-seat/nested-compositor",
 		"/usr/libexec/polaris-seat/encoder",
+		"/usr/libexec/polaris-seat/encode-media",
 	} {
 		if !strings.Contains(containerfile, provider) {
-			t.Fatalf("implemented but inert provider %q is absent from the worker image", provider)
+			t.Fatalf("runtime provider %q is absent from the worker image", provider)
 		}
 	}
 	if strings.Contains(containerfile, "multiseat-runtime-providers.json") {

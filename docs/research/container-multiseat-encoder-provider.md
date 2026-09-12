@@ -1,80 +1,91 @@
-# The encoder provider: what is already decided, and the one thing that is not
+# Continuous seat media
 
-Companion to `container-multiseat-architecture.md` and
-`container-multiseat-user-model.md`. Those settle how a seat is allocated and
-what it is to the person using it. This one settles the last provider, because
-it is the piece the architecture calls "the one thing standing between a worker
-and a stream" and it is the only stage with no implementation.
+The worker now has a continuous encoder and a concrete source for its existing
+`seatDataPlane`. The earlier fake-only diagnosis was incorrect: the missing
+piece was the connection to a real encoder. This document describes the local
+implementation, not acceptance of a client game stream.
 
-## The seam is already cut, on both sides
+## Process and media ownership
 
-Almost nothing here is an open question. Every surface around the encoder exists
-and agrees:
+Each seat owns one Go encoder supervisor and one native GStreamer helper. The
+helper consumes that seat's descriptor-pinned capture socket and private Pulse
+sink monitor. Its request includes the allocated render node, encoder session
+reservation, audio sink, width, height and refresh rate. It never discovers a
+replacement GPU or attaches to the desktop audio server.
 
-- **The controller already asks for it.** The worker catalog it writes contains
-  `provider("encoder", executable("encoder"))`, so a seat is already told to run
-  `/usr/libexec/polaris-seat/encoder`.
-- **The protocol already speaks it.** `StageEncoder` carries
-  `--logical-gpu-id`, `--render-node`, `--sessions` and `--media-pipeline`, plus
-  `POLARIS_RENDER_NODE` in its environment, and the argv parser round-trips all
-  four.
-- **The catalog already validates it.** An encoder entry is accepted with an
-  empty selector and target, like every non-launcher stage.
-- **Its input already exists.** Display capture runs
-  `waylanddisplaysrc render-node=… ! <caps> ! unixfdsink socket-path=…`, so the
-  encoder reads `unixfdsrc` from that socket. The capture provider's own probe
-  proves the consumer side works.
-- **Its output is already typed.** `routedOutput{Identity, messageVideo, Payload}`
-  delivered through `workerDataPlane.NextMedia`, under the rule written into
-  `data_plane.go`: raw captured frames never leave the worker-local pipeline,
-  only encoded packets cross.
+The current codec path is software H.264 constrained baseline at an 8 Mbps
+ceiling, with stereo 48 kHz Opus in five millisecond packets. It supports even
+SDR dimensions from 16 through 3840 pixels and refresh rates from 1 through
+240 Hz. These are admitted limits, not achieved performance claims. Hardware
+encoding, HDR, configurable bitrate and additional codecs remain unfinished.
 
-What is missing is four files' worth of work, not a design.
+The GPU capture path shares the retained GBM/EGL context and explicit texture
+conversion used by the encoded capture probe. Imported GPU memory must pass
+texture-target checks before download. All pipelines retire before releasing
+the GPU descriptor or EGL objects.
 
-## What is actually missing
+## Readiness and transport
 
-1. **`RunEncoder`** in `internal/seatprovider`, following the shape every other
-   provider uses: parse the invocation, open the readiness writer, normalise
-   options, take a signal context, run.
-2. **`cmd/polaris-seat-encoder`**, the eight-line entrypoint the other five
-   stages each have.
-3. **A production `workerDataPlane`.** This is the real gap. The interface has
-   one implementation and it is a test fake, and `newWorkerServer` passes `nil`.
-   The server already pumps `NextMedia`; nothing fills it.
-4. **The image.** The Containerfile builds seven provider binaries and the
-   encoder is not among them, which is precisely why the validation run found no
-   encoder binary in a locked root.
+The helper publishes a contract only after observing a real H.264 IDR/SPS and
+a valid encoded Opus packet. The supervisor verifies that contract against the
+allocation before signaling readiness. It creates a mode-0600 encoded Unix
+socket inside the seat's mode-0700 runtime directory. One consumer is accepted;
+there is no reconnect or second reader for the same generation.
 
-## The one decision worth making deliberately
+The private connection uses a 12-byte `PME1` header with a packet kind and a
+bounded big-endian payload length. Contract and frame bodies use the existing
+worker media format. Video is bounded to 16 MiB including its prefix; audio is
+bounded to 1400 encoded bytes. Raw video never crosses this connection.
 
-**Where the encoder process ends and the data plane begins.**
+The worker pins and authenticates the endpoint, reads its contract, and
+announces it on the authenticated controller media channel. It sends the local
+Start command only after the controller acknowledges that contract. Each
+stream has monotonic frame indices and the first video frame is an IDR. Capture
+timestamps are zero because capture clock provenance is not established;
+encode timestamps use the shared kernel's monotonic clock.
 
-Option A, a provider process per seat, consistent with the other five. The
-encoder owns its GStreamer pipeline, signals readiness, and publishes encoded
-packets on a seat-private socket. The worker's data plane reads that socket and
-answers `NextMedia`.
+IDR requests use an independent control writer while frame reads are blocked.
+Reference invalidation requests conservatively force a complete IDR. Malformed
+packets, changed contracts, invalid sequence metadata, timeouts and cancellation
+retire the connection. Provider teardown stops the producer before closing its
+pipes and removes only the endpoint whose inode it still owns.
 
-Option B, encode inside the worker process. Fewer moving parts and no third
-socket, but it breaks the pattern every other stage follows and it weakens the
-rule stated in `data_plane.go`, that no implementation may share an encoder
-instance across seats. A process per seat makes that structural rather than
-something a reviewer has to keep checking.
+## Explicit worker activation
 
-**Recommendation: A.** The isolation rule is the deciding argument; consistency
-with the existing five is the supporting one. The cost is one more socket whose
-identity has to be verified the way the capture socket already is.
+The Docker backend has an internal `media_enabled` option, defaulting to false.
+Only that option appends the final literal `--media=enabled` worker argument.
+Container inventory verifies the executed argument as part of recovery.
 
-## What this does not deliver
+The enabled path authenticates the seat's private authority before starting
+providers and installs the real process adapters and encoder source. It
+currently admits the Gamescope `input-pong-v1` acceptance workload in SDR.
+Input and rumble continue through the host's existing generation-bound input
+authority; the media plane does not inject input a second time.
 
-A stream a person can watch. After the encoder provider there is still no
-activation key, and the user model is explicit that enabling multiseat with no
-profiles configured must be a no-op rather than a behaviour change. The order is
-encoder, then activation, then a seat is reachable.
+This is an explicit worker integration path. The host production controller
+still has no activation caller, profile configuration or client launch routing.
+Single-device streaming keeps its current behavior. Steam, Heroic and Lutris
+launchers still need concrete catalog-backed implementations and acceptance.
 
-## How it gets proven
+## Verification and remaining acceptance
 
-The physical harness reaches the encoded lane now, which it could not do before
-the DRM primary node was bound. `POLARIS_PHYSICAL_ENCODED_GAME=1` already
-observes encoded frames per seat, with `source: worker-capture`, and already
-checks that the surviving seat keeps encoding after its peer stops. That is the
-gate this work has to pass, and it exists.
+`test-encode-media.py` checks actual software H.264 decoding, bounded Opus
+packets, the acknowledgement gate, requested IDRs, malformed controls and
+normal termination. The real Go provider test streams two synthetic seats and
+proves that stopping one removes its endpoint while the other continues. The
+image builder requires this test to pass without skipping in the produced
+runtime filesystem. Unit and race checks cover contract validation, endpoint
+ownership, cancellation and controller acknowledgement order.
+
+These checks do not validate GPU game capture or client playback. The existing
+physical encoded-game probe still skips the continuous encoder and runs its
+own bounded native codec observation. Its `RecordProperty` receipts require
+`--gtest_output=xml`; they cannot substitute for exercising this data plane.
+
+The next acceptance lane must exercise two exact-image Docker workers through
+the continuous media channel, decode both streams, verify input isolation and
+IDR recovery, stop either seat, and demonstrate uninterrupted output from its
+peer. Hardware encoding must then receive its own AMD and NVIDIA measurements
+before any performance or latency claim. Host activation and profile routing
+follow that evidence, with enabling multiseat and no configured profiles leaving
+ordinary streaming unchanged.

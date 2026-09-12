@@ -23,7 +23,8 @@ The backend explicitly selects a local Unix socket and clears inherited Docker
 context, host, and client configuration. Workers never receive that socket.
 Worker roots are read only, capabilities are dropped, privilege escalation is
 disabled, networking is disabled, and runtime temporary filesystems have bounded
-sizes and explicit ownership. Image tags, privileged workers, broad input-device
+sizes and explicit ownership. The worker owns a mode-0700 `/tmp` so its
+Gamescope provider can safely initialize the private X11 socket directory. Image tags, privileged workers, broad input-device
 mounts, and implicit NVIDIA runtime/CDI injection are refused.
 
 The existing GPU and input authority still admits exact character devices for

@@ -98,7 +98,7 @@ def sbom(packages, profile, revision, context):
                        'properties': [{'name': 'polaris:workload-id', 'value': 'input-pong-v1'},
                                       {'name': 'polaris:source-sha256', 'value': digest(here / 'workloads/input-pong.c')}],
                        'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/papi-ux/polaris/blob/' + revision + '/containers/multiseat/workloads/input-pong.c'}]})
-    for name in ['capture-input.c', 'seat-input.c', 'seat-input.h', 'game-status.c', 'encoded-game-check.c', 'encoded-audio-check.c', 'polaris-audio-policy.conf', 'polaris-audio-target.lua']:
+    for name in ['capture-input.c', 'seat-input.c', 'seat-input.h', 'game-status.c', 'encoded-game-check.c', 'encoded-audio-check.c', 'encode-media.c', 'capture-gpu.h', 'polaris-audio-policy.conf', 'polaris-audio-target.lua']:
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
@@ -190,13 +190,14 @@ def build_artifact(args, revision, epoch, context):
         raise ValueError('provider test image does not extend the produced worker filesystem')
     test_command = engine + ['run', '--rm', '--network=none', '--cap-drop=all',
                     '--security-opt=no-new-privileges', provider_image, '-test.v',
-                    '-test.run=^TestReal(SessionBus|PrivateAudio|AudioReadiness|Display)', '-test.timeout=2m']
+                    '-test.run=^TestReal(SessionBus|PrivateAudio|AudioReadiness|Display|Encoder)', '-test.timeout=2m']
     with (artifact / 'providers.log').open('w') as log:
         run(test_command, stdout=log, stderr=subprocess.STDOUT)
     results = (artifact / 'providers.log').read_text()
     names = re.findall(r'^--- PASS: ([A-Za-z0-9_]+)', results, re.MULTILINE)
     required = {
         'TestRealSessionBusAuthenticatesAndCleansUp',
+        'TestRealEncoderBridgeKeepsTwoSeatsIndependent',
         'TestRealPrivateAudioGraphRoutesExactlyAndCleansUp',
         'TestRealAudioReadinessFailureCleansPartialArtifacts',
         'TestRealPrivateAudioGraphsRemainIndependent',
@@ -210,7 +211,7 @@ def build_artifact(args, revision, epoch, context):
     write_json(artifact / 'providers.json', {'schema': 1, 'result': 'passed', 'tests': names,
                                             'variant': variant, 'worker_config_digest': config_digest,
                                             'provider_config_digest': 'sha256:' + provider_inspected['Id'].removeprefix('sha256:'),
-                                            'scope': 'isolated session bus, audio and software display; no game stream'})
+                                            'scope': 'isolated session bus, audio, software display and continuous software encoder; no game stream'})
     package_manifest = output(engine + ['run', '--rm', '--network=none', '--read-only',
                                '--cap-drop=all', '--security-opt=no-new-privileges',
                                '--entrypoint=/usr/bin/cat', image, '/usr/share/polaris/build/packages.tsv'])

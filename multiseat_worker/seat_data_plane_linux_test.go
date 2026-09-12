@@ -169,6 +169,13 @@ func TestSeatDataPlaneCarriesControllerAsksToItsOwnEncoder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if _, err := plane.NextMedia(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := plane.RouteMediaControl(ctx, routedMediaControl{Identity: testSeatIdentity(), Message: messageMediaConfigAck}); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := plane.RouteMediaControl(ctx, routedMediaControl{
 		Identity: testSeatIdentity(),
 		Message:  messageRequestIDR,
@@ -248,5 +255,18 @@ func TestSeatDataPlaneFeedbackWaitsRatherThanRetiringTheChannel(t *testing.T) {
 	defer cancel()
 	if _, err := plane.NextFeedback(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("feedback returned something other than its own cancellation: %v", err)
+	}
+}
+
+func TestSeatDataPlaneRefusesControlBeforeItsContractAndNilSource(t *testing.T) {
+	plane := newSeatDataPlane(testSeatIdentity(), newFixtureMediaSource(), nil)
+	for _, kind := range []message{messageMediaConfigAck, messageRequestIDR, messageInvalidateReferenceFrames} {
+		if err := plane.RouteMediaControl(t.Context(), routedMediaControl{Identity: testSeatIdentity(), Message: kind}); err == nil {
+			t.Fatal("early media control accepted")
+		}
+	}
+	plane = newSeatDataPlane(testSeatIdentity(), nil, nil)
+	if _, err := plane.NextMedia(t.Context()); err == nil {
+		t.Fatal("missing encoder accepted")
 	}
 }

@@ -157,6 +157,7 @@ namespace multiseat::container {
 
   struct options_t {
     engine_e engine = engine_e::docker;
+    bool media_enabled = false;
     std::filesystem::path executable {"/usr/bin/docker"};
     std::filesystem::path runtime_executable {"/usr/bin/runc"};
     /** Only a local Linux Docker Engine is admitted. No context or remote URI. */

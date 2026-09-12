@@ -16,6 +16,7 @@ func encoderTestRequest() seatruntime.Request {
 		LogicalGPU:               "physical-gpu",
 		RenderNode:               "/dev/dri/renderD128",
 		EncoderSessions:          1,
+		AudioSink:                "encoder-audio",
 		MediaPipeline:            seatruntime.MediaPipelineWorkerLocal,
 		DisplayWidth:             1920,
 		DisplayHeight:            1080,
@@ -46,44 +47,28 @@ func TestEncodedEndpointNeverCollidesWithTheCaptureEndpoint(t *testing.T) {
 	}
 }
 
-// The pipeline has a direction: it reads the capture endpoint and publishes the
-// encoded one. Reversing those would be silent, because both are Unix sockets
-// in the same runtime directory.
-func TestEncoderPipelineReadsCaptureAndPublishesEncoded(t *testing.T) {
-	arguments := encoderArguments(encoderTestRequest(), "/run/capture.sock", "/run/encoded.sock", true)
-	joined := strings.Join(arguments, " ")
-
-	source := strings.Index(joined, "unixfdsrc socket-path=/run/capture.sock")
-	sink := strings.Index(joined, "unixfdsink socket-path=/run/encoded.sock")
-	if source < 0 {
-		t.Fatalf("encoder must read the capture endpoint, got: %s", joined)
-	}
-	if sink < 0 {
-		t.Fatalf("encoder must publish the encoded endpoint, got: %s", joined)
-	}
-	if source > sink {
-		t.Fatalf("encoder reads and writes the wrong way round, got: %s", joined)
-	}
-	if !strings.Contains(joined, "openh264enc") {
-		t.Fatalf("encoder must name its encoder element, got: %s", joined)
-	}
-	if !strings.Contains(joined, "video/x-h264") {
-		t.Fatalf("encoder must constrain its output caps, got: %s", joined)
+func TestEncoderUsesOnlyAllocatedCaptureAudioAndDisplay(t *testing.T) {
+	request := encoderTestRequest()
+	arguments := encoderArguments(request, "/run/capture.sock", true)
+	expected := []string{"/run/capture.sock", "/dev/dri/renderD128", "encoder-audio", "1920", "1080", "60000", "true"}
+	if strings.Join(arguments, "\x00") != strings.Join(expected, "\x00") {
+		t.Fatalf("encoder arguments differ from allocation: %v", arguments)
 	}
 }
 
-// The probe reads the encoded endpoint, never the capture one, or readiness
-// would be published on the strength of a raw frame the client can never use.
-func TestEncoderProbeReadsOnlyTheEncodedEndpoint(t *testing.T) {
-	joined := strings.Join(encoderProbeArguments("/run/encoded.sock"), " ")
-	if !strings.Contains(joined, "unixfdsrc socket-path=/run/encoded.sock") {
-		t.Fatalf("probe must read the encoded endpoint, got: %s", joined)
+func TestEncoderRejectsMissingAudioGeometryAndHDR(t *testing.T) {
+	mutations := []func(*seatruntime.Request){
+		func(r *seatruntime.Request) { r.AudioSink = "" },
+		func(r *seatruntime.Request) { r.DisplayWidth = 0 },
+		func(r *seatruntime.Request) { r.DisplayHeight = 1079 },
+		func(r *seatruntime.Request) { r.DisplayHDR = true },
 	}
-	if !strings.Contains(joined, "video/x-h264") {
-		t.Fatalf("probe must require an encoded packet, got: %s", joined)
-	}
-	if strings.Contains(joined, "num-buffers=0") {
-		t.Fatalf("probe must demand at least one packet, got: %s", joined)
+	for _, mutate := range mutations {
+		request := encoderTestRequest()
+		mutate(&request)
+		if err := runEncoder(t.Context(), request, nopReadyWriter{}, defaultProviderOptions()); err == nil {
+			t.Fatal("unsupported encoder allocation accepted")
+		}
 	}
 }
 
@@ -101,3 +86,22 @@ type nopReadyWriter struct{}
 
 func (nopReadyWriter) Write(payload []byte) (int, error) { return len(payload), nil }
 func (nopReadyWriter) Close() error                      { return nil }
+
+func TestEncoderReadinessRequiresItsExactMediaContract(t *testing.T) {
+	// Literal protocol fixture: constrained baseline, 1920x1080 at 60 Hz,
+	// 8 Mbps video and stereo 48 kHz Opus in five millisecond packets.
+	contract := []byte{1, 1, 66, 40, 7, 128, 4, 56, 0, 0, 234, 96, 0, 0, 3, 232, 0, 0, 31, 64, 1, 2, 19, 136, 0, 0, 187, 128, 0, 0, 0, 0}
+	if !validEncoderContract(contract, encoderTestRequest()) {
+		t.Fatal("valid native contract rejected")
+	}
+	for index := range contract {
+		changed := append([]byte(nil), contract...)
+		changed[index] ^= 128
+		if validEncoderContract(changed, encoderTestRequest()) {
+			t.Fatalf("malformed native contract accepted at offset %d", index)
+		}
+	}
+	if validEncoderContract(contract[:31], encoderTestRequest()) {
+		t.Fatal("truncated native contract accepted")
+	}
+}

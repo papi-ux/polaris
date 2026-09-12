@@ -544,8 +544,10 @@ namespace {
                            std::string(64, 'b') :
                          std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} +
                            std::string(64, 'a');
-    const auto profile = spec.runtime_profile == runtime_profile_e::heroic ? "heroic" : "steam";
-    const auto workload_kind = spec.workload.kind == workload_kind_e::heroic ?
+    const auto profile = spec.runtime_profile == runtime_profile_e::gamescope ? "gamescope" :
+                           spec.runtime_profile == runtime_profile_e::heroic ? "heroic" : "steam";
+    const auto workload_kind = spec.workload.kind == workload_kind_e::gamescope ? "gamescope" :
+                               spec.workload.kind == workload_kind_e::heroic ?
                                  "heroic" : "steam";
     const auto input_fingerprint = multiseat::container::input_manifest_fingerprint(
       input_allocation_for(spec.identity.seat)
@@ -2663,7 +2665,7 @@ namespace {
       {"Tmpfs", {
         {"/run", "rw,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000"},
         {"/run/polaris", "rw,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000"},
-        {"/tmp", "rw,nosuid,nodev,size=1073741824,mode=1777,uid=1000,gid=1000"},
+        {"/tmp", "rw,nosuid,nodev,size=1073741824,mode=0700,uid=1000,gid=1000"},
         {"/var/tmp", "rw,nosuid,nodev,size=1073741824,mode=1777,uid=1000,gid=1000"},
       }},
       {"Mounts", json::array({{{"Type", "volume"}, {"Source", volume}, {"Target", "/var/lib/polaris-seat"},
@@ -2725,6 +2727,36 @@ TEST(MultiseatDockerBackend, LaunchUsesNonRootIdentityExactDevicesAndDockerSuppo
     EXPECT_EQ(arg.find("--device=/dev/uinput"), std::string::npos);
     EXPECT_EQ(arg.find("--device=/dev/uhid"), std::string::npos);
   }
+}
+
+TEST(MultiseatDockerBackend, MediaRequiresAnExplicitSupportedWorkerAllocation) {
+  auto options = docker_options_for_tests();
+  EXPECT_FALSE(options.media_enabled);
+  options.media_enabled = true;
+  options.profiles.front().runtime_profile = runtime_profile_e::gamescope;
+  options.workloads = {{workload_kind_e::gamescope, "input-pong-v1"}};
+  auto spec = valid_spec();
+  spec.runtime_profile = runtime_profile_e::gamescope;
+  spec.workload = options.workloads.front();
+  spec.display_mode = {1280, 720, 60000, false};
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+  ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
+  ASSERT_FALSE(host.calls.empty());
+  EXPECT_EQ(host.calls.back().back(), "--media=enabled");
+  auto record = docker_container_for(spec, first_id);
+  record["Config"]["Cmd"].push_back("--media=enabled");
+  queue_docker_inventory(host, {record});
+  EXPECT_EQ(backend.inventory().size(), 1U);
+  record["Config"]["Cmd"].erase(record["Config"]["Cmd"].end() - 1);
+  queue_docker_inventory(host, {record});
+  EXPECT_THROW(backend.inventory(), std::runtime_error);
+  spec.display_mode.hdr = true;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
 }
 
 TEST(MultiseatDockerBackend, AdmitsOnlyTheReviewedSelinuxTypeAndChecksItOnRecovery) {
