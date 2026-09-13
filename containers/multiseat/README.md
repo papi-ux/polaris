@@ -468,6 +468,9 @@ relative/absolute pointer, buttons, and wheel; gamepads remain direct workload
 readers. Touch and pen allocations fail this experimental admission until their
 mappings are implemented. Source retirement, dropped kernel events, excessive
 input backlog, or stalled capture fails the provider and tears down its stream.
+Capture allows up to five seconds between frames so a brief Steam launch or
+game presentation transition can recover. A longer stall still retires the
+seat, and input descriptor failures remain immediate during that interval.
 
 A post-creation X11 directory failure without a retained inode leaves cleanup
 unproven. Startup fails and the worker's private tmpfs must be destroyed before

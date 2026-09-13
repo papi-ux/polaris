@@ -16,6 +16,10 @@
 
 static volatile sig_atomic_t stopping;
 static _Atomic gint64 last_frame;
+/* Steam and games can pause presentation during launch and mode changes.
+ * Allow a bounded transition, still shorter than the encoder's ten-second
+ * media deadline. Input rate limits and descriptor retirement remain active. */
+#define CAPTURE_ACTIVITY_TIMEOUT_US (5 * G_USEC_PER_SEC)
 static void stop(int number) { (void)number; stopping = 1; }
 static void report_failure(const char *reason) {
   g_printerr("polaris-seat-display-capture: %s\n", reason);
@@ -120,8 +124,8 @@ int main(int argc, char **argv) {
     int result = poll(polls,4,100);
     if (result < 0) { if (errno == EINTR) continue; report_failure("capture event polling failed"); failed=1; break; }
     const gint64 captured = atomic_load(&last_frame), checked = g_get_monotonic_time();
-    if (captured && checked-captured > G_USEC_PER_SEC) {
-      report_failure("capture produced no frame within the one-second activity deadline");
+    if (captured && checked-captured > CAPTURE_ACTIVITY_TIMEOUT_US) {
+      report_failure("capture produced no frame within the five-second activity deadline");
       drain_bus_failures(bus);
       failed=1; break;
     }
@@ -144,7 +148,7 @@ int main(int argc, char **argv) {
       events += count/sizeof(batch[0]);
       /* Bound work and the plugin command backlog if compositor delivery stops. */
       if (events > 16384) { report_failure("capture input exceeded the bounded event rate"); failed=1; break; }
-      if (!captured || now-captured > G_USEC_PER_SEC) { report_failure("capture input arrived without a recent frame"); failed=1; break; }
+      if (!captured || now-captured > CAPTURE_ACTIVITY_TIMEOUT_US) { report_failure("capture input arrived without a recent frame"); failed=1; break; }
       for (size_t j=0;j<(size_t)count/sizeof(batch[0]);++j) {
         if (!seat_input_event(&state[i],&batch[j],send_input,display)) { report_failure("capture input event or delivery was rejected"); failed=1; break; }
       }
