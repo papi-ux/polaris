@@ -44,6 +44,9 @@ namespace launch_profile {
     bool hdr_locked = false;
     std::optional<bool> host_hdr_capable;
     std::optional<bool> client_profile_hdr;
+    /// The client reported an HDR10-capable display, which outranks an uncorrected
+    /// device record whose hdr_capable has simply never been edited.
+    bool client_reports_hdr10_display = false;
     std::optional<int> color_range;
   };
 

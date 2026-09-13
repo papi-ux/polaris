@@ -362,6 +362,12 @@ namespace nvhttp {
   bool remember_client_controller_type(std::string_view uuid, int controller_type);
 
   /**
+   * @brief Remember that a paired client reported an HDR10-capable display.
+   * @return True when the stored value changed and was persisted.
+   */
+  bool remember_client_hdr10_display(std::string_view uuid, bool supports_hdr10_display);
+
+  /**
    * @brief Remove single client.
    * @param uuid The UUID of the client to remove.
    * @examples

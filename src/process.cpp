@@ -7439,6 +7439,8 @@ namespace proc {
     preset_request.hdr_requested = launch_session->enable_hdr;
     preset_request.hdr_locked = launch_session->resolved_profile_from_client;
     preset_request.client_profile_hdr = client_profile_hdr;
+    preset_request.client_reports_hdr10_display =
+      launch_session && launch_session->client_reports_hdr10_display;
     preset_request.host_hdr_capable = launch_session->host_hdr_capable;
     if (resolved_optimization.color_range) {
       preset_request.color_range = resolved_optimization.color_range;
