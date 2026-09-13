@@ -754,6 +754,24 @@ namespace stream_stats {
 
     nlohmann::json configuration_warnings = nlohmann::json::array();
 #ifdef __linux__
+    // The configured capture backend could not capture anything and Polaris used another one.
+    // Without this the only trace is a warning in the middle of startup, while the host goes on
+    // serving with a backend nobody chose.
+    if (const auto substitution = platf::capture_backend_substitution_note(); !substitution.empty()) {
+      configuration_warnings.push_back({
+        {"id", "capture_backend_substituted"},
+        {"severity", "warning"},
+        {"message", "The capture backend this host is configured to use cannot capture anything "
+                    "in the current stream mode, so Polaris substituted another one (" +
+                    substitution + "). Capture backends are not interchangeable across "
+                    "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
+                    "do not have, so only the private-compositor modes can use it there."},
+        {"action", "Either set capture to the substituted backend so the configuration matches "
+                   "what is running, or go back to a private-compositor stream mode if you want "
+                   "the configured one."}
+      });
+    }
+
     if (
       linux_display.headless_mode &&
       linux_display.use_cage_compositor &&

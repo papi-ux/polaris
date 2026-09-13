@@ -885,6 +885,41 @@ TEST(StreamStatsFecProtectionTests, RoutesEvidenceBySessionGeneration) {
   );
 }
 
+TEST(StreamStatsDoctorTests, ReportsACaptureBackendThatWasSubstituted) {
+  // Before this, the only trace of a substituted capture backend was one warning in the middle of
+  // startup, while the host went on serving with a backend nobody chose. See #677.
+  platf::set_capture_backend_substitution_for_tests("wlr -> portal");
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "capture_backend_substituted") {
+      continue;
+    }
+    saw_warning = true;
+    EXPECT_EQ(warning.at("severity"), "warning");
+    EXPECT_NE(warning.at("message").get<std::string>().find("wlr -> portal"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+
+  platf::set_capture_backend_substitution_for_tests("");
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingWhenTheConfiguredCaptureBackendWasUsed) {
+  platf::set_capture_backend_substitution_for_tests("");
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "capture_backend_substituted");
+  }
+}
+
 TEST(StreamStatsDoctorTests, NamesTheCapturePathWhenHdrWasAskedForAndNotDelivered) {
   // The host already knew why and only ever said so over the session-status route, while a
   // stream was live. A person who ticks "request HDR", sees SDR and goes looking for a reason
