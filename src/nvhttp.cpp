@@ -4010,6 +4010,7 @@ namespace nvhttp {
         named_cert_node["last_seen_at"] = named_cert_p->last_seen_at.load(std::memory_order_relaxed);
         named_cert_node["client_family"] = named_cert_p->client_family;
         named_cert_node["controller_type"] = named_cert_p->controller_type;
+        named_cert_node["client_reports_hdr10_display"] = named_cert_p->client_reports_hdr10_display;
         named_cert_node["display_mode"] = named_cert_p->display_mode;
         named_cert_node["target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
@@ -4172,6 +4173,7 @@ namespace nvhttp {
           named_cert->last_seen_persisted_at.store(last_seen_at, std::memory_order_relaxed);
           named_cert->client_family = entry.value("client_family", "");
           named_cert->controller_type = entry.value("controller_type", 0);
+          named_cert->client_reports_hdr10_display = entry.value("client_reports_hdr10_display", false);
           named_cert->display_mode = entry.value("display_mode", "");
           named_cert->target_bitrate_kbps = util::get_non_string_json_value<int>(entry, "target_bitrate_kbps", 0);
           named_cert->perm = (PERM)(util::get_non_string_json_value<uint32_t>(entry, "perm", (uint32_t)PERM::_all)) & PERM::_all;
@@ -4218,6 +4220,7 @@ namespace nvhttp {
     clone->cert = source->cert;
     clone->client_family = source->client_family;
     clone->controller_type = source->controller_type;
+    clone->client_reports_hdr10_display = source->client_reports_hdr10_display;
     clone->display_mode = source->display_mode;
     clone->target_bitrate_kbps = source->target_bitrate_kbps;
     clone->paired_at = source->paired_at;
@@ -4431,6 +4434,7 @@ namespace nvhttp {
 
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
     launch_session->controller_type = named_cert_p->controller_type;
+    launch_session->client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display;
     launch_session->unique_id = named_cert_p->uuid;
     launch_session->temporary_authorization = named_cert_p->temporary_authorization;
     launch_session->profile_preference = launch_profile::normalize_preset(
@@ -7667,6 +7671,15 @@ namespace nvhttp {
               write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
+            // The client just told us what its own panel can do. Keep it, so the answer outlives
+            // this process and the next launch does not fall back to an uncorrected record.
+            if (const auto capabilities = body.value("device_capabilities", nlohmann::json::object());
+                capabilities.is_object()) {
+              remember_client_hdr10_display(
+                named_cert_p->uuid,
+                capabilities.value("supports_hdr10_display", false)
+              );
+            }
           }
 
           if (stream_display_mode) {
@@ -10533,6 +10546,36 @@ namespace nvhttp {
     BOOST_LOG(info) << "Remembered controller type ["sv << controller_type
                     << "] for client ["sv << uuid
                     << "]; the pad created before the next launch will match it"sv;
+    return true;
+  }
+
+  bool remember_client_hdr10_display(const std::string_view uuid, const bool supports_hdr10_display) {
+    if (!supports_hdr10_display) {
+      // A client that says no, or says nothing, must not clear a capability already observed.
+      // Nova reports false for an external display it cannot inspect, among other things.
+      return false;
+    }
+    {
+      std::lock_guard lock(client_state_mutex);
+      const auto client = std::find_if(
+        client_root.named_devices.begin(),
+        client_root.named_devices.end(),
+        [&](const crypto::p_named_cert_t &candidate) {
+          return candidate->uuid == uuid;
+        }
+      );
+      if (client == client_root.named_devices.end() ||
+          (*client)->client_reports_hdr10_display) {
+        return false;
+      }
+      (*client)->client_reports_hdr10_display = true;
+      if (!save_state()) {
+        return false;
+      }
+    }
+    BOOST_LOG(info) << "Client ["sv << uuid
+                    << "] reported an HDR10-capable display; it will no longer be refused HDR "
+                       "because of an uncorrected device record"sv;
     return true;
   }
 

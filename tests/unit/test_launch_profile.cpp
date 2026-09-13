@@ -197,6 +197,49 @@ TEST(LaunchProfileTests, HardHdrCapabilityNormalizesAnExplicitLockLast) {
   EXPECT_TRUE(field.at("normalized"));
 }
 
+TEST(LaunchProfileTests, AClientReportingHdr10OutranksAnUncorrectedDeviceRecord) {
+  // hdr_capable defaults to false in device_db and stays there until somebody edits the file by
+  // hand, so it is not evidence that a device cannot do HDR. The client measured its own panel.
+  // A stale default silently refusing HDR, with no log line naming it, is what made this
+  // impossible to diagnose from the outside.
+  launch_profile::request_t request;
+  request.device_name = "RetroidPocket6";
+  request.preset = "quality";
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 120000;
+  request.hdr_requested = true;
+  request.hdr_locked = true;
+  request.client_reports_hdr10_display = true;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_TRUE(resolved.hdr);
+  const auto &field = resolved.fields.at("hdr");
+  EXPECT_EQ(field.at("source"), "client_reported_capability");
+  EXPECT_EQ(field.at("reason_code"), "paired_device_hdr_reported_by_client");
+  // Not a normalization: nothing was taken away from what the client asked for.
+  EXPECT_FALSE(field.at("normalized").get<bool>());
+}
+
+TEST(LaunchProfileTests, ADeviceRecordStillRefusesHdrWhenTheClientHasNotReported) {
+  // The override must depend on the client actually having said so, not on the field existing.
+  launch_profile::request_t request;
+  request.device_name = "RetroidPocket6";
+  request.preset = "quality";
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 120000;
+  request.hdr_requested = true;
+  request.hdr_locked = true;
+  request.client_reports_hdr10_display = false;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_FALSE(resolved.hdr);
+  EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "paired_device_hdr_unsupported");
+}
+
 TEST(LaunchProfileTests, MeteredBitrateLockWinsOverStabilityPreset) {
   launch_profile::request_t request;
   request.device_name = "RetroidPocket6";
