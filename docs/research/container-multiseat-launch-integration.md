@@ -118,13 +118,27 @@ Profile capabilities disable host diagnostics, host settings synchronization
 and host media controls. A profile stop request checks the current paired
 identity and exact session token before cancelling that device's worker.
 
-## Cancellation and shutdown
+## Profile assignment interface
 
 The Devices page shows separate gaming profiles only when a profile controller
 is configured. Permanently paired devices with launch permission can be moved
 between provisioned profiles or returned to Standard streaming. Creating a
 profile remains an administrative command. Multiple devices may share its
 games and settings, with one active stream for that profile.
+
+The panel separates the current assignment from an unsaved choice, names the
+other devices assigned to a shared profile, and explains Steam sign-in in
+expandable help. Refreshing the catalog or saving one device preserves valid
+draft choices for other devices. Empty catalogs and devices without profile
+access have explicit explanations; an existing assignment can still be removed
+after its device loses launch permission.
+
+A successful write is shown as saved only after a fresh, valid catalog reports
+the requested assignment and an available controller. Pending changes remain
+pending. Failed or malformed reads retain the last displayed snapshot and
+disable edits until a successful refresh. An initial read failure offers a retry;
+a successful response with multiseat disabled keeps ordinary device setup
+unchanged. The panel does not create profiles or infer whether Steam is signed in.
 
 The assignment API requires Web UI administrator authentication or the
 administrator API key. A paired streaming certificate alone is insufficient.
@@ -141,6 +155,8 @@ Polaris itself does not restart. A failed write restores the prior catalog when
 possible. Uncertain durability or failed reconstruction preserves affected
 routes as unavailable, preventing fallback to host capture. The UI then requires
 configuration review and restart.
+
+## Cancellation and shutdown
 
 Worker lifecycle generations are independent of host application generations.
 Worker startup and teardown do not resume, pause, terminate, or reconfigure the
@@ -198,9 +214,21 @@ or acceptance with two independent physical client devices.
 
 Available workloads are Gamescope `input-pong-v1` and the experimental
 [Steam launcher](container-multiseat-steam.md), with Big Picture or a typed game
-ID. Real Steam game acceptance, profile creation UI, AMD hardware and two
-independent physical clients remain pending, including reconnect and measured
-latency.
+ID. Bounded NVIDIA validation on September 13 exercised Control Ultimate
+Edition gameplay and controller input alongside the comparison stream near
+60 FPS. Two fresh stop cycles completed without provider errors, kernel faults
+or owned coredumps. Those cycles used native host revision `775cdaa5`, worker
+revision `872e4186`, and Nova revision `7f435a9e`.
+
+Profile assignment UI checks cover delayed and failed read-back, pending
+changes, stale catalogs, retained drafts, access removal, and empty states.
+A browser preview with fixture data also checks assignment saves, keyboard
+navigation, and layouts from 320 to 1280 pixels wide. These checks do not
+substitute for live game acceptance.
+
+Two independent commercial games, profile creation UI, AMD hardware, audio
+quality, rumble and two independent physical clients remain pending, including
+reconnect and measured latency.
 The UI must preserve the existing flow for one person with one device.
 Runtime images use Polaris builds from official Ubuntu. Required third party
 source and license notices remain intact until those dependencies are replaced.

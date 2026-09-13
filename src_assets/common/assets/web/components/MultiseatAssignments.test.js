@@ -50,4 +50,182 @@ describe('profile assignments', () => {
     expect(wrapper.get('select').element.value).toBe('')
     expect(wrapper.text()).not.toContain('Assignment saved.')
   })
+
+  it('explains profile sharing using device names without exposing catalog identifiers', async () => {
+    const current = snapshot()
+    current.profiles[0].clients = ['device-b']
+    vi.stubGlobal('fetch', vi.fn(async () => reply(current)))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client, { ...client, uuid: 'device-b', name: 'Bedroom TV' }] } })
+    await flushPromises()
+    await wrapper.get('#gaming-profile-device-a').setValue('profile-a')
+    expect(wrapper.get('#gaming-profile-current-device-a').text()).toContain('Standard streaming')
+    expect(wrapper.get('#gaming-profile-help-device-a').text()).toContain('Also assigned to Bedroom TV')
+    expect(wrapper.get('#gaming-profile-help-device-a').text()).toContain('Only one')
+    expect(wrapper.text()).toContain('Unsaved change')
+    expect(wrapper.text()).not.toContain('device-b')
+    expect(wrapper.get('button[aria-label="Save assignment for Living room"]').exists()).toBe(true)
+  })
+
+  it('does not claim success while read-back is still pending', async () => {
+    let confirm
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(snapshot()))
+      .mockResolvedValueOnce(reply({ status: true }))
+      .mockImplementationOnce(() => new Promise(resolve => { confirm = resolve })))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    await wrapper.get('select').setValue('profile-a')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Assignment saved.')
+    expect(wrapper.get('select').element.disabled).toBe(true)
+    expect(wrapper.get('section').attributes('aria-busy')).toBe('true')
+    confirm(reply({ ...snapshot(), profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'] }] }))
+    await flushPromises()
+    expect(wrapper.text()).toContain('Living room now opens Alex')
+  })
+
+  it('locks stale assignments after failed read-back and recovers through refresh', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(snapshot()))
+      .mockResolvedValueOnce(reply({ status: true }))
+      .mockResolvedValueOnce(reply({}, false, 503))
+      .mockResolvedValueOnce(reply({ ...snapshot(), profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'] }] })))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    await wrapper.get('select').setValue('profile-a')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Assignment saved.')
+    expect(wrapper.get('[role=alert]').text()).toContain('Refresh profiles to try again')
+    expect(wrapper.get('select').element.disabled).toBe(true)
+    await wrapper.findAll('button').at(-1).trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role=alert]').exists()).toBe(false)
+    expect(wrapper.get('select').element.disabled).toBe(false)
+    expect(wrapper.get('#gaming-profile-current-device-a').text()).toContain('Alex')
+    expect(wrapper.text()).not.toContain('Unsaved change')
+  })
+
+  it('reports an accepted request whose assignment did not take effect', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_, options) => reply(options.method === 'POST' ? { status: true } : snapshot())))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    await wrapper.get('select').setValue('profile-a')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toContain('could not be confirmed')
+    expect(wrapper.text()).not.toContain('Assignment saved.')
+    expect(wrapper.get('select').element.value).toBe('')
+  })
+
+  it('keeps pending activation distinct from a confirmed assignment', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(snapshot()))
+      .mockResolvedValueOnce(reply({ status: false, message: 'Pending' }, true, 202))
+      .mockResolvedValueOnce(reply({ ...snapshot(), changing: true })))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    await wrapper.get('select').setValue('profile-a')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('still being applied')
+    expect(wrapper.text()).not.toContain('Assignment saved.')
+    expect(wrapper.get('select').element.disabled).toBe(true)
+  })
+
+  it('preserves another device draft when saving and refreshing an assignment', async () => {
+    let current = snapshot()
+    const other = { ...client, uuid: 'device-b', name: 'Bedroom TV' }
+    vi.stubGlobal('fetch', vi.fn(async (_, options) => {
+      if (options.method === 'POST') {
+        current = { ...snapshot(), profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'] }] }
+        return reply({ status: true })
+      }
+      return reply(JSON.parse(JSON.stringify(current)))
+    }))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client, other] } })
+    await flushPromises()
+    await wrapper.get('#gaming-profile-device-a').setValue('profile-a')
+    await wrapper.get('#gaming-profile-device-b').setValue('profile-a')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ clients: [{ ...client }, { ...other }, { ...client, uuid: 'device-c', name: 'New device' }] })
+    await wrapper.findAll('button').at(-1).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#gaming-profile-device-b').element.value).toBe('profile-a')
+    expect(wrapper.get('#gaming-profile-current-device-b').text()).toContain('Standard streaming')
+    expect(wrapper.get('#gaming-profile-device-c').element.value).toBe('')
+    expect(wrapper.text()).toContain('Unsaved change')
+  })
+
+  it('removes a draft for a profile that disappears on refresh', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(snapshot()))
+      .mockResolvedValueOnce(reply({ ...snapshot(), profiles: [] })))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    await wrapper.get('select').setValue('profile-a')
+    await wrapper.findAll('button').at(-1).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('select').element.value).toBe('')
+    expect(wrapper.text()).toContain('No gaming profiles are configured yet')
+    expect(wrapper.text()).not.toContain('Unsaved change')
+  })
+
+  it.each([
+    ['missing availability', value => { delete value.available }],
+    ['nonboolean availability', value => { value.available = 'true' }],
+    ['duplicate profile', value => { value.profiles.push({ ...value.profiles[0] }) }],
+    ['duplicate device assignment', value => { value.profiles[0].clients = ['device-a']; value.profiles.push({ id: 'profile-b', name: 'Sam', clients: ['device-a'] }) }],
+    ['malformed profile', value => { value.profiles = [null] }],
+    ['nonstring device', value => { value.profiles[0].clients = [42] }],
+  ])('rejects %s without enabling changes from a stale snapshot', async (_, mutate) => {
+    const invalid = snapshot()
+    mutate(invalid)
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(snapshot()))
+      .mockResolvedValueOnce(reply(invalid)))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    await wrapper.findAll('button').at(-1).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toContain('Could not verify')
+    expect(wrapper.get('select').element.disabled).toBe(true)
+  })
+
+  it('offers a retry after the initial load fails', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockRejectedValueOnce(new Error('Connection unavailable'))
+      .mockResolvedValueOnce(reply({ ...snapshot(), enabled: false })))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
+    await flushPromises()
+    expect(wrapper.get('[role=alert]').text()).toContain('Connection unavailable')
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('section').exists()).toBe(false)
+  })
+
+  it('keeps guests out of profile assignment but permits removal of lost access', async () => {
+    const former = { ...client, perm: 0 }
+    const current = snapshot()
+    current.profiles[0].clients = ['device-a']
+    vi.stubGlobal('fetch', vi.fn(async () => reply(current)))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [former, { ...client, uuid: 'guest', temporary_authorization: true }] } })
+    await flushPromises()
+    expect(wrapper.findAll('select')).toHaveLength(1)
+    expect(wrapper.get('option[value="profile-a"]').element.disabled).toBe(true)
+    expect(wrapper.get('option[value=""]').element.disabled).toBe(false)
+    expect(wrapper.text()).toContain('no longer has profile access')
+    await wrapper.get('select').setValue('')
+    expect(wrapper.get('button').element.disabled).toBe(false)
+  })
+
+  it('explains why there are no devices to assign', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
+    wrapper = mount(MultiseatAssignments)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Pair a device with permission to launch apps')
+    expect(wrapper.find('select').exists()).toBe(false)
+  })
 })
