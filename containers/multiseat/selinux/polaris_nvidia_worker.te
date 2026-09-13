@@ -1,4 +1,4 @@
-policy_module(polaris_nvidia_worker, 1.0.4)
+policy_module(polaris_nvidia_worker, 1.0.5)
 
 gen_require(`
     type container_file_t;
@@ -27,6 +27,12 @@ allow polaris_nvidia_worker_t self:tcp_socket { listen accept };
 # Bubblewrap remounts files read only in its new user namespace's tmpfs.
 # The outer worker drops all capabilities; this does not grant host mount authority.
 fs_remount_tmpfs(polaris_nvidia_worker_t)
+
+# Wine relocates DLLs in private writable file mappings before making their
+# code executable. The container template permits execution but not execmod.
+# Limit this permission to container files in this worker domain; retain MCS
+# constraints, noexec mounts, and the existing device and capability limits.
+allow polaris_nvidia_worker_t container_file_t:file execmod;
 
 # Device admission still comes exclusively from the exact GPU catalog. This
 # standard container template retains file-management permissions; dropped Linux
