@@ -335,3 +335,32 @@ TEST(ConfigValidationTests, AcceptsVaapiSessionControlKeysForPersistence) {
     {"vaapi_blbrc", "enabled"}, {"vaapi_strict_rc_buffer", "disabled"}
   }, error)) << error;
 }
+
+TEST(ConfigValidationTests, SpacesOwnershipCannotBeChangedThroughGenericSettings) {
+  for (const auto *key : {"multiseat_enabled", "multiseat_config"}) {
+    EXPECT_TRUE(confighttp::validation::is_local_config_key(key));
+    for (const auto &value : {nlohmann::json(true), nlohmann::json(false),
+           nlohmann::json(nullptr), nlohmann::json(""), nlohmann::json("/tmp/other.json")}) {
+      std::string error;
+      EXPECT_FALSE(confighttp::validation::validate_config_payload({{key, value}}, error));
+    }
+  }
+  EXPECT_FALSE(confighttp::validation::is_local_config_key("sunshine_name"));
+}
+
+TEST(ConfigValidationTests, SettingsSavePreservesOnlyExistingSpacesOwnership) {
+  const std::unordered_map<std::string, std::string> existing {
+    {"multiseat_enabled", "true"}, {"multiseat_config", "/private/controller.json"},
+    {"sunshine_name", "Before"}
+  };
+  for (auto payload : {nlohmann::json{{"sunshine_name", "After"}},
+         nlohmann::json{{"sunshine_name", "After"}, {"multiseat_enabled", false},
+           {"multiseat_config", nullptr}}}) {
+    confighttp::validation::preserve_local_config(existing, payload);
+    EXPECT_EQ(payload.at("multiseat_enabled"), "true");
+    EXPECT_EQ(payload.at("multiseat_config"), "/private/controller.json");
+    EXPECT_EQ(payload.at("sunshine_name"), "After");
+    confighttp::validation::preserve_local_config({}, payload);
+    EXPECT_EQ(payload, (nlohmann::json{{"sunshine_name", "After"}}));
+  }
+}

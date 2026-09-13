@@ -980,11 +980,13 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, ProfileSetupDeadlineCannotBeBypassedWithoutWorkerSelection) {
-    auto now = worker_broker_t::time_point_t {};
-    create_ready_controller(true, {shared_profile_route()}, [&] { return now; });
+    // The controller also reads its clock during fixture teardown, after the
+    // test body returns. Keep that clock alive with the installed callback.
+    auto now = std::make_shared<worker_broker_t::time_point_t>();
+    create_ready_controller(true, {shared_profile_route()}, [now] { return *now; });
     auto launch = controller_launch(2103, 3103);
     ASSERT_TRUE(controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false}).admitted());
-    now += std::chrono::milliseconds {29999};
+    *now += std::chrono::milliseconds {29999};
     ASSERT_TRUE(controller_->reconcile().ready());
     EXPECT_EQ(controller_->seats(), 1U);
     EXPECT_FALSE(launch->is_cancelled());
@@ -992,7 +994,7 @@ namespace {
     // reservation into an indefinitely retained running seat.
     ASSERT_TRUE(launch->try_begin_setup_handoff());
     ASSERT_TRUE(launch->commit_setup_start());
-    now += std::chrono::milliseconds {1};
+    *now += std::chrono::milliseconds {1};
     ASSERT_TRUE(controller_->reconcile().ready());
     EXPECT_TRUE(launch->is_cancelled());
     EXPECT_TRUE(launch->worker_connection_requirement()->load());

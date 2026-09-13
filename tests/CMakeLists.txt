@@ -103,6 +103,7 @@ if(NOT WIN32)
 endif()
 
 set(TEST_AUDIT_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp

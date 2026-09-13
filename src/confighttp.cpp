@@ -4385,6 +4385,7 @@ namespace confighttp {
     }
     auto vars = config::parse_config(observed->contents);
     for (auto &[name, value] : vars) {
+      if (validation::is_local_config_key(name)) continue;
       if (is_write_only_secret_config_key(name)) {
         if (name == "ai_api_key") {
           output_tree["has_ai_api_key"] = !value.empty();
@@ -4604,8 +4605,10 @@ namespace confighttp {
       observed_revision.value_or(configuration_store::revision(config::sunshine.config_file, true)));
     std::stringstream config_stream;
     const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    auto persisted = tree;
+    validation::preserve_local_config(existing_vars, persisted);
     std::vector<std::string> written_keys;
-    for (const auto &[k, v] : tree.items()) {
+    for (const auto &[k, v] : persisted.items()) {
       if (v.is_null()) {
         continue;
       }
@@ -4615,7 +4618,7 @@ namespace confighttp {
       // v.dump() will dump valid json, which we do not want for strings in the config right now
       // we should migrate the config file to straight json and get rid of all this nonsense
       config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
-      written_keys.push_back(k);
+      if (!validation::is_local_config_key(k)) written_keys.push_back(k);
     }
     if (!tree.contains("adaptive_bitrate_enabled")) {
       config_stream << "adaptive_bitrate_enabled = "
@@ -4623,7 +4626,7 @@ namespace confighttp {
     }
     std::size_t dropped = 0;
     for (const auto &[key, value] : existing_vars) {
-      if (tree.contains(key) || value.empty()) {
+      if (persisted.contains(key) || value.empty()) {
         continue;
       }
       if (is_write_only_secret_config_key(key)) {

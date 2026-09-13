@@ -5093,10 +5093,9 @@ namespace nvhttp {
         if (args.count(key) != 1 || value.empty() || value.size() > 32 ||
             value.find_first_not_of("0123456789.") != std::string::npos)
           throw std::invalid_argument("numeric field");
-        std::size_t consumed = 0;
-        const auto parsed = std::stod(value, &consumed);
-        if (consumed != value.size() || !std::isfinite(parsed)) throw std::invalid_argument("numeric field");
-        return parsed;
+        const auto parsed = util::parse_decimal<double>(value);
+        if (!parsed) throw std::invalid_argument("numeric field");
+        return *parsed;
       };
       for (const auto *key : {"game", "encoder", "mode", "preference", "mirrorDesktop",
                               "closeDesktopSteamForPrivate", "launchMode"})
@@ -5128,7 +5127,12 @@ namespace nvhttp {
             h.find_first_not_of("0123456789") != std::string::npos ||
             f.find_first_not_of("0123456789") != std::string::npos)
           return reject(409, "The paired display override is unsupported for profile streams");
-        width = std::stod(w); height = std::stod(h); fps = std::stod(f);
+        const auto parsed_width = util::parse_decimal<double>(w);
+        const auto parsed_height = util::parse_decimal<double>(h);
+        const auto parsed_fps = util::parse_decimal<double>(f);
+        if (!parsed_width || !parsed_height || !parsed_fps)
+          return reject(409, "The paired display override is unsupported for profile streams");
+        width = *parsed_width; height = *parsed_height; fps = *parsed_fps;
         if (fps >= 1000) fps /= 1000;
         if (fps != std::floor(fps) || fps < 15 || fps > 240 || fps > ceiling + .5 ||
             width < 320 || width > 4096 || height < 240 || height > 2160 ||
