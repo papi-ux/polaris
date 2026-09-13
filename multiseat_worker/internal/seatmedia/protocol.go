@@ -34,19 +34,28 @@ func validSize(kind byte, size uint32) bool {
 	}
 }
 
-// Read rejects the advertised length before allocating or waiting for a body.
-func Read(reader io.Reader) (byte, []byte, error) {
-	var header [HeaderSize]byte
+func readHeader(reader io.Reader, header *[HeaderSize]byte) (byte, uint32, error) {
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
-		return 0, nil, err
+		return 0, 0, err
 	}
 	size := binary.BigEndian.Uint32(header[8:])
 	if string(header[:4]) != "PME1" || header[5] != 0 || header[6] != 0 || header[7] != 0 || !validSize(header[4], size) {
-		return 0, nil, errors.New("invalid private encoder packet")
+		return 0, 0, errors.New("invalid private encoder packet")
+	}
+	return header[4], size, nil
+}
+
+// Read rejects the advertised length before allocating or waiting for a body.
+// Its payload remains owned by the caller across subsequent reads.
+func Read(reader io.Reader) (byte, []byte, error) {
+	var header [HeaderSize]byte
+	kind, size, err := readHeader(reader, &header)
+	if err != nil {
+		return 0, nil, err
 	}
 	payload := make([]byte, size)
-	_, err := io.ReadFull(reader, payload)
-	return header[4], payload, err
+	_, err = io.ReadFull(reader, payload)
+	return kind, payload, err
 }
 
 func Write(writer io.Writer, kind byte, payload []byte) error {

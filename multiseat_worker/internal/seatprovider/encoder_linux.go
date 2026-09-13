@@ -147,7 +147,8 @@ func runEncoder(parent context.Context, request seatruntime.Request, ready io.Wr
 		err  error
 	}
 	first := make(chan packet, 1)
-	go func() { kind, body, err := seatmedia.Read(mediaRead); first <- packet{kind, body, err} }()
+	packets := seatmedia.NewReader(mediaRead)
+	go func() { kind, body, err := packets.Read(); first <- packet{kind, body, err} }()
 	startup := time.NewTimer(options.startupTimeout)
 	defer startup.Stop()
 	var contract packet
@@ -231,7 +232,9 @@ func runEncoder(parent context.Context, request seatruntime.Request, ready io.Wr
 				failures <- err
 				return
 			}
-			kind, body, err := seatmedia.Read(mediaRead)
+			// Write has consumed the borrowed packet before the next Read can
+			// reuse its storage. No payload is queued or shared with another seat.
+			kind, body, err := packets.Read()
 			next = packet{kind, body, err}
 			if err == nil && kind == seatmedia.Config {
 				failures <- errors.New("encoder changed its contract")
