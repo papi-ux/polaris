@@ -221,6 +221,7 @@ namespace multiseat_test {
     oversized_handshake_payload,
     stall,
     media_contract,
+    media_contract_variable_audio,
   };
 
   inline media_config_t fake_media_config() {
@@ -435,10 +436,12 @@ namespace multiseat_test {
             if (behavior_ == fake_behavior_e::cross_routed_media) {
               ++output_identity.generation;
             }
-            if (behavior_ == fake_behavior_e::media_contract) {
+            const bool has_contract = behavior_ == fake_behavior_e::media_contract ||
+                                      behavior_ == fake_behavior_e::media_contract_variable_audio;
+            if (has_contract) {
               std::this_thread::sleep_for(contract_delay_);
             }
-            if (behavior_ == fake_behavior_e::media_contract &&
+            if (has_contract &&
                 !send_test_frame(connection, {
                                                .channel = channel,
                                                .message = message_e::media_config,
@@ -452,11 +455,11 @@ namespace multiseat_test {
             // Under the contract every payload carries the frame prefix; the
             // plain behavior keeps sending bare bytes, which is what the
             // transport suite asserts on.
-            const auto media_payload = [this](const std::string_view bytes, const std::uint64_t index, const bool idr) {
+            const auto media_payload = [has_contract](const std::string_view bytes, const std::uint64_t index, const bool idr) {
               const std::span<const std::uint8_t> encoded {
                 reinterpret_cast<const std::uint8_t *>(bytes.data()), bytes.size()
               };
-              if (behavior_ != fake_behavior_e::media_contract) {
+              if (!has_contract) {
                 return std::vector<std::uint8_t> {encoded.begin(), encoded.end()};
               }
               return encode_media_frame({.frame_index = index, .idr = idr}, encoded);
@@ -476,6 +479,17 @@ namespace multiseat_test {
                                                .generation = output_identity.generation,
                                                .sequence = outgoing++,
                                                .payload = media_payload("audio", 1, false),
+                                             })) {
+              break;
+            }
+            if (behavior_ == fake_behavior_e::media_contract_variable_audio &&
+                !send_test_frame(connection, {
+                                               .channel = channel,
+                                               .message = message_e::audio,
+                                               .slot = output_identity.slot,
+                                               .generation = output_identity.generation,
+                                               .sequence = outgoing++,
+                                               .payload = media_payload("longer audio", 2, false),
                                              })) {
               break;
             }

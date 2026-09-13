@@ -242,6 +242,7 @@ namespace multiseat::media {
     request_side.enable_media_controls();
 
     std::vector<std::uint8_t> bytes;
+    std::optional<std::size_t> audio_packet_size;
     while (true) {
       const auto received = connection.receive_media(packet);
       if (received != transport_status_e::applied) {
@@ -260,6 +261,13 @@ namespace multiseat::media {
             ++report.video_frames;
             sinks.video(std::move(bytes), static_cast<std::int64_t>(frame.frame_index), frame.idr);
           } else {
+            // Moonlight audio FEC requires equal shard sizes. Refuse a legacy
+            // or faulty worker before its variable packet can reach the client.
+            if (audio_packet_size && *audio_packet_size != bytes.size()) {
+              report.detail = "the worker changed its Opus packet size";
+              return finish(pump_status_e::malformed_frame);
+            }
+            audio_packet_size = bytes.size();
             ++report.audio_frames;
             sinks.audio(std::move(bytes));
           }

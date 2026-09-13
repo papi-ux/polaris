@@ -109,6 +109,9 @@ def check(executable, invalid=False, render_node=None, peers=None, survivor=Fals
                 encoded_video.extend(body[32:])
             else:
                 assert body[1] == 0 and len(body) <= 1432
+                # Moonlight's audio FEC shards must have equal sizes, including
+                # the transition from silence to sound. 128 kbps at 5 ms is 80 bytes.
+                assert len(body) - 32 == 80, 'Opus packet size violates the audio FEC contract'
             return kind == 2 and body[1] == 1
 
         for _ in range(100):

@@ -174,6 +174,28 @@ TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream)
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 
+TEST(MultiseatWorkerMediaPump, RejectsVariableAudioPacketSizesBeforeDelivery) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x41)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-variable-audio");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract_variable_audio};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+  delivered_t delivered;
+  const auto report = run(
+    client.lease_connection(), matching_expectation(), delivered.sinks(), quiet_host()
+  );
+  EXPECT_EQ(report.status, pump_status_e::malformed_frame);
+  EXPECT_EQ(report.audio_frames, 1U);
+  {
+    std::scoped_lock lock {delivered.mutex};
+    ASSERT_EQ(delivered.audio.size(), 1U);
+  }
+  worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
 TEST(MultiseatWorkerMediaPump, RefusesAContractTheClientDidNotNegotiate) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x42)};

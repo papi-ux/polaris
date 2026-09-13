@@ -140,7 +140,7 @@ int main(int argc,char **argv) {
     "h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline ! "
     "appsink name=video max-buffers=2 drop=false sync=false async=false enable-last-sample=false "
     "%s audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! "
-    "opusenc bitrate=128000 frame-size=5 max-payload-size=1400 audio-type=restricted-lowdelay ! "
+    "opusenc bitrate=128000 bitrate-type=cbr dtx=false frame-size=5 max-payload-size=1400 audio-type=restricted-lowdelay ! "
     "appsink name=audio max-buffers=8 drop=false sync=false async=false enable-last-sample=false",
     video_head,software?"I420":"NV12",width,height,refresh,video_encoder,audio_head);
   g_free(video_encoder);
