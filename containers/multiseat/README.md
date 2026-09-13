@@ -77,6 +77,29 @@ the original policy. Client connection warnings, decoder watchdog flushes and
 audio queue overruns still occurred; this validates startup bitrate selection,
 not sustained streaming quality.
 
+A later RP6 delivery check isolated a degraded wireless link. With no stream
+running, a 30 second synthetic UDP test lost 46.2% of packets sent at 12 Mbps,
+and the device reported an 8 Mbps receive link rate. Reconnecting to the same
+saved network raised the reported receive rate to 648 Mbps; the identical
+31962 packet test then had no loss. A 1 Mbps probe alongside the worker stream
+went from 64.9% loss before reconnecting to no loss afterward.
+
+Using the same NVIDIA image and Nova
+`10a8389a5bd307630006b544783a27ab9dd5f19c` with
+`-PnovaNativeDebugChecks=false`, the subsequent 507 second stream delivered
+30431 video frames and 101438 audio frames. Native client logs recorded no
+unrecoverable video frames, network frame drops or decoder watchdog flushes.
+PEAK offline navigation, movement and camera input worked, and the game
+returned to Steam through its own menus before the bounded test expired.
+All three profile volumes remained and policy cleanup completed. There were
+33 pending-audio messages, so this does not establish prolonged audio quality.
+The cause of the degraded wireless state and its recurrence remain unproven.
+
+Nova Debug normally enables native FEC validation that intentionally requires
+an extra parity packet. Quality checks now explicitly disable that mode and
+verify the packaged native library. The earlier comparison that accidentally
+reused a debug native library was excluded. Detailed evidence remains private.
+
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
 each receive an offline runtime dependency stage, a Wayland GStreamer plugin
