@@ -3,8 +3,9 @@
 Saved Docker profiles can launch Steam Big Picture or one canonical Steam game
 ID through the experimental profile streaming path. A Steam profile owns its
 persistent home and one dedicated Docker bridge. Production activation remains
-off by default; this implementation has not passed real Steam or two-client
-playback acceptance.
+off by default. An isolated NVIDIA/Docker run has reached the Big Picture
+sign-in screen through Nova while a separate profile streamed to Moonlight.
+Steam game playback still requires acceptance.
 
 ## Provision and assign
 
@@ -90,24 +91,40 @@ pinned Docker default policy. The outer worker still drops all capabilities
 and uses no new privileges. Missing, writable, or changed policy files refuse
 launch; recovery also verifies the exact policy reported by Docker.
 
-The optional NVIDIA SELinux domain permits outbound TCP connections for Steam
-downloads and sign-in over the profile's existing bridge. It retains enforcing
-SELinux and does not require the broad container networking domain attribute
-or a host networking change.
+The optional NVIDIA SELinux domain permits outbound TCP, ephemeral client
+socket binding, and TCP helper listeners over the profile's private network.
+It also permits tmpfs remounts inside Steam's nested sandbox. The outer worker
+retains no capabilities and exposes no published ports. The policy retains
+enforcing SELinux without the broad container networking domain attribute.
+The ordinary container domain still denies the required tmpfs remount on the
+tested Fedora host; other GPU and distribution lanes require their own
+acceptance.
 
 ## Acceptance still required
 
 The current stream contract requires a compatible manual SDR H.264 4:2:0 preset,
-whole frame rate, and stereo audio with 5 ms packets. Moonlight can request this
+whole frame rate, and stereo audio with 5 ms packets. The worker produces
+128 kbps constant bitrate Opus with DTX disabled, giving 80 byte packets for
+Moonlight audio recovery. The host rejects an older or faulty worker if its
+packet size changes before forwarding the changed packet to a client. Moonlight can request this
 contract. Nova can resolve an assigned profile and use its supported stream
 preset. See the
 [launch integration](container-multiseat-launch-integration.md) for device
 permissions, revocation, cancellation, and host configuration.
 
-Real Steam bootstrap, Big Picture focus and input, game installation, Proton's
-runtime sandbox under the fixed Steam security policy, game audio, and
-two simultaneous clients still require acceptance using the exact produced
-image. The NVIDIA Steam layer supplies and checks amd64 and i386 vendor
+Physical testing on the NVIDIA/Fedora lane exercised the first-use installer
+and client update while resolving the sandbox denials. The final rebuilt
+Steam image reached Big Picture sign-in through Nova at 1080p60, and touch
+input opened Steam's keyboard. A separate Gamescope profile streamed to
+Moonlight concurrently. Disconnecting the Steam seat preserved that stream;
+both workers then retired and left no IPC resources. The run retained
+enforcing SELinux, no outer capabilities, private networking, and the exact
+compiled seccomp policy. No account credentials were entered.
+
+Game installation, authenticated Big Picture use, Proton, game audio,
+controller behavior in games, and two simultaneous games still require
+acceptance using the produced images. The NVIDIA Steam layer supplies and
+checks amd64 and i386 vendor
 libraries, generic graphics loaders, and their dynamic dependencies. Real
 32 bit rendering remains part of game acceptance. Image checks and
 process tests do not establish game compatibility or latency. Heroic and Lutris
