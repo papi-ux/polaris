@@ -176,6 +176,15 @@ func (child *managedChild) exited() bool {
 	}
 }
 
+func (child *managedChild) exitError(message string) error {
+	if child == nil || child.command == nil || child.done == nil || !child.exited() {
+		return errors.New(message)
+	}
+	// Wait publishes ProcessState before closing done. Never read it while
+	// the wait goroutine could still be updating the command.
+	return childExitError(message, child.command.ProcessState)
+}
+
 func (child *managedChild) stop(timeout time.Duration) error {
 	if child == nil || child.command == nil || child.command.Process == nil ||
 		child.done == nil || timeout <= 0 {

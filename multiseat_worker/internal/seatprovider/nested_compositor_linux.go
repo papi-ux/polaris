@@ -1128,6 +1128,6 @@ func runNestedCompositor(
 	case <-parent.Done():
 		return nil
 	case <-child.done:
-		return errors.New("runtime Gamescope exited unexpectedly")
+		return child.exitError("runtime Gamescope exited unexpectedly")
 	}
 }

@@ -17,7 +17,7 @@ func main() {
 		uint32(os.Geteuid()),
 		0,
 	); err != nil {
-		fmt.Fprintln(os.Stderr, "runtime provider failed:", err)
+		fmt.Fprintln(os.Stderr, "polaris-seat-runtime:", err)
 		os.Exit(1)
 	}
 }

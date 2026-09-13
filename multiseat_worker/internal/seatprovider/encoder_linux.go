@@ -162,12 +162,12 @@ func runEncoder(parent context.Context, request seatruntime.Request, ready io.Wr
 	case <-parent.Done():
 		return parent.Err()
 	case <-child.done:
-		return errors.New("encoder exited before media readiness")
+		return child.exitError("encoder exited before media readiness")
 	}
 	// The child emits this contract only after inspecting actual video and audio
 	// samples. It emits no frames before Start follows the controller's ack.
 	if child.exited() {
-		return errors.New("encoder exited before readiness")
+		return child.exitError("encoder exited before readiness")
 	}
 	if err := publishReadiness(ready); err != nil {
 		return err
@@ -273,7 +273,7 @@ func runEncoder(parent context.Context, request seatruntime.Request, ready io.Wr
 		if parent.Err() != nil {
 			return nil
 		}
-		return errors.New("encoder process exited")
+		return child.exitError("encoder process exited")
 	case <-failures:
 		if parent.Err() != nil {
 			return nil

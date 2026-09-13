@@ -11,7 +11,7 @@ import (
 
 func main() {
 	if err := seatprovider.RunSessionBus(os.Args[1:], os.Environ()); err != nil {
-		fmt.Fprintln(os.Stderr, "runtime provider failed:", err)
+		fmt.Fprintln(os.Stderr, "polaris-seat-session-bus:", err)
 		os.Exit(1)
 	}
 }
