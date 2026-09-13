@@ -73,7 +73,7 @@ static gboolean bus_failed(GstBus *bus) {
   if(!message)return FALSE;
   if(GST_MESSAGE_TYPE(message)==GST_MESSAGE_ERROR) {
     GError *error=NULL;gst_message_parse_error(message,&error,NULL);
-    fprintf(stderr,"encoder pipeline: %.200s\n",error?error->message:"unknown failure");
+    fprintf(stderr,"polaris-seat-encoder: encoder pipeline: %.200s\n",error?error->message:"unknown failure");
     if(error)g_error_free(error);
   }
   gst_message_unref(message);return TRUE;
@@ -122,12 +122,12 @@ int main(int argc,char **argv) {
     capture=pin_encoder_socket("/run/polaris",strrchr(argv[1],'/')+1,false);
     pulse=pin_encoder_socket("/run/polaris","native",true);
     if(capture<0 || pulse<0) {
-      fprintf(stderr,"encoder %s socket identity rejected\n",capture<0?"capture":"audio");
+      fprintf(stderr,"polaris-seat-encoder: encoder %s socket identity rejected\n",capture<0?"capture":"audio");
       goto finish;
     }
   }
   if(!software && (!open_gpu(argv[2],&gpu) || !choose_hardware_encoder(gpu.descriptor,&choice))) {
-    fprintf(stderr,"no H.264 hardware encoder matches the allocated render device\n");
+    fprintf(stderr,"polaris-seat-encoder: no H.264 hardware encoder matches the allocated render device\n");
     goto finish;
   }
   fprintf(stderr,"seat encoder: %s\n",choice.factory?choice.factory:"openh264enc");
@@ -145,7 +145,7 @@ int main(int argc,char **argv) {
     video_head,software?"I420":"NV12",width,height,refresh,video_encoder,audio_head);
   g_free(video_encoder);
   GError *error=NULL;GstElement *pipeline=gst_parse_launch(description,&error);g_free(description);
-  if(!pipeline || error){if(error){fprintf(stderr,"encoder construction: %.200s\n",error->message);g_error_free(error);}if(pipeline)gst_object_unref(pipeline);goto finish;}
+  if(!pipeline || error){if(error){fprintf(stderr,"polaris-seat-encoder: encoder construction: %.200s\n",error->message);g_error_free(error);}if(pipeline)gst_object_unref(pipeline);goto finish;}
   if(!synthetic) {
     GstElement *source=gst_bin_get_by_name(GST_BIN(pipeline),"capture");
     char path[64];snprintf(path,sizeof(path),"/proc/self/fd/%d",capture);g_object_set(source,"socket-path",path,NULL);gst_object_unref(source);

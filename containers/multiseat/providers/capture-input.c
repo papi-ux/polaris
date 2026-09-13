@@ -17,6 +17,31 @@
 static volatile sig_atomic_t stopping;
 static _Atomic gint64 last_frame;
 static void stop(int number) { (void)number; stopping = 1; }
+static void report_failure(const char *reason) {
+  g_printerr("polaris-seat-display-capture: %s\n", reason);
+}
+static void report_pipeline_error(const char *stage, const GError *error) {
+  g_printerr("polaris-seat-display-capture: %s: %.200s\n",
+             stage, error ? error->message : "unknown pipeline failure");
+}
+static bool drain_bus_failures(GstBus *bus) {
+  bool failed = false;
+  GstMessage *message;
+  while ((message = gst_bus_pop(bus))) {
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+      GError *error = NULL;
+      gst_message_parse_error(message, &error, NULL);
+      report_pipeline_error("capture pipeline failed", error);
+      if (error) g_error_free(error);
+      failed = true;
+    } else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) {
+      report_failure("capture pipeline ended unexpectedly");
+      failed = true;
+    }
+    gst_message_unref(message);
+  }
+  return failed;
+}
 static GstPadProbeReturn frame_ready(GstPad *pad, GstPadProbeInfo *info, gpointer unused) {
   (void)pad; (void)info; (void)unused;
   atomic_store(&last_frame, g_get_monotonic_time());
@@ -61,9 +86,18 @@ int main(int argc, char **argv) {
   struct sigaction action = {0}; action.sa_handler = stop;
   sigaction(SIGTERM,&action,NULL); sigaction(SIGINT,&action,NULL);
   GError *error = NULL;
-  if (!gst_init_check(NULL,NULL,&error)) { if (error) g_error_free(error); return 1; }
+  if (!gst_init_check(NULL,NULL,&error)) {
+    report_pipeline_error("capture initialization failed", error);
+    if (error) g_error_free(error);
+    return 1;
+  }
   GstElement *pipeline = gst_parse_launchv((const gchar **)&argv[4], &error);
-  if (!pipeline || error) { if (pipeline) gst_object_unref(pipeline); if (error) g_error_free(error); return 1; }
+  if (!pipeline || error) {
+    report_pipeline_error("capture construction failed", error);
+    if (pipeline) gst_object_unref(pipeline);
+    if (error) g_error_free(error);
+    return 1;
+  }
   GstElement *display = gst_bin_get_by_name(GST_BIN(pipeline), "display");
   if (!display) { gst_object_unref(pipeline); return 1; }
   GstPad *pad = gst_element_get_static_pad(display,"src");
@@ -77,33 +111,42 @@ int main(int argc, char **argv) {
   atomic_store(&last_frame,0);
   const gint64 started = g_get_monotonic_time();
   int failed = gst_element_set_state(pipeline,GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE;
+  if (failed) {
+    report_failure("capture pipeline could not enter playing state");
+    drain_bus_failures(bus);
+  }
   gint64 window = g_get_monotonic_time(); unsigned events = 0;
   while (!stopping && !failed) {
     int result = poll(polls,4,100);
-    if (result < 0) { if (errno == EINTR) continue; failed=1; break; }
+    if (result < 0) { if (errno == EINTR) continue; report_failure("capture event polling failed"); failed=1; break; }
     const gint64 captured = atomic_load(&last_frame), checked = g_get_monotonic_time();
-    if ((captured && checked-captured > G_USEC_PER_SEC) ||
-        (!captured && checked-started > 15*G_USEC_PER_SEC)) { failed=1; break; }
+    if (captured && checked-captured > G_USEC_PER_SEC) {
+      report_failure("capture produced no frame within the one-second activity deadline");
+      drain_bus_failures(bus);
+      failed=1; break;
+    }
+    if (!captured && checked-started > 15*G_USEC_PER_SEC) {
+      report_failure("capture produced no first frame within the startup deadline");
+      drain_bus_failures(bus);
+      failed=1; break;
+    }
     if (polls[3].revents) {
-      GstMessage *message;
-      while ((message=gst_bus_pop(bus))) {
-        if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR || GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) failed=1;
-        gst_message_unref(message);
-      }
+      if (drain_bus_failures(bus)) failed=1;
     }
     for (int i=0;i<3 && !failed;++i) {
-      if (polls[i].revents & (POLLERR|POLLHUP|POLLNVAL)) { failed=1; break; }
+      if (polls[i].revents & (POLLERR|POLLHUP|POLLNVAL)) { report_failure("capture input descriptor became unavailable"); failed=1; break; }
       if (!(polls[i].revents & POLLIN)) continue;
       struct input_event batch[64]; ssize_t count = read(polls[i].fd,batch,sizeof(batch));
       if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-      if (count <= 0 || count % sizeof(batch[0])) { failed=1; break; }
+      if (count <= 0 || count % sizeof(batch[0])) { report_failure("capture input read failed or returned an incomplete event"); failed=1; break; }
       gint64 now=g_get_monotonic_time();
       if (now-window >= G_USEC_PER_SEC) { window=now; events=0; }
       events += count/sizeof(batch[0]);
       /* Bound work and the plugin command backlog if compositor delivery stops. */
-      if (events > 16384 || !captured || now-captured > G_USEC_PER_SEC) { failed=1; break; }
+      if (events > 16384) { report_failure("capture input exceeded the bounded event rate"); failed=1; break; }
+      if (!captured || now-captured > G_USEC_PER_SEC) { report_failure("capture input arrived without a recent frame"); failed=1; break; }
       for (size_t j=0;j<(size_t)count/sizeof(batch[0]);++j) {
-        if (!seat_input_event(&state[i],&batch[j],send_input,display)) { failed=1; break; }
+        if (!seat_input_event(&state[i],&batch[j],send_input,display)) { report_failure("capture input event or delivery was rejected"); failed=1; break; }
       }
     }
   }
