@@ -736,6 +736,53 @@ namespace {
     EXPECT_EQ(state->begins, 0U);
   }
 
+  TEST_F(MultiseatProfileHttp, HighRefreshProfileLaunchKeepsTheOtherSessionAtItsOwnRate) {
+    uninstall_profile_launch_service(service);
+    ASSERT_TRUE(service->shutdown(2s));
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t> {{"profile-a", "First", {"client-a"}},
+        {"profile-b", "Second", {"client-b"}}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    const auto other = launch("client-b");
+    ASSERT_TRUE(service->prepare(other).prepared());
+    ASSERT_TRUE(other->try_begin_setup_handoff());
+    ASSERT_TRUE(other->commit_setup_start());
+    nvhttp::args_t request {{"game", std::string(profile_app_uuid)}, {"width", "1920"}, {"height", "1080"},
+      {"fps", "120"}, {"client_max_fps", "120"}};
+    const auto resolved = nvhttp::resolve_profile_request(client, request);
+    ASSERT_TRUE(resolved);
+    ASSERT_EQ(resolved->status, 200);
+    const auto &fields = resolved->body["resolved_profile"]["fields"];
+    EXPECT_EQ(fields["display_mode"]["value"], "1920x1080x120");
+    EXPECT_EQ(fields["target_fps"]["value"], 120);
+    EXPECT_EQ(fields["target_fps"]["normalized"], false);
+    EXPECT_EQ(state->begins, 1U);
+
+    auto launch_args = args();
+    launch_args.erase("mode"); launch_args.emplace("mode", "1920x1080x120");
+    launch_args.emplace("workerProfile", *service->profile_for_client(client->uuid));
+    launch_args.emplace("resolvedProfile", "1"); launch_args.emplace("expectedTopology", "gamescope_stream");
+    launch_args.emplace("resolvedHdr", "0"); launch_args.emplace("bitrateKbps", "8000");
+    const auto launched = nvhttp::launch_profile_request(client, launch_args, false,
+      [](const auto &value) {
+        EXPECT_EQ(value->fps, 120000);
+        EXPECT_TRUE(value->worker_connection_requirement()->load());
+        return true;
+      });
+    ASSERT_TRUE(launched);
+    ASSERT_EQ(launched->status, 200);
+    ASSERT_TRUE(launched->launch);
+    ASSERT_TRUE(launched->launch->try_begin_setup_handoff());
+    ASSERT_TRUE(launched->launch->commit_setup_start());
+    const auto status = nvhttp::profile_session_status(client);
+    ASSERT_TRUE(status);
+    EXPECT_EQ(status->body["encoder"]["session_target_fps"], 120);
+    EXPECT_EQ(other->fps, 60000);
+    EXPECT_FALSE(other->is_cancelled());
+    launched->launch->cancel();
+    EXPECT_FALSE(other->is_cancelled());
+  }
+
   TEST_F(MultiseatProfileHttp, ResolverRejectsUnsupportedLocksAndMalformedRequests) {
     for (const auto &[key, value] : std::vector<std::pair<std::string, std::string>> {
       {"game", "host-game"}, {"encoder", "software"}, {"width", "1920.5"}, {"width", "nan"},

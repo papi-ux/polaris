@@ -95,6 +95,48 @@ All three profile volumes remained and policy cleanup completed. There were
 33 pending-audio messages, so this does not establish prolonged audio quality.
 The cause of the degraded wireless state and its recurrence remain unproven.
 
+A subsequent 1800 second dual-game observation used the same image and Nova
+build. Control and PEAK remained unpaused in loaded scenes with periodic bounded
+input. Both workers kept their identities and separate profile storage; sampled
+streams delivered approximately 60 FPS. Nova recorded no unrecoverable video
+frames or decoder watchdog flushes during that interval, but 272 pending-audio
+warnings remained. This was a scene stability observation, not continuous human
+gameplay or a combat workload benchmark.
+
+The RP6 seat then disconnected and relaunched at 1920x1080x120 while Control's
+original worker stayed at 60 FPS. Nova requested 120 FPS, the worker received
+120000 millihertz, and the Android decoder and surface used 120 FPS. A further
+300 second observation in PEAK's offline airport delivered 120 FPS in sampled
+overlays, with controller camera input and approximately 6 ms reported decode
+time. Control continued at approximately 60 FPS. All 59 worker inventory
+samples within that interval retained both identities.
+
+Nova logged no unrecoverable video frames, decoder watchdog flushes or pending
+audio warnings within those 300 seconds. Its complete 120 FPS connection still
+had 15 pending-audio warnings during other phases. The full connection delivered
+85120 video frames and 141866 audio frames with no worker discontinuities.
+This validates a short mixed refresh streaming observation; it does not establish unique game-rendered
+frames, sustained high refresh gameplay, two 120 FPS seats, or audio quality.
+The stream budget remained 4000 kbps, so maximum image quality was not tested.
+Both games exited through their normal menus. PEAK finished cloud sync; Control
+returned to a Steam account-in-use-elsewhere prompt, which was left untouched,
+so its cloud sync was not verified. The temporary host expired cleanly, all
+three profile homes remained, the prior Nova FPS preference was restored, and
+the original SELinux policy and normal service were verified.
+
+For a 120 FPS check, both Nova's requested frame rate and any paired-device
+display-mode override must permit 120. Confirm the resolved contract, worker
+refresh, decoder configuration and delivered frame rate. A panel running at
+120 Hz alone is insufficient because a 60 FPS stream can use the same mode.
+
+A separate 119 second host audio capture had no reported capture drops. It
+contained 23791 data packets and 11894 FEC packets, totaling about 336 kbps at
+the IP layer. Data packet gaps reached 54.919 ms, with two gaps over 40 ms.
+Capture-point timing includes host scheduling and does not establish delivery
+timing at the handheld or the cause of its audio backlog. The offline audio
+timing reader below makes that analysis reproducible without publishing raw
+captures.
+
 Nova Debug normally enables native FEC validation that intentionally requires
 an extra parity packet. Quality checks now explicitly disable that mode and
 verify the packaged native library. The earlier comparison that accidentally
@@ -573,3 +615,25 @@ archive URL in its lock entry; the existing January 20 snapshot inputs retain
 their versions and hashes. Offline installation against all four locked source
 roots and runtime package sets adds only WirePlumber: its library, Lua, and
 PipeWire dependencies are already covered. Final builds remain network-free.
+
+### Audio packet timing
+
+A private capture of one worker audio flow can be summarized offline:
+
+~~~sh
+python3 containers/multiseat/audio_packet_timing.py audio.pcap --source-port 48000
+~~~
+
+Use the audio source port from that test host and restrict the capture to one
+client destination. The reader accepts classic Ethernet PCAP with IPv4,
+including VLAN tags and captures truncated after the complete RTP header.
+It rejects incomplete records, fragmented UDP, mixed audio flows and backwards
+timestamps. Capture-tool drop counts must be checked separately.
+
+The summary separates data from audio FEC, measures packet intervals, and counts
+complete IP datagram bytes even when payload capture is truncated. It emits no
+addresses or payloads. Its bitrate includes IP, UDP, RTP, encryption and FEC
+overhead, but excludes Ethernet and wireless overhead. FEC packets are normally
+sent in groups, so their short intervals are distinct from data packet timing.
+These are measurements at the capture point; they do not establish receiver
+delivery, audible quality or end-to-end latency.
