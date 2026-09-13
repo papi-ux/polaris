@@ -799,6 +799,17 @@ namespace platf {
    */
   std::string capture_backend_substitution_note();
 
+  /**
+   * @brief Whether an evaluation ran and found no capture source at all.
+   * @return False before any evaluation has run, so this never reports an unlooked-for problem.
+   */
+  bool capture_sources_missing();
+
+  #ifdef POLARIS_TESTS
+  /// Drive the missing-capture state directly, so the reporting can be tested without a compositor.
+  void set_capture_sources_missing_for_tests(bool missing);
+  #endif
+
   #ifdef POLARIS_TESTS
   /// Set the substitution note directly, so the reporting can be tested without a compositor.
   void set_capture_backend_substitution_for_tests(const std::string &note);

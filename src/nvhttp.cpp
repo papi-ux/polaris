@@ -6137,7 +6137,7 @@ namespace nvhttp {
                              << launch_policy.physicalDisplayRisk;
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 409);
-          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.");
+          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close desktop Steam for private launches\" for this app so Polaris closes it for you, or retry with explicit desktop mirroring.");
           tree.put("root.error_code", "desktop_active_private_stream_refused");
           tree.put("root.gamesession", 0);
           return;
@@ -8527,7 +8527,7 @@ namespace nvhttp {
                              << " physical_display_risk="sv
                              << launch_policy.physicalDisplayRisk;
           nlohmann::json err;
-          err["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.";
+          err["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close desktop Steam for private launches\" for this app so Polaris closes it for you, or retry with explicit desktop mirroring.";
           err["error_code"] = "desktop_active_private_stream_refused";
           err["launchPolicy"] = launch_policy_json;
           SimpleWeb::CaseInsensitiveMultimap headers;

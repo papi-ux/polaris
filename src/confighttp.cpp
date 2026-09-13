@@ -5661,7 +5661,7 @@ namespace confighttp {
             nlohmann::json error_tree;
             error_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_conflict);
             error_tree["status"] = false;
-            error_tree["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.";
+            error_tree["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close desktop Steam for private launches\" for this app so Polaris closes it for you, or retry with explicit desktop mirroring.";
             error_tree["error_code"] = "desktop_active_private_stream_refused";
             error_tree["launchPolicy"] = launch_policy_json;
             conflict_response(response, error_tree);

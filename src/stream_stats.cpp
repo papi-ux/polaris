@@ -754,6 +754,24 @@ namespace stream_stats {
 
     nlohmann::json configuration_warnings = nlohmann::json::array();
 #ifdef __linux__
+    // No capture at all. Polaris logs this fatally at startup and then carries on serving, so a
+    // host in this state pairs normally, accepts launches and advertises H.264 as the only codec
+    // it has, while Doctor reports nothing. The log line is the only trace and it scrolls past
+    // once, at boot, which is the worst possible place for it.
+    if (platf::capture_sources_missing()) {
+      configuration_warnings.push_back({
+        {"id", "no_capture_backend"},
+        {"severity", "fail"},
+        {"message", "This host has no working capture backend, so no encoder could be probed and "
+                    "it is advertising H.264 as the only codec it has. Streams will connect and "
+                    "look far worse than this hardware can manage, or fail outright."},
+        {"action", "Check the capture setting against the stream mode. Capture backends are not "
+                   "interchangeable across compositors: wlr needs the wlroots capture protocols, "
+                   "which KDE and GNOME do not have. Leaving capture unset lets Polaris pick one "
+                   "that works. The startup log names the protocol that was missing."}
+      });
+    }
+
     // The configured capture backend could not capture anything and Polaris used another one.
     // Without this the only trace is a warning in the middle of startup, while the host goes on
     // serving with a backend nobody chose.
