@@ -30,10 +30,18 @@ output's exact event node; device creation stays on the host.
 
 The translated output currently supports one controller per Steam seat. Software
 tests cover both library ABIs, private broker admission, controller release, and
-Docker device reconciliation. PEAK with Steam Input enabled, Steam runtime
-library propagation, rumble, and coexistence with games that disable Steam Input
-still require physical acceptance. Existing game overrides and profile storage
-are preserved.
+Docker device reconciliation.
+
+On 2026-09-13, the Steam NVIDIA Docker image built from
+`4eec5ced8392ce98ff405fbe3c5cbcab6a13746e` passed a bounded PEAK DX12
+controller smoke through Nova on an RP6. Automated events on the RP6 controller
+device exercised movement, camera control, menu navigation, and pause/resume with
+Steam Input both enabled and disabled. The compatibility libraries loaded in
+Steam and Proton, and the original Enable Steam Input override was restored.
+This is controller-path evidence for one seat. Rumble, AMD hardware, independent
+simultaneous gameplay, and sustained streaming quality still require acceptance;
+intermittent slow-connection warnings occurred during this run. Existing game
+overrides and profile storage are preserved.
 
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
