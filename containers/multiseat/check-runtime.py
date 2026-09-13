@@ -48,6 +48,16 @@ if sys.argv[1:] in (['--worker'], ['--nvidia']):
                           ['session-bus', 'audio', 'display-capture', 'nested-compositor', 'virtual-input', 'launcher', 'encoder', 'encode-media']]
 elif sys.argv[1:]:
     raise ValueError('unknown dependency check scope')
+steam_libraries = []
+if profile == 'steam' and sys.argv[1:] in (['--worker'], ['--nvidia']):
+    for triplet, elf_class, machine in [('x86_64-linux-gnu', 2, 62), ('i386-linux-gnu', 1, 3)]:
+        library = pathlib.Path('/usr/lib') / triplet / 'libpolaris-steam-input.so'
+        header = library.read_bytes()[:20]
+        if (len(header) != 20 or header[:6] != bytes([127, 69, 76, 70, elf_class, 1]) or
+                int.from_bytes(header[18:20], 'little') != machine or not os.access(library, os.X_OK)):
+            raise ValueError('Steam input library ABI or permissions are invalid')
+        steam_libraries.append(library)
+    files += steam_libraries
 hardware_libraries = []
 if '--nvidia' in sys.argv:
     hardware_libraries = [pathlib.Path('/usr/lib/x86_64-linux-gnu') / name for name in
@@ -65,7 +75,7 @@ for path in files:
         raise ValueError('untrusted provider dependency: ' + str(path))
     if (path.parent == pathlib.Path('/usr/bin') or path.is_relative_to('/usr/libexec/polaris-seat')) and not os.access(path, os.X_OK):
         raise ValueError('non-executable provider dependency: ' + str(path))
-for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if any(arg in sys.argv for arg in ('--worker', '--nvidia')) else []) + hardware_libraries:
+for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if any(arg in sys.argv for arg in ('--worker', '--nvidia')) else []) + hardware_libraries + steam_libraries:
     linked = subprocess.check_output(['ldd', '-r', str(path)], text=True, stderr=subprocess.STDOUT)
     if 'not found' in linked or 'undefined symbol:' in linked:
         raise ValueError('unresolved ELF dependency: ' + str(path) + '\n' + linked)

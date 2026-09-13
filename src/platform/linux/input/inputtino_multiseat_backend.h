@@ -30,6 +30,7 @@ namespace multiseat::input {
     touch,
     pen,
     gamepad,
+    steam_gamepad,
   };
 
   struct expected_event_node_t {

@@ -45,8 +45,28 @@ RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
 
 # Native acceptance workload uses the same pinned compiler and ABI closure.
 FROM runtime-root-build AS workload-build
+ARG RUNTIME_PROFILE=gamescope
 COPY containers/multiseat/workloads/input-pong.c /workloads/input-pong.c
 COPY containers/multiseat/providers /providers
+# Steam uses both ELF ABIs. Both libraries pass the same real preload test.
+RUN mkdir -p /out/steam-input && \
+    if test "$RUNTIME_PROFILE" = steam; then \
+      for abi in 64 32; do \
+        triplet=x86_64-linux-gnu; if test "$abi" = 32; then triplet=i386-linux-gnu; fi; \
+        directory=/out/steam-input/usr/lib/$triplet; mkdir -p "$directory"; \
+        cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared \
+          -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+          /providers/steam-input.c -o "$directory/libpolaris-steam-input.so" -pthread -ldl \
+          -Wl,--no-as-needed -l:libdl.so.2 -l:libpthread.so.0 -Wl,--as-needed && \
+        cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror \
+          -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+          /providers/test-steam-input.c -o /out/test-steam-input-$abi -pthread && \
+        python3 /providers/test-steam-input.py /out/test-steam-input-$abi \
+          "$directory/libpolaris-steam-input.so" || exit 1; \
+        chmod 0555 "$directory/libpolaris-steam-input.so"; \
+      done; \
+    fi
+
 RUN mkdir -p /out && cc -std=c11 -O2 -Wall -Wextra -Werror \
       -ffile-prefix-map=/workloads=. -Wl,--build-id=none \
       /workloads/input-pong.c -o /out/input-pong-v1 \
@@ -214,6 +234,7 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.description="Isolated Polaris multiseat worker" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
       io.polaris.multiseat.architecture="linux/amd64"
+COPY --from=workload-build /out/steam-input/ /
 COPY --from=workload-build --chmod=0555 /out/encode-media /usr/libexec/polaris-seat/encode-media
 COPY --from=workload-build --chmod=0555 /out/encoded-game-check /usr/libexec/polaris-seat/encoded-game-check
 COPY --from=workload-build --chmod=0555 /out/encoded-audio-check /usr/libexec/polaris-seat/encoded-audio-check

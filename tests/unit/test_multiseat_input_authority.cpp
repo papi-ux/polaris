@@ -78,6 +78,9 @@ namespace {
     for (std::uint32_t slot = 0; slot < plan.gamepad_slots; ++slot) {
       result.emplace_back(device_kind_e::gamepad, slot);
     }
+    if (plan.steam_input) {
+      result.emplace_back(device_kind_e::steam_gamepad, 0);
+    }
     return result;
   }
 
@@ -97,7 +100,9 @@ namespace {
         .kind = kind,
         .slot = slot,
         .host_path = "/dev/input/event" + std::to_string(minor < 96 ? minor - 64 : minor),
-        .worker_path = multiseat::input::expected_worker_path(kind, slot),
+        .worker_path = kind == device_kind_e::steam_gamepad ?
+                         std::filesystem::path {"/dev/input/event" + std::to_string(minor < 96 ? minor - 64 : minor)} :
+                         multiseat::input::expected_worker_path(kind, slot),
         .filesystem_device = 41,
         .inode = 10000 + minor,
         .character_major = 13,
@@ -301,6 +306,34 @@ namespace {
     EXPECT_FALSE(multiseat::input::valid_plan({
       .gamepad_slots = maximum_gamepad_slots + 1,
     }));
+  }
+
+  TEST(MultiseatInputAuthority, SteamOutputRequiresPermissionAndExactGenerationDevice) {
+    EXPECT_FALSE(multiseat::input::valid_plan({.gamepad_slots = 0, .steam_input = true}));
+    EXPECT_FALSE(multiseat::input::valid_plan({.gamepad_slots = 2, .steam_input = true}));
+    const auto expectation = expectation_for(0, 70, {.steam_input = true});
+    const auto canonical = allocation_for(expectation, 64);
+    ASSERT_EQ(canonical.nodes.size(), 5U);
+    EXPECT_TRUE(multiseat::input::valid_allocation(canonical, expectation));
+    EXPECT_EQ(canonical.nodes.back().worker_path, "/dev/input/event4");
+    auto invalid = canonical;
+    invalid.nodes.back().worker_path = "/dev/input/event5";
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
+    invalid.nodes.back().host_path = "/dev/uinput";
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
+    invalid.nodes.back().worker_path = "/dev/input/polaris-gamepad-0";
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    invalid = canonical;
+    invalid.nodes.back() = allocation_for(expectation_for(1, 71, {.steam_input = true}), 74).nodes.back();
+    EXPECT_FALSE(multiseat::input::valid_allocation(invalid, expectation));
+    auto denied = expectation;
+    denied.plan.steam_input = false;
+    EXPECT_FALSE(multiseat::input::valid_allocation(canonical, denied));
+    auto ordinary = allocation_for(denied, 64);
+    ordinary.nodes[3].worker_path = ordinary.nodes[3].host_path;
+    EXPECT_FALSE(multiseat::input::valid_allocation(ordinary, denied));
   }
 
   TEST(MultiseatInputAuthority, ReconciliationGatesPreparationAndPrepareIsIdempotent) {

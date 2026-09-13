@@ -130,6 +130,51 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	if err != nil {
 		return err
 	}
+	var steamBroker *steamInputBroker
+	var steamDone <-chan struct{}
+	if request.WorkloadKind == seatruntime.WorkloadSteam {
+		path, _, err := inputs.SteamOutput()
+		if err != nil {
+			return err
+		}
+		if path != "" {
+			for _, library := range []string{
+				"/usr/lib/x86_64-linux-gnu/libpolaris-steam-input.so",
+				"/usr/lib/i386-linux-gnu/libpolaris-steam-input.so",
+			} {
+				file, err := openTrustedExecutable(library, options.executableOwnerUID)
+				if err != nil {
+					return err
+				}
+				_ = file.Close()
+			}
+			sysname, err := inputs.SteamOutputSysname()
+			if err != nil {
+				return err
+			}
+			output, err := inputs.SteamOutputWriter()
+			if err != nil {
+				return err
+			}
+			defer output.Close()
+			socket := filepath.Join(runtime.path, "polaris-steam-input.sock")
+			steamBroker, err = startSteamInputBroker(parent, socket, options.runtimeOwnerUID, func(state steamInputState) error {
+				events := steamInputEvents(state)
+				n, err := output.Write(events)
+				if err != nil || n != len(events) {
+					return errors.New("Steam output device write failed")
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			defer func() { result = errors.Join(result, steamBroker.close()) }()
+			steamDone = steamBroker.done
+			environment = append(environment, "LD_PRELOAD=libpolaris-steam-input.so",
+				"POLARIS_STEAM_INPUT_SOCKET="+socket, "POLARIS_STEAM_INPUT_SYSNAME="+sysname)
+		}
+	}
 	if err := parent.Err(); err != nil {
 		return err
 	}
@@ -176,12 +221,22 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 		select {
 		case <-parent.Done():
 			return nil
+		case <-steamDone:
+			if parent.Err() != nil {
+				return nil
+			}
+			return errors.Join(errors.New("Steam input broker stopped"), steamBroker.verify())
 		case <-primaryDone:
 			primaryDone = nil
 			if alive, err := launcherDescendantsAlive(command.retainDescendants); err != nil || !alive {
 				return err
 			}
 		case <-ticker.C:
+			if steamBroker != nil {
+				if err := steamBroker.verify(); err != nil {
+					return err
+				}
+			}
 			if primaryDone == nil {
 				if alive, err := launcherDescendantsAlive(command.retainDescendants); err != nil || !alive {
 					return err

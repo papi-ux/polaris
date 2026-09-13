@@ -65,6 +65,8 @@ namespace multiseat {
           .touch = false,
           .pen = false,
           .gamepad_slots = (launch->perm & crypto::PERM::input_controller) == crypto::PERM::_no ? 0U : 1U,
+          .steam_input = admitted.admission.seat->runtime_profile == runtime_profile_e::steam &&
+            (launch->perm & crypto::PERM::input_controller) != crypto::PERM::_no,
         };
         if (runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch") != mutation_result_e::applied ||
             !runtime_->start_seat(handle, plan).started()) return {};

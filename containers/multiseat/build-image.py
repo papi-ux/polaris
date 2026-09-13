@@ -121,6 +121,11 @@ def sbom(packages, profile, revision, context):
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
+    if profile == 'steam':
+        name = 'steam-input.c'
+        components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
+                           'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
+                           'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
     for line in packages.splitlines():
         name, version, architecture = line.split('\t')
         purl = 'pkg:deb/ubuntu/' + urllib.parse.quote(name, safe='') + '@' + urllib.parse.quote(version, safe='') + '?arch=' + architecture

@@ -56,6 +56,8 @@ namespace multiseat::input {
           return "pen";
         case device_kind_e::gamepad:
           return "gamepad";
+        case device_kind_e::steam_gamepad:
+          return "steam-gamepad";
       }
       return {};
     }
@@ -74,6 +76,8 @@ namespace multiseat::input {
           return "pen";
         case device_kind_e::gamepad:
           return "gamepad";
+        case device_kind_e::steam_gamepad:
+          return "steam-gamepad";
       }
       return {};
     }
@@ -150,6 +154,9 @@ namespace multiseat::input {
       }
       for (std::uint32_t slot = 0; slot < plan.gamepad_slots; ++slot) {
         nodes.emplace_back(device_kind_e::gamepad, slot);
+      }
+      if (plan.steam_input) {
+        nodes.emplace_back(device_kind_e::steam_gamepad, 0);
       }
       return nodes;
     }
@@ -238,7 +245,8 @@ namespace multiseat::input {
   }  // namespace
 
   bool valid_plan(const plan_t &plan) {
-    return plan.gamepad_slots <= maximum_gamepad_slots;
+    return plan.gamepad_slots <= maximum_gamepad_slots &&
+           (!plan.steam_input || plan.gamepad_slots == 1);
   }
 
   std::filesystem::path expected_worker_path(
@@ -266,6 +274,10 @@ namespace multiseat::input {
         return slot == 0 ?
                  std::filesystem::path {"/dev/input/polaris-pen"} :
                  std::filesystem::path {};
+      case device_kind_e::steam_gamepad:
+        // Reserved planning alias. Once bound, this output alone retains its
+        // exact host eventN path so Proton can resolve the sysfs device.
+        return slot == 0 ? std::filesystem::path {"/dev/input/polaris-steam-gamepad-0"} : std::filesystem::path {};
       case device_kind_e::gamepad:
         if (slot < maximum_gamepad_slots) {
           return "/dev/input/polaris-gamepad-" + std::to_string(slot);
@@ -283,11 +295,11 @@ namespace multiseat::input {
     if (!valid_name_token(input_seat) || expected_worker_path(kind, slot).empty()) {
       return {};
     }
-    const auto prefix = kind == device_kind_e::gamepad ?
+    const auto prefix = (kind == device_kind_e::gamepad || kind == device_kind_e::steam_gamepad) ?
                           gamepad_phys_prefix : input_phys_prefix;
     auto result = std::string {prefix} + std::string {input_seat} + "/" +
                   std::string {kind_name(kind)};
-    if (kind == device_kind_e::gamepad) {
+    if (kind == device_kind_e::gamepad || kind == device_kind_e::steam_gamepad) {
       result += "/" + std::to_string(slot);
     }
     return result;
@@ -330,7 +342,7 @@ namespace multiseat::input {
     }
     auto result = std::string {multiseat_kernel_device_prefix} + *digest + " " +
                   std::string {role};
-    if (kind == device_kind_e::gamepad) {
+    if (kind == device_kind_e::gamepad || kind == device_kind_e::steam_gamepad) {
       result += "-" + std::to_string(slot);
     }
     return result.size() <= maximum_kernel_device_name_bytes ? result : std::string {};
@@ -359,7 +371,8 @@ namespace multiseat::input {
     for (std::size_t index = 0; index < required.size(); ++index) {
       const auto &[expected_kind, expected_slot] = required[index];
       const auto &node = allocation.nodes[index];
-      const auto worker_path = expected_worker_path(expected_kind, expected_slot);
+      const auto worker_path = expected_kind == device_kind_e::steam_gamepad ?
+                                 node.host_path : expected_worker_path(expected_kind, expected_slot);
       const auto event_number = canonical_event_number(node.host_path);
       const auto expected_node_phys = expected_phys(
         expectation.input_seat,

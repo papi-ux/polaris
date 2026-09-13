@@ -20,6 +20,21 @@ owns the controller when explicitly enabled; production activation defaults off.
 
 Building these images does not enable multiseat in the running Polaris service.
 
+Steam images also build and test 32-bit and 64-bit controller compatibility
+libraries from Polaris source. With controller permission, a Steam seat receives
+one raw controller and one separately allocated Steam translation output. The
+launcher verifies both libraries and the exact output identity before starting
+Steam. Its private broker accepts bounded controller reports, releases held
+controls on disconnect, and retires with the seat. The container receives the
+output's exact event node; device creation stays on the host.
+
+The translated output currently supports one controller per Steam seat. Software
+tests cover both library ABIs, private broker admission, controller release, and
+Docker device reconciliation. PEAK with Steam Input enabled, Steam runtime
+library propagation, rumble, and coexistence with games that disable Steam Input
+still require physical acceptance. Existing game overrides and profile storage
+are preserved.
+
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
 each receive an offline runtime dependency stage, a Wayland GStreamer plugin

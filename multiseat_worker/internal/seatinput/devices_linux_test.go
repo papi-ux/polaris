@@ -71,7 +71,7 @@ func TestConsumerLifetimeRemainsRetiredAfterReap(t *testing.T) {
 }
 
 func TestRolesRejectAmbientDevicesAndNoncanonicalSlots(t *testing.T) {
-	for _, name := range []string{"event0", "js0", "mouse0", "polaris-gamepad-00", "polaris-gamepad-16", "polaris-gamepad-+1", "../polaris-keyboard", "polaris-gamepad-0/child"} {
+	for _, name := range []string{"event00", "event32", "event255", "js0", "mouse0", "polaris-gamepad-00", "polaris-gamepad-16", "polaris-gamepad-+1", "../polaris-keyboard", "polaris-gamepad-0/child"} {
 		if _, ok := deviceRole(name); ok {
 			t.Fatalf("accepted %q", name)
 		}
@@ -159,5 +159,37 @@ func TestCompositorDescriptorRolesAreOrderedAndUnsupportedRolesRejected(t *testi
 			t.Fatal("unsupported role accepted")
 		}
 		s.devices = s.devices[:len(s.devices)-1]
+	}
+}
+
+func TestSteamOutputCanonicalNumberAndGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		minor uint64
+	}{
+		{"event0", 64}, {"event31", 95}, {"event256", 256}, {"event300", 300},
+	} {
+		minor, ok := eventMinor(test.name)
+		if !ok || minor != test.minor {
+			t.Fatal(test)
+		}
+		role, ok := deviceRole(test.name)
+		if !ok || !role.steamOutput || role.compositor {
+			t.Fatal(role)
+		}
+		name, phys := expectedIdentity("input-seat-test", role)
+		if name != "Polaris multiseat 5753eb36944ebc0919a26d97732be17e steam-gamepad-0" ||
+			phys != "polaris/client-gamepad-seat-isolated/input-seat-test/steam-gamepad/0" {
+			t.Fatal(name, phys)
+		}
+		other, _ := expectedIdentity("another-seat", role)
+		if other == name {
+			t.Fatal("output aliases another seat")
+		}
+	}
+	for _, bad := range []string{"event32", "event95", "event255", "event01", "event-1", "event4294967296", "../event0"} {
+		if _, ok := eventMinor(bad); ok {
+			t.Fatal(bad)
+		}
 	}
 }

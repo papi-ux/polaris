@@ -2737,6 +2737,52 @@ TEST(MultiseatDockerBackend, LaunchUsesNonRootIdentityExactDevicesAndDockerSuppo
   }
 }
 
+TEST(MultiseatDockerBackend, SteamOutputMountAndRecoveryRemainBoundToTheAllocatedGeneration) {
+  using multiseat::input::device_kind_e;
+  using multiseat::input::expected_kernel_name;
+  using multiseat::input::expected_phys;
+  const auto spec = valid_spec();
+  auto allocation = input_allocation_for(spec.identity.seat);
+  allocation.plan.steam_input = true;
+  auto output = allocation.nodes.back();
+  output.kind = device_kind_e::steam_gamepad;
+  output.host_path = "/dev/input/event14";
+  output.worker_path = output.host_path;
+  output.character_minor = 78;
+  output.inode = 10078;
+  output.kernel_name = expected_kernel_name(allocation.input_seat, output.kind, 0);
+  output.phys = expected_phys(allocation.input_seat, output.kind, 0);
+  allocation.nodes.push_back(output);
+  const auto fingerprint = multiseat::container::input_manifest_fingerprint(allocation);
+  ASSERT_TRUE(fingerprint);
+  fake_host_t host;
+  host.accessible_devices[output.host_path.native()] = device_identity(13, 78);
+  fake_input_manifest_source_t inputs;
+  inputs.replacement_after_call = 1;
+  inputs.replacement = allocation;
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+  ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
+  EXPECT_TRUE(has_argument(host.calls.back(), "--device=/dev/input/event14:/dev/input/event14:rw"));
+  EXPECT_FALSE(any_argument_contains(host.calls.back(), "/dev/uinput"));
+  EXPECT_FALSE(any_argument_contains(host.calls.back(), "/dev/uhid"));
+  auto record = docker_container_for(spec, first_id);
+  record["Config"]["Labels"]["io.polaris.multiseat.input-manifest"] = *fingerprint;
+  record["HostConfig"]["Devices"].push_back({
+    {"PathOnHost", "/dev/input/event14"}, {"PathInContainer", "/dev/input/event14"}, {"CgroupPermissions", "rw"}});
+  queue_docker_inventory(host, {record});
+  EXPECT_EQ(backend.inventory().size(), 1U);
+  record["HostConfig"]["Devices"].back()["PathInContainer"] = "/dev/input/event15";
+  queue_docker_inventory(host, {record});
+  EXPECT_THROW(backend.inventory(), std::runtime_error);
+  record["HostConfig"]["Devices"].back()["PathInContainer"] = "/dev/input/event14";
+  inputs.replacement->nodes.back().kernel_name = expected_kernel_name("different-generation", output.kind, 0);
+  queue_docker_inventory(host, {record});
+  EXPECT_THROW(backend.inventory(), std::runtime_error);
+}
+
 TEST(MultiseatDockerBackend, MediaRequiresAnExplicitSupportedWorkerAllocation) {
   auto options = docker_options_for_tests();
   EXPECT_FALSE(options.media_enabled);

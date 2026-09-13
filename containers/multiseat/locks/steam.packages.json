@@ -4281,6 +4281,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-15/gcc-15-base_15.2.0-16ubuntu1_amd64.deb"
     },
     {
+      "name": "gcc-15-multilib",
+      "version": "15.2.0-16ubuntu1",
+      "architecture": "amd64",
+      "filename": "gcc-15-multilib_15.2.0-16ubuntu1_amd64.deb",
+      "sha256": "a10636760fc3e3025e9f72843fe2feda568a42bc8782aa4808515d9814956317",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-15/gcc-15-multilib_15.2.0-16ubuntu1_amd64.deb"
+    },
+    {
       "name": "gcc-15-x86-64-linux-gnu",
       "version": "15.2.0-16ubuntu1",
       "architecture": "amd64",
@@ -4295,6 +4303,14 @@
       "filename": "gcc-16-base_16-20260322-1ubuntu1_i386.deb",
       "sha256": "720505101aab4d8c1df11ee998e86d00d967bb174b746d665c40a1a32bccf5d2",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/gcc-16-base_16-20260322-1ubuntu1_i386.deb"
+    },
+    {
+      "name": "gcc-multilib",
+      "version": "4:15.2.0-5ubuntu1",
+      "architecture": "amd64",
+      "filename": "gcc-multilib_4%3a15.2.0-5ubuntu1_amd64.deb",
+      "sha256": "64c1bec26e94f52229a182319094f3b7cef792f2de8058a95ee4b1046fb6fa19",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-defaults/gcc-multilib_15.2.0-5ubuntu1_amd64.deb"
     },
     {
       "name": "gcc-x86-64-linux-gnu",
@@ -4503,6 +4519,78 @@
       "filename": "iso-codes_4.20.1-1_all.deb",
       "sha256": "7df9871f8f18c779cca92b04c87f6e727f4e11caa3bf0f233ff7d10a9ad2bb0d",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/i/iso-codes/iso-codes_4.20.1-1_all.deb"
+    },
+    {
+      "name": "lib32asan8",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32asan8_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "7c768b000220083d15c65accb66e3ab310834b489b6445b8c359715cb584413c",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32asan8_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32atomic1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32atomic1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "88181ff14b92bb0c5409be05b2663a0bb45df53221325cfa0c36ea522f522c9c",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32atomic1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32gcc-15-dev",
+      "version": "15.2.0-16ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32gcc-15-dev_15.2.0-16ubuntu1_amd64.deb",
+      "sha256": "8b25c4ac3dc9bd040d0f77f3dc9b72549f3b6fbed4e55138bd51994f9895518d",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-15/lib32gcc-15-dev_15.2.0-16ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32gcc-s1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32gcc-s1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "65aa3967807849071674146a8237c3a44393dfca10722f9d7d8e80c8831de8aa",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32gcc-s1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32gomp1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32gomp1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "fb01c5590fe5a6bb49088601cd921a9b4bce92e31b546a276ddc7d78c003401c",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32gomp1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32itm1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32itm1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "f3a54a348ea1cc37bed471aaf833ed02b93ba8fd94e552e0ef4479508ee77d4c",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32itm1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32quadmath0",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32quadmath0_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "08d51261b4f20b671725ec7bf2a5e4299fc0c1c2135f611acc2fce51771f04e7",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32quadmath0_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32stdc++6",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32stdc++6_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "cb56910e76ae4bff697391e2224bc8e8edda93ca5117b26e8f9a6118f2c0cd27",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32stdc%2b%2b6_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "lib32ubsan1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "lib32ubsan1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "b626877acdb3592dc2294696d28caf2bd4a786992e375e9d5e62d26af150b453",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/lib32ubsan1_16-20260322-1ubuntu1_amd64.deb"
     },
     {
       "name": "libaa1",
@@ -4775,6 +4863,38 @@
       "filename": "libc6-dev_2.43-2ubuntu2.4_amd64.deb",
       "sha256": "17bb816a65a25c3416854eef7e9cc6d9a3761f45bad0d44e49bc676b7bab1769",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc6-dev_2.43-2ubuntu2.4_amd64.deb"
+    },
+    {
+      "name": "libc6-dev-i386",
+      "version": "2.43-2ubuntu2.4",
+      "architecture": "amd64",
+      "filename": "libc6-dev-i386_2.43-2ubuntu2.4_amd64.deb",
+      "sha256": "014284cc94c384fec7c6faf4559824d21fd0febdac5482415a3a601ea6656331",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc6-dev-i386_2.43-2ubuntu2.4_amd64.deb"
+    },
+    {
+      "name": "libc6-dev-x32",
+      "version": "2.43-2ubuntu2.4",
+      "architecture": "amd64",
+      "filename": "libc6-dev-x32_2.43-2ubuntu2.4_amd64.deb",
+      "sha256": "c4a9014de332436ddfe37c2bfca0f3aa7b6ec11a94ffcdc4d375b4c9c9185cb5",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc6-dev-x32_2.43-2ubuntu2.4_amd64.deb"
+    },
+    {
+      "name": "libc6-i386",
+      "version": "2.43-2ubuntu2.4",
+      "architecture": "amd64",
+      "filename": "libc6-i386_2.43-2ubuntu2.4_amd64.deb",
+      "sha256": "03c4702b069d9e6549df388d38f73cab5270ad3d2b1e7569e0b93c6a3d752816",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc6-i386_2.43-2ubuntu2.4_amd64.deb"
+    },
+    {
+      "name": "libc6-x32",
+      "version": "2.43-2ubuntu2.4",
+      "architecture": "amd64",
+      "filename": "libc6-x32_2.43-2ubuntu2.4_amd64.deb",
+      "sha256": "9f4441958daff34e104841478dd242728802e1f84737b0d2166cf0c86150c237",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc6-x32_2.43-2ubuntu2.4_amd64.deb"
     },
     {
       "name": "libcaca0",
@@ -7903,6 +8023,78 @@
       "filename": "libx265-215_4.1-4_amd64.deb",
       "sha256": "42119a16e5382db41fa96ad779b0dc5771dce0f0d2109047132607ccd2be9ba3",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/universe/x/x265/libx265-215_4.1-4_amd64.deb"
+    },
+    {
+      "name": "libx32asan8",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32asan8_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "b03b6686021160fa1bd62dd491e3c8f854c4909c423b7aa1d88159f363a499f9",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32asan8_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32atomic1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32atomic1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "07ea29be37cf0b19918ae904eb5be6fa134ddd1f900248409e086b29e9882e1b",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32atomic1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32gcc-15-dev",
+      "version": "15.2.0-16ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32gcc-15-dev_15.2.0-16ubuntu1_amd64.deb",
+      "sha256": "2ee8362b1adb431f40224feb916398734c0b9895950fe6aeac449f1bee769362",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-15/libx32gcc-15-dev_15.2.0-16ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32gcc-s1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32gcc-s1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "63a6803843941fedf606283fb8fb4cc43d71713793c403671763a590767dec25",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32gcc-s1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32gomp1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32gomp1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "9d051efe8283eddbce551f37bc664777158721b044931b5b308622ce1c190196",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32gomp1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32itm1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32itm1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "9001de698a36be361d8ff7e22d5adb0b1d3bb867c8dddd545cf21e2c08375b11",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32itm1_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32quadmath0",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32quadmath0_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "a900201cc1d530ffce70068db582380b5441152a7ebce01491088702c5a1d7cb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32quadmath0_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32stdc++6",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32stdc++6_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "673e85d2bf0aae72cea01fe24c0b88febd2a00caeb684c8bbe5c237363adf101",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32stdc%2b%2b6_16-20260322-1ubuntu1_amd64.deb"
+    },
+    {
+      "name": "libx32ubsan1",
+      "version": "16-20260322-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "libx32ubsan1_16-20260322-1ubuntu1_amd64.deb",
+      "sha256": "acacc379086912f8139c25f9ab891f599e32978533d6d89d00ad4516177ed91d",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gcc-16/libx32ubsan1_16-20260322-1ubuntu1_amd64.deb"
     },
     {
       "name": "libxau-dev",

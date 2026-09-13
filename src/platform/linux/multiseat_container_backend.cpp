@@ -701,6 +701,9 @@ namespace multiseat::container {
     append_fingerprint_integer(record, allocation.plan.touch ? 1 : 0);
     append_fingerprint_integer(record, allocation.plan.pen ? 1 : 0);
     append_fingerprint_integer(record, allocation.plan.gamepad_slots);
+    if (allocation.plan.steam_input) {
+      append_fingerprint_field(record, "steam-input-output-v1");
+    }
     append_fingerprint_integer(record, allocation.nodes.size());
     for (const auto &node : allocation.nodes) {
       append_fingerprint_integer(record, static_cast<unsigned int>(node.kind));
