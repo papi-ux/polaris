@@ -4350,7 +4350,7 @@ namespace nvhttp {
       const bool worker_contract = args.contains("workerProfile") &&
         get_arg(args, "resolvedProfile", "0") == "1" &&
         get_arg(args, "expectedTopology", "") == "gamescope_stream" &&
-        get_arg(args, "resolvedHdr", "") == "0" && get_arg(args, "bitrateKbps", "") == "8000";
+        get_arg(args, "resolvedHdr", "") == "0" && args.count("bitrateKbps") == 1;
       if ((!worker_contract && get_arg(args, "resolvedProfile", "0") != "0") ||
           (args.contains("workerProfile") && !worker_contract) || get_arg(args, "hdrMode", "0") != "0" ||
           get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder")) return nullptr;
@@ -4378,6 +4378,13 @@ namespace nvhttp {
           *height < 240 || *height > 2160 || *height % 2 || *rate <= 0 || *rate > 240000) return nullptr;
       const auto fps = *rate < 1000 ? *rate * 1000 : *rate;
       if (fps > 240000 || fps % 1000 != 0) return nullptr;
+      const auto bitrate = integer(get_arg(args, "bitrateKbps", "8000"));
+      if (!bitrate || *bitrate == 0 || *bitrate > 8000 || args.count("bitrateKbps") > 1) return nullptr;
+      launch_session->target_bitrate_kbps = *bitrate;
+      if (named_cert_p->target_bitrate_kbps > 0)
+        launch_session->target_bitrate_kbps = std::min(*launch_session->target_bitrate_kbps, named_cert_p->target_bitrate_kbps);
+      if (config::video.max_bitrate > 0)
+        launch_session->target_bitrate_kbps = std::min(*launch_session->target_bitrate_kbps, config::video.max_bitrate);
       const auto surround = integer(get_arg(args, "surroundAudioInfo", "196610"));
       if (!surround || (*surround & 0xffff) != 2 || !get_arg(args, "surroundParams", "").empty()) return nullptr;
       launch_session->width = launch_session->requested_width = *width;
@@ -5036,7 +5043,9 @@ namespace nvhttp {
       {"capture", {{"backend", "worker"}, {"resolution", session.active ?
         std::to_string(session.width) + "x" + std::to_string(session.height) : ""}}},
       {"encoder", {{"active_backend", "unknown"}, {"effective_backend", "unknown"}, {"codec", "h264"},
-        {"bitrate_kbps", session.active ? 8000 : 0}, {"session_target_fps", session.fps}}},
+        // The profile snapshot does not measure encoder bitrate. Publish the
+        // capability separately rather than presenting its ceiling as telemetry.
+        {"bitrate_kbps", 0}, {"bitrate_ceiling_kbps", 8000}, {"session_target_fps", session.fps}}},
       {"health", {{"grade", "unknown"}, {"summary", "Profile performance diagnostics are not available yet."}}},
       {"live_tuning", nullptr}
     };
@@ -5108,7 +5117,7 @@ namespace nvhttp {
       if ((hdr != 0 && hdr != 1) || (display_locked != 0 && display_locked != 1) ||
           (bitrate_locked != 0 && bitrate_locked != 1) || width != std::floor(width) ||
           height != std::floor(height) || width < 320 || width > 4096 || height < 240 || height > 2160 ||
-          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < 1000 || bitrate > 300000)
+          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < 1000 || bitrate > 300000 || bitrate != std::floor(bitrate))
         return reject(400, "Unsupported profile stream limits");
       if (!current->display_mode.empty()) {
         std::istringstream input(current->display_mode);
@@ -5128,9 +5137,15 @@ namespace nvhttp {
         width = std::floor(width / 2) * 2; height = std::floor(height / 2) * 2;
         fps = std::min(std::floor(fps + .5), std::floor(ceiling + .5));
       }
-      if ((display_locked && (width != requested_width || height != requested_height)) ||
-          (bitrate_locked && bitrate < 8000))
-        return reject(409, "This profile cannot honor the locked display or bitrate limit");
+      if (display_locked && (width != requested_width || height != requested_height))
+        return reject(409, "This profile cannot honor the locked display limit");
+      // This is the total client budget. RTSP reserves audio and packet
+      // recovery overhead before the worker selects its video encoder target.
+      auto target_bitrate = std::min(static_cast<int>(bitrate), 8000);
+      if (current->target_bitrate_kbps > 0)
+        target_bitrate = std::min(target_bitrate, current->target_bitrate_kbps);
+      if (config::video.max_bitrate > 0)
+        target_bitrate = std::min(target_bitrate, config::video.max_bitrate);
       nlohmann::json fields;
       auto field = [&](const char *key, nlohmann::json value, bool normalized = false) {
         fields[key] = {{"value", std::move(value)}, {"source", "capability_validation"},
@@ -5142,7 +5157,7 @@ namespace nvhttp {
       field("display_width", static_cast<int>(width), width != requested_width);
       field("display_height", static_cast<int>(height), height != requested_height);
       field("target_fps", static_cast<int>(fps), fps != requested_fps);
-      field("target_bitrate_kbps", 8000, bitrate != 8000);
+      field("target_bitrate_kbps", target_bitrate, bitrate != target_bitrate);
       field("hdr", false, hdr != 0);
       field("preferred_codec", "h264");
       nlohmann::json body {

@@ -6,6 +6,7 @@
 
   #include "multiseat_worker_media_pump.h"
 
+  #include <algorithm>
   #include <atomic>
   #include <chrono>
   #include <limits>
@@ -176,6 +177,8 @@ namespace multiseat::media {
         return "the worker announced a contract this host cannot represent";
       case pump_status_e::mismatched_contract:
         return "the worker announced a contract the client did not negotiate";
+      case pump_status_e::bitrate_refused:
+        return "the worker refused the negotiated video bitrate";
       case pump_status_e::acknowledgement_refused:
         return "the worker refused the contract acknowledgement";
       case pump_status_e::malformed_frame:
@@ -236,6 +239,13 @@ namespace multiseat::media {
                       std::to_string(contract->audio_channels) + " audio channels";
       return finish(pump_status_e::mismatched_contract);
     }
+    const auto bitrate = expected.bitrate_kbps == 0 ? contract->bitrate_ceiling_kbps :
+      std::min(expected.bitrate_kbps, contract->bitrate_ceiling_kbps);
+    if (expected.bitrate_kbps != 0 &&
+        connection.select_media_bitrate(bitrate) != transport_status_e::applied) {
+      return finish(pump_status_e::bitrate_refused);
+    }
+    report.selected_bitrate_kbps = bitrate;
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
       return finish(pump_status_e::acknowledgement_refused);
     }

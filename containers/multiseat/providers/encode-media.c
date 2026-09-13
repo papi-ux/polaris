@@ -1,5 +1,5 @@
 /* One seat's continuously encoded H.264/Opus stream. Only encoded samples
- * cross FD 4; FD 5 carries Start and IDR controls. No raw frames leave here. */
+ * cross FD 4; FD 5 carries bitrate selection, Start and IDR controls. */
 #define _GNU_SOURCE
 #include "capture-gpu.h"
 #include "encoder-gpu.h"
@@ -166,7 +166,11 @@ int main(int argc,char **argv) {
   gboolean failed=!software && !encoder_matches(encoder,&choice);
   if(!failed)failed=gst_element_set_state(pipeline,GST_STATE_PLAYING)==GST_STATE_CHANGE_FAILURE;
   gboolean ready=FALSE,started=FALSE,need_idr=TRUE,seen_audio=FALSE,seen_video=FALSE;
-  unsigned profile=0,level=0,requests=0;uint64_t indices[2]={0};
+  unsigned profile=0,level=0,announced_level=0,requests=0;uint64_t indices[2]={0};
+  gboolean selected=FALSE,selecting=FALSE;
+  unsigned selected_bitrate=BITRATE_KBPS,command_size=0;
+  unsigned char command[5]={0};
+  uint64_t selection_deadline=0,command_deadline=0;
   const uint64_t startup_deadline=monotonic_ns()+15000000000ull;
   uint64_t last_frame[2]={monotonic_ns(),monotonic_ns()};
   while(!failed && !stopping) {
@@ -174,7 +178,28 @@ int main(int argc,char **argv) {
     unsigned char commands[32];ssize_t count=read(control,commands,sizeof(commands));
     if(count==0 || (count<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)){failed=TRUE;break;}
     for(ssize_t i=0;i<count;++i) {
-      if(!ready || (!started && commands[i]!=1) || (started && commands[i]!=2)){failed=TRUE;break;}
+      if(!ready || selecting){failed=TRUE;break;}
+      if(command_size) {
+        command[command_size++]=commands[i];
+        if(command_size<sizeof(command))continue;
+        command_size=0;
+        selected_bitrate=((unsigned)command[1]<<24)|((unsigned)command[2]<<16)|((unsigned)command[3]<<8)|command[4];
+        if(!selected_bitrate || selected_bitrate>BITRATE_KBPS ||
+           gst_element_set_state(pipeline,GST_STATE_READY)!=GST_STATE_CHANGE_SUCCESS ||
+           !encoder_select_bitrate(encoder,&choice,selected_bitrate,refresh)) {failed=TRUE;break;}
+        /* READY flushes old encoder and appsink buffers. Confirm fresh samples
+         * after restarting before acknowledging the setting or releasing Start. */
+        seen_video=FALSE;seen_audio=FALSE;selecting=TRUE;selected=TRUE;need_idr=TRUE;
+        selection_deadline=monotonic_ns()+3000000000ull;
+        last_frame[0]=last_frame[1]=monotonic_ns();
+        if(gst_element_set_state(pipeline,GST_STATE_PLAYING)==GST_STATE_CHANGE_FAILURE){failed=TRUE;break;}
+        continue;
+      }
+      if(commands[i]==3 && !started && !selected) {
+        command[0]=3;command_size=1;command_deadline=monotonic_ns()+2000000000ull;
+        continue;
+      }
+      if((!started && commands[i]!=1) || (started && commands[i]!=2)){failed=TRUE;break;}
       started=TRUE;need_idr=TRUE;
       if(!gst_element_send_event(encoder,gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE,TRUE,++requests))){failed=TRUE;break;}
     }
@@ -189,7 +214,9 @@ int main(int argc,char **argv) {
       else if(stream==0) {
         unsigned current_profile=profile,current_level=level;
         h264_headers(map.data,map.size,&idr,&current_profile,&current_level);
-        if(ready && (current_profile!=profile || current_level!=level))failed=TRUE;
+        // A lower bitrate may lower the SPS level. It must stay within the
+        // baseline capability inspected before announcement.
+        if(ready && (current_profile!=66 || current_level<10 || current_level>announced_level))failed=TRUE;
         profile=current_profile;level=current_level;
         if(idr && profile==66 && level>=10 && level<=62)seen_video=TRUE;
       } else { if(!opus_five_ms(map.data,map.size))failed=TRUE;else seen_audio=TRUE; }
@@ -198,7 +225,14 @@ int main(int argc,char **argv) {
         unsigned char config[32]={1,1,0,0};config[2]=profile;config[3]=level;
         be16(config+4,width);be16(config+6,height);be32(config+8,refresh);be32(config+12,1000);be32(config+16,BITRATE_KBPS);
         config[20]=1;config[21]=2;be16(config+22,5000);be32(config+24,48000);
-        failed=!packet(output,1,config,sizeof(config),NULL,0);ready=!failed;
+        failed=!packet(output,1,config,sizeof(config),NULL,0);ready=!failed;announced_level=level;
+      }
+      if(!failed && selecting && seen_video && seen_audio) {
+        if(!software && !encoder_matches(encoder,&choice))failed=TRUE;
+        unsigned char confirmation[4];be32(confirmation,selected_bitrate);
+        if(!failed)failed=!packet(output,4,confirmation,sizeof(confirmation),NULL,0);
+        if(!failed)fprintf(stderr,"seat encoder: selected video target %u kbps\n",selected_bitrate);
+        selecting=FALSE;
       }
       if(!failed && started && (stream || !need_idr || idr)) {
         if(!stream)need_idr=FALSE;
@@ -212,7 +246,9 @@ int main(int argc,char **argv) {
       gst_buffer_unmap(buffer,&map);gst_sample_unref(sample);
     }
     const uint64_t now=monotonic_ns();
-    if((!ready && now>startup_deadline) || now-last_frame[0]>10000000000ull || now-last_frame[1]>10000000000ull)failed=TRUE;
+    if((!ready && now>startup_deadline) || (selecting && now>selection_deadline) ||
+       (command_size && now>command_deadline) ||
+       now-last_frame[0]>10000000000ull || now-last_frame[1]>10000000000ull)failed=TRUE;
   }
   if(gst_element_set_state(pipeline,GST_STATE_NULL)!=GST_STATE_CHANGE_SUCCESS)_exit(1);
   if(bus_failed(bus))failed=TRUE;

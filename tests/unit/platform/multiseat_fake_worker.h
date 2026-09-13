@@ -329,6 +329,11 @@ namespace multiseat_test {
       return contract_messages_;
     }
 
+    [[nodiscard]] std::uint32_t selected_bitrate() const {
+      std::scoped_lock lock {contract_mutex_};
+      return selected_bitrate_;
+    }
+
     [[nodiscard]] std::optional<frame_range_t> invalidated() const {
       std::scoped_lock lock {contract_mutex_};
       return invalidated_;
@@ -523,11 +528,17 @@ namespace multiseat_test {
         }
         if (channel == channel_e::control && attached &&
             (request.message == message_e::media_config_ack ||
+             request.message == message_e::select_media_bitrate ||
              request.message == message_e::request_idr ||
              request.message == message_e::invalidate_ref_frames)) {
           {
             std::scoped_lock lock {contract_mutex_};
             contract_messages_.push_back(request.message);
+            if (request.message == message_e::select_media_bitrate) {
+              selected_bitrate_ = (std::uint32_t(request.payload[0]) << 24) |
+                (std::uint32_t(request.payload[1]) << 16) |
+                (std::uint32_t(request.payload[2]) << 8) | request.payload[3];
+            }
             if (request.message == message_e::invalidate_ref_frames) {
               invalidated_ = parse_frame_range(request.payload);
             }
@@ -646,6 +657,7 @@ namespace multiseat_test {
     std::vector<std::uint8_t> input_;
     mutable std::mutex contract_mutex_;
     std::vector<message_e> contract_messages_;
+    std::uint32_t selected_bitrate_ = 0;
     std::optional<frame_range_t> invalidated_;
     std::atomic<bool> stopped_ = false;
     std::atomic<bool> failed_ = false;

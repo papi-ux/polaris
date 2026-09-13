@@ -2478,6 +2478,7 @@ namespace stream {
       .fps = static_cast<std::uint32_t>(session->config.monitor.framerate),
       .video_format = session->config.monitor.videoFormat,
       .audio_channels = static_cast<std::uint8_t>(session->config.audio.channels),
+      .bitrate_kbps = static_cast<std::uint32_t>(std::max(1, session->config.monitor.bitrate)),
     };
 
     BOOST_LOG(info) << "Carrying worker media for this session"sv;
@@ -2485,7 +2486,8 @@ namespace stream {
     const auto summary = [&] {
       return std::string {multiseat::media::describe(report.status)} +
              (report.detail.empty() ? std::string {} : " ("s + report.detail + ")"s) +
-             ": "s + std::to_string(report.video_frames) + " video frames, "s +
+             ": "s + std::to_string(report.selected_bitrate_kbps) + " kbps video target, "s +
+             std::to_string(report.video_frames) + " video frames, "s +
              std::to_string(report.audio_frames) + " audio frames, "s +
              std::to_string(report.discontinuities) + " discontinuities, "s +
              std::to_string(report.idr_requests) + " keyframe requests"s +

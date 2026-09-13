@@ -16,6 +16,8 @@ type mediaSource interface {
 	// Contract is what this encoder produces for the life of the seat. It is
 	// asked for once, before anything is read, and never changes afterwards.
 	Contract(context.Context) (mediaConfig, error)
+	// SelectBitrate confirms a video target before the first frame is released.
+	SelectBitrate(context.Context, uint32) error
 	// Next blocks for the next encoded frame: its message, its prefix and the
 	// encoded bytes that follow it.
 	Next(context.Context) (message, mediaFrame, []byte, error)
@@ -48,11 +50,14 @@ type seatDataPlane struct {
 	source   mediaSource
 	input    inputSink
 
-	mutex        sync.Mutex
-	announced    bool
-	announcing   bool
-	acknowledged chan struct{}
-	released     bool
+	mutex            sync.Mutex
+	announced        bool
+	announcing       bool
+	acknowledged     chan struct{}
+	released         bool
+	bitrateCeiling   uint32
+	bitrateAttempted bool
+	bitrateFailed    bool
 }
 
 func newSeatDataPlane(identity endpointIdentity, source mediaSource, input inputSink) *seatDataPlane {
@@ -85,11 +90,22 @@ func (plane *seatDataPlane) RouteMediaControl(ctx context.Context, control route
 		return errors.New("seat encoder source is missing")
 	}
 	switch control.Message {
+	case messageSelectMediaBitrate:
+		plane.mutex.Lock()
+		defer plane.mutex.Unlock()
+		if !plane.announced || plane.released || plane.bitrateAttempted ||
+			control.BitrateKbps == 0 || control.BitrateKbps > plane.bitrateCeiling {
+			return errors.New("invalid seat bitrate selection")
+		}
+		plane.bitrateAttempted = true
+		err := plane.source.SelectBitrate(ctx, control.BitrateKbps)
+		plane.bitrateFailed = err != nil
+		return err
 	case messageMediaConfigAck:
 		plane.mutex.Lock()
 		defer plane.mutex.Unlock()
-		if !plane.announced {
-			return errors.New("worker contract acknowledged before announcement")
+		if !plane.announced || plane.bitrateFailed {
+			return errors.New("worker contract is not ready for acknowledgement")
 		}
 		if plane.released {
 			// One contract, one acknowledgement. A second one would mean the
@@ -151,6 +167,7 @@ func (plane *seatDataPlane) NextMedia(ctx context.Context) (routedOutput, error)
 			return routedOutput{}, errUnrepresentableContract
 		}
 		plane.mutex.Lock()
+		plane.bitrateCeiling = contract.BitrateCeilingKbps
 		plane.announced = true
 		plane.mutex.Unlock()
 		return routedOutput{

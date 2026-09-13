@@ -121,6 +121,31 @@ static gboolean choose_hardware_encoder(int render_descriptor, struct encoder_ch
   return choice->factory != NULL;
 }
 
+/* Called only with the whole pipeline in READY, before media is released.
+ * Read back every rate-control property; an unsupported setting is a failure. */
+static inline gboolean encoder_uint_property(GstElement *encoder, const char *name, guint value) {
+  GParamSpec *spec = g_object_class_find_property(G_OBJECT_GET_CLASS(encoder), name);
+  if (!spec || G_PARAM_SPEC_VALUE_TYPE(spec) != G_TYPE_UINT ||
+      !(spec->flags & G_PARAM_WRITABLE) || !(spec->flags & G_PARAM_READABLE)) return FALSE;
+  GParamSpecUInt *range = G_PARAM_SPEC_UINT(spec);
+  if (value < range->minimum || value > range->maximum) return FALSE;
+  g_object_set(encoder, name, value, NULL);
+  guint actual = 0;
+  g_object_get(encoder, name, &actual, NULL);
+  return actual == value;
+}
+
+static inline gboolean encoder_select_bitrate(GstElement *encoder, const struct encoder_choice *choice,
+    unsigned bitrate, unsigned refresh) {
+  if (!bitrate || bitrate > 8000 || !refresh) return FALSE;
+  const guint rate = choice->kind == ENCODER_SOFTWARE ? bitrate * 1000u : bitrate;
+  const guint buffer = (bitrate * 1000u + refresh - 1) / refresh;
+  return encoder_uint_property(encoder, "bitrate", rate) &&
+    (choice->kind == ENCODER_VA || encoder_uint_property(encoder, "max-bitrate", rate)) &&
+    (choice->kind == ENCODER_SOFTWARE || encoder_uint_property(encoder,
+      choice->kind == ENCODER_NVENC ? "vbv-buffer-size" : "cpb-size", buffer));
+}
+
 static gchar *encoder_description(const struct encoder_choice *choice, unsigned bitrate, unsigned refresh) {
   /* One frame of VBV/CPB capacity, in kbits. Capture still downloads through
    * the verified GL path; hardware encoding does not imply zero-copy capture. */

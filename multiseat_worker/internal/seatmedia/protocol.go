@@ -12,8 +12,10 @@ const (
 	Config          byte = 1
 	Video           byte = 2
 	Audio           byte = 3
+	BitrateSelected byte = 4
 	Start           byte = 1
 	RequestIDR      byte = 2
+	SelectBitrate   byte = 3
 	HeaderSize           = 12
 	ConfigSize           = 32
 	FramePrefixSize      = 32
@@ -23,6 +25,8 @@ const (
 
 func validSize(kind byte, size uint32) bool {
 	switch kind {
+	case BitrateSelected:
+		return size == 4
 	case Config:
 		return size == ConfigSize
 	case Video:

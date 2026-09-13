@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,19 +21,20 @@ import (
 // One source owns one connection to one generation's encoder. Cancellation
 // retires that connection; a late read can never consume a replacement seat.
 type encoderMediaSource struct {
-	config       workerConfig
-	directory    string
-	uid          uint32
-	readMutex    sync.Mutex
-	writeMutex   sync.Mutex
-	mutex        sync.Mutex
-	connection   *net.UnixConn
-	closed       bool
-	started      bool
-	contract     *mediaConfig
-	indices      [2]uint64
-	seen         [2]bool
-	videoStarted bool
+	config           workerConfig
+	directory        string
+	uid              uint32
+	readMutex        sync.Mutex
+	writeMutex       sync.Mutex
+	mutex            sync.Mutex
+	connection       *net.UnixConn
+	closed           bool
+	started          bool
+	contract         *mediaConfig
+	bitrateAttempted bool
+	indices          [2]uint64
+	seen             [2]bool
+	videoStarted     bool
 }
 
 func newEncoderMediaSource(config workerConfig, directory string, uid uint32) *encoderMediaSource {
@@ -232,6 +234,45 @@ func (source *encoderMediaSource) Contract(ctx context.Context) (mediaConfig, er
 	}
 	source.contract = &contract
 	return contract, nil
+}
+
+// Serialize selection with both media reads and Start. The acknowledgement
+// comes from the native producer after it has inspected samples at the new
+// setting, not merely after a control write has entered a queue.
+func (source *encoderMediaSource) SelectBitrate(ctx context.Context, bitrate uint32) error {
+	source.readMutex.Lock()
+	defer source.readMutex.Unlock()
+	source.writeMutex.Lock()
+	defer source.writeMutex.Unlock()
+	if source.contract == nil || source.started || source.bitrateAttempted ||
+		bitrate == 0 || bitrate > source.contract.BitrateCeilingKbps {
+		return errors.New("invalid encoder bitrate selection")
+	}
+	source.bitrateAttempted = true
+	connection, err := source.connectionFor(ctx)
+	if err != nil {
+		return err
+	}
+	stop, err := source.prepareIO(ctx, connection, 2*time.Second, true)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	var command [5]byte
+	command[0] = seatmedia.SelectBitrate
+	binary.BigEndian.PutUint32(command[1:], bitrate)
+	n, err := connection.Write(command[:])
+	if err != nil || n != len(command) {
+		source.retire()
+		return errors.New("encoder bitrate write failed")
+	}
+	kind, body, err := source.read(ctx)
+	if err != nil || kind != seatmedia.BitrateSelected || len(body) != 4 ||
+		binary.BigEndian.Uint32(body) != bitrate {
+		source.retire()
+		return errors.New("encoder did not confirm the selected bitrate")
+	}
+	return nil
 }
 
 func (source *encoderMediaSource) Next(ctx context.Context) (message, mediaFrame, []byte, error) {

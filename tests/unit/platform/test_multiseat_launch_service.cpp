@@ -749,7 +749,6 @@ namespace {
       EXPECT_EQ(result->status, 400) << key << "=" << value;
     }
     for (const auto &extra : std::vector<nvhttp::args_t> {
-      {{"bitrate_locked", "1"}, {"bitrate_kbps", "4000"}},
       {{"display_locked", "1"}, {"width", "1921"}}}) {
       auto request = extra; request.emplace("game", std::string(profile_app_uuid));
       EXPECT_EQ(nvhttp::resolve_profile_request(client, request)->status, 409);
@@ -760,6 +759,25 @@ namespace {
     EXPECT_EQ(state->begins, 0U);
   }
 
+  TEST_F(MultiseatProfileHttp, LowerLockedBitrateIsResolvedAndCarriedToTheLaunch) {
+    nvhttp::args_t request {{"game", std::string(profile_app_uuid)},
+      {"bitrate_locked", "1"}, {"bitrate_kbps", "4000"}};
+    const auto resolved = nvhttp::resolve_profile_request(client, request);
+    ASSERT_TRUE(resolved);
+    ASSERT_EQ(resolved->status, 200);
+    EXPECT_EQ(resolved->body["resolved_profile"]["fields"]["target_bitrate_kbps"]["value"], 4000);
+    EXPECT_EQ(state->begins, 0U);
+    auto launch_args = args();
+    launch_args.emplace("workerProfile", *service->profile_for_client(client->uuid));
+    launch_args.emplace("resolvedProfile", "1"); launch_args.emplace("expectedTopology", "gamescope_stream");
+    launch_args.emplace("resolvedHdr", "0"); launch_args.emplace("bitrateKbps", "4000");
+    const auto launched = nvhttp::launch_profile_request(client, launch_args, false,
+      [](const auto &value) { EXPECT_EQ(value->target_bitrate_kbps, 4000); return true; });
+    ASSERT_TRUE(launched);
+    EXPECT_EQ(launched->status, 200);
+    if (launched->launch) launched->launch->cancel();
+  }
+
   TEST_F(MultiseatProfileHttp, WorkerAssertionMustMatchAssignmentAndMediaBeforeStartup) {
     auto request = args();
     request.emplace("workerProfile", *service->profile_for_client(client->uuid));
@@ -767,7 +785,7 @@ namespace {
     request.emplace("resolvedHdr", "0"); request.emplace("bitrateKbps", "8000");
     for (const auto &[key, value] : std::vector<std::pair<std::string, std::string>> {
       {"workerProfile", "another-profile"}, {"expectedTopology", "desktop_display"},
-      {"bitrateKbps", "4000"}, {"resolvedHdr", "1"}}) {
+      {"bitrateKbps", "8001"}, {"bitrateKbps", "0"}, {"bitrateKbps", "4000.5"}, {"resolvedHdr", "1"}}) {
       auto bad = request; bad.erase(key); bad.emplace(key, value);
       const auto result = nvhttp::launch_profile_request(client, bad, false, [](const auto &) { return true; });
       ASSERT_TRUE(result);

@@ -466,6 +466,7 @@ namespace multiseat::worker_ipc {
     bool requires_attached_data_plane(message_e message) {
       return message == message_e::input ||
              message == message_e::media_config_ack ||
+             message == message_e::select_media_bitrate ||
              message == message_e::request_idr ||
              message == message_e::invalidate_ref_frames;
     }
@@ -944,6 +945,19 @@ namespace multiseat::worker_ipc {
   transport_status_e controller_connection_t::acknowledge_media_config() const {
     const auto &connection = connection_;
     return connection ? connection->request(connection->control, message_e::media_config_ack, message_e::media_control_ack) : transport_status_e::closed;
+  }
+
+  transport_status_e controller_connection_t::select_media_bitrate(std::uint32_t bitrate_kbps) const {
+    if (bitrate_kbps == 0) {
+      return transport_status_e::invalid_argument;
+    }
+    const std::array<std::uint8_t, 4> body {
+      static_cast<std::uint8_t>(bitrate_kbps >> 24), static_cast<std::uint8_t>(bitrate_kbps >> 16),
+      static_cast<std::uint8_t>(bitrate_kbps >> 8), static_cast<std::uint8_t>(bitrate_kbps),
+    };
+    const auto &connection = connection_;
+    return connection ? connection->request(connection->control, message_e::select_media_bitrate,
+      message_e::media_control_ack, body) : transport_status_e::closed;
   }
 
   transport_status_e controller_connection_t::request_idr() const {

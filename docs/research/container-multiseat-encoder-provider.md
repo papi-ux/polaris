@@ -39,7 +39,9 @@ plugin interfaces. They are configuration choices, not measured latency claims.
 
 The allocation admits even SDR dimensions from 16 through 3840 pixels and
 refresh rates from 1 through 240 Hz, subject to the selected encoder's actual
-caps. HDR, configurable bitrate and additional codecs remain unfinished.
+caps. A client can select a lower bitrate at startup; the capability ceiling
+remains 8 Mbps. HDR, changes to bitrate during a stream, and additional codecs
+remain unfinished.
 
 The GPU capture path shares the retained GBM/EGL context and explicit texture
 conversion used by the encoded capture probe. Imported GPU memory must pass
@@ -68,8 +70,27 @@ bounded to 1400 encoded bytes. Raw video never crosses this connection.
 
 The worker pins and authenticates the endpoint, reads its contract, and
 announces it on the authenticated controller media channel. It sends the local
-Start command only after the controller acknowledges that contract. Each
-stream has monotonic frame indices and the first video frame is an IDR. Capture
+Start command only after the controller acknowledges that contract.
+
+Before acknowledgement, the host selects the video budget negotiated by RTSP,
+after reservations for audio, recovery packets and transport overhead. The
+authenticated control message 30 carries exactly four big-endian bytes in
+kbps. Selection is limited to the announced ceiling, once per seat, after
+announcement and before acknowledgement. Its response uses media control
+acknowledgement 29. Invalid selection or encoder failure retires the seat;
+a failure cannot release media at the old rate. An older worker that lacks
+this message cannot serve the updated host's streaming path.
+
+The private encoder command 3 carries the same four-byte target. The native
+producer moves its pipeline to READY to flush pre-selection buffers, sets
+and reads back the encoder rate and buffer properties, then resumes capture.
+It confirms with private packet kind 4 only after inspecting fresh H.264 and
+Opus samples. The worker waits for that confirmation before acknowledging
+selection. Partial controls, confirmation, and provider I/O have bounded
+deadlines. The original contract describes a capability ceiling; a lower SPS
+level is allowed within that announced baseline capability.
+
+Each stream has monotonic frame indices and the first video frame is an IDR. Capture
 timestamps are zero because capture clock provenance is not established;
 encode timestamps use the shared kernel's monotonic clock.
 

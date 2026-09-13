@@ -215,6 +215,7 @@ func runEncoder(parent context.Context, request seatruntime.Request, ready io.Wr
 		controlWrite.Close()
 		pumps.Wait()
 	}()
+	bitrateCeiling := binary.BigEndian.Uint32(contract.body[16:20])
 	pumps.Add(2)
 	go func() {
 		defer pumps.Done()
@@ -244,23 +245,47 @@ func runEncoder(parent context.Context, request seatruntime.Request, ready io.Wr
 	}()
 	go func() {
 		defer pumps.Done()
-		started := false
+		started, selected := false, false
 		for {
 			var command [1]byte
 			if _, err := io.ReadFull(connection, command[:]); err != nil {
 				failures <- err
 				return
 			}
-			if (!started && command[0] != seatmedia.Start) || (started && command[0] != seatmedia.RequestIDR) {
-				failures <- errors.New("invalid encoder control transition")
-				return
+			payload := command[:]
+			if command[0] == seatmedia.SelectBitrate && !started && !selected {
+				var body [4]byte
+				if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+					failures <- err
+					return
+				}
+				if _, err := io.ReadFull(connection, body[:]); err != nil {
+					failures <- err
+					return
+				}
+				if err := connection.SetReadDeadline(time.Time{}); err != nil {
+					failures <- err
+					return
+				}
+				bitrate := binary.BigEndian.Uint32(body[:])
+				if bitrate == 0 || bitrate > bitrateCeiling {
+					failures <- errors.New("encoder bitrate exceeds its contract")
+					return
+				}
+				selected = true
+				payload = append([]byte{command[0]}, body[:]...)
+			} else {
+				if (!started && command[0] != seatmedia.Start) || (started && command[0] != seatmedia.RequestIDR) {
+					failures <- errors.New("invalid encoder control transition")
+					return
+				}
+				started = true
 			}
-			started = true
 			if err := controlWrite.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 				failures <- err
 				return
 			}
-			if _, err := controlWrite.Write(command[:]); err != nil {
+			if _, err := controlWrite.Write(payload); err != nil {
 				failures <- err
 				return
 			}

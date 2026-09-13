@@ -56,7 +56,7 @@ def check_reference_limit(encoded):
     assert headers >= 2, 'initial and recovery SPS were not both inspected'
 
 
-def check(executable, invalid=False, render_node=None, peers=None, survivor=False):
+def check(executable, invalid=False, render_node=None, peers=None, survivor=False, bitrate=None, invalid_selection=None):
     arguments = ['--self-test-gpu', render_node] if render_node else ['--self-test']
     child = subprocess.Popen([executable, *arguments], stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -86,11 +86,31 @@ def check(executable, invalid=False, render_node=None, peers=None, survivor=Fals
         assert struct.unpack('>HHII', contract[4:16]) == (640, 480, 60000, 1000)
         assert contract[20:24] == bytes([1, 2, 0x13, 0x88])
         assert not select.select([child.stdout], [], [], 0.15)[0], 'media before start'
+        if bitrate is not None:
+            selection = bytes([3]) + struct.pack('>I', bitrate)
+            # Exercise a fragmented control body, not just one pipe write.
+            child.stdin.write(selection[:2]); child.stdin.flush()
+            assert not select.select([child.stdout], [], [], 0.03)[0], 'partial selection produced output'
+            child.stdin.write(selection[2:]); child.stdin.flush()
+            if bitrate == 0 or bitrate > 8000:
+                assert child.wait(timeout=4) == 1, 'invalid bitrate accepted'
+                return
+            kind, confirmed = packet()
+            assert kind == 4 and confirmed == struct.pack('>I', bitrate), 'encoder did not confirm the selected rate'
+            assert not select.select([child.stdout], [], [], 0.15)[0], 'selection released media before Start'
+            if invalid_selection == 'duplicate':
+                child.stdin.write(selection); child.stdin.flush()
+                assert child.wait(timeout=4) == 1, 'duplicate selection accepted'
+                return
         if peers:
             peers['ready'].wait(timeout=25)
         child.stdin.write(bytes([9 if invalid else 1])); child.stdin.flush()
         if invalid:
             assert child.wait(timeout=3) == 1
+            return
+        if invalid_selection == 'after-start':
+            child.stdin.write(bytes([3]) + struct.pack('>I', 1000)); child.stdin.flush()
+            assert child.wait(timeout=4) == 1, 'selection after Start accepted'
             return
         counts = {2: 0, 3: 0}
         indices = {2: -1, 3: -1}
@@ -150,7 +170,7 @@ def check(executable, invalid=False, render_node=None, peers=None, survivor=Fals
         expected = counts[2] * 640 * 480 * 3 // 2
         assert len(decoded.stdout) == expected, f'decoded bytes {len(decoded.stdout)} expected {expected} for {counts[2]} frames'
 
-        print('synthetic H.264 decode, Opus packets, ack gate, IDR and clean stop passed', flush=True)
+        print(f'synthetic H.264 decode, Opus packets, ack gate, IDR and clean stop passed (video target {bitrate or 8000} kbps)', flush=True)
     except BaseException:
         if peers:
             peers['failed'].set()
@@ -176,10 +196,14 @@ if __name__ == '__main__':
         peers = {'ready': threading.Barrier(2), 'stopped': threading.Event(), 'failed': threading.Event()}
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(check, args.executable, render_node=args.render_node,
-                                   peers=peers, survivor=survivor) for survivor in (False, True)]
+                                   peers=peers, survivor=survivor, bitrate=4000 if survivor else 1000) for survivor in (False, True)]
             for future in futures:
                 future.result()
         print('two concurrent encoder sessions, IDRs and 30 survivor frames after peer stop passed')
     else:
         check(args.executable, render_node=args.render_node)
         check(args.executable, invalid=True, render_node=args.render_node)
+        for bitrate in (1000, 4000, 8000, 0, 8001):
+            check(args.executable, render_node=args.render_node, bitrate=bitrate)
+        check(args.executable, render_node=args.render_node, bitrate=4000, invalid_selection='duplicate')
+        check(args.executable, render_node=args.render_node, invalid_selection='after-start')

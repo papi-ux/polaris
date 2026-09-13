@@ -3,6 +3,7 @@
 package seatprovider
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -32,7 +33,7 @@ func TestRealEncoderBridgeKeepsTwoSeatsIndependent(t *testing.T) {
 		done       chan error
 		path       string
 	}
-	start := func(namespace string) seat {
+	start := func(namespace string, bitrate uint32) seat {
 		root, err := os.MkdirTemp("/tmp", "eb-")
 		if err != nil {
 			t.Fatal(err)
@@ -79,12 +80,21 @@ func TestRealEncoderBridgeKeepsTwoSeatsIndependent(t *testing.T) {
 		if err != nil || kind != seatmedia.Config || len(body) != 32 {
 			t.Fatal("provider contract unavailable", err)
 		}
+		selection := []byte{seatmedia.SelectBitrate, byte(bitrate >> 24), byte(bitrate >> 16), byte(bitrate >> 8), byte(bitrate)}
+		if _, err := connection.Write(selection); err != nil {
+			t.Fatal(err)
+		}
+		kind, body, err = seatmedia.Read(connection)
+		if err != nil || kind != seatmedia.BitrateSelected || len(body) != 4 ||
+			!bytes.Equal(body, selection[1:]) {
+			t.Fatal("native bitrate confirmation unavailable", err)
+		}
 		if _, err := connection.Write([]byte{seatmedia.Start}); err != nil {
 			t.Fatal(err)
 		}
 		return seat{connection, cancel, done, path}
 	}
-	first, second := start("encoder-a"), start("encoder-b")
+	first, second := start("encoder-a", 1000), start("encoder-b", 4000)
 	nextVideo := func(value seat) {
 		value.connection.SetReadDeadline(time.Now().Add(3 * time.Second))
 		for i := 0; i < 100; i++ {

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -345,5 +346,84 @@ func TestEncoderSourceUnexpectedDisconnectStillFails(t *testing.T) {
 	}
 	if _, _, _, err := source.Next(t.Context()); err == nil {
 		t.Fatal("unexpected provider disconnect accepted")
+	}
+}
+
+func TestEncoderBitrateWaitsForNativeConfirmationAndRetiresFailures(t *testing.T) {
+	for _, scenario := range []string{"confirmed", "wrong-rate", "frame-instead", "cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			received, respond := make(chan struct{}), make(chan struct{})
+			source, _ := encoderFixture(t, func(connection *net.UnixConn, contract mediaConfig) {
+				writeEncoderContract(t, connection, contract)
+				var command [5]byte
+				if _, err := io.ReadFull(connection, command[:]); err != nil {
+					t.Error(err)
+					return
+				}
+				if command[0] != seatmedia.SelectBitrate || binary.BigEndian.Uint32(command[1:]) != 4000 {
+					t.Error("wrong selected bitrate")
+				}
+				close(received)
+				<-respond
+				if scenario == "cancel" {
+					return
+				}
+				body := []byte{0, 0, 0x0f, 0xa0}
+				kind := seatmedia.BitrateSelected
+				if scenario == "wrong-rate" {
+					body[3]++
+				}
+				if scenario == "frame-instead" {
+					kind = seatmedia.Video
+					body, _ = encodeMediaFrame(mediaFrame{IDR: true, EncodeTimestampNS: 42}, []byte("frame"))
+				}
+				_ = seatmedia.Write(connection, kind, body)
+				if scenario == "confirmed" {
+					var start [1]byte
+					if _, err := io.ReadFull(connection, start[:]); err != nil || start[0] != seatmedia.Start {
+						t.Error("missing Start")
+						return
+					}
+					body, _ = encodeMediaFrame(mediaFrame{IDR: true, EncodeTimestampNS: 42}, []byte("frame"))
+					_ = seatmedia.Write(connection, seatmedia.Video, body)
+				}
+			})
+			if _, err := source.Contract(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- source.SelectBitrate(ctx, 4000) }()
+			<-received
+			select {
+			case err := <-result:
+				t.Fatalf("selection acknowledged before encoder confirmation: %v", err)
+			default:
+			}
+			if scenario == "cancel" {
+				cancel()
+			}
+			close(respond)
+			err := <-result
+			if scenario == "confirmed" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := source.SelectBitrate(t.Context(), 4000); err == nil {
+					t.Fatal("duplicate selection accepted")
+				}
+				if kind, frame, _, err := source.Next(t.Context()); err != nil || kind != messageVideo || !frame.IDR {
+					t.Fatal("selected encoder did not start with an IDR", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("unconfirmed selection accepted")
+				}
+				if _, err := source.Contract(t.Context()); err == nil {
+					t.Fatal("failed selection reused its connection")
+				}
+			}
+		})
 	}
 }

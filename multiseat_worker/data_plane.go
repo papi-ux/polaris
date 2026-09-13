@@ -25,9 +25,10 @@ type routedOutput struct {
 // routedInput, so a faulty router cannot steer one seat's encoder from
 // another seat's control channel.
 type routedMediaControl struct {
-	Identity endpointIdentity
-	Message  message
-	Range    frameRange
+	Identity    endpointIdentity
+	Message     message
+	Range       frameRange
+	BitrateKbps uint32
 }
 
 // workerDataPlane owns the exact seat-local bridges behind authenticated IPC.

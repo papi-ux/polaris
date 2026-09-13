@@ -139,6 +139,26 @@ TEST(MultiseatWorkerMediaPump, RefusesWithoutAConnectionOrSinks) {
   EXPECT_FALSE(describe(pump_status_e::transport_lost).empty());
 }
 
+TEST(MultiseatWorkerMediaPump, SelectsTheNegotiatedVideoBudgetBeforeAcknowledgement) {
+  for (const auto requested : {4000U, 20000U}) {
+    temporary_root_t root;
+    authority_store_t store {root.path(), deterministic_capability(0x41)};
+    auto authority = create_authority(store, identity_for(), "generation-pump-bitrate");
+    fake_worker_t worker {authority, fake_behavior_e::media_contract};
+    controller_client_t client;
+    ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+    delivered_t delivered;
+    auto expected = matching_expectation();
+    expected.bitrate_kbps = requested;
+    const auto report = run(client.lease_connection(), expected, delivered.sinks(), quiet_host());
+    EXPECT_EQ(report.selected_bitrate_kbps, std::min(requested, 15000U));
+    EXPECT_EQ(worker.selected_bitrate(), report.selected_bitrate_kbps);
+    EXPECT_EQ(worker.contract_messages(),
+      (std::vector<message_e> {message_e::select_media_bitrate, message_e::media_config_ack}));
+    EXPECT_EQ(report.video_frames, 1U);
+  }
+}
+
 TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x41)};

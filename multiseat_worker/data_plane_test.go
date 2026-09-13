@@ -257,11 +257,13 @@ func TestMediaContractIsAnnouncedOnMediaAndInstructedOnControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	control.mediaControl(t, messageSelectMediaBitrate, []byte{0, 0, 0x0f, 0xa0})
 	control.mediaControl(t, messageMediaConfigAck, nil)
 	control.mediaControl(t, messageRequestIDR, nil)
 	control.mediaControl(t, messageInvalidateReferenceFrames, span)
 
 	for _, want := range []routedMediaControl{
+		{Identity: worker.config.Identity, Message: messageSelectMediaBitrate, BitrateKbps: 4000},
 		{Identity: worker.config.Identity, Message: messageMediaConfigAck},
 		{Identity: worker.config.Identity, Message: messageRequestIDR},
 		{Identity: worker.config.Identity, Message: messageInvalidateReferenceFrames, Range: frameRange{First: 11, Last: 14}},

@@ -85,9 +85,13 @@ rate, and stereo audio in 5 ms packets. The request parser bounds dimensions to 
 performance guarantees. ANNOUNCE must agree with the prepared dimensions and
 frame rate. Host optimizer envelopes, HDR, HEVC, AV1, and surround audio are
 rejected. Mapped devices receive a dedicated `worker_profile_v1` response from
-the Nova optimizer endpoint. It resolves an SDR H.264 stream at 8000 kbps with
-stereo audio and a whole frame rate from 15 through 240 Hz. Explicit display
-and bitrate limits are checked before returning the contract.
+the Nova optimizer endpoint. It resolves an SDR H.264 stream with a requested
+bitrate budget capped at 8000 kbps, stereo audio and a whole frame rate from
+15 through 240 Hz. Paired and configured host bitrate limits can reduce that
+budget. Explicit display and bitrate limits are checked before returning the
+contract. RTSP reserves audio and transport overhead before selecting the
+worker's video encoder rate. Profile status reports the capability ceiling
+separately from bitrate telemetry, which is not yet available.
 Nova validates the complete response and applies it only for the reserved
 profile app. Its launch includes `workerProfile` as an assertion against the
 current assignment, checked again at queue admission. A stale assertion is
