@@ -64,6 +64,19 @@ reported with incomplete data. That observation does not locate the loss or
 distinguish late delivery from client handling. Streaming quality remains open;
 screenshots, packet captures, and detailed receipts are retained privately.
 
+A follow-up Steam NVIDIA image from
+`1c25a2eb6e5ba5e9e73fdd00c70bf21f57f46b0e`, with Nova
+`de88f759c3363c009af0455f6210dacf65875259`, negotiated a 4000 kbps stream
+budget. NVIDIA confirmed a 3067 kbps video target after audio and transport
+reservations, and Nova requested the required 5 ms Opus packets. The bounded
+11 minute RP6 run reached PEAK's offline airport scene and verified controller
+menu navigation, forward movement and camera rotation. The stream ended at its
+configured test timeout with 39764 video frames, 133308 audio frames and no
+worker discontinuities. Cleanup retained all three profile volumes and restored
+the original policy. Client connection warnings, decoder watchdog flushes and
+audio queue overruns still occurred; this validates startup bitrate selection,
+not sustained streaming quality.
+
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
 each receive an offline runtime dependency stage, a Wayland GStreamer plugin

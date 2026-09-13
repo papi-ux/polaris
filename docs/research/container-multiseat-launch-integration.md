@@ -90,7 +90,10 @@ bitrate budget capped at 8000 kbps, stereo audio and a whole frame rate from
 15 through 240 Hz. Paired and configured host bitrate limits can reduce that
 budget. Explicit display and bitrate limits are checked before returning the
 contract. RTSP reserves audio and transport overhead before selecting the
-worker's video encoder rate. Profile status reports the capability ceiling
+worker's video encoder rate. Nova retains five millisecond audio packets for
+profile streams even below its usual low bitrate threshold. Older clients that
+request ten millisecond packets cannot use this worker contract. Profile status
+reports the capability ceiling
 separately from bitrate telemetry, which is not yet available.
 Nova validates the complete response and applies it only for the reserved
 profile app. Its launch includes `workerProfile` as an assertion against the
