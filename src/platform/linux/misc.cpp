@@ -1808,6 +1808,10 @@ std::string get_local_ip_for_gateway() {
   /// Non-empty when the configured backend found nothing and auto-selection was used instead.
   static std::string capture_backend_substitution;
 
+  /// False until an evaluation has actually run, so this can never report a problem it has not
+  /// looked for. Doctor asks this on every report, including before startup finishes.
+  static bool capture_sources_evaluated = false;
+
   const std::string &requested_capture() {
     return capture_backend_override ? *capture_backend_override : config::video.capture;
   }
@@ -1904,6 +1908,7 @@ std::string get_local_ip_for_gateway() {
   void reevaluate_capture_sources() {
     capture_backend_override.reset();
     capture_backend_substitution.clear();
+    capture_sources_evaluated = true;
     evaluate_capture_sources();
 
     if (!sources.none()) {
@@ -1954,6 +1959,17 @@ std::string get_local_ip_for_gateway() {
   std::string capture_backend_substitution_note() {
     return capture_backend_substitution;
   }
+
+  bool capture_sources_missing() {
+    return capture_sources_evaluated && sources.none();
+  }
+
+#ifdef POLARIS_TESTS
+  void set_capture_sources_missing_for_tests(bool missing) {
+    capture_sources_evaluated = missing;
+    sources.reset();
+  }
+#endif
 
 #ifdef POLARIS_TESTS
   void set_capture_backend_substitution_for_tests(const std::string &note) {

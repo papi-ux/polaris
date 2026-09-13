@@ -885,6 +885,43 @@ TEST(StreamStatsFecProtectionTests, RoutesEvidenceBySessionGeneration) {
   );
 }
 
+TEST(StreamStatsDoctorTests, ReportsAHostWithNoCaptureBackendAsFailed) {
+  // Polaris logs this fatally at startup and then serves anyway, so the host pairs, accepts
+  // launches and advertises H.264 as the only codec it has while Doctor reads clean. See #677.
+  platf::set_capture_sources_missing_for_tests(true);
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "no_capture_backend") {
+      continue;
+    }
+    saw_warning = true;
+    EXPECT_EQ(warning.at("severity"), "fail");
+    EXPECT_NE(warning.at("message").get<std::string>().find("H.264"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+
+  platf::set_capture_sources_missing_for_tests(false);
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingAboutCaptureBeforeAnythingHasBeenEvaluated) {
+  // The accessor must not report a problem it has never looked for: Doctor is asked for a report
+  // before startup has finished, and an empty source set then means "not yet", not "broken".
+  platf::set_capture_sources_missing_for_tests(false);
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "no_capture_backend");
+  }
+}
+
 TEST(StreamStatsDoctorTests, ReportsACaptureBackendThatWasSubstituted) {
   // Before this, the only trace of a substituted capture backend was one warning in the middle of
   // startup, while the host went on serving with a backend nobody chose. See #677.
