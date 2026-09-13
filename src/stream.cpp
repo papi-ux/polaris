@@ -601,6 +601,9 @@ namespace stream {
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
+    // Requested from RTSP or the control thread; only the control thread
+    // sends termination and acknowledges the session's final control use.
+    std::atomic_bool graceful_stop_requested {false};
 
     std::atomic<session::state_e> state;
 
@@ -1250,6 +1253,26 @@ namespace stream {
     }
   }
 
+  // ENet, sequence numbers and control encryption are owned by the control
+  // thread. Stop callers only request termination; they never send it directly.
+  void send_control_termination(control_server_t *server, session_t *session) {
+    if (!session->control.peer) return;
+
+    control_terminate_t plaintext {};
+    plaintext.header.type = packetTypes[IDX_TERMINATION];
+    plaintext.header.payloadLength = sizeof(plaintext.ec);
+    plaintext.ec = util::endian::big<std::uint32_t>(0x80030023);
+    std::array<std::uint8_t, sizeof(control_encrypted_t) +
+      crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
+      crypto::cipher::tag_size> encrypted_payload;
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (server->send(payload, session->control.peer)) {
+      BOOST_LOG(warning) << "Couldn't send control termination";
+    }
+    // Flush before disconnecting the peer in the same control-thread turn.
+    server->flush();
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1544,6 +1567,9 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+            if (session->graceful_stop_requested.load(std::memory_order_acquire)) {
+              send_control_termination(server, session);
+            }
             pos = server->_sessions->erase(pos);
 
             if (session->control.peer) {
@@ -1594,37 +1620,19 @@ namespace stream {
       server->iterate(has_active_session ? 5ms : 100ms);
     }
 
-    // Let all remaining connections know the server is shutting down
-    // reason: graceful termination
-    std::uint32_t reason = 0x80030023;
-
-    control_terminate_t plaintext;
-    plaintext.header.type = packetTypes[IDX_TERMINATION];
-    plaintext.header.payloadLength = sizeof(plaintext.ec);
-    plaintext.ec = util::endian::big<uint32_t>(reason);
-
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
+    // Retire every remaining session before acknowledging final control use.
     auto lg = server->_sessions.lock();
-    for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
-      auto session = *pos;
-
-      // We may not have gotten far enough to have an ENet connection yet
+    while (!server->_sessions->empty()) {
+      auto session = server->_sessions->back();
+      send_control_termination(server, session);
+      server->_sessions->pop_back();
       if (session->control.peer) {
-        auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-
-        if (server->send(payload, session->control.peer)) {
-          TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
-          BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
-        }
+        auto peers = server->_peer_to_session.lock();
+        server->_peer_to_session->erase(session->control.peer);
       }
-
       session->shutdown_event->raise(true);
       session->controlEnd.raise(true);
     }
-
-    server->flush();
   }
 
   void recvThread(broadcast_ctx_t &ctx) {
@@ -2613,6 +2621,10 @@ namespace stream {
       return session.packet_owner.destination();
     }
 
+    bool control_ended_for_tests(session_t &session) {
+      return session.controlEnd.peek();
+    }
+
     void set_state_for_tests(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
     }
@@ -2817,41 +2829,11 @@ namespace stream {
       session.shutdown_event->raise(true);
     }
 
-    void graceful_stop(session_t& session) {
-      while_starting_do_nothing(session.state);
-      session.packet_owner.close();
-#ifdef __linux__
-      close_multiseat_input(session);
-#endif
-      auto expected = state_e::RUNNING;
-      auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
-      if (already_stopping) {
-        return;
-      }
-
-      // reason: graceful termination
-      std::uint32_t reason = 0x80030023;
-
-      control_terminate_t plaintext;
-      plaintext.header.type = packetTypes[IDX_TERMINATION];
-      plaintext.header.payloadLength = sizeof(plaintext.ec);
-      plaintext.ec = util::endian::big<uint32_t>(reason);
-
-      // We may not have gotten far enough to have an ENet connection yet
-      if (session.control.peer) {
-        std::array<std::uint8_t,
-          sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-          encrypted_payload;
-        auto payload = stream::encode_control(&session, util::view(plaintext), encrypted_payload);
-
-        if (send(session, payload)) {
-          TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session.control.peer->address.address));
-          BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
-        }
-      }
-
-      session.shutdown_event->raise(true);
-      session.controlEnd.raise(true);
+    void graceful_stop(session_t &session) {
+      // controlEnd is an acknowledgement, not a stop request. Raising it here
+      // lets RTSP destroy the cipher while the control thread still decrypts.
+      session.graceful_stop_requested.store(true, std::memory_order_release);
+      stop(session);
     }
 
     void join(session_t &session) {

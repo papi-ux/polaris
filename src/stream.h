@@ -140,6 +140,7 @@ namespace stream {
     void set_host_start_abort_hook_for_tests(std::function<void()> hook);
     unsigned exchange_active_count_for_tests(unsigned count);
     void set_state_for_tests(session_t &session, state_e state);
+    bool control_ended_for_tests(session_t &session);
     stream_packets::destination_t packet_destination_for_tests(session_t &session);
 #ifdef __linux__
     std::shared_ptr<multiseat::input::worker_launch_connection_t>

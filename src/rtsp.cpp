@@ -891,9 +891,9 @@ namespace rtsp_stream {
         cleanup_unlocked_probe_for_tests();
       }
 #endif
-      // SB-2: send control terminate to every live session *before* joining so
-      // clients see an orderly end instead of a mid-flight connection reset.
-      // Probe path still short-circuits join for unit tests.
+      // Request termination for every live session before joining. The control
+      // thread owns encryption and ENet and acknowledges its final use before
+      // join allows session destruction. Probe paths still bypass join.
       for (auto &slot : sessions_to_join) {
 #ifdef POLARIS_TESTS
         if (cleanup_session_probe_for_tests) {
@@ -902,10 +902,6 @@ namespace rtsp_stream {
         }
 #endif
         stream::session::graceful_stop(*slot);
-      }
-      if (!sessions_to_join.empty()) {
-        // Give ENet a beat to flush the terminate packet before socket teardown.
-        std::this_thread::sleep_for(50ms);
       }
       for (auto &slot : sessions_to_join) {
 #ifdef POLARIS_TESTS
