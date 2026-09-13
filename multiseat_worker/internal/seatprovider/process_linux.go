@@ -224,6 +224,26 @@ func (child *managedChild) stop(timeout time.Duration) error {
 	}
 }
 
+// stopChecked preserves bounded termination but reports a child's failed cleanup.
+// A successful exit and the requested TERM/KILL signals are expected; a crash or
+// nonzero exit during a requested stop must not become a successful teardown.
+func (child *managedChild) stopChecked(timeout time.Duration, message string) error {
+	if err := child.stop(timeout); err != nil {
+		return err
+	}
+	state := child.command.ProcessState
+	if state != nil && state.Success() {
+		return nil
+	}
+	if state != nil {
+		if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() &&
+			(status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL) {
+			return nil
+		}
+	}
+	return child.exitError(message)
+}
+
 // Exhausting a shared wait budget must never skip the termination request for
 // a later owned child. Process.Kill retains exec's process identity; the caller
 // must preserve artifacts unless the wait goroutine has also proved exit.

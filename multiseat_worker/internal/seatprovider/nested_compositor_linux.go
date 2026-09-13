@@ -984,7 +984,7 @@ func runNestedCompositor(
 	defer func() {
 		defer func() { lifetime.close() }()
 		_ = readyFIFO.Close()
-		stopError := child.stop(options.stopTimeout)
+		stopError := child.stopChecked(options.stopTimeout, "runtime Gamescope failed during shutdown")
 		if !readyPublished && len(knownX11) == 0 {
 			capturedX11, captureError := capturePartialGamescopeX11Artifacts(
 				x11Sockets,

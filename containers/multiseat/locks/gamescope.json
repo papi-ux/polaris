@@ -31,6 +31,7 @@
     "stb": "5736b15f7ea0ffb08dd38af21067c314d6a3aae9"
   },
   "patches": [
-    "patches/gamescope-ignore-unsupported-switches.patch"
+    "patches/gamescope-ignore-unsupported-switches.patch",
+    "patches/gamescope-finish-command-buffers.patch"
   ]
 }

@@ -1,0 +1,41 @@
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -775,6 +775,7 @@
+ 	uint64_t submitInternal( CVulkanCmdBuffer* cmdBuf );
+ 	void wait(uint64_t sequence, bool reset = true);
+ 	void waitIdle(bool reset = true);
++	void finishCommandBuffers();
+ 	void garbageCollect();
+ 	inline VkDescriptorSet descriptorSet()
+ 	{
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1496,6 +1496,17 @@
+ 	wait(m_submissionSeqNo, reset);
+ }
+ 
++void CVulkanDevice::finishCommandBuffers()
++{
++	// Retire GPU work and its references before backend cleanup and process-exit
++	// destructors can invalidate dynamically loaded Vulkan dispatch code.
++	if (!m_bInitialized)
++		return;
++	waitIdle(false);
++	m_pendingCmdBufs.clear();
++	m_unusedCmdBufs.clear();
++}
++
+ void CVulkanDevice::resetCmdBuffers(uint64_t sequence)
+ {
+ 	auto last = m_pendingCmdBufs.find(sequence);
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -6532,6 +6532,8 @@
+ 	}
+ 
+ 	g_VirtualConnectorFocuses.clear();
++
++	g_device.finishCommandBuffers();
+ 
+     gamescope::IBackend::Set( nullptr );
+ 

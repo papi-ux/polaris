@@ -35,6 +35,7 @@ RUN patch -d /src -p1 --batch --forward --fuzz=0 < /patches/display-polaris-mode
     test -f target/release/libgstwaylanddisplaysrc.so
 RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-ignore-unsupported-switches.patch && \
+    patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-finish-command-buffers.patch && \
     meson setup /gamescope-src/build /gamescope-src --prefix=/usr --buildtype=release --wrap-mode=nodownload \
       -Ddefault_library=static -Denable_openvr_support=false -Denable_gamescope_wsi_layer=false \
       -Dpipewire=enabled -Ddrm_backend=enabled -Dsdl2_backend=disabled -Davif_screenshots=disabled \
