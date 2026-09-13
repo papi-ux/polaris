@@ -38,10 +38,31 @@ controller smoke through Nova on an RP6. Automated events on the RP6 controller
 device exercised movement, camera control, menu navigation, and pause/resume with
 Steam Input both enabled and disabled. The compatibility libraries loaded in
 Steam and Proton, and the original Enable Steam Input override was restored.
-This is controller-path evidence for one seat. Rumble, AMD hardware, independent
-simultaneous gameplay, and sustained streaming quality still require acceptance;
-intermittent slow-connection warnings occurred during this run. Existing game
-overrides and profile storage are preserved.
+A second bounded run with the same image reached Control Ultimate Edition
+gameplay and PEAK's offline airport scene concurrently under two saved Steam
+accounts. A local Moonlight client decoded Control at approximately 60 FPS at
+1080p, while Nova on the RP6 streamed PEAK. Each worker had distinct profile
+storage, a private network namespace, and five allocated input nodes with no
+overlap. RP6 controller events moved PEAK and operated its menus while Control
+remained paused; bounded writes to Control's verified seat keyboard moved its
+character while PEAK remained paused. This does not validate a second physical
+controller or keyboard transport through the local client.
+
+After Control exited normally, disconnecting its client retired only that
+worker. PEAK continued streaming and responding to the RP6 controller after the
+peer worker was removed. Both games returned to Steam through their normal exit
+menus. Final cleanup retained all three profile homes, preserved Enable Steam
+Input for PEAK, removed the test workers and IPC, and restored the original
+SELinux policy with enforcement and the regular Polaris service still active.
+
+Rumble, AMD hardware, and sustained streaming quality still require acceptance.
+The RP6's slow-connection warning also reproduced in Steam Big Picture before
+PEAK started. Client logs recorded decoder watchdog flushes and audio queue
+overruns while the local comparison stream remained stable during gameplay.
+A bounded host capture contained the expected packets for frames the RP6
+reported with incomplete data. That observation does not locate the loss or
+distinguish late delivery from client handling. Streaming quality remains open;
+screenshots, packet captures, and detailed receipts are retained privately.
 
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
@@ -205,11 +226,12 @@ Mailbox retry and close results map directly to the bridge without exposing an
 ENet peer or session secret. The `stream::session_t` mailbox endpoint and
 profile launch owner connect this route only for an authenticated worker binding.
 
-These paths still need acceptance through simultaneous client playback.
+Rumble delivery still needs acceptance through simultaneous client playback.
 The worker's older opaque input/feedback test adapter is
-deliberately not treated as injection authority. Mediated Steam Input also
-remains missing. Rootless launches now require trusted crun, the actual launching UID and
-`keep-groups`. The optional policy under `selinux/` labels only reserved
+deliberately not treated as injection authority. Steam controller translation
+and its current physical evidence are described above. The optional rootless
+Podman backend requires trusted crun, the actual launching UID and `keep-groups`.
+The optional policy under `selinux/` labels only reserved
 multiseat event nodes. Policy installation remains explicit; the isolated
 harness must establish device access for each selected final image.
 
