@@ -4138,33 +4138,18 @@ namespace video {
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
-    float wd = display->width;
-    float hd = display->height;
-
-    float wt = config.width;
-    float ht = config.height;
-
-    auto scalar = std::fminf(wt / wd, ht / hd);
-
-    auto w2 = scalar * wd;
-    auto h2 = scalar * hd;
-
-    auto offsetX = (config.width - w2) * 0.5f;
-    auto offsetY = (config.height - h2) * 0.5f;
-
-    return input::touch_port_t {
-      {
+    return input::make_touch_port(
+      platf::touch_port_t {
         display->offset_x,
         display->offset_y,
-        config.width,
-        config.height,
+        display->width,
+        display->height,
       },
       display->env_width,
       display->env_height,
-      offsetX,
-      offsetY,
-      1.0f / scalar,
-    };
+      config.width,
+      config.height
+    );
   }
 
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
