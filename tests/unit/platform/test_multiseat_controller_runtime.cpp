@@ -168,6 +168,9 @@ namespace {
          ++slot) {
       devices.emplace_back(input::device_kind_e::gamepad, slot);
     }
+    if (expectation.plan.steam_input) {
+      devices.emplace_back(input::device_kind_e::steam_gamepad, 0);
+    }
     for (std::size_t index = 0; index < devices.size(); ++index) {
       const auto [kind, slot] = devices[index];
       const auto identity = expectation.handle.generation * 32 + index;
@@ -175,7 +178,9 @@ namespace {
         .kind = kind,
         .slot = slot,
         .host_path = "/dev/input/event" + std::to_string(256 + identity),
-        .worker_path = input::expected_worker_path(kind, slot),
+        .worker_path = kind == input::device_kind_e::steam_gamepad ?
+          std::filesystem::path {"/dev/input/event" + std::to_string(256 + identity)} :
+          input::expected_worker_path(kind, slot),
         .filesystem_device = 61,
         .inode = 15000 + identity,
         .character_major = 13,
@@ -185,6 +190,7 @@ namespace {
           kind,
           slot
         ),
+        .phys = input::expected_phys(expectation.input_seat, kind, slot),
         .host_seat = std::string {input::isolated_host_seat},
       });
     }
@@ -1138,6 +1144,11 @@ namespace {
       EXPECT_FALSE(plan.touch);
       EXPECT_FALSE(plan.pen);
       EXPECT_EQ(plan.gamepad_slots, 1U);
+      EXPECT_TRUE(plan.steam_input);
+      EXPECT_TRUE(std::any_of(state_->input_allocations.front().nodes.begin(),
+        state_->input_allocations.front().nodes.end(), [](const auto &node) {
+          return node.kind == input::device_kind_e::steam_gamepad;
+        }));
       ASSERT_EQ(state_->workers.size(), 1U);
       identity = state_->workers.front().identity;
     }
