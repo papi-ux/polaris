@@ -51,6 +51,7 @@ namespace {
     std::string volume, profile, image;
     std::string image_family = "gamescope";
     bool wrong_network = false;
+    bool retain_volume_in_inventory = false;
     std::uint64_t effective_uid() const override { return uid; }
     bool executable_file(const std::filesystem::path &) const override { return true; }
     bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
@@ -86,6 +87,7 @@ namespace {
         result = json::array({{{"Name", volume}, {"Driver", "local"}, {"Scope", "local"},
           {"Options", nullptr}, {"Labels", {{"io.polaris.multiseat.profile", wrong_label ? "someone-else" : profile}}}}});
       } else if (args[0] == "volume" && args[1] == "ls") {
+        if (retain_volume_in_inventory && !volume.empty()) return {.exit_status = 0, .output = json(volume).dump() + "\n"};
         return {.exit_status = 0, .output = "\"unrelated-volume\"\n"};
       } else if (args[0] == "network" && args[1] == "ls") {
         return {.exit_status = 0, .output = "\"bridge\"\n\"none\"\n"};
@@ -116,6 +118,122 @@ namespace {
       return {.exit_status = 0, .output = result.dump()};
     }
   };
+
+  const profiles::steam_create_request_t steam_request {
+    "12345678-1234-4234-8234-123456789abc", "profile-a", "Second player"
+  };
+
+  TEST_F(MultiseatProfileCatalog, SteamCreationUsesConfiguredImageAndFreshBigPictureHome) {
+    auto catalog = sample();
+    catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;
+    catalog.profiles[0].workload = {workload_kind_e::steam, "870780"};
+    save(catalog);
+    provisioning_host_t host; host.image_family = "steam";
+    const auto result = profiles::create_steam(path, steam_request, host);
+    ASSERT_TRUE(result) << result.error;
+    EXPECT_EQ(result.profile_key, steam_request.request_id);
+    EXPECT_EQ(host.calls.size(), 10U);
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+    const auto &created = loaded->catalog.profiles.back();
+    EXPECT_EQ(created.name, steam_request.name);
+    EXPECT_EQ(created.storage.image_reference, catalog.profiles[0].storage.image_reference);
+    EXPECT_NE(created.storage.opaque_volume_name, catalog.profiles[0].storage.opaque_volume_name);
+    EXPECT_TRUE(created.client_keys.empty());
+    EXPECT_EQ(created.workload.target_id, "big-picture-v1");
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, catalog.profiles[0].client_keys);
+  }
+
+  TEST_F(MultiseatProfileCatalog, RepeatedCreationConfirmsTheSameHomeAndPreservesLaterAssignments) {
+    auto catalog = sample();
+    catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;
+    catalog.profiles[0].workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(catalog);
+    provisioning_host_t host; host.image_family = "steam";
+    ASSERT_TRUE(profiles::create_steam(path, steam_request, host));
+    ASSERT_TRUE(profiles::assign(path, steam_request.request_id, "client-b"));
+    ASSERT_TRUE(profiles::create_steam(path, steam_request, host));
+    EXPECT_EQ(host.calls.size(), 10U);
+    auto changed = steam_request; changed.name = "Different player";
+    EXPECT_FALSE(profiles::create_steam(path, changed, host));
+    EXPECT_EQ(host.calls.size(), 10U);
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+    EXPECT_EQ(loaded->catalog.profiles.back().client_keys, std::vector<std::string>{"client-b"});
+    EXPECT_EQ(loaded->catalog.profiles.back().name, steam_request.name);
+  }
+
+  TEST_F(MultiseatProfileCatalog, FailedCreationRetainsResourcesAndRetryCannotAdoptTheOrphan) {
+    auto catalog = sample();
+    catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;
+    catalog.profiles[0].workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(catalog);
+    provisioning_host_t host; host.image_family = "steam";
+    host.fail_call = 5; host.retain_volume_in_inventory = true;
+    const auto failed = profiles::create_steam(path, steam_request, host);
+    EXPECT_FALSE(failed);
+    EXPECT_EQ(failed.volume_name, "pv-" + steam_request.request_id);
+    EXPECT_EQ(host.calls.size(), 5U);
+    EXPECT_FALSE(profiles::create_steam(path, steam_request, host));
+    EXPECT_EQ(host.calls.size(), 7U); // Only engine admission and absence inventory on retry.
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(profiles::encode(loaded->catalog), profiles::encode(catalog));
+  }
+
+  TEST_F(MultiseatProfileCatalog, UncertainCreationCanBeConfirmedWithoutProvisioningAgain) {
+    auto catalog = sample();
+    catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;
+    catalog.profiles[0].workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(catalog);
+    provisioning_host_t host; host.image_family = "steam";
+    psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+    EXPECT_EQ(profiles::create_steam(path, steam_request, host).status, psf::write_status_e::durability_uncertain);
+    psf::set_write_fault_for_tests(psf::write_fault_e::none);
+    ASSERT_TRUE(profiles::create_steam(path, steam_request, host));
+    EXPECT_EQ(host.calls.size(), 10U);
+  }
+
+  TEST_F(MultiseatProfileCatalog, CreationRejectsUnconfiguredOrNonSteamSourcesBeforeDocker) {
+    save(sample());
+    provisioning_host_t host;
+    EXPECT_FALSE(profiles::create_steam(path, steam_request, host));
+    auto request = steam_request; request.source_profile_id = "missing";
+    EXPECT_FALSE(profiles::create_steam(path, request, host));
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  TEST(MultiseatSteamCreationRequest, RejectsUnboundedAmbiguousAndRuntimeAuthorityFields) {
+    const json base {{"request_id", steam_request.request_id}, {"source_profile_id", steam_request.source_profile_id},
+      {"name", steam_request.name}};
+    ASSERT_TRUE(profiles::decode_steam_create_request(base.dump()));
+    const std::vector<std::function<void(json &)>> mutations {
+      [](auto &v) { v["image"] = "sha256:" + std::string(64, 'a'); },
+      [](auto &v) { v["volume"] = "existing-home"; },
+      [](auto &v) { v["command"] = "/bin/sh"; },
+      [](auto &v) { v["clients"] = json::array({"client-a"}); },
+      [](auto &v) { v["name"] = ""; }, [](auto &v) { v["name"] = "   "; },
+      [](auto &v) { v["name"] = "name\nsecond line"; },
+      [](auto &v) { v["name"] = std::string(129, 'a'); },
+      [](auto &v) { v["name"] = 123; },
+      [](auto &v) { v["source_profile_id"] = "../profile"; },
+      [](auto &v) { v["source_profile_id"] = v["request_id"]; },
+      [](auto &v) { v["request_id"] = "../../../somewhere"; },
+      [](auto &v) { v["request_id"] = "12345678-1234-4234-8234-123456789abz"; },
+      [](auto &v) { v.erase("request_id"); },
+    };
+    for (const auto &mutate : mutations) {
+      auto payload = base; mutate(payload);
+      EXPECT_FALSE(profiles::decode_steam_create_request(payload.dump())) << payload;
+    }
+    auto duplicate = base.dump(); duplicate.insert(1, "\"name\":\"Other\",");
+    EXPECT_FALSE(profiles::decode_steam_create_request(duplicate));
+    EXPECT_FALSE(profiles::decode_steam_create_request(std::string(4097, ' ')));
+    EXPECT_FALSE(profiles::decode_steam_create_request("null"));
+    EXPECT_FALSE(profiles::decode_steam_create_request("[]"));
+  }
 
   TEST_F(MultiseatProfileCatalog, AtomicAssignmentMovesPreserveOtherDevicesAndRejectUnknownTargets) {
     auto catalog = sample();

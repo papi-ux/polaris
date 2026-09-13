@@ -8,6 +8,7 @@
 
   #include "multiseat_container_host.h"
   #include "multiseat_profile_catalog.h"
+  #include "multiseat_profile_network.h"
   #include "src/uuid.h"
 
   #include <algorithm>
@@ -219,7 +220,9 @@ namespace multiseat {
       catalog_lease = std::move(loaded->lease);
       catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
       for (auto &entry : loaded->catalog.profiles) {
-        catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys});
+        catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
+          entry.storage.runtime_profile == runtime_profile_e::steam &&
+            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload)});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
           options.container.workloads.push_back(entry.workload);

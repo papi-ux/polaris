@@ -109,8 +109,8 @@ namespace {
 
   class MultiseatAssignments : public MultiseatLaunchService {
   protected:
-    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}}, {"profile-b", "Sam", {"client-b"}}};
-    std::atomic<unsigned> writes {0}, reloads {0};
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, true}, {"profile-b", "Sam", {"client-b"}}};
+    std::atomic<unsigned> writes {0}, reloads {0}, creates {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
     bool reload_fails = false;
     std::function<void()> before_write;
@@ -132,10 +132,127 @@ namespace {
               for (auto &entry : catalog) if (entry.id == profile) entry.clients.emplace_back(client);
             }
             return profiles::change_result_t {.status = write_status};
+          },
+          .create = [&](const profiles::steam_create_request_t &request) {
+            state->called();
+            ++creates;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            if (before_write) before_write();
+            if (write_status != private_state_file::write_status_e::not_committed)
+              catalog.push_back({request.request_id, request.name, {}, true});
+            return profiles::change_result_t {.status = write_status, .profile_key = request.request_id};
           }
         });
     }
   };
+
+  const profiles::steam_create_request_t create_request {
+    "12345678-1234-4234-8234-123456789abc", "profile-a", "Second player"
+  };
+
+  TEST_F(MultiseatAssignments, CreatesAnUnassignedSteamProfileUnderTheControllerOwner) {
+    EXPECT_TRUE(service->admin_snapshot().creation_available);
+    ASSERT_EQ(service->create_steam_profile(create_request).status, 200);
+    const auto snapshot = service->admin_snapshot();
+    ASSERT_EQ(snapshot.profiles.size(), 3U);
+    EXPECT_EQ(snapshot.profiles.back().id, create_request.request_id);
+    EXPECT_TRUE(snapshot.profiles.back().clients.empty());
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    EXPECT_EQ(creates, 1U);
+    EXPECT_EQ(writes, 0U);
+    EXPECT_EQ(reloads, 1U);
+    std::lock_guard lock(state->mutex);
+    ASSERT_FALSE(state->owners.empty());
+    for (const auto owner : state->owners) {
+      EXPECT_EQ(owner, state->owners.front());
+      EXPECT_NE(owner, std::this_thread::get_id());
+    }
+  }
+
+  TEST_F(MultiseatAssignments, CreationCannotCancelActiveStreamsOrSkipCleanup) {
+    const auto active = launch();
+    ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 409);
+    EXPECT_FALSE(active->is_cancelled());
+    active->cancel();
+    state->idle = false;
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 409);
+    EXPECT_EQ(creates, 0U);
+    EXPECT_EQ(state->shutdowns, 0U);
+  }
+
+  TEST_F(MultiseatAssignments, CreationRejectsInvalidAndUnsupportedSourcesBeforeShutdown) {
+    auto request = create_request; request.source_profile_id = "profile-b";
+    EXPECT_EQ(service->create_steam_profile(request).status, 404);
+    request.source_profile_id = "unknown";
+    EXPECT_EQ(service->create_steam_profile(request).status, 404);
+    request = create_request; request.name = "\n";
+    EXPECT_EQ(service->create_steam_profile(request).status, 400);
+    EXPECT_EQ(creates, 0U);
+    EXPECT_EQ(state->shutdowns, 0U);
+  }
+
+  TEST_F(MultiseatAssignments, ConcurrentCreationRetriesJoinOneTransactionAndRetainExistingRoutes) {
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    before_write = [&] { entered.set_value(); released.wait(); };
+    auto first = std::async(std::launch::async, [&] { return service->create_steam_profile(create_request); });
+    EXPECT_EQ(entered.get_future().wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(service->admin_snapshot().changing);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
+    EXPECT_NE(service->set_assignment("profile-a", "new-client").status, 200);
+    auto changed = create_request; changed.name = "Different player";
+    EXPECT_EQ(service->create_steam_profile(changed).status, 409);
+    // Let a retry reach its bounded response while the original remains owned.
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 202);
+    EXPECT_EQ(creates, 1U);
+    release.set_value();
+    const auto status = first.get().status;
+    EXPECT_TRUE(status == 200 || status == 202);
+    for (int i = 0; i < 100 && service->admin_snapshot().changing; ++i) std::this_thread::sleep_for(10ms);
+    EXPECT_FALSE(service->admin_snapshot().changing);
+    EXPECT_FALSE(service->admin_snapshot().failed);
+    EXPECT_EQ(service->admin_snapshot().profiles.size(), 3U);
+    EXPECT_EQ(creates, 1U);
+    EXPECT_EQ(reloads, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, FailedCreationRestoresExistingAssignmentsWithoutPublishingAProfile) {
+    write_status = private_state_file::write_status_e::not_committed;
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 409);
+    EXPECT_FALSE(service->admin_snapshot().failed);
+    EXPECT_EQ(service->admin_snapshot().profiles.size(), 2U);
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+  }
+
+  TEST_F(MultiseatAssignments, UncertainCreationDurabilityKeepsExistingRoutesUnavailable) {
+    write_status = private_state_file::write_status_e::durability_uncertain;
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
+    EXPECT_EQ(reloads, 0U);
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(creates, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, CreationCannotProceedAfterUnprovenShutdownOrFailedReload) {
+    state->close = false;
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(creates, 0U);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->admin_snapshot().failed);
+  }
+
+  TEST_F(MultiseatAssignments, CreatedProfileWithFailedReloadIsNotReportedReady) {
+    reload_fails = true;
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(creates, 1U);
+  }
 
   TEST_F(MultiseatAssignments, MovesAndUnassignsWithoutRetainingStaleLaunchAuthority) {
     ASSERT_EQ(service->set_assignment("profile-b", "client-a").status, 200);

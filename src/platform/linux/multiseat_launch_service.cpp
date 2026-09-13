@@ -3,6 +3,8 @@
  */
 #include "multiseat_launch_service.h"
 #ifdef __linux__
+#include "multiseat_container_host.h"
+#include "src/logging.h"
 #include "src/private_state_file.h"
 #include "src/rtsp.h"
 #include "src/utility.h"
@@ -161,7 +163,9 @@ namespace multiseat {
   struct profile_launch_service_t::impl_t {
     struct admin_request_t {
       std::string profile, client;
+      std::optional<profiles::steam_create_request_t> creation;
       std::promise<profile_launch_result_t> promise;
+      std::shared_future<profile_launch_result_t> future = promise.get_future().share();
     };
     struct request_t {
       std::weak_ptr<rtsp_stream::launch_session_t> launch;
@@ -172,6 +176,7 @@ namespace multiseat {
     std::unique_ptr<profile_controller_t> controller;
     profile_admin_options_t admin;
     std::shared_ptr<admin_request_t> queued_admin;
+    std::shared_ptr<admin_request_t> active_admin;
     bool reconfiguring = false, admin_failed = false;
     std::vector<profile_summary_t> fallback_catalog;
     std::set<std::string> blocked_clients;
@@ -190,20 +195,26 @@ namespace multiseat {
         throw std::invalid_argument("profile service options");
       if (!admin.persist && !admin.catalog.empty())
         admin.persist = [path = admin.catalog](auto profile, auto client) { return profiles::set_assignment(path, profile, client); };
+      if (!admin.create && !admin.catalog.empty())
+        admin.create = [path = admin.catalog](const auto &request) {
+          container::local_host_t host;
+          return profiles::create_steam(path, request, host);
+        };
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
     }
 
-    void change_assignment(const std::shared_ptr<admin_request_t> &request, bool pending) noexcept {
+    void change_profiles(const std::shared_ptr<admin_request_t> &request, bool pending) noexcept {
       profile_launch_result_t result {503, "Profile configuration could not be restored. Restart Polaris after reviewing the catalog."};
       try {
         if (pending || !controller || !controller->idle()) {
           { std::lock_guard lock(mutex); blocked_clients.clear(); }
-          result = {409, "Stop profile sessions and wait for cleanup before changing assignments"};
+          result = {409, request->creation ? "Stop profile sessions and wait for cleanup before creating a profile" :
+            "Stop profile sessions and wait for cleanup before changing assignments"};
         } else {
           {
             std::lock_guard lock(mutex);
             fallback_catalog = controller->profile_catalog();
-            blocked_clients.insert(request->client);
+            if (!request->client.empty()) blocked_clients.insert(request->client);
           }
           if (!controller->shutdown()) {
             std::lock_guard lock(mutex);
@@ -212,7 +223,12 @@ namespace multiseat {
             // Closing proves that no stream owns this catalog. Destruction
             // releases the old global input owner before the replacement is built.
             { std::lock_guard lock(mutex); controller.reset(); admin_failed = true; }
-            const auto persisted = admin.persist(request->profile, request->client);
+            const auto persisted = request->creation ? admin.create(*request->creation) :
+              admin.persist(request->profile, request->client);
+            if (request->creation && !persisted && !persisted.volume_name.empty()) {
+              BOOST_LOG(error) << "Profile creation retained resources for inspection: volume=" << persisted.volume_name
+                << " initializer=" << persisted.initializer_name << " network=" << persisted.network_name;
+            }
             if (persisted.status != private_state_file::write_status_e::durability_uncertain) {
               auto replacement = admin.reload();
               if (replacement) {
@@ -220,8 +236,10 @@ namespace multiseat {
                 controller = std::move(replacement);
                 admin_failed = false;
                 fallback_catalog.clear(); blocked_clients.clear();
-                result = persisted ? profile_launch_result_t {200, "Profile assignment saved"} :
-                  profile_launch_result_t {409, "Assignment was not saved; refresh before retrying"};
+                result = persisted ? profile_launch_result_t {200, request->creation ? "Steam profile created" : "Profile assignment saved"} :
+                  profile_launch_result_t {409, request->creation ?
+                    "Profile was not created. Refresh before retrying; retained provisioning resources may need administrator review." :
+                    "Assignment was not saved; refresh before retrying"};
               }
             }
           }
@@ -230,7 +248,7 @@ namespace multiseat {
         std::lock_guard lock(mutex);
         admin_failed = true;
       }
-      { std::lock_guard lock(mutex); reconfiguring = false; }
+      { std::lock_guard lock(mutex); reconfiguring = false; active_admin.reset(); }
       request->promise.set_value(result);
     }
 
@@ -263,7 +281,7 @@ namespace multiseat {
             return;
           }
         } else {
-          if (change) change_assignment(change, !pending.empty());
+          if (change) change_profiles(change, !pending.empty());
           bool reconciled = true;
           try {
             if (controller && !admin_failed) controller->reconcile();
@@ -365,13 +383,14 @@ namespace multiseat {
     std::lock_guard lock(impl_->mutex);
     return {static_cast<bool>(impl_->admin.reload && impl_->admin.persist), impl_->reconfiguring,
       impl_->admin_failed && !impl_->reconfiguring,
-      impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog};
+      impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog,
+      static_cast<bool>(impl_->admin.reload && impl_->admin.create)};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client);
-    auto future = request->promise.get_future();
+    auto future = request->future;
     {
       std::lock_guard lock(impl_->mutex);
       if (!impl_->admin.reload || !impl_->admin.persist || !impl_->controller || impl_->admin_failed || impl_->stopping)
@@ -388,11 +407,44 @@ namespace multiseat {
       // starts the catalog transaction. It must not fall through to host apps.
       impl_->blocked_clients.insert(request->client);
       impl_->queued_admin = request;
+      impl_->active_admin = request;
     }
     impl_->wake.notify_all();
     if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
       return {202, "The assignment change is still running; refresh before retrying"};
     return future.get();
+  }
+
+  profile_launch_result_t profile_launch_service_t::create_steam_profile(profiles::steam_create_request_t creation) {
+    if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid profile name and Steam setup"};
+    std::shared_ptr<impl_t::admin_request_t> request;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (impl_->stopping) return {503, "The profile controller is stopping"};
+      if (impl_->active_admin && impl_->active_admin->creation &&
+          impl_->active_admin->creation->request_id == creation.request_id) {
+        if (*impl_->active_admin->creation != creation) return {409, "This creation request is already in use"};
+        request = impl_->active_admin;
+      } else {
+        if (!impl_->admin.reload || !impl_->admin.create || !impl_->controller || impl_->admin_failed)
+          return {503, "Profile creation is unavailable"};
+        if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+            [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+          return {409, "Stop profile sessions and wait for cleanup before creating a profile"};
+        const auto catalog = impl_->controller->profile_catalog();
+        if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+              return entry.id == creation.source_profile_id && entry.steam;
+            })) return {404, "Select an existing configured Steam profile"};
+        request = std::make_shared<impl_t::admin_request_t>();
+        request->creation = std::move(creation);
+        impl_->reconfiguring = true;
+        impl_->active_admin = impl_->queued_admin = request;
+      }
+    }
+    impl_->wake.notify_all();
+    if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
+      return {202, "The profile is still being created; refresh before retrying"};
+    return request->future.get();
   }
 
   bool profile_launch_service_t::cancel_client(std::string_view client, std::string_view token) {

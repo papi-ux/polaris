@@ -3640,17 +3640,41 @@ namespace confighttp {
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
-      {"failed", false}, {"profiles", nlohmann::json::array()}};
+      {"failed", false}, {"profiles", nlohmann::json::array()}, {"creation_available", false}};
 #ifdef __linux__
     if (const auto service = multiseat::installed_profile_service()) {
       const auto state = service->admin_snapshot();
       output["enabled"] = true; output["available"] = state.available;
       output["changing"] = state.changing; output["failed"] = state.failed;
+      output["creation_available"] = state.creation_available;
       for (const auto &profile : state.profiles)
-        output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients}});
+        output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
+          {"steam", profile.steam}});
     }
 #endif
     send_response(response, output);
+  }
+
+  void createMultiseatProfile(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Creation request is too large"); return; }
+    const auto creation = multiseat::profiles::decode_steam_create_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!creation) { bad_request(response, request, "Invalid profile creation request"); return; }
+    const auto result = service->create_steam_profile(*creation);
+    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
+      {"profile_id", creation->request_id}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
   }
 
   void setMultiseatAssignment(resp_https_t response, req_https_t request) {
@@ -7553,6 +7577,7 @@ namespace confighttp {
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;
     server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
+    server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);

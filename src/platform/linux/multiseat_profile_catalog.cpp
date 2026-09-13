@@ -333,6 +333,76 @@ namespace multiseat::profiles {
     });
   }
 
+  bool valid_steam_create_request(const steam_create_request_t &request) {
+    if (request.request_id.size() != 36 || !token(request.source_profile_id) ||
+        request.request_id == request.source_profile_id || request.name.empty() || request.name.size() > 128 ||
+        request.name.front() == ' ' || request.name.back() == ' ' ||
+        std::any_of(request.name.begin(), request.name.end(), [](unsigned char c) { return c < 32 || c == 127; })) return false;
+    for (std::size_t i = 0; i < request.request_id.size(); ++i) {
+      const char c = request.request_id[i];
+      if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; }
+      else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+  }
+
+  std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload) {
+    if (payload.empty() || payload.size() > 4096) return std::nullopt;
+    try {
+      std::set<std::string> names;
+      const auto body = json::parse(payload, [&](int depth, json::parse_event_t event, json &value) {
+        if (depth > 2) throw std::invalid_argument("creation nesting");
+        if (event == json::parse_event_t::key && !names.insert(value.get<std::string>()).second)
+          throw std::invalid_argument("duplicate creation field");
+        return true;
+      });
+      keys(body, {"request_id", "source_profile_id", "name"});
+      steam_create_request_t request {body.at("request_id").get<std::string>(),
+        body.at("source_profile_id").get<std::string>(), body.at("name").get<std::string>()};
+      return valid_steam_create_request(request) ? std::optional {std::move(request)} : std::nullopt;
+    } catch (...) { return std::nullopt; }
+  }
+
+  change_result_t create_steam(const std::filesystem::path &path,
+                             const steam_create_request_t &request, container::host_t &host) {
+    if (!valid_steam_create_request(request)) return {.error = "Invalid Steam profile creation request."};
+    return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
+      if (catalog.owner_uid != host.effective_uid() || catalog.owner_gid != host.effective_gid() ||
+          host.effective_uid() != 1000 || host.effective_gid() != 1000) {
+        result.error = "Current Steam runtime images require the catalog and service identity to be 1000:1000.";
+        return std::nullopt;
+      }
+      const auto source = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
+        return entry.storage.profile_key == request.source_profile_id;
+      });
+      if (source == catalog.profiles.end() || source->storage.runtime_profile != runtime_profile_e::steam ||
+          !container::supported_streaming_workload(source->storage.runtime_profile, source->workload)) {
+        result.error = "Select an existing configured Steam profile."; return std::nullopt;
+      }
+      const entry_t entry {
+        .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, source->storage.image_reference},
+        .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+      };
+      const auto existing = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &value) {
+        return value.storage.profile_key == request.request_id;
+      });
+      if (existing != catalog.profiles.end()) {
+        if (existing->name != entry.name || existing->storage.image_reference != entry.storage.image_reference ||
+            existing->storage.opaque_volume_name != entry.storage.opaque_volume_name ||
+            existing->storage.runtime_profile != runtime_profile_e::steam || existing->workload != entry.workload) {
+          result.error = "This creation request already identifies a different profile."; return std::nullopt;
+        }
+        result.profile_key = request.request_id;
+        return encode(catalog); // Durable confirmation, with no Docker operations or assignment changes.
+      }
+      catalog.profiles.push_back(entry);
+      const auto payload = encode(catalog); // Validate the complete catalog before provisioning.
+      result.profile_key = request.request_id;
+      provision(host, entry, result);
+      return payload;
+    });
+  }
+
   int command(int argc, char **argv) {
     if (argc < 2) {
       std::cerr << "Usage: polaris --multiseat-profiles init|list CATALOG\n"

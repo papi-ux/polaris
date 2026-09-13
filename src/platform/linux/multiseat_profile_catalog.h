@@ -60,6 +60,16 @@ namespace multiseat::profiles {
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,
     std::string_view name, std::string_view image, container::host_t &host,
     const workload_plan_t &workload = {workload_kind_e::gamescope, "input-pong-v1"});
+  struct steam_create_request_t {
+    std::string request_id, source_profile_id, name;
+    bool operator==(const steam_create_request_t &) const = default;
+  };
+  [[nodiscard]] bool valid_steam_create_request(const steam_create_request_t &request);
+  [[nodiscard]] std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload);
+  // Request identity also names the new profile. Retrying the same request can
+  // confirm its existing catalog entry but never copies or adopts another home.
+  [[nodiscard]] change_result_t create_steam(const std::filesystem::path &path,
+    const steam_create_request_t &request, container::host_t &host);
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif

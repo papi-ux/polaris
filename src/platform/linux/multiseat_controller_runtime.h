@@ -23,6 +23,7 @@ namespace multiseat {
     std::string id;
     std::string name;
     std::vector<std::string> clients;
+    bool steam = false;
   };
 
   /** Immutable operator routing for one persistent profile in this epoch. */

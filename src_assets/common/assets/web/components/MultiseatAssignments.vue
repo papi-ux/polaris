@@ -1,5 +1,5 @@
 <template>
-  <section v-if="state.enabled || loadError" class="section-card" aria-labelledby="profile-assignment-title" :aria-busy="loading || !!saving">
+  <section v-if="state.enabled || loadError" class="section-card" aria-labelledby="profile-assignment-title" :aria-busy="loading || creating || !!saving">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0">
         <h2 id="profile-assignment-title" class="section-title">Separate gaming profiles</h2>
@@ -38,6 +38,9 @@
     <p v-if="state.enabled && !devices.length" class="mt-4 text-sm text-storm">
       Pair a device with permission to launch apps to assign a gaming profile. Temporary guests cannot use these profiles.
     </p>
+    <MultiseatProfileCreate v-if="state.enabled && state.creation_available" :profiles="state.profiles"
+                           :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError"
+                           :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
     <div v-if="state.enabled && devices.length" class="mt-5 grid gap-3">
       <div v-for="client in devices" :key="client.uuid" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
         <div class="flex flex-wrap items-start justify-between gap-2">
@@ -72,7 +75,7 @@
     <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
       <p v-if="state.enabled && devices.length" class="text-xs text-storm">Stop profile streams before changing assignments.</p>
       <button type="button" class="focus-ring rounded-lg px-1 py-2 text-sm text-ice disabled:opacity-40"
-              :disabled="!!saving || loading" @click="refresh">
+              :disabled="!!saving || creating || loading" @click="refresh">
         {{ loading ? 'Refreshing…' : 'Refresh profiles' }}
       </button>
     </div>
@@ -81,13 +84,15 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
 
 const props = defineProps({ clients: { type: Array, default: () => [] } })
-const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [] })
+const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], creation_available: false })
 const choices = reactive({})
 const saving = ref(''), loading = ref(false)
+const creating = ref(false)
 const loadError = ref(''), actionError = ref(''), message = ref('')
-const locked = computed(() => !!saving.value || loading.value || !!loadError.value || state.changing || state.failed || !state.available)
+const locked = computed(() => !!saving.value || creating.value || loading.value || !!loadError.value || state.changing || state.failed || !state.available)
 const eligible = client => !client.temporary_authorization && (Number(client.perm) & 0x04000000) !== 0
 const assigned = id => state.profiles.find(profile => profile.clients.includes(id))?.id || ''
 const profileName = id => state.profiles.find(profile => profile.id === id)?.name || 'Standard streaming'
@@ -126,11 +131,12 @@ watch(() => props.clients, () => reconcileChoices(), { deep: true })
 
 function validSnapshot(next) {
   if (!next || ['enabled', 'available', 'changing', 'failed'].some(key => typeof next[key] !== 'boolean') ||
-      !Array.isArray(next.profiles)) return false
+      !Array.isArray(next.profiles) || (next.creation_available !== undefined && typeof next.creation_available !== 'boolean')) return false
   const profiles = new Set(), clients = new Set()
   for (const profile of next.profiles) {
     if (!profile || typeof profile.id !== 'string' || !profile.id || profiles.has(profile.id) ||
-        typeof profile.name !== 'string' || !Array.isArray(profile.clients)) return false
+        typeof profile.name !== 'string' || !Array.isArray(profile.clients) ||
+        (profile.steam !== undefined && typeof profile.steam !== 'boolean')) return false
     profiles.add(profile.id)
     for (const id of profile.clients) {
       if (typeof id !== 'string' || !id || clients.has(id)) return false
@@ -148,7 +154,7 @@ async function loadProfiles(resetClient = '') {
     const next = await response.json()
     if (!validSnapshot(next)) throw new Error('Could not verify profile assignments. Refresh profiles to try again.')
     const edited = new Set(props.clients.filter(client => dirty(client.uuid) && choices[client.uuid] !== undefined).map(client => client.uuid))
-    Object.assign(state, next)
+    Object.assign(state, { creation_available: false }, next)
     for (const client of props.clients) {
       if (!edited.has(client.uuid)) choices[client.uuid] = assigned(client.uuid)
     }
@@ -162,7 +168,7 @@ async function loadProfiles(resetClient = '') {
 }
 
 async function refresh() {
-  if (saving.value || loading.value) return
+  if (saving.value || creating.value || loading.value) return
   clearFeedback()
   await loadProfiles()
 }

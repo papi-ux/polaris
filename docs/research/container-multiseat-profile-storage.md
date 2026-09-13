@@ -95,8 +95,12 @@ retrying. Do not delete storage based only on the command's failure status.
 
 This provides administrative storage and controller ingestion. Explicit host
 configuration, controller ownership, reconciliation, and HTTP launch activation
-are implemented behind the default-off profile launch setting. Settings UI and
-pairing UI assignments remain separate work.
+are implemented behind the default-off profile launch setting. The Devices page
+now supports profile assignments and additional Steam profile creation from an
+existing configured Steam runtime. The first runtime and catalog still require
+administrative setup. See the
+[profile interface](container-multiseat-launch-integration.md#profile-assignment-interface)
+for the creation request, idempotent retries, and controller ownership boundary.
 Steam has a typed launcher and dedicated network policy. Heroic and Lutris have
 typed catalog families and built runtime images; their launch adapters remain pending.
 The catalog does not claim real game or client playback acceptance.

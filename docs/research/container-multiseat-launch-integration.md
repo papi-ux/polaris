@@ -122,8 +122,9 @@ identity and exact session token before cancelling that device's worker.
 
 The Devices page shows separate gaming profiles only when a profile controller
 is configured. Permanently paired devices with launch permission can be moved
-between provisioned profiles or returned to Standard streaming. Creating a
-profile remains an administrative command. Multiple devices may share its
+between provisioned profiles or returned to Standard streaming. The first Steam
+runtime setup remains an administrative command. After that setup, the panel
+can create additional Steam profiles. Multiple devices may share a profile's
 games and settings, with one active stream for that profile.
 
 The panel separates the current assignment from an unsaved choice, names the
@@ -138,13 +139,36 @@ the requested assignment and an available controller. Pending changes remain
 pending. Failed or malformed reads retain the last displayed snapshot and
 disable edits until a successful refresh. An initial read failure offers a retry;
 a successful response with multiseat disabled keeps ordinary device setup
-unchanged. The panel does not create profiles or infer whether Steam is signed in.
+unchanged. The panel does not infer whether Steam is signed in.
+
+Create Steam profile accepts a name and an existing configured Steam profile as
+the runtime source. It uses that immutable local image for fresh private storage
+and a dedicated profile network, always opening Big Picture. Sign-ins, saves,
+game downloads and device assignments are not copied from the source profile.
+The new profile is unassigned until the administrator chooses a device below.
+An empty or non-Steam catalog cannot provision the first runtime through this UI.
+
+Creation uses the same owner thread, idle requirement, catalog lease release,
+durable transaction and controller replacement as assignment changes. The
+administrator request contains exactly `request_id`, `source_profile_id` and
+`name`; it cannot supply an image, volume, mount, command or paired device.
+The lower-case UUID request ID identifies the new catalog profile. Concurrent
+identical requests share one operation. A repeated committed request confirms
+the same profile and preserves any subsequent assignments, without Docker work.
+Conflicting profile metadata is rejected. Orphan storage is never adopted on retry.
+
+A bounded HTTP wait may return 202 while creation remains owned by the service.
+The UI retains the request and offers a status check or a retry of that same
+request. It reports success only after the available controller's catalog contains
+the expected profile. Failed or uncertain provisioning retains its resources
+for administrative review and does not publish a usable partial profile.
 
 The assignment API requires Web UI administrator authentication or the
 administrator API key. A paired streaming certificate alone is insufficient.
-Cookie based writes also require the existing CSRF token. The request supplies
-only a paired device UUID and an existing profile ID, never an image, path,
-volume or command.
+Cookie based writes also require the existing CSRF token. Assignment requests
+supply only a paired device UUID and an existing profile ID, never an image,
+path, volume or command. Creation uses the same administrator authentication
+and CSRF boundary.
 
 Assignments change on the same owner thread as resource operations. New profile
 launches are fenced while an edit is pending. Active or queued profile launches
@@ -226,7 +250,7 @@ A browser preview with fixture data also checks assignment saves, keyboard
 navigation, and layouts from 320 to 1280 pixels wide. These checks do not
 substitute for live game acceptance.
 
-Two independent commercial games, profile creation UI, AMD hardware, audio
+Two independent commercial games, initial runtime setup UI, AMD hardware, audio
 quality, rumble and two independent physical clients remain pending, including
 reconnect and measured latency.
 The UI must preserve the existing flow for one person with one device.
