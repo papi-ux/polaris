@@ -257,9 +257,27 @@ A browser preview with fixture data also checks assignment saves, keyboard
 navigation, and layouts from 320 to 1280 pixels wide. These checks do not
 substitute for live game acceptance.
 
-Two independent commercial games, initial runtime setup UI, AMD hardware, audio
-quality, rumble and two independent physical clients remain pending, including
-reconnect and measured latency.
+Later bounded observations ran Control Ultimate Edition and PEAK concurrently,
+including [two 120 FPS streams and audio timing comparisons](container-multiseat-audio-timing.md).
+Initial runtime setup UI, AMD hardware, sustained audio quality, rumble and two
+independent physical clients remain pending, including reconnect and measured
+latency.
 The UI must preserve the existing flow for one person with one device.
 Runtime images use Polaris builds from official Ubuntu. Required third party
 source and license notices remain intact until those dependencies are replaced.
+
+## Assigned names in client libraries
+
+Revision `4ee1468df9b48d5c001805b5e2363a9d572415a5` exposes only the
+requesting device's assigned profile name in GameStream app lists, paired JSON
+libraries and session status. The app ID and UUID remain stable. Generic profile
+search terms still work, and unavailable names fall back to Polaris Profile.
+
+The stream test target ran 164 multiseat tests: 163 passed and the opt-in
+physical harness test skipped. The new coverage checks device-specific names,
+reassignment, unassignment, shutdown, reconfiguration and failed configuration.
+A temporary host built from that revision showed the assigned name in the
+ordinary Nova library on a physical Android client. Visual inspection matched
+the assigned catalog entry, with no other profile names visible and no worker
+launch. Cleanup retained all three profile homes, removed IPC, restored the
+original enforcing policy and left the normal service active.
