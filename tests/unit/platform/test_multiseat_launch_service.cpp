@@ -254,15 +254,26 @@ namespace {
     EXPECT_EQ(creates, 1U);
   }
 
+  TEST_F(MultiseatAssignments, ProfileNamesAreLimitedToTheAssignedDevice) {
+    EXPECT_EQ(service->profile_name_for_client("client-a"), "Alex");
+    EXPECT_EQ(service->profile_name_for_client("client-b"), "Sam");
+    EXPECT_FALSE(service->profile_name_for_client("unknown-client"));
+    service->stop_admission();
+    EXPECT_FALSE(service->profile_name_for_client("client-a"));
+  }
+
   TEST_F(MultiseatAssignments, MovesAndUnassignsWithoutRetainingStaleLaunchAuthority) {
     ASSERT_EQ(service->set_assignment("profile-b", "client-a").status, 200);
     EXPECT_EQ(service->profile_for_client("client-a"), "profile-b");
     EXPECT_EQ(service->profile_for_client("client-b"), "profile-b");
+    EXPECT_EQ(service->profile_name_for_client("client-a"), "Sam");
     EXPECT_EQ(service->prepare(launch(), "profile-a").status, 409);
     EXPECT_EQ(state->begins, 0U);
     ASSERT_EQ(service->set_assignment("", "client-a").status, 200);
     EXPECT_FALSE(service->routes_client("client-a"));
     EXPECT_TRUE(service->routes_client("client-b"));
+    EXPECT_FALSE(service->profile_name_for_client("client-a"));
+    EXPECT_EQ(service->profile_name_for_client("client-b"), "Sam");
     EXPECT_EQ(service->admin_snapshot().profiles[1].clients, std::vector<std::string> {"client-b"});
     EXPECT_EQ(writes, 2U);
     EXPECT_EQ(reloads, 2U);
@@ -307,6 +318,8 @@ namespace {
     EXPECT_TRUE(service->routes_client("client-a"));
     EXPECT_TRUE(service->routes_client("new-client"));
     EXPECT_FALSE(service->profile_for_client("new-client"));
+    EXPECT_FALSE(service->profile_name_for_client("new-client"));
+    EXPECT_FALSE(service->profile_name_for_client("client-a"));
     EXPECT_EQ(service->prepare(launch("new-client"), "profile-a").status, 503);
     EXPECT_NE(service->set_assignment("profile-b", "client-a").status, 200);
     release.set_value();
@@ -330,6 +343,8 @@ namespace {
     EXPECT_TRUE(service->routes_client("client-a"));
     EXPECT_TRUE(service->routes_client("new-client"));
     EXPECT_FALSE(service->profile_for_client("client-a"));
+    EXPECT_FALSE(service->profile_name_for_client("client-a"));
+    EXPECT_FALSE(service->profile_name_for_client("new-client"));
     EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
     EXPECT_EQ(reloads, 0U);
   }
@@ -657,7 +672,7 @@ namespace {
     EXPECT_FALSE(idle->body.contains("doctor"));
     EXPECT_FALSE(idle->body.contains("owner_device_name"));
     EXPECT_FALSE(idle->body["capture"].contains("cpu_copy"));
-    EXPECT_EQ(idle->body["display_mode"]["label"], "Polaris Profile");
+    EXPECT_EQ(idle->body["display_mode"]["label"], "Primary");
     const auto own = launch();
     ASSERT_TRUE(service->prepare(own).prepared());
     ASSERT_TRUE(own->try_begin_setup_handoff());
@@ -668,6 +683,7 @@ namespace {
     EXPECT_NE(status->body["session_token"], other->session_token);
     EXPECT_TRUE(status->body["owned_by_client"]);
     EXPECT_TRUE(status->body["streaming_active"]);
+    EXPECT_EQ(status->body["game"], "Primary");
     EXPECT_EQ(status->body["capture"]["resolution"], "1920x1080");
     EXPECT_EQ(status->body["encoder"]["session_target_fps"], 60);
     EXPECT_FALSE(status->body["encoder"].contains("fps"));

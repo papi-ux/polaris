@@ -5026,6 +5026,7 @@ namespace nvhttp {
     const auto service = multiseat::profile_service_for(current->uuid);
     if (!service) return std::nullopt;
     const auto session = service->session_snapshot(current->uuid);
+    const auto name = service->profile_name_for_client(current->uuid).value_or("Polaris Profile");
     // These are the worker's admitted settings and the requesting device's
     // lifecycle. Global host capture counters and Doctor findings are unrelated.
     nlohmann::json output {
@@ -5033,12 +5034,12 @@ namespace nvhttp {
       {"streaming_active", session.active}, {"owned_by_client", session.active},
       {"client_role", session.active ? "owner" : "none"}, {"viewer_count", 0},
       {"session_token", session.token}, {"app_session_id", session.token},
-      {"game", session.active ? "Polaris Profile" : ""},
+      {"game", session.active ? name : ""},
       {"game_id", session.active ? multiseat::profile_app_id : 0},
       {"game_uuid", session.active ? std::string(multiseat::profile_app_uuid) : ""},
       {"controls", {{"host_tuning_allowed", false}, {"quit_allowed", session.active}, {"stop_allowed", session.active},
         {"client_commands_enabled", false}, {"device_commands_enabled", false}, {"shutdown_in_progress", false}}},
-      {"display_mode", {{"selection", "gamescope_stream"}, {"label", "Polaris Profile"},
+      {"display_mode", {{"selection", "gamescope_stream"}, {"label", name},
         {"mirror_desktop", false}, {"virtual_display", false}, {"force_private_after_steam_close", false}}},
       {"capture", {{"backend", "worker"}, {"resolution", session.active ?
         std::to_string(session.width) + "x" + std::to_string(session.height) : ""}}},
@@ -5974,11 +5975,11 @@ namespace nvhttp {
     apps.put("<xmlattr>.status_code", 200);
 
 #ifdef __linux__
-    if (multiseat::profile_service_for(named_cert_p->uuid)) {
+    if (const auto service = multiseat::profile_service_for(named_cert_p->uuid)) {
       if (!!(named_cert_p->perm & PERM::_all_actions)) {
         pt::ptree app;
         app.put("IsHdrSupported", 0);
-        app.put("AppTitle", "Polaris Profile");
+        app.put("AppTitle", service->profile_name_for_client(named_cert_p->uuid).value_or("Polaris Profile"));
         app.put("UUID", std::string(multiseat::profile_app_uuid));
         app.put("IDX", 0);
         app.put("ID", multiseat::profile_app_id);
@@ -8156,11 +8157,14 @@ namespace nvhttp {
 #ifdef __linux__
       if (const auto service = multiseat::profile_service_for(client->uuid)) {
         const auto query = request->parse_query_string();
-        const std::string name = "Polaris Profile";
+        const auto name = service->profile_name_for_client(client->uuid).value_or("Polaris Profile");
+        auto searchable_name = name + " Polaris Profile";
+        std::transform(searchable_name.begin(), searchable_name.end(), searchable_name.begin(),
+          [](unsigned char c) { return std::tolower(c); });
         auto search = get_arg(query, "search", "");
         std::transform(search.begin(), search.end(), search.begin(), [](unsigned char c) { return std::tolower(c); });
         const auto source = get_arg(query, "source", "");
-        const bool matches = std::string("polaris profile").find(search) != std::string::npos &&
+        const bool matches = searchable_name.find(search) != std::string::npos &&
           (source.empty() || source == "other" || source == "polaris") &&
           !!(client->perm & PERM::launch) && !client->temporary_authorization;
         nlohmann::json games = nlohmann::json::array();

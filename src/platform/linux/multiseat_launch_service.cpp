@@ -341,6 +341,16 @@ namespace multiseat {
       impl_->controller->profile_for_client(client) : std::nullopt;
   }
 
+  std::optional<std::string> profile_launch_service_t::profile_name_for_client(std::string_view client) const {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->controller || impl_->stopping || impl_->admin_failed || impl_->reconfiguring) return std::nullopt;
+    const auto id = impl_->controller->profile_for_client(client);
+    if (!id) return std::nullopt;
+    for (const auto &profile : impl_->controller->profile_catalog())
+      if (profile.id == *id && !profile.name.empty()) return profile.name;
+    return std::nullopt;
+  }
+
   profile_launch_result_t profile_launch_service_t::prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
                                                          std::string_view expected_profile) {
     if (!launch || !routes_client(launch->unique_id)) return {404, "No profile is assigned to this device"};

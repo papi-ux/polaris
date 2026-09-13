@@ -70,6 +70,8 @@ namespace multiseat {
     profile_launch_service_t &operator=(const profile_launch_service_t &) = delete;
     [[nodiscard]] bool routes_client(std::string_view client) const;
     [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client) const;
+    // Only the assigned profile name, read from one controller snapshot.
+    [[nodiscard]] std::optional<std::string> profile_name_for_client(std::string_view client) const;
     [[nodiscard]] profile_launch_result_t prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
       std::string_view expected_profile = {});
     [[nodiscard]] profile_admin_snapshot_t admin_snapshot() const;
