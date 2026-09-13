@@ -55,6 +55,14 @@ func launcherEnvironment(request seatruntime.Request, session launcherSession) (
 	if err != nil {
 		return nil, err
 	}
+	if request.WorkloadKind == seatruntime.WorkloadSteam {
+		// Profile streams currently allocate at most one gamepad. SDL's Linux
+		// discovery skips our reserved alias because it is not an eventN name
+		// and this namespace has no host udev database. Select only that exact
+		// host-admitted node. It stays absent when controller input is denied;
+		// this hint neither creates a device nor grants access to another seat.
+		environment = append(environment, "SDL_JOYSTICK_DEVICE=/dev/input/polaris-gamepad-0")
+	}
 	return append(environment,
 		"PATH=/usr/bin", "LC_ALL=C",
 		"DISPLAY="+session.display, "STEAM_GAME_DISPLAY_0="+session.display,

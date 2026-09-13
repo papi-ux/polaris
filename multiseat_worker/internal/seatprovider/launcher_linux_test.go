@@ -110,6 +110,7 @@ func TestLauncherRejectsUnimplementedWorkloads(t *testing.T) {
 }
 
 func TestSteamLauncherUsesTypedTargetsAndCanonicalPackagePath(t *testing.T) {
+	t.Setenv("SDL_JOYSTICK_DEVICE", "/dev/input/event0")
 	request := seatruntime.Request{Stage: seatruntime.StageLauncher, RuntimeNamespace: "steam-test", RuntimeProfile: "steam", WorkloadKind: seatruntime.WorkloadSteam, WorkloadID: seatruntime.SteamBigPicture, WaylandSocket: "polaris-wayland-test", AudioSink: "audio-test", InputSeat: "input-test"}
 	for _, target := range []string{seatruntime.SteamBigPicture, "570"} {
 		request.WorkloadID = target
@@ -128,7 +129,7 @@ func TestSteamLauncherUsesTypedTargetsAndCanonicalPackagePath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, required := range []string{"DISPLAY=:0", "HOME=" + launcherHome, "XDG_RUNTIME_DIR=/run/polaris", "PULSE_SINK=audio-test"} {
+		for _, required := range []string{"DISPLAY=:0", "HOME=" + launcherHome, "XDG_RUNTIME_DIR=/run/polaris", "PULSE_SINK=audio-test", "SDL_JOYSTICK_DEVICE=/dev/input/polaris-gamepad-0"} {
 			if !strings.Contains(strings.Join(environment, "\n"), required+"\n") {
 				t.Fatalf("missing private environment %s", required)
 			}
