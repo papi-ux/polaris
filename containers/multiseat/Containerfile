@@ -61,6 +61,8 @@ RUN mkdir -p /out/steam-input && \
         cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror \
           -ffile-prefix-map=/providers=. -Wl,--build-id=none \
           /providers/test-steam-input.c -o /out/test-steam-input-$abi -pthread && \
+        cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared \
+          /providers/test-steam-evdev.c -o /out/test-steam-input-$abi.evdev.so -ldl && \
         python3 /providers/test-steam-input.py /out/test-steam-input-$abi \
           "$directory/libpolaris-steam-input.so" || exit 1; \
         chmod 0555 "$directory/libpolaris-steam-input.so"; \

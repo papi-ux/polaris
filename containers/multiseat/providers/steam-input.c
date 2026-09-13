@@ -204,6 +204,29 @@ static int controller_ioctl(int fd,struct controller *c,unsigned long request,ui
   if (request==UI_SET_PHYS) return arg ? 0 : failure(EFAULT); // identity stays host-owned
   return failure(EINVAL);
 }
+static int real_ioctl(int fd,unsigned long request,uintptr_t arg) {
+  return next_ioctl ? next_ioctl(fd,request,arg) : (int)syscall(SYS_ioctl,fd,request,arg);
+}
+static int output_name(int fd,unsigned long request,uintptr_t arg,int result) {
+  if (result<0 || !arg || _IOC_TYPE(request)!='E' || _IOC_NR(request)!=6 ||
+      _IOC_DIR(request)!=_IOC_READ || !_IOC_SIZE(request)) return result;
+  const char *expected=getenv("POLARIS_STEAM_INPUT_NAME");
+  if (!expected || !enabled()) return result;
+  struct input_id id={0};
+  char name[256]={0};
+  if (real_ioctl(fd,EVIOCGID,(uintptr_t)&id)<0 ||
+      id.bustype!=BUS_USB || id.vendor!=0x28de || id.product!=0x11ff || id.version!=0 ||
+      real_ioctl(fd,EVIOCGNAME(sizeof(name)),(uintptr_t)name)<0 ||
+      !memchr(name,0,sizeof(name)) || strcmp(name,expected)) return result;
+  /* Proton extracts Steam's controller slot from this compatibility name.
+   * Only the verified output's userspace readback changes. The host kernel
+   * name and the broker's generation checks retain the Polaris identity. */
+  static const char alias[]="Microsoft X-Box 360 pad 0";
+  size_t count=_IOC_SIZE(request);
+  if (count>sizeof(alias)) count=sizeof(alias);
+  memcpy((void *)arg,alias,count);
+  return (int)count;
+}
 int ioctl(int fd,unsigned long request,...) {
   uintptr_t arg=0;
   if (request!=UI_DEV_CREATE && request!=UI_DEV_DESTROY) {
@@ -211,7 +234,7 @@ int ioctl(int fd,unsigned long request,...) {
   }
   pthread_mutex_lock(&mutex);
   struct handle *h=lookup(fd);
-  if (!h) { pthread_mutex_unlock(&mutex); return next_ioctl ? next_ioctl(fd,request,arg) : (int)syscall(SYS_ioctl,fd,request,arg); }
+  if (!h) { pthread_mutex_unlock(&mutex); return output_name(fd,request,arg,real_ioctl(fd,request,arg)); }
   int result=controller_ioctl(fd,h->controller,request,arg);
   pthread_mutex_unlock(&mutex);
   return result;

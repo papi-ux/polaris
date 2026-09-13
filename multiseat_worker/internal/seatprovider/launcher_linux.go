@@ -133,7 +133,7 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	var steamBroker *steamInputBroker
 	var steamDone <-chan struct{}
 	if request.WorkloadKind == seatruntime.WorkloadSteam {
-		path, _, err := inputs.SteamOutput()
+		path, name, err := inputs.SteamOutput()
 		if err != nil {
 			return err
 		}
@@ -172,7 +172,7 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 			defer func() { result = errors.Join(result, steamBroker.close()) }()
 			steamDone = steamBroker.done
 			environment = append(environment, "LD_PRELOAD=libpolaris-steam-input.so",
-				"POLARIS_STEAM_INPUT_SOCKET="+socket, "POLARIS_STEAM_INPUT_SYSNAME="+sysname)
+				"POLARIS_STEAM_INPUT_SOCKET="+socket, "POLARIS_STEAM_INPUT_SYSNAME="+sysname, "POLARIS_STEAM_INPUT_NAME="+name)
 		}
 	}
 	if err := parent.Err(); err != nil {

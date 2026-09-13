@@ -17,6 +17,13 @@ for client, library in zip(sys.argv[1::2], sys.argv[2::2]):
     assert required and max(required) <= (2, 15), ("requires newer Steam runtime libc", required)
     dynamic = subprocess.check_output(["readelf", "-d", library], text=True)
     assert "[libdl.so.2]" in dynamic and "[libpthread.so.0]" in dynamic, "missing older runtime dependencies"
+    for scenario in ("name-valid", "name-generation", "name-id"):
+        env = dict(os.environ, LD_PRELOAD=str(pathlib.Path(library).resolve()) + ":" +
+                   str(pathlib.Path(client + ".evdev.so").resolve()),
+                   POLARIS_STEAM_INPUT_SOCKET="/unused-test-socket",
+                   POLARIS_STEAM_INPUT_NAME="Polaris multiseat 0123456789abcdef0123456789abcdef steam-gamepad-0")
+        subprocess.run([client, scenario], env=env, check=True, timeout=10)
+        print(pathlib.Path(client).name, scenario, "passed", flush=True)
     for scenario in ("modern", "legacy", "destroy"):
         with tempfile.TemporaryDirectory(prefix="polaris-steam-") as directory:
             path = str(pathlib.Path(directory) / "input.sock")

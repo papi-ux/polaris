@@ -70,6 +70,25 @@ static void configure(int fd,int legacy) {
 }
 int main(int argc,char **argv) {
   assert(argc==2);
+  if (!strncmp(argv[1],"name-",5)) {
+    const char *expected=getenv("POLARIS_STEAM_INPUT_NAME");
+    assert(expected);
+    int fd=open("/dev/null",O_RDWR); assert(fd>=0);
+    char value[32]; snprintf(value,sizeof(value),"%d",fd);
+    assert(setenv("POLARIS_TEST_EVDEV_FD",value,1)==0);
+    const char *kernel=expected;
+    if (!strcmp(argv[1],"name-generation")) kernel="Polaris multiseat different-generation steam-gamepad-0";
+    assert(setenv("POLARIS_TEST_KERNEL_NAME",kernel,1)==0);
+    if (!strcmp(argv[1],"name-id")) assert(setenv("POLARIS_TEST_WRONG_ID","1",1)==0);
+    char name[256]={0};
+    assert(ioctl(fd,EVIOCGNAME(sizeof(name)),name)>0);
+    const char *wanted=!strcmp(argv[1],"name-valid") ? "Microsoft X-Box 360 pad 0" : kernel;
+    assert(!strcmp(name,wanted));
+    memset(name,0,sizeof(name));
+    assert(ioctl(fd,EVIOCGNAME(5),name)==5 && !memcmp(name,wanted,5));
+    close(fd);
+    return 0;
+  }
   ordinary_io();
   assert(open("/dev/uinput",O_RDONLY)<0 && errno==EINVAL);
   assert(open("/dev/uinput",O_RDWR|O_PATH)<0 && errno==EINVAL);
