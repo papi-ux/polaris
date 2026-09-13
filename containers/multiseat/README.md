@@ -137,6 +137,11 @@ timing at the handheld or the cause of its audio backlog. The offline audio
 timing reader below makes that analysis reproducible without publishing raw
 captures.
 
+A later capture batching change requests 5 ms Pulse audio capture and logs the
+backend's actual value. Bounded comparisons and a two-seat 120 FPS observation
+are recorded in [the audio timing report](../../docs/research/container-multiseat-audio-timing.md).
+The earlier high bitrate audio failure remains unresolved.
+
 Nova Debug normally enables native FEC validation that intentionally requires
 an extra parity packet. Quality checks now explicitly disable that mode and
 verify the packaged native library. The earlier comparison that accidentally
