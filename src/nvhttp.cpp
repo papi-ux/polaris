@@ -4060,6 +4060,12 @@ namespace nvhttp {
     std::lock_guard lock(client_state_mutex);
     const std::filesystem::path state_path {config::nvhttp.file_state};
     state_file_lock_t interprocess_lock {state_path};
+    const auto start_unpaired = [&]() {
+      clear_authorization_state_locked();
+      http::uuid = uuid_util::uuid_t::generate();
+      http::unique_id = http::uuid.string();
+      return false;
+    };
     const auto fail_closed = [&](std::string_view reason) {
       // This reads as fatal and is not: the host carries on with a fresh
       // identity. A reporter on discussion #637 hit it right after fixing a
@@ -4067,10 +4073,7 @@ namespace nvhttp {
       BOOST_LOG(error) << "Refusing authorization state from "sv << state_path << ": "sv << reason
                        << ". Continuing with a new host identity, so any client paired before "
                           "now has to pair again."sv;
-      clear_authorization_state_locked();
-      http::uuid = uuid_util::uuid_t::generate();
-      http::unique_id = http::uuid.string();
-      return false;
+      return start_unpaired();
     };
 
     if (!interprocess_lock) {
@@ -4078,10 +4081,7 @@ namespace nvhttp {
     }
     if (!fs::exists(state_path)) {
       BOOST_LOG(info) << "File "sv << state_path << " doesn't exist"sv;
-      clear_authorization_state_locked();
-      http::uuid = uuid_util::uuid_t::generate();
-      http::unique_id = http::uuid.string();
-      return false;
+      return start_unpaired();
     }
 
     try {
@@ -4091,7 +4091,22 @@ namespace nvhttp {
         return fail_closed("couldn't open the file");
       }
       input >> tree;
-      if (!tree.is_object() || !tree.contains("root") || !tree["root"].is_object()) {
+      if (!tree.is_object()) {
+        return fail_closed("the file does not hold a JSON object");
+      }
+      if (!tree.contains("root")) {
+        // The web credentials live in this same file (config.cpp points
+        // credentials_file at file_state), and pairing is the only writer that
+        // ever creates "root". Setting a password on a fresh install therefore
+        // leaves a state file with no "root" in it at all. That is a host that
+        // has not paired anything yet, not a damaged file. Reporting it as
+        // damage on every start sends its owner looking for corruption that is
+        // not there.
+        BOOST_LOG(info) << "No client has paired with this host yet, so "sv << state_path
+                        << " holds no pairing state"sv;
+        return start_unpaired();
+      }
+      if (!tree["root"].is_object()) {
         return fail_closed("root must be an object");
       }
 
