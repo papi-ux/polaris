@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"sync"
@@ -43,9 +44,70 @@ func (source *encoderMediaSource) Close() error {
 	defer source.mutex.Unlock()
 	source.closed = true
 	if source.connection != nil {
-		return source.connection.Close()
+		connection := source.connection
+		source.connection = nil
+		return connection.Close()
 	}
 	return nil
+}
+
+// Retire routing immediately, but retain the socket until the runtime has
+// stopped its providers in dependency order. Closing it here races the encoder's
+// signal handler and makes normal shutdown look like a lost consumer.
+func (source *encoderMediaSource) retire() {
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+	if source.closed {
+		return
+	}
+	source.closed = true
+	connection := source.connection
+	if connection == nil {
+		return
+	}
+	_ = connection.SetDeadline(time.Now())
+	go func() {
+		// Let the canceled read release its borrowed packet first. All later
+		// operations reject the retired source before touching the socket.
+		source.readMutex.Lock()
+		source.mutex.Lock()
+		drain := source.connection == connection
+		if drain {
+			drain = connection.SetReadDeadline(time.Time{}) == nil
+		}
+		source.mutex.Unlock()
+		source.readMutex.Unlock()
+		if drain {
+			// Discard bounded-buffer media while the launcher stops, so a slow
+			// launcher cannot trigger the encoder's backpressure timeout.
+			// The owner's deferred Close terminates this drain.
+			_, _ = io.Copy(io.Discard, connection)
+		}
+	}()
+}
+
+func (source *encoderMediaSource) prepareIO(ctx context.Context, connection *net.UnixConn, timeout time.Duration, write bool) (func() bool, error) {
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+	if source.closed || ctx.Err() != nil {
+		return nil, errors.New("seat encoder connection retired")
+	}
+	deadline := time.Now().Add(timeout)
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	var err error
+	if write {
+		err = connection.SetWriteDeadline(deadline)
+	} else {
+		err = connection.SetReadDeadline(deadline)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Register after setting the deadline, while serialized with retirement:
+	// cancellation must never have its immediate deadline overwritten.
+	return context.AfterFunc(ctx, source.retire), nil
 }
 
 func (source *encoderMediaSource) connectionFor(ctx context.Context) (*net.UnixConn, error) {
@@ -96,20 +158,14 @@ func (source *encoderMediaSource) read(ctx context.Context) (byte, []byte, error
 	if err != nil {
 		return 0, nil, err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = source.Close() })
-	defer stop()
-	// A dead producer cannot hold a seat indefinitely. The independent control
-	// writer can request an IDR while this read waits for a frame.
-	deadline := time.Now().Add(10 * time.Second)
-	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
-		deadline = limit
-	}
-	if err := connection.SetReadDeadline(deadline); err != nil {
+	stop, err := source.prepareIO(ctx, connection, 10*time.Second, false)
+	if err != nil {
 		return 0, nil, err
 	}
+	defer stop()
 	kind, body, err := seatmedia.Read(connection)
 	if err != nil {
-		_ = source.Close()
+		source.retire()
 	}
 	return kind, body, err
 }
@@ -133,21 +189,17 @@ func (source *encoderMediaSource) send(ctx context.Context, command byte) error 
 	if err != nil {
 		return err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = source.Close() })
-	defer stop()
-	deadline := time.Now().Add(2 * time.Second)
-	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
-		deadline = limit
+	stop, err := source.prepareIO(ctx, connection, 2*time.Second, true)
+	if err != nil {
+		return err
 	}
-	if err = connection.SetWriteDeadline(deadline); err == nil {
-		var n int
-		n, err = connection.Write([]byte{command})
-		if err == nil && n != 1 {
-			err = errors.New("encoder control write incomplete")
-		}
+	defer stop()
+	n, err := connection.Write([]byte{command})
+	if err == nil && n != 1 {
+		err = errors.New("encoder control write incomplete")
 	}
 	if err != nil {
-		_ = source.Close()
+		source.retire()
 	} else if command == seatmedia.Start {
 		source.started = true
 	}
@@ -175,7 +227,7 @@ func (source *encoderMediaSource) Contract(ctx context.Context) (mediaConfig, er
 		uint32(contract.Width) != source.config.DisplayWidth || uint32(contract.Height) != source.config.DisplayHeight ||
 		uint64(contract.FPSNumerator)*1000 != uint64(source.config.RefreshMillihz)*uint64(contract.FPSDenominator) ||
 		contract.AudioChannels != 2 || contract.AudioFrameDurationUS != 5000 {
-		_ = source.Close()
+		source.retire()
 		return mediaConfig{}, errors.New("seat encoder contract differs from allocation")
 	}
 	source.contract = &contract
@@ -186,7 +238,7 @@ func (source *encoderMediaSource) Next(ctx context.Context) (message, mediaFrame
 	source.readMutex.Lock()
 	defer source.readMutex.Unlock()
 	failure := func(err error) (message, mediaFrame, []byte, error) {
-		_ = source.Close()
+		source.retire()
 		return 0, mediaFrame{}, nil, err
 	}
 	if source.contract == nil {

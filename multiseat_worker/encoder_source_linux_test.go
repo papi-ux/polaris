@@ -257,3 +257,93 @@ func TestWorkerMediaModeRequiresTheExactFinalOption(t *testing.T) {
 		}
 	}
 }
+
+// Cancellation must unblock the caller without disconnecting a still-live
+// provider. The runtime stops the launcher before the encoder; drain discarded
+// media until that ordered shutdown closes the source.
+func TestEncoderSourceCancellationDrainsUntilOwnerCloses(t *testing.T) {
+	for _, stage := range []string{"contract", "frame"} {
+		t.Run(stage, func(t *testing.T) {
+			entered := make(chan struct{})
+			probe := make(chan struct{})
+			result := make(chan error, 1)
+			peerClosed := make(chan error, 1)
+			source, _ := encoderFixture(t, func(connection *net.UnixConn, contract mediaConfig) {
+				if stage == "frame" {
+					writeEncoderContract(t, connection, contract)
+					var command [1]byte
+					if _, err := io.ReadFull(connection, command[:]); err != nil {
+						result <- err
+						return
+					}
+				}
+				close(entered)
+				<-probe
+				// A full socket buffer must not turn requested shutdown into
+				// the provider's five-second backpressure failure.
+				_, err := connection.Write(make([]byte, 2*1024*1024))
+				result <- err
+				var b [1]byte
+				_, err = connection.Read(b[:])
+				peerClosed <- err
+			})
+			if stage == "frame" {
+				if _, err := source.Contract(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			canceled := make(chan error, 1)
+			go func() {
+				if stage == "contract" {
+					_, err := source.Contract(ctx)
+					canceled <- err
+				} else {
+					_, _, _, err := source.Next(ctx)
+					canceled <- err
+				}
+			}()
+			<-entered
+			cancel()
+			select {
+			case err := <-canceled:
+				if err == nil {
+					t.Fatal("canceled operation succeeded")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled operation blocked")
+			}
+			close(probe)
+			if err := <-result; err != nil {
+				t.Fatalf("provider lost its connection before ordered shutdown: %v", err)
+			}
+			if _, err := source.Contract(t.Context()); err == nil {
+				t.Fatal("retired connection reused")
+			}
+			select {
+			case err := <-peerClosed:
+				t.Fatalf("provider observed early close: %v", err)
+			default:
+			}
+			if err := source.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-peerClosed; !errors.Is(err, io.EOF) {
+				t.Fatalf("owner cleanup did not close provider connection: %v", err)
+			}
+		})
+	}
+}
+
+func TestEncoderSourceUnexpectedDisconnectStillFails(t *testing.T) {
+	source, _ := encoderFixture(t, func(connection *net.UnixConn, contract mediaConfig) {
+		writeEncoderContract(t, connection, contract)
+	})
+	if _, err := source.Contract(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := source.Next(t.Context()); err == nil {
+		t.Fatal("unexpected provider disconnect accepted")
+	}
+}
