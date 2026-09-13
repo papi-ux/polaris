@@ -56,16 +56,56 @@ namespace input {
   };
 
   /**
+   * @brief Build the mapping from a client's stream onto the captured desktop.
+   * @param capture The captured rectangle's offset and size, as the backend reports it.
+   * @param env_width The full desktop width.
+   * @param env_height The full desktop height.
+   * @param stream_width The width the client is streaming at.
+   * @param stream_height The height the client is streaming at.
+   * @return The touchport for this session.
+   */
+  touch_port_t make_touch_port(
+    const platf::touch_port_t &capture,
+    int env_width,
+    int env_height,
+    int stream_width,
+    int stream_height
+  );
+
+  /**
+   * @brief Why a client coordinate could not be mapped onto the touchport.
+   *
+   * One warning covering every one of these told a reporter on nova#302 only
+   * that something was out of bounds, several hundred times a second, while the
+   * pointer sat still.
+   */
+  enum class touchport_reject_e {
+    none,  ///< The coordinate mapped.
+    client_surface_empty,  ///< The client described a surface with no area.
+    capture_viewport_empty,  ///< The capture never reported its own size.
+    letterbox_bounds_inverted,  ///< The letterbox offsets do not bracket the frame.
+  };
+
+  /**
+   * @brief Name a rejection reason for a log line.
+   * @param reason The reason to name.
+   * @return A short human readable phrase.
+   */
+  std::string_view touchport_reject_name(touchport_reject_e reason);
+
+  /**
    * @brief Convert client coordinates on the specified surface into touchport coordinates.
    * @param touch_port The active touchport mapping.
    * @param val The cartesian coordinate pair to convert.
    * @param size The size of the client's surface containing the value.
+   * @param reason Optional out parameter naming why a mapping was refused.
    * @return The host-relative coordinate pair if the mapping bounds are valid.
    */
   std::optional<std::pair<float, float>> map_client_to_touchport(
     const touch_port_t &touch_port,
     const std::pair<float, float> &val,
-    const std::pair<float, float> &size
+    const std::pair<float, float> &size,
+    touchport_reject_e *reason = nullptr
   );
 
   /**
