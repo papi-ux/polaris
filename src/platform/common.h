@@ -792,6 +792,19 @@ namespace platf {
    */
   void reevaluate_capture_sources();
 
+#ifdef __linux__
+  /**
+   * @brief Describe a capture backend substitution, as "requested -> selected".
+   * @return Empty when the configured backend was the one actually used.
+   */
+  std::string capture_backend_substitution_note();
+
+  #ifdef POLARIS_TESTS
+  /// Set the substitution note directly, so the reporting can be tested without a compositor.
+  void set_capture_backend_substitution_for_tests(const std::string &note);
+  #endif
+#endif
+
   enum class thread_priority_e : int {
     low,  ///< Low priority
     normal,  ///< Normal priority
