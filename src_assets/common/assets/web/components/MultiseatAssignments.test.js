@@ -10,6 +10,15 @@ let wrapper
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 
 describe('profile assignments', () => {
+  it('does not mistake a failed device lookup for an unpaired host', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
+    wrapper = mount(MultiseatAssignments, { props: { clients: [], clientsReady: false } })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Pair a device with permission')
+    await wrapper.setProps({ clientsReady: true })
+    expect(wrapper.text()).toContain('Pair a device with permission')
+  })
+
   it('keeps ordinary device setup unchanged when multiseat is off', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply({ ...snapshot(), enabled: false })))
     wrapper = mount(MultiseatAssignments, { props: { clients: [client] } })
@@ -97,7 +106,7 @@ describe('profile assignments', () => {
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(wrapper.text()).not.toContain('Assignment saved.')
-    expect(wrapper.get('[role=alert]').text()).toContain('Refresh profiles to try again')
+    expect(wrapper.get('[role=alert]').text()).toContain('Refresh spaces to try again')
     expect(wrapper.get('select').element.disabled).toBe(true)
     await wrapper.findAll('button').at(-1).trigger('click')
     await flushPromises()
@@ -169,7 +178,7 @@ describe('profile assignments', () => {
     await wrapper.findAll('button').at(-1).trigger('click')
     await flushPromises()
     expect(wrapper.get('select').element.value).toBe('')
-    expect(wrapper.text()).toContain('No gaming profiles are configured yet')
+    expect(wrapper.text()).toContain('No spaces are configured yet')
     expect(wrapper.text()).not.toContain('Unsaved change')
   })
 
@@ -216,7 +225,7 @@ describe('profile assignments', () => {
     expect(wrapper.findAll('select')).toHaveLength(1)
     expect(wrapper.get('option[value="profile-a"]').element.disabled).toBe(true)
     expect(wrapper.get('option[value=""]').element.disabled).toBe(false)
-    expect(wrapper.text()).toContain('no longer has profile access')
+    expect(wrapper.text()).toContain('no longer has space access')
     await wrapper.get('select').setValue('')
     expect(wrapper.get('button').element.disabled).toBe(false)
   })

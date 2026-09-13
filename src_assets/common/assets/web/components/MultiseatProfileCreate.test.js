@@ -9,6 +9,7 @@ const reply = (body, status = 200) => ({ ok: status < 400, status, json: async (
 const button = text => wrapper.findAll('button').find(item => item.text() === text)
 let wrapper, refresh
 beforeEach(() => {
+  sessionStorage.clear()
   refresh = vi.fn(async () => true)
   vi.stubGlobal('crypto', { randomUUID: vi.fn(() => id) })
   vi.stubGlobal('fetch', vi.fn(async () => reply({ status: true, profile_id: id })))
@@ -17,7 +18,7 @@ afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 
 async function open(props = {}) {
   wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source], ready: true, refresh, ...props } })
-  await button('Create Steam profile').trigger('click')
+  await button('Create a space').trigger('click')
   await wrapper.get('input').setValue('Player 2')
 }
 
@@ -137,8 +138,8 @@ describe('Steam profile creation', () => {
 
   it('explains first profile setup when no Steam source exists', async () => {
     wrapper = mount(MultiseatProfileCreate, { props: { profiles: [{ ...source, steam: false }], refresh } })
-    expect(button('Create Steam profile').element.disabled).toBe(true)
-    expect(wrapper.text()).toContain('Set up the first Steam profile')
+    expect(button('Create a space').element.disabled).toBe(true)
+    expect(wrapper.text()).toContain('The first Steam space still needs host configuration')
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -147,7 +148,7 @@ describe('Steam profile creation', () => {
     await wrapper.get('input').setValue(value)
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(button('Create profile').element.disabled).toBe(true)
+    expect(button('Create space').element.disabled).toBe(true)
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -176,8 +177,43 @@ describe('Steam profile creation', () => {
     await open()
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(wrapper.get('[role=alert]').text()).toContain('Could not refresh profiles')
+    expect(wrapper.get('[role=alert]').text()).toContain('Could not refresh spaces')
     expect(wrapper.emitted('busy')).toEqual([[true], [false]])
     expect(wrapper.text()).not.toContain('was created')
+  })
+
+  it('restores an unfinished request after navigation without automatically posting it again', async () => {
+    fetch.mockRejectedValueOnce(new Error('Connection lost'))
+    await open()
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    const body = fetch.mock.calls[0][1].body
+    wrapper.unmount()
+    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source], ready: true, refresh } })
+    await flushPromises()
+    expect(wrapper.get('input').element.value).toBe('Player 2')
+    expect(wrapper.get('input').element.disabled).toBe(true)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(fetch.mock.calls[1][1].body).toBe(body)
+    expect(crypto.randomUUID).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a restored request only after finding its exact saved space', async () => {
+    sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: id, source_profile_id: source.id, name: created.name }))
+    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source, created], ready: true, refresh } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Player 2 was created')
+    expect(sessionStorage.getItem('polaris:spaces:create-request:v1')).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('ignores invalid saved requests and never submits them', async () => {
+    sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: 'invalid', source_profile_id: source.id, name: created.name }))
+    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source], ready: true, refresh } })
+    await flushPromises()
+    expect(wrapper.find('form').exists()).toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
   })
 })

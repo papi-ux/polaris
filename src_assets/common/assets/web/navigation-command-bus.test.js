@@ -18,6 +18,7 @@ const labels = {
   'navbar.dashboard': 'Mission Control',
   'navbar.library': 'Library',
   'navbar.pairing': 'Devices',
+  'navbar.spaces': 'Spaces',
   'navbar.browser_stream': 'Browser Stream',
   'navbar.settings': 'Settings',
   'navbar.security': 'Security',
@@ -48,6 +49,7 @@ describe('navigation metadata shell', () => {
       '/',
       '/apps',
       '/pin',
+      '/spaces',
       '/config',
       '/password',
       '/info',
@@ -82,6 +84,7 @@ describe('command action registry', () => {
       'dashboard',
       'apps',
       'pairing',
+      'spaces',
       'config',
       'password',
       'info',
@@ -91,6 +94,7 @@ describe('command action registry', () => {
 
     expect(filterCommandActions(actions, 'moonlight')[0]).toMatchObject({ id: 'browser-stream', hint: '/browser-stream' })
     expect(filterCommandActions(actions, 'game library')[0]).toMatchObject({ id: 'apps', hint: '/apps' })
+    expect(filterCommandActions(actions, 'docker')[0]).toMatchObject({ id: 'spaces', label: 'Spaces' })
     expect(filterCommandActions(actions, 'pairing')[0]).toMatchObject({ id: 'pairing', label: 'Devices' })
     expect(filterCommandActions(actions, 'doctor')[0]).toMatchObject({ id: 'troubleshooting', label: 'Doctor & Support' })
     expect(scoreCommandAction(actions.find((action) => action.id === 'apps'), 'library')).toBeGreaterThan(0)

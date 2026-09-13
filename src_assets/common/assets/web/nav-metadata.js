@@ -1,4 +1,5 @@
 const ICONS = {
+  spaces: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2" stroke-width="2"/><rect x="14" y="3" width="7" height="7" rx="2" stroke-width="2"/><rect x="3" y="14" width="7" height="7" rx="2" stroke-width="2"/><rect x="14" y="14" width="7" height="7" rx="2" stroke-width="2"/></svg>',
   dashboard: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 14a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1v-2zm10 0a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1h-4a1 1 0 01-1-1v-5z"/></svg>',
   apps: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>',
   pairing: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>',
@@ -18,6 +19,7 @@ export const NAV_SECTION_DEFINITIONS = [
       { commandId: 'dashboard', to: '/', icon: ICONS.dashboard, labelKey: 'navbar.dashboard', fallbackLabel: 'Mission Control', aliases: ['dashboard', 'home', 'overview', 'session', 'stream status'], description: 'Open the live control surface and active session overview.' },
       { commandId: 'apps', to: '/apps', icon: ICONS.apps, labelKey: 'navbar.library', fallbackLabel: 'Library', aliases: ['apps', 'applications', 'games', 'game library', 'streamable apps'], description: 'Browse, edit, and import games or streamable applications.' },
       { commandId: 'pairing', to: '/pin', icon: ICONS.pairing, labelKey: 'navbar.pairing', fallbackLabel: 'Devices', aliases: ['pairing', 'pin', 'devices', 'clients', 'moonlight pairing'], description: 'Pair clients and review devices trusted to use this host.' },
+      { commandId: 'spaces', to: '/spaces', icon: ICONS.spaces, labelKey: 'navbar.spaces', fallbackLabel: 'Spaces', aliases: ['space', 'gaming spaces', 'multiseat', 'multi session', 'multiple players', 'headless', 'docker'], description: 'Set up separate gaming spaces, Steam sign-ins, and device access.' },
     ],
   },
   {

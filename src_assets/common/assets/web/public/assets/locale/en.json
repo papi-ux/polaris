@@ -1193,6 +1193,7 @@
     "library": "Library",
     "password": "Change Password",
     "pairing": "Devices",
+        "spaces": "Spaces",
     "pin": "PIN",
     "search_hint": "to search",
     "security": "Security",

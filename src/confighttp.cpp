@@ -88,6 +88,7 @@
 #elif __linux__
   #include "platform/linux/session_media.h"
   #include "platform/linux/multiseat_launch_service.h"
+#include "platform/linux/spaces_setup.h"
   #include <pwd.h>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -3636,6 +3637,18 @@ namespace confighttp {
   }
 
   // ---- Client Profile CRUD API ----
+
+  void getSpacesSetup(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    multiseat::container::local_host_t host;
+    const auto service = multiseat::installed_profile_service();
+    const bool available = service && service->admin_snapshot().available;
+    send_response(response, multiseat::spaces::inspect_setup(host, config::multiseat.enabled, available));
+#else
+    not_found(response, request);
+#endif
+  }
 
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -7576,6 +7589,7 @@ namespace confighttp {
     server.resource["^/api/devices$"]["GET"] = getDevices;
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;
+    server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
     server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
     server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
