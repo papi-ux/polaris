@@ -365,9 +365,17 @@ func consumerAlive(pidFD int) bool {
 		FD              int32
 		Events, Revents int16
 	}{FD: int32(pidFD), Events: 1}
-	timeout := syscall.Timespec{}
-	count, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&poll)), 1, uintptr(unsafe.Pointer(&timeout)), 0, 0, 0)
-	return errno == 0 && count == 0 && poll.Revents == 0
+	for {
+		// Runtime preemption signals can interrupt a zero-timeout poll too.
+		// Retry the same pinned lifetime; EINTR does not establish child death.
+		timeout := syscall.Timespec{}
+		poll.Revents = 0
+		count, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&poll)), 1, uintptr(unsafe.Pointer(&timeout)), 0, 0, 0)
+		if errno == syscall.EINTR {
+			continue
+		}
+		return errno == 0 && count == 0 && poll.Revents == 0
+	}
 }
 
 func readableConsumerFD(path string) bool {
