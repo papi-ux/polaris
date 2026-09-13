@@ -133,7 +133,9 @@ int main(int argc,char **argv) {
   fprintf(stderr,"seat encoder: %s\n",choice.factory?choice.factory:"openh264enc");
   const char *video_head=synthetic?"videotestsrc is-live=true pattern=ball ! videoconvert ! ":
     software?"unixfdsrc name=capture ! videoconvert ! ":"unixfdsrc name=capture ! " CAPTURE_DOWNLOAD_CHAIN;
-  const char *audio_head=synthetic?"audiotestsrc is-live=true samplesperbuffer=240 volume=0.05 ! ":"pulsesrc name=audio-source ! ";
+  /* Match capture requests to the 5 ms Opus packet duration. The Pulse backend
+   * may round up; its default 10 ms request batches pairs of outgoing packets. */
+  const char *audio_head=synthetic?"audiotestsrc is-live=true samplesperbuffer=240 volume=0.05 ! ":"pulsesrc name=audio-source latency-time=5000 ! ";
   gchar *video_encoder=encoder_description(&choice,BITRATE_KBPS,refresh);
   char *description=g_strdup_printf(
     "%s video/x-raw,format=%s,width=%u,height=%u,framerate=%u/1000 ! %s ! "
@@ -219,7 +221,20 @@ int main(int argc,char **argv) {
         if(ready && (current_profile!=66 || current_level<10 || current_level>announced_level))failed=TRUE;
         profile=current_profile;level=current_level;
         if(idr && profile==66 && level>=10 && level<=62)seen_video=TRUE;
-      } else { if(!opus_five_ms(map.data,map.size))failed=TRUE;else seen_audio=TRUE; }
+      } else {
+        if(!opus_five_ms(map.data,map.size))failed=TRUE;
+        else {
+          if(!seen_audio && !synthetic) {
+            GstElement *source=gst_bin_get_by_name(GST_BIN(pipeline),"audio-source");
+            gint64 latency=0,buffer_time=0;
+            g_object_get(source,"actual-latency-time",&latency,"actual-buffer-time",&buffer_time,NULL);
+            gst_object_unref(source);
+            fprintf(stderr,"seat encoder: audio capture requested_us=5000 actual_us=%" G_GINT64_FORMAT
+              " buffer_us=%" G_GINT64_FORMAT "\n",latency,buffer_time);
+          }
+          seen_audio=TRUE;
+        }
+      }
       if(!failed && !ready && seen_video && seen_audio) {
         if(!software && !encoder_matches(encoder,&choice)){failed=TRUE;gst_buffer_unmap(buffer,&map);gst_sample_unref(sample);break;}
         unsigned char config[32]={1,1,0,0};config[2]=profile;config[3]=level;
