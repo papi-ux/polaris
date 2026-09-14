@@ -235,7 +235,8 @@ LABEL org.opencontainers.image.source="https://github.com/papi-ux/polaris" \
       org.opencontainers.image.revision="${POLARIS_REVISION}" \
       org.opencontainers.image.description="Isolated Polaris multiseat worker" \
       io.polaris.multiseat.profile="${RUNTIME_PROFILE}" \
-      io.polaris.multiseat.architecture="linux/amd64"
+      io.polaris.multiseat.architecture="linux/amd64" \
+      io.polaris.multiseat.media-contract="1"
 COPY --from=workload-build /out/steam-input/ /
 COPY --from=workload-build --chmod=0555 /out/encode-media /usr/libexec/polaris-seat/encode-media
 COPY --from=workload-build --chmod=0555 /out/encoded-game-check /usr/libexec/polaris-seat/encoded-game-check

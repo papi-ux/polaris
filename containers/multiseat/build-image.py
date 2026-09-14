@@ -15,6 +15,7 @@ import urllib.parse
 
 from oci_archive import docker_to_oci, verify_archive
 from nvidia_runtime import architectures
+from runtime_catalog import REQUIRED_PROVIDER_TESTS
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -229,17 +230,7 @@ def build_artifact(args, revision, epoch, context):
         run(test_command, stdout=log, stderr=subprocess.STDOUT)
     results = (artifact / 'providers.log').read_text()
     names = re.findall(r'^--- PASS: ([A-Za-z0-9_]+)', results, re.MULTILINE)
-    required = {
-        'TestRealSessionBusAuthenticatesAndCleansUp',
-        'TestRealEncoderBridgeKeepsTwoSeatsIndependent',
-        'TestRealPrivateAudioGraphRoutesExactlyAndCleansUp',
-        'TestRealAudioReadinessFailureCleansPartialArtifacts',
-        'TestRealPrivateAudioGraphsRemainIndependent',
-        'TestRealPrivateAudioPolicyRejectsWrongTargetsAndReplacement',
-        'TestRealPrivateAudioPolicyDeathRetiresProvider',
-        'TestRealDisplayCaptureProducesFrameAndCleansUp',
-        'TestRealDisplayCapturesRemainIndependent',
-    }
+    required = REQUIRED_PROVIDER_TESTS
     if '--- SKIP:' in results or set(names) != required or len(names) != len(required):
         raise ValueError('real provider tests skipped or did not all execute')
     write_json(artifact / 'providers.json', {'schema': 1, 'result': 'passed', 'tests': names,
@@ -297,11 +288,12 @@ def build_artifact(args, revision, epoch, context):
     write_json(artifact / 'artifact.json', {
         'schema': 1, 'source_revision': revision, 'profile': args.profile,
         'platform': 'linux/amd64', 'variant': variant, 'source_root': profile['reference'],
+        'media_contract': 1, 'owner_uid': 1000, 'owner_gid': 1000,
         'worker_digest': worker_digest, 'worker_config_digest': config_digest,
         'build_engine': args.engine,
         'worker_reference': config_digest if args.engine == 'docker' else image.split(':')[0] + '@' + worker_digest,
         'dependency_locks': {str(path.relative_to(context)): digest(path) for path in lock_files},
-        'files': {name: {'sha256': digest(artifact / name)} for name in ['worker.oci.tar', 'packages.tsv', 'sbom.cdx.json', 'providers.json'] + extra_files},
+        'files': {name: {'sha256': digest(artifact / name), 'bytes': (artifact / name).stat().st_size} for name in ['worker.oci.tar', 'packages.tsv', 'sbom.cdx.json', 'providers.json'] + extra_files},
         'validation': {'dependencies': 'passed', 'session_bus_audio_display': 'passed',
                        'nested_compositor': 'physical receipt required', 'input': 'physical receipt required',
                        'game_streaming': 'not exercised', 'production_activation': False},

@@ -42,6 +42,7 @@
 #elif __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
   #include "platform/linux/multiseat_profile_catalog.h"
+  #include "platform/linux/spaces_runtime.h"
   #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
@@ -80,6 +81,9 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
      return args::version();
    }},
 #ifdef __linux__
+  {"spaces-runtime"sv, [](const char *name, int argc, char **argv) {
+     return multiseat::spaces::runtime_command(argc, argv);
+   }},
   {"multiseat-profiles"sv, [](const char *name, int argc, char **argv) {
      return multiseat::profiles::command(argc, argv);
    }},
@@ -232,6 +236,10 @@ int main(int argc, char *argv[]) {
 #ifdef __linux__
   // Profile administration must not start a streaming host or initialize its
   // unrelated user configuration. Require the subcommand as the first argument.
+  if (argc > 1 && std::string_view(argv[1]) == "--spaces-runtime") {
+    auto log_deinit_guard = logging::init(2, "");
+    return multiseat::spaces::runtime_command(argc - 2, argv + 2);
+  }
   if (argc > 1 && std::string_view(argv[1]) == "--multiseat-profiles") {
     auto log_deinit_guard = logging::init(2, "");
     return multiseat::profiles::command(argc - 2, argv + 2);

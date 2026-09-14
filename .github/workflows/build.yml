@@ -147,6 +147,11 @@ jobs:
           ref: ${{ needs.resolve-source.outputs.commit }}
           submodules: recursive
 
+      - name: Verify Spaces runtime catalog and artifact checks
+        run: |
+          python3 containers/multiseat/runtime_catalog.py validate containers/multiseat/runtime-catalog.json
+          python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:

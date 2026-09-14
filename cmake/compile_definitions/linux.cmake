@@ -11,6 +11,12 @@ set(POLARIS_STEAM_SECCOMP_NAME "steam-seccomp-${POLARIS_STEAM_SECCOMP_SHA256}.js
 set(POLARIS_STEAM_SECCOMP_PATH "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polaris/multiseat/${POLARIS_STEAM_SECCOMP_NAME}")
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_steam_seccomp.h.in"
                "${CMAKE_BINARY_DIR}/generated/multiseat_steam_seccomp.h" @ONLY)
+# Only a catalog reviewed into the host build may authorize runtime downloads.
+set(POLARIS_SPACES_RUNTIME_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_RUNTIME_SOURCE}")
+file(READ "${POLARIS_SPACES_RUNTIME_SOURCE}" POLARIS_SPACES_RUNTIME_CATALOG)
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_catalog.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_runtime_catalog.h" @ONLY)
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
 
@@ -565,6 +571,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_launch_service.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

@@ -15,6 +15,10 @@ on:
       - '.github/workflows/multiseat-images.yml'
   workflow_dispatch:
     inputs:
+      steam_only:
+        type: boolean
+        default: false
+        description: Build only the Steam runtime for Spaces validation
       nvidia:
         type: boolean
         default: false
@@ -35,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [gamescope, steam, heroic, lutris]
+        profile: ${{ fromJSON(inputs.steam_only && '["steam"]' || '["gamescope","steam","heroic","lutris"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,6 +54,7 @@ jobs:
           NVIDIA: ${{ inputs.nvidia || 'false' }}
         run: |
           set -euo pipefail
+          python3 containers/multiseat/runtime_catalog.py validate containers/multiseat/runtime-catalog.json
           python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
           arguments=("$PROFILE")
           if [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
@@ -77,3 +82,5 @@ jobs:
             build/worker-artifacts/**/packages.tsv
             build/worker-artifacts/**/sbom.cdx.json
             build/worker-artifacts/**/providers.json
+            build/worker-artifacts/**/nvidia-files.json
+            build/worker-artifacts/**/nvidia-runtime.json
