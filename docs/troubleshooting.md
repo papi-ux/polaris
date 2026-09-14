@@ -376,6 +376,8 @@ For low-FPS NVIDIA headless reports, check `Build features: cuda=...` first. If 
 `cuda=disabled` and later shows `Attempting to use NVENC without CUDA support. Reverting back to
 GPU -> RAM -> GPU`, the stream is taking an extra CPU copy/upload path. Use a CUDA-enabled package
 or rebuild with `-DPOLARIS_ENABLE_CUDA=ON` before comparing headless performance against Sunshine.
+The host Doctor reports the same fact before any stream as `capture_copies_through_system_memory`
+with cause `build_without_cuda`; see [Capture is on the CPU](#capture-is-on-the-cpu).
 
 The expected fast-path markers for NVIDIA true-headless testing look like this:
 
@@ -407,6 +409,32 @@ the selected path, reason message, transport, residency, runtime backend, effect
 state, and GPU-native override state.
 
 For LTS distro expectations and package caveats, see the [Linux LTS Headless Fallback Matrix](runtime.md#linux-lts-headless-fallback-matrix). Xvfb or gamescope should be treated as investigation-only unless this supported labwc path cannot cover a confirmed target environment.
+
+## Capture is on the CPU
+
+Mission Control reads `SHM` or `system memory`, the Doctor's capture row says `shm_cpu_capture`,
+and encode times sit at 4 ms and up where a GPU-native stream would show about 1 ms. The host
+Doctor now says this **before** the first stream, as `capture_copies_through_system_memory` with
+a `cause`, read from the configuration, the build and the capture backend the host selected at
+startup. Each cause has one fix.
+
+| cause | what is happening | fix |
+|---|---|---|
+| `build_without_cuda` | The binary was built without CUDA, so on NVIDIA every capture path copies each frame through system memory before NVENC. `polaris --version` prints `Build features: cuda=disabled`; each session logs `Attempting to use NVENC without CUDA support. Reverting back to GPU -> RAM -> GPU`. Stream mode and the GPU-native setting cannot change it. | Install a package built with CUDA. The official Fedora, Arch and Ubuntu packages are; a source build needs `-DPOLARIS_ENABLE_CUDA=ON`. Only the NVIDIA driver is needed at run time, not the toolkit. |
+| `x11_capture` | The host session is X11 and capture runs through `x11grab`, which is a system-memory path by construction. | Stream from a Wayland session, or use a Private Stream mode, which captures Polaris' own compositor. `capture = nvfbc` keeps X11 capture on the GPU on NVIDIA cards that expose NvFBC. |
+| `headless_dmabuf_unavailable` | Private Stream runs the hidden headless compositor, and its last attempt on this host could not hand frames over as DMA-BUF, so capture fell back to SHM. | Pick **Private Stream (GPU-native)** in Play Setup for one launch, or set `linux_prefer_gpu_native_capture = enabled` and restart: Polaris then runs the private compositor windowed, where DMA-BUF capture works. |
+| `windowed_dmabuf_unavailable` | The private compositor already runs windowed for GPU capture and the last DMA-BUF probe failed. | This path needs `wlr-export-dmabuf` from labwc and a driver that can import the buffer. Send a support bundle from one stream; it carries the import error. |
+| `vaapi_system_memory_by_design` | AMD and Intel: every VA-API capture path takes one copy per frame on purpose, because the DMA-BUF import into the encoder has crashed or stalled on AMD hosts (#367) and stays off until affected hosts prove it safe. Reported as `info`. | Nothing. If throughput falls short at high resolution or refresh, lower resolution, frame rate or bitrate first. `POLARIS_PORTAL_DMABUF=1` opts the portal path into the unvalidated DMA-BUF route with no automatic fallback. |
+
+Mirror Desktop and Host Virtual Display on KDE or GNOME capture through the desktop portal.
+With CUDA or Vulkan the portal is asked for DMA-BUF and the compositor decides; KDE handed over
+system memory in testing. The forecast says nothing for that case, and the session's
+`capture_transport=` log line says which it got.
+
+The forecast is silent until Polaris has evaluated its capture backends at startup, and it can
+only tell NVIDIA from AMD once an encoder is chosen: with `encoder` left on auto and a headless
+mode, that is the first launch. `linux_gpu_profile.capture_forecast` in the support bundle
+carries the backend, the encoder, `build_has_cuda` and the verdict.
 
 ## VAAPI or software encode fallback
 

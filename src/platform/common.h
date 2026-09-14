@@ -813,10 +813,20 @@ namespace platf {
   bool kms_capture_refused_for_capability();
   void note_kms_capture_refused_for_capability();
 
+  /**
+   * @brief The capture backend the last evaluation selected for the configured
+   * stream mode: nvfbc, wlr, portal, kms, x11, or none. Empty until an
+   * evaluation has run, so anything forecast from it stays silent until the
+   * host has actually looked.
+   */
+  std::string selected_capture_backend();
+
   #ifdef POLARIS_TESTS
   /// Drive the missing-capture state directly, so the reporting can be tested without a compositor.
   void set_capture_sources_missing_for_tests(bool missing);
   void set_kms_capture_refused_for_tests(bool refused);
+  /// Pin the selected backend directly; nullopt restores what the evaluation found.
+  void set_selected_capture_backend_for_tests(std::optional<std::string> backend);
   #endif
 
   #ifdef POLARIS_TESTS

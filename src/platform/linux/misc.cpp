@@ -1815,6 +1815,10 @@ std::string get_local_ip_for_gateway() {
   /// looked for. Doctor asks this on every report, including before startup finishes.
   static bool capture_sources_evaluated = false;
 
+#ifdef POLARIS_TESTS
+  static std::optional<std::string> selected_capture_backend_override;
+#endif
+
   const std::string &requested_capture() {
     return capture_backend_override ? *capture_backend_override : config::video.capture;
   }
@@ -1968,6 +1972,18 @@ std::string get_local_ip_for_gateway() {
     return capture_sources_evaluated && sources.none();
   }
 
+  std::string selected_capture_backend() {
+#ifdef POLARIS_TESTS
+    if (selected_capture_backend_override) {
+      return *selected_capture_backend_override;
+    }
+#endif
+    if (!capture_sources_evaluated) {
+      return {};
+    }
+    return describe_selected_sources();
+  }
+
   bool kms_capture_refused_for_capability() {
     return kms_capability_refused;
   }
@@ -1993,6 +2009,10 @@ std::string get_local_ip_for_gateway() {
 
   void set_kms_capture_refused_for_tests(bool refused) {
     kms_capability_refused = refused;
+  }
+
+  void set_selected_capture_backend_for_tests(std::optional<std::string> backend) {
+    selected_capture_backend_override = std::move(backend);
   }
 #endif
 

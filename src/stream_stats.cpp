@@ -10,10 +10,12 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 // lib includes
@@ -27,6 +29,10 @@
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
+
+namespace video {
+  std::string active_encoder_name();
+}
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/user_unit_override.h"
@@ -714,6 +720,182 @@ namespace stream_stats {
 #endif
   }
 
+
+  namespace {
+    std::optional<bool> build_has_cuda_override;
+  }
+
+  bool build_has_cuda() {
+    if (build_has_cuda_override) {
+      return *build_has_cuda_override;
+    }
+#ifdef POLARIS_BUILD_CUDA
+    return true;
+#else
+    return false;
+#endif
+  }
+
+#ifdef POLARIS_TESTS
+  void set_build_has_cuda_for_tests(std::optional<bool> has_cuda) {
+    build_has_cuda_override = has_cuda;
+  }
+#endif
+
+  capture_forecast_t forecast_capture_path(const capture_forecast_inputs_t &in) {
+    capture_forecast_t out;
+    out.residency = "unknown";
+
+    const auto system_memory = [&out](std::string cause, std::string severity, std::string message, std::string action) {
+      out.residency = "system_memory";
+      out.cause = std::move(cause);
+      out.severity = std::move(severity);
+      out.message = std::move(message);
+      out.action = std::move(action);
+    };
+
+    const auto &backend = in.capture_backend;
+    const bool nvidia = in.encoder == "nvenc";
+    const bool vaapi = in.encoder == "vaapi";
+    const bool vulkan = in.encoder == "vulkan";
+
+    // Nothing has been looked at yet, or nothing captures at all; both have their own findings.
+    if (backend.empty() || backend == "none") {
+      return out;
+    }
+    // A software encoder reads system memory whatever the capture did; that is the encoder's
+    // own story, not a capture one.
+    if (in.encoder == "software") {
+      out.residency = "system_memory";
+      return out;
+    }
+    if (backend == "nvfbc") {
+      out.residency = "gpu";
+      return out;
+    }
+    if (backend == "x11") {
+      system_memory(
+        "x11_capture",
+        "warning",
+        "Capture is running through X11 (x11grab), which copies every frame through system "
+        "memory before the encoder. That is the X11 path itself, not a fault in the driver or "
+        "the GPU.",
+        "Stream from a Wayland session, or use a Private Stream mode, which captures Polaris' "
+        "own compositor and can keep frames on the GPU. capture = nvfbc keeps X11 capture on "
+        "the GPU on NVIDIA cards that expose NvFBC."
+      );
+      return out;
+    }
+    if (nvidia && !in.build_has_cuda) {
+      system_memory(
+        "build_without_cuda",
+        "warning",
+        "This Polaris binary was built without CUDA, so on NVIDIA every capture path copies "
+        "each frame through system memory before NVENC sees it, whatever stream mode or "
+        "GPU-native setting is chosen. The startup log says Build features: cuda=disabled and "
+        "each session logs Attempting to use NVENC without CUDA support. Reverting back to "
+        "GPU -> RAM -> GPU.",
+        "Install a Polaris package built with CUDA: the official Fedora, Arch and Ubuntu "
+        "packages all are (polaris --version reports cuda=enabled), or build from source with "
+        "-DPOLARIS_ENABLE_CUDA=ON. Only the NVIDIA driver is needed at run time, not the CUDA "
+        "toolkit."
+      );
+      return out;
+    }
+    if (backend == "kms") {
+      out.residency = (nvidia || vaapi || vulkan) ? "gpu" : "unknown";
+      return out;
+    }
+    if (vaapi && (backend == "portal" || backend == "wlr")) {
+      // Every VA-API capture path stays on the copy route until the DMA-BUF import boundary has
+      // proof from affected hosts (#367). Say so before the first stream, because a fresh AMD
+      // host reads SHM in Mission Control and assumes something is broken.
+      if (backend == "portal" && in.portal_vaapi_dmabuf_opted_in) {
+        return out;
+      }
+      const bool private_stream = backend == "wlr" && in.use_cage_compositor;
+      const std::string path =
+        backend == "portal" ? "Desktop capture through the desktop portal (Mirror Desktop, Host Virtual Display)" :
+        private_stream ? "Private Stream capture" :
+                         "wlroots capture";
+      system_memory(
+        "vaapi_system_memory_by_design",
+        "info",
+        path + " on VA-API keeps frames in system memory by design: the DMA-BUF import into the "
+        "encoder has crashed or stalled on AMD hosts, so every VA-API capture path takes one copy "
+        "per frame until affected hosts prove it safe. This is the expected path on AMD and "
+        "Intel, not a fault.",
+        std::string {"Nothing to change for a stable stream. If throughput falls short at high "
+                     "resolution or refresh, lower resolution, frame rate or bitrate first."} +
+          (backend == "portal" ?
+             " POLARIS_PORTAL_DMABUF=1 in Polaris' environment opts into the unvalidated DMA-BUF "
+             "path, with no automatic fallback if it stalls." :
+             "")
+      );
+      return out;
+    }
+    if (backend == "portal") {
+      // With CUDA or Vulkan the portal is asked for DMA-BUF and the compositor decides; KDE
+      // handed over system memory in the lab. Nothing to say until a stream shows which.
+      return out;
+    }
+    if (backend == "wlr" && vulkan) {
+      out.residency = "gpu";
+      return out;
+    }
+    if (backend == "wlr" && nvidia) {
+      if (!in.use_cage_compositor) {
+        // A wlroots desktop captured directly: GPU-native when it offers wlr-export-dmabuf.
+        return out;
+      }
+      const bool hidden_headless = in.headless_mode && !in.prefer_gpu_native_capture;
+      if (hidden_headless) {
+        if (in.headless_extcopy_dmabuf_probe == std::optional<bool> {false}) {
+          system_memory(
+            "headless_dmabuf_unavailable",
+            "warning",
+            "Private Stream runs the hidden headless compositor, and the last time this host "
+            "tried, that compositor could not hand frames over as DMA-BUF, so capture fell back "
+            "to system memory (SHM) and each frame is copied before NVENC.",
+            "Pick Private Stream (GPU-native) in Play Setup for one launch, or set "
+            "linux_prefer_gpu_native_capture = enabled and restart Polaris to make it the "
+            "default: Polaris then runs the private compositor windowed, where DMA-BUF capture "
+            "works."
+          );
+        } else if (in.headless_extcopy_dmabuf_probe == std::optional<bool> {true}) {
+          out.residency = "gpu";
+        }
+        return out;
+      }
+      if (in.windowed_gpu_native_probe == std::optional<bool> {false}) {
+        system_memory(
+          "windowed_dmabuf_unavailable",
+          "warning",
+          "The private compositor runs windowed so capture can stay on the GPU, but the last "
+          "DMA-BUF probe on this host failed, so frames are copied through system memory (SHM) "
+          "before NVENC.",
+          "Check the NVIDIA driver and the compositor under it: this path needs wlr-export-dmabuf "
+          "from labwc and a driver that can import the buffer. A support bundle from one stream "
+          "shows the import error."
+        );
+      } else if (in.windowed_gpu_native_probe == std::optional<bool> {true}) {
+        out.residency = "gpu";
+      }
+      return out;
+    }
+    return out;
+  }
+
+  nlohmann::json capture_forecast_json(const capture_forecast_inputs_t &in, const capture_forecast_t &forecast) {
+    return {
+      {"backend", in.capture_backend.empty() ? "unevaluated" : in.capture_backend},
+      {"encoder", in.encoder.empty() ? "unknown" : in.encoder},
+      {"build_has_cuda", in.build_has_cuda},
+      {"residency", forecast.residency},
+      {"cause", forecast.cause}
+    };
+  }
+
   nlohmann::json linux_gpu_profile_json(const stats_t &stats) {
     const auto &linux_display = config::video.linux_display;
     const bool gpu_native_requested =
@@ -754,6 +936,7 @@ namespace stream_stats {
       stats.encode_target_residency != platf::frame_residency_e::unknown;
 
     nlohmann::json configuration_warnings = nlohmann::json::array();
+    nlohmann::json capture_forecast = nullptr;
 #ifdef __linux__
     // No capture at all. Polaris logs this fatally at startup and then carries on serving, so a
     // host in this state pairs normally, accepts launches and advertises H.264 as the only codec
@@ -821,11 +1004,14 @@ namespace stream_stats {
       });
     }
 
+    // Without CUDA the GPU-native advice below is a dead end; the capture forecast names the
+    // build instead.
     if (
       linux_display.headless_mode &&
       linux_display.use_cage_compositor &&
       !linux_display.prefer_gpu_native_capture &&
-      config::video.encoder == "nvenc"
+      config::video.encoder == "nvenc" &&
+      build_has_cuda()
     ) {
       configuration_warnings.push_back({
         {"id", "nvidia_headless_gpu_native_disabled"},
@@ -833,6 +1019,40 @@ namespace stream_stats {
         {"message", "NVIDIA true-headless labwc is configured with GPU-native capture disabled; cold or missing encoder cache can fail launch with 503 encoder initialization even when NVENC is healthy."},
         {"action", "Set linux_prefer_gpu_native_capture = enabled, restart Polaris, and retry Private Stream (GPU-native) before chasing CUDA/NVENC driver issues."}
       });
+    }
+
+    // Where capture will land for the configured mode on this host, before any stream. The
+    // capture reasons carried by a session say what happened after it happened, which is
+    // exactly when a first-time host gives up. The forecast reads configuration, the build and
+    // the last capture-source evaluation, and stays silent until the host has looked.
+    {
+      std::string encoder = config::video.encoder;
+      if (encoder.empty() || encoder == "auto") {
+        encoder = video::active_encoder_name();
+      }
+      const char *portal_dmabuf_env = std::getenv("POLARIS_PORTAL_DMABUF");
+      const capture_forecast_inputs_t inputs {
+        .capture_backend = platf::selected_capture_backend(),
+        .encoder = encoder,
+        .build_has_cuda = build_has_cuda(),
+        .use_cage_compositor = linux_display.use_cage_compositor,
+        .headless_mode = linux_display.headless_mode,
+        .prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture,
+        .headless_extcopy_dmabuf_probe = stream_runtime::labwc::cached_headless_extcopy_dmabuf_probe_result(),
+        .windowed_gpu_native_probe = stream_runtime::labwc::cached_windowed_gpu_native_probe_result(),
+        .portal_vaapi_dmabuf_opted_in = portal_dmabuf_env != nullptr && std::string_view {portal_dmabuf_env} == "1",
+      };
+      const auto forecast = forecast_capture_path(inputs);
+      capture_forecast = capture_forecast_json(inputs, forecast);
+      if (!forecast.cause.empty()) {
+        configuration_warnings.push_back({
+          {"id", "capture_copies_through_system_memory"},
+          {"cause", forecast.cause},
+          {"severity", forecast.severity},
+          {"message", forecast.message},
+          {"action", forecast.action}
+        });
+      }
     }
   #ifdef POLARIS_BUILD_VULKAN
     auto vaapi_vendor = stats.vaapi_vendor;
@@ -945,6 +1165,7 @@ namespace stream_stats {
       {"adapter_pairing_device", adapter_pairing_device},
       {"adapter_pairing_device_source", adapter_pairing_device_source},
       {"vaapi_vendor", stats.vaapi_vendor},
+      {"capture_forecast", std::move(capture_forecast)},
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
       {"gpu_native_requested", gpu_native_requested},
       {"gpu_native_attempted", stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted || (gpu_native_requested && capture_metadata_reported)},

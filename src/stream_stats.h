@@ -312,6 +312,46 @@ namespace stream_stats {
    */
   nlohmann::json linux_gpu_profile_json(const stats_t &stats);
 
+  /**
+   * @brief Inputs for forecasting the capture path of the configured stream mode on this
+   * host, read from configuration and the last capture-source evaluation rather than from a
+   * stream. Every stream-scoped capture reason says what happened after it happened; someone
+   * deciding whether to stream at all needs it first.
+   */
+  struct capture_forecast_inputs_t {
+    std::string capture_backend;  ///< nvfbc, wlr, portal, kms, x11, none; empty before any evaluation
+    std::string encoder;  ///< nvenc, vaapi, vulkan, software; empty when the host has not chosen yet
+    bool build_has_cuda = false;
+    bool use_cage_compositor = false;
+    bool headless_mode = false;
+    bool prefer_gpu_native_capture = false;
+    std::optional<bool> headless_extcopy_dmabuf_probe;  ///< last hidden-headless DMA-BUF probe, if one ran
+    std::optional<bool> windowed_gpu_native_probe;  ///< last windowed private-runtime DMA-BUF probe, if one ran
+    bool portal_vaapi_dmabuf_opted_in = false;  ///< POLARIS_PORTAL_DMABUF=1 in the host environment
+  };
+
+  struct capture_forecast_t {
+    std::string residency;  ///< gpu, system_memory, or unknown
+    std::string cause;  ///< set only when residency is system_memory for a reason worth a finding
+    std::string severity;  ///< warning or info, with cause
+    std::string message;
+    std::string action;
+  };
+
+  /** @brief Pure forecast; the Doctor turns a cause into a configuration warning. */
+  capture_forecast_t forecast_capture_path(const capture_forecast_inputs_t &inputs);
+
+  /** @brief The forecast and the facts it was built from, for the support bundle. */
+  nlohmann::json capture_forecast_json(const capture_forecast_inputs_t &inputs, const capture_forecast_t &forecast);
+
+  /** @brief Whether this binary was built with CUDA, the one build fact the forecast turns on. */
+  bool build_has_cuda();
+
+#ifdef POLARIS_TESTS
+  /// Pin the build's CUDA fact; nullopt restores what the binary was compiled with.
+  void set_build_has_cuda_for_tests(std::optional<bool> has_cuda);
+#endif
+
   /** @brief Structured result of GPU-native capture probes for diagnostics. */
   nlohmann::json gpu_native_probe_json(const stats_t &stats);
 

@@ -327,6 +327,7 @@
         "adapter_pairing_device_source",
         "adapter_pairing_status",
         "capture_device",
+        "capture_forecast",
         "configuration_warnings",
         "cross_gpu_dmabuf_risk",
         "encoder_adapter",
@@ -342,6 +343,7 @@
         "adapter_pairing_device",
         "adapter_pairing_device_source",
         "adapter_pairing_status",
+        "capture_forecast",
         "configuration_warnings",
         "wayland_main_device"
       ],

@@ -522,8 +522,8 @@ jobs:
             exit 1
           fi
 
-          if ! grep -Fq "optdepend = cuda: Nvidia GPU encoding support" arch-pkgbuild/package-pkginfo.txt; then
-            echo "Arch package metadata does not advertise CUDA/Nvidia GPU encoding support" >&2
+          if ! grep -Fq "optdepend = nvidia-utils: NVIDIA GPU capture and NVENC encoding" arch-pkgbuild/package-pkginfo.txt; then
+            echo "Arch package metadata does not name nvidia-utils as the NVIDIA runtime dependency" >&2
             exit 1
           fi
 
@@ -1006,21 +1006,86 @@ jobs:
           test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
-      - name: Configure
+      # Release builds carry CUDA so NVIDIA hosts on Ubuntu get the GPU-native
+      # capture path; branch builds stay CUDA-off to keep pull requests fast, the
+      # same split the Fedora RPM job uses. The smoke test below refuses a
+      # release package that reports cuda=disabled.
+      - name: Install CUDA toolkit
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
-          cmake -B build -G Ninja \
-            -DBUILD_TESTS=ON \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            "-DCMAKE_C_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
-            "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=." \
-            -DPOLARIS_ASSETS_DIR=share/polaris \
-            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
-            -DPOLARIS_ENABLE_CUDA=OFF \
-            -DPOLARIS_ENABLE_BROWSER_STREAM=ON \
-            -DCUDA_FAIL_ON_MISSING=OFF
+          set -euo pipefail
+
+          architecture="$(uname -m)"
+          cuda_supported_architectures=("x86_64" "aarch64")
+          if [[ " ${cuda_supported_architectures[*]} " != *" ${architecture} "* ]]; then
+            echo "CUDA toolkit install skipped for unsupported architecture ${architecture}"
+            exit 0
+          fi
+
+          cuda_version="13.2.1"
+          cuda_build="595.58.03"
+          cuda_dir="${GITHUB_WORKSPACE}/.cuda"
+          cuda_suffix=""
+          if [ "${architecture}" = "aarch64" ]; then
+            cuda_suffix="_sbsa"
+          fi
+
+          if [ ! -x "${cuda_dir}/bin/nvcc" ]; then
+            mkdir -p "${cuda_dir}" "${GITHUB_WORKSPACE}/.cuda-tmp"
+            cuda_url="https://developer.download.nvidia.com/compute/cuda/${cuda_version}/local_installers/cuda_${cuda_version}_${cuda_build}_linux${cuda_suffix}.run"
+            wget \
+              "${cuda_url}" \
+              --progress=bar:force:noscroll \
+              --retry-connrefused \
+              --tries=3 \
+              -q -O "${GITHUB_WORKSPACE}/cuda.run"
+            chmod a+x "${GITHUB_WORKSPACE}/cuda.run"
+            "${GITHUB_WORKSPACE}/cuda.run" \
+              --no-drm \
+              --no-man-page \
+              --no-opengl-libs \
+              --override \
+              --silent \
+              --tmpdir="${GITHUB_WORKSPACE}/.cuda-tmp" \
+              --toolkit \
+              --toolkitpath="${cuda_dir}"
+            rm "${GITHUB_WORKSPACE}/cuda.run"
+          fi
+
+      - name: Configure
+        env:
+          POLARIS_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        run: |
+          cmake_args=(
+            -B build
+            -G Ninja
+            -DBUILD_TESTS=ON
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_INSTALL_PREFIX=/usr
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            "-DCMAKE_C_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=."
+            "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=${GITHUB_WORKSPACE}=."
+            -DPOLARIS_ASSETS_DIR=share/polaris
+            -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris
+            -DPOLARIS_ENABLE_BROWSER_STREAM=ON
+          )
+
+          if [ "${POLARIS_RELEASE_BUILD}" = "true" ]; then
+            cmake_args+=(
+              -DPOLARIS_ENABLE_CUDA=ON
+              -DCUDA_FAIL_ON_MISSING=ON
+              -DCMAKE_CUDA_COMPILER:PATH="${GITHUB_WORKSPACE}/.cuda/bin/nvcc"
+              -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++
+            )
+          else
+            cmake_args+=(
+              -DPOLARIS_ENABLE_CUDA=OFF
+              -DCUDA_FAIL_ON_MISSING=OFF
+            )
+          fi
+
+          cmake "${cmake_args[@]}"
 
       - name: Download prebuilt web UI bundle
         uses: actions/download-artifact@v8
@@ -1116,6 +1181,11 @@ jobs:
             build/cpack_artifacts/package-strings.txt
 
           polaris --version | tee build/cpack_artifacts/package-version.txt
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}" = "true" ] &&
+              ! grep -Fq "cuda=enabled" build/cpack_artifacts/package-version.txt; then
+            echo "Release Ubuntu DEB was not built with CUDA enabled" >&2
+            exit 1
+          fi
 
       - name: Summarize Ubuntu DEB validation
         if: always()
@@ -1125,6 +1195,9 @@ jobs:
             echo
             echo "- Build tree directory: \`build/\`"
             echo "- DEB output directory: \`build/cpack_artifacts/\`"
+            if [ -r build/cpack_artifacts/package-version.txt ]; then
+              echo "- Build features: $(grep -o 'cuda=[a-z]*' build/cpack_artifacts/package-version.txt || echo 'cuda=unknown')"
+            fi
             echo "- DEB artifacts and generated CPack metadata are uploaded from this job."
           } >> "$GITHUB_STEP_SUMMARY"
 
