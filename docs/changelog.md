@@ -6,9 +6,9 @@ Older historical tags remain in the repository for continuity, but the current p
 starts at `v1.0.0`.
 
 ## Unreleased
+
 - The Doctor now says when KMS capture was refused because the binary lacks `CAP_SYS_ADMIN`, and names the one command that grants it, instead of blaming compositor protocols and steering you off the only capture path that carries HDR. The HDR finding names the working recipe: `capture = kms` with a stream mode that shows the real HDR output.
 - Docs: the configuration that carries true HDR on Linux today, all five gates with the journal line that names each one, in `runtime.md`, `configuration.md` and `troubleshooting.md`; and how to point MoonDeck Buddy at Polaris' `apps.json` in `moonlight.md`.
-
 - Launches where Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope) were capped at 120 FPS by three separate literals, and `/serverinfo` advertised a different number again, so a 144 or 165 Hz client was either refused before connecting or quietly served 120. One ceiling now, 240 by default and settable with `headless_max_refresh_rate`, advertised and enforced from the same value (#686)
 
 ## v1.4.7 - 2026-09-12
