@@ -99,6 +99,14 @@ On a regular Arch installation, update the system and install Docker:
 
 ```sh
 sudo pacman -Syu docker
+```
+
+If the update installed a new kernel, save your work and restart the host before
+starting Docker. Signing out alone does not load the new kernel. Docker can fail
+to start when the running kernel no longer has its matching network modules.
+After restarting, continue with:
+
+```sh
 sudo systemctl enable --now docker
 ```
 

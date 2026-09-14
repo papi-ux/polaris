@@ -59,6 +59,10 @@
               <summary class="focus-ring cursor-pointer rounded py-1 text-sm text-ice">Start Docker and grant access</summary>
               <div class="mt-3 space-y-3 text-sm text-storm">
                 <p>After installing Docker, start the system Docker service:</p>
+                <p v-if="setup.distribution === 'arch' && !setup.immutable_host">
+                  If the update installed a new kernel, save your work and restart this host before starting Docker.
+                  Signing out alone does not load the new kernel.
+                </p>
                 <pre class="overflow-x-auto rounded-lg bg-void/60 p-3 text-xs text-silver"><code>{{ startDocker }}</code></pre>
                 <button type="button" class="focus-ring rounded px-1 py-2 text-xs text-ice" @click="copy(startDocker)">Copy start command</button>
                 <template v-if="accessCommand">
