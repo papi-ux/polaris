@@ -40,7 +40,7 @@
     "jsdom": "29.0.2",
     "vite": "^6.4.2",
     "vite-plugin-ejs": "1.8.0",
-    "vitest": "4.1.4",
+    "vitest": "4.1.11",
     "vue-eslint-parser": "10.4.0"
   },
   "overrides": {
