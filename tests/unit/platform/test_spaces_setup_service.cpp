@@ -13,7 +13,7 @@
 
 #ifdef __linux__
 namespace confighttp {
-  void registerSpacesSetupRoutes(SimpleWeb::Server<SimpleWeb::HTTPS> &);
+  void registerSpacesSetupRoutes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &);
   void with_web_session_for_tests(const std::filesystem::path &, const std::string &,
     const std::function<void(const std::string &)> &);
 }

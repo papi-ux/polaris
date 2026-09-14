@@ -3684,7 +3684,7 @@ namespace confighttp {
 #endif
   }
 
-  void registerSpacesSetupRoutes(SimpleWeb::Server<SimpleWeb::HTTPS> &server) {
+  void registerSpacesSetupRoutes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
     server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
     server.resource["^/api/spaces/setup/job$"]["GET"] = getSpacesSetupJob;
     server.resource["^/api/spaces/setup/job$"]["POST"] = withCsrf(updateSpacesSetupJob);
