@@ -329,10 +329,18 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   // hosts keep running the booted deployment. That confusion reads like a
   // failed update, so it gets its own state ahead of everything else.
   const installedVersion = String(host.installed_package_version || '').trim()
+  // A service pointed at a copy of the binary outside the package (the Bazzite
+  // DRM/KMS recipe) keeps running the old version after every update, and a
+  // restart changes nothing; the advice has to be the copy.
+  const runningBinary = host.running_binary && typeof host.running_binary === 'object' ? host.running_binary : null
+  const runningBinaryPath = String(runningBinary?.path || '').trim()
+  const runningOutsidePackage = runningBinary?.matches_package === false && Boolean(runningBinaryPath)
   if (installedVersion && isInstalledNewerThanRunning(installedVersion, currentVersion)) {
     status = 'restart_required'
-    statusLabel = 'Installed, not running'
-    summary = `Polaris ${installedVersion} is installed but this host is still running ${currentVersion}. Restart Polaris to use it.`
+    statusLabel = runningOutsidePackage ? 'Installed, running a copy' : 'Installed, not running'
+    summary = runningOutsidePackage
+      ? `Polaris ${installedVersion} is installed but this host is running ${currentVersion} from ${runningBinaryPath}, a copy outside the package. Refresh that copy from the package or remove the service drop-in, then restart Polaris.`
+      : `Polaris ${installedVersion} is installed but this host is still running ${currentVersion}. Restart Polaris to use it.`
   }
 
   const asset = selectReleaseAsset(candidateRelease, host)
@@ -361,6 +369,8 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     installCommand,
     canCopyInstallCommand: Boolean(installCommand),
     manualInstallOnly: true,
+    runningBinaryPath,
+    runningOutsidePackage,
     ...action,
   }
 }

@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #ifdef __linux__
+  #include <src/platform/linux/user_unit_override.h>
   #include <unistd.h>
 #endif
 
@@ -5716,3 +5717,32 @@ TEST(BenchmarkRunHotPathTests, RecordDuringDrainAcceptsInWindowStartsAndExcludes
   });
   EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
 }
+
+#ifdef __linux__
+TEST(StreamStatsDoctorTests, NamesTheBinaryThatProducedTheReport) {
+  // A support thread needs the running binary on its first line: the Bazzite
+  // KMS recipe runs a copy outside the package that updates never touch.
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto running = platf::user_unit::running_executable();
+  ASSERT_TRUE(running.has_value());
+  const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
+  const bool outside_package = binary.matches_package == std::optional<bool> {false};
+
+  bool saw_row = false;
+  for (const auto &entry : doctor.at("evidence")) {
+    if (entry.at("id") != "running_binary") {
+      continue;
+    }
+    saw_row = true;
+    EXPECT_EQ(entry.at("value"), binary.path);
+    EXPECT_EQ(entry.at("status"), outside_package ? "watch" : "pass");
+    const auto detail = entry.at("detail").get<std::string>();
+    EXPECT_NE(detail.find(binary.path), std::string::npos);
+    EXPECT_NE(detail.find(PROJECT_VERSION), std::string::npos);
+    EXPECT_EQ(detail.find("outside") != std::string::npos || detail.find("not the packaged") != std::string::npos, outside_package);
+  }
+  EXPECT_TRUE(saw_row);
+}
+#endif
