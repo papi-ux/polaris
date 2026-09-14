@@ -763,8 +763,10 @@ describe('Linux packaging contracts', () => {
     const pkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
     const reviewedNamcap = readSource('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')
 
-    expect(steamOs).toContain('git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"')
-    expect(steamOs).toContain("git rev-parse 'FETCH_HEAD^{commit}'")
+    expect(steamOs).toContain('EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}')
+    expect(steamOs).toContain("git rev-parse 'HEAD^{commit}'")
+    expect(steamOs).toContain('test "$POLARIS_BUILD_COMMIT" = "$EXPECTED_SOURCE_COMMIT"')
+    expect(steamOs).not.toContain('git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"')
     expect(steamOs).toContain('--env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT"')
     expect(bootstrap).toContain('${POLARIS_BUILD_COMMIT:?POLARIS_BUILD_COMMIT is required}')
     expect(bootstrap).not.toMatch(/(?:^|\n)POLARIS_BUILD_COMMIT=/)
