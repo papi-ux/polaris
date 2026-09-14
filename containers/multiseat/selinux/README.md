@@ -39,3 +39,18 @@ To remove the policy, first stop every multiseat worker and verify every
 reserved virtual device was destroyed. Remove only the matching installed
 rule, reload udev rules, then run `sudo semodule -r polaris_multiseat_input`.
 No package or service installs this policy automatically.
+
+## Steam worker networking
+
+The separate `polaris_nvidia_worker.te` policy confines Steam and its embedded
+Chromium processes to the worker domain. Chromium can explicitly bind a random
+UDP client port outside the kernel's automatic ephemeral range. Policy version
+1.0.6 admits `name_bind` on `unreserved_port_t` UDP sockets so these connections
+do not generate repeated `Chrome_ChildIOT` denials.
+
+This rule depends on the controller's existing private Docker bridge and absence
+of published worker ports. It does not grant host networking, named service-port
+binding, TCP port binding, raw sockets, network administration or input-device
+writes. Keep SELinux enforcing when validating it. Check the effective policy
+and exercise a real UDP bind inside an isolated worker before repeating Steam
+startup; a successful policy compilation alone does not prove the launch works.
