@@ -6620,7 +6620,9 @@ namespace proc {
 #endif
       launch_session->host_max_fps.reset();
       if (launch_owns_refresh_rate) {
-        launch_session->host_max_fps = 120000;
+        // Same ceiling the Optimize API resolved and /serverinfo advertised
+        // (#686); a launch must not be clamped below what it was promised.
+        launch_session->host_max_fps = launch_profile::owned_display_refresh_ceiling_hz() * 1000;
       } else if (const auto refresh_rate =
                    display_device::active_refresh_rate_hz_hint(selected_output_name)) {
         launch_session->host_max_fps = *refresh_rate * 1000;

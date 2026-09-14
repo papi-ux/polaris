@@ -16,6 +16,21 @@ namespace launch_profile {
 
   inline constexpr int k_policy_version = 1;
 
+  /// Refresh ceiling, in Hz, for a launch where Polaris creates the display
+  /// itself, when headless_max_refresh_rate is unset. Polaris chooses the mode
+  /// on those paths, so this bounds absurdity rather than matching any panel;
+  /// the client's own maximum is applied separately.
+  inline constexpr int k_default_owned_display_refresh_ceiling_hz = 240;
+
+  /// What a launch is bounded to when the host neither creates the display nor
+  /// can read the physical output's refresh rate.
+  inline constexpr int k_unknown_output_refresh_fallback_hz = 120;
+
+  /// The refresh ceiling applied to every launch where Polaris owns the display,
+  /// and advertised for such launches. One source, so /serverinfo, the Optimize
+  /// API and launch validation cannot disagree (#686).
+  int owned_display_refresh_ceiling_hz();
+
   struct request_t {
     std::string device_name;
     std::string app_name;

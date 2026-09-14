@@ -563,6 +563,7 @@ namespace nvhttp {
   );
   bool save_pairing_state_for_tests();
   void load_pairing_state_for_tests();
+  int advertised_max_launch_refresh_rate_for_tests();
   void ensure_response_status_code_for_tests(
     boost::property_tree::ptree &tree,
     int fallback_code,

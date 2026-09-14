@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Launches where Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope) were capped at 120 FPS by three separate literals, and `/serverinfo` advertised a different number again, so a 144 or 165 Hz client was either refused before connecting or quietly served 120. One ceiling now, 240 by default and settable with `headless_max_refresh_rate`, advertised and enforced from the same value (#686)
+
 ## v1.4.7 - 2026-09-12
 
 A controller and configuration update matched with Nova v1.4.7. The virtual DualSense maps the way a real one does, and the per-user configuration directory stops being created in a state Polaris then refuses to use. Existing configurations and paired devices remain valid.

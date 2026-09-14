@@ -611,6 +611,7 @@ namespace config {
       false,  // linux_display.headless_mode
       false,  // linux_display.prefer_gpu_native_capture
       false,  // linux_display.capture_profile
+      0,      // linux_display.headless_max_refresh_rate (0 = built-in default)
       {},     // linux_display.stream_mode (empty = derive from legacy booleans)
       "labwc",  // linux_display.private_runtime
       "privacy",  // linux_display.headless_swap_mode
@@ -1434,6 +1435,7 @@ namespace config {
     bool_f(vars, "headless_mode", video.linux_display.headless_mode);
     bool_f(vars, "linux_prefer_gpu_native_capture", video.linux_display.prefer_gpu_native_capture);
     bool_f(vars, "linux_capture_profile", video.linux_display.capture_profile);
+    int_between_f(vars, "headless_max_refresh_rate", video.linux_display.headless_max_refresh_rate, {0, 1000});
     string_f(vars, "linux_stream_mode", video.linux_display.stream_mode);
     string_f(vars, "linux_private_runtime", video.linux_display.private_runtime);
     string_f(vars, "headless_swap_mode", video.linux_display.headless_swap_mode);

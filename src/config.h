@@ -171,6 +171,12 @@ namespace config {
       bool prefer_gpu_native_capture;  ///< Prefer a GPU-native DMA-BUF path even if that requires windowed labwc
       bool capture_profile;          ///< Emit periodic transport-tagged capture timing summaries
       /**
+       * @brief Refresh ceiling, in Hz, for launches where Polaris creates the
+       * display itself (Private Stream, Host Virtual Display, Desktop Takeover,
+       * Gamescope). 0 means the built-in default. Key: headless_max_refresh_rate.
+       */
+      int headless_max_refresh_rate;
+      /**
        * @brief First-class stream mode id (headless_stream, windowed_stream, …).
        * Empty means derive from legacy booleans on load.
        */

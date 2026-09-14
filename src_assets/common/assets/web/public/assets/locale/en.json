@@ -593,6 +593,8 @@
     "max_bitrate_desc": "The maximum bitrate (in Kbps) that Polaris will encode the stream at. If set to 0, it will always use the bitrate requested by the client.",
     "minimum_fps_target": "Minimum FPS Target",
     "minimum_fps_target_desc": "The lowest effective FPS a stream can reach. Set 0 for automatic.",
+    "headless_max_refresh_rate": "Owned Display FPS Ceiling",
+    "headless_max_refresh_rate_desc": "The highest FPS a client may launch at when Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope). Advertised to clients and enforced at launch from this one value. Set 0 for the built-in default of 240.",
     "min_threads": "Minimum CPU Thread Count",
     "min_threads_desc": "The fewest CPU threads the software encoder may use; raise it to spread encoding across more cores.",
     "misc": "Miscellaneous options",
