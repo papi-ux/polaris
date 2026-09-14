@@ -8,12 +8,16 @@ namespace multiseat::spaces {
   struct runtime_t {
     std::string id, variant, source_revision, registry_digest, config_digest, nvidia_driver;
     [[nodiscard]] std::string reference() const;
+    [[nodiscard]] bool matches_image_id(std::string_view image) const;
   };
   // The production caller only consumes the catalog compiled into Polaris.
   // Parsing is exposed to exercise rejection and compatibility in unit tests.
   [[nodiscard]] std::optional<std::vector<runtime_t>> decode_runtime_catalog(std::string_view payload);
   [[nodiscard]] const std::optional<std::vector<runtime_t>> &trusted_runtimes();
   [[nodiscard]] bool matches_runtime_image(const runtime_t &runtime, std::string_view inspection);
+  // Docker's classic store addresses configurations; its containerd store
+  // addresses manifests. Both identities must belong to the compiled catalog.
+  [[nodiscard]] std::optional<std::string> verified_runtime_image(const runtime_t &runtime, std::string_view inspection);
   struct runtime_install_result_t {
     bool ready = false;
     std::string code, message, image;

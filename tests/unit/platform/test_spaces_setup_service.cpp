@@ -108,6 +108,36 @@ TEST_F(SpacesSetupService, NavigationAndRestartRetainOneCompletedRequestWithoutR
   EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 1U);
 }
 
+TEST_F(SpacesSetupService, SavesContainerdIdentityBeforeProvisioningAndRetainsItAcrossRestart) {
+  auto ops = operations();
+  ops.install = [&](auto, auto) {
+    ++installs;
+    return spaces::runtime_install_result_t {true, "runtime_ready", {}, runtime().registry_digest};
+  };
+  ops.prepare = [&](const auto &, std::string_view image, auto) {
+    ++homes;
+    EXPECT_EQ(image, runtime().registry_digest);
+    const auto saved = psf::read_secure(journal, 4096, false, false);
+    if (!saved) { ADD_FAILURE() << "Missing durable setup record"; return false; }
+    const auto body = json::parse(saved.payload);
+    EXPECT_EQ(body["state"], "preparing");
+    EXPECT_EQ(body["image"], image);
+    return true;
+  };
+  {
+    auto job = service(ops);
+    ASSERT_EQ(job->submit(request), 202);
+    ASSERT_TRUE(wait_state(*job, "prepared"));
+    EXPECT_TRUE(job->snapshot()["job"]["can_activate"]);
+  }
+  auto resumed = service(ops);
+  EXPECT_EQ(resumed->submit(request), 200);
+  EXPECT_TRUE(resumed->snapshot()["job"]["can_activate"]);
+  EXPECT_EQ(resumed->submit({"activate", request.request_id, {}, {}, "gpu-0"}), 202);
+  ASSERT_TRUE(wait_state(*resumed, "restart_required"));
+  EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 1U);
+}
+
 TEST_F(SpacesSetupService, SerializesDuplicatesAndFencesStaleCancellation) {
   std::promise<void> entered;
   auto ops = operations();

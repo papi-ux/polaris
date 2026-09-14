@@ -60,6 +60,10 @@ namespace multiseat::spaces {
     return "ghcr.io/papi-ux/polaris-worker-steam@" + registry_digest;
   }
 
+  bool runtime_t::matches_image_id(std::string_view image) const {
+    return valid(*this) && (image == config_digest || image == registry_digest);
+  }
+
   std::optional<std::vector<runtime_t>> decode_runtime_catalog(std::string_view payload) {
     try {
       const auto document = strict_json(payload);
@@ -87,16 +91,25 @@ namespace multiseat::spaces {
     return catalog;
   }
 
-  bool matches_runtime_image(const runtime_t &r, std::string_view inspection) {
-    if (!valid(r)) return false;
+  std::optional<std::string> verified_runtime_image(const runtime_t &r, std::string_view inspection) {
+    if (!valid(r)) return {};
     try {
       const auto images = strict_json(inspection);
-      if (!images.is_array() || images.size() != 1) return false;
+      if (!images.is_array() || images.size() != 1) return {};
       const auto &image = images.front();
-      if (image.at("Id") != r.config_digest || image.at("Os") != "linux" || image.at("Architecture") != "amd64" ||
+      if (!r.matches_image_id(image.at("Id").get<std::string>()) || image.at("Os") != "linux" || image.at("Architecture") != "amd64" ||
           !image.at("RepoDigests").is_array() ||
           std::find(image.at("RepoDigests").begin(), image.at("RepoDigests").end(), r.reference()) == image.at("RepoDigests").end())
-        return false;
+        return {};
+      if (image.at("Id") == r.registry_digest) {
+        // The reviewed registry manifest already binds its config digest. Do
+        // not accept an arbitrary descriptor, tag or multi-platform index.
+        const auto &descriptor = image.at("Descriptor");
+        if (descriptor.at("digest") != r.registry_digest ||
+            !descriptor.at("size").is_number_unsigned() || descriptor.at("size") == 0 || descriptor.at("size") > 65536 ||
+            (descriptor.at("mediaType") != "application/vnd.oci.image.manifest.v1+json" &&
+             descriptor.at("mediaType") != "application/vnd.docker.distribution.manifest.v2+json")) return {};
+      }
       const auto &config = image.at("Config"), &labels = config.at("Labels");
       if (labels.at("org.opencontainers.image.source") != "https://github.com/papi-ux/polaris" ||
           labels.at("org.opencontainers.image.revision") != r.source_revision ||
@@ -104,11 +117,16 @@ namespace multiseat::spaces {
           labels.at("io.polaris.multiseat.architecture") != "linux/amd64" ||
           labels.at("io.polaris.multiseat.media-contract") != "1" ||
           config.at("Entrypoint") != json::array({"/usr/bin/polaris-seat-worker"}) ||
-          config.at("Cmd") != json::array({"run"})) return false;
+          config.at("Cmd") != json::array({"run"})) return {};
       for (const auto *key : {"Volumes", "ExposedPorts", "OnBuild"})
-        if (config.contains(key) && !config.at(key).empty()) return false;
-      return labels.value("io.polaris.multiseat.nvidia.driver", "") == r.nvidia_driver;
-    } catch (...) { return false; }
+        if (config.contains(key) && !config.at(key).empty()) return {};
+      if (labels.value("io.polaris.multiseat.nvidia.driver", "") != r.nvidia_driver) return {};
+      return image.at("Id").get<std::string>();
+    } catch (...) { return {}; }
+  }
+
+  bool matches_runtime_image(const runtime_t &runtime, std::string_view inspection) {
+    return verified_runtime_image(runtime, inspection).has_value();
   }
 
   runtime_install_result_t install_runtime(container::host_t &host, std::string_view id,
@@ -132,8 +150,8 @@ namespace multiseat::spaces {
     const auto before = host.run(inspect, std::chrono::seconds(5), 65536);
     if (stop.stop_requested()) return cancelled();
     if (succeeded(before)) {
-      if (matches_runtime_image(runtime, before.output))
-        return {true, "runtime_ready", "The approved gaming runtime is available.", runtime.config_digest};
+      if (const auto image = verified_runtime_image(runtime, before.output))
+        return {true, "runtime_ready", "The approved gaming runtime is available.", *image};
       return {false, "runtime_identity_mismatch", "The installed runtime does not match this Polaris build. No space was created.", {}};
     }
     auto pull = container::command_prefix({});
@@ -146,9 +164,10 @@ namespace multiseat::spaces {
       return {false, "download_incomplete", "The runtime download did not finish. Retry the same runtime to reuse verified layers.", {}};
     const auto after = host.run(inspect, std::chrono::seconds(5), 65536);
     if (stop.stop_requested()) return cancelled();
-    if (!succeeded(after) || !matches_runtime_image(runtime, after.output))
+    const auto image = succeeded(after) ? verified_runtime_image(runtime, after.output) : std::nullopt;
+    if (!image)
       return {false, "runtime_verification_failed", "The downloaded runtime could not be verified. No space was created.", {}};
-    return {true, "runtime_ready", "The approved gaming runtime is available.", runtime.config_digest};
+    return {true, "runtime_ready", "The approved gaming runtime is available.", *image};
   }
 
   int runtime_command(int argc, char **argv) {

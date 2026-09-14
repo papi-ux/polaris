@@ -162,7 +162,7 @@ namespace multiseat::spaces {
     if (record_) {
       const auto &r = *record_;
       const bool approved = std::any_of(catalog_.begin(), catalog_.end(), [&](const auto &runtime) {
-        return runtime.id == r.request.runtime_id && runtime.reference() == r.reference && runtime.config_digest == r.image;
+        return runtime.id == r.request.runtime_id && runtime.reference() == r.reference && runtime.matches_image_id(r.image);
       });
       if (approved && operations_.graphics && (r.state == "prepared" || r.state == "activation_failed")) {
         try {
@@ -197,7 +197,7 @@ namespace multiseat::spaces {
       if (!record_ || record_->request.request_id != request.request_id || !operations_.activate) return 409;
       if (!record_->gpu_id.empty() && record_->gpu_id != request.gpu_id) return 409;
       const auto runtime = std::find_if(catalog_.begin(), catalog_.end(), [&](const auto &r) {
-        return r.id == record_->request.runtime_id && r.reference() == record_->reference && r.config_digest == record_->image;
+        return r.id == record_->request.runtime_id && r.reference() == record_->reference && r.matches_image_id(record_->image);
       });
       if (runtime == catalog_.end()) return 409;
       if (record_->state == "restart_required") return 200;
@@ -220,7 +220,7 @@ namespace multiseat::spaces {
     if (record_) {
       const auto &old = record_->request;
       if (old.request_id != request.request_id || old.name != request.name || old.runtime_id != request.runtime_id ||
-          record_->reference != found->reference() || record_->image != found->config_digest) return 409;
+          record_->reference != found->reference() || !found->matches_image_id(record_->image)) return 409;
       if (active_) return 202;
       if (record_->state == "prepared" || record_->state == "restart_required") return 200;
       if (!retryable(record_->state)) return 409;
@@ -260,7 +260,10 @@ namespace multiseat::spaces {
       try { if (!stop.stop_requested()) runtime = operations_.install(request.runtime_id, stop); }
       catch (...) { runtime.code = "setup_failed"; }
       lock.lock();
-      if (stop.stop_requested() || !runtime.ready || runtime.image != record_->image) {
+      const auto approved = std::find_if(catalog_.begin(), catalog_.end(), [&](const auto &r) {
+        return r.id == request.runtime_id && r.reference() == record_->reference && r.matches_image_id(runtime.image);
+      });
+      if (stop.stop_requested() || !runtime.ready || approved == catalog_.end()) {
         record_->state = stop.stop_requested() ? "cancelled" : "failed";
         record_->code = stop.stop_requested() ? "cancelled" :
           messages.contains(runtime.code) && !runtime.ready ? runtime.code : "runtime_verification_failed";
@@ -268,6 +271,9 @@ namespace multiseat::spaces {
       } else {
         // Fence UI cancellation before provisioning. Shutdown still interrupts
         // bounded host commands; uncertain resources are retained for recovery.
+        // Persist the daemon's verified immutable identity before any home
+        // effects. Existing profile retries still refuse a different identity.
+        record_->image = runtime.image;
         record_->state = "preparing"; record_->code = "preparing";
         if (save_locked()) {
           lock.unlock();

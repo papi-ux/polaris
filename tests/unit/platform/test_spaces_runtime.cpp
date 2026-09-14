@@ -122,6 +122,33 @@ TEST(SpacesRuntime, RechecksInstalledIdentityAndDoesNotPullOrStartAnExistingImag
   EXPECT_EQ(host.calls.size(), 2U);
 }
 
+TEST(SpacesRuntime, ContainerdUsesTheApprovedManifestAsItsLocalImageIdentity) {
+  const auto r = runtime();
+  auto image = inspected(r);
+  image[0]["Id"] = r.registry_digest;
+  image[0]["Descriptor"] = {{"digest", r.registry_digest}, {"size", 7834},
+    {"mediaType", "application/vnd.oci.image.manifest.v1+json"}};
+  download_host_t host; host.replies = {engine(), ok(image.dump())};
+  const auto result = spaces::install_runtime(host, r.id, {r});
+  ASSERT_TRUE(result.ready);
+  EXPECT_EQ(result.image, r.registry_digest);
+  EXPECT_EQ(host.calls.size(), 2U);
+  host.replies = {engine(), {.exit_status = 1}, ok("downloaded"), ok(image.dump())};
+  const auto downloaded = spaces::install_runtime(host, r.id, {r});
+  ASSERT_TRUE(downloaded.ready);
+  EXPECT_EQ(downloaded.image, r.registry_digest);
+
+  for (const auto &[path, value] : std::vector<std::pair<std::string, json>> {
+      {"/0/Descriptor", nullptr}, {"/0/Descriptor/digest", r.config_digest},
+      {"/0/Descriptor/size", 0}, {"/0/Descriptor/size", 65537},
+      {"/0/Descriptor/mediaType", "application/vnd.oci.image.index.v1+json"},
+      {"/0/Id", "sha256:" + std::string(64, 'd')}, {"/0/RepoDigests", json::array()},
+      {"/0/Config/Labels/org.opencontainers.image.revision", std::string(40, 'e')}}) {
+    auto bad = image; bad[json::json_pointer(path)] = value;
+    EXPECT_FALSE(spaces::matches_runtime_image(r, bad.dump())) << path;
+  }
+}
+
 TEST(SpacesRuntime, PullUsesOnlyTheApprovedRegistryDigestThenChecksTheInstalledImage) {
   const auto r = runtime();
   download_host_t host;

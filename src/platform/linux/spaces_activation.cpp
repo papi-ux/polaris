@@ -186,11 +186,13 @@ namespace multiseat::spaces {
     if (found == choices.end()) return false;
     // Recheck the local exact image and matching NVIDIA driver without pulling.
     auto command = container::command_prefix({});
-    command.insert(command.end(), {"image", "inspect", runtime.config_digest});
+    command.insert(command.end(), {"image", "inspect", runtime.reference()});
     const auto image = host.run(command, std::chrono::seconds(5), 65536);
-    if ((image.exit_status != 0 || image.timed_out || image.output_truncated) || !matches_runtime_image(runtime, image.output) || stop.stop_requested()) return false;
+    if (image.exit_status != 0 || image.timed_out || image.output_truncated || stop.stop_requested()) return false;
+    const auto identity = verified_runtime_image(runtime, image.output);
+    if (!identity) return false;
     return configure_first_space(activation_paths(directory, config::sunshine.config_file), request,
-      runtime.config_digest, *found, *label, host);
+      *identity, *found, *label, host);
   }
 }
 #endif
