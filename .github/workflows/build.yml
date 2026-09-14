@@ -855,10 +855,14 @@ jobs:
           ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Resolve exact SteamOS source commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
         run: |
-          git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"
-          POLARIS_BUILD_COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
-          test "$(git rev-parse HEAD)" = "$POLARIS_BUILD_COMMIT"
+          # The branch may advance while prerequisite jobs run. Build the same
+          # resolved source as every other package; release publication still
+          # revalidates the release tag against that exact source.
+          POLARIS_BUILD_COMMIT="$(git rev-parse 'HEAD^{commit}')"
+          test "$POLARIS_BUILD_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
           printf 'POLARIS_BUILD_COMMIT=%s\n' "$POLARIS_BUILD_COMMIT" >> "$GITHUB_ENV"
 
       - name: Initialize submodules
