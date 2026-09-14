@@ -481,6 +481,30 @@ When all five pass, the session logs `HDR metadata: available=true usable=true`,
 `Session started for [...]`. The encoder probe logs the same lines earlier even when the session
 will not, so read the ones after the session starts.
 
+## A launch was refused
+
+A client that could not start a stream used to see `error 503` and one generic sentence,
+whatever the host knew. The host now sends the reason as the message the client shows, with
+the one change that fixes it, and Nova shows both in its launch sheet. The `error_code` names
+below are stable, so they can be searched for here and in support threads.
+
+| error_code | what happened on the host | fix |
+|---|---|---|
+| `encoder_probe_failed` | No video encoder could start; on NVIDIA the message adds the driver detail when the driver is the reason | Check the Doctor's Encoder and Capture rows. Against the private compositor: pick **Private Stream (GPU-native)** or set `linux_prefer_gpu_native_capture = enabled` |
+| `no_capture_backend` | No capture backend works in the configured stream mode, so nothing could be probed | Check `capture` against the stream mode; unset lets Polaris pick. The Doctor names the missing protocol |
+| `kms_capture_needs_capability` | `capture = kms` without `CAP_SYS_ADMIN` on the binary | `sudo -H polaris --setup-host --enable-kms`, restart |
+| `desktop_capture_not_prepared` | The screen sharing prompt was declined, or desktop capture could not be prepared | Approve the prompt on the host desktop, or use a Private Stream mode |
+| `private_runtime_unavailable` | labwc (or gamescope) is not installed for the chosen mode | Install it, or use Mirror Desktop |
+| `private_runtime_start_failed`, `private_runtime_socket_missing` | The private compositor did not start, or started without a Wayland socket | The host journal has the compositor's own error; restart Polaris and retry |
+| `gamescope_session_failed` | The nested gamescope session did not start, or timed out | Check gamescope on the host; the Doctor has a Gamescope helper report |
+| `virtual_display_failed`, `virtual_display_unavailable` | Host Virtual Display could not be created, or no backend exists | The message carries the reason (usually the `evdi` module); Private Stream needs no virtual display |
+| `desktop_takeover_failed`, `desktop_takeover_recovery_pending` | Desktop Takeover could not start, or the previous one is still restoring the display | Wait for the host display to return; the Doctor's display warning names the reason |
+| `session_stopping`, `session_state_changed`, `launch_cancelled`, `previous_session_cleanup_pending`, `steam_shutdown_pending`, `virtual_display_recovery_pending` | The previous session, Steam, or a display is still being torn down | Wait a few seconds and launch again; restart Polaris if it persists |
+| `child_tracking_failed`, `no_active_session` | The app started but could not be tracked, or a resume found nothing to resume | Launch again; send a support bundle if it repeats |
+
+Moonlight clients see the same message in their own error dialog; only the code and action
+attributes are Nova's.
+
 ## Quick recovery ladder
 
 The Doctor & Support page offers three recovery actions, ordered from least to most disruptive.

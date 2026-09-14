@@ -72,6 +72,7 @@
 #include "game_artwork_provider.h"
 #include "globals.h"
 #include "httpcommon.h"
+#include "launch_failure.h"
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
@@ -381,6 +382,24 @@ namespace nvhttp {
         return;
       }
       tree.put("root.<xmlattr>.status_code", fallback_code);
+      tree.put("root.<xmlattr>.status_message", fallback_message);
+    }
+
+    // A refused launch reaches the client as one status_message. When the code
+    // that refused said why, that is the message, followed by the one change
+    // that fixes it; error_code and error_action ride along as root attributes
+    // that Moonlight ignores and Nova reads. Without a record, the old generic
+    // text stands, so nothing gets vaguer than before.
+    void put_launch_refusal(pt::ptree &tree, int status, const std::string &fallback_message) {
+      tree.put("root.<xmlattr>.status_code", status);
+      if (const auto refusal = launch_failure::take(); refusal && !refusal->message.empty()) {
+        tree.put("root.<xmlattr>.status_message", launch_failure::status_message(*refusal));
+        tree.put("root.<xmlattr>.error_code", refusal->code);
+        if (!refusal->action.empty()) {
+          tree.put("root.<xmlattr>.error_action", refusal->action);
+        }
+        return;
+      }
       tree.put("root.<xmlattr>.status_message", fallback_message);
     }
 
@@ -2484,6 +2503,10 @@ namespace nvhttp {
 
   void ensure_response_status_code_for_tests(pt::ptree &tree, int fallback_code, const std::string &fallback_message) {
     ensure_response_status_code(tree, fallback_code, fallback_message);
+  }
+
+  void put_launch_refusal_for_tests(pt::ptree &tree, int status, const std::string &fallback_message) {
+    put_launch_refusal(tree, status, fallback_message);
   }
 #endif
 
@@ -5820,6 +5843,7 @@ namespace nvhttp {
 
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
+    launch_failure::clear();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -6104,8 +6128,8 @@ namespace nvhttp {
                 launch_session->encoder_backend_explicit &&
                 launch_session->encoder_backend != "auto")) {
             tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+            video::note_launch_refused_by_probe(false);
+            put_launch_refusal(tree, 503, "Failed to initialize video capture/encoding. Is a display connected and turned on?");
 
             return;
           }
@@ -6215,9 +6239,9 @@ namespace nvhttp {
         });
         launch_session_raised = err == 0;
         if (err) {
-          tree.put("root.<xmlattr>.status_code", err);
-          tree.put(
-            "root.<xmlattr>.status_message",
+          put_launch_refusal(
+            tree,
+            err,
             err == 503
             ? "Video capture or encoding could not start. If prompted, approve screen sharing on the host."
             : (err == 401 || err == 403 || err == 409)
@@ -6237,8 +6261,7 @@ namespace nvhttp {
     if (!launch_session_raised) {
       if (const auto capture_error = proc::proc.prepare_capture_for_admitted_launch(launch_session)) {
         tree.put("root.gamesession", 0);
-        tree.put("root.<xmlattr>.status_code", capture_error);
-        tree.put("root.<xmlattr>.status_message", "Desktop screen sharing was cancelled or capture could not be prepared");
+        put_launch_refusal(tree, capture_error, "Desktop screen sharing was cancelled or capture could not be prepared");
         return;
       }
     }
@@ -6275,6 +6298,7 @@ namespace nvhttp {
 
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
+    launch_failure::clear();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -6418,8 +6442,8 @@ namespace nvhttp {
             launch_session->encoder_backend_explicit &&
             launch_session->encoder_backend != "auto")) {
         tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+        video::note_launch_refused_by_probe(false);
+        put_launch_refusal(tree, 503, "Failed to initialize video capture/encoding. Is a display connected and turned on?");
 
         return;
       }
@@ -6503,8 +6527,7 @@ namespace nvhttp {
 
     if (const auto capture_error = proc::proc.prepare_capture_for_admitted_launch(launch_session)) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", capture_error);
-      tree.put("root.<xmlattr>.status_message", "Desktop screen sharing was cancelled or capture could not be prepared");
+      put_launch_refusal(tree, capture_error, "Desktop screen sharing was cancelled or capture could not be prepared");
       return;
     }
     if (const auto publish_error = publish_authorized_launch(named_cert_p, PERM::_allow_view, [&]() {
