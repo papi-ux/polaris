@@ -30,11 +30,12 @@ ENV PATH=/opt/rust/bin:$PATH \
     SOURCE_DATE_EPOCH=1754524800
 WORKDIR /src
 COPY containers/multiseat/patches /patches
-COPY containers/multiseat/collect-plugin-notices.py /collect-plugin-notices.py
 RUN patch -d /src -p1 --batch --forward --fuzz=0 < /patches/display-polaris-model.patch && \
     cargo build --frozen --release -p gst-plugin-wayland-display && \
-    test -f target/release/libgstwaylanddisplaysrc.so && \
-    python3 /collect-plugin-notices.py
+    test -f target/release/libgstwaylanddisplaysrc.so
+COPY containers/multiseat/collect-plugin-notices.py /collect-plugin-notices.py
+COPY containers/multiseat/licenses/display-dependencies /plugin-license-supplements
+RUN python3 /collect-plugin-notices.py
 RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-ignore-unsupported-switches.patch && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-finish-command-buffers.patch && \

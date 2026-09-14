@@ -61,6 +61,12 @@ with the existing display, Gamescope, codec and NVIDIA notices. The display
 plugin's vendored notices and declared license metadata are retained in
 `polaris-seat-display/dependencies/index.json`. This complete vendor inventory
 also includes dependencies used only during development or compilation.
+Where a crate omits a standalone notice, reviewed supplemental texts come from
+its exact recorded upstream source revision. The collector verifies that revision
+and each notice hash before copying them. `AUTHORS` files are retained too because
+some projects put their license grants there. Two current crates, drm-fourcc and
+input-event-codes-sys, declare licenses but provide no standalone notice at their
+recorded revisions; their metadata remains visible for distribution review.
 
 Before distributing an image, review the actual notices and preserve matching
 source, patches and build scripts for all components whose terms require them.

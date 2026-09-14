@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "package": "gbm-sys-0.4.0",
+      "repository": "https://github.com/Drakulix/gbm.rs",
+      "vcs_revision": "2b4047f8e5ab4d050d4ed88f5ee2515069478fac",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "56ab09c42eb251646c1c00ba32f5db0e51e297cd379eccc5a1cb7808f2de4ce7",
+          "url": "https://github.com/Smithay/gbm.rs/blob/2b4047f8e5ab4d050d4ed88f5ee2515069478fac/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "gl_generator-0.14.0",
+      "repository": "https://github.com/brendanzab/gl-rs",
+      "vcs_revision": "ea503e8d5fb6d73c6030e6191ce738cd3bf3433e",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "url": "https://github.com/rust-windowing/gl-rs/blob/ea503e8d5fb6d73c6030e6191ce738cd3bf3433e/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "khronos_api-3.1.0",
+      "repository": "https://github.com/brendanzab/gl-rs",
+      "vcs_revision": "f150967b1c44ae888e6676f93f639ebc82771bdc",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "url": "https://github.com/rust-windowing/gl-rs/blob/f150967b1c44ae888e6676f93f639ebc82771bdc/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "profiling-1.0.17",
+      "repository": "https://github.com/aclysma/profiling",
+      "vcs_revision": "740d74c82212f1f0584cfa5c6d884c5ab5367101",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "url": "https://github.com/aclysma/profiling/blob/740d74c82212f1f0584cfa5c6d884c5ab5367101/LICENSE-APACHE"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "url": "https://github.com/aclysma/profiling/blob/740d74c82212f1f0584cfa5c6d884c5ab5367101/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "profiling-procmacros-1.0.17",
+      "repository": "https://github.com/aclysma/profiling",
+      "vcs_revision": "740d74c82212f1f0584cfa5c6d884c5ab5367101",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "url": "https://github.com/aclysma/profiling/blob/740d74c82212f1f0584cfa5c6d884c5ab5367101/LICENSE-APACHE"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "url": "https://github.com/aclysma/profiling/blob/740d74c82212f1f0584cfa5c6d884c5ab5367101/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "valuable-0.1.1",
+      "repository": "https://github.com/tokio-rs/valuable",
+      "vcs_revision": "9efc29b6e58cef28f6566a47aa7e142a55fead77",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "ed60d479b8fd1f64e9cbc3de449a16a53ac1b3d1b6aeb9bf9d190a8e93061b44",
+          "url": "https://github.com/tokio-rs/valuable/blob/9efc29b6e58cef28f6566a47aa7e142a55fead77/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "wit-bindgen-rt-0.39.0",
+      "repository": "https://github.com/bytecodealliance/wit-bindgen",
+      "vcs_revision": "f2393e6e98fa5f9236cac580db8a3fc9de6a4b70",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "url": "https://github.com/bytecodealliance/wit-bindgen/blob/f2393e6e98fa5f9236cac580db8a3fc9de6a4b70/LICENSE-APACHE"
+        },
+        {
+          "path": "LICENSE-Apache-2.0_WITH_LLVM-exception",
+          "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
+          "url": "https://github.com/bytecodealliance/wit-bindgen/blob/f2393e6e98fa5f9236cac580db8a3fc9de6a4b70/LICENSE-Apache-2.0_WITH_LLVM-exception"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "url": "https://github.com/bytecodealliance/wit-bindgen/blob/f2393e6e98fa5f9236cac580db8a3fc9de6a4b70/LICENSE-MIT"
+        }
+      ]
+    }
+  ]
+}
