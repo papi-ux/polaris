@@ -205,6 +205,7 @@ TEST_F(SpacesSetupService, InvalidJournalAndChangedRuntimeCannotBeSilentlyReplac
   auto changed = runtime(); changed.registry_digest.back() = 'd';
   spaces::setup_service_t upgraded(journal, {changed}, true, operations());
   EXPECT_EQ(upgraded.submit(request), 409);
+  EXPECT_FALSE(upgraded.snapshot()["job"]["can_retry"]);
   EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 0U);
 }
 

@@ -31,9 +31,12 @@ The Spaces tab has host prerequisite checks, Docker installation guidance, and
 management for configured Steam spaces. Creating additional spaces from an
 existing Steam setup is supported by the development backend.
 
-**First space bootstrap and automatic download of a verified gaming runtime are
-still being integrated.** A fresh host cannot yet complete the entire setup from
-this page. The page keeps that step incomplete even when Docker is working.
+**First space preparation now has a persistent background job.** It connects the
+verified runtime download to a new private Steam home, with progress, stop and
+retry controls in Spaces. The preview catalog is still empty until a runtime
+completes publication and review, so this build shows that the download is
+unavailable. A fresh host cannot yet complete graphics configuration and
+streaming activation from this page.
 The current runtime also requires the Polaris service account to use UID and
 GID 1000. Do not change an existing Linux account's identity to work around this
 preview limitation.
@@ -99,6 +102,32 @@ Regular Fedora or Arch package commands do not apply to these systems. The
 preview does not automate their Docker installation. Use your distribution's
 supported installation method, and do not disable filesystem protection to
 follow instructions intended for another distribution.
+
+## Prepare your first Steam home
+
+Once this build offers an approved gaming runtime:
+
+1. Complete the host checks above.
+2. Under **Prepare your first space**, enter a name such as **Living room**.
+   If more than one runtime is offered, choose the variant for your graphics
+   hardware. An NVIDIA variant names its required host driver version.
+3. Select **Download and prepare**. Allow space and bandwidth for a download of
+   several gigabytes. You can leave Spaces and return; the host keeps the job.
+4. If the connection drops, select **Reconnect to setup** before retrying.
+   **Retry setup** checks the original request and its saved home. It does not
+   create a second home or copy another player's Steam login.
+5. **Stop setup** is available while obtaining the runtime. Docker may retain
+   verified layers for another attempt. Once Steam home preparation begins, wait
+   for it to finish. Polaris keeps uncertain resources for recovery instead of
+   deleting or adopting them.
+6. If Polaris restarts, return to Spaces and explicitly retry the interrupted
+   job. A restart does not automatically resume downloads or provisioning.
+
+**Steam home prepared** means storage has been saved. Graphics configuration,
+device assignment and streaming activation are still separate pending work in
+this preview. Do not treat this message as a successful game or controller test.
+If setup repeatedly cannot finish, open **Doctor & Support** and retain the
+existing player data while diagnosing the failure.
 
 ## Add a space on a configured host
 

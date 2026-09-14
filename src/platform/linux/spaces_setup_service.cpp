@@ -52,6 +52,14 @@ namespace multiseat::spaces {
     bool retryable(std::string_view state) {
       return state == "failed" || state == "interrupted" || state == "cancelled";
     }
+    bool valid_stage(std::string_view state, const std::string &code) {
+      if (!messages.contains(code)) return false;
+      if (state == "failed")
+        return code != "prepared" && code != "preparing" && code != "downloading" &&
+          code != "interrupted" && code != "cancelled";
+      return (state == "prepared" || state == "preparing" || state == "downloading" ||
+        state == "interrupted" || state == "cancelled") && state == code;
+    }
   }
 
   std::optional<setup_request_t> decode_setup_request(std::string_view payload) {
@@ -93,8 +101,7 @@ namespace multiseat::spaces {
         const std::string prefix = "ghcr.io/papi-ux/polaris-worker-steam@";
         if (!valid_request(r.request) || r.request.operation != "start" ||
             !r.reference.starts_with(prefix) || !digest(r.reference.substr(prefix.size())) || !digest(r.image) ||
-            !messages.contains(r.code) ||
-            !(retryable(r.state) || r.state == "downloading" || r.state == "preparing" || r.state == "prepared"))
+            !valid_stage(r.state, r.code))
           throw std::invalid_argument("setup record");
         record_ = std::move(r);
         if (record_->state == "downloading" || record_->state == "preparing") {
@@ -133,10 +140,14 @@ namespace multiseat::spaces {
         catalog_.empty() ? "The verified gaming runtime is not published for this preview yet." : ""}};
     if (record_) {
       const auto &r = *record_;
+      const bool approved = std::any_of(catalog_.begin(), catalog_.end(), [&](const auto &runtime) {
+        return runtime.id == r.request.runtime_id && runtime.reference() == r.reference && runtime.config_digest == r.image;
+      });
       result["job"] = {{"request_id", r.request.request_id}, {"runtime_id", r.request.runtime_id},
         {"name", r.request.name}, {"state", fault_ ? "recovery_required" : r.state},
-        {"message", fault_ ? result["message"].get<std::string>() : messages.at(r.code)},
-        {"can_retry", !fault_ && !closing_ && !active_ && retryable(r.state)},
+        {"message", fault_ ? result["message"].get<std::string>() : !approved && retryable(r.state) ?
+          "This build no longer offers the runtime saved for this setup. Existing player data is preserved." : messages.at(r.code)},
+        {"can_retry", approved && !fault_ && !closing_ && !active_ && retryable(r.state)},
         {"can_cancel", !fault_ && !closing_ && active_ && r.state == "downloading" && !cancellation_.stop_requested()}};
     }
     return result;
@@ -180,7 +191,7 @@ namespace multiseat::spaces {
       const auto stop = cancellation_.get_token();
       lock.unlock();
       runtime_install_result_t runtime;
-      try { runtime = operations_.install(request.runtime_id, stop); }
+      try { if (!stop.stop_requested()) runtime = operations_.install(request.runtime_id, stop); }
       catch (...) { runtime.code = "setup_failed"; }
       lock.lock();
       if (stop.stop_requested() || !runtime.ready || runtime.image != record_->image) {

@@ -17,7 +17,7 @@
         {{ setup.host_prerequisites_ready ? 'Host prerequisites checked.' : 'Complete the steps below, then recheck setup.' }}
         {{ setup.available ? 'Spaces are configured on this host.' : 'Spaces configuration still needs attention.' }}
       </p>
-      <details class="mt-4" :open="!setup.available || !setup.host_prerequisites_ready">
+      <details class="mt-4" :open="!setup.host_prerequisites_ready || (setup.configured && !setup.available)">
         <summary class="focus-ring cursor-pointer rounded py-2 text-sm text-ice">Docker and host setup</summary>
         <ol class="mt-3 grid gap-3">
           <li v-for="check in setup.checks" :key="check.id" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4"

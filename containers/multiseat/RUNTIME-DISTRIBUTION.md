@@ -14,8 +14,8 @@ polaris --spaces-runtime install RUNTIME_ID
 polaris --spaces-runtime create-first CATALOG RUNTIME_ID REQUEST_ID NAME
 ```
 
-This is an implementation and validation interface. The guided Spaces download
-job and first-space configuration transaction still need to call this backend.
+This is an implementation and validation interface. The guided Spaces job now
+calls the same runtime and first-home backend outside the HTTP request thread.
 `create-first` obtains an approved runtime and prepares one new private Steam
 home plus its owned network and catalog entry. Use a stable UUID request ID and
 the same name on retries. An existing catalog cannot be replaced; a matching
@@ -43,9 +43,37 @@ to satisfy it.
 If downloading is interrupted, rerun the same runtime ID. Docker can reuse
 verified layers; Polaris re-inspects the complete image on every attempt. It
 does not claim byte-level resume or return success from a stale progress record.
-The command can wait up to 30 minutes and must run on the setup job worker,
-never on an HTTP request or stream owner thread. It must not be wired into the
-web flow until the job's cancellation and restart lifecycle is implemented.
+The command can wait up to 30 minutes. The web flow uses a host-owned worker,
+never an HTTP request or stream owner thread.
+
+## Guided setup job
+
+Authenticated clients read `GET /api/spaces/setup/job` and submit bounded JSON
+to `POST /api/spaces/setup/job`. Start accepts only `operation`, `request_id`,
+`runtime_id` and `name`; cancel accepts only `operation` and `request_id`.
+Image references, shell commands, paths, GPU devices and controller settings
+cannot be supplied through this endpoint.
+
+The main process owns and joins the setup worker. A private cross-process lease
+admits one setup owner. Its bounded journal records the request, approved
+registry/configuration digests and stage before effects. Repeated requests must
+match that identity. Reloading the page reads progress; restarting Polaris marks
+unfinished work interrupted and requires an explicit retry. An unavailable
+catalog or an existing local controller configuration cannot bootstrap a home.
+
+The installer uses a cancellation-aware host adapter. Its child-process output
+drain is bounded per pass so continuous output cannot starve a stop request.
+Stopping a download kills the owned Docker CLI; the daemon may finish retaining
+layers. It does not prune images or stop other containers. Once home preparation
+begins, browser cancellation is fenced. Process shutdown still interrupts host
+commands; the existing provisioning transaction retains uncertain resources and
+only a durable catalog confirmation can report the home prepared.
+
+A journal durability failure freezes that owner until restart and secure
+read-back. No later request overwrites uncertain state. First-home storage is
+server-owned at `spaces-profiles.json` under Polaris's application-data directory.
+This job does not write controller/native configuration or activate streaming.
+The page explicitly distinguishes prepared storage from a playable space.
 
 ## Catalog admission
 
@@ -89,3 +117,5 @@ python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
 The Python checks require Python 3.11 or newer and do not use Docker or hardware.
 Native `SpacesRuntime.*` tests cover bounded commands, identity mismatches,
 interrupted downloads, retry and refusal to create containers or player storage.
+`SpacesSetupService.*` covers concurrent requests, stale cancellation,
+shutdown, durable recovery, changed runtime identity and owner exclusion.
