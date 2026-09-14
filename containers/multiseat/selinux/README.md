@@ -45,14 +45,18 @@ No package or service installs this policy automatically.
 The separate `polaris_nvidia_worker.te` policy confines Steam and its embedded
 Chromium processes to the worker domain. Chromium can explicitly bind a random
 UDP client port outside the kernel's automatic ephemeral range. Policy version
-1.0.7 admits `name_bind` on `unreserved_port_t` UDP and TCP sockets for Chromium
-client connections and Steam's local IPC listeners. Chromium's mDNS socket also
-needs UDP binding on `howl_port_t`. These permissions cover the observed
-`Chrome_ChildIOT`, `IPC:CSteamEngin` and `Chrome_IOThread` startup denials.
+1.0.8 admits UDP `name_bind` on `port_type` within this worker domain, plus TCP
+binding on `unreserved_port_t` for Steam's local IPC listeners. A random UDP
+choice can land on a service label such as `radacct_port_t`, `ipp_port_t` or
+`jboss_management_port_t`. Some labels cover numbers both below and above 1024,
+so allowing only `unreserved_port_type` would still produce intermittent
+denials. The UDP rule also covers Chromium's mDNS socket.
 
 This rule depends on the controller's existing private Docker bridge and absence
-of published worker ports. It does not grant host networking, other named or
-reserved service-port binding, raw sockets, network administration or input-device
-writes. Keep SELinux enforcing when validating it. Check the effective policy
+of published worker ports. It permits UDP service-port binding inside that
+namespace; it does not grant host networking, named TCP service-port binding,
+raw sockets, network administration, `net_bind_service` or input-device writes.
+The controller still drops all Linux capabilities. Keep SELinux enforcing when
+validating it. Check the effective policy
 and exercise a real UDP bind inside an isolated worker before repeating Steam
 startup; a successful policy compilation alone does not prove the launch works.
