@@ -111,7 +111,7 @@ on Linux it looks in `~/.config/sunshine/apps.json` by default, which a Polaris 
 have. Polaris keeps the same file, with the same shape, at `~/.config/polaris/apps.json`.
 
 Point Buddy at it: in Buddy's `settings.json` (`~/.config/moondeckbuddy/`) set
-**Sunshine apps filepath** to `/home/<you>/.config/polaris/apps.json`, add an app named
+**Sunshine apps filepath** to the absolute path of `~/.config/polaris/apps.json`, add an app named
 `MoonDeckStream` in Polaris whose command runs Buddy's `MoonDeckStream` executable, and leave
 "Continue streaming if the application exits quickly" unchecked, exactly as Buddy's own Sunshine
 guide says. Everything past that check is Moonlight pairing and launching, which Polaris answers
