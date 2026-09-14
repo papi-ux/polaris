@@ -248,7 +248,7 @@ def build_artifact(args, revision, epoch, context):
                                             'scope': 'isolated session bus, audio, software display and continuous software encoder; no game stream'})
     package_manifest = output(engine + ['run', '--rm', '--network=none', '--read-only',
                                '--cap-drop=all', '--security-opt=no-new-privileges',
-                               '--entrypoint=/usr/bin/cat', image, '/usr/share/polaris/build/packages.tsv'])
+                               '--entrypoint=/usr/bin/cat', inspected['Id'], '/usr/share/polaris/build/packages.tsv'])
     (artifact / 'packages.tsv').write_text(package_manifest)
     bill = sbom(package_manifest, args.profile, revision, context)
     extra_files = []
@@ -265,7 +265,7 @@ def build_artifact(args, revision, epoch, context):
         for filename in ['nvidia-files.json', 'nvidia-runtime.json']:
             content = output(engine + ['run', '--rm', '--network=none', '--read-only',
                              '--cap-drop=all', '--security-opt=no-new-privileges',
-                             '--entrypoint=/usr/bin/cat', image, '/usr/share/polaris/build/' + filename])
+                             '--entrypoint=/usr/bin/cat', inspected['Id'], '/usr/share/polaris/build/' + filename])
             (artifact / filename).write_text(content)
             records[filename] = json.loads(content)
             extra_files.append(filename)

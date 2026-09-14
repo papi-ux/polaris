@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 from oci_archive import verify_archive
 
@@ -140,11 +141,17 @@ def main():
         for source, target, mode in mounts:
             command += ['--volume', str(source) + ':' + target + ':' + mode]
         with (destination / log).open('wb') as output:
-            subprocess.run(command + [scanners[tool]['reference'], '--config', '/scanner.yaml'] + arguments,
-                           check=True, stdout=output, stderr=subprocess.STDOUT)
+            result = subprocess.run(command + [scanners[tool]['reference'], '--config', '/scanner.yaml'] + arguments,
+                                    stdout=output, stderr=subprocess.STDOUT)
+        if result.returncode:
+            print((destination / log).read_text(errors='replace')[-16384:], file=sys.stderr)
+            result.check_returncode()
 
     if not args.offline:
-        invoke('grype', ['db', 'update'], [(cache, '/cache', 'Z')], 'database-update.log', network=True)
+        # Downloading a fresh database also creates a temporary listing file.
+        # Keep the container root read-only and provide only this private scratch.
+        invoke('grype', ['db', 'update'], [(cache, '/cache', 'Z'), (temporary, '/tmp', 'Z')],
+               'database-update.log', network=True)
     invoke('syft', ['scan', 'oci-archive:/input/worker.oci.tar', '--scope', 'squashed',
                    '-o', 'syft-json=/out/image-sbom.syft.json', '-o', 'cyclonedx-json=/out/image-sbom.cdx.json'],
            [(directory / 'worker.oci.tar', '/input/worker.oci.tar', 'ro,z'),
