@@ -692,4 +692,39 @@ namespace {
     EXPECT_TRUE(loaded->catalog.profiles.empty());
     EXPECT_EQ(host.calls.size(), 7);
   }
+  TEST_F(MultiseatProfileCatalog, AdditionalSpaceAccessDoesNotMoveTheDefaultAssignment) {
+    auto catalog = sample();
+    auto extra = catalog.profiles.front();
+    extra.storage.profile_key = "profile-b"; extra.storage.opaque_volume_name = "pv-profile-b";
+    extra.client_keys.clear(); catalog.profiles.push_back(extra); save(catalog);
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, std::vector<std::string>{"client-a"});
+    EXPECT_TRUE(loaded->catalog.profiles[1].client_keys.empty());
+    const auto payload = profiles::encode(loaded->catalog); loaded.reset();
+    EXPECT_EQ(json::parse(payload)["schema"], 3);
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", false));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalog, DuplicateAccessAndAccessToRemovedSpacesAreRejected) {
+    auto catalog = sample(); catalog.profiles[0].access_clients = {"client-b", "client-b"};
+    EXPECT_THROW((void)profiles::encode(catalog), std::invalid_argument);
+    catalog.profiles[0].access_clients = {"client-b"}; save(catalog);
+    ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::remove, "profile-a", {}}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[0].access_clients.empty()); loaded.reset();
+    EXPECT_FALSE(profiles::set_access(path, "profile-a", "client-b", true));
+  }
+
+  TEST_F(MultiseatProfileCatalog, ReturningToOrdinaryStreamingRemovesEverySpaceGrant) {
+    auto catalog = sample(); catalog.profiles[0].access_clients = {"client-a", "client-b"}; save(catalog);
+    ASSERT_TRUE(profiles::set_assignment(path, "", "client-a"));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-b"});
+  }
+
 }  // namespace

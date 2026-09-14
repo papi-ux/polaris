@@ -17,6 +17,7 @@ namespace multiseat::profiles {
     workload_plan_t workload;
     std::vector<std::string> client_keys;
     bool archived = false;
+    std::vector<std::string> access_clients;
   };
 
   struct catalog_t {
@@ -56,6 +57,9 @@ namespace multiseat::profiles {
   // One atomic move between profiles, or unassignment with an empty profile.
   [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key);
+  // Additional access does not change the default assignment.
+  [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
+    std::string_view profile_key, std::string_view client_key, bool allowed);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
   // private storage, and an owned bridge for Steam. No pulls or host binds.
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,

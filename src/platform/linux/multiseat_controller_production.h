@@ -38,6 +38,7 @@ namespace multiseat {
     std::string profile_key;
     std::vector<std::string> client_keys;
     workload_plan_t workload;
+    std::vector<std::string> access_clients;
   };
 
   struct production_controller_options_t {

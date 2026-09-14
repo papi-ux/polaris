@@ -24,14 +24,14 @@
     <p v-if="state.enabled && clientsReady && !devices.length" class="mt-4 text-sm text-storm">
       Pair a device with permission to launch apps to assign a space. Temporary guests cannot use these spaces.
     </p>
-    <SpacesList v-if="state.enabled" :profiles="state.profiles" :clients="clients" :manageable="state.management_available"
+    <SpacesList v-if="state.enabled" :profiles="state.profiles" :clients="clients" :manageable="state.management_available" :access-available="state.access_available"
                 :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError" :refresh="loadProfiles" @busy="managing = $event" />
     <MultiseatProfileCreate v-if="state.enabled && state.creation_available" :profiles="state.profiles"
                            :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError"
                            :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
     <details v-if="state.enabled && devices.length" class="mt-5 border-t border-storm/20 pt-3" open>
-      <summary class="focus-ring cursor-pointer rounded py-2 font-semibold text-silver">Device access</summary>
-      <p class="mt-2 text-sm text-storm">Devices are the handhelds, TVs, and computers paired with Polaris. Choose what each one opens.
+      <summary class="focus-ring cursor-pointer rounded py-2 font-semibold text-silver">Default Space</summary>
+      <p class="mt-2 text-sm text-storm">Devices are the handhelds, TVs, and computers paired with Polaris. Choose the Space each device starts with. Allow additional Spaces using Device Access on a Space card.
         Rename a device in Devices if its name is hard to recognize.</p>
       <div class="mt-4 grid gap-3">
       <div v-for="client in devices" :key="client.uuid" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
@@ -42,7 +42,7 @@
           <span v-if="dirty(client.uuid)" class="text-xs text-warning-bright">Unsaved change</span>
         </div>
         <p :id="'gaming-profile-current-' + client.uuid" class="mt-1 break-words text-xs text-storm">
-          Opens: {{ profileName(assigned(client.uuid)) }}
+          Default: {{ profileName(assigned(client.uuid)) }}
         </p>
         <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <select :id="'gaming-profile-' + client.uuid" v-model="choices[client.uuid]"
@@ -86,7 +86,7 @@ const props = defineProps({
   clients: { type: Array, default: () => [] },
   clientsReady: { type: Boolean, default: true },
 })
-const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], creation_available: false, management_available: false })
+const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], creation_available: false, management_available: false, access_available: false })
 const choices = reactive({})
 const saving = ref(''), loading = ref(false)
 const creating = ref(false), managing = ref(false)
@@ -94,7 +94,8 @@ const activeSpaces = computed(() => state.profiles.filter(space => !space.archiv
 const loadError = ref(''), actionError = ref(''), message = ref('')
 const locked = computed(() => !!saving.value || creating.value || managing.value || loading.value || !!loadError.value || state.changing || state.failed || !state.available)
 const eligible = client => !client.temporary_authorization && (Number(client.perm) & 0x04000000) !== 0
-const assigned = id => state.profiles.find(profile => profile.clients.includes(id))?.id || ''
+const assigned = id => state.profiles.find(profile => profile.clients.includes(id))?.id ||
+  state.profiles.find(profile => !profile.archived && (profile.access_clients || []).includes(id))?.id || ''
 const profileName = id => state.profiles.find(profile => profile.id === id)?.name || 'This PC’s desktop and apps'
 const deviceName = client => client.friendly_name || client.name || 'Paired device'
 const devices = computed(() => props.clients.filter(client => eligible(client) || assigned(client.uuid)))
@@ -105,7 +106,7 @@ function clearFeedback() { message.value = ''; actionError.value = '' }
 function selectionHelp(client) {
   if (!eligible(client)) return 'This device no longer has space access. Choose This PC’s desktop and apps to remove its assignment.'
   const selected = state.profiles.find(profile => profile.id === choices[client.uuid])
-  if (!selected) return 'Uses the usual apps and account on this PC.'
+  if (!selected) return 'Removes all Space access and uses the usual apps and account on this PC.'
   const others = selected.clients.filter(id => id !== client.uuid)
   if (!others.length) return 'Keeps this space’s sign-ins, saves, and settings between sessions.'
   const names = others.map(id => {
@@ -138,7 +139,7 @@ async function loadProfiles(resetClient = '') {
     const next = await response.json()
     if (!validSnapshot(next)) throw new Error('Could not verify space assignments. Refresh spaces to try again.')
     const edited = new Set(props.clients.filter(client => dirty(client.uuid) && choices[client.uuid] !== undefined).map(client => client.uuid))
-    Object.assign(state, { creation_available: false, management_available: false }, next)
+    Object.assign(state, { creation_available: false, management_available: false, access_available: false }, next)
     emit('snapshot', { ...next })
     for (const client of props.clients) {
       if (!edited.has(client.uuid)) choices[client.uuid] = assigned(client.uuid)
@@ -177,7 +178,7 @@ async function save(client) {
     if (!verified) return
     if (state.enabled && state.available && !state.changing && !state.failed && assigned(client) === requested) {
       const name = deviceName(props.clients.find(item => item.uuid === client) || {})
-      message.value = 'Assignment saved. ' + name + ' now opens ' + profileName(requested) + '. Refresh the device library before starting a stream.'
+      message.value = 'Assignment saved. ' + name + ' has default Space ' + profileName(requested) + '. Refresh the device library before starting a stream.'
     } else if (response.status === 202 || state.changing) {
       message.value = 'The assignment is still being applied. Refresh spaces to confirm it before starting a stream.'
     } else {

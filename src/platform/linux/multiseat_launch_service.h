@@ -33,6 +33,7 @@ namespace multiseat {
     virtual bool routes_client(std::string_view client) const = 0;
     virtual std::optional<std::string> profile_for_client(std::string_view client) const { return std::nullopt; }
     virtual std::vector<profile_summary_t> profile_catalog() const { return {}; }
+    virtual std::vector<profile_activity_t> profile_activity() const { return {}; }
     virtual bool idle() const { return false; }
     virtual void reconcile() = 0;
     virtual profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) = 0;
@@ -50,6 +51,7 @@ namespace multiseat {
     std::function<profiles::change_result_t(std::string_view, std::string_view)> persist;
     std::function<profiles::change_result_t(const profiles::steam_create_request_t &)> create;
     std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
+    std::function<profiles::change_result_t(std::string_view, std::string_view, bool)> access;
   };
   struct profile_admin_snapshot_t {
     bool available = false, changing = false, failed = false;
@@ -60,6 +62,16 @@ namespace multiseat {
     bool active = false;
     std::string token;
     int width = 0, height = 0, fps = 0;
+  };
+
+  struct profile_client_space_t {
+    std::string id, name, state;
+    bool selected = false;
+  };
+  struct profile_client_spaces_t {
+    bool available = false, can_switch = false;
+    std::string selected;
+    std::vector<profile_client_space_t> spaces;
   };
 
   class profile_launch_service_t final {
@@ -77,6 +89,10 @@ namespace multiseat {
       std::string_view expected_profile = {});
     [[nodiscard]] profile_admin_snapshot_t admin_snapshot() const;
     [[nodiscard]] profile_launch_result_t set_assignment(std::string profile, std::string client);
+    [[nodiscard]] profile_launch_result_t set_access(std::string profile, std::string client, bool allowed);
+    [[nodiscard]] profile_client_spaces_t client_spaces(std::string_view client) const;
+    [[nodiscard]] profile_launch_result_t select_space(std::string_view client, std::string_view profile,
+      std::string_view previous);
     [[nodiscard]] profile_launch_result_t create_steam_profile(profiles::steam_create_request_t request);
     [[nodiscard]] profile_launch_result_t edit_profile(profiles::edit_request_t request);
     // Cancellation only marks launches. Docker and input teardown remain on the

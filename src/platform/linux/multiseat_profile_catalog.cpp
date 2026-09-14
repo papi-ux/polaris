@@ -78,6 +78,7 @@ namespace multiseat::profiles {
           catalog.owner_uid > 2147483647 || catalog.owner_gid > 2147483647 ||
           catalog.profiles.size() > 4096) return false;
       std::set<std::string> profiles, volumes, clients;
+      std::size_t grants = 0;
       for (const auto &entry : catalog.profiles) {
         const auto &storage = entry.storage;
         if (!token(storage.profile_key) || !storage.opaque_volume_name.starts_with("pv-") ||
@@ -86,8 +87,12 @@ namespace multiseat::profiles {
             !volumes.emplace(storage.opaque_volume_name).second ||
             entry.name.empty() || entry.name.size() > 128 ||
             std::any_of(entry.name.begin(), entry.name.end(), [](unsigned char c) { return c < 32 || c == 127; }) ||
-            (entry.archived && !entry.client_keys.empty()) || entry.client_keys.size() > 4096 || !valid_workload_plan(entry.workload) ||
+            (entry.archived && (!entry.client_keys.empty() || !entry.access_clients.empty())) ||
+            entry.access_clients.size() > 4096 || entry.client_keys.size() > 4096 || !valid_workload_plan(entry.workload) ||
             !workload_matches_runtime_profile(entry.workload, storage.runtime_profile)) return false;
+        std::set<std::string> access;
+        for (const auto &client : entry.access_clients)
+          if (!token(client) || !access.insert(client).second || ++grants > 65536) return false;
         for (const auto &client : entry.client_keys) {
           if (!token(client) || !clients.emplace(client).second || clients.size() > 65536) return false;
         }
@@ -216,14 +221,15 @@ namespace multiseat::profiles {
         return true;
       });
       keys(root, {"schema", "owner_uid", "owner_gid", "profiles"});
-      if (!root.at("schema").is_number_unsigned() || (root.at("schema") != 1 && root.at("schema") != 2) ||
+      if (!root.at("schema").is_number_unsigned() || (root.at("schema") != 1 && root.at("schema") != 2 && root.at("schema") != 3) ||
           !root.at("owner_uid").is_number_unsigned() || !root.at("owner_gid").is_number_unsigned() ||
           root.at("owner_uid").get<std::uint64_t>() > 2147483647 ||
           root.at("owner_gid").get<std::uint64_t>() > 2147483647 ||
           !root.at("profiles").is_array() || root.at("profiles").size() > 4096) return std::nullopt;
       catalog_t catalog {root.at("owner_uid").get<std::uint32_t>(), root.at("owner_gid").get<std::uint32_t>(), {}};
       for (const auto &value : root.at("profiles")) {
-        if (root.at("schema") == 2) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived"});
+        if (root.at("schema") == 3) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived", "access_clients"});
+        else if (root.at("schema") == 2) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived"});
         else keys(value, {"id", "name", "volume", "family", "image", "target", "clients"});
         const auto [runtime, kind] = family(value.at("family").get<std::string>());
         if (!value.at("clients").is_array() || value.at("clients").size() > 4096) return std::nullopt;
@@ -233,7 +239,8 @@ namespace multiseat::profiles {
           .name = value.at("name").get<std::string>(),
           .workload = {kind, value.at("target").get<std::string>()},
           .client_keys = value.at("clients").get<std::vector<std::string>>(),
-          .archived = root.at("schema") == 2 ? value.at("archived").get<bool>() : false,
+          .archived = root.at("schema") != 1 ? value.at("archived").get<bool>() : false,
+          .access_clients = root.at("schema") == 3 ? value.at("access_clients").get<std::vector<std::string>>() : std::vector<std::string>{},
         });
       }
       return valid(catalog) ? std::optional {std::move(catalog)} : std::nullopt;
@@ -243,12 +250,14 @@ namespace multiseat::profiles {
   std::string encode(const catalog_t &catalog) {
     if (!valid(catalog)) throw std::invalid_argument("invalid profile catalog");
     const bool archives = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return entry.archived; });
-    json root {{"schema", archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
+    const bool access = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return !entry.access_clients.empty(); });
+    json root {{"schema", access ? 3 : archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
     for (const auto &entry : catalog.profiles) {
       root["profiles"].push_back({{"id", entry.storage.profile_key}, {"name", entry.name},
         {"volume", entry.storage.opaque_volume_name}, {"family", family(entry.storage.runtime_profile)},
         {"image", entry.storage.image_reference}, {"target", entry.workload.target_id}, {"clients", entry.client_keys}});
-      if (archives) root["profiles"].back()["archived"] = entry.archived;
+      if (archives || access) root["profiles"].back()["archived"] = entry.archived;
+      if (access) root["profiles"].back()["access_clients"] = entry.access_clients;
     }
     auto payload = root.dump(2) + "\n";
     if (payload.size() > maximum_catalog_bytes) throw std::invalid_argument("catalog too large");
@@ -300,7 +309,10 @@ namespace multiseat::profiles {
   change_result_t unassign(const std::filesystem::path &path, std::string_view client_key) {
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
-      for (auto &entry : catalog.profiles) std::erase(entry.client_keys, client_key);
+      for (auto &entry : catalog.profiles) {
+        std::erase(entry.client_keys, client_key);
+        std::erase(entry.access_clients, client_key);
+      }
       return encode(catalog);
     });
   }
@@ -317,6 +329,20 @@ namespace multiseat::profiles {
       }
       for (auto &entry : catalog.profiles) std::erase(entry.client_keys, client_key);
       if (target != catalog.profiles.end()) target->client_keys.emplace_back(client_key);
+      if (profile_key.empty()) for (auto &entry : catalog.profiles) std::erase(entry.access_clients, client_key);
+      return encode(catalog);
+    });
+  }
+
+  change_result_t set_access(const std::filesystem::path &path,
+    std::string_view profile_key, std::string_view client_key, bool allowed) {
+    if (!token(profile_key) || !token(client_key)) return {.error = "Invalid space or paired device."};
+    return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
+      auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+        [&](const auto &entry) { return entry.storage.profile_key == profile_key && !entry.archived; });
+      if (target == catalog.profiles.end()) { result.error = "Unknown or removed space."; return std::nullopt; }
+      std::erase(target->access_clients, client_key);
+      if (allowed) target->access_clients.emplace_back(client_key);
       return encode(catalog);
     });
   }
@@ -511,7 +537,7 @@ namespace multiseat::profiles {
       if (request.operation == edit_operation_e::rename) entry->name = request.name;
       else {
         entry->archived = request.operation == edit_operation_e::remove;
-        if (entry->archived) entry->client_keys.clear();
+        if (entry->archived) { entry->client_keys.clear(); entry->access_clients.clear(); }
         // An archived entry already has no routes. A repeated restore must
         // preserve assignments deliberately added after the first restore.
       }

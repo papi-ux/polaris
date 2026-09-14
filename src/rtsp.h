@@ -68,6 +68,8 @@ namespace rtsp_stream {
     std::optional<int> host_max_fps;
     std::optional<bool> host_hdr_capable;
     std::string session_token;
+    // Set by the profile service after checking this paired device's access.
+    std::string worker_profile_key;
     // Lifecycle generation admitted by authenticated /launch or /resume.
     // RTSP SETUP must claim this exact generation before starting media.
     std::optional<std::uint64_t> lifecycle_generation;

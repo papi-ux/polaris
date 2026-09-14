@@ -1019,4 +1019,83 @@ namespace {
     EXPECT_FALSE(result);
     EXPECT_EQ(state->begins, 0U);
   }
+  TEST_F(MultiseatLaunchService, ClientSelectionOnlyUsesGrantedSpacesAndRejectsStaleChoices) {
+    ASSERT_TRUE(service->shutdown(2s));
+    std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
+      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}},
+      {"private", "Private", {"client-c"}}};
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
+    EXPECT_EQ(service->client_spaces("client-a").spaces.size(), 2U);
+    EXPECT_EQ(service->select_space("client-a", "private", "profile-a").status, 404);
+    EXPECT_EQ(service->select_space("client-a", "profile-b", "profile-a").status, 200);
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-b");
+    EXPECT_EQ(service->select_space("client-a", "profile-a", "profile-a").status, 409);
+    auto owned = launch();
+    EXPECT_EQ(service->prepare(owned, "profile-a").status, 409);
+    EXPECT_EQ(service->prepare(owned, "profile-b").status, 200);
+    EXPECT_EQ(owned->worker_profile_key, "profile-b");
+    EXPECT_EQ(service->select_space("client-a", "profile-a", "profile-b").status, 409);
+    owned->cancel();
+  }
+
+  TEST_F(MultiseatLaunchService, ChoosingASpaceDoesNotRestartAnotherDevicesController) {
+    ASSERT_TRUE(service->shutdown(2s));
+    std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
+      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}}};
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
+    auto other = launch("client-b"); ASSERT_EQ(service->prepare(other, "profile-b").status, 200);
+    const auto shutdowns = state->shutdowns.load();
+    EXPECT_EQ(service->select_space("client-a", "profile-b", "profile-a").status, 200);
+    EXPECT_FALSE(other->is_cancelled()); EXPECT_EQ(state->shutdowns.load(), shutdowns);
+    const auto visible = service->client_spaces("client-a");
+    ASSERT_EQ(visible.spaces.size(), 2U); EXPECT_EQ(visible.spaces[1].state, "in_use");
+    other->cancel();
+  }
+
+
+  TEST_F(MultiseatProfileHttp, SpaceListUsesPairedIdentityAndHidesOtherDevices) {
+    const auto response = nvhttp::profile_spaces_request(client);
+    ASSERT_EQ(response.status, 200);
+    ASSERT_EQ(response.body.at("spaces").size(), 1U);
+    EXPECT_EQ(response.body.at("spaces")[0].at("name"), "Primary");
+    EXPECT_EQ(response.body.dump().find("client-b"), std::string::npos);
+    EXPECT_EQ(response.body.dump().find("clients"), std::string::npos);
+    EXPECT_EQ(nvhttp::profile_spaces_request(nullptr).status, 401);
+    EXPECT_EQ(nvhttp::profile_spaces_request(client, R"({"space_id":"private","previous_space_id":"12345678-1234-4234-8234-123456789abc"})").status, 404);
+    for (const auto payload : {R"({"space_id":"a","space_id":"b","previous_space_id":"a"})",
+      R"({"space_id":"a","previous_space_id":"a","client_id":"client-b"})", R"({"space_id":true,"previous_space_id":"a"})"})
+      EXPECT_EQ(nvhttp::profile_spaces_request(client, payload).status, 400);
+    EXPECT_EQ(state->begins, 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, SpaceSelectionRejectsReplacedPermissions) {
+    auto replacement = std::make_shared<crypto::named_cert_t>();
+    replacement->uuid = client->uuid; replacement->name = client->name; replacement->cert = client->cert;
+    ASSERT_TRUE(nvhttp::add_authorized_client_for_tests(replacement, crypto::PERM::_default));
+    EXPECT_EQ(nvhttp::profile_spaces_request(client).status, 403);
+    EXPECT_EQ(nvhttp::profile_spaces_request(client, R"({"space_id":"a","previous_space_id":"a"})").status, 403);
+  }
+
+  TEST_F(MultiseatLaunchService, SelectionSurvivesRestartButNeverRestoresRevokedAccess) {
+    char pattern[] = "/tmp/polaris-space-selection-XXXXXX";
+    const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
+    const std::filesystem::path path = std::filesystem::path(created) / "catalog.json";
+    const auto cleanup = util::fail_guard([&] { std::filesystem::remove_all(path.parent_path()); });
+    std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
+      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}}};
+    auto restart = [&] {
+      ASSERT_TRUE(service->shutdown(2s));
+      service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s,
+        profile_admin_options_t {.catalog = path});
+    };
+    restart();
+    ASSERT_EQ(service->select_space("client-a", "profile-b", "profile-a").status, 200);
+    restart(); EXPECT_EQ(service->profile_for_client("client-a"), "profile-b");
+    struct stat info {}; ASSERT_EQ(::stat((path.string() + ".selections").c_str(), &info), 0);
+    EXPECT_EQ(info.st_mode & 0777, 0600U);
+    catalog[1].access_clients.clear(); restart();
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    EXPECT_EQ(service->select_space("client-a", "profile-b", "profile-a").status, 404);
+  }
+
 }  // namespace

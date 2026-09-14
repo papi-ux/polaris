@@ -17,6 +17,7 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <thread>
@@ -37,6 +38,7 @@ namespace multiseat {
         return runtime_->profile_for_client(client);
       }
       std::vector<profile_summary_t> profile_catalog() const override { return runtime_->profile_catalog(); }
+      std::vector<profile_activity_t> profile_activity() const override { return runtime_->profile_activity(); }
       bool idle() const override {
         return runtime_->seats() == 0 && runtime_->managed_workers() == 0 &&
           runtime_->input_allocations() == 0 && runtime_->tracked_launches() == 0;
@@ -165,6 +167,7 @@ namespace multiseat {
   struct profile_launch_service_t::impl_t {
     struct admin_request_t {
       std::string profile, client;
+      std::optional<bool> access;
       std::optional<profiles::steam_create_request_t> creation;
       std::optional<profiles::edit_request_t> edit;
       std::promise<profile_launch_result_t> promise;
@@ -180,7 +183,60 @@ namespace multiseat {
     profile_admin_options_t admin;
     std::shared_ptr<admin_request_t> queued_admin;
     std::shared_ptr<admin_request_t> active_admin;
-    bool reconfiguring = false, admin_failed = false;
+    bool reconfiguring = false, admin_failed = false, selection_failed = false;
+    std::map<std::string, std::string> selections;
+    std::filesystem::path selection_path;
+
+    static bool permitted(const profile_summary_t &profile, std::string_view client) {
+      return !profile.archived &&
+        (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end() ||
+         std::find(profile.access_clients.begin(), profile.access_clients.end(), client) != profile.access_clients.end());
+    }
+    std::optional<std::string> selected_for(std::string_view client) const {
+      if (!controller || stopping || reconfiguring || admin_failed || selection_failed) return std::nullopt;
+      const auto saved = selections.find(std::string(client));
+      if (saved != selections.end()) for (const auto &profile : controller->profile_catalog())
+        if (profile.id == saved->second && permitted(profile, client)) return profile.id;
+      return controller->profile_for_client(client);
+    }
+    static std::map<std::string, std::string> decode_selections(std::string_view payload) {
+      using json = nlohmann::json;
+      std::vector<std::set<std::string>> keys;
+      const auto value = json::parse(payload, [&](int depth, json::parse_event_t event, json &item) {
+        if (depth > 4) throw std::invalid_argument("selection nesting");
+        if (event == json::parse_event_t::object_start) keys.emplace_back();
+        if (event == json::parse_event_t::key && !keys.back().insert(item.get<std::string>()).second)
+          throw std::invalid_argument("duplicate selection field");
+        if (event == json::parse_event_t::object_end) keys.pop_back();
+        return true;
+      });
+      exact_keys(value, {"schema", "selections"});
+      if (!value.at("schema").is_number_unsigned() || value.at("schema") != 1 || !value.at("selections").is_object() || value.at("selections").size() > 65536)
+        throw std::invalid_argument("selection schema");
+      auto result = value.at("selections").get<std::map<std::string, std::string>>();
+      for (const auto &[client, profile] : result)
+        for (const auto *id : {&client, &profile})
+          if (id->empty() || id->size() > 128 || id->find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
+            throw std::invalid_argument("selection identity");
+      return result;
+    }
+    bool save_selection(std::string_view client, std::string_view profile) {
+      auto next = selections; next[std::string(client)] = profile;
+      if (next.size() > 65536) return false;
+      if (!selection_path.empty()) {
+        const auto result = private_state_file::update_atomic(selection_path, profiles::maximum_catalog_bytes,
+          [&](const auto &current) -> std::optional<std::string> {
+            if (current && decode_selections(current.payload) != selections) return std::nullopt;
+            if (!current && !selections.empty()) return std::nullopt;
+            const auto payload = nlohmann::json{{"schema", 1}, {"selections", next}}.dump();
+            return payload.size() <= profiles::maximum_catalog_bytes ? std::optional{payload} : std::nullopt;
+          });
+        if (result.status == private_state_file::write_status_e::durability_uncertain) selection_failed = true;
+        if (result.status != private_state_file::write_status_e::committed) return false;
+      }
+      selections = std::move(next);
+      return true;
+    }
     std::vector<profile_summary_t> fallback_catalog;
     std::set<std::string> blocked_clients;
     const std::chrono::milliseconds timeout;
@@ -205,6 +261,16 @@ namespace multiseat {
         };
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
+      if (!admin.access && !admin.catalog.empty())
+        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed) { return profiles::set_access(path, profile, client, allowed); };
+      if (!admin.catalog.empty()) {
+        selection_path = admin.catalog; selection_path += ".selections";
+        if (std::filesystem::exists(selection_path)) {
+          const auto saved = private_state_file::read_secure(selection_path, profiles::maximum_catalog_bytes, false, false);
+          if (!saved) throw std::invalid_argument("unsafe space selections");
+          selections = decode_selections(saved.payload);
+        }
+      }
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
     }
 
@@ -228,7 +294,8 @@ namespace multiseat {
             // Closing proves that no stream owns this catalog. Destruction
             // releases the old global input owner before the replacement is built.
             { std::lock_guard lock(mutex); controller.reset(); admin_failed = true; }
-            const auto persisted = request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
+            const auto persisted = request->access ? admin.access(request->profile, request->client, *request->access) :
+              request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
               admin.persist(request->profile, request->client);
             if (request->creation && !persisted && !persisted.volume_name.empty()) {
               BOOST_LOG(error) << "Profile creation retained resources for inspection: volume=" << persisted.volume_name
@@ -335,19 +402,18 @@ namespace multiseat {
     if (impl_->blocked_clients.contains(std::string(client))) return true;
     if (impl_->controller) return impl_->controller->routes_client(client);
     for (const auto &profile : impl_->fallback_catalog)
-      if (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end()) return true;
+      if (impl_t::permitted(profile, client)) return true;
     return false;
   }
   std::optional<std::string> profile_launch_service_t::profile_for_client(std::string_view client) const {
     std::lock_guard lock(impl_->mutex);
-    return impl_->controller && !impl_->admin_failed && !impl_->reconfiguring ?
-      impl_->controller->profile_for_client(client) : std::nullopt;
+    return impl_->selected_for(client);
   }
 
   std::optional<std::string> profile_launch_service_t::profile_name_for_client(std::string_view client) const {
     std::lock_guard lock(impl_->mutex);
     if (!impl_->controller || impl_->stopping || impl_->admin_failed || impl_->reconfiguring) return std::nullopt;
-    const auto id = impl_->controller->profile_for_client(client);
+    const auto id = impl_->selected_for(client);
     if (!id) return std::nullopt;
     for (const auto &profile : impl_->controller->profile_catalog())
       if (profile.id == *id && !profile.name.empty()) return profile.name;
@@ -369,13 +435,16 @@ namespace multiseat {
     auto future = request->promise.get_future();
     {
       std::lock_guard lock(impl_->mutex);
-      if (impl_->stopping || impl_->reconfiguring || impl_->admin_failed || !impl_->controller ||
+      if (impl_->stopping || impl_->reconfiguring || impl_->admin_failed || impl_->selection_failed || !impl_->controller ||
           impl_->tracked.size() >= 64 || launch->lifecycle_generation)
         return {503, "Profile launch admission is unavailable"};
       if (!impl_->controller->routes_client(launch->unique_id) ||
-          (!expected_profile.empty() && impl_->controller->profile_for_client(launch->unique_id) !=
+          (!expected_profile.empty() && impl_->selected_for(launch->unique_id) !=
             std::optional<std::string>{expected_profile}))
         return {409, "The profile assignment changed; refresh the library"};
+      const auto selected = impl_->selected_for(launch->unique_id);
+      if (!selected) return {409, "Choose an available space before launching"};
+      launch->worker_profile_key = *selected;
       const auto generation = next_generation.fetch_add(1);
       if (generation < (1ULL << 63) || generation == std::numeric_limits<std::uint64_t>::max()) return {};
       launch->lifecycle_generation = generation;
@@ -428,6 +497,81 @@ namespace multiseat {
     impl_->wake.notify_all();
     if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
       return {202, "The assignment change is still running; refresh before retrying"};
+    return future.get();
+  }
+
+  profile_client_spaces_t profile_launch_service_t::client_spaces(std::string_view client) const {
+    std::lock_guard lock(impl_->mutex);
+    profile_client_spaces_t result;
+    const auto selected = impl_->selected_for(client);
+    result.available = selected.has_value(); result.selected = selected.value_or("");
+    result.can_switch = result.available;
+    auto activity = impl_->controller ? impl_->controller->profile_activity() : std::vector<profile_activity_t>{};
+    for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock(); launch && !launch->is_cancelled()) {
+      if (std::none_of(activity.begin(), activity.end(), [&](const auto &item) { return item.client == launch->unique_id; }))
+        activity.push_back({launch->worker_profile_key, launch->unique_id,
+          launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started ? "running" : "starting"});
+    }
+    for (const auto &item : activity) if (item.client == client) result.can_switch = false;
+    const auto catalog = impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog;
+    for (const auto &profile : catalog) {
+      if (!impl_t::permitted(profile, client)) continue;
+      std::string state = result.available ? "ready" : "unavailable";
+      for (const auto &item : activity) if (item.profile == profile.id) {
+        state = item.client == client ? item.state : "in_use"; break;
+      }
+      result.spaces.push_back({profile.id, profile.name, state, selected == profile.id});
+    }
+    return result;
+  }
+
+  profile_launch_result_t profile_launch_service_t::select_space(std::string_view client, std::string_view profile,
+                                                                std::string_view previous) {
+    std::lock_guard lock(impl_->mutex);
+    const auto selected = impl_->selected_for(client);
+    if (!selected) return {503, "Spaces are unavailable. Refresh and try again."};
+    if (client.empty() || client.size() > 128 || profile.empty() || profile.size() > 128 || previous.size() > 128)
+      return {400, "Invalid space selection"};
+    const auto catalog = impl_->controller->profile_catalog();
+    if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+          return entry.id == profile && impl_t::permitted(entry, client);
+        })) return {404, "This space is not available to this device"};
+    if (*selected != previous) return {409, "Your selected space changed. Refresh before choosing again."};
+    // Re-selecting the same Space is harmless while it is active.
+    if (*selected == profile) return {200, "Space selected"};
+    for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock();
+      launch && launch->unique_id == client && !launch->is_cancelled())
+      return {409, "End your stream before switching spaces"};
+    for (const auto &activity : impl_->controller->profile_activity()) if (activity.client == client)
+      return {409, "Wait for your space to finish closing before switching"};
+    try {
+      if (!impl_->save_selection(client, profile)) return {503, "Space selection was not saved. Refresh before retrying."};
+    } catch (...) { return {503, "Space selection was not saved. Refresh before retrying."}; }
+    return {200, "Space selected"};
+  }
+
+  profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed) {
+    auto request = std::make_shared<impl_t::admin_request_t>();
+    request->profile = std::move(profile); request->client = std::move(client); request->access = allowed;
+    const auto future = request->future;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (!impl_->admin.reload || !impl_->admin.access || !impl_->controller || impl_->admin_failed || impl_->stopping)
+        return {503, "Space access administration is unavailable"};
+      if (request->client.empty() || request->client.size() > 128 || request->profile.empty() || request->profile.size() > 128)
+        return {400, "Invalid space or paired device"};
+      const auto catalog = impl_->controller->profile_catalog();
+      if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == request->profile && !entry.archived; }))
+        return {404, "Unknown space"};
+      if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+        [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+        return {409, "Stop space streams and wait for cleanup before changing access"};
+      impl_->reconfiguring = true; impl_->blocked_clients.insert(request->client);
+      impl_->queued_admin = request; impl_->active_admin = request;
+    }
+    impl_->wake.notify_all();
+    if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
+      return {202, "Space access is still being saved. Refresh before retrying."};
     return future.get();
   }
 

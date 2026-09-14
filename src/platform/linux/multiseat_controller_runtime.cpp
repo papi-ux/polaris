@@ -35,12 +35,13 @@ namespace multiseat {
       }
       std::unordered_set<std::string> profiles;
       std::unordered_set<std::string> clients;
+      std::size_t grant_count = 0;
       for (const auto &route : options.profile_routes) {
         if (!routing_key(route.profile_key) ||
             !profiles.insert(route.profile_key).second ||
             !valid_workload_plan(route.workload) ||
             !workload_matches_runtime_profile(route.workload, route.runtime_profile) ||
-            route.client_keys.size() > 4096 || route.logical_gpu_ids.empty() ||
+            route.client_keys.size() > 4096 || route.access_clients.size() > 4096 || route.logical_gpu_ids.empty() ||
             route.logical_gpu_ids.size() > 64) {
           return false;
         }
@@ -49,6 +50,9 @@ namespace multiseat {
             return false;
           }
         }
+        std::unordered_set<std::string> access;
+        for (const auto &client : route.access_clients)
+          if (!routing_key(client) || !access.insert(client).second || ++grant_count > 65536) return false;
         std::unordered_set<std::string> gpus;
         for (const auto &gpu : route.logical_gpu_ids) {
           if (!routing_key(gpu) || !gpus.insert(gpu).second) {
@@ -100,6 +104,7 @@ namespace multiseat {
       std::weak_ptr<rtsp_stream::launch_session_t> launch;
       input::moonlight_launch_selection_key_t key;
       std::string client_key;
+      std::string profile_key;
       seat_handle_t handle;
       worker_broker_t::time_point_t deadline;
       bool cleanup_requested = false;
@@ -411,14 +416,19 @@ namespace multiseat {
     if (!launch || launch->unique_id.empty()) {
       return {.status = status_e::invalid_launch};
     }
-    const auto route = std::find_if(
-      impl_->profile_routes.begin(), impl_->profile_routes.end(),
+    const auto selected = launch->worker_profile_key.empty() ? profile_for_client(launch->unique_id) :
+      std::optional<std::string>{launch->worker_profile_key};
+    const auto route = std::find_if(impl_->profile_routes.begin(), impl_->profile_routes.end(),
       [&](const auto &candidate) {
-        return std::find(candidate.client_keys.begin(), candidate.client_keys.end(),
-                 launch->unique_id) != candidate.client_keys.end();
-      }
-    );
+        return selected == candidate.profile_key &&
+          (std::find(candidate.client_keys.begin(), candidate.client_keys.end(), launch->unique_id) != candidate.client_keys.end() ||
+           std::find(candidate.access_clients.begin(), candidate.access_clients.end(), launch->unique_id) != candidate.access_clients.end());
+      });
     if (route == impl_->profile_routes.end()) {
+      if (!launch->worker_profile_key.empty() || routes_client(launch->unique_id)) {
+        launch->require_worker_connection();
+        return {.status = status_e::invalid_launch};
+      }
       return {.status = status_e::unselected};
     }
     // Routing is sticky even if admission or a later worker step fails. Stream
@@ -455,6 +465,7 @@ namespace multiseat {
         .launch = launch,
         .key = {launch->id, *launch->lifecycle_generation},
         .client_key = launch->unique_id,
+        .profile_key = route->profile_key,
         .deadline = impl_->now() + impl_->profile_launch_timeout,
       };
       auto admission = impl_->registry->admit_first_available(request, route->logical_gpu_ids);
@@ -840,7 +851,8 @@ namespace multiseat {
   bool controller_runtime_t::routes_client(std::string_view client_key) const {
     // Routes are immutable for this owner's entire lifetime, including drain.
     return std::any_of(impl_->profile_routes.begin(), impl_->profile_routes.end(), [&](const auto &route) {
-      return std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end();
+      return std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end() ||
+        std::find(route.access_clients.begin(), route.access_clients.end(), client_key) != route.access_clients.end();
     });
   }
 
@@ -848,10 +860,28 @@ namespace multiseat {
     for (const auto &route : impl_->profile_routes)
       if (std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end())
         return route.profile_key;
+    for (const auto &route : impl_->profile_routes)
+      if (std::find(route.access_clients.begin(), route.access_clients.end(), client_key) != route.access_clients.end())
+        return route.profile_key;
     return std::nullopt;
   }
 
   std::vector<profile_summary_t> controller_runtime_t::profile_catalog() const { return impl_->profile_catalog; }
+
+  std::vector<profile_activity_t> controller_runtime_t::profile_activity() const {
+    std::scoped_lock lock {impl_->state_mutex};
+    std::vector<profile_activity_t> result;
+    for (const auto &entry : impl_->profile_launches) {
+      const auto launch = entry.launch.lock();
+      const auto seat = impl_->registry->snapshot(entry.handle);
+      // Keep cleanup visible until reconciliation releases the owned record.
+      const auto state = entry.cleanup_requested || !launch || launch->is_cancelled() ||
+        (seat && seat->state == seat_state_e::stopping) ? "stopping" :
+        launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started ? "running" : "starting";
+      result.push_back({entry.profile_key, entry.client_key, state});
+    }
+    return result;
+  }
 
   std::optional<seat_state_e> controller_runtime_t::seat_state(const seat_handle_t &handle) const {
     std::scoped_lock lock {impl_->state_mutex};

@@ -197,7 +197,7 @@ Once this build offers an approved gaming runtime:
 8. Save any running game, then select **Restart Polaris and finish setup**.
    Restarting disconnects active streams. Reconnect to Polaris and return to
    **Spaces**.
-9. Under **Device access**, assign your paired Nova device to the saved Space.
+9. Under **Default Space**, assign your paired Nova device to the saved Space.
    Refresh the host library in Nova, open the Space, and sign in through Steam
    Big Picture. Keyboard, controller and sound should be checked in your game.
 
@@ -225,7 +225,7 @@ existing player data while diagnosing the failure.
    request. Returning to Spaces in the same browser tab restores an unfinished
    request without submitting it again automatically. If browser storage is
    unavailable, keep the form open as instructed until the result is confirmed.
-5. Under **Device access**, choose that space for a paired device and select
+5. Under **Default Space**, choose that space for a paired device and select
    **Save assignment**. Wait for the saved assignment to be confirmed.
 6. Refresh the host's game library in Nova, open the assigned space, and sign
    in through Steam Big Picture. Download a game and check picture, sound,
@@ -234,8 +234,9 @@ existing player data while diagnosing the failure.
 A device needs permission to launch apps. Temporary guests cannot be assigned
 these persistent spaces. Devices assigned to the same space share that space's
 Steam login and saved data, and take turns streaming it. Assign separate spaces
-for simultaneous players. In this preview each device has one assigned space;
-an owner-controlled choice between multiple allowed spaces is still planned.
+for simultaneous players. Devices with more than one permitted Space can use **Choose Space** in Nova.
+To allow another Space, expand **Device Access** on its card and select the device.
+Wait for the saved access to be confirmed before returning to Nova.
 
 For simultaneous Steam play, use separate Steam accounts and ensure each player
 has access to the game. Spaces do not change
@@ -248,8 +249,8 @@ Steam sign-in and saves. A **streaming preset** in Nova saves stream settings,
 such as resolution, frame rate, and bitrate. Switching a preset does not switch
 Steam accounts or create a new space.
 
-**Standard streaming** opens the usual apps on the host. Select it in a device's
-assignment to return that device to ordinary streaming.
+**This PC’s desktop and apps** opens the usual apps on the host. Select it under
+Default Space to clear all Space access for that device and return to ordinary streaming.
 
 ## Compatibility and troubleshooting
 
@@ -289,9 +290,9 @@ Give a space a player or room name, such as Alex or Living room. In **Spaces**,
 use **Rename** on its card to change that name without changing its Steam account
 or files. Refresh Library in Nova afterward to see the new name.
 
-**Device access** lists the handhelds, TVs, and computers paired with Polaris.
+**Default Space** lists the handhelds, TVs, and computers paired with Polaris.
 Choose a space for each device and save the assignment. **This PC’s desktop and
-apps** uses the host’s usual desktop session. Rename an unfamiliar device in
+apps** clears all of that device’s Space grants and uses the host’s usual desktop session. Rename an unfamiliar device in
 **Devices**. Nova’s **Streaming presets** change picture quality and performance;
 they do not select a Steam account or space.
 
@@ -299,8 +300,8 @@ To remove a space:
 
 1. Stop space streams and wait for cleanup.
 2. Select **Remove space** on its card, then confirm the displayed space name.
-3. The space moves to **Removed spaces**. Its devices return to the host’s usual
-   desktop and apps when their libraries refresh.
+3. The space moves to **Removed spaces**. Devices lose access to it. Other allowed Spaces remain available;
+   devices with none return to the host’s usual desktop and apps.
 
 Removal keeps installed games, saves, settings, and Steam sign-in on the host.
 It does not free disk space or delete Docker volumes. Select **Restore** under
@@ -308,7 +309,29 @@ It does not free disk space or delete Docker volumes. Select **Restore** under
 restores device permissions or assignments automatically. You can restore the
 last removed space or create another one using the retained runtime setup.
 
-For administrators: catalogs with removed spaces use schema 2 so older builds
-reject them instead of accidentally launching a removed space. The catalog keeps
-the original storage and image identities. When every space is restored, saves
-use the compatible schema 1 format again. Keep catalog and volume backups together.
+## Choose And Check Spaces In Nova
+
+With one allowed Space, Nova shows **Your Space** and **Open Space** directly.
+With several, it also offers **Choose Space**. The chooser lists only the Spaces
+allowed for that paired device. Choosing does not start a game or change another
+device's selection. The host remembers each device's last choice across restarts;
+Default Space is used when there is no saved permitted choice.
+
+**Ready To Play** means the Space is idle. **In Use** means another device is using
+it. **Starting** and **Stopping** mean Nova must wait before opening. An active
+Space owned by this device can offer **Resume Space** after checking its session.
+Finish your own stream and wait for cleanup before switching Spaces. Other devices
+can keep streaming while you choose. Changing access or defaults still requires all
+Space streams to stop because it reloads the host's permission catalog.
+
+Status refreshes while Nova's Space screen is open and is checked again before
+opening. If it cannot be verified, Nova keeps opening and switching unavailable
+until a fresh check succeeds. Older hosts without this API retain the single-Space
+flow. Stream Settings stay associated with the device and host, not each Space.
+
+For administrators: catalogs with extra access grants use schema 3. Archived-only
+catalogs use schema 2; catalogs with neither use schema 1. Older builds reject new
+schemas instead of guessing their permissions. Selections live in a private file
+beside the catalog with a `.selections` suffix. A selection is never an access
+grant: it is revalidated against the catalog before use. Keep the catalog,
+selections, and volume backups together.

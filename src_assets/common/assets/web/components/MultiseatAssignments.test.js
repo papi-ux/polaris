@@ -91,7 +91,7 @@ describe('profile assignments', () => {
     expect(wrapper.get('section').attributes('aria-busy')).toBe('true')
     confirm(reply({ ...snapshot(), profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'] }] }))
     await flushPromises()
-    expect(wrapper.text()).toContain('Living room now opens Alex')
+    expect(wrapper.text()).toContain('Living room has default Space Alex')
   })
 
   it('locks stale assignments after failed read-back and recovers through refresh', async () => {

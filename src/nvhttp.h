@@ -123,6 +123,8 @@ namespace nvhttp {
     int status;
     nlohmann::json body;
   };
+  profile_api_response_t profile_spaces_request(const crypto::p_named_cert_t &candidate,
+    std::optional<std::string_view> selection = std::nullopt);
   std::optional<profile_api_response_t> resolve_profile_request(
     const crypto::p_named_cert_t &candidate, const args_t &args);
   std::optional<profile_api_response_t> profile_session_status(const crypto::p_named_cert_t &candidate);

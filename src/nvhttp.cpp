@@ -25,6 +25,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -5020,6 +5021,58 @@ namespace nvhttp {
   }
 
 #ifdef __linux__
+  profile_api_response_t profile_spaces_request(const crypto::p_named_cert_t &candidate,
+                                               std::optional<std::string_view> selection) {
+    auto reject = [](int status, std::string_view message) {
+      return profile_api_response_t{status, {{"status", false}, {"error", message}, {"code", "space_request_rejected"}}};
+    };
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return reject(401, "Pair this device with Polaris again");
+    if (!(current->perm & PERM::launch) || current->temporary_authorization)
+      return reject(403, "Spaces require permanent pairing and permission to launch");
+    std::string profile, previous;
+    if (selection) {
+      if (selection->empty() || selection->size() > 4096) return reject(400, "Invalid space selection");
+      try {
+        std::set<std::string> keys;
+        const auto body = nlohmann::json::parse(*selection, [&](int depth, auto event, auto &value) {
+          if (depth > 2) throw std::invalid_argument("selection nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.template get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+        if (!body.is_object() || body.size() != 2 || !body.contains("space_id") || !body.contains("previous_space_id"))
+          throw std::invalid_argument("selection fields");
+        profile = body.at("space_id").get<std::string>(); previous = body.at("previous_space_id").get<std::string>();
+        if (profile.empty() || profile.size() > 128 || previous.empty() || previous.size() > 128)
+          throw std::invalid_argument("selection identity");
+      } catch (...) { return reject(400, "Invalid space selection"); }
+    }
+    profile_api_response_t response{200, {{"schema", 1}, {"status", true}, {"enabled", false},
+      {"available", false}, {"can_switch", false}, {"selected_space_id", ""}, {"spaces", nlohmann::json::array()}}};
+    // Revalidate the exact paired identity and permission at the mutation point.
+    // A caller cannot transplant another device ID into this request.
+    const auto auth = publish_authorized_launch(current, PERM::launch, [&] {
+      const auto service = multiseat::installed_profile_service();
+      if (!service) {
+        if (selection) response = reject(503, "Spaces are unavailable on this host");
+        return true;
+      }
+      if (selection) {
+        const auto result = service->select_space(current->uuid, profile, previous);
+        if (!result.prepared()) { response = reject(result.status, result.message); return true; }
+      }
+      const auto state = service->client_spaces(current->uuid);
+      response.body["enabled"] = true; response.body["available"] = state.available;
+      response.body["can_switch"] = state.can_switch; response.body["selected_space_id"] = state.selected;
+      for (const auto &space : state.spaces)
+        response.body["spaces"].push_back({{"id", space.id}, {"name", space.name}, {"state", space.state}, {"selected", space.selected}});
+      return true;
+    });
+    if (auth) return reject(auth, "Pairing or permissions changed. Refresh before retrying.");
+    return response;
+  }
+
   std::optional<profile_api_response_t> profile_session_status(const crypto::p_named_cert_t &candidate) {
     const auto current = resolve_authorized_client(candidate);
     if (!current) return profile_api_response_t {401, {{"status", false}}};
@@ -7331,6 +7384,30 @@ namespace nvhttp {
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(output.dump(), headers);
+    };
+
+    auto polarisSpaces = [](resp_https_t response, req_https_t request) {
+#ifdef __linux__
+      std::optional<std::string> body;
+      if (request->method == "POST") {
+        const auto type = request->header.find("Content-Type");
+        if (type == request->header.end() || type->second.substr(0, type->second.find(';')) != "application/json") {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request); return;
+        }
+        std::array<char, 4097> bytes;
+        request->content.read(bytes.data(), bytes.size());
+        const auto size = request->content.gcount();
+        if (size > 4096) { response->write(SimpleWeb::StatusCode::client_error_bad_request); return; }
+        body = std::string(bytes.data(), static_cast<std::size_t>(size));
+      }
+      const auto result = profile_spaces_request(get_verified_cert(request),
+        body ? std::optional<std::string_view>{*body} : std::nullopt);
+      SimpleWeb::CaseInsensitiveMultimap headers{{"Content-Type", "application/json"}, {"Cache-Control", "no-store"},
+        {"X-Content-Type-Options", "nosniff"}};
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(), headers);
+#else
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+#endif
     };
 
     auto polarisSessionStatus = [](resp_https_t response, req_https_t request) {
@@ -10574,6 +10651,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/spaces$"]["GET"] = polarisSpaces;
+    https_server.resource["^/polaris/v1/spaces/select$"]["POST"] = polarisSpaces;
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;

@@ -839,6 +839,25 @@ namespace {
     EXPECT_EQ(controller_->seats(), 0U);
   }
 
+  TEST_F(MultiseatControllerRuntimeTest, ExplicitSpaceSelectionRequiresItsOwnAccessGrant) {
+    auto route = shared_profile_route(); route.access_clients = {"extra-device"};
+    create_ready_controller(true, {route});
+    auto denied = controller_launch(2001, 3001, "unmapped-device");
+    denied->worker_profile_key = route.profile_key;
+    auto rejected = controller_->admit_authenticated_profile_launch(denied, {1920, 1080, 60000, false});
+    EXPECT_FALSE(rejected.admitted()); EXPECT_FALSE(rejected.use_host_launch());
+    EXPECT_TRUE(denied->worker_connection_requirement()->load()); EXPECT_EQ(controller_->seats(), 0U);
+    auto allowed = controller_launch(2002, 3002, "extra-device");
+    allowed->worker_profile_key = route.profile_key;
+    auto admitted = controller_->admit_authenticated_profile_launch(allowed, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted()); EXPECT_FALSE(admitted.use_host_launch());
+    EXPECT_EQ(admitted.admission.seat->profile_key, route.profile_key);
+    auto activity = controller_->profile_activity(); ASSERT_EQ(activity.size(), 1U);
+    EXPECT_EQ(activity[0].state, "starting");
+    allowed->cancel(); activity = controller_->profile_activity();
+    ASSERT_EQ(activity.size(), 1U); EXPECT_EQ(activity[0].state, "stopping");
+  }
+
   TEST_F(MultiseatControllerRuntimeTest, RoutesPairedDevicesToOneProfileAndReleasesItsReservation) {
     create_ready_controller(true, {shared_profile_route()});
     auto launch = controller_launch(2001, 3001);

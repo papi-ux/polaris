@@ -25,6 +25,11 @@ namespace multiseat {
     std::vector<std::string> clients;
     bool steam = false;
     bool archived = false;
+    std::vector<std::string> access_clients;
+  };
+
+  struct profile_activity_t {
+    std::string profile, client, state;
   };
 
   /** Immutable operator routing for one persistent profile in this epoch. */
@@ -34,6 +39,7 @@ namespace multiseat {
     runtime_profile_e runtime_profile = runtime_profile_e::unknown;
     workload_plan_t workload;
     std::vector<std::string> logical_gpu_ids;
+    std::vector<std::string> access_clients;
   };
 
   struct controller_runtime_options_t {
@@ -268,6 +274,7 @@ namespace multiseat {
     [[nodiscard]] bool routes_client(std::string_view client_key) const;
     [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client_key) const;
     [[nodiscard]] std::vector<profile_summary_t> profile_catalog() const;
+    [[nodiscard]] std::vector<profile_activity_t> profile_activity() const;
     [[nodiscard]] std::optional<seat_state_e> seat_state(const seat_handle_t &handle) const;
     [[nodiscard]] bool shutting_down() const;
     [[nodiscard]] bool closed() const;

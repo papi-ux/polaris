@@ -13,6 +13,8 @@
           <button type="button" class="focus-ring rounded py-2 text-sm text-storm disabled:opacity-40" :disabled="locked"
                   :aria-label="'Remove ' + space.name" @click="open(space, 'remove')">Remove space</button>
         </div>
+        <SpaceAccess v-if="accessAvailable" :space="space" :clients="clients" :locked="locked"
+                     :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" />
       </article>
     </div>
     <p v-if="!active.length" class="mt-3 text-sm text-storm">No spaces yet. Create one below, or restore a removed space.</p>
@@ -26,7 +28,7 @@
                class="focus-ring mt-2 w-full rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver">
       </template>
       <p v-else-if="operation === 'remove'" class="mt-3 text-sm text-storm">
-        This removes the space from your play list. Its devices return to this PC’s desktop and apps.
+        This removes the space from your play list. Devices lose access to this Space. Other allowed Spaces remain available; devices with none return to this PC’s desktop and apps.
         Installed games, saves, and Steam sign-in stay on this PC. Restore it from Removed spaces whenever you need it.
         This does not free disk space.
       </p>
@@ -54,8 +56,9 @@
 
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
+import SpaceAccess from './SpaceAccess.vue'
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
-  manageable: Boolean, locked: Boolean, ready: Boolean, refresh: { type: Function, required: true } })
+  accessAvailable: Boolean, manageable: Boolean, locked: Boolean, ready: Boolean, refresh: { type: Function, required: true } })
 const emit = defineEmits(['busy'])
 const active = computed(() => props.profiles.filter(space => !space.archived))
 const removed = computed(() => props.profiles.filter(space => space.archived))

@@ -3693,7 +3693,7 @@ namespace confighttp {
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
-      {"failed", false}, {"profiles", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}};
+      {"failed", false}, {"profiles", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}, {"access_available", false}};
 #ifdef __linux__
     if (const auto service = multiseat::installed_profile_service()) {
       const auto state = service->admin_snapshot();
@@ -3701,9 +3701,10 @@ namespace confighttp {
       output["changing"] = state.changing; output["failed"] = state.failed;
       output["creation_available"] = state.creation_available;
       output["management_available"] = state.management_available;
+      output["access_available"] = state.management_available;
       for (const auto &profile : state.profiles)
         output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
-          {"steam", profile.steam}, {"archived", profile.archived}});
+          {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}});
     }
 #endif
     send_response(response, output);
@@ -3784,6 +3785,50 @@ namespace confighttp {
         return;
       }
       const auto result = service->set_assignment(profile, client);
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid assignment request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void setMultiseatAccess(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    try {
+      std::array<char, 4097> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 4096) { bad_request(response, request, "Assignment request is too large"); return; }
+      std::set<std::string> keys;
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count,
+        [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &value) {
+          if (depth > 2) throw std::invalid_argument("assignment nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+      if (!body.is_object() || body.size() != 3 || !body.contains("profile_id") || !body.contains("client_id") || !body.contains("allowed") || !body.at("allowed").is_boolean())
+        throw std::invalid_argument("assignment fields");
+      const auto profile = body.at("profile_id").get<std::string>();
+      const auto client = body.at("client_id").get<std::string>();
+      const auto devices = nvhttp::get_all_clients();
+      const auto device = std::find_if(devices.begin(), devices.end(),
+        [&](const auto &item) { return item.at("uuid").template get<std::string>() == client; });
+      if ((!profile.empty() && (device == devices.end() || device->at("temporary_authorization").get<bool>() ||
+           !(device->at("perm").get<std::uint32_t>() & static_cast<std::uint32_t>(crypto::PERM::launch)))) ||
+          (profile.empty() && device == devices.end() && !service->routes_client(client))) {
+        bad_request(response, request, "Select a permanently paired device with launch permission");
+        return;
+      }
+      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>());
       const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
       SimpleWeb::CaseInsensitiveMultimap headers;
       append_json_security_headers(headers);
@@ -7659,6 +7704,7 @@ namespace confighttp {
     server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
     server.resource["^/api/multiseat/profiles/manage$"]["POST"] = withCsrf(editMultiseatProfile);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
+    server.resource["^/api/multiseat/access$"]["POST"] = withCsrf(setMultiseatAccess);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);

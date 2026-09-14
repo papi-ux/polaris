@@ -222,13 +222,13 @@ namespace multiseat {
       for (auto &entry : loaded->catalog.profiles) {
         catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
           entry.storage.runtime_profile == runtime_profile_e::steam &&
-            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived});
+            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
           options.container.workloads.push_back(entry.workload);
         }
-        if (!entry.client_keys.empty()) {
-          options.profile_routes.push_back({entry.storage.profile_key, std::move(entry.client_keys), entry.workload});
+        if (!entry.client_keys.empty() || !entry.access_clients.empty()) {
+          options.profile_routes.push_back({entry.storage.profile_key, std::move(entry.client_keys), entry.workload, std::move(entry.access_clients)});
         }
         options.container.profiles.push_back(std::move(entry.storage));
       }
@@ -266,6 +266,7 @@ namespace multiseat {
         .client_keys = route.client_keys,
         .runtime_profile = profile->runtime_profile,
         .workload = route.workload,
+        .access_clients = route.access_clients,
       };
       for (const auto &gpu : options.gpus) {
         resolved.logical_gpu_ids.push_back(gpu.logical_gpu_id);
