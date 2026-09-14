@@ -43,6 +43,33 @@ systemctl --user restart polaris
 
 For foreground sessions, stop Polaris and start it again.
 
+## Service does not start, or the console keeps an old version
+
+`systemctl --user status polaris` reporting `status=203/EXEC`, or a console that still shows the
+previous version after a package update, usually means the user service is not running the
+packaged binary. The Bazzite DRM/KMS recipe points the service at a copy under `/usr/local`
+through a drop-in: delete the copy without the drop-in and the service execs a path that no
+longer exists; update the package and the copy silently stays on the old version.
+
+`systemctl --user cat polaris` shows the drop-in and its `ExecStart`. `sudo -H polaris --setup-host`
+reports both cases with the fix, the Update Center says "Installed, running a copy" instead of
+asking for a restart that would change nothing, and the Doctor's `running_binary` row (also in
+the support bundle) names the binary that produced the report.
+
+To run the packaged binary again:
+
+```bash
+systemctl --user stop polaris
+rm -f ~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf
+systemctl --user daemon-reload
+systemctl --user start polaris
+```
+
+To keep the copy, refresh it after every update as the
+[Bazzite guide](bazzite.md#optional-drmkms-capture) describes. On rpm-ostree hosts the console
+also shows the old version until the new deployment is booted; `rpm-ostree status` marks the
+booted one with `●`.
+
 ## Web UI does not load
 
 1. Confirm Polaris is running.
