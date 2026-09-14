@@ -3684,6 +3684,12 @@ namespace confighttp {
 #endif
   }
 
+  void registerSpacesSetupRoutes(SimpleWeb::Server<SimpleWeb::HTTPS> &server) {
+    server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
+    server.resource["^/api/spaces/setup/job$"]["GET"] = getSpacesSetupJob;
+    server.resource["^/api/spaces/setup/job$"]["POST"] = withCsrf(updateSpacesSetupJob);
+  }
+
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
@@ -7626,9 +7632,7 @@ namespace confighttp {
     server.resource["^/api/devices$"]["GET"] = getDevices;
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;
-    server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
-    server.resource["^/api/spaces/setup/job$"]["GET"] = getSpacesSetupJob;
-    server.resource["^/api/spaces/setup/job$"]["POST"] = updateSpacesSetupJob;
+    registerSpacesSetupRoutes(server);
     server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
     server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);

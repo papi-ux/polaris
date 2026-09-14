@@ -1,4 +1,9 @@
 #include "src/platform/linux/spaces_setup_service.h"
+#include "src/config.h"
+#include "src/crypto.h"
+#include "src/utility.h"
+#include <Simple-Web-Server/server_https.hpp>
+#include <Simple-Web-Server/client_https.hpp>
 #include <gtest/gtest.h>
 #include <array>
 #include <atomic>
@@ -7,6 +12,11 @@
 #include <unistd.h>
 
 #ifdef __linux__
+namespace confighttp {
+  void registerSpacesSetupRoutes(SimpleWeb::Server<SimpleWeb::HTTPS> &);
+  void with_web_session_for_tests(const std::filesystem::path &, const std::string &,
+    const std::function<void(const std::string &)> &);
+}
 namespace {
   using namespace multiseat;
   using json = nlohmann::json;
@@ -219,5 +229,54 @@ TEST_F(SpacesSetupService, FailedVerificationNeverCreatesAHome) {
   ASSERT_EQ(job->submit(request), 202);
   ASSERT_TRUE(wait_state(*job, "failed"));
   EXPECT_EQ(homes, 0U);
+}
+
+TEST_F(SpacesSetupService, ProductionTlsRoutesRequireAdminAuthenticationAndCookieCsrf) {
+  const auto old_config = config::sunshine;
+  auto restore = util::fail_guard([&] { config::sunshine = old_config; });
+  config::sunshine.username = "test-admin";
+  config::sunshine.api_key = "isolated-setup-test-key";
+  const auto credentials = crypto::gen_creds("localhost", 2048);
+  ASSERT_TRUE(psf::write_atomic(root / "cert.pem", credentials.x509));
+  ASSERT_TRUE(psf::write_atomic(root / "key.pem", credentials.pkey));
+  auto job = std::make_shared<spaces::setup_service_t>(journal, std::vector {runtime()}, true, operations());
+  ASSERT_TRUE(spaces::install_setup_service(job));
+  auto release = util::fail_guard([&] {
+    job->shutdown();
+    spaces::uninstall_setup_service(job);
+  });
+  confighttp::with_web_session_for_tests(root / "sessions.json", "setup-csrf", [&](const std::string &cookie) {
+    SimpleWeb::Server<SimpleWeb::HTTPS> server((root / "cert.pem").string(), (root / "key.pem").string());
+    server.config.address = "127.0.0.1"; server.config.port = 0;
+    server.config.timeout_request = 5; server.config.timeout_content = 5;
+    // Exercise the same registration used by confighttp::start, including its
+    // CSRF wrapper, rather than wrapping a test-only copy of the handler.
+    confighttp::registerSpacesSetupRoutes(server);
+    std::atomic<unsigned short> port {0};
+    std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
+    auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
+    for (int attempt = 0; attempt < 100 && port == 0; ++attempt) std::this_thread::sleep_for(10ms);
+    ASSERT_NE(port, 0);
+    SimpleWeb::Client<SimpleWeb::HTTPS> client("127.0.0.1:" + std::to_string(port.load()), false);
+    client.config.timeout = 5;
+    const auto start = json {{"operation", "start"}, {"request_id", request.request_id},
+      {"runtime_id", request.runtime_id}, {"name", request.name}}.dump();
+    auto call = [&](const std::string &method, const std::string &body, SimpleWeb::CaseInsensitiveMultimap headers) {
+      headers.emplace("Content-Type", "application/json");
+      return std::stoi(client.request(method, "/api/spaces/setup/job", body, headers)->status_code);
+    };
+    EXPECT_EQ(call("GET", "", {}), 401);
+    EXPECT_EQ(call("POST", start, {}), 403);
+    EXPECT_EQ(call("POST", start, {{"X-CSRF-Token", "setup-csrf"}}), 401);
+    EXPECT_EQ(call("POST", start, {{"Cookie", "auth=" + cookie}}), 403);
+    EXPECT_EQ(call("POST", start, {{"Cookie", "auth=" + cookie}, {"Authorization", "Bearer wrong"}}), 403);
+    EXPECT_EQ(call("GET", "", {{"Cookie", "auth=" + cookie}}), 200);
+    EXPECT_EQ(installs, 0U); EXPECT_EQ(homes, 0U);
+    EXPECT_EQ(call("POST", "{}", {{"Authorization", "Bearer isolated-setup-test-key"}}), 400);
+    ASSERT_EQ(call("POST", start, {{"Cookie", "auth=" + cookie}, {"X-CSRF-Token", "setup-csrf"}}), 202);
+    ASSERT_TRUE(wait_state(*job, "prepared"));
+    EXPECT_EQ(call("POST", start, {{"Authorization", "Bearer isolated-setup-test-key"}}), 200);
+    EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 1U);
+  });
 }
 #endif
