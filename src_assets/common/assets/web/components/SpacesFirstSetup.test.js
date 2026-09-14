@@ -109,3 +109,44 @@ describe('first-space preparation', () => {
     ]) expect(validJobSnapshot(bad)).toBe(false)
   })
 })
+
+
+describe('first-space activation', () => {
+  const prepared = () => ({ ...state({ ...job('prepared'), can_activate: true, gpu_id: '' }),
+    graphics: [{ id: 'pci-0000_01_00.0', label: 'NVIDIA graphics' }] })
+  it('sends only the saved request and discovered graphics selection, then requires an explicit restart', async () => {
+    const configured = { ...prepared(), job: { ...job('restart_required'), can_activate: false, gpu_id: 'pci-0000_01_00.0' } }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(prepared()))
+      .mockResolvedValueOnce(reply({ ...configured, accepted: true }, 202))
+      .mockResolvedValueOnce(reply({ restarting: true })))
+    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    await flushPromises()
+    await button('Enable Spaces').trigger('click')
+    await flushPromises()
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ operation: 'activate', request_id: id, gpu_id: 'pci-0000_01_00.0' })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('disconnects active streams')
+    await button('Restart Polaris and finish setup').trigger('click')
+    await flushPromises()
+    expect(fetch.mock.calls[2][0]).toBe('./api/restart')
+    expect(wrapper.text()).toContain('assign your device')
+  })
+  it('cannot enable without a matching GPU or after an unverified response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply({ ...prepared(), graphics: [] }))
+      .mockResolvedValueOnce(reply(prepared()))
+      .mockRejectedValueOnce(new Error('Offline')))
+    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    await flushPromises()
+    expect(button('Enable Spaces').attributes('disabled')).toBeDefined()
+    await button('Reconnect to setup').trigger('click'); await flushPromises()
+    await button('Enable Spaces').trigger('click'); await flushPromises()
+    expect(button('Enable Spaces').attributes('disabled')).toBeDefined()
+    expect(fetch.mock.calls.filter(([url]) => url === './api/restart')).toHaveLength(0)
+  })
+  it('rejects activation authority in contradictory or malformed snapshots', () => {
+    expect(validJobSnapshot(prepared())).toBe(true)
+    expect(validJobSnapshot({ ...prepared(), graphics: [{ id: '/dev/dri/renderD128', label: 'GPU' }] })).toBe(false)
+    expect(validJobSnapshot({ ...prepared(), job: { ...job('downloading'), can_activate: true } })).toBe(false)
+    expect(validJobSnapshot({ ...prepared(), job: { ...job('restart_required'), gpu_id: '' } })).toBe(false)
+  })
+})

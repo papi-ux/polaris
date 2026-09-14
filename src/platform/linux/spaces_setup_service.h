@@ -1,4 +1,4 @@
-/** Host-owned, durable first-space preparation. No controller activation. */
+/** Host-owned, durable first-space preparation. Configuration takes effect at the next explicit restart. */
 #pragma once
 #ifdef __linux__
 #include "spaces_runtime.h"
@@ -10,13 +10,15 @@
 
 namespace multiseat::spaces {
   struct setup_request_t {
-    std::string operation, request_id, runtime_id, name;
+    std::string operation, request_id, runtime_id, name, gpu_id;
   };
   [[nodiscard]] std::optional<setup_request_t> decode_setup_request(std::string_view payload);
 
   struct setup_operations_t {
     std::function<runtime_install_result_t(std::string_view, std::stop_token)> install;
     std::function<bool(const profiles::first_steam_request_t &, std::string_view, std::stop_token)> prepare;
+    std::function<nlohmann::json(const runtime_t &)> graphics;
+    std::function<bool(const profiles::first_steam_request_t &, const runtime_t &, std::string_view, std::stop_token)> activate;
   };
 
   class setup_service_t {
@@ -32,7 +34,7 @@ namespace multiseat::spaces {
   private:
     struct record_t {
       setup_request_t request;
-      std::string reference, image, state, code;
+      std::string reference, image, state, code, gpu_id;
     };
     bool save_locked();
     void work();

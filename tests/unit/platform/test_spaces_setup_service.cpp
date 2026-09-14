@@ -1,5 +1,9 @@
 #include "src/platform/linux/spaces_setup_service.h"
 #include "src/config.h"
+#include "src/configuration_store.h"
+#include "src/platform/linux/spaces_activation.h"
+#include "src/platform/linux/multiseat_launch_service.h"
+#include "src/platform/linux/multiseat_worker_authority.h"
 #include "src/crypto.h"
 #include "src/utility.h"
 #include <Simple-Web-Server/server_https.hpp>
@@ -9,6 +13,7 @@
 #include <atomic>
 #include <fstream>
 #include <future>
+#include <set>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -53,6 +58,8 @@ namespace {
           EXPECT_EQ(image, runtime().config_digest);
           return true;
         },
+        .graphics = [](const auto &) { return json::array({{{"id", "gpu-0"}, {"label", "Test graphics"}}}); },
+        .activate = [](const auto &, const auto &, auto, auto) { return true; },
       };
     }
     std::unique_ptr<spaces::setup_service_t> service(spaces::setup_operations_t ops) {
@@ -276,7 +283,204 @@ TEST_F(SpacesSetupService, ProductionTlsRoutesRequireAdminAuthenticationAndCooki
     ASSERT_EQ(call("POST", start, {{"Cookie", "auth=" + cookie}, {"X-CSRF-Token", "setup-csrf"}}), 202);
     ASSERT_TRUE(wait_state(*job, "prepared"));
     EXPECT_EQ(call("POST", start, {{"Authorization", "Bearer isolated-setup-test-key"}}), 200);
+    const auto activate = json {{"operation", "activate"}, {"request_id", request.request_id}, {"gpu_id", "gpu-0"}}.dump();
+    EXPECT_EQ(call("POST", activate, {}), 403);
+    EXPECT_EQ(call("POST", activate, {{"Cookie", "auth=" + cookie}}), 403);
+    EXPECT_EQ(job->snapshot()["job"]["state"], "prepared");
+    EXPECT_EQ(call("POST", activate, {{"Cookie", "auth=" + cookie}, {"X-CSRF-Token", "setup-csrf"}}), 202);
+    ASSERT_TRUE(wait_state(*job, "restart_required"));
     EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 1U);
   });
 }
+
+TEST_F(SpacesSetupService, ActivationRequiresPreparedHomeAndExactGpuAndSurvivesRestart) {
+  const spaces::setup_request_t activate {"activate", request.request_id, {}, {}, "gpu-0"};
+  auto job = service(operations());
+  EXPECT_EQ(job->submit(activate), 409);
+  ASSERT_EQ(job->submit(request), 202);
+  ASSERT_TRUE(wait_state(*job, "prepared"));
+  auto wrong = activate; wrong.gpu_id = "not-discovered";
+  EXPECT_EQ(job->submit(wrong), 409);
+  EXPECT_TRUE(job->snapshot()["job"]["can_activate"]);
+  ASSERT_EQ(job->submit(activate), 202);
+  ASSERT_TRUE(wait_state(*job, "restart_required"));
+  EXPECT_EQ(job->submit(activate), 200);
+  EXPECT_EQ(job->submit(wrong), 409);
+  job.reset();
+  auto resumed = service(operations());
+  EXPECT_EQ(resumed->snapshot()["job"]["state"], "restart_required");
+  EXPECT_EQ(resumed->submit(activate), 200);
+  EXPECT_EQ(homes, 1U); EXPECT_EQ(installs, 1U);
+}
+
+TEST_F(SpacesSetupService, ActivationInterruptionRequiresSameSelectionAndNeverRecreatesHome) {
+  std::promise<void> entered;
+  auto ops = operations();
+  ops.activate = [&](const auto &, const auto &, auto, std::stop_token stop) {
+    entered.set_value();
+    std::mutex mutex; std::condition_variable_any changed; std::unique_lock lock(mutex);
+    changed.wait(lock, stop, [] { return false; });
+    return false;
+  };
+  const spaces::setup_request_t activate {"activate", request.request_id, {}, {}, "gpu-0"};
+  auto job = service(ops);
+  ASSERT_EQ(job->submit(request), 202);
+  ASSERT_TRUE(wait_state(*job, "prepared"));
+  ASSERT_EQ(job->submit(activate), 202);
+  ASSERT_EQ(entered.get_future().wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(job->submit({"cancel", request.request_id}), 409);
+  job->shutdown(); job.reset();
+  auto resumed = service(operations());
+  EXPECT_EQ(resumed->snapshot()["job"]["state"], "activation_failed");
+  EXPECT_FALSE(resumed->snapshot()["job"]["can_retry"]);
+  auto wrong = activate; wrong.gpu_id = "gpu-1";
+  EXPECT_EQ(resumed->submit(wrong), 409);
+  ASSERT_EQ(resumed->submit(activate), 202);
+  ASSERT_TRUE(wait_state(*resumed, "restart_required"));
+  EXPECT_EQ(homes, 1U); EXPECT_EQ(installs, 1U);
+}
+
+TEST_F(SpacesSetupService, ActivationDecoderRejectsPathsAndAdditionalAuthority) {
+  json body {{"operation", "activate"}, {"request_id", request.request_id}, {"gpu_id", "gpu-0"}};
+  ASSERT_TRUE(spaces::decode_setup_request(body.dump()));
+  auto extra = body; extra["max_seats"] = 16;
+  EXPECT_FALSE(spaces::decode_setup_request(extra.dump()));
+  for (const auto *value : {"/dev/dri/renderD128", "", "../device"}) {
+    body["gpu_id"] = value;
+    EXPECT_FALSE(spaces::decode_setup_request(body.dump()));
+  }
+}
+
+namespace {
+  class activation_host_t : public container::host_t {
+  public:
+    std::set<std::string> denied;
+    std::uint64_t effective_uid() const override { return geteuid(); }
+    std::uint64_t effective_gid() const override { return getegid(); }
+    bool executable_file(const std::filesystem::path &) const override { return true; }
+    bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return std::vector<std::uint64_t> {}; }
+    bool readable_directory(const std::filesystem::path &) const override { return true; }
+    bool private_read_write_directory(const std::filesystem::path &) const override { return true; }
+    bool private_readable_file(const std::filesystem::path &) const override { return true; }
+    std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &path) const override {
+      if (denied.contains(path)) return {};
+      return container::character_device_identity_t {1, 1, 226, static_cast<unsigned>(std::hash<std::string>{}(path.string()))};
+    }
+    std::optional<std::string> read_owned_regular_file(const std::filesystem::path &, std::size_t) const override { return {}; }
+    container::command_result_t run(const std::vector<std::string> &, std::chrono::milliseconds, std::size_t) override {
+      ADD_FAILURE() << "Configuration must not run Docker or start a game";
+      return {};
+    }
+  };
+}
+
+TEST_F(SpacesSetupService, ConfigurationCommitsLastPreservesSettingsAndRecreatesOnlyManagedIpc) {
+  activation_host_t host;
+  const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
+  ASSERT_TRUE(psf::write_atomic(paths.native, "# Keep my settings\nport = 47989\nbitrate = 8000\n"));
+  const profiles::catalog_t catalog {static_cast<unsigned>(geteuid()), static_cast<unsigned>(getegid()), {{
+    .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, runtime().config_digest},
+    .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+  }}};
+  const auto original = profiles::encode(catalog);
+  ASSERT_TRUE(psf::write_atomic(paths.profiles, original));
+  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
+  auto configure = [&] { return spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host); };
+  ASSERT_TRUE(configure());
+  const auto committed = configuration_store::read(paths.native);
+  ASSERT_TRUE(committed);
+  EXPECT_TRUE(committed->contents.starts_with("# Keep my settings\nport = 47989\nbitrate = 8000\n"));
+  EXPECT_EQ(config::parse_config(committed->contents).at("multiseat_enabled"), "true");
+  EXPECT_EQ(psf::read_secure(paths.profiles, 4096).payload, original);
+  const auto options = load_controller_options(paths.controller);
+  ASSERT_TRUE(options); ASSERT_EQ(options->gpus.size(), 1U);
+  EXPECT_EQ(options->gpus[0].max_seats, 1U);
+  EXPECT_EQ(options->gpus[0].devices, graphics.gpu.devices);
+  EXPECT_TRUE(configure());
+  EXPECT_EQ(configuration_store::read(paths.native)->contents, committed->contents);
+  worker_ipc::authority_store_t authority(paths.ipc);
+  EXPECT_EQ(authority.status(), worker_ipc::authority_status_e::applied);
+  std::filesystem::remove_all(paths.ipc);
+  EXPECT_TRUE(spaces::prepare_managed_ipc(paths));
+  auto wrong = paths; wrong.ipc = root / "unrelated";
+  EXPECT_FALSE(spaces::prepare_managed_ipc(wrong));
+  EXPECT_FALSE(std::filesystem::exists(wrong.ipc));
+}
+
+TEST_F(SpacesSetupService, ConfigurationRefusesExistingAuthoritySymlinksAndUncertainWrites) {
+  activation_host_t host;
+  const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
+  const profiles::catalog_t catalog {static_cast<unsigned>(geteuid()), static_cast<unsigned>(getegid()), {{
+    .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, runtime().config_digest},
+    .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+  }}};
+  ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
+  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128"}, 1, 1}, "Test", "default"};
+  auto configure = [&] { return spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host); };
+  for (const auto &contents : {"multiseat_enabled = true\n", "multiseat_config = /existing/controller.json\n", "multiseat_moonlight_input = true\n"}) {
+    ASSERT_TRUE(psf::write_atomic(paths.native, contents));
+    EXPECT_FALSE(configure());
+    EXPECT_EQ(psf::read_secure(paths.native, 4096).payload, contents);
+    EXPECT_FALSE(std::filesystem::exists(paths.controller));
+  }
+  ASSERT_TRUE(psf::write_atomic(paths.native, "port = 47989\n"));
+  std::filesystem::create_symlink(root / "another", paths.controller);
+  EXPECT_FALSE(configure());
+  EXPECT_FALSE(std::filesystem::exists(root / "another"));
+  std::filesystem::remove(paths.controller);
+  psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+  EXPECT_FALSE(configure());
+  psf::set_write_fault_for_tests(psf::write_fault_e::none);
+  EXPECT_EQ(psf::read_secure(paths.native, 4096).payload, "port = 47989\n");
+  EXPECT_TRUE(configure());
+}
+
+TEST_F(SpacesSetupService, GraphicsDiscoveryPairsPhysicalNodesAndRejectsMissingAccess) {
+  namespace fs = std::filesystem;
+  activation_host_t host;
+  spaces::graphics_roots_t roots {root / "class", root / "nvidia"};
+  const auto device = root / "devices/0000:01:00.0";
+  fs::create_directories(device / "drm/card2");
+  fs::create_directories(roots.drm / "renderD128");
+  fs::create_directory_symlink(device, roots.drm / "renderD128/device");
+  std::ofstream(device / "vendor") << "0x1002\n";
+  auto cards = spaces::discover_graphics(host, roots);
+  ASSERT_EQ(cards.size(), 1U);
+  EXPECT_EQ(cards[0].gpu.devices, (std::vector<fs::path> {"/dev/dri/renderD128", "/dev/dri/card2"}));
+  EXPECT_EQ(cards[0].gpu.logical_gpu_id, "pci-0000_01_00.0");
+  host.denied.insert("/dev/dri/card2");
+  EXPECT_TRUE(spaces::discover_graphics(host, roots).empty());
+  host.denied.clear();
+  std::ofstream(device / "vendor") << "0x10de\n";
+  EXPECT_TRUE(spaces::discover_graphics(host, roots).empty());
+  fs::create_directories(roots.nvidia / "0000:01:00.0");
+  std::ofstream(roots.nvidia / "0000:01:00.0/information") << "Device Minor: \t 3\n";
+  cards = spaces::discover_graphics(host, roots);
+  ASSERT_EQ(cards.size(), 1U);
+  EXPECT_EQ(cards[0].gpu.devices[2], "/dev/nvidia3");
+  fs::create_directories(roots.drm / "renderD129");
+  fs::create_directory_symlink(device, roots.drm / "renderD129/device");
+  EXPECT_EQ(spaces::discover_graphics(host, roots).size(), 1U);
+}
+TEST_F(SpacesSetupService, ManagedSocketPathsLeaveRoomForGenerationGrowth) {
+  const auto paths = spaces::activation_paths(root, root / "polaris.conf");
+  const auto socket = paths.ipc / ("polaris-runtime-" + request.request_id + "-1000000") / "ipc/control.sock";
+  EXPECT_LT(socket.string().size(), 108U);
+}
+
+TEST_F(SpacesSetupService, NewJournalSchemaRequiresTheExactGraphicsField) {
+  auto job = service(operations());
+  ASSERT_EQ(job->submit(request), 202);
+  ASSERT_TRUE(wait_state(*job, "prepared"));
+  job.reset();
+  auto saved = json::parse(psf::read_secure(journal, 4096).payload);
+  ASSERT_EQ(saved["schema"], 2);
+  saved.erase("gpu_id"); saved["unknown"] = "";
+  ASSERT_TRUE(psf::write_atomic(journal, saved.dump()));
+  auto resumed = service(operations());
+  EXPECT_EQ(resumed->submit(request), 503);
+  EXPECT_EQ(homes, 1U); EXPECT_EQ(installs, 1U);
+}
+
 #endif

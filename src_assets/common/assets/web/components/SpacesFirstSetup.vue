@@ -1,16 +1,35 @@
 <template>
   <div class="mt-5 border-t border-storm/20 pt-5" aria-labelledby="spaces-first-title">
-    <h3 id="spaces-first-title" class="text-base font-semibold text-silver">Prepare your first space</h3>
+    <h3 id="spaces-first-title" class="text-base font-semibold text-silver">Set up your first space</h3>
     <p class="mt-2 max-w-2xl text-sm text-storm">
       Give your space a name. Polaris will download its gaming runtime and prepare a separate Steam home for your sign-in, games and saves.
     </p>
-    <p class="mt-2 text-sm text-storm">This preview prepares storage. Graphics configuration and device assignment are still required before playing.</p>
+    <p class="mt-2 text-sm text-storm">Prepare a Steam home, choose its graphics card, then enable Spaces and assign your device.</p>
     <p v-if="error" class="mt-3 text-sm text-warning-bright" role="alert">{{ error }}</p>
     <p v-if="snapshot?.message" class="mt-3 text-sm text-storm">{{ snapshot.message }}</p>
     <div v-if="snapshot?.job" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4">
       <h4 class="font-medium text-silver">{{ snapshot.job.name }}</h4>
       <p class="mt-2 text-sm text-silver" role="status" aria-live="polite">{{ snapshot.job.message }}</p>
       <p v-if="snapshot.job.state === 'prepared'" class="mt-2 text-sm text-storm">Your Steam home is saved. Setup has not started a game or enabled streaming.</p>
+      <div v-if="snapshot.job.can_activate" class="mt-4 space-y-3">
+        <label for="spaces-first-gpu" class="block text-sm font-medium text-silver">Graphics card</label>
+        <select id="spaces-first-gpu" v-model="gpuId" :disabled="busy || !connected || !!snapshot.job.gpu_id"
+                class="focus-ring w-full rounded-lg border border-storm/30 bg-void px-3 py-2.5 text-silver">
+          <option v-for="gpu in snapshot.graphics" :key="gpu.id" :value="gpu.id">{{ gpu.label }}</option>
+        </select>
+        <p v-if="!snapshot.graphics?.length" class="text-sm text-storm">No accessible graphics card matches this runtime. Recheck host setup before continuing.</p>
+        <p class="text-sm text-storm">This preview sets up one Space at a time. Guided setup for simultaneous play is still being added.</p>
+        <button type="button" class="job-button" :disabled="busy || !connected || !hostReady || !gpuId || !snapshot.graphics?.some(g => g.id === gpuId)"
+                @click="send({ operation: 'activate', request_id: snapshot.job.request_id, gpu_id: gpuId })">
+          {{ snapshot.job.state === 'activation_failed' ? 'Retry configuration' : 'Enable Spaces' }}
+        </button>
+      </div>
+      <div v-if="snapshot.job.state === 'restart_required'" class="mt-4 space-y-3">
+        <p class="text-sm text-storm">Save your game before restarting. Restarting Polaris disconnects active streams. After reconnecting, assign your Nova device to this Space below and open it in Nova to sign in to Steam.</p>
+        <button type="button" class="job-button" :disabled="busy || !connected || restarting" @click="restart">
+          {{ restarting ? 'Restart requested…' : 'Restart Polaris and finish setup' }}
+        </button>
+      </div>
       <div class="mt-3 flex flex-wrap gap-3">
         <button v-if="snapshot.job.can_cancel" type="button" :disabled="busy || !connected" class="job-button"
                 @click="send({ operation: 'cancel', request_id: snapshot.job.request_id })">Stop setup</button>
@@ -52,7 +71,7 @@ import { requestForJob, validJobSnapshot, validSetupStart } from '../spaces-job.
 
 defineProps({ hostReady: { type: Boolean, default: false } })
 const snapshot = ref(null), busy = ref(false), connected = ref(false), error = ref('')
-const name = ref(''), runtimeId = ref(''), pending = ref(null)
+const name = ref(''), runtimeId = ref(''), gpuId = ref(''), pending = ref(null), restarting = ref(false)
 const storageKey = 'polaris.spaces.first-setup'
 try {
   const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null')
@@ -64,6 +83,8 @@ const runtimeLabel = runtime => runtime?.variant === 'nvidia'
 
 function adopt(next) {
   snapshot.value = next; connected.value = true
+  if (next.job?.gpu_id) gpuId.value = next.job.gpu_id
+  else if (!next.graphics?.some(g => g.id === gpuId.value)) gpuId.value = next.graphics?.[0]?.id || ''
   if (!next.runtimes.some(runtime => runtime.id === runtimeId.value)) runtimeId.value = next.runtimes[0]?.id || ''
   if (next.job) {
     pending.value = null
@@ -97,9 +118,23 @@ async function exchange(action) {
       : cause.message || 'Could not check setup. Reconnect to try again.'
   } finally {
     clearTimeout(timeout); busy.value = false
-    if (!disposed && ['downloading', 'preparing'].includes(snapshot.value?.job?.state))
+    if (!disposed && ['downloading', 'preparing', 'configuring'].includes(snapshot.value?.job?.state))
       poll = setTimeout(refresh, 2000)
   }
+}
+async function restart() {
+  if (restarting.value || busy.value || !connected.value || snapshot.value?.job?.state !== 'restart_required') return
+  restarting.value = true; error.value = ''
+  request = new AbortController()
+  const timeout = setTimeout(() => request.abort(), 12000)
+  try {
+    const response = await fetch('./api/restart', { method: 'POST', credentials: 'include', signal: request.signal,
+      headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    if (!response.ok || (await response.json()).restarting !== true) throw new Error('Restart was not accepted.')
+    if (!disposed) error.value = 'Restart requested. Reconnect to Polaris, then return to Spaces to assign your device.'
+  } catch {
+    if (!disposed) { connected.value = false; error.value = 'The restart response could not be confirmed. Reconnect to Polaris before trying again.' }
+  } finally { clearTimeout(timeout); restarting.value = false }
 }
 const refresh = () => exchange()
 const send = action => exchange(action)

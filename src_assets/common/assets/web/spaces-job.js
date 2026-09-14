@@ -1,6 +1,6 @@
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const runtimeId = /^[a-z0-9][a-z0-9-]{0,63}$/
-const states = ['downloading', 'preparing', 'prepared', 'cancelled', 'interrupted', 'failed', 'recovery_required']
+const states = ['downloading', 'preparing', 'prepared', 'cancelled', 'interrupted', 'failed', 'recovery_required', 'configuring', 'restart_required', 'activation_failed']
 const retryStates = ['cancelled', 'interrupted', 'failed']
 const text = value => typeof value === 'string' && value.length <= 1024
 export function validSetupStart(value) {
@@ -20,9 +20,20 @@ export function validJobSnapshot(value) {
     ids.add(runtime.id)
   }
   if (value.available && !ids.size) return false
+  const graphics = value.graphics ?? []
+  if (!Array.isArray(graphics) || graphics.length > 64) return false
+  const gpuIds = new Set()
+  for (const gpu of graphics) {
+    if (!gpu || !validGpuId(gpu.id) || gpuIds.has(gpu.id) || !text(gpu.label) || !gpu.label) return false
+    gpuIds.add(gpu.id)
+  }
   if (value.job === null) return true
   const job = value.job
   return !!job && validSetupStart({ ...job, operation: 'start' }) && states.includes(job.state) &&
+    (job.gpu_id === undefined || job.gpu_id === '' || validGpuId(job.gpu_id)) &&
+    (job.can_activate === undefined || (typeof job.can_activate === 'boolean' && (!job.can_activate ||
+      (value.available && ['prepared', 'activation_failed'].includes(job.state))))) &&
+    (!['configuring', 'restart_required', 'activation_failed'].includes(job.state) || validGpuId(job.gpu_id)) &&
     text(job.message) && typeof job.can_retry === 'boolean' && typeof job.can_cancel === 'boolean' &&
     (!job.can_retry || (value.available && retryStates.includes(job.state))) &&
     (!job.can_cancel || (value.available && job.state === 'downloading'))
@@ -30,3 +41,5 @@ export function validJobSnapshot(value) {
 export function requestForJob(job) {
   return { operation: 'start', request_id: job.request_id, runtime_id: job.runtime_id, name: job.name }
 }
+
+function validGpuId(value) { return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value) }

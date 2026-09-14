@@ -44,6 +44,7 @@
   #include "platform/linux/multiseat_profile_catalog.h"
   #include "platform/linux/spaces_runtime.h"
   #include "platform/linux/spaces_setup_service.h"
+  #include "platform/linux/spaces_activation.h"
   #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
@@ -537,28 +538,34 @@ int main(int argc, char *argv[]) {
     }
   });
   if (config::multiseat.enabled) {
-    const auto options = multiseat::load_controller_options(config::multiseat.config_file);
+    const auto managed_paths = multiseat::spaces::activation_paths(platf::appdata(), config::sunshine.config_file);
+    const bool managed = config::multiseat.config_file == managed_paths.controller;
+    const bool ipc_ready = !managed || (multiseat::spaces::managed_graphics_current(managed_paths) &&
+      multiseat::spaces::prepare_managed_ipc(managed_paths));
+    const auto options = ipc_ready ? multiseat::load_controller_options(config::multiseat.config_file) : std::nullopt;
     if (!options || config::input.multiseat_moonlight_input) {
       BOOST_LOG(error) << "Multiseat configuration is invalid or conflicts with the separate input owner"sv;
-      return 1;
+      if (!managed) return 1;
     }
-    auto created = multiseat::create_production_controller_runtime(*options);
-    if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
-      profile_service = std::make_shared<multiseat::profile_launch_service_t>(
-        multiseat::make_profile_controller(std::move(created.runtime)), std::chrono::seconds(25),
-        multiseat::profile_admin_options_t {
-          .catalog = options->profile_catalog,
-          .reload = [settings = *options]() -> std::unique_ptr<multiseat::profile_controller_t> {
-            auto replacement = multiseat::create_production_controller_runtime(settings);
-            return replacement.status == multiseat::controller_runtime_create_status_e::ready_enabled ?
-              multiseat::make_profile_controller(std::move(replacement.runtime)) : nullptr;
-          }
-        });
-      if (!multiseat::install_profile_launch_service(profile_service)) return 1;
-      BOOST_LOG(info) << "Multiseat profile controller started"sv;
-    } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {
-      BOOST_LOG(error) << "Multiseat controller could not establish its configured authority"sv;
-      return 1;
+    if (options && !config::input.multiseat_moonlight_input) {
+      auto created = multiseat::create_production_controller_runtime(*options);
+      if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
+        profile_service = std::make_shared<multiseat::profile_launch_service_t>(
+          multiseat::make_profile_controller(std::move(created.runtime)), std::chrono::seconds(25),
+          multiseat::profile_admin_options_t {
+            .catalog = options->profile_catalog,
+            .reload = [settings = *options]() -> std::unique_ptr<multiseat::profile_controller_t> {
+              auto replacement = multiseat::create_production_controller_runtime(settings);
+              return replacement.status == multiseat::controller_runtime_create_status_e::ready_enabled ?
+                multiseat::make_profile_controller(std::move(replacement.runtime)) : nullptr;
+            }
+          });
+        if (!multiseat::install_profile_launch_service(profile_service)) return 1;
+        BOOST_LOG(info) << "Multiseat profile controller started"sv;
+      } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {
+        BOOST_LOG(error) << "Multiseat controller could not establish its configured authority"sv;
+        if (!managed) return 1;
+      }
     }
   }
   auto multiseat_runtime_created =

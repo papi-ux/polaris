@@ -21,7 +21,8 @@ home plus its owned network and catalog entry. Use a stable UUID request ID and
 the same name on retries. An existing catalog cannot be replaced; a matching
 retry confirms the same home and preserves later device assignments. It never
 adopts an orphaned volume after an uncertain failure. Controller configuration,
-GPU selection, device assignment and activation remain separate pending steps.
+GPU selection and restart-based configuration are now a separate guided step;
+device assignment uses the existing authenticated controller API after restart.
 The shipped catalog is currently empty because no runtime has completed the
 publication and catalog admission process below. An unknown runtime fails
 before any Docker command. Do not fill the catalog with a guessed digest,
@@ -51,6 +52,8 @@ never an HTTP request or stream owner thread.
 Authenticated clients read `GET /api/spaces/setup/job` and submit bounded JSON
 to `POST /api/spaces/setup/job`. Start accepts only `operation`, `request_id`,
 `runtime_id` and `name`; cancel accepts only `operation` and `request_id`.
+Activate accepts only `operation`, the prepared `request_id`, and a discovered
+`gpu_id`. It cannot change the runtime, profile identity or player home.
 Image references, shell commands, paths, GPU devices and controller settings
 cannot be supplied through this endpoint.
 
@@ -72,8 +75,40 @@ only a durable catalog confirmation can report the home prepared.
 A journal durability failure freezes that owner until restart and secure
 read-back. No later request overwrites uncertain state. First-home storage is
 server-owned at `spaces-profiles.json` under Polaris's application-data directory.
-This job does not write controller/native configuration or activate streaming.
-The page explicitly distinguishes prepared storage from a playable space.
+Activation records its exact GPU selection before writing controller configuration.
+Discovery pairs render and primary nodes through physical sysfs identity, matches
+NVIDIA device minors through the kernel driver, and requires access to every
+explicit node. Only one physical GPU is admitted by this first setup. Its initial
+seat and encoder budgets are one; this is a conservative admission limit, not a
+claim about hardware throughput. Existing configured hosts are not migrated.
+
+The controller catalog is written privately and is immutable on retry. The final
+native-configuration patch is the commit point, serialized with other settings
+writes and preserving unrelated values. Activation rechecks the prepared profile,
+local image, NVIDIA host-driver version, compiled seccomp file and installed
+SELinux worker type. Failure preserves player data and requires an explicit retry.
+The running process does not install a second controller. An explicit restart
+loads configuration through the existing production factory, rechecks physical
+GPU identity and recreates only its bound private IPC root after host reboot.
+A failed managed startup leaves the web interface available for diagnosis.
+Device assignment remains under the existing paired-client authorization path.
+
+The page distinguishes a prepared home, saved configuration awaiting restart and
+an available controller. None of these states establishes gameplay acceptance.
+
+## Native packages and container registry
+
+`papi-ux/packages` publishes signed RPM and pacman repositories from stable
+Polaris release assets; it does not rebuild them. It remains responsible for
+native package signatures, metadata and public read-back. The Polaris native
+build packages the Spaces UI/controller and its exact Steam seccomp file.
+The dedicated SELinux policies still require a reviewed host integration and
+installation path before clean-host setup can be called complete.
+
+The worker image belongs in GitHub Container Registry. Keep its provider receipts,
+immutable digest, anonymous read-back and compiled host catalog admission with
+the runtime release procedure below. Do not put Docker archives in the dnf or
+pacman repository or treat a signed host package as proof of image publication.
 
 ## Catalog admission
 

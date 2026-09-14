@@ -21,7 +21,12 @@ as well. Polaris manages a separate gaming container for each active space.
 | Polaris gaming runtime image | Contains the launcher and the software used inside a space |
 | Nova Android app | Opens the stream and sends your controls |
 
-The native host packages and gaming runtime images serve different purposes.
+The [packages repository](https://github.com/papi-ux/packages) distributes signed
+Fedora and Arch host packages through `repo.papi-ux.com`. The approved gaming
+runtime is an OCI image downloaded by Docker from GitHub Container Registry.
+Native packages include the setup UI, controller and packaged host policy files;
+the image supplies the software running inside each Space. These are coordinated
+release artifacts, not interchangeable installation choices.
 This preview does not provide a supported image for running the entire Polaris
 host inside Docker, or an Unraid installation template.
 
@@ -35,8 +40,10 @@ existing Steam setup is supported by the development backend.
 verified runtime download to a new private Steam home, with progress, stop and
 retry controls in Spaces. The preview catalog is still empty until a runtime
 completes publication and review, so this build shows that the download is
-unavailable. A fresh host cannot yet complete graphics configuration and
-streaming activation from this page.
+unavailable. The next step now selects a detected graphics card, saves Spaces
+configuration and offers an explicit restart. The initial configuration permits
+one active Space; simultaneous Spaces still need a separately reviewed graphics
+budget. Registry publication and packaged host integration remain release gates.
 The current runtime also requires the Polaris service account to use UID and
 GID 1000. Do not change an existing Linux account's identity to work around this
 preview limitation.
@@ -108,7 +115,7 @@ follow instructions intended for another distribution.
 Once this build offers an approved gaming runtime:
 
 1. Complete the host checks above.
-2. Under **Prepare your first space**, enter a name such as **Living room**.
+2. Under **Set up your first space**, enter a name such as **Living room**.
    If more than one runtime is offered, choose the variant for your graphics
    hardware. An NVIDIA variant names its required host driver version.
 3. Select **Download and prepare**. Allow space and bandwidth for a download of
@@ -123,9 +130,26 @@ Once this build offers an approved gaming runtime:
 6. If Polaris restarts, return to Spaces and explicitly retry the interrupted
    job. A restart does not automatically resume downloads or provisioning.
 
-**Steam home prepared** means storage has been saved. Graphics configuration,
-device assignment and streaming activation are still separate pending work in
-this preview. Do not treat this message as a successful game or controller test.
+7. Once the home is prepared, choose its detected **Graphics card**, then select
+   **Enable Spaces**. Polaris saves its configuration without starting a game.
+   This first setup permits one Space at a time. Existing manually configured
+   hosts retain their own simultaneous-session budgets.
+8. Save any running game, then select **Restart Polaris and finish setup**.
+   Restarting disconnects active streams. Reconnect to Polaris and return to
+   **Spaces**.
+9. Under **Device access**, assign your paired Nova device to the saved Space.
+   Refresh the host library in Nova, open the Space, and sign in through Steam
+   Big Picture. Keyboard, controller and sound should be checked in your game.
+
+If configuration is interrupted, retry the same graphics selection. Polaris
+preserves the home and refuses to replace existing controller settings. A changed
+or inaccessible GPU requires attention; Polaris does not silently choose another.
+The native package must install its matching Steam seccomp policy. SELinux hosts
+also need the dedicated Spaces worker and input policy; this preview does not
+install or change SELinux policy from the browser.
+
+**Steam home prepared** means storage has been saved. **Configuration saved**
+means a restart is required. Neither is a successful game or controller test.
 If setup repeatedly cannot finish, open **Doctor & Support** and retain the
 existing player data while diagnosing the failure.
 

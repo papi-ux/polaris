@@ -1,6 +1,7 @@
 #include "spaces_setup_service.h"
 #ifdef __linux__
 #include "spaces_setup.h"
+#include "spaces_activation.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -15,7 +16,10 @@ namespace multiseat::spaces {
     const std::map<std::string, std::string> messages {
       {"downloading", "Checking and downloading the gaming runtime. You can leave this page and return later."},
       {"preparing", "Preparing your private Steam home. Wait for this step to finish."},
-      {"prepared", "Your Steam home is prepared. Graphics configuration and device assignment still need to be completed before you can play."},
+      {"prepared", "Your Steam home is prepared. Choose its graphics card to enable Spaces."},
+      {"configuring", "Saving Spaces configuration. Wait for this step to finish."},
+      {"restart_required", "Spaces configuration is saved. Restart Polaris when you are ready, then assign your device."},
+      {"activation_failed", "Spaces configuration needs attention. Check the installed host integration, graphics access and gaming runtime, then retry the same selection. Your Steam home is preserved."},
       {"cancelled", "Setup stopped. Docker may keep verified download layers for your next retry."},
       {"interrupted", "Polaris stopped before setup finished. Retry to check the saved progress and continue."},
       {"host_prerequisites", "Host setup needs attention. Recheck Docker, graphics and controller access before retrying."},
@@ -38,7 +42,14 @@ namespace multiseat::spaces {
         return true;
       });
     }
+    bool valid_gpu(std::string_view id) {
+      return !id.empty() && id.size() <= 128 &&
+        id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == std::string_view::npos;
+    }
     bool valid_request(const setup_request_t &r) {
+      if (r.operation == "activate") return r.runtime_id.empty() && r.name.empty() && valid_gpu(r.gpu_id) &&
+        profiles::valid_first_steam_request({r.request_id, "Activate"});
+      if (!r.gpu_id.empty()) return false;
       if (!profiles::valid_first_steam_request({r.request_id, r.operation == "cancel" ? "Cancel" : r.name})) return false;
       if (r.operation == "cancel") return r.runtime_id.empty() && r.name.empty();
       return r.operation == "start" && !r.runtime_id.empty() && r.runtime_id.size() <= 64 &&
@@ -54,9 +65,11 @@ namespace multiseat::spaces {
     }
     bool valid_stage(std::string_view state, const std::string &code) {
       if (!messages.contains(code)) return false;
+      if (state == "configuring" || state == "restart_required" || state == "activation_failed") return state == code;
       if (state == "failed")
         return code != "prepared" && code != "preparing" && code != "downloading" &&
-          code != "interrupted" && code != "cancelled";
+          code != "interrupted" && code != "cancelled" && code != "configuring" &&
+          code != "restart_required" && code != "activation_failed";
       return (state == "prepared" || state == "preparing" || state == "downloading" ||
         state == "interrupted" || state == "cancelled") && state == code;
     }
@@ -71,6 +84,8 @@ namespace multiseat::spaces {
       if (r.operation == "start" && body.size() == 4) {
         r.runtime_id = body.at("runtime_id").get<std::string>();
         r.name = body.at("name").get<std::string>();
+      } else if (r.operation == "activate" && body.size() == 3) {
+        r.gpu_id = body.at("gpu_id").get<std::string>();
       } else if (r.operation != "cancel" || body.size() != 2) return {};
       return valid_request(r) ? std::optional {r} : std::nullopt;
     } catch (...) { return {}; }
@@ -94,10 +109,13 @@ namespace multiseat::spaces {
       const auto saved = psf::read_secure(journal_, 4096, false, false);
       if (saved) {
         const auto body = strict(saved.payload);
-        if (body.size() != 9 || !body.at("schema").is_number_unsigned() || body.at("schema") != 1)
+        if (!body.at("schema").is_number_unsigned() ||
+            !((body.at("schema") == 1 && body.size() == 9) || (body.at("schema") == 2 && body.size() == 10)))
           throw std::invalid_argument("setup schema");
         record_t r {{body.at("operation"), body.at("request_id"), body.at("runtime_id"), body.at("name")},
-          body.at("reference"), body.at("image"), body.at("state"), body.at("code")};
+          body.at("reference"), body.at("image"), body.at("state"), body.at("code"), body.at("schema") == 2 ? body.at("gpu_id").get<std::string>() : std::string {}};
+        const bool configuring = r.state == "configuring" || r.state == "restart_required" || r.state == "activation_failed";
+        if (configuring ? !valid_gpu(r.gpu_id) : !r.gpu_id.empty()) throw std::invalid_argument("setup graphics");
         const std::string prefix = "ghcr.io/papi-ux/polaris-worker-steam@";
         if (!valid_request(r.request) || r.request.operation != "start" ||
             !r.reference.starts_with(prefix) || !digest(r.reference.substr(prefix.size())) || !digest(r.image) ||
@@ -106,6 +124,9 @@ namespace multiseat::spaces {
         record_ = std::move(r);
         if (record_->state == "downloading" || record_->state == "preparing") {
           record_->state = "interrupted"; record_->code = "interrupted";
+          if (!save_locked()) return;
+        } else if (record_->state == "configuring") {
+          record_->state = "activation_failed"; record_->code = "activation_failed";
           if (!save_locked()) return;
         }
       } else if (saved.status != psf::read_status_e::missing) { fault_ = true; return; }
@@ -118,9 +139,9 @@ namespace multiseat::spaces {
   bool setup_service_t::save_locked() {
     const auto &r = *record_;
     try {
-      const json body {{"schema", 1}, {"operation", "start"}, {"request_id", r.request.request_id},
+      const json body {{"schema", 2}, {"operation", "start"}, {"request_id", r.request.request_id},
         {"runtime_id", r.request.runtime_id}, {"name", r.request.name}, {"reference", r.reference},
-        {"image", r.image}, {"state", r.state}, {"code", r.code}};
+        {"image", r.image}, {"state", r.state}, {"code", r.code}, {"gpu_id", r.gpu_id}};
       if (psf::write_atomic(journal_, body.dump())) return true;
     } catch (...) {}
     // A rename with uncertain durability may have committed. Freeze this owner;
@@ -134,7 +155,7 @@ namespace multiseat::spaces {
     json runtimes = json::array();
     for (const auto &r : catalog_) runtimes.push_back({{"id", r.id}, {"variant", r.variant}, {"nvidia_driver", r.nvidia_driver}});
     json result {{"version", 1}, {"available", enabled_ && !fault_ && !closing_ && bool(lease_)},
-      {"runtimes", runtimes}, {"job", nullptr},
+      {"runtimes", runtimes}, {"graphics", json::array()}, {"job", nullptr},
       {"message", !enabled_ ? "Spaces already have local configuration. Manage your existing spaces below." :
         fault_ ? "Saved setup state could not be secured. Restart Polaris after saving your work. If this persists, open Doctor & Support." :
         catalog_.empty() ? "The verified gaming runtime is not published for this preview yet." : ""}};
@@ -143,8 +164,16 @@ namespace multiseat::spaces {
       const bool approved = std::any_of(catalog_.begin(), catalog_.end(), [&](const auto &runtime) {
         return runtime.id == r.request.runtime_id && runtime.reference() == r.reference && runtime.config_digest == r.image;
       });
+      if (approved && operations_.graphics && (r.state == "prepared" || r.state == "activation_failed")) {
+        try {
+          const auto runtime = std::find_if(catalog_.begin(), catalog_.end(), [&](const auto &value) { return value.id == r.request.runtime_id; });
+          result["graphics"] = operations_.graphics(*runtime);
+        } catch (...) { /* Keep the saved home visible when discovery fails. */ }
+      }
       result["job"] = {{"request_id", r.request.request_id}, {"runtime_id", r.request.runtime_id},
-        {"name", r.request.name}, {"state", fault_ ? "recovery_required" : r.state},
+        {"name", r.request.name}, {"gpu_id", r.gpu_id},
+        {"can_activate", approved && !fault_ && !closing_ && !active_ && bool(operations_.activate) &&
+          (r.state == "prepared" || r.state == "activation_failed")}, {"state", fault_ ? "recovery_required" : r.state},
         {"message", fault_ ? result["message"].get<std::string>() : !approved && retryable(r.state) ?
           "This build no longer offers the runtime saved for this setup. Existing player data is preserved." : messages.at(r.code)},
         {"can_retry", approved && !fault_ && !closing_ && !active_ && retryable(r.state)},
@@ -164,6 +193,28 @@ namespace multiseat::spaces {
       cancellation_.request_stop();
       return 202;
     }
+    if (request.operation == "activate") {
+      if (!record_ || record_->request.request_id != request.request_id || !operations_.activate) return 409;
+      if (!record_->gpu_id.empty() && record_->gpu_id != request.gpu_id) return 409;
+      const auto runtime = std::find_if(catalog_.begin(), catalog_.end(), [&](const auto &r) {
+        return r.id == record_->request.runtime_id && r.reference() == record_->reference && r.config_digest == record_->image;
+      });
+      if (runtime == catalog_.end()) return 409;
+      if (record_->state == "restart_required") return 200;
+      if (active_) return record_->state == "configuring" ? 202 : 409;
+      if (record_->state != "prepared" && record_->state != "activation_failed") return 409;
+      if (!operations_.graphics) return 409;
+      try {
+        const auto choices = operations_.graphics(*runtime);
+        if (!std::any_of(choices.begin(), choices.end(), [&](const auto &gpu) { return gpu.at("id") == request.gpu_id; })) return 409;
+      } catch (...) { return 503; }
+      record_->gpu_id = request.gpu_id;
+      record_->state = "configuring"; record_->code = "configuring";
+      if (!save_locked()) return 503;
+      cancellation_ = std::stop_source {};
+      active_ = true; changed_.notify_one();
+      return 202;
+    }
     const auto found = std::find_if(catalog_.begin(), catalog_.end(), [&](const auto &r) { return r.id == request.runtime_id; });
     if (found == catalog_.end()) return 409;
     if (record_) {
@@ -171,7 +222,7 @@ namespace multiseat::spaces {
       if (old.request_id != request.request_id || old.name != request.name || old.runtime_id != request.runtime_id ||
           record_->reference != found->reference() || record_->image != found->config_digest) return 409;
       if (active_) return 202;
-      if (record_->state == "prepared") return 200;
+      if (record_->state == "prepared" || record_->state == "restart_required") return 200;
       if (!retryable(record_->state)) return 409;
     }
     record_ = record_t {request, found->reference(), found->config_digest, "downloading", "downloading"};
@@ -189,6 +240,21 @@ namespace multiseat::spaces {
       if (closing_ && !active_) return;
       const auto request = record_->request;
       const auto stop = cancellation_.get_token();
+      if (record_->state == "configuring") {
+        const auto runtime = *std::find_if(catalog_.begin(), catalog_.end(), [&](const auto &r) { return r.id == request.runtime_id; });
+        const auto gpu = record_->gpu_id;
+        lock.unlock();
+        bool configured = false;
+        try { if (!stop.stop_requested()) configured = operations_.activate({request.request_id, request.name}, runtime, gpu, stop); }
+        catch (...) {}
+        lock.lock();
+        record_->state = configured ? "restart_required" : "activation_failed";
+        record_->code = record_->state;
+        save_locked();
+        active_ = false;
+        if (closing_) return;
+        continue;
+      }
       lock.unlock();
       runtime_install_result_t runtime;
       try { if (!stop.stop_requested()) runtime = operations_.install(request.runtime_id, stop); }
@@ -243,6 +309,10 @@ namespace multiseat::spaces {
         .prepare = [path = directory / "spaces-profiles.json"](const auto &request, std::string_view image, std::stop_token stop) {
           container::local_host_t host(stop);
           return static_cast<bool>(profiles::create_first_steam(path, request, image, host));
+        },
+        .graphics = graphics_choices,
+        .activate = [directory](const auto &request, const auto &runtime, auto gpu, auto stop) {
+          return activate_first_space(directory, request, runtime, gpu, stop);
         },
       });
   }
