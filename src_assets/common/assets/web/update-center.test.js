@@ -257,6 +257,43 @@ describe('Update Center release awareness', () => {
     expect(unknown.status).toBe('current')
   })
 
+  it('names the copy when the running binary is outside the package', () => {
+    // A restart would relaunch the same copy; the state has to say what to change.
+    const state = buildUpdateCenterState({
+      currentVersion: '1.4.3',
+      latestRelease: { ...release, tag_name: 'v1.4.4', name: 'v1.4.4' },
+      host: {
+        platform: 'linux',
+        distro: { id: 'bazzite', version_id: '44' },
+        installed_package_version: '1.4.4',
+        running_binary: { path: '/usr/local/bin/polaris-kms', packaged_path: '/usr/bin/polaris', matches_package: false },
+      },
+    })
+
+    expect(state.status).toBe('restart_required')
+    expect(state.statusLabel).toBe('Installed, running a copy')
+    expect(state.summary).toContain('running 1.4.3 from /usr/local/bin/polaris-kms, a copy outside the package')
+    expect(state.summary).not.toContain('Restart Polaris to use it')
+    expect(state.runningBinaryPath).toBe('/usr/local/bin/polaris-kms')
+    expect(state.runningOutsidePackage).toBe(true)
+
+    // The packaged binary itself, or a host that cannot tell, keeps the plain restart advice.
+    for (const running_binary of [
+      { path: '/usr/bin/polaris', packaged_path: '/usr/bin/polaris', matches_package: true },
+      { path: '/opt/polaris/polaris', packaged_path: null, matches_package: null },
+      undefined,
+    ]) {
+      const plain = buildUpdateCenterState({
+        currentVersion: '1.4.3',
+        latestRelease: { ...release, tag_name: 'v1.4.4', name: 'v1.4.4' },
+        host: { platform: 'linux', distro: { id: 'fedora', version_id: '44' }, installed_package_version: '1.4.4', running_binary },
+      })
+      expect(plain.statusLabel).toBe('Installed, not running')
+      expect(plain.summary).toContain('Restart Polaris to use it')
+      expect(plain.runningOutsidePackage).toBe(false)
+    }
+  })
+
   it('detects a stable update and selects the Arch/CachyOS package', () => {
     const state = buildUpdateCenterState({
       currentVersion: '1.2.1',

@@ -10,6 +10,10 @@ if(POLARIS_ENABLE_WEBRTC)
     list(APPEND POLARIS_DEFINITIONS POLARIS_ENABLE_WEBRTC=1)
 endif()
 
+# Where the package installs the binary, so the running binary can say whether
+# it is that one. The default "polaris" (init.cmake) marks a non-packaged build.
+list(APPEND POLARIS_DEFINITIONS POLARIS_EXECUTABLE_PATH="${POLARIS_EXECUTABLE_PATH}")
+
 # AppImage
 if(${POLARIS_BUILD_APPIMAGE})
     # use relative assets path for AppImage
@@ -495,6 +499,7 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_session_helper.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_host.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_host.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/user_unit_override.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.h"

@@ -52,7 +52,10 @@ curl --fail --location --output "./${rpm_name}" \
 sudo rpm-ostree install "./${rpm_name}"
 ```
 
-Continue only after the transaction succeeds. Inspect the pending deployment:
+Continue only after the transaction succeeds. If Polaris is already layered, this command
+fails with `cannot install both polaris-... / conflicting requests`; that is the
+[Update](#update) case, one transaction that replaces the old local package. Inspect the
+pending deployment:
 
 ```bash
 rpm-ostree status
@@ -227,8 +230,12 @@ systemctl --user is-active polaris
 
 If you previously installed a KMS runtime copy, refresh it using the next section
 before restarting. A copy under `/usr/local` is outside the deployment and does
-not change automatically with an RPM update or rollback. Check
-`systemctl --user cat polaris` if the service still runs an older binary.
+not change automatically with an RPM update or rollback. `sudo -H polaris --setup-host`
+says so when the service points at a copy, and says which command to run when the
+copy is gone but its drop-in is not; `systemctl --user cat polaris` shows the same
+drop-in. The Update Center names the copy when the package is newer than the
+running binary, and the Doctor's `running_binary` row names the binary that
+produced the report.
 
 ## Optional DRM/KMS capture
 

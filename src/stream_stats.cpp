@@ -29,6 +29,7 @@
 #include "verified_action.h"
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/user_unit_override.h"
   #include "platform/linux/stream_display_policy.h"
 #endif
 
@@ -1634,6 +1635,24 @@ namespace stream_stats {
 
     nlohmann::json evidence = nlohmann::json::array();
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
+#ifdef __linux__
+    // Which binary produced this report. The Bazzite DRM/KMS recipe runs a copy
+    // outside the package, and that copy stays on the old version across
+    // updates while the console says nothing; a support thread needs this on
+    // its first line.
+    if (const auto running = platf::user_unit::running_executable()) {
+      const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
+      const bool outside_package = binary.matches_package == std::optional<bool> {false};
+      std::string detail = std::string {"Polaris "} + PROJECT_VERSION + " is running from " + binary.path + ".";
+      if (outside_package) {
+        detail += " That is not the packaged " + binary.packaged_path +
+                  "; package updates do not change a copy, so refresh it from the package or remove the service drop-in after updating.";
+      } else if (binary.matches_package) {
+        detail += " This is the packaged binary.";
+      }
+      append_doctor_evidence(evidence, "running_binary", "Running binary", binary.path, "", outside_package ? "watch" : "pass", "process", detail);
+    }
+#endif
     append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
     const auto encoder_selection = health.value("encoder_selection", nlohmann::json::object());
