@@ -1,6 +1,12 @@
 #include "../tests_common.h"
 
 #include <src/launch_profile.h>
+#include <src/config.h>
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 
 TEST(LaunchProfileTests, NonLinuxTopologyUsesDeterministicPrecedence) {
   const auto explicit_desktop = launch_profile::resolve_non_linux_topology(
@@ -472,4 +478,76 @@ TEST(LaunchProfileExplicitFields, BoundsAndEchoesOnlyASafeSliceOfTheValue) {
   EXPECT_NE(fields.problems[1].reason.find(std::string(32, 'x') + "...'"), std::string::npos);
   EXPECT_EQ(fields.problems[1].reason.find('\n'), std::string::npos);
   EXPECT_EQ(fields.problems[1].reason.find('\x01'), std::string::npos);
+}
+
+namespace {
+  struct OwnedDisplayCeilingGuard {
+    int previous = config::video.linux_display.headless_max_refresh_rate;
+
+    ~OwnedDisplayCeilingGuard() {
+      config::video.linux_display.headless_max_refresh_rate = previous;
+    }
+  };
+
+  std::string read_source(const char *relative) {
+    const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / relative;
+    std::ifstream file {path};
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+  }
+
+  // The body of a function defined at namespace indent (four spaces): from its
+  // signature to the next closing brace at that indent.
+  std::string function_body(const std::string &source, const std::string &signature) {
+    const auto start = source.find(signature);
+    if (start == std::string::npos) {
+      return {};
+    }
+    const auto end = source.find("\n    }\n", start);
+    return source.substr(start, end == std::string::npos ? std::string::npos : end - start);
+  }
+}  // namespace
+
+// Polaris creates the mode on these paths, so the ceiling bounds absurdity and
+// nothing else; a 144 or 165 Hz panel has to clear it out of the box (#686).
+TEST(LaunchProfileTests, OwnedDisplayCeilingClearsShippingPanelsByDefault) {
+  OwnedDisplayCeilingGuard guard;
+
+  config::video.linux_display.headless_max_refresh_rate = 0;
+  EXPECT_EQ(launch_profile::owned_display_refresh_ceiling_hz(),
+            launch_profile::k_default_owned_display_refresh_ceiling_hz);
+  EXPECT_GE(launch_profile::k_default_owned_display_refresh_ceiling_hz, 165);
+
+  config::video.linux_display.headless_max_refresh_rate = 165;
+  EXPECT_EQ(launch_profile::owned_display_refresh_ceiling_hz(), 165);
+
+  config::video.linux_display.headless_max_refresh_rate = 120;
+  EXPECT_EQ(launch_profile::owned_display_refresh_ceiling_hz(), 120);
+}
+
+// Three literal 120s that happened to agree is how #686 came to be: one in the
+// Optimize API, one in launch validation, and /serverinfo never consulting the
+// owned-display branch at all. The three sites have to share the one function.
+TEST(LaunchProfileTests, OwnedDisplayCeilingHasOneSourceAcrossHostAndLaunch) {
+  const auto nvhttp = read_source("src/nvhttp.cpp");
+  ASSERT_FALSE(nvhttp.empty()) << "could not read nvhttp.cpp via POLARIS_SOURCE_DIR";
+  const auto process = read_source("src/process.cpp");
+  ASSERT_FALSE(process.empty()) << "could not read process.cpp via POLARIS_SOURCE_DIR";
+
+  const auto optimize = function_body(nvhttp, "topology_max_launch_refresh_rate_for_http(\n");
+  ASSERT_FALSE(optimize.empty());
+  EXPECT_NE(optimize.find("owned_display_refresh_ceiling_hz()"), std::string::npos);
+  EXPECT_EQ(optimize.find("return 120;"), std::string::npos);
+
+  const auto advertised = function_body(nvhttp, "int advertised_max_launch_refresh_rate_for_http()");
+  ASSERT_FALSE(advertised.empty());
+  EXPECT_EQ(advertised.find("_for_http(false)"), std::string::npos)
+    << "/serverinfo must ask whether the configured mode owns the display";
+  EXPECT_EQ(advertised.find("value_or(120)"), std::string::npos);
+
+  const auto validate = function_body(process, "int validate_resolved_launch_profile_for_app(");
+  ASSERT_FALSE(validate.empty());
+  EXPECT_NE(validate.find("owned_display_refresh_ceiling_hz()"), std::string::npos);
+  EXPECT_EQ(validate.find("120000"), std::string::npos);
 }

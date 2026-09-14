@@ -1,5 +1,7 @@
 #include "launch_profile.h"
 
+#include "config.h"
+
 #include "device_db.h"
 #include "utility.h"
 
@@ -358,6 +360,11 @@ namespace launch_profile {
       "desktop_display", false,
       "host_configuration", "host_default_topology"
     );
+  }
+
+  int owned_display_refresh_ceiling_hz() {
+    const int configured = config::video.linux_display.headless_max_refresh_rate;
+    return configured > 0 ? configured : k_default_owned_display_refresh_ceiling_hz;
   }
 
   resolution_t resolve(const request_t &request) {

@@ -1126,6 +1126,12 @@ pactl info | grep Source</pre>
           </div>
 
           <div>
+            <label for="headless_max_refresh_rate" class="block text-sm font-medium text-storm mb-1">{{ $t("config.headless_max_refresh_rate") }}</label>
+            <input id="headless_max_refresh_rate" v-model="config.headless_max_refresh_rate" type="number" min="0" max="1000" placeholder="240" class="settings-input" />
+            <div class="text-sm text-storm mt-1">{{ $t("config.headless_max_refresh_rate_desc") }}</div>
+          </div>
+
+          <div>
             <label for="disconnect_resume_timeout_seconds" class="block text-sm font-medium text-storm mb-1">{{ $t("config.disconnect_resume_timeout_seconds") }}</label>
             <input id="disconnect_resume_timeout_seconds" v-model.number="config.disconnect_resume_timeout_seconds" type="number" min="0" max="86400" step="30" placeholder="300" class="settings-input" />
             <div class="text-sm text-storm mt-1">{{ $t("config.disconnect_resume_timeout_seconds_desc") }}</div>

@@ -2576,9 +2576,12 @@ namespace nvhttp {
         bool launch_owned_display,
         std::string_view output_name = {}) {
       if (launch_owned_display) {
-        // Virtual/headless display creation owns the future mode. Keep the
-        // containment contract bounded to Nova's stock high-FPS ceiling.
-        return 120;
+        // Virtual/headless display creation owns the future mode, so the
+        // ceiling is a policy bound, not a panel's limit. It used to be a
+        // literal 120 here, another in process.cpp, and a third feeding
+        // /serverinfo, all pinned to Nova's dropdown from before Native FPS
+        // could ask for the panel's real rate (#686). One function now.
+        return launch_profile::owned_display_refresh_ceiling_hz();
       }
       const std::string selected_output = output_name.empty() ?
         config::video.output_name : std::string {output_name};
@@ -2586,7 +2589,37 @@ namespace nvhttp {
     }
 
     int advertised_max_launch_refresh_rate_for_http() {
-      return topology_max_launch_refresh_rate_for_http(false).value_or(120);
+      // The launch that follows is validated against the same ceiling, so
+      // advertise the one it will actually meet. This always passed false, so a
+      // headless host advertised its physical monitor's rate and Nova rejected
+      // a 165 Hz request before connecting while other clients were silently
+      // clamped at launch (#686). Whether the host's configured stream mode
+      // creates its own display is the same question launch validation asks.
+      bool configured_mode_owns_display = false;
+#ifdef __linux__
+      configured_mode_owns_display = stream_display_policy::selection_owns_launch_refresh_rate(
+        stream_display_policy::configured_selection()
+      );
+#else
+      bool virtual_display_supported = false;
+      bool host_requires_virtual_display = false;
+#if defined(_WIN32)
+      virtual_display_supported = settings_metadata::host_virtual_display_available();
+      host_requires_virtual_display =
+        config::video.linux_display.headless_mode ||
+        !video::allow_encoder_probing();
+#endif
+      configured_mode_owns_display = launch_profile::resolve_non_linux_topology(
+        {},
+        false,
+        false,
+        false,
+        virtual_display_supported,
+        host_requires_virtual_display
+      ).launch_owns_refresh_rate;
+#endif
+      return topology_max_launch_refresh_rate_for_http(configured_mode_owns_display)
+        .value_or(launch_profile::k_unknown_output_refresh_fallback_hz);
     }
 
     std::string_view codec_name_for_video_format(int video_format) {
@@ -10390,6 +10423,10 @@ namespace nvhttp {
 
   void load_pairing_state_for_tests() {
     load_state();
+  }
+
+  int advertised_max_launch_refresh_rate_for_tests() {
+    return advertised_max_launch_refresh_rate_for_http();
   }
 #endif
 

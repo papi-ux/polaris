@@ -394,6 +394,7 @@ const tabs = ref([
       "double_refreshrate": "disabled",
       "max_bitrate": 0,
       "minimum_fps_target": 0,
+      "headless_max_refresh_rate": 0,
       "disconnect_resume_timeout_seconds": 300,
       "adaptive_bitrate_enabled": "disabled",
       "adaptive_bitrate_min": 2000,

@@ -460,7 +460,10 @@ TEST(DoctorResetContract, FutureLaunchOwnedDisplayIsNotCappedByCurrentPhysicalRe
     "int advertised_max_launch_refresh_rate_for_http()"
   );
   EXPECT_NE(helper.find("if (launch_owned_display)"), std::string::npos);
-  EXPECT_NE(helper.find("return 120"), std::string::npos);
+  // The owned-display branch returns the one shared ceiling, never a literal
+  // and never the physical output's current rate (#686).
+  EXPECT_NE(helper.find("owned_display_refresh_ceiling_hz()"), std::string::npos);
+  EXPECT_EQ(helper.find("return 120"), std::string::npos);
   EXPECT_EQ(helper.find("return 60"), std::string::npos);
 }
 
