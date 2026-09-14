@@ -1,6 +1,7 @@
 #include "spaces_runtime.h"
 #ifdef __linux__
 #include "spaces_runtime_catalog.h"
+#include "multiseat_profile_catalog.h"
 #include <algorithm>
 #include <iostream>
 #include <set>
@@ -155,6 +156,21 @@ namespace multiseat::spaces {
       std::cout << json({{"schema", 1}, {"runtimes", entries}}).dump() << '\n';
       return 0;
     }
+    if (argc == 5 && std::string_view(argv[0]) == "create-first") {
+      container::local_host_t host;
+      const auto runtime = install_runtime(host, argv[2], *catalog);
+      if (!runtime.ready) {
+        std::cout << json({{"prepared", false}, {"activated", false},
+          {"code", runtime.code}, {"message", runtime.message}}).dump() << '\n';
+        return 1;
+      }
+      const auto result = profiles::create_first_steam(argv[1], {argv[3], argv[4]}, runtime.image, host);
+      std::cout << json({{"prepared", static_cast<bool>(result)}, {"activated", false},
+        {"profile_id", result.profile_key}, {"volume", result.volume_name},
+        {"initializer", result.initializer_name}, {"network", result.network_name},
+        {"message", result ? "The first Steam home is prepared. Controller configuration and device assignment are still required." : result.error}}).dump() << '\n';
+      return result ? 0 : 1;
+    }
     if (argc == 2 && std::string_view(argv[0]) == "install") {
       container::local_host_t host;
       const auto result = install_runtime(host, argv[1], *catalog);
@@ -162,7 +178,8 @@ namespace multiseat::spaces {
         {"message", result.message}, {"image", result.image}}).dump() << '\n';
       return result.ready ? 0 : 1;
     }
-    std::cerr << "Usage: polaris --spaces-runtime list | install RUNTIME_ID\n";
+    std::cerr << "Usage: polaris --spaces-runtime list | install RUNTIME_ID\n"
+                 "       polaris --spaces-runtime create-first CATALOG RUNTIME_ID REQUEST_ID NAME\n";
     return 2;
   }
 }

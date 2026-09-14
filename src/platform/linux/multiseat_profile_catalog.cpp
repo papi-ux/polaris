@@ -37,6 +37,19 @@ namespace multiseat::profiles {
         });
     }
 
+    bool valid_new_steam(std::string_view request_id, std::string_view name) {
+      if (request_id.size() != 36 ||
+          name.empty() || name.size() > 128 ||
+          name.front() == ' ' || name.back() == ' ' ||
+          std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; })) return false;
+      for (std::size_t i = 0; i < request_id.size(); ++i) {
+        const char c = request_id[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; }
+        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+      }
+      return true;
+    }
+
     std::string family(runtime_profile_e value) {
       switch (value) {
         case runtime_profile_e::gamescope: return "gamescope";
@@ -334,16 +347,8 @@ namespace multiseat::profiles {
   }
 
   bool valid_steam_create_request(const steam_create_request_t &request) {
-    if (request.request_id.size() != 36 || !token(request.source_profile_id) ||
-        request.request_id == request.source_profile_id || request.name.empty() || request.name.size() > 128 ||
-        request.name.front() == ' ' || request.name.back() == ' ' ||
-        std::any_of(request.name.begin(), request.name.end(), [](unsigned char c) { return c < 32 || c == 127; })) return false;
-    for (std::size_t i = 0; i < request.request_id.size(); ++i) {
-      const char c = request.request_id[i];
-      if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; }
-      else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-    }
-    return true;
+    return valid_new_steam(request.request_id, request.name) && token(request.source_profile_id) &&
+      request.request_id != request.source_profile_id;
   }
 
   std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload) {
@@ -401,6 +406,59 @@ namespace multiseat::profiles {
       provision(host, entry, result);
       return payload;
     });
+  }
+
+  change_result_t create_first_steam(const std::filesystem::path &path,
+    const first_steam_request_t &request, std::string_view image, container::host_t &host) {
+    if (!valid_new_steam(request.request_id, request.name) || !image_id(image))
+      return {.error = "Invalid first-space request or runtime identity."};
+    if (host.effective_uid() != 1000 || host.effective_gid() != 1000)
+      return {.error = "The current Steam runtime requires service identity 1000:1000. Do not change your Linux user ID."};
+    change_result_t result;
+    try {
+      result.status = private_state_file::update_atomic(path, maximum_catalog_bytes,
+        [&](const auto &current) -> std::optional<std::string> {
+          auto catalog = current.status == private_state_file::read_status_e::missing ?
+            std::optional {catalog_t {1000, 1000, {}}} : current ? decode(current.payload) : std::nullopt;
+          if (!catalog || catalog->owner_uid != 1000 || catalog->owner_gid != 1000) {
+            result.error = "The private Spaces catalog is unsafe or belongs to another service account.";
+            return std::nullopt;
+          }
+          const entry_t entry {
+            .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, std::string(image)},
+            .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+          };
+          const auto existing = std::find_if(catalog->profiles.begin(), catalog->profiles.end(), [&](const auto &value) {
+            return value.storage.profile_key == request.request_id;
+          });
+          if (existing != catalog->profiles.end()) {
+            if (existing->name != entry.name || existing->storage.image_reference != entry.storage.image_reference ||
+                existing->storage.opaque_volume_name != entry.storage.opaque_volume_name ||
+                existing->storage.runtime_profile != runtime_profile_e::steam || existing->workload != entry.workload) {
+              result.error = "This creation request already identifies a different space.";
+              return std::nullopt;
+            }
+            result.profile_key = request.request_id;
+            return encode(*catalog);
+          }
+          if (!catalog->profiles.empty()) {
+            result.error = "Spaces is already configured. Add another space from the existing setup.";
+            return std::nullopt;
+          }
+          catalog->profiles.push_back(entry);
+          const auto payload = encode(*catalog);
+          result.profile_key = request.request_id;
+          provision(host, entry, result);
+          return payload;
+        }).status;
+    } catch (const std::exception &) {
+      result.error = "First-space creation failed. Retain any reported resources for inspection.";
+    }
+    if (result.status == status_e::durability_uncertain)
+      result.error = "Catalog replacement occurred but durability is uncertain. Retry the same request to confirm it; retain the volume.";
+    else if (!result && result.error.empty())
+      result.error = "The Spaces catalog is busy, unsafe, or could not be saved. No controller was activated.";
+    return result;
   }
 
   int command(int argc, char **argv) {

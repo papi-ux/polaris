@@ -11,10 +11,17 @@ The host now has a verified runtime acquisition command:
 ```sh
 polaris --spaces-runtime list
 polaris --spaces-runtime install RUNTIME_ID
+polaris --spaces-runtime create-first CATALOG RUNTIME_ID REQUEST_ID NAME
 ```
 
 This is an implementation and validation interface. The guided Spaces download
 job and first-space configuration transaction still need to call this backend.
+`create-first` obtains an approved runtime and prepares one new private Steam
+home plus its owned network and catalog entry. Use a stable UUID request ID and
+the same name on retries. An existing catalog cannot be replaced; a matching
+retry confirms the same home and preserves later device assignments. It never
+adopts an orphaned volume after an uncertain failure. Controller configuration,
+GPU selection, device assignment and activation remain separate pending steps.
 The shipped catalog is currently empty because no runtime has completed the
 publication and catalog admission process below. An unknown runtime fails
 before any Docker command. Do not fill the catalog with a guessed digest,

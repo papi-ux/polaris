@@ -123,6 +123,106 @@ namespace {
     "12345678-1234-4234-8234-123456789abc", "profile-a", "Second player"
   };
 
+  const profiles::first_steam_request_t first_request {steam_request.request_id, "First player"};
+  const std::string first_image = "sha256:" + std::string(64, 'b');
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceCreatesAPrivateCatalogAndFreshHomeWithoutASource) {
+    provisioning_host_t host; host.image_family = "steam";
+    const auto result = profiles::create_first_steam(path, first_request, first_image, host);
+    ASSERT_TRUE(result) << result.error;
+    ASSERT_EQ(host.calls.size(), 10U);
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 1U);
+    const auto &created = loaded->catalog.profiles.front();
+    EXPECT_EQ(created.storage.profile_key, first_request.request_id);
+    EXPECT_EQ(created.storage.opaque_volume_name, "pv-" + first_request.request_id);
+    EXPECT_EQ(created.storage.image_reference, first_image);
+    EXPECT_EQ(created.name, first_request.name);
+    EXPECT_EQ(created.workload.target_id, "big-picture-v1");
+    EXPECT_TRUE(created.client_keys.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceSupportsAnEmptyInitializedCatalog) {
+    ASSERT_TRUE(profiles::initialize(path, 1000, 1000));
+    provisioning_host_t host; host.image_family = "steam";
+    EXPECT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_EQ(host.calls.size(), 10U);
+  }
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceRetryPreservesItsHomeAndLaterPlayerAssignments) {
+    provisioning_host_t host; host.image_family = "steam";
+    ASSERT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    ASSERT_TRUE(profiles::assign(path, first_request.request_id, "paired-client"));
+    ASSERT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_EQ(host.calls.size(), 10U);
+    auto changed = first_request; changed.name = "Someone else";
+    EXPECT_FALSE(profiles::create_first_steam(path, changed, first_image, host));
+    EXPECT_FALSE(profiles::create_first_steam(path, first_request, "sha256:" + std::string(64, 'c'), host));
+    EXPECT_EQ(host.calls.size(), 10U);
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles.front().client_keys, std::vector<std::string>{"paired-client"});
+  }
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceCannotReplaceAnExistingUnsafeOrBusyCatalog) {
+    save(sample());
+    const auto before = psf::read_secure(path, profiles::maximum_catalog_bytes).payload;
+    provisioning_host_t host; host.image_family = "steam";
+    EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).payload, before);
+    {
+      auto lease = profiles::load(path);
+      ASSERT_TRUE(lease);
+      EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    }
+    ASSERT_TRUE(psf::write_atomic(path, "not a catalog"));
+    EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).payload, "not a catalog");
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceFailuresRetainResourcesWithoutPublishingOrAdoptingAHome) {
+    for (std::size_t failure = 1; failure <= 10; ++failure) {
+      const auto target = root / ("failed-" + std::to_string(failure) + ".json");
+      provisioning_host_t host; host.image_family = "steam"; host.fail_call = failure;
+      const auto result = profiles::create_first_steam(target, first_request, first_image, host);
+      EXPECT_FALSE(result) << failure;
+      EXPECT_EQ(host.calls.size(), failure);
+      EXPECT_EQ(psf::read_secure(target, profiles::maximum_catalog_bytes).status, psf::read_status_e::missing);
+      for (const auto &args : host.calls) EXPECT_EQ(std::find(args.begin(), args.end(), "rm"), args.end());
+      if (!host.volume.empty()) {
+        EXPECT_EQ(result.volume_name, "pv-" + first_request.request_id);
+        host.retain_volume_in_inventory = true;
+        EXPECT_FALSE(profiles::create_first_steam(target, first_request, first_image, host));
+        EXPECT_EQ(host.calls.size(), failure + 2);
+      }
+    }
+  }
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceUncertainCommitIsConfirmedWithoutProvisioningAgain) {
+    provisioning_host_t host; host.image_family = "steam";
+    psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+    EXPECT_EQ(profiles::create_first_steam(path, first_request, first_image, host).status,
+      psf::write_status_e::durability_uncertain);
+    psf::set_write_fault_for_tests(psf::write_fault_e::none);
+    EXPECT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_EQ(host.calls.size(), 10U);
+  }
+
+  TEST_F(MultiseatProfileCatalog, FirstSpaceRejectsInvalidIdentityBeforeStorageOrDocker) {
+    provisioning_host_t host; host.image_family = "steam";
+    auto invalid = first_request; invalid.request_id = "../other";
+    EXPECT_FALSE(profiles::create_first_steam(path, invalid, first_image, host));
+    invalid = first_request; invalid.name = " Hidden";
+    EXPECT_FALSE(profiles::create_first_steam(path, invalid, first_image, host));
+    EXPECT_FALSE(profiles::create_first_steam(path, first_request, "mutable:latest", host));
+    host.uid = 1001;
+    EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_TRUE(host.calls.empty());
+    EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).status, psf::read_status_e::missing);
+  }
+
   TEST_F(MultiseatProfileCatalog, SteamCreationUsesConfiguredImageAndFreshBigPictureHome) {
     auto catalog = sample();
     catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;

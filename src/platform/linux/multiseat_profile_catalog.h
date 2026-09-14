@@ -70,6 +70,15 @@ namespace multiseat::profiles {
   // confirm its existing catalog entry but never copies or adopts another home.
   [[nodiscard]] change_result_t create_steam(const std::filesystem::path &path,
     const steam_create_request_t &request, container::host_t &host);
+  struct first_steam_request_t {
+    std::string request_id, name;
+  };
+  // First-space storage transaction. Only a missing or empty private catalog
+  // can gain its first entry. Matching retries preserve assignments and homes.
+  // The caller must obtain image from the approved runtime installer; this does
+  // not select a GPU, assign a device, configure or activate the controller.
+  [[nodiscard]] change_result_t create_first_steam(const std::filesystem::path &path,
+    const first_steam_request_t &request, std::string_view image, container::host_t &host);
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif
