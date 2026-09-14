@@ -458,4 +458,27 @@ namespace device_db {
     }
   }
 
+#ifdef POLARIS_TESTS
+  std::optional<device_t> set_device_for_tests(const std::string &name, const device_t &device) {
+    load();
+    const auto canonical = canonicalize_name(name);
+    std::optional<device_t> previous;
+    if (const auto it = devices.find(canonical); it != devices.end()) {
+      previous = it->second;
+    }
+    devices[canonical] = device;
+    return previous;
+  }
+
+  void restore_device_for_tests(const std::string &name, const std::optional<device_t> &previous) {
+    load();
+    const auto canonical = canonicalize_name(name);
+    if (previous) {
+      devices[canonical] = *previous;
+    } else {
+      devices.erase(canonical);
+    }
+  }
+#endif
+
 }  // namespace device_db

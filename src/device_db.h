@@ -108,4 +108,18 @@ namespace device_db {
    */
   void save_device(const std::string &name, const device_t &device);
 
+#ifdef POLARIS_TESTS
+  /**
+   * @brief Replace one record for the duration of a test, returning what was there.
+   *
+   * The database loads from the developer's real appdata, so a test that assumes the
+   * shipped record for a device is really asserting the state of one machine's
+   * device_db.json (#687). A test that cares about a record sets it.
+   */
+  std::optional<device_t> set_device_for_tests(const std::string &name, const device_t &device);
+
+  /** @brief Put back what set_device_for_tests returned. */
+  void restore_device_for_tests(const std::string &name, const std::optional<device_t> &previous);
+#endif
+
 }  // namespace device_db

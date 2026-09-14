@@ -2,6 +2,8 @@
 
 #include <src/launch_profile.h>
 #include <src/config.h>
+#include <src/device_db.h>
+#include <src/utility.h>
 
 #include <filesystem>
 #include <fstream>
@@ -186,6 +188,15 @@ TEST(LaunchProfileTests, HardHostBitrateCapNormalizesExplicitRequestLast) {
 TEST(LaunchProfileTests, HardHdrCapabilityNormalizesAnExplicitLockLast) {
   launch_profile::request_t request;
   request.device_name = "RetroidPocket6";
+  // This test asserts the shipped record for this device, not whatever this machine's
+  // device_db.json says about it (#687).
+  auto shipped_record = device_db::get_device("RetroidPocket6");
+  ASSERT_TRUE(shipped_record.has_value());
+  shipped_record->hdr_capable = false;
+  const auto previous_record = device_db::set_device_for_tests("RetroidPocket6", *shipped_record);
+  const auto restore_record = util::fail_guard([&]() {
+    device_db::restore_device_for_tests("RetroidPocket6", previous_record);
+  });
   request.preset = "quality";
   request.requested_width = 1920;
   request.requested_height = 1080;
@@ -210,6 +221,15 @@ TEST(LaunchProfileTests, AClientReportingHdr10OutranksAnUncorrectedDeviceRecord)
   // impossible to diagnose from the outside.
   launch_profile::request_t request;
   request.device_name = "RetroidPocket6";
+  // This test asserts the shipped record for this device, not whatever this machine's
+  // device_db.json says about it (#687).
+  auto shipped_record = device_db::get_device("RetroidPocket6");
+  ASSERT_TRUE(shipped_record.has_value());
+  shipped_record->hdr_capable = false;
+  const auto previous_record = device_db::set_device_for_tests("RetroidPocket6", *shipped_record);
+  const auto restore_record = util::fail_guard([&]() {
+    device_db::restore_device_for_tests("RetroidPocket6", previous_record);
+  });
   request.preset = "quality";
   request.requested_width = 1920;
   request.requested_height = 1080;
@@ -232,6 +252,15 @@ TEST(LaunchProfileTests, ADeviceRecordStillRefusesHdrWhenTheClientHasNotReported
   // The override must depend on the client actually having said so, not on the field existing.
   launch_profile::request_t request;
   request.device_name = "RetroidPocket6";
+  // This test asserts the shipped record for this device, not whatever this machine's
+  // device_db.json says about it (#687).
+  auto shipped_record = device_db::get_device("RetroidPocket6");
+  ASSERT_TRUE(shipped_record.has_value());
+  shipped_record->hdr_capable = false;
+  const auto previous_record = device_db::set_device_for_tests("RetroidPocket6", *shipped_record);
+  const auto restore_record = util::fail_guard([&]() {
+    device_db::restore_device_for_tests("RetroidPocket6", previous_record);
+  });
   request.preset = "quality";
   request.requested_width = 1920;
   request.requested_height = 1080;
