@@ -1,0 +1,2 @@
+# Explicit defaults prevent discovery of unrelated configuration files.
+{}

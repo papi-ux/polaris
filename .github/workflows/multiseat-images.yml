@@ -4,17 +4,23 @@ on:
   pull_request:
     branches: [master]
     paths:
+      - 'LICENSE'
       - 'containers/multiseat/**'
       - 'multiseat_worker/**'
       - '.github/workflows/multiseat-images.yml'
   push:
     branches: [master]
     paths:
+      - 'LICENSE'
       - 'containers/multiseat/**'
       - 'multiseat_worker/**'
       - '.github/workflows/multiseat-images.yml'
   workflow_dispatch:
     inputs:
+      attest:
+        type: boolean
+        default: false
+        description: Sign checked artifacts from master without publishing a runtime image
       steam_only:
         type: boolean
         default: false
@@ -68,7 +74,21 @@ jobs:
           arguments=("$PROFILE")
           if [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
           python3 containers/multiseat/build-image.py "${arguments[@]}"
+      - name: Scan the image and declared dependencies
+        env:
+          PROFILE: ${{ matrix.profile }}
+          NVIDIA: ${{ inputs.nvidia || 'false' }}
+          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          variant=default
+          if [ "$NVIDIA" = true ]; then variant=nvidia; fi
+          artifact="build/worker-artifacts/$PROFILE/$variant"
+          python3 containers/multiseat/audit-runtime.py "$artifact" \
+            --source-revision "$SOURCE_REVISION" \
+            --cache "$RUNNER_TEMP/grype-db" --output "$artifact/audit"
       - name: Downloadable OCI and provenance
+        if: ${{ always() }}
         uses: actions/upload-artifact@v6
         with:
           name: polaris-worker-${{ matrix.profile }}-${{ github.event.pull_request.head.sha || github.sha }}
@@ -84,3 +104,62 @@ jobs:
             build/worker-artifacts/**/providers.json
             build/worker-artifacts/**/nvidia-files.json
             build/worker-artifacts/**/nvidia-runtime.json
+            build/worker-artifacts/**/audit/*.json
+
+  attest:
+    name: Sign checked runtime artifacts (${{ matrix.profile }})
+    needs: image
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.attest && github.ref == 'refs/heads/master' && github.repository == 'papi-ux/polaris' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.steam_only && '["steam"]' || '["gamescope","steam","heroic","lutris"]') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: polaris-worker-${{ matrix.profile }}-${{ github.sha }}
+          path: runtime-artifact
+      - name: Recheck exact artifact and scan evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import subprocess
+          artifacts = list(Path('runtime-artifact').rglob('artifact.json'))
+          if len(artifacts) != 1:
+              raise SystemExit('Expected one runtime artifact')
+          subprocess.run(['python3', 'containers/multiseat/audit-runtime.py',
+                          str(artifacts[0].parent), '--verify',
+                          '--source-revision', os.environ['SOURCE_REVISION']], check=True)
+          PYTHON
+      - name: Sign build provenance for the archive and its evidence
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            runtime-artifact/**/worker.oci.tar
+            runtime-artifact/**/artifact.json
+            runtime-artifact/**/sbom.cdx.json
+            runtime-artifact/**/audit/*.json
+          create-storage-record: false
+      - name: Downloadable signature bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: polaris-worker-${{ matrix.profile }}-${{ github.sha }}-signature
+          path: ${{ steps.provenance.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 14

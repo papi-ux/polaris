@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "platform": "linux/amd64",
+  "syft": {
+    "version": "1.51.1",
+    "reference": "docker.io/anchore/syft@sha256:95fe0835e5bebc6f8b1f8acef68d47d63d594ef4c0f25c097ff853b23cbac74c"
+  },
+  "grype": {
+    "version": "0.118.0",
+    "reference": "docker.io/anchore/grype@sha256:8a93fc48da96bd6ec5981279d099b69de11541dc68fdf222fb9161f8ff284af7"
+  }
+}
