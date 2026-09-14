@@ -274,3 +274,15 @@ The temporary host and workers stopped, original client APK and display
 preferences were restored, and the original enforcing worker policy was
 restored. The normal Polaris service was not restarted. No runtime image was
 signed, published or admitted to the download catalog by this experiment.
+
+
+## Sustained Two Stream Followup, September 14
+
+The [sustained streaming report](container-multiseat-sustained-streaming.md)
+records two ordinary-build 15 minute intervals and a separate receive diagnostic.
+Both game workers stayed running, but audio queue skips remained. Eight matched
+RTP packet pairs in the diagnostic left the host within 5.317 ms and arrived at
+Android's kernel as much as 65.889 ms apart. Nova read those packets within
+0.481 ms of their kernel timestamps. These events locate delay after host egress;
+they do not identify a particular network component or supersede the earlier host
+stalls. Audio reliability remains an acceptance gate.

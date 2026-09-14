@@ -267,7 +267,7 @@ Host package availability and Spaces validation are separate:
 | --- | --- |
 | NVIDIA encoding | Exercised in the development Steam runtime |
 | AMD encoding | Do not infer Spaces support from native Polaris VA-API support; equivalent runtime acceptance is still needed |
-| 120 FPS | Short simultaneous gameplay checks passed; a longer audio-dropout failure remains unresolved |
+| 120 FPS | Two streams stayed connected through a 15 minute test with one at 120 FPS; uneven presentation and audio gaps remain unresolved |
 | Browser Stream | Separate experiment; it does not yet open a space's isolated stream |
 | Automatic recovery | Do not apply global host adjustments to a space; isolated telemetry and verified session-scoped repair are still needed |
 
@@ -279,6 +279,9 @@ the supported Spaces engine in this preview.
 If a graphics or input check fails, use Doctor & Support and resolve the named
 host permission or driver issue before trying another launch. Keep SELinux
 enabled. Do not add privileged container flags or mount the entire device tree.
+
+The [sustained streaming report](research/container-multiseat-sustained-streaming.md)
+records the current test configuration, measurements, and remaining limits.
 
 If a space stops on its own or loses sound, retain the time of the failure and
 the space name for diagnosis. A successful setup check is not evidence that
@@ -320,6 +323,12 @@ Default Space is used when there is no saved permitted choice.
 **Ready To Play** means the Space is idle. **In Use** means another device is using
 it. **Starting** and **Stopping** mean Nova must wait before opening. An active
 Space owned by this device can offer **Resume Space** after checking its session.
+
+The current gaming runtime ends its game session when the stream disconnects.
+Reopening uses the same Steam home, installed games, and saved data, but starts a
+new session. Save your game before disconnecting; returning to the running game
+later is not supported by this runtime.
+
 Finish your own stream and wait for cleanup before switching Spaces. Other devices
 can keep streaming while you choose. Changing access or defaults still requires all
 Space streams to stop because it reloads the host's permission catalog.
