@@ -103,9 +103,9 @@ install path described in the release notes.
 
 The package a repository serves is the package the release published, byte for
 byte, with a signature added to the repository copy. Nothing is rebuilt:
-a rebuild would ship a binary that CI never tested, and the Fedora packaging
-pulls a CUDA toolkit over the network at build time, which no sandboxed rebuild
-service permits.
+a rebuild would ship a binary that CI never tested, and the Fedora and Ubuntu
+packaging pull a CUDA toolkit over the network at build time, which no sandboxed
+rebuild service permits.
 
 The repository currently carries the latest stable release only. Prereleases are
 never published to it. Rolling back means installing an older release package by
