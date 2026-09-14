@@ -24,6 +24,7 @@
 #include "platform/common.h"
 #ifdef __linux__
   #include "platform/linux/game_mode_host.h"
+  #include "platform/linux/user_unit_override.h"
   #include "platform/linux/input/input_group_access.h"
 #endif
 
@@ -551,6 +552,7 @@ namespace args {
     // about the account that streams, so like headless boot itself it stays
     // silent when a bare root login cannot name one.
     std::string game_mode_advice;
+    std::string service_override_advice;
     if (const auto *target_pw = setup_target_user.empty() || setup_target_user == "root" ? nullptr : getpwnam(setup_target_user.c_str());
         target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
       const auto game_mode = platf::game_mode_host::detect(platf::game_mode_host::default_probe(target_pw->pw_uid));
@@ -563,6 +565,18 @@ namespace args {
                          boot_before.independent() ? state_t::already_independent :
                                                      state_t::needs_headless_boot;
       game_mode_advice = platf::game_mode_host::setup_host_advice(game_mode, state, exe_path->string());
+
+      // The Bazzite DRM/KMS recipe points the user service at a copy of the
+      // binary through a drop-in. A copy removed without its drop-in leaves a
+      // service that cannot exec, and a copy kept across package updates keeps
+      // running the old version; both are invisible until someone reads
+      // `systemctl --user cat polaris`. Say it here, where the person fixing
+      // the host is reading.
+      service_override_advice = platf::user_unit::setup_host_advice(
+        platf::user_unit::effective_exec_override(fs::path(target_pw->pw_dir) / ".config/systemd/user/polaris.service.d"),
+        setup_target_user,
+        *exe_path
+      );
     }
 
     const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
@@ -580,6 +594,10 @@ namespace args {
           << "and /dev/uhid are already usable by ["sv << setup_target_user << "]."sv << std::endl
           << std::endl
           << game_mode_advice;
+      }
+      if (!service_override_advice.empty()) {
+        std::cout << std::endl
+                  << service_override_advice;
       }
       if (!input_group_advice.empty()) {
         std::cout << std::endl
@@ -710,6 +728,10 @@ namespace args {
     } else {
       std::cout
         << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
+    }
+    if (!service_override_advice.empty()) {
+      std::cout << std::endl
+                << service_override_advice;
     }
     if (!input_group_advice.empty()) {
       std::cout << std::endl

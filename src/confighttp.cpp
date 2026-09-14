@@ -100,6 +100,7 @@
   #include "platform/linux/virtual_display.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/game_mode_host.h"
+  #include "platform/linux/user_unit_override.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/display_topology.h"
@@ -6844,6 +6845,27 @@ namespace confighttp {
     output["boot_readiness"]["status"] = boot_guidance.status;
     output["boot_readiness"]["summary"] = boot_guidance.summary;
     output["boot_readiness"]["action"] = boot_guidance.action;
+
+    // Which binary is actually running, and whether the user service points
+    // somewhere else. A copy outside the package (the Bazzite DRM/KMS recipe)
+    // keeps running the old version across updates, and a copy removed
+    // without its drop-in leaves a service that cannot start; the console
+    // showed neither.
+    if (const auto running = platf::user_unit::running_executable()) {
+      const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
+      output["running_binary"]["path"] = binary.path;
+      output["running_binary"]["version"] = PROJECT_VERSION;
+      output["running_binary"]["packaged_path"] = binary.packaged_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(binary.packaged_path);
+      output["running_binary"]["matches_package"] = binary.matches_package ? nlohmann::json(*binary.matches_package) : nlohmann::json(nullptr);
+    }
+    if (!account_home.empty()) {
+      const auto override = platf::user_unit::effective_exec_override(account_home / ".config/systemd/user/polaris.service.d");
+      if (override.active()) {
+        output["running_binary"]["service_override"]["drop_in"] = override.drop_in.string();
+        output["running_binary"]["service_override"]["exec_start"] = override.exec_start;
+        output["running_binary"]["service_override"]["binary_missing"] = override.binary_missing;
+      }
+    }
 
     // A headless-boot host has no desktop on purpose, and a Game Mode host
     // has gamescope instead of one; telling either to restart from the
