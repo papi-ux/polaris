@@ -70,6 +70,7 @@ class ArtifactIntegrity(unittest.TestCase):
             here = root / 'containers/multiseat'
             (here / 'locks').mkdir(parents=True)
             (root / 'multiseat_worker').mkdir()
+            (root / 'LICENSE').write_text('reviewed license\n')
             (root / '.gitignore').write_text('*sync-conflict*\nbuild/\n')
             original = 'package main\n'
             source = root / 'multiseat_worker/main.go'

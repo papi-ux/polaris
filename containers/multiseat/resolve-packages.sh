@@ -29,13 +29,17 @@ runtime="$runtime libgles2"
 if [ "$profile" != gamescope ]; then
   runtime="$runtime libegl1:i386 libgles2:i386 libgl1:i386 libwayland-server0:i386"
 fi
+# A pinned base can still contain older packages than the signed snapshot.
+# Explicitly resolve its installed packages too, so a dependency-only install
+# cannot leave libc-bin, gpgv or perl-base behind their reviewed security fixes.
+base_packages=$(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' | awk '$2 == "installed" {print $1}')
 for role in runtime build; do
   mkdir -p "/out/$role/partial"
-  requested="$runtime"
-  if [ "$role" = build ]; then requested="$runtime $build"; fi
+  requested="$base_packages $runtime"
+  if [ "$role" = build ]; then requested="$base_packages $runtime $build"; fi
   # Word splitting is intentional for the fixed lists above.
-  apt-get --yes --no-install-recommends --print-uris install $requested > "/out/$role.uris"
-  apt-get -o Acquire::https::CaInfo=/resolver-ca.crt --yes --no-install-recommends --download-only -o "Dir::Cache::archives=/out/$role" install $requested
+  apt-get --yes --no-remove --no-install-recommends --print-uris install $requested > "/out/$role.uris"
+  apt-get -o Acquire::https::CaInfo=/resolver-ca.crt --yes --no-remove --no-install-recommends --download-only -o "Dir::Cache::archives=/out/$role" install $requested
   if [ "$profile" = heroic ]; then
     launcher_filename=$(awk '$1 ~ /^.file:/ {print $2}' "/out/$role.uris")
     case "$launcher_filename" in */*|*[!a-zA-Z0-9._+%:~=-]*|'') exit 1 ;; esac

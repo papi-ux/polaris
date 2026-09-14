@@ -13,7 +13,7 @@ import tempfile
 import tomllib
 import urllib.parse
 
-from oci_archive import docker_to_oci, verify_archive
+from oci_archive import docker_config_digest, docker_to_oci, verify_archive
 from nvidia_runtime import architectures
 from runtime_catalog import REQUIRED_PROVIDER_TESTS
 
@@ -46,7 +46,7 @@ def materialized_context(revision, profile_id, nvidia):
         context = pathlib.Path(temporary)
         archive_path = context / 'source.tar'
         with archive_path.open('wb') as stream:
-            run(['git', 'archive', revision, 'multiseat_worker', 'containers/multiseat'], stdout=stream)
+            run(['git', 'archive', revision, 'LICENSE', 'multiseat_worker', 'containers/multiseat'], stdout=stream)
         with tarfile.open(archive_path) as archive:
             for member in archive.getmembers():
                 name = pathlib.PurePosixPath(member.name)
@@ -146,7 +146,7 @@ def sbom(packages, profile, revision, context):
                            'externalReferences': [{'type': 'vcs', 'url': lock['url'] + '/tree/' + lock['revision']}],
                            'properties': [{'name': 'polaris:source-archive-sha256', 'value': lock['sha256']}] +
                                          [{'name': 'polaris:patch-sha256:' + path, 'value': digest(here / path)}
-                                          for path in lock.get('patches', [])]})
+                                          for path in lock.get('patches', []) + lock.get('dependency_patches', [])]})
     # Retain the complete reviewed Rust closure, including declared build/dev
     # inputs; this is dependency provenance, not a claim that every crate links.
     with tarfile.open(context / 'build/runtime-inputs/plugin.tar') as archive:
@@ -214,17 +214,26 @@ def build_artifact(args, revision, epoch, context):
     if inspected['Architecture'] != 'amd64' or inspected['Os'] != 'linux' or labels.get('org.opencontainers.image.revision') != revision or labels.get('io.polaris.multiseat.profile') != args.profile:
         raise ValueError('produced worker identity does not match the build')
     config_digest = 'sha256:' + inspected['Id'].removeprefix('sha256:')
+    if args.engine == 'docker':
+        run(engine + ['image', 'save', '-o', str(artifact / 'worker.docker.tar'), inspected['Id']])
+        config_digest = docker_config_digest(artifact / 'worker.docker.tar', inspected['Id'])
 
     # CI covers all device-free real providers and their independent teardown.
     # Gamescope hardware acceptance is a separate required physical receipt.
     provider_image = image + '-providers'
     run(command + ['--target', 'provider-nvidia-test' if args.nvidia else 'provider-test', '-t', provider_image, str(context)])
     provider_inspected = json.loads(output(engine + ['image', 'inspect', provider_image]))[0]
+    provider_config = 'sha256:' + provider_inspected['Id'].removeprefix('sha256:')
+    if args.engine == 'docker':
+        with tempfile.TemporaryDirectory(prefix='polaris-provider-export-') as temporary:
+            saved = pathlib.Path(temporary) / 'provider.docker.tar'
+            run(engine + ['image', 'save', '-o', str(saved), provider_inspected['Id']])
+            provider_config = docker_config_digest(saved, provider_inspected['Id'])
     worker_layers = inspected['RootFS']['Layers']
     if provider_inspected['RootFS']['Layers'][:len(worker_layers)] != worker_layers:
         raise ValueError('provider test image does not extend the produced worker filesystem')
     test_command = engine + ['run', '--rm', '--network=none', '--user=1000:1000', '--cap-drop=all',
-                    '--security-opt=no-new-privileges', provider_image, '-test.v',
+                    '--security-opt=no-new-privileges', provider_inspected['Id'], '-test.v',
                     '-test.run=^TestReal(SessionBus|PrivateAudio|AudioReadiness|Display|Encoder)', '-test.timeout=2m']
     with (artifact / 'providers.log').open('w') as log:
         run(test_command, stdout=log, stderr=subprocess.STDOUT)
@@ -235,7 +244,7 @@ def build_artifact(args, revision, epoch, context):
         raise ValueError('real provider tests skipped or did not all execute')
     write_json(artifact / 'providers.json', {'schema': 1, 'result': 'passed', 'tests': names,
                                             'variant': variant, 'worker_config_digest': config_digest,
-                                            'provider_config_digest': 'sha256:' + provider_inspected['Id'].removeprefix('sha256:'),
+                                            'provider_config_digest': provider_config,
                                             'scope': 'isolated session bus, audio, software display and continuous software encoder; no game stream'})
     package_manifest = output(engine + ['run', '--rm', '--network=none', '--read-only',
                                '--cap-drop=all', '--security-opt=no-new-privileges',
@@ -273,7 +282,6 @@ def build_artifact(args, revision, epoch, context):
                                                   {'name': 'polaris:file-manifest-sha256', 'value': report['manifest_sha256']}]})
     write_json(artifact / 'sbom.cdx.json', bill)
     if args.engine == 'docker':
-        run(engine + ['image', 'save', '-o', str(artifact / 'worker.docker.tar'), image])
         docker_to_oci(artifact / 'worker.docker.tar', artifact / 'worker.oci.tar', config_digest, int(epoch))
         extra_files.append('worker.docker.tar')
     else:
@@ -284,14 +292,15 @@ def build_artifact(args, revision, epoch, context):
     lock_files = [here / 'images.lock.json', here / profile['dependency_lock']]
     lock_files += [here / path for name, path in images['dependency_locks'].items() if args.nvidia or name not in ('nvidia', 'nvcodec')]
     for name in ['plugin', 'gamescope'] + (['nvcodec'] if args.nvidia else []):
-        lock_files += [here / path for path in json.loads((here / ('locks/' + name + '.json')).read_text()).get('patches', [])]
+        dependency = json.loads((here / ('locks/' + name + '.json')).read_text())
+        lock_files += [here / path for path in dependency.get('patches', []) + dependency.get('dependency_patches', [])]
     write_json(artifact / 'artifact.json', {
         'schema': 1, 'source_revision': revision, 'profile': args.profile,
         'platform': 'linux/amd64', 'variant': variant, 'source_root': profile['reference'],
         'media_contract': 1, 'owner_uid': 1000, 'owner_gid': 1000,
         'worker_digest': worker_digest, 'worker_config_digest': config_digest,
         'build_engine': args.engine,
-        'worker_reference': config_digest if args.engine == 'docker' else image.split(':')[0] + '@' + worker_digest,
+        'worker_reference': inspected['Id'] if args.engine == 'docker' else image.split(':')[0] + '@' + worker_digest,
         'dependency_locks': {str(path.relative_to(context)): digest(path) for path in lock_files},
         'files': {name: {'sha256': digest(artifact / name), 'bytes': (artifact / name).stat().st_size} for name in ['worker.oci.tar', 'packages.tsv', 'sbom.cdx.json', 'providers.json'] + extra_files},
         'validation': {'dependencies': 'passed', 'session_bus_audio_display': 'passed',

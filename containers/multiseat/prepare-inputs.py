@@ -86,8 +86,13 @@ def prepare_plugin(lock, rust):
              '--components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu', '--disable-ldconfig'])
         source = temporary / 'source'
         checkout(lock['url'], lock['revision'], source)
+        if digest(source / 'Cargo.lock') != lock['upstream_cargo_lock_sha256']:
+            raise ValueError('upstream plugin Cargo.lock changed')
+        for patch in lock['dependency_patches']:
+            with (HERE / patch).open('rb') as stream:
+                run(['patch', '-d', str(source), '-p1', '--batch', '--forward', '--fuzz=0'], stdin=stream)
         if digest(source / 'Cargo.lock') != lock['cargo_lock_sha256']:
-            raise ValueError('plugin Cargo.lock changed')
+            raise ValueError('patched plugin Cargo.lock differs from its reviewed lock')
         environment = dict(os.environ, PATH=str(prefix / 'bin') + ':' + os.environ['PATH'],
                            CARGO_HOME=str(temporary / 'cargo-home'), CARGO_NET_OFFLINE='false',
                            CARGO_NET_GIT_FETCH_WITH_CLI='true')

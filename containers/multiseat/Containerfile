@@ -30,9 +30,11 @@ ENV PATH=/opt/rust/bin:$PATH \
     SOURCE_DATE_EPOCH=1754524800
 WORKDIR /src
 COPY containers/multiseat/patches /patches
+COPY containers/multiseat/collect-plugin-notices.py /collect-plugin-notices.py
 RUN patch -d /src -p1 --batch --forward --fuzz=0 < /patches/display-polaris-model.patch && \
     cargo build --frozen --release -p gst-plugin-wayland-display && \
-    test -f target/release/libgstwaylanddisplaysrc.so
+    test -f target/release/libgstwaylanddisplaysrc.so && \
+    python3 /collect-plugin-notices.py
 RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-ignore-unsupported-switches.patch && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-finish-command-buffers.patch && \
@@ -195,7 +197,7 @@ RUN go test -trimpath ./... && \
       -o /out/polaris-seat-input-probe ./cmd/polaris-seat-input-probe && \
     go test -c -trimpath -o /out/provider-tests ./internal/seatprovider
 
-FROM ${RUNTIME_IMAGE} AS runtime-root
+FROM ${RUNTIME_IMAGE} AS runtime-root-prepared
 ARG RUNTIME_PROFILE=gamescope
 ARG POLARIS_REVISION=unknown
 USER 0
@@ -222,11 +224,20 @@ COPY containers/multiseat/locks/gamescope.json /usr/share/polaris/build/gamescop
 COPY containers/multiseat/patches /usr/share/polaris/build/patches
 COPY containers/multiseat/locks/plugin.json /usr/share/polaris/build/plugin.lock.json
 COPY --from=runtime-root-build /src/LICENSE /usr/share/licenses/polaris-seat-display/LICENSE
+COPY --from=runtime-root-build /plugin-notices /usr/share/licenses/polaris-seat-display/dependencies
 COPY --from=runtime-root-build /gamescope-src/LICENSE /usr/share/licenses/polaris-gamescope/LICENSE
+COPY LICENSE /usr/share/licenses/polaris/LICENSE
+COPY --from=worker-build /usr/local/go/LICENSE /usr/share/licenses/polaris-go/LICENSE
 COPY --chmod=0644 containers/multiseat/providers/polaris-audio-policy.conf /usr/share/wireplumber/wireplumber.conf.d/99-polaris-seat.conf
 COPY --chmod=0644 containers/multiseat/providers/polaris-audio-target.lua /usr/share/wireplumber/scripts/polaris-allocated-target.lua
 COPY containers/multiseat/check-runtime.py /check-runtime.py
 RUN python3 /check-runtime.py && rm /check-runtime.py
+
+# Export the prepared filesystem once. Deleted init binaries and downloaded
+# package archives must not survive in layers delivered to a player's host.
+FROM scratch AS runtime-root
+COPY --from=runtime-root-prepared / /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 FROM runtime-root AS worker-base
 ARG RUNTIME_PROFILE=gamescope

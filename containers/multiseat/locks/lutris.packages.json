@@ -399,6 +399,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glycin/glycin-thumbnailers_2.1.1%2bds-0ubuntu1_amd64.deb"
     },
     {
+      "name": "gpgv",
+      "version": "2.4.8-4ubuntu3.1",
+      "architecture": "amd64",
+      "filename": "gpgv_2.4.8-4ubuntu3.1_amd64.deb",
+      "sha256": "0fcce72656439d90821bbd23580afc794a01ec2f28622ae31b4f5394a830bb09",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gnupg2/gpgv_2.4.8-4ubuntu3.1_amd64.deb"
+    },
+    {
       "name": "gsettings-desktop-schemas",
       "version": "50.0-1ubuntu2",
       "architecture": "all",
@@ -615,6 +623,22 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/at-spi2-core/libatspi2.0-0t64_2.60.4-0ubuntu0.1_amd64.deb"
     },
     {
+      "name": "libaudit-common",
+      "version": "1:4.1.2-1ubuntu0.1",
+      "architecture": "all",
+      "filename": "libaudit-common_1%3a4.1.2-1ubuntu0.1_all.deb",
+      "sha256": "2dc79ab6b5bca3602f93cf1beb0b53e5db7481058b086e6398f47f1b238259cc",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/audit/libaudit-common_4.1.2-1ubuntu0.1_all.deb"
+    },
+    {
+      "name": "libaudit1",
+      "version": "1:4.1.2-1ubuntu0.1",
+      "architecture": "amd64",
+      "filename": "libaudit1_1%3a4.1.2-1ubuntu0.1_amd64.deb",
+      "sha256": "17901d46cb54e0c1b61b58554facf6186d285666bf0d43f9622f6af08e6c12c3",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/audit/libaudit1_4.1.2-1ubuntu0.1_amd64.deb"
+    },
+    {
       "name": "libavahi-client3",
       "version": "0.8-18ubuntu1.1",
       "architecture": "amd64",
@@ -717,6 +741,14 @@
       "filename": "libbsd0_0.12.2-2build2_i386.deb",
       "sha256": "df5de4751eb130a058b0fd95611f41ce7c590b1481d23b4084ca595de96c14e6",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libb/libbsd/libbsd0_0.12.2-2build2_i386.deb"
+    },
+    {
+      "name": "libc-bin",
+      "version": "2.43-2ubuntu2.4",
+      "architecture": "amd64",
+      "filename": "libc-bin_2.43-2ubuntu2.4_amd64.deb",
+      "sha256": "bc4f50a0aebbb348598749c291a3742f9485d94b044715d382388607b9159a1b",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc-bin_2.43-2ubuntu2.4_amd64.deb"
     },
     {
       "name": "libc-gconv-modules-extra",
@@ -4127,6 +4159,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/p/pci.ids/pci.ids_0.0%7e2026.02.12-1_all.deb"
     },
     {
+      "name": "perl-base",
+      "version": "5.40.1-7ubuntu0.3",
+      "architecture": "amd64",
+      "filename": "perl-base_5.40.1-7ubuntu0.3_amd64.deb",
+      "sha256": "eae28e944eccca8ab1a5387dfec710ed32f66531880a6c2a3285ffd95d3b59f2",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/p/perl/perl-base_5.40.1-7ubuntu0.3_amd64.deb"
+    },
+    {
       "name": "pipewire",
       "version": "1.6.2-1ubuntu1.1",
       "architecture": "amd64",
@@ -4559,6 +4599,14 @@
       "filename": "adwaita-icon-theme_50.0-1_all.deb",
       "sha256": "db9f11a94f993de589e7d8879664cb371eb8aefc8a2bce100d923951e4ef30c8",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/adwaita-icon-theme/adwaita-icon-theme_50.0-1_all.deb"
+    },
+    {
+      "name": "aria2",
+      "version": "1.37.0+debian-4",
+      "architecture": "amd64",
+      "filename": "aria2_1.37.0+debian-4_amd64.deb",
+      "sha256": "01c963e0c14516d2c7e39493343f049b8265c2c2353689f02b6c1aa96c82ea0f",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/universe/a/aria2/aria2_1.37.0%2bdebian-4_amd64.deb"
     },
     {
       "name": "at-spi2-common",
@@ -5105,6 +5153,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glycin/glycin-thumbnailers_2.1.1%2bds-0ubuntu1_amd64.deb"
     },
     {
+      "name": "gpgv",
+      "version": "2.4.8-4ubuntu3.1",
+      "architecture": "amd64",
+      "filename": "gpgv_2.4.8-4ubuntu3.1_amd64.deb",
+      "sha256": "0fcce72656439d90821bbd23580afc794a01ec2f28622ae31b4f5394a830bb09",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/gnupg2/gpgv_2.4.8-4ubuntu3.1_amd64.deb"
+    },
+    {
       "name": "gsettings-desktop-schemas",
       "version": "50.0-1ubuntu2",
       "architecture": "all",
@@ -5241,6 +5297,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/liba/libarchive/libarchive13t64_3.8.5-1ubuntu2.2_amd64.deb"
     },
     {
+      "name": "libaria2-0",
+      "version": "1.37.0+debian-4",
+      "architecture": "amd64",
+      "filename": "libaria2-0_1.37.0+debian-4_amd64.deb",
+      "sha256": "cafc887e14b0ce6846b5cb9fd3894e03007fa3221db306977da9ddf30c448a2b",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/universe/a/aria2/libaria2-0_1.37.0%2bdebian-4_amd64.deb"
+    },
+    {
       "name": "libasan8",
       "version": "16-20260322-1ubuntu1",
       "architecture": "amd64",
@@ -5327,6 +5391,22 @@
       "filename": "libatspi2.0-0t64_2.60.4-0ubuntu0.1_amd64.deb",
       "sha256": "6db6e1d7d40f15d38ab5ec302463ac502a057560294d9c73ede22998f733fbd8",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/at-spi2-core/libatspi2.0-0t64_2.60.4-0ubuntu0.1_amd64.deb"
+    },
+    {
+      "name": "libaudit-common",
+      "version": "1:4.1.2-1ubuntu0.1",
+      "architecture": "all",
+      "filename": "libaudit-common_1%3a4.1.2-1ubuntu0.1_all.deb",
+      "sha256": "2dc79ab6b5bca3602f93cf1beb0b53e5db7481058b086e6398f47f1b238259cc",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/audit/libaudit-common_4.1.2-1ubuntu0.1_all.deb"
+    },
+    {
+      "name": "libaudit1",
+      "version": "1:4.1.2-1ubuntu0.1",
+      "architecture": "amd64",
+      "filename": "libaudit1_1%3a4.1.2-1ubuntu0.1_amd64.deb",
+      "sha256": "17901d46cb54e0c1b61b58554facf6186d285666bf0d43f9622f6af08e6c12c3",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/a/audit/libaudit1_4.1.2-1ubuntu0.1_amd64.deb"
     },
     {
       "name": "libavahi-client3",
@@ -5441,6 +5521,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/libb/libbsd/libbsd0_0.12.2-2build2_i386.deb"
     },
     {
+      "name": "libc-bin",
+      "version": "2.43-2ubuntu2.4",
+      "architecture": "amd64",
+      "filename": "libc-bin_2.43-2ubuntu2.4_amd64.deb",
+      "sha256": "bc4f50a0aebbb348598749c291a3742f9485d94b044715d382388607b9159a1b",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/g/glibc/libc-bin_2.43-2ubuntu2.4_amd64.deb"
+    },
+    {
       "name": "libc-dev-bin",
       "version": "2.43-2ubuntu2.4",
       "architecture": "amd64",
@@ -5535,6 +5623,14 @@
       "filename": "libcapi20-3t64_1%3a3.27-3.2build1_amd64.deb",
       "sha256": "e7195161c7f07de5383be17cdcc38db18aaa987c5ca9706a59022555d374cd9b",
       "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/universe/libc/libcapi20-3/libcapi20-3t64_3.27-3.2build1_amd64.deb"
+    },
+    {
+      "name": "libcares2",
+      "version": "1.34.6-1",
+      "architecture": "amd64",
+      "filename": "libcares2_1.34.6-1_amd64.deb",
+      "sha256": "163c4c1b52abbd150dd3d1e112cbf2db528d75c09146b36f69f535218319ce23",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/pool/main/c/c-ares/libcares2_1.34.6-1_amd64.deb"
     },
     {
       "name": "libcc1-0",
