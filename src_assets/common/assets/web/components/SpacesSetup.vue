@@ -11,7 +11,7 @@
               :disabled="loading" @click="refresh">{{ loading ? 'Checking…' : 'Recheck setup' }}</button>
     </div>
     <p v-if="error" class="mt-4 text-sm text-warning-bright" role="alert">{{ error }}</p>
-    <p v-else-if="loading" class="mt-4 text-sm text-storm" role="status">Checking Docker, graphics, and controller access on this host…</p>
+    <p v-else-if="loading" class="mt-4 text-sm text-storm" role="status">Checking Docker, graphics, controls, and host security…</p>
     <template v-if="setup">
       <p class="mt-4 text-sm text-silver" role="status">
         {{ setup.host_prerequisites_ready ? 'Host prerequisites checked.' : 'Complete the steps below, then recheck setup.' }}
@@ -72,7 +72,28 @@
                    class="focus-ring inline-block text-ice hover:underline">Docker access instructions</a>
               </div>
             </details>
-            <router-link v-if="['input', 'gpu'].includes(check.id) && check.state !== 'ready'"
+            <details v-if="check.id === 'security' && check.state !== 'ready' && check.action === 'install_selinux'" class="mt-3">
+              <summary class="focus-ring cursor-pointer rounded py-1 text-sm text-ice">Prepare Spaces security support</summary>
+              <div class="mt-3 space-y-3 text-sm text-storm">
+                <p v-if="setup.immutable_host">Security installation for system image hosts is not available in this preview.</p>
+                <template v-else>
+                  <p>These one-time host steps let the gaming container use its reserved controller devices while keeping SELinux enforcing.</p>
+                  <template v-if="setup.distribution === 'fedora'">
+                    <p>1. In a terminal on the Polaris host, install the policy build tools:</p>
+                    <pre class="overflow-x-auto rounded-lg bg-void/60 p-3 text-xs text-silver"><code>{{ fedoraSecurityPackages }}</code></pre>
+                    <button type="button" class="focus-ring rounded px-1 py-2 text-xs text-ice" @click="copy(fedoraSecurityPackages)">Copy policy tools command</button>
+                  </template>
+                  <p v-else>Install your distribution's SELinux development tools and container reference policy first. The helper checks for these files before making changes.</p>
+                  <p>2. Finish your games, stop Spaces streams, and quit Polaris. If it runs as a service, stop that service first.</p>
+                  <p>3. Run the packaged setup helper in the same host terminal. Your administrator password stays there:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-void/60 p-3 text-xs text-silver"><code>{{ installSpacesSecurity }}</code></pre>
+                  <button type="button" class="focus-ring rounded px-1 py-2 text-xs text-ice" @click="copy(installSpacesSecurity)">Copy security setup command</button>
+                  <p>4. Reopen Polaris, return to Spaces, and select Recheck setup.</p>
+                  <p>If setup is interrupted, run the same command again. Existing manually installed policies need review before the helper can manage them.</p>
+                </template>
+              </div>
+            </details>
+            <router-link v-if="['input', 'gpu', 'security'].includes(check.id) && check.state !== 'ready'"
                          to="/troubleshooting" class="focus-ring mt-3 inline-block rounded py-2 text-sm text-ice hover:underline">
               Open Doctor &amp; Support
             </router-link>
@@ -92,7 +113,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { dockerAccessCommand, installGuide, startDocker, validSetup } from '../spaces-setup.js'
+import { dockerAccessCommand, installGuide, startDocker, validSetup, installSpacesSecurity, fedoraSecurityPackages } from '../spaces-setup.js'
 import SpacesFirstSetup from './SpacesFirstSetup.vue'
 
 const setup = ref(null), loading = ref(false), error = ref(''), copyStatus = ref('')

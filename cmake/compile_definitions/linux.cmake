@@ -11,6 +11,30 @@ set(POLARIS_STEAM_SECCOMP_NAME "steam-seccomp-${POLARIS_STEAM_SECCOMP_SHA256}.js
 set(POLARIS_STEAM_SECCOMP_PATH "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polaris/multiseat/${POLARIS_STEAM_SECCOMP_NAME}")
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_steam_seccomp.h.in"
                "${CMAKE_BINARY_DIR}/generated/multiseat_steam_seccomp.h" @ONLY)
+# Optional SELinux support is shipped inert, then installed by an explicit
+# administrator command against the host's own reference-policy interfaces.
+set(POLARIS_SPACES_SECURITY_DIR "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polaris/multiseat/security")
+set(POLARIS_SPACES_SECURITY_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/selinux")
+set(POLARIS_SPACES_INPUT "${POLARIS_SPACES_SECURITY_SOURCE}/polaris_multiseat_input.cil")
+set(POLARIS_SPACES_WORKER "${POLARIS_SPACES_SECURITY_SOURCE}/polaris_nvidia_worker.te")
+set(POLARIS_SPACES_RULE "${POLARIS_SPACES_SECURITY_SOURCE}/97-polaris-multiseat-input.rules")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${POLARIS_SPACES_INPUT}" "${POLARIS_SPACES_WORKER}" "${POLARIS_SPACES_RULE}")
+file(SHA256 "${POLARIS_SPACES_INPUT}" POLARIS_SPACES_INPUT_SHA)
+file(SHA256 "${POLARIS_SPACES_WORKER}" POLARIS_SPACES_WORKER_SHA)
+file(SHA256 "${POLARIS_SPACES_RULE}" POLARIS_SPACES_RULE_SHA)
+string(SHA256 POLARIS_SPACES_SECURITY_RELEASE "1:${POLARIS_SPACES_INPUT_SHA}:${POLARIS_SPACES_WORKER_SHA}:${POLARIS_SPACES_RULE_SHA}")
+string(SUBSTRING "${POLARIS_SPACES_SECURITY_RELEASE}" 0 32 POLARIS_SPACES_SECURITY_SHORT)
+set(POLARIS_SPACES_SECURITY_MARKER "polaris_spaces_${POLARIS_SPACES_SECURITY_SHORT}_t")
+set(POLARIS_SPACES_VERSION_DATA "(type ${POLARIS_SPACES_SECURITY_MARKER})\n(roletype object_r ${POLARIS_SPACES_SECURITY_MARKER})\n")
+string(SHA256 POLARIS_SPACES_VERSION_SHA "${POLARIS_SPACES_VERSION_DATA}")
+file(WRITE "${CMAKE_BINARY_DIR}/generated/polaris_spaces_version.cil" "${POLARIS_SPACES_VERSION_DATA}")
+file(READ "${POLARIS_SPACES_RULE}" POLARIS_SPACES_RULE_DATA)
+set(POLARIS_SPACES_READY_DATA "{\"schema\":1,\"release\":\"${POLARIS_SPACES_SECURITY_RELEASE}\"}\n")
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security_data.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_security_data.h" @ONLY)
+configure_file("${CMAKE_SOURCE_DIR}/scripts/spaces/security_setup.py.in"
+               "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup" @ONLY)
 # Only a catalog reviewed into the host build may authorize runtime downloads.
 set(POLARIS_SPACES_RUNTIME_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_RUNTIME_SOURCE}")
@@ -577,6 +601,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

@@ -1,5 +1,13 @@
 # linux specific packaging
 
+install(FILES "${POLARIS_SPACES_INPUT}" "${POLARIS_SPACES_WORKER}" "${POLARIS_SPACES_RULE}"
+              "${CMAKE_BINARY_DIR}/generated/polaris_spaces_version.cil"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polaris/multiseat/security")
+if(NOT POLARIS_BUILD_APPIMAGE)
+    install(PROGRAMS "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+
 install(FILES "${POLARIS_STEAM_SECCOMP_SOURCE}"
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polaris/multiseat"
         RENAME "${POLARIS_STEAM_SECCOMP_NAME}")
@@ -82,6 +90,7 @@ set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             bash, \
+            python3, \
             debianutils, \
             grim, \
             labwc, \
@@ -105,6 +114,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
 set(CPACK_RPM_PACKAGE_REQUIRES "\
             ${CPACK_RPM_PLATFORM_PACKAGE_REQUIRES} \
             bash, \
+            python3, \
             grim, \
             labwc, \
             libcap >= 2.22, \

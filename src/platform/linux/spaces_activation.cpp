@@ -2,14 +2,13 @@
 #ifdef __linux__
 #include "spaces_setup.h"
 #include "multiseat_launch_service.h"
-#include "multiseat_steam_seccomp.h"
+#include "spaces_security.h"
 #include "src/config.h"
 #include "src/configuration_store.h"
 #include "src/crypto.h"
 #include "src/utility.h"
 #include <algorithm>
 #include <cctype>
-#include <dlfcn.h>
 #include <fstream>
 #include <regex>
 #include <set>
@@ -41,18 +40,7 @@ namespace multiseat::spaces {
       if (found == values.end()) return true;
       return found->second == "false" || found->second == "0" || found->second == "disabled" || found->second == "off";
     }
-    std::optional<std::string> worker_label() {
-      std::error_code ec;
-      if (!fs::exists("/sys/fs/selinux/enforce", ec)) return ec ? std::nullopt : std::optional<std::string> {""};
-      // Ask the running policy whether the dedicated worker type is installed.
-      // This does not modify the policy, enforcement, device labels or booleans.
-      void *library = dlopen("libselinux.so.1", RTLD_NOW | RTLD_LOCAL);
-      if (!library) return {};
-      auto close = util::fail_guard([&] { dlclose(library); });
-      const auto check = reinterpret_cast<int (*)(const char *)>(dlsym(library, "security_check_context"));
-      if (!check || check("system_u:system_r:polaris_nvidia_worker_t:s0") != 0) return {};
-      return "polaris_nvidia_worker_t";
-    }
+
   }
 
   std::vector<graphics_t> discover_graphics(container::host_t &host, const graphics_roots_t &roots) {
@@ -187,10 +175,9 @@ namespace multiseat::spaces {
     if (stop.stop_requested() || config::multiseat.enabled || config::input.multiseat_moonlight_input ||
         !config::multiseat.config_file.empty()) return false;
     container::local_host_t host(stop);
-    if (!inspect_setup(host, false, false).at("host_prerequisites_ready").get<bool>() ||
-        !host.trusted_data_file(std::filesystem::path(container::steam_seccomp_path), container::steam_seccomp_data)) return false;
+    if (!inspect_setup(host, false, false).at("host_prerequisites_ready").get<bool>()) return false;
     if (runtime.variant == "nvidia" && small_file("/sys/module/nvidia/version") != runtime.nvidia_driver) return false;
-    const auto label = worker_label();
+    const auto label = installed_worker_label(inspect_security(host));
     if (!label) return false;
     const auto choices = discover_graphics(host);
     const auto found = std::find_if(choices.begin(), choices.end(), [&](const auto &g) {

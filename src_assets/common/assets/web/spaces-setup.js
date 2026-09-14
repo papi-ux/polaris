@@ -1,8 +1,8 @@
 // Commands are fixed application text, never shell instructions returned by an API.
-export const hostChecks = ['docker', 'docker_access', 'identity', 'input', 'gpu']
+export const hostChecks = ['docker', 'docker_access', 'identity', 'input', 'gpu', 'security']
 const checkIds = [...hostChecks, 'spaces']
 export function validSetup(value) {
-  if (!value || value.version !== 1 || typeof value.distribution !== 'string' ||
+  if (!value || value.version !== 2 || typeof value.distribution !== 'string' ||
       typeof value.immutable_host !== 'boolean' ||
       !Number.isSafeInteger(value.service_uid) || value.service_uid < 0 ||
       !['host_prerequisites_ready', 'configured', 'available'].every(key => typeof value[key] === 'boolean') ||
@@ -11,7 +11,7 @@ export function validSetup(value) {
   for (const item of value.checks) {
     if (!item || !checkIds.includes(item.id) || seen.has(item.id) ||
         !['ready', 'required', 'not_configured'].includes(item.state) ||
-        typeof item.title !== 'string' || typeof item.detail !== 'string') return false
+        typeof item.title !== 'string' || typeof item.detail !== 'string' || typeof item.action !== 'string') return false
     if (item.id !== 'spaces' && item.state === 'not_configured') return false
     seen.add(item.id)
   }
@@ -54,3 +54,6 @@ export function installGuide(setup) {
   if (!setup || setup.immutable_host) return null
   return Object.hasOwn(installGuides, setup.distribution) ? installGuides[setup.distribution] : null
 }
+
+export const installSpacesSecurity = 'sudo -H polaris-spaces-setup install'
+export const fedoraSecurityPackages = 'sudo dnf install selinux-policy-devel container-selinux make'

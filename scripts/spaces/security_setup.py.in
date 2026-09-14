@@ -1,0 +1,371 @@
+#!/usr/bin/python3 -I
+"""Explicit, recoverable installation of the packaged Spaces SELinux policies."""
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+DATA = Path('@POLARIS_SPACES_SECURITY_DIR@')
+RELEASE = '@POLARIS_SPACES_SECURITY_RELEASE@'
+MARKER = '@POLARIS_SPACES_SECURITY_MARKER@'
+EXPECTED = {
+    'polaris_multiseat_input.cil': '@POLARIS_SPACES_INPUT_SHA@',
+    'polaris_nvidia_worker.te': '@POLARIS_SPACES_WORKER_SHA@',
+    '97-polaris-multiseat-input.rules': '@POLARIS_SPACES_RULE_SHA@',
+    'polaris_spaces_version.cil': '@POLARIS_SPACES_VERSION_SHA@',
+}
+NAMES = ('polaris_multiseat_input', 'polaris_nvidia_worker', 'polaris_spaces_version')
+PRIORITY = '200'
+RULE = Path('/etc/udev/rules.d/97-polaris-multiseat-input.rules')
+STATE = Path('/var/lib/polaris/spaces-security')
+ENV = {'PATH': '/usr/sbin:/usr/bin', 'LANG': 'C', 'LC_ALL': 'C'}
+MAX_FILE = 4 * 1024 * 1024
+
+
+class SetupError(Exception):
+    pass
+
+
+def require(condition, message):
+    if not condition:
+        raise SetupError(message)
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def trusted(path, directory=False, owner=0):
+    """No writable ancestors or symlinks, including the final component."""
+    path = Path(path)
+    require(path.is_absolute() and '..' not in path.parts, 'Unsafe setup path.')
+    for parent in reversed(path.parents):
+        meta = parent.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == owner and not meta.st_mode & 0o022,
+                'Setup path has an untrusted parent.')
+    meta = path.lstat()
+    require(meta.st_uid == owner and not meta.st_mode & 0o7022 and
+            (stat.S_ISDIR(meta.st_mode) if directory else stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1),
+            'Setup file has unsafe ownership or permissions.')
+    return meta
+
+
+def read(path, optional=False, owner=0):
+    try:
+        trusted(path, owner=owner)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise SetupError('A required setup file is missing. Install the matching Polaris package.')
+    with os.fdopen(fd, 'rb') as source:
+        meta = os.fstat(source.fileno())
+        require(stat.S_ISREG(meta.st_mode) and meta.st_uid == owner and not meta.st_mode & 0o7022 and meta.st_nlink == 1,
+                'Setup file changed while it was being opened.')
+        value = source.read(MAX_FILE + 1)
+    require(len(value) <= MAX_FILE, 'Setup file is too large.')
+    return value
+
+
+def sync_directory(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write(path, data, mode=0o600, owner=0):
+    trusted(path.parent, directory=True, owner=owner)
+    read(path, optional=True, owner=owner)
+    fd, temporary = tempfile.mkstemp(prefix='.spaces-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as target:
+            os.fchmod(target.fileno(), mode)
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def remove_file(path, owner=0):
+    if read(path, optional=True, owner=owner) is not None:
+        path.unlink()
+        sync_directory(path.parent)
+
+
+def ready_bytes(release):
+    return ('{"schema":1,"release":"' + release + '"}\n').encode()
+
+
+def kernel_ready(marker=MARKER):
+    try:
+        if Path('/sys/fs/selinux/enforce').read_text().strip() != '1':
+            return False
+        lib = ctypes.CDLL('libselinux.so.1')
+        check = lib.security_check_context
+        check.argtypes = [ctypes.c_char_p]
+        check.restype = ctypes.c_int
+        return all(check(context.encode()) == 0 for context in (
+            'system_u:object_r:' + marker + ':s0',
+            'system_u:object_r:polaris_multiseat_input_device_t:s0',
+            'system_u:system_r:polaris_nvidia_worker_t:s0'))
+    except (OSError, AttributeError):
+        return False
+
+
+def status():
+    if not Path('/sys/fs/selinux/enforce').exists():
+        return {'ready': True, 'message': 'This host does not use SELinux; no Spaces SELinux setup is needed.'}
+    try:
+        ready = kernel_ready() and read(STATE / 'ready.json', optional=True) == ready_bytes(RELEASE) and \
+            digest(read(RULE)) == EXPECTED[RULE.name]
+    except (SetupError, OSError):
+        ready = False
+    return {'ready': ready, 'message': 'Spaces SELinux setup is ready.' if ready else
+            'Spaces SELinux setup needs attention. Quit Polaris, then run sudo -H polaris-spaces-setup install.'}
+
+
+def inventory(output):
+    result = {}
+    for line in output.decode('ascii').splitlines():
+        fields = line.split()
+        if len(fields) < 2 or fields[1] not in NAMES:
+            continue
+        require(len(fields) == 4 and fields[0] == PRIORITY and fields[2] == 'cil' and
+                re.fullmatch(r'sha256:[0-9a-f]{64}', fields[3]) and fields[1] not in result,
+                'An existing Spaces policy is disabled, overridden or locally managed. Review it before installation.')
+        result[fields[1]] = fields[3][7:]
+    return result
+
+
+def decode_state(payload):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'Duplicate setup state field.')
+            result[key] = value
+        return result
+    body = json.loads(payload, object_pairs_hook=unique)
+    require(isinstance(body, dict) and set(body) == {'schema', 'phase', 'release', 'before', 'after', 'rule_before', 'rule_after'} and
+            type(body['schema']) is int and body['schema'] == 1 and
+            body['phase'] in ('installing', 'installed', 'removing', 'removed'), 'Invalid setup state.')
+    for field in ('release', 'rule_after'):
+        require(isinstance(body[field], str) and re.fullmatch('[0-9a-f]{64}', body[field]), 'Invalid setup identity.')
+    require(body['rule_before'] == '' or isinstance(body['rule_before'], str) and
+            re.fullmatch('[0-9a-f]{64}', body['rule_before']), 'Invalid earlier input rule.')
+    for field in ('before', 'after'):
+        require(isinstance(body[field], dict) and set(body[field]) in (set(), set(NAMES)) and
+                all(isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) for value in body[field].values()),
+                'Invalid module ownership record.')
+    require(set(body['after']) == set(NAMES), 'Incomplete module ownership record.')
+    return body
+
+
+class System:
+    def __init__(self, state=STATE, rule=RULE, data=DATA):
+        self.state, self.rule, self.data = state, rule, data
+
+    def run(self, argv, *, cwd=None, source=None, timeout=120):
+        trusted(Path(argv[0]))
+        # Root-owned tools have bounded output and runtime. Output never becomes
+        # a shell command, nor is ambient Docker/Python/Make configuration used.
+        with tempfile.TemporaryFile() as input_file:
+            input_file.write(source or b'')
+            input_file.seek(0)
+            child = subprocess.Popen(argv, stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     cwd=cwd, env=ENV, start_new_session=True)
+            output = bytearray()
+            deadline = time.monotonic() + timeout
+            try:
+                with selectors.DefaultSelector() as selector:
+                    os.set_blocking(child.stdout.fileno(), False)
+                    selector.register(child.stdout, selectors.EVENT_READ)
+                    while selector.get_map() or child.poll() is None:
+                        require(time.monotonic() < deadline, 'A setup command timed out. Retry the same operation to check saved progress.')
+                        for key, _ in selector.select(0.1):
+                            chunk = os.read(key.fd, 32768)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                            else:
+                                output.extend(chunk)
+                                require(len(output) <= MAX_FILE, 'A setup command returned too much data.')
+                require(child.wait() == 0, 'A setup command failed. Check the required SELinux packages and retry; saved progress is retained.')
+                return bytes(output)
+            finally:
+                # Only the process group created for this bounded command.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+                child.stdout.close()
+
+    def modules(self):
+        return inventory(self.run(['/usr/bin/semodule', '-lfull', '-m']))
+
+    def idle(self):
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal() or int(process.name) == os.getpid():
+                continue
+            try:
+                command = (process / 'comm').read_text().strip()
+                if command == 'polaris' or command.startswith('polaris-'):
+                    return False
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError):
+                return False
+        for name in Path('/sys/class/input').glob('event*/device/name'):
+            try:
+                if name.read_text().startswith('Polaris multiseat '):
+                    return False
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError):
+                return False
+        return True
+
+    def compile(self):
+        payloads = {name: read(self.data / name) for name in EXPECTED}
+        require(all(digest(data) == EXPECTED[name] for name, data in payloads.items()),
+                'Packaged Spaces policy files do not match this setup helper.')
+        for path in ('/usr/share/selinux/devel/Makefile', '/usr/share/selinux/devel/include/Makefile',
+                     '/usr/share/selinux/devel/include/services/container.if'):
+            trusted(Path(path))
+        with tempfile.TemporaryDirectory(prefix='compile-', dir=self.state) as directory:
+            directory = Path(directory)
+            (directory / 'polaris_nvidia_worker.te').write_bytes(payloads['polaris_nvidia_worker.te'])
+            self.run(['/usr/bin/make', '-f', '/usr/share/selinux/devel/Makefile', 'polaris_nvidia_worker.pp'], cwd=directory)
+            worker = self.run(['/usr/libexec/selinux/hll/pp'], source=(directory / 'polaris_nvidia_worker.pp').read_bytes())
+        result = {NAMES[0]: payloads['polaris_multiseat_input.cil'], NAMES[1]: worker,
+                  NAMES[2]: payloads['polaris_spaces_version.cil']}
+        for name, data in result.items():
+            write(self.state / (name + '.cil'), data)
+        return {name: digest(data) for name, data in result.items()}
+
+    def save(self, body):
+        write(self.state / 'state.json', (json.dumps(body, sort_keys=True) + '\n').encode())
+
+    def rule_hash(self):
+        value = read(self.rule, optional=True)
+        return digest(value) if value is not None else ''
+
+    def change(self, operation):
+        payload = read(self.state / 'state.json', optional=True)
+        state = decode_state(payload) if payload is not None else None
+        observed = self.modules()
+        rule = self.rule_hash()
+        if operation == 'install' and state and state['phase'] == 'installed' and state['release'] == RELEASE and \
+                observed == state['after'] and rule == state['rule_after'] and kernel_ready():
+            write(self.state / 'ready.json', ready_bytes(RELEASE), 0o644)
+            return 'Spaces SELinux setup is already installed.'
+        require(self.idle(), 'Quit Polaris and stop Spaces streams before changing security setup. Reopen Polaris afterward.')
+        if state and state['phase'] in ('installing', 'removing'):
+            require(operation == ('install' if state['phase'] == 'installing' else 'remove'),
+                    'Finish the saved setup operation before requesting a different one.')
+            require(observed in (state['before'], state['after']) if operation == 'install' else observed in (state['after'], {}),
+                    'Installed policy changed outside the saved operation. No changes were made.')
+            require(rule in (state['rule_before'], state['rule_after']) if operation == 'install' else rule in ('', state['rule_after']),
+                    'Input rules changed outside the saved operation. No changes were made.')
+        else:
+            owned = state and state['phase'] == 'installed'
+            require(observed == (state['after'] if owned else {}), 'Existing Spaces policies are not owned by this setup. Review them before continuing.')
+            require(rule == (state['rule_after'] if owned else ''), 'Existing Spaces input rule is not owned by this setup. Review it before continuing.')
+            if operation == 'remove' and not owned:
+                return 'No owned Spaces SELinux setup is installed.'
+            if operation == 'install':
+                after = self.compile()
+                state = {'schema': 1, 'phase': 'installing', 'release': RELEASE, 'before': observed, 'after': after,
+                         'rule_before': rule, 'rule_after': EXPECTED[RULE.name]}
+                # Retain the exact candidate rule across package upgrades and retries.
+                write(self.state / RULE.name, read(self.data / RULE.name))
+            else:
+                state = dict(state, phase='removing')
+            self.save(state)
+        remove_file(self.state / 'ready.json')
+        if operation == 'install':
+            for name, checksum in state['after'].items():
+                require(digest(read(self.state / (name + '.cil'))) == checksum, 'Saved policy candidate changed. No policy was installed.')
+            candidate = read(self.state / RULE.name)
+            require(digest(candidate) == state['rule_after'], 'Saved input rule changed.')
+            if observed != state['after']:
+                # One libsemanage transaction installs the input type, worker
+                # domain and version marker together. Never suppress reload.
+                self.run(['/usr/bin/semodule', '-X', PRIORITY, '-i'] +
+                         [str(self.state / (name + '.cil')) for name in NAMES])
+            else:
+                # A previous timeout may have committed without completing its
+                # reload. Explicitly reload before allowing a ready receipt.
+                self.run(['/usr/bin/semodule', '-R'])
+            require(self.modules() == state['after'], 'Installed policy read-back did not match the saved candidate.')
+            write(self.rule, candidate, 0o644)
+            self.run(['/usr/bin/udevadm', 'control', '--reload-rules'])
+            # An interrupted older package operation may finish, but cannot
+            # mark the newly installed native build ready until its own upgrade.
+            state['phase'] = 'installed'
+            self.save(state)
+            if state['release'] == RELEASE:
+                require(kernel_ready(), 'Installed policy could not be confirmed in the enforcing kernel. Recheck SELinux and retry.')
+                write(self.state / 'ready.json', ready_bytes(RELEASE), 0o644)
+            return 'Spaces security files are installed. Reopen Polaris and select Recheck setup.'
+        remove_file(self.rule)
+        self.run(['/usr/bin/udevadm', 'control', '--reload-rules'])
+        if observed:
+            self.run(['/usr/bin/semodule', '-X', PRIORITY, '-r', *NAMES])
+        else:
+            self.run(['/usr/bin/semodule', '-R'])
+        require(self.modules() == {}, 'Policy removal could not be confirmed. Retry removal to check saved progress.')
+        state['phase'] = 'removed'
+        self.save(state)
+        return 'Owned Spaces policies and input rule were removed. Player homes were not changed.'
+
+
+def main(argv):
+    require(len(argv) == 1 and argv[0] in ('install', 'remove', 'status'),
+            'Usage: polaris-spaces-setup {status|install|remove}')
+    if argv[0] == 'status':
+        result = status()
+        print(json.dumps(result))
+        return 0 if result['ready'] else 1
+    require(os.geteuid() == 0, 'Run this operation with sudo -H polaris-spaces-setup ' + argv[0])
+    require(Path('/sys/fs/selinux/enforce').read_text().strip() == '1',
+            'This installer requires SELinux enforcing. No policy or enforcement settings were changed.')
+    require(not Path('/run/ostree-booted').exists(), 'Spaces security installation on system-image hosts is not supported by this preview.')
+    os.umask(0o077)
+    trusted(Path(__file__))
+    for directory in (STATE.parent, STATE):
+        if not directory.exists():
+            trusted(directory.parent, directory=True)
+            directory.mkdir(mode=0o755)
+            directory.chmod(0o755)
+        trusted(directory, directory=True)
+    lock_path = STATE / 'lock'
+    read(lock_path, optional=True)
+    with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600), 'r+') as lock:
+        trusted(lock_path)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print(System().change(argv[0]))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (SetupError, OSError, ValueError) as error:
+        print('Spaces setup: ' + str(error), file=sys.stderr)
+        sys.exit(1)

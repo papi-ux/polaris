@@ -24,11 +24,20 @@ as well. Polaris manages a separate gaming container for each active space.
 The [packages repository](https://github.com/papi-ux/packages) distributes signed
 Fedora and Arch host packages through `repo.papi-ux.com`. The approved gaming
 runtime is an OCI image downloaded by Docker from GitHub Container Registry.
-Native packages include the setup UI, controller and packaged host policy files;
+Native packages include the setup UI, controller, host policy files, and the
+`polaris-spaces-setup` terminal helper;
 the image supplies the software running inside each Space. These are coordinated
 release artifacts, not interchangeable installation choices.
 This preview does not provide a supported image for running the entire Polaris
 host inside Docker, or an Unraid installation template.
+
+Steam, its 32-bit libraries, and the gaming userspace belong inside the runtime
+image. You do not need a host Steam installation to use a Space. The host still
+needs Polaris's native dependencies, Docker, GPU drivers, and input permissions.
+NVIDIA userspace in the image must also match the supported host driver version.
+The current preview image targets NVIDIA 610.57.04. A clean Arch installation
+without host Steam libraries still needs physical acceptance before we describe
+that complete setup as tested.
 
 ## Preview status
 
@@ -43,7 +52,7 @@ completes publication and review, so this build shows that the download is
 unavailable. The next step now selects a detected graphics card, saves Spaces
 configuration and offers an explicit restart. The initial configuration permits
 one active Space; simultaneous Spaces still need a separately reviewed graphics
-budget. Registry publication and packaged host integration remain release gates.
+budget. Registry publication and clean-host package acceptance remain release gates.
 The current runtime also requires the Polaris service account to use UID and
 GID 1000. Do not change an existing Linux account's identity to work around this
 preview limitation.
@@ -110,6 +119,49 @@ preview does not automate their Docker installation. Use your distribution's
 supported installation method, and do not disable filesystem protection to
 follow instructions intended for another distribution.
 
+## Prepare Spaces security support
+
+On hosts with SELinux, the **Spaces security support** check verifies that
+SELinux is enforcing and that the matching dedicated policies and input rule
+are installed. A missing file, an older policy version, or a failed check keeps
+first-space preparation unavailable. Hosts without SELinux only need the
+matching Steam seccomp file included in the native package.
+
+On a mutable Fedora installation:
+
+1. Install the development tools used to compile against your host policy:
+   ```bash
+   sudo dnf install selinux-policy-devel container-selinux make
+   ```
+2. Finish your games, stop Spaces streams, and quit Polaris. If Polaris runs as a
+   service, stop that service first.
+3. Run the helper included in the matching native Polaris package:
+   ```bash
+   sudo -H polaris-spaces-setup install
+   ```
+4. Reopen Polaris, return to **Spaces**, and select **Recheck setup**.
+
+The helper installs only the dedicated worker policy, reserved controller policy,
+version marker, and reserved input rule. It reloads policy and udev rules without
+changing SELinux enforcement or relabeling active controllers. It does not
+install Steam, change graphics drivers, start Docker, or restart Polaris.
+The browser only checks readiness and shows these terminal commands.
+
+If interrupted, repeat the same command to finish the recorded operation. Existing
+manually installed Spaces policies or an input rule with no ownership record are
+reported for review; the helper will not silently replace them. For other SELinux
+distributions, the host must supply the compatible SELinux development interfaces
+and container reference policy. System image installations are not supported by
+this helper in the preview.
+
+You can inspect readiness with `polaris-spaces-setup status`. To remove only the
+policies and input rule owned by the helper, stop Polaris and Spaces first, then
+run `sudo -H polaris-spaces-setup remove`. This does not delete player homes. Remove
+owned policies before uninstalling the native package if you no longer need them.
+Native package installation and removal do not activate or remove live SELinux
+policy automatically.
+
+
 ## Prepare your first Steam home
 
 Once this build offers an approved gaming runtime:
@@ -145,8 +197,9 @@ If configuration is interrupted, retry the same graphics selection. Polaris
 preserves the home and refuses to replace existing controller settings. A changed
 or inaccessible GPU requires attention; Polaris does not silently choose another.
 The native package must install its matching Steam seccomp policy. SELinux hosts
-also need the dedicated Spaces worker and input policy; this preview does not
-install or change SELinux policy from the browser.
+also need the dedicated Spaces worker and input policy installed with the
+[terminal helper](#prepare-spaces-security-support). The browser does not change
+SELinux policy.
 
 **Steam home prepared** means storage has been saved. **Configuration saved**
 means a restart is required. Neither is a successful game or controller test.

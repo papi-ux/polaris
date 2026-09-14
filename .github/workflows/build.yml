@@ -151,6 +151,7 @@ jobs:
         run: |
           python3 containers/multiseat/runtime_catalog.py validate containers/multiseat/runtime-catalog.json
           python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
+          python3 -m unittest discover -s scripts/spaces -p 'test_*.py'
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -1073,6 +1074,9 @@ jobs:
           dpkg-deb --info "$deb_path" | tee build/cpack_artifacts/package-info.txt
           dpkg-deb --field "$deb_path" Depends | tee build/cpack_artifacts/package-depends.txt
           dpkg-deb --contents "$deb_path" | tee build/cpack_artifacts/package-files.txt
+          spaces_package_root="$(mktemp -d "$RUNNER_TEMP/spaces-deb.XXXXXX")"
+          dpkg-deb --extract "$deb_path" "$spaces_package_root"
+          python3 scripts/spaces/verify_package.py "$spaces_package_root"
 
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
@@ -1423,6 +1427,7 @@ jobs:
 
           dnf install -y "$rpm_path"
           rpm -ql polaris | tee build/cpack_artifacts/package-files.txt
+          python3 scripts/spaces/verify_package.py /
           binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
           if [ -z "$binary" ]; then
             echo "Installed Polaris binary was not found" >&2

@@ -30,21 +30,23 @@ namespace multiseat::spaces {
     add("gpu", "Graphics device access", f.gpu_access,
       f.gpu_access ? "A graphics device is accessible. Hardware encoding is checked when the space starts." :
       "Polaris cannot access a graphics device. Check the driver and host permissions.", "host_setup");
+    add("security", "Spaces security support", f.security.ready, f.security.detail.c_str(), f.security.code.c_str());
     checks.push_back({{"id", "spaces"}, {"title", "Spaces configuration"},
       {"state", f.controller_available ? "ready" : f.controller_enabled ? "required" : "not_configured"},
       {"detail", f.controller_available ? "The configured Spaces controller is available." :
         f.controller_enabled ? "The configured Spaces controller is unavailable. Review the setup diagnostics." :
         "Host preparation comes first. No spaces have been configured on this host."},
       {"action", "configure_spaces"}});
-    return {{"version", 1}, {"distribution", f.distribution},
+    return {{"version", 2}, {"distribution", f.distribution},
       {"immutable_host", f.immutable_host}, {"service_uid", f.uid},
-      {"host_prerequisites_ready", f.docker_cli && f.runc && engine && f.uid == 1000 && f.gid == 1000 && f.input_access && f.gpu_access},
+      {"host_prerequisites_ready", f.docker_cli && f.runc && engine && f.uid == 1000 && f.gid == 1000 && f.input_access && f.gpu_access && f.security.ready},
       {"configured", f.controller_enabled}, {"available", f.controller_available},
       {"checks", std::move(checks)}};
   }
 
-  nlohmann::json inspect_setup(container::host_t &host, bool enabled, bool available) {
+  nlohmann::json inspect_setup(container::host_t &host, bool enabled, bool available, const std::optional<security_facts_t> &security) {
     setup_facts_t f;
+    f.security = describe_security(security ? *security : inspect_security(host));
     f.uid = host.effective_uid(); f.gid = host.effective_gid();
     f.controller_enabled = enabled; f.controller_available = available;
     std::error_code error;
