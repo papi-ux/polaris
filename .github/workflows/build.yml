@@ -465,8 +465,10 @@ jobs:
           pkgbuild.write_text(text)
           PY
 
+      # Manual validation must produce the same installable package as a PR,
+      # without requiring a release tag or enabling release publication.
       - name: Validate Arch package
-        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           useradd -m builder
           # The base system was synchronized before the exact Boost overlay.
@@ -510,7 +512,7 @@ jobs:
           su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && ${arch_makepkg_env} makepkg --nodeps --noconfirm --nocheck"
 
       - name: Smoke test Arch package
-        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           set -euo pipefail
 
@@ -660,7 +662,7 @@ jobs:
   arch-current-compatibility:
     name: Arch rolling compatibility
     needs: [resolve-source, cpp-sanitizer-tests, arch-build]
-    if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
     runs-on: ubuntu-24.04
     container:
       # The container identity is immutable; its mirror is deliberately live.
