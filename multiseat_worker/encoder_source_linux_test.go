@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -330,8 +331,16 @@ func TestEncoderSourceCancellationDrainsUntilOwnerCloses(t *testing.T) {
 			if err := source.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := <-peerClosed; !errors.Is(err, io.EOF) {
-				t.Fatalf("owner cleanup did not close provider connection: %v", err)
+			select {
+			case err := <-peerClosed:
+				// Closing with bytes still queued in the drain can report reset
+				// on Linux. Both results prove closure after the owner's Close;
+				// the checks above still reject any earlier disconnection.
+				if !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+					t.Fatalf("owner cleanup did not close provider connection: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("owner cleanup left provider connection open")
 			}
 		})
 	}
