@@ -195,6 +195,39 @@ func TestEncoderSourceRefusesContractAndFrameDrift(t *testing.T) {
 	}
 }
 
+// The server accepting a socket does not prove DialContext has returned it to
+// the source. Wait for the established operation to register cancellation;
+// otherwise the test can cancel a pending dial instead of its intended read.
+type encoderReadCancellationContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (ctx *encoderReadCancellationContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.observed) })
+	return ctx.Context.Done()
+}
+
+func encoderReadCancellation(t *testing.T, source *encoderMediaSource) (*encoderReadCancellationContext, context.CancelFunc) {
+	t.Helper()
+	if _, err := source.connectionFor(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	return &encoderReadCancellationContext{Context: ctx, observed: make(chan struct{})}, cancel
+}
+
+func waitEncoderCancellationRegistration(t *testing.T, ctx *encoderReadCancellationContext) {
+	t.Helper()
+	select {
+	case <-ctx.observed:
+	case <-time.After(time.Second):
+		t.Fatal("encoder operation did not register cancellation")
+	}
+}
+
 func TestEncoderSourceCancellationRetiresBlockedConnection(t *testing.T) {
 	entered := make(chan struct{})
 	source, _ := encoderFixture(t, func(connection *net.UnixConn, _ mediaConfig) {
@@ -202,10 +235,11 @@ func TestEncoderSourceCancellationRetiresBlockedConnection(t *testing.T) {
 		var body [1]byte
 		_, _ = connection.Read(body[:])
 	})
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := encoderReadCancellation(t, source)
 	result := make(chan error, 1)
 	go func() { _, err := source.Contract(ctx); result <- err }()
 	<-entered
+	waitEncoderCancellationRegistration(t, ctx)
 	cancel()
 	select {
 	case err := <-result:
@@ -294,7 +328,7 @@ func TestEncoderSourceCancellationDrainsUntilOwnerCloses(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := encoderReadCancellation(t, source)
 			defer cancel()
 			canceled := make(chan error, 1)
 			go func() {
@@ -307,6 +341,7 @@ func TestEncoderSourceCancellationDrainsUntilOwnerCloses(t *testing.T) {
 				}
 			}()
 			<-entered
+			waitEncoderCancellationRegistration(t, ctx)
 			cancel()
 			select {
 			case err := <-canceled:
