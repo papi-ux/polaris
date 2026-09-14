@@ -312,6 +312,21 @@ desktop environment variables such as `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and
 is logged as a limited desktop-preview/portal warning instead of a stream startup failure because
 Polaris starts its own `labwc` Wayland socket for the client session.
 
+## KMS capture refused for a missing capability
+
+KMS/DRM capture reads framebuffers straight from the kernel, which needs `CAP_SYS_ADMIN` on the
+Polaris binary. That is deliberately opt-in: the package does not grant it, the host setup step
+does. With `capture = kms` and no capability, Polaris finds the display, logs
+`Failed to gain CAP_SYS_ADMIN` and `Couldn't get handle for DRM Framebuffer`, and then either
+substitutes another backend or, when nothing else can capture, serves with no capture at all and
+H.264 as the only codec. The Doctor reports both cases as `kms_capture_needs_capability`.
+
+```
+sudo -H polaris --setup-host --enable-kms
+```
+
+then restart Polaris. KMS capture is the path that carries HDR, so keep it if HDR is the goal.
+
 ## NVIDIA KMS capture issues
 
 If KMS capture gives a black screen on NVIDIA, confirm the kernel is using:
