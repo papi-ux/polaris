@@ -63,12 +63,19 @@ func stopRealAudioTone(t *testing.T, child *managedChild, options providerOption
 
 func captureRealAudioSamples(options providerOptions, sink string) ([]byte, error) {
 	// A finite receiver and bounded stdout avoid writing unbounded sample files.
-	// Six 10 ms Pulse buffers fit the production probe's 64 KiB output bound.
-	return runTrustedCommand(options.gstLaunchPath, options.executableOwnerUID,
+	// A new monitor connection can begin with silent preroll, especially in a
+	// VM. Capture twelve 10 ms buffers (46 KiB), then check the final six. This
+	// retains the same waveform window and the production probe's 64 KiB bound.
+	output, err := runTrustedCommand(options.gstLaunchPath, options.executableOwnerUID,
 		[]string{"-q", "pulsesrc", "device=" + sink + ".monitor", "server=unix:" + options.runtimeDirectory + "/pulse/native",
-			"num-buffers=6", "buffer-time=20000", "latency-time=10000", "!", "audioconvert", "!", "audioresample", "!",
+			"num-buffers=12", "buffer-time=20000", "latency-time=10000", "!", "audioconvert", "!", "audioresample", "!",
 			"audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=2", "!", "fdsink", "fd=1", "sync=false"},
 		audioEnvironment(options.runtimeDirectory, sink), 3*time.Second)
+	const windowBytes = 6 * 480 * 2 * 4
+	if err == nil && len(output) == 2*windowBytes {
+		output = output[windowBytes:]
+	}
+	return output, err
 }
 
 func assertRealAudioSamples(t *testing.T, options providerOptions, sink string, left, right int) {
