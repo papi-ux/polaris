@@ -650,6 +650,14 @@ namespace video {
   );
 
   /**
+   * @brief Record a launch refusal for an encoder probe that just failed.
+   * @param against_private_compositor True when the probe ran against Polaris' own compositor.
+   * @details Names the capture-side cause when there is one (no capture backend, KMS without the
+   *          capability), otherwise the encoder side with the NVENC driver detail when it applies.
+   */
+  void note_launch_refused_by_probe(bool against_private_compositor);
+
+  /**
    * @brief Get the name of the currently selected encoder.
    * @return Encoder name such as "nvenc", or an empty string if none is selected.
    */

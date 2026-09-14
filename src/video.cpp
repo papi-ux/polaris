@@ -37,6 +37,7 @@ extern "C" {
 #include "display_device.h"
 #include "globals.h"
 #include "input.h"
+#include "launch_failure.h"
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
@@ -5885,6 +5886,53 @@ namespace video {
     return std::any_of(encoders.begin(), encoders.end(), [&](const auto *encoder) {
       return encoder->name == backend;
     });
+  }
+
+  void note_launch_refused_by_probe(bool against_private_compositor) {
+#ifdef __linux__
+    if (platf::kms_capture_refused_for_capability()) {
+      launch_failure::refuse(
+        503,
+        "kms_capture_needs_capability",
+        "No video capture could start: this host is configured for KMS capture, but the Polaris "
+        "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
+        "On the host, run sudo -H polaris --setup-host --enable-kms once, then restart Polaris."
+      );
+      return;
+    }
+    if (platf::capture_sources_missing()) {
+      launch_failure::refuse(
+        503,
+        "no_capture_backend",
+        "No video capture backend works in the configured stream mode, so no encoder could be probed.",
+        "Check the capture setting against the stream mode on the host; leaving capture unset lets "
+        "Polaris pick one that works. The host Doctor names the missing protocol."
+      );
+      return;
+    }
+#endif
+    std::string message = against_private_compositor ?
+                            "No video encoder could start against the private stream compositor." :
+                            "No video encoder could start on this host.";
+    const auto detail = nvenc_fallback_detail(
+      encoder_selection_info.preferred_encoder,
+      encoder_selection_info.selected_encoder,
+      encoder_selection_info.driver_version
+    );
+    if (!detail.empty()) {
+      message += " " + detail;
+    }
+    launch_failure::refuse(
+      503,
+      "encoder_probe_failed",
+      message,
+      against_private_compositor ?
+        "On NVIDIA, pick Private Stream (GPU-native) in Play Setup, or set "
+        "linux_prefer_gpu_native_capture = enabled on the host, and retry. The host Doctor's "
+        "Encoder row says which encoder was tried and why it failed." :
+        "Check the host Doctor's Encoder and Capture rows; they say which encoder was tried and "
+        "why it failed. If this mode captures a real display, make sure one is connected and on."
+    );
   }
 
   std::string active_encoder_name() {
