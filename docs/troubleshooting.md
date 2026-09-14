@@ -407,6 +407,25 @@ but the active Linux display path did not provide enough metadata to advertise a
 If `usable=false`, the display path exposed an HDR metadata blob, but Polaris rejected it because core
 static metadata such as display primaries or max display luminance was missing.
 
+## HDR never engages
+
+`stream_hdr_enabled=false` on every launch, whatever you toggle, is five independent gates and
+any one of them is enough. Check them in this order; each has a line in
+`journalctl --user -u polaris` that names it.
+
+| gate | what the journal says | fix |
+|---|---|---|
+| capture backend cannot report HDR | `HDR decision: ... display_hdr=false` with `capture = wlr` or unset on a private mode | `capture = kms` |
+| stream mode captures Polaris' own compositor | `session_runtime: ... effective_headless=true` | Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope |
+| binary lacks `CAP_SYS_ADMIN` | `Failed to gain CAP_SYS_ADMIN`, `Couldn't get handle for DRM Framebuffer [...]: Probably not permitted` | `sudo -H polaris --setup-host --enable-kms`, restart |
+| client forced off on the host | Doctor `hdr_disabled_by_saved_setting`; `client_profiles.json` `hdr: false` or `device_db.json` `hdr_capable: false` | clear both, or let the client's own HDR10 report win (1.4.8) |
+| client never asked | `portal HDR force -> 0 from enable_hdr=false`, `client_dynamic_range=0` | turn on Request HDR in the client; in Nova it is off by default |
+
+When all five pass, the session logs `HDR metadata: available=true usable=true`,
+`Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)` and `stream_hdr_enabled=true` after
+`Session started for [...]`. The encoder probe logs the same lines earlier even when the session
+will not, so read the ones after the session starts.
+
 ## Quick recovery ladder
 
 The Doctor & Support page offers three recovery actions, ordered from least to most disruptive.

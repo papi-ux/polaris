@@ -101,3 +101,18 @@ Across networks, forward those ports to the host or let **UPnP** under **Setting
 it, and set the encryption mode for WAN sessions on the same page. The web UI itself stays
 reachable only from the host or the local network unless **Web UI origin** on that page allows
 more.
+
+## MoonDeck on Steam Deck
+
+[MoonDeck](https://github.com/FrogTheFrog/moondeck) launches your Steam library through Moonlight
+from the Deck's own UI and needs its host sidecar, MoonDeck Buddy, on the Polaris machine. Buddy
+confirms its `MoonDeckStream` app exists by reading Sunshine's `apps.json` straight off disk, and
+on Linux it looks in `~/.config/sunshine/apps.json` by default, which a Polaris host does not
+have. Polaris keeps the same file, with the same shape, at `~/.config/polaris/apps.json`.
+
+Point Buddy at it: in Buddy's `settings.json` (`~/.config/moondeckbuddy/`) set
+**Sunshine apps filepath** to `/home/<you>/.config/polaris/apps.json`, add an app named
+`MoonDeckStream` in Polaris whose command runs Buddy's `MoonDeckStream` executable, and leave
+"Continue streaming if the application exits quickly" unchecked, exactly as Buddy's own Sunshine
+guide says. Everything past that check is Moonlight pairing and launching, which Polaris answers
+the same way Sunshine does.
