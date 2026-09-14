@@ -1,25 +1,14 @@
 <template>
-  <section v-if="state.enabled || loadError" class="section-card" aria-labelledby="profile-assignment-title" :aria-busy="loading || creating || !!saving">
+  <section v-if="state.enabled || loadError" class="section-card" aria-labelledby="profile-assignment-title" :aria-busy="loading || creating || managing || !!saving">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0">
-        <h2 id="profile-assignment-title" class="section-title">Device access</h2>
+        <h2 id="profile-assignment-title" class="section-title">Your spaces</h2>
         <p class="mt-2 max-w-2xl text-sm text-storm">
-          Choose which space each device opens. Each space keeps its own sign-ins, saves, and settings.
-          Standard streaming opens the usual apps on this PC.
+          A space keeps its own Steam sign-in, games, and saves. Open your assigned space from Library in Nova.
         </p>
       </div>
-      <span v-if="state.enabled" class="meta-pill">{{ state.profiles.length }} {{ state.profiles.length === 1 ? 'space' : 'spaces' }}</span>
+      <span v-if="state.enabled" class="meta-pill">{{ activeSpaces.length }} {{ activeSpaces.length === 1 ? 'space' : 'spaces' }}</span>
     </div>
-    <details v-if="state.enabled && state.profiles.length" class="mt-4 rounded-xl border border-ice/20 bg-ice/5 p-4 text-sm text-silver">
-      <summary class="focus-ring cursor-pointer rounded font-medium">Sharing spaces and Steam sign-in</summary>
-      <p class="mt-3 text-storm">
-        Your handheld and TV can share a space, with one stream at a time.
-        Use one space per player to play at the same time.
-      </p>
-      <p class="mt-2 text-storm">
-        In a space, open Steam Big Picture and sign in when prompted. The space keeps that sign-in for future sessions.
-      </p>
-    </details>
     <p v-if="message" class="mt-4 text-sm text-silver" role="status">{{ message }}</p>
     <p v-if="actionError" class="mt-4 text-sm text-warning-bright" role="alert">{{ actionError }}</p>
     <p v-if="loadError" class="mt-4 text-sm text-warning-bright" role="alert">{{ loadError }}</p>
@@ -32,16 +21,19 @@
     <p v-else-if="state.enabled && !state.available" class="mt-4 text-sm text-storm" role="status">
       Spaces are temporarily unavailable. Refresh spaces to try again.
     </p>
-    <p v-if="state.enabled && !state.profiles.length" class="mt-4 text-sm text-storm">
-      No spaces are configured yet. Devices can continue using Standard streaming.
-    </p>
     <p v-if="state.enabled && clientsReady && !devices.length" class="mt-4 text-sm text-storm">
       Pair a device with permission to launch apps to assign a space. Temporary guests cannot use these spaces.
     </p>
+    <SpacesList v-if="state.enabled" :profiles="state.profiles" :clients="clients" :manageable="state.management_available"
+                :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError" :refresh="loadProfiles" @busy="managing = $event" />
     <MultiseatProfileCreate v-if="state.enabled && state.creation_available" :profiles="state.profiles"
                            :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError"
                            :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
-    <div v-if="state.enabled && devices.length" class="mt-5 grid gap-3">
+    <details v-if="state.enabled && devices.length" class="mt-5 border-t border-storm/20 pt-3" open>
+      <summary class="focus-ring cursor-pointer rounded py-2 font-semibold text-silver">Device access</summary>
+      <p class="mt-2 text-sm text-storm">Devices are the handhelds, TVs, and computers paired with Polaris. Choose what each one opens.
+        Rename a device in Devices if its name is hard to recognize.</p>
+      <div class="mt-4 grid gap-3">
       <div v-for="client in devices" :key="client.uuid" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
         <div class="flex flex-wrap items-start justify-between gap-2">
           <label :for="'gaming-profile-' + client.uuid" class="min-w-0 break-words text-sm font-semibold text-silver">
@@ -50,15 +42,15 @@
           <span v-if="dirty(client.uuid)" class="text-xs text-warning-bright">Unsaved change</span>
         </div>
         <p :id="'gaming-profile-current-' + client.uuid" class="mt-1 break-words text-xs text-storm">
-          Currently opens: {{ profileName(assigned(client.uuid)) }}
+          Opens: {{ profileName(assigned(client.uuid)) }}
         </p>
         <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <select :id="'gaming-profile-' + client.uuid" v-model="choices[client.uuid]"
                   class="focus-ring min-w-0 w-full rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver sm:flex-1"
                   :aria-describedby="'gaming-profile-current-' + client.uuid + ' gaming-profile-help-' + client.uuid"
                   :disabled="locked" @change="clearFeedback">
-            <option value="">Standard streaming</option>
-            <option v-for="profile in state.profiles" :key="profile.id" :value="profile.id"
+            <option value="">This PC’s desktop and apps</option>
+            <option v-for="profile in activeSpaces" :key="profile.id" :value="profile.id"
                     :disabled="!eligible(client)">{{ profile.name }}</option>
           </select>
           <button type="button" class="focus-ring shrink-0 rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
@@ -71,11 +63,12 @@
           {{ selectionHelp(client) }}
         </p>
       </div>
-    </div>
+      </div>
+    </details>
     <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
       <p v-if="state.enabled && devices.length" class="text-xs text-storm">Stop space streams before changing assignments.</p>
       <button type="button" class="focus-ring rounded-lg px-1 py-2 text-sm text-ice disabled:opacity-40"
-              :disabled="!!saving || creating || loading" @click="refresh">
+              :disabled="!!saving || creating || managing || loading" @click="refresh">
         {{ loading ? 'Refreshing…' : 'Refresh spaces' }}
       </button>
     </div>
@@ -84,6 +77,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import SpacesList from './SpacesList.vue'
 import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
 import { validSnapshot } from '../spaces-access.js'
 
@@ -92,15 +86,16 @@ const props = defineProps({
   clients: { type: Array, default: () => [] },
   clientsReady: { type: Boolean, default: true },
 })
-const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], creation_available: false })
+const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], creation_available: false, management_available: false })
 const choices = reactive({})
 const saving = ref(''), loading = ref(false)
-const creating = ref(false)
+const creating = ref(false), managing = ref(false)
+const activeSpaces = computed(() => state.profiles.filter(space => !space.archived))
 const loadError = ref(''), actionError = ref(''), message = ref('')
-const locked = computed(() => !!saving.value || creating.value || loading.value || !!loadError.value || state.changing || state.failed || !state.available)
+const locked = computed(() => !!saving.value || creating.value || managing.value || loading.value || !!loadError.value || state.changing || state.failed || !state.available)
 const eligible = client => !client.temporary_authorization && (Number(client.perm) & 0x04000000) !== 0
 const assigned = id => state.profiles.find(profile => profile.clients.includes(id))?.id || ''
-const profileName = id => state.profiles.find(profile => profile.id === id)?.name || 'Standard streaming'
+const profileName = id => state.profiles.find(profile => profile.id === id)?.name || 'This PC’s desktop and apps'
 const deviceName = client => client.friendly_name || client.name || 'Paired device'
 const devices = computed(() => props.clients.filter(client => eligible(client) || assigned(client.uuid)))
 const dirty = id => choices[id] !== assigned(id)
@@ -108,7 +103,7 @@ const dirty = id => choices[id] !== assigned(id)
 function clearFeedback() { message.value = ''; actionError.value = '' }
 
 function selectionHelp(client) {
-  if (!eligible(client)) return 'This device no longer has space access. Choose Standard streaming to remove its assignment.'
+  if (!eligible(client)) return 'This device no longer has space access. Choose This PC’s desktop and apps to remove its assignment.'
   const selected = state.profiles.find(profile => profile.id === choices[client.uuid])
   if (!selected) return 'Uses the usual apps and account on this PC.'
   const others = selected.clients.filter(id => id !== client.uuid)
@@ -127,7 +122,7 @@ function reconcileChoices(resetClient = '') {
   for (const client of props.clients) {
     const choice = choices[client.uuid]
     if (client.uuid === resetClient || choice === undefined ||
-        (choice !== '' && (!eligible(client) || !state.profiles.some(profile => profile.id === choice)))) {
+        (choice !== '' && (!eligible(client) || !activeSpaces.value.some(profile => profile.id === choice)))) {
       choices[client.uuid] = assigned(client.uuid)
     }
   }
@@ -143,7 +138,7 @@ async function loadProfiles(resetClient = '') {
     const next = await response.json()
     if (!validSnapshot(next)) throw new Error('Could not verify space assignments. Refresh spaces to try again.')
     const edited = new Set(props.clients.filter(client => dirty(client.uuid) && choices[client.uuid] !== undefined).map(client => client.uuid))
-    Object.assign(state, { creation_available: false }, next)
+    Object.assign(state, { creation_available: false, management_available: false }, next)
     emit('snapshot', { ...next })
     for (const client of props.clients) {
       if (!edited.has(client.uuid)) choices[client.uuid] = assigned(client.uuid)
@@ -159,7 +154,7 @@ async function loadProfiles(resetClient = '') {
 }
 
 async function refresh() {
-  if (saving.value || creating.value || loading.value) return
+  if (saving.value || creating.value || managing.value || loading.value) return
   clearFeedback()
   await loadProfiles()
 }

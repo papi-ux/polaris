@@ -18,15 +18,16 @@
              class="focus-ring mt-2 w-full rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver"
              placeholder="e.g. Player 2" :disabled="locked || !!pending" aria-describedby="new-steam-name-help">
       <p id="new-steam-name-help" class="mt-1 text-xs text-storm">
-        {{ name.trim() && !validName ? 'Use a shorter name without control characters.' : 'Choose a name you will recognize when assigning devices.' }}
+        {{ name.trim() && !validName ? 'Use a shorter name without control characters.' : 'Use a player or room name, such as Alex or Living room.' }}
       </p>
-      <template v-if="sources.length > 1">
-        <label for="new-steam-profile-source" class="mt-4 block text-sm text-silver">Use Steam setup from</label>
+      <details v-if="sources.length > 1" class="mt-4">
+        <summary class="focus-ring cursor-pointer rounded text-sm text-storm">Advanced setup</summary>
+        <label for="new-steam-profile-source" class="mt-4 block text-sm text-silver">Gaming runtime</label>
         <select id="new-steam-profile-source" v-model="source" :disabled="locked || !!pending"
                 class="focus-ring mt-2 w-full min-w-0 rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver">
           <option v-for="profile in sources" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
         </select>
-      </template>
+      </details>
       <p class="mt-3 text-xs text-storm">Stop space streams before creating a space. Creation can take a little while.</p>
       <div class="mt-4 flex flex-wrap gap-3">
         <button type="submit" class="focus-ring rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
@@ -111,7 +112,7 @@ async function closeForm() {
 function confirmCreation() {
   if (!pending.value || !props.ready) return false
   const found = props.profiles.find(profile => profile.id === pending.value.request_id &&
-    profile.name === pending.value.name && profile.steam === true)
+    profile.name === pending.value.name && profile.steam === true && !profile.archived)
   if (!found) return false
   message.value = found.name + ' was created. Assign it to a device below, then open Big Picture to sign in.'
   error.value = ''; clearPending(); name.value = ''

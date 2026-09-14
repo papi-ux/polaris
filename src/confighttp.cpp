@@ -3693,16 +3693,17 @@ namespace confighttp {
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
-      {"failed", false}, {"profiles", nlohmann::json::array()}, {"creation_available", false}};
+      {"failed", false}, {"profiles", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}};
 #ifdef __linux__
     if (const auto service = multiseat::installed_profile_service()) {
       const auto state = service->admin_snapshot();
       output["enabled"] = true; output["available"] = state.available;
       output["changing"] = state.changing; output["failed"] = state.failed;
       output["creation_available"] = state.creation_available;
+      output["management_available"] = state.management_available;
       for (const auto &profile : state.profiles)
         output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
-          {"steam", profile.steam}});
+          {"steam", profile.steam}, {"archived", profile.archived}});
     }
 #endif
     send_response(response, output);
@@ -3722,6 +3723,27 @@ namespace confighttp {
     const auto result = service->create_steam_profile(*creation);
     const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
       {"profile_id", creation->request_id}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void editMultiseatProfile(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Space change is too large"); return; }
+    const auto edit = multiseat::profiles::decode_edit_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!edit) { bad_request(response, request, "Invalid space change"); return; }
+    const auto result = service->edit_profile(*edit);
+    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message}, {"profile_id", edit->profile_id}};
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
     response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
@@ -7635,6 +7657,7 @@ namespace confighttp {
     registerSpacesSetupRoutes(server);
     server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
     server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
+    server.resource["^/api/multiseat/profiles/manage$"]["POST"] = withCsrf(editMultiseatProfile);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);

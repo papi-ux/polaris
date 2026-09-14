@@ -24,6 +24,7 @@ namespace multiseat {
     std::string name;
     std::vector<std::string> clients;
     bool steam = false;
+    bool archived = false;
   };
 
   /** Immutable operator routing for one persistent profile in this epoch. */

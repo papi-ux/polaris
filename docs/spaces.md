@@ -282,3 +282,33 @@ enabled. Do not add privileged container flags or mount the entire device tree.
 If a space stops on its own or loses sound, retain the time of the failure and
 the space name for diagnosis. A successful setup check is not evidence that
 120 FPS, every game, or every GPU is reliable.
+
+## Names, device access, and removal
+
+Give a space a player or room name, such as Alex or Living room. In **Spaces**,
+use **Rename** on its card to change that name without changing its Steam account
+or files. Refresh Library in Nova afterward to see the new name.
+
+**Device access** lists the handhelds, TVs, and computers paired with Polaris.
+Choose a space for each device and save the assignment. **This PC’s desktop and
+apps** uses the host’s usual desktop session. Rename an unfamiliar device in
+**Devices**. Nova’s **Streaming presets** change picture quality and performance;
+they do not select a Steam account or space.
+
+To remove a space:
+
+1. Stop space streams and wait for cleanup.
+2. Select **Remove space** on its card, then confirm the displayed space name.
+3. The space moves to **Removed spaces**. Its devices return to the host’s usual
+   desktop and apps when their libraries refresh.
+
+Removal keeps installed games, saves, settings, and Steam sign-in on the host.
+It does not free disk space or delete Docker volumes. Select **Restore** under
+**Removed spaces** to use it again, then assign its devices. Restoring never
+restores device permissions or assignments automatically. You can restore the
+last removed space or create another one using the retained runtime setup.
+
+For administrators: catalogs with removed spaces use schema 2 so older builds
+reject them instead of accidentally launching a removed space. The catalog keeps
+the original storage and image identities. When every space is restored, saves
+use the compatible schema 1 format again. Keep catalog and volume backups together.

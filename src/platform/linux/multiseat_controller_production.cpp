@@ -222,7 +222,7 @@ namespace multiseat {
       for (auto &entry : loaded->catalog.profiles) {
         catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
           entry.storage.runtime_profile == runtime_profile_e::steam &&
-            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload)});
+            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
           options.container.workloads.push_back(entry.workload);

@@ -110,7 +110,7 @@ namespace {
   class MultiseatAssignments : public MultiseatLaunchService {
   protected:
     std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, true}, {"profile-b", "Sam", {"client-b"}}};
-    std::atomic<unsigned> writes {0}, reloads {0}, creates {0};
+    std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
     bool reload_fails = false;
     std::function<void()> before_write;
@@ -141,6 +141,18 @@ namespace {
             if (write_status != private_state_file::write_status_e::not_committed)
               catalog.push_back({request.request_id, request.name, {}, true});
             return profiles::change_result_t {.status = write_status, .profile_key = request.request_id};
+          },
+          .edit = [&](const profiles::edit_request_t &request) {
+            state->called(); ++edits;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            if (before_write) before_write();
+            if (write_status != private_state_file::write_status_e::not_committed) {
+              for (auto &entry : catalog) if (entry.id == request.profile_id) {
+                if (request.operation == profiles::edit_operation_e::rename) entry.name = request.name;
+                else { entry.archived = request.operation == profiles::edit_operation_e::remove; if (entry.archived) entry.clients.clear(); }
+              }
+            }
+            return profiles::change_result_t {.status = write_status};
           }
         });
     }
@@ -149,6 +161,80 @@ namespace {
   const profiles::steam_create_request_t create_request {
     "12345678-1234-4234-8234-123456789abc", "profile-a", "Second player"
   };
+
+  const profiles::edit_request_t remove_request {profiles::edit_operation_e::remove, "profile-a", ""};
+
+  TEST_F(MultiseatAssignments, RemovalClearsOnlyItsRoutesAndRestorationRequiresNewAssignment) {
+    EXPECT_TRUE(service->admin_snapshot().management_available);
+    ASSERT_EQ(service->edit_profile(remove_request).status, 200);
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->routes_client("client-b"));
+    EXPECT_TRUE(service->admin_snapshot().profiles[0].archived);
+    EXPECT_EQ(service->set_assignment("profile-a", "client-a").status, 404);
+    ASSERT_EQ(service->edit_profile({profiles::edit_operation_e::restore, "profile-a", ""}).status, 200);
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_FALSE(service->admin_snapshot().profiles[0].archived);
+    ASSERT_EQ(service->set_assignment("profile-a", "client-a").status, 200);
+    ASSERT_EQ(service->edit_profile({profiles::edit_operation_e::rename, "profile-a", "Player one"}).status, 200);
+    EXPECT_EQ(service->profile_name_for_client("client-a"), "Player one");
+    EXPECT_EQ(edits, 3U);
+    std::lock_guard lock(state->mutex);
+    for (const auto owner : state->owners) EXPECT_EQ(owner, state->owners.front());
+  }
+
+  TEST_F(MultiseatAssignments, RemovalRefusesActiveStreamsAndUnfinishedCleanupWithoutCancellation) {
+    const auto active = launch();
+    ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
+    EXPECT_EQ(service->edit_profile(remove_request).status, 409);
+    EXPECT_FALSE(active->is_cancelled());
+    active->cancel(); state->idle = false;
+    EXPECT_EQ(service->edit_profile(remove_request).status, 409);
+    EXPECT_EQ(edits, 0U); EXPECT_EQ(state->shutdowns, 0U);
+  }
+
+  TEST_F(MultiseatAssignments, ConcurrentRemovalRetriesKeepRoutesFencedUntilOneCommit) {
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    before_write = [&] { entered.set_value(); released.wait(); };
+    auto first = std::async(std::launch::async, [&] { return service->edit_profile(remove_request); });
+    EXPECT_EQ(entered.get_future().wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
+    EXPECT_EQ(service->edit_profile(remove_request).status, 202);
+    EXPECT_EQ(edits, 1U);
+    release.set_value(); first.get();
+    for (int i = 0; i < 100 && service->admin_snapshot().changing; ++i) std::this_thread::sleep_for(10ms);
+    EXPECT_FALSE(service->admin_snapshot().changing);
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_EQ(edits, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, FailedRemovalRestoresRoutesAndUncertainDurabilityFailsClosed) {
+    write_status = private_state_file::write_status_e::not_committed;
+    EXPECT_EQ(service->edit_profile(remove_request).status, 409);
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    write_status = private_state_file::write_status_e::durability_uncertain;
+    EXPECT_EQ(service->edit_profile(remove_request).status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
+    EXPECT_EQ(reloads, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, RemovalCannotMutateAfterUnprovenShutdown) {
+    state->close = false;
+    EXPECT_EQ(service->edit_profile(remove_request).status, 503);
+    EXPECT_EQ(edits, 0U);
+    EXPECT_TRUE(service->routes_client("client-a"));
+  }
+
+  TEST_F(MultiseatAssignments, RemovalWithFailedReloadRetainsTheOldRoutingFence) {
+    reload_fails = true;
+    EXPECT_EQ(service->edit_profile(remove_request).status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->routes_client("client-a"));
+    EXPECT_EQ(service->edit_profile(remove_request).status, 503);
+  }
 
   TEST_F(MultiseatAssignments, CreatesAnUnassignedSteamProfileUnderTheControllerOwner) {
     EXPECT_TRUE(service->admin_snapshot().creation_available);

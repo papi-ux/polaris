@@ -49,11 +49,12 @@ namespace multiseat {
     std::function<std::unique_ptr<profile_controller_t>()> reload;
     std::function<profiles::change_result_t(std::string_view, std::string_view)> persist;
     std::function<profiles::change_result_t(const profiles::steam_create_request_t &)> create;
+    std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
   };
   struct profile_admin_snapshot_t {
     bool available = false, changing = false, failed = false;
     std::vector<profile_summary_t> profiles;
-    bool creation_available = false;
+    bool creation_available = false, management_available = false;
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -77,6 +78,7 @@ namespace multiseat {
     [[nodiscard]] profile_admin_snapshot_t admin_snapshot() const;
     [[nodiscard]] profile_launch_result_t set_assignment(std::string profile, std::string client);
     [[nodiscard]] profile_launch_result_t create_steam_profile(profiles::steam_create_request_t request);
+    [[nodiscard]] profile_launch_result_t edit_profile(profiles::edit_request_t request);
     // Cancellation only marks launches. Docker and input teardown remain on the
     // owner thread. Empty tokens allow an authenticated owner to cancel itself.
     [[nodiscard]] bool cancel_client(std::string_view client, std::string_view token = {});

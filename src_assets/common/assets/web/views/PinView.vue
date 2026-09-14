@@ -1753,7 +1753,7 @@ watch(
 
 const spacesSummary = ref(null)
 function spaceForClient(id) {
-  return spacesSummary.value?.profiles.find(space => space.clients.includes(id))?.name || 'Standard streaming'
+  return spacesSummary.value?.profiles.find(space => space.clients.includes(id))?.name || 'This PC’s desktop and apps'
 }
 async function refreshSpaceSummary() {
   try {

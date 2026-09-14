@@ -166,6 +166,7 @@ namespace multiseat {
     struct admin_request_t {
       std::string profile, client;
       std::optional<profiles::steam_create_request_t> creation;
+      std::optional<profiles::edit_request_t> edit;
       std::promise<profile_launch_result_t> promise;
       std::shared_future<profile_launch_result_t> future = promise.get_future().share();
     };
@@ -202,6 +203,8 @@ namespace multiseat {
           container::local_host_t host;
           return profiles::create_steam(path, request, host);
         };
+      if (!admin.edit && !admin.catalog.empty())
+        admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
     }
 
@@ -210,7 +213,7 @@ namespace multiseat {
       try {
         if (pending || !controller || !controller->idle()) {
           { std::lock_guard lock(mutex); blocked_clients.clear(); }
-          result = {409, request->creation ? "Stop profile sessions and wait for cleanup before creating a profile" :
+          result = {409, request->edit ? "Stop space streams and wait for cleanup before renaming or removing a space" : request->creation ? "Stop profile sessions and wait for cleanup before creating a profile" :
             "Stop profile sessions and wait for cleanup before changing assignments"};
         } else {
           {
@@ -225,7 +228,7 @@ namespace multiseat {
             // Closing proves that no stream owns this catalog. Destruction
             // releases the old global input owner before the replacement is built.
             { std::lock_guard lock(mutex); controller.reset(); admin_failed = true; }
-            const auto persisted = request->creation ? admin.create(*request->creation) :
+            const auto persisted = request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
               admin.persist(request->profile, request->client);
             if (request->creation && !persisted && !persisted.volume_name.empty()) {
               BOOST_LOG(error) << "Profile creation retained resources for inspection: volume=" << persisted.volume_name
@@ -238,8 +241,8 @@ namespace multiseat {
                 controller = std::move(replacement);
                 admin_failed = false;
                 fallback_catalog.clear(); blocked_clients.clear();
-                result = persisted ? profile_launch_result_t {200, request->creation ? "Steam profile created" : "Profile assignment saved"} :
-                  profile_launch_result_t {409, request->creation ?
+                result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Steam profile created" : "Profile assignment saved"} :
+                  profile_launch_result_t {409, request->edit ? "Space change was not saved; refresh before retrying" : request->creation ?
                     "Profile was not created. Refresh before retrying; retained provisioning resources may need administrator review." :
                     "Assignment was not saved; refresh before retrying"};
               }
@@ -396,7 +399,8 @@ namespace multiseat {
     return {static_cast<bool>(impl_->admin.reload && impl_->admin.persist), impl_->reconfiguring,
       impl_->admin_failed && !impl_->reconfiguring,
       impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog,
-      static_cast<bool>(impl_->admin.reload && impl_->admin.create)};
+      static_cast<bool>(impl_->admin.reload && impl_->admin.create),
+      static_cast<bool>(impl_->admin.reload && impl_->admin.edit)};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
@@ -410,7 +414,7 @@ namespace multiseat {
       if (request->client.empty() || request->client.size() > 256) return {400, "Invalid paired device"};
       const auto catalog = impl_->controller->profile_catalog();
       if (!request->profile.empty() && std::none_of(catalog.begin(), catalog.end(),
-          [&](const auto &entry) { return entry.id == request->profile; })) return {404, "Unknown profile"};
+          [&](const auto &entry) { return entry.id == request->profile && !entry.archived; })) return {404, "Unknown profile"};
       if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
           [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
         return {409, "Stop profile sessions and wait for cleanup before changing assignments"};
@@ -456,6 +460,35 @@ namespace multiseat {
     impl_->wake.notify_all();
     if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
       return {202, "The profile is still being created; refresh before retrying"};
+    return request->future.get();
+  }
+
+  profile_launch_result_t profile_launch_service_t::edit_profile(profiles::edit_request_t edit) {
+    if (!profiles::valid_edit_request(edit)) return {400, "Enter a valid space name and operation"};
+    std::shared_ptr<impl_t::admin_request_t> request;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (impl_->stopping) return {503, "The space controller is stopping"};
+      if (impl_->active_admin && impl_->active_admin->edit && *impl_->active_admin->edit == edit) {
+        request = impl_->active_admin;
+      } else {
+        if (!impl_->admin.reload || !impl_->admin.edit || !impl_->controller || impl_->admin_failed)
+          return {503, "Space management is unavailable"};
+        if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+            [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+          return {409, "Stop space streams and wait for cleanup before renaming or removing a space"};
+        const auto catalog = impl_->controller->profile_catalog();
+        if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == edit.profile_id; }))
+          return {404, "Space not found. Refresh spaces"};
+        request = std::make_shared<impl_t::admin_request_t>();
+        request->edit = std::move(edit);
+        impl_->reconfiguring = true;
+        impl_->active_admin = impl_->queued_admin = request;
+      }
+    }
+    impl_->wake.notify_all();
+    if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
+      return {202, "The space change is still running; refresh before retrying"};
     return request->future.get();
   }
 

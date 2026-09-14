@@ -126,6 +126,98 @@ namespace {
   const profiles::first_steam_request_t first_request {steam_request.request_id, "First player"};
   const std::string first_image = "sha256:" + std::string(64, 'b');
 
+  TEST_F(MultiseatProfileCatalog, RemoveAndRestorePreserveTheHomeButNeverRestoreDeviceAccess) {
+    save(sample());
+    const profiles::edit_request_t remove {profiles::edit_operation_e::remove, "profile-a", ""};
+    ASSERT_TRUE(profiles::edit(path, remove));
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 1U);
+    const auto entry = loaded->catalog.profiles.front();
+    EXPECT_TRUE(entry.archived);
+    EXPECT_TRUE(entry.client_keys.empty());
+    EXPECT_EQ(entry.storage.opaque_volume_name, sample().profiles[0].storage.opaque_volume_name);
+    EXPECT_EQ(entry.storage.image_reference, sample().profiles[0].storage.image_reference);
+    EXPECT_EQ(entry.workload, sample().profiles[0].workload);
+    EXPECT_EQ(entry.name, "Living room");
+    EXPECT_EQ(json::parse(profiles::encode(loaded->catalog))["schema"], 2);
+    EXPECT_FALSE(profiles::edit(path, {profiles::edit_operation_e::restore, "profile-a", ""})); // live lease
+    loaded.reset();
+    EXPECT_FALSE(profiles::assign(path, "profile-a", "client-b"));
+    EXPECT_FALSE(profiles::set_assignment(path, "profile-a", "client-b"));
+    ASSERT_TRUE(profiles::edit(path, remove)); // safe retry
+    ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::restore, "profile-a", ""}));
+    loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_FALSE(loaded->catalog.profiles[0].archived);
+    EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+    EXPECT_EQ(json::parse(profiles::encode(loaded->catalog))["schema"], 1);
+  }
+
+  TEST_F(MultiseatProfileCatalog, RestoreRetriesPreserveLaterExplicitAssignments) {
+    save(sample());
+    ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::remove, "profile-a", ""}));
+    const profiles::edit_request_t restore {profiles::edit_operation_e::restore, "profile-a", ""};
+    ASSERT_TRUE(profiles::edit(path, restore));
+    ASSERT_TRUE(profiles::set_assignment(path, "profile-a", "client-b"));
+    ASSERT_TRUE(profiles::edit(path, restore));
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_FALSE(loaded->catalog.profiles[0].archived);
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-b"});
+  }
+
+  TEST_F(MultiseatProfileCatalog, RenamePreservesAssignmentsAndRemoveRespectsCommitFailures) {
+    save(sample());
+    ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::rename, "profile-a", "Living room Steam"}));
+    auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].name, "Living room Steam");
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, sample().profiles[0].client_keys);
+    loaded.reset();
+    psf::set_write_fault_for_tests(psf::write_fault_e::rename);
+    EXPECT_EQ(profiles::edit(path, {profiles::edit_operation_e::remove, "profile-a", ""}).status, psf::write_status_e::not_committed);
+    loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_FALSE(loaded->catalog.profiles[0].archived);
+    loaded.reset();
+    psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+    EXPECT_EQ(profiles::edit(path, {profiles::edit_operation_e::remove, "profile-a", ""}).status, psf::write_status_e::durability_uncertain);
+    loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[0].archived);
+  }
+
+  TEST_F(MultiseatProfileCatalog, ArchivedCatalogCannotContainRoutesOrAmbiguousArchiveState) {
+    auto encoded = json::parse(profiles::encode(sample()));
+    encoded["schema"] = 2;
+    encoded["profiles"][0]["archived"] = true;
+    EXPECT_FALSE(profiles::decode(encoded.dump()));
+    encoded["profiles"][0]["clients"] = json::array();
+    EXPECT_TRUE(profiles::decode(encoded.dump()));
+    encoded["profiles"][0]["archived"] = 1;
+    EXPECT_FALSE(profiles::decode(encoded.dump()));
+    encoded["profiles"][0].erase("archived");
+    EXPECT_FALSE(profiles::decode(encoded.dump()));
+  }
+
+  TEST(MultiseatProfileEditRequest, RejectsAmbiguousRemovalAndUntrustedRuntimeFields) {
+    EXPECT_TRUE(profiles::decode_edit_request(R"({"operation":"remove","profile_id":"space-a"})"));
+    EXPECT_TRUE(profiles::decode_edit_request(R"({"operation":"restore","profile_id":"space-a"})"));
+    EXPECT_TRUE(profiles::decode_edit_request(R"({"operation":"rename","profile_id":"space-a","name":"Player 2"})"));
+    for (const auto *body : {
+      R"({"operation":"rename","profile_id":"space-a","name":""})",
+      R"({"operation":"rename","profile_id":"space-a","name":" x "})",
+      R"({"operation":"remove","profile_id":"space-a","name":"x"})",
+      R"({"operation":"remove","profile_id":"space-a","delete_data":true})",
+      R"({"operation":"remove","profile_id":"space-a","image":"sha256:abc"})",
+      R"({"operation":"remove","profile_id":"space-a","profile_id":"space-b"})",
+      R"({"operation":"unknown","profile_id":"space-a"})",
+      R"({"operation":"remove","profile_id":"../space-a"})",
+      R"({"operation":"remove","profile_id":[]})"}) EXPECT_FALSE(profiles::decode_edit_request(body));
+    EXPECT_FALSE(profiles::decode_edit_request(std::string(4097, ' ')));
+  }
+
   TEST_F(MultiseatProfileCatalog, FirstSpaceCreatesAPrivateCatalogAndFreshHomeWithoutASource) {
     provisioning_host_t host; host.image_family = "steam";
     const auto result = profiles::create_first_steam(path, first_request, first_image, host);

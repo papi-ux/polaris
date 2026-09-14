@@ -16,6 +16,7 @@ namespace multiseat::profiles {
     std::string name;
     workload_plan_t workload;
     std::vector<std::string> client_keys;
+    bool archived = false;
   };
 
   struct catalog_t {
@@ -80,6 +81,17 @@ namespace multiseat::profiles {
   // not select a GPU, assign a device, configure or activate the controller.
   [[nodiscard]] change_result_t create_first_steam(const std::filesystem::path &path,
     const first_steam_request_t &request, std::string_view image, container::host_t &host);
+  enum class edit_operation_e { rename, remove, restore };
+  struct edit_request_t {
+    edit_operation_e operation = edit_operation_e::rename;
+    std::string profile_id, name;
+    bool operator==(const edit_request_t &) const = default;
+  };
+  [[nodiscard]] bool valid_edit_request(const edit_request_t &request);
+  [[nodiscard]] std::optional<edit_request_t> decode_edit_request(std::string_view payload);
+  // Catalog-only edits. Removal also unassigns devices; homes and networks are
+  // retained in a restorable catalog entry. The controller owner must quiesce launches and release its lease.
+  [[nodiscard]] change_result_t edit(const std::filesystem::path &path, const edit_request_t &request);
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif

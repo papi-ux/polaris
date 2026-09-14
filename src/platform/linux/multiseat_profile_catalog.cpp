@@ -86,7 +86,7 @@ namespace multiseat::profiles {
             !volumes.emplace(storage.opaque_volume_name).second ||
             entry.name.empty() || entry.name.size() > 128 ||
             std::any_of(entry.name.begin(), entry.name.end(), [](unsigned char c) { return c < 32 || c == 127; }) ||
-            entry.client_keys.size() > 4096 || !valid_workload_plan(entry.workload) ||
+            (entry.archived && !entry.client_keys.empty()) || entry.client_keys.size() > 4096 || !valid_workload_plan(entry.workload) ||
             !workload_matches_runtime_profile(entry.workload, storage.runtime_profile)) return false;
         for (const auto &client : entry.client_keys) {
           if (!token(client) || !clients.emplace(client).second || clients.size() > 65536) return false;
@@ -216,14 +216,15 @@ namespace multiseat::profiles {
         return true;
       });
       keys(root, {"schema", "owner_uid", "owner_gid", "profiles"});
-      if (!root.at("schema").is_number_unsigned() || root.at("schema") != 1 ||
+      if (!root.at("schema").is_number_unsigned() || (root.at("schema") != 1 && root.at("schema") != 2) ||
           !root.at("owner_uid").is_number_unsigned() || !root.at("owner_gid").is_number_unsigned() ||
           root.at("owner_uid").get<std::uint64_t>() > 2147483647 ||
           root.at("owner_gid").get<std::uint64_t>() > 2147483647 ||
           !root.at("profiles").is_array() || root.at("profiles").size() > 4096) return std::nullopt;
       catalog_t catalog {root.at("owner_uid").get<std::uint32_t>(), root.at("owner_gid").get<std::uint32_t>(), {}};
       for (const auto &value : root.at("profiles")) {
-        keys(value, {"id", "name", "volume", "family", "image", "target", "clients"});
+        if (root.at("schema") == 2) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived"});
+        else keys(value, {"id", "name", "volume", "family", "image", "target", "clients"});
         const auto [runtime, kind] = family(value.at("family").get<std::string>());
         if (!value.at("clients").is_array() || value.at("clients").size() > 4096) return std::nullopt;
         catalog.profiles.push_back({
@@ -232,6 +233,7 @@ namespace multiseat::profiles {
           .name = value.at("name").get<std::string>(),
           .workload = {kind, value.at("target").get<std::string>()},
           .client_keys = value.at("clients").get<std::vector<std::string>>(),
+          .archived = root.at("schema") == 2 ? value.at("archived").get<bool>() : false,
         });
       }
       return valid(catalog) ? std::optional {std::move(catalog)} : std::nullopt;
@@ -240,11 +242,13 @@ namespace multiseat::profiles {
 
   std::string encode(const catalog_t &catalog) {
     if (!valid(catalog)) throw std::invalid_argument("invalid profile catalog");
-    json root {{"schema", 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
+    const bool archives = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return entry.archived; });
+    json root {{"schema", archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
     for (const auto &entry : catalog.profiles) {
       root["profiles"].push_back({{"id", entry.storage.profile_key}, {"name", entry.name},
         {"volume", entry.storage.opaque_volume_name}, {"family", family(entry.storage.runtime_profile)},
         {"image", entry.storage.image_reference}, {"target", entry.workload.target_id}, {"clients", entry.client_keys}});
+      if (archives) root["profiles"].back()["archived"] = entry.archived;
     }
     auto payload = root.dump(2) + "\n";
     if (payload.size() > maximum_catalog_bytes) throw std::invalid_argument("catalog too large");
@@ -280,7 +284,7 @@ namespace multiseat::profiles {
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
         return entry.storage.profile_key == profile_key;
       });
-      if (target == catalog.profiles.end()) { result.error = "Unknown profile."; return std::nullopt; }
+      if (target == catalog.profiles.end() || target->archived) { result.error = "Unknown or removed space."; return std::nullopt; }
       for (const auto &entry : catalog.profiles) {
         if (std::find(entry.client_keys.begin(), entry.client_keys.end(), client_key) != entry.client_keys.end()) {
           if (&entry == &*target) return encode(catalog);
@@ -308,7 +312,7 @@ namespace multiseat::profiles {
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
         return entry.storage.profile_key == profile_key;
       });
-      if (!profile_key.empty() && target == catalog.profiles.end()) {
+      if (!profile_key.empty() && (target == catalog.profiles.end() || target->archived)) {
         result.error = "Unknown profile."; return std::nullopt;
       }
       for (auto &entry : catalog.profiles) std::erase(entry.client_keys, client_key);
@@ -463,6 +467,56 @@ namespace multiseat::profiles {
     else if (!result && result.error.empty())
       result.error = "The Spaces catalog is busy, unsafe, or could not be saved. No controller was activated.";
     return result;
+  }
+
+  bool valid_edit_request(const edit_request_t &request) {
+    if (!token(request.profile_id)) return false;
+    if (request.operation == edit_operation_e::remove || request.operation == edit_operation_e::restore) return request.name.empty();
+    return request.operation == edit_operation_e::rename && !request.name.empty() && request.name.size() <= 128 &&
+      request.name.front() != ' ' && request.name.back() != ' ' &&
+      std::none_of(request.name.begin(), request.name.end(), [](unsigned char c) { return c < 32 || c == 127; });
+  }
+
+  std::optional<edit_request_t> decode_edit_request(std::string_view payload) {
+    if (payload.empty() || payload.size() > 4096) return std::nullopt;
+    try {
+      std::set<std::string> seen;
+      const auto body = json::parse(payload, [&](int depth, json::parse_event_t event, json &value) {
+        if (depth > 2) throw std::invalid_argument("space edit nesting");
+        if (event == json::parse_event_t::key && !seen.emplace(value.get<std::string>()).second)
+          throw std::invalid_argument("duplicate space edit field");
+        return true;
+      });
+      const auto operation = body.at("operation").get<std::string>();
+      edit_request_t request;
+      if (operation == "rename") {
+        keys(body, {"operation", "profile_id", "name"});
+        request.name = body.at("name").get<std::string>();
+      } else if (operation == "remove" || operation == "restore") {
+        keys(body, {"operation", "profile_id"});
+        request.operation = operation == "remove" ? edit_operation_e::remove : edit_operation_e::restore;
+      } else return std::nullopt;
+      request.profile_id = body.at("profile_id").get<std::string>();
+      return valid_edit_request(request) ? std::optional {request} : std::nullopt;
+    } catch (...) { return std::nullopt; }
+  }
+
+  change_result_t edit(const std::filesystem::path &path, const edit_request_t &request) {
+    if (!valid_edit_request(request)) return {.error = "Invalid space change."};
+    return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
+      const auto entry = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+        [&](const auto &value) { return value.storage.profile_key == request.profile_id; });
+      if (entry == catalog.profiles.end()) { result.error = "Space not found. Refresh spaces."; return std::nullopt; }
+      result.profile_key = entry->storage.profile_key;
+      if (request.operation == edit_operation_e::rename) entry->name = request.name;
+      else {
+        entry->archived = request.operation == edit_operation_e::remove;
+        if (entry->archived) entry->client_keys.clear();
+        // An archived entry already has no routes. A repeated restore must
+        // preserve assignments deliberately added after the first restore.
+      }
+      return encode(catalog);
+    });
   }
 
   int command(int argc, char **argv) {

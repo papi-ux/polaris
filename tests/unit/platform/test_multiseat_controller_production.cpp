@@ -882,6 +882,40 @@ TEST(
     EXPECT_EQ(calls, 0U);
   }
 
+  TEST(MultiseatControllerProduction, LastRemovedSpaceKeepsItsCatalogAndHomeWithoutLaunchAuthority) {
+    temporary_production_root_t root;
+    temporary_production_root_t authority_root;
+    const auto path = root.path() / "profiles.json";
+    auto options = production_options(authority_root.path());
+    profiles::catalog_t catalog {1000, 1000, {{
+      .storage = options.container.profiles.front(), .name = "Retained games",
+      .workload = options.container.workloads.front(), .client_keys = {}, .archived = true,
+    }}};
+    catalog.profiles.front().storage.image_reference = "sha256:" + std::string(64, 'a');
+    ASSERT_TRUE(private_state_file::write_atomic(path, profiles::encode(catalog)));
+    options.profile_catalog = path;
+    options.container.profiles.clear(); options.container.workloads.clear();
+    options.container.engine = container::engine_e::docker;
+    options.container.executable = "/usr/bin/docker";
+    options.container.runtime_executable = "/usr/bin/runc";
+    options.container.media_enabled = true;
+    auto factory_state = std::make_shared<production_factory_state_t>();
+    auto input_state = std::make_shared<production_input_state_t>();
+    auto host_state = std::make_shared<production_host_state_t>();
+    auto created = create_production_controller_runtime(options,
+      production_factories(factory_state, input_state, host_state));
+    ASSERT_TRUE(created.runtime);
+    ASSERT_EQ(created.runtime->profile_catalog().size(), 1U);
+    EXPECT_TRUE(created.runtime->profile_catalog().front().archived);
+    EXPECT_FALSE(created.runtime->routes_client("paired-client"));
+    EXPECT_EQ(created.runtime->managed_workers(), 0U);
+    const profiles::edit_request_t restore {profiles::edit_operation_e::restore,
+      catalog.profiles.front().storage.profile_key, ""};
+    EXPECT_FALSE(profiles::edit(path, restore));
+    ASSERT_TRUE(created.runtime->shutdown().closed());
+    EXPECT_TRUE(profiles::edit(path, restore));
+  }
+
   TEST(MultiseatControllerProduction, SavedAssignmentsRemainLockedThroughIncompleteShutdown) {
     temporary_production_root_t root;
     temporary_production_root_t authority_root;
