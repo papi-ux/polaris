@@ -55,5 +55,5 @@ export function installGuide(setup) {
   return Object.hasOwn(installGuides, setup.distribution) ? installGuides[setup.distribution] : null
 }
 
-export const installSpacesSecurity = 'sudo -H polaris-spaces-setup install'
+export const installSpacesSecurity = 'sudo -H /usr/bin/polaris-spaces-setup install'
 export const fedoraSecurityPackages = 'sudo dnf install selinux-policy-devel container-selinux make'

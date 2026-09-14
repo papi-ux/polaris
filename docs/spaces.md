@@ -145,7 +145,7 @@ On a mutable Fedora installation:
    service, stop that service first.
 3. Run the helper included in the matching native Polaris package:
    ```bash
-   sudo -H polaris-spaces-setup install
+   sudo -H /usr/bin/polaris-spaces-setup install
    ```
 4. Reopen Polaris, return to **Spaces**, and select **Recheck setup**.
 
@@ -164,7 +164,7 @@ this helper in the preview.
 
 You can inspect readiness with `polaris-spaces-setup status`. To remove only the
 policies and input rule owned by the helper, stop Polaris and Spaces first, then
-run `sudo -H polaris-spaces-setup remove`. This does not delete player homes. Remove
+run `sudo -H /usr/bin/polaris-spaces-setup remove`. This does not delete player homes. Remove
 owned policies before uninstalling the native package if you no longer need them.
 Native package installation and removal do not activate or remove live SELinux
 policy automatically.

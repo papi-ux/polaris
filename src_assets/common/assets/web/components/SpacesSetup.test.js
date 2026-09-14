@@ -58,7 +58,7 @@ describe('Spaces setup', () => {
     await flushPromises()
     expect(wrapper.text()).not.toContain('sudo dnf')
     expect(wrapper.text()).toContain('system image')
-    expect(wrapper.text()).not.toContain('sudo -H polaris-spaces-setup')
+    expect(wrapper.text()).not.toContain('sudo -H /usr/bin/polaris-spaces-setup')
     expect(installGuide({ distribution: 'constructor', immutable_host: false })).toBeNull()
   })
 
@@ -70,7 +70,7 @@ describe('Spaces setup', () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(result)))
     wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
-    expect(wrapper.text()).toContain('sudo -H polaris-spaces-setup install')
+    expect(wrapper.text()).toContain('sudo -H /usr/bin/polaris-spaces-setup install')
     expect(wrapper.text()).toContain('stop Spaces streams, and quit Polaris')
     expect(wrapper.text()).toContain('selinux-policy-devel container-selinux make')
     expect(wrapper.find('spaces-first-setup-stub').attributes('hostready')).toBe('false')
@@ -79,7 +79,7 @@ describe('Spaces setup', () => {
     security.action = 'sudo untrusted'
     await wrapper.get('button').trigger('click'); await flushPromises()
     expect(wrapper.text()).not.toContain('sudo untrusted')
-    expect(wrapper.text()).not.toContain('sudo -H polaris-spaces-setup')
+    expect(wrapper.text()).not.toContain('sudo -H /usr/bin/polaris-spaces-setup')
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 

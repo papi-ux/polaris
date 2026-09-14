@@ -137,7 +137,7 @@ def status():
     except (SetupError, OSError):
         ready = False
     return {'ready': ready, 'message': 'Spaces SELinux setup is ready.' if ready else
-            'Spaces SELinux setup needs attention. Quit Polaris, then run sudo -H polaris-spaces-setup install.'}
+            'Spaces SELinux setup needs attention. Quit Polaris, then run sudo -H @CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup install.'}
 
 
 def inventory(output):
@@ -342,7 +342,7 @@ def main(argv):
         result = status()
         print(json.dumps(result))
         return 0 if result['ready'] else 1
-    require(os.geteuid() == 0, 'Run this operation with sudo -H polaris-spaces-setup ' + argv[0])
+    require(os.geteuid() == 0, 'Run this operation with sudo -H @CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup ' + argv[0])
     require(Path('/sys/fs/selinux/enforce').read_text().strip() == '1',
             'This installer requires SELinux enforcing. No policy or enforcement settings were changed.')
     require(not Path('/run/ostree-booted').exists(), 'Spaces security installation on system-image hosts is not supported by this preview.')
