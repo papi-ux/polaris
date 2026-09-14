@@ -1,4 +1,4 @@
-policy_module(polaris_nvidia_worker, 1.0.6)
+policy_module(polaris_nvidia_worker, 1.0.7)
 
 gen_require(`
     type container_file_t;
@@ -6,6 +6,7 @@ gen_require(`
     type xserver_misc_device_t;
     type polaris_multiseat_input_device_t;
     type unreserved_port_t;
+    type howl_port_t;
 ')
 
 # Opt-in physical worker domain. Preserve the reference policy's container
@@ -22,10 +23,12 @@ corenet_tcp_bind_generic_node(polaris_nvidia_worker_t)
 corenet_udp_bind_generic_node(polaris_nvidia_worker_t)
 # Chromium's UDP random-bind path chooses its own port, including ports outside
 # the kernel's ephemeral range. Steam's Chrome_ChildIOT needs name_bind there.
-# Only ordinary unreserved UDP ports are admitted, inside the worker's private
-# Docker bridge with no published ports. Named service port types, TCP binding,
-# host networking and the generic container_t domain are not widened.
-allow polaris_nvidia_worker_t unreserved_port_t:udp_socket name_bind;
+# Steam's local IPC engine also explicitly binds unreserved TCP listeners.
+# Both remain inside the worker's private bridge with no published ports.
+allow polaris_nvidia_worker_t unreserved_port_t:{ tcp_socket udp_socket } name_bind;
+# Chromium uses mDNS for its local WebRTC address discovery. Admit only its
+# named UDP socket type; other named services and reserved ports remain denied.
+allow polaris_nvidia_worker_t howl_port_t:udp_socket name_bind;
 # Steam's process helpers communicate through ephemeral TCP listeners too.
 # They remain inside the private bridge with no published worker ports.
 allow polaris_nvidia_worker_t self:tcp_socket { listen accept };
