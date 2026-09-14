@@ -3,6 +3,7 @@
  * @brief Regression coverage for shell-free Linux child process launches.
  */
 #include <gtest/gtest.h>
+#include <thread>
 
 #ifdef __linux__
 
@@ -54,6 +55,31 @@ TEST(LinuxProcessArgv, TerminatesCapturedProcessAtDeadline) {
 
 TEST(GamescopeRuntime, ClosesInheritedDescriptorsBeforeExec) {
   EXPECT_TRUE(stream_runtime::gamescope_runtime_closes_inherited_descriptors_for_tests());
+}
+
+TEST(LinuxProcessArgv, AlreadyCancelledCommandsDoNotLaunch) {
+  std::stop_source stop;
+  stop.request_stop();
+  const auto result = platf::run_process_argv_capture({"printf", "must not run"},
+    std::chrono::seconds(5), 4096, stop.get_token());
+  EXPECT_TRUE(result.cancelled);
+  EXPECT_EQ(result.exit_status, 125);
+  EXPECT_TRUE(result.output.empty());
+}
+
+TEST(LinuxProcessArgv, CancellationCannotBeStarvedByContinuousOutput) {
+  std::stop_source stop;
+  std::jthread cancel([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stop.request_stop();
+  });
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = platf::run_process_argv_capture({"yes"},
+    std::chrono::seconds(10), 64, stop.get_token());
+  EXPECT_TRUE(result.cancelled);
+  EXPECT_FALSE(result.timed_out);
+  EXPECT_LE(result.output.size(), 64U);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3));
 }
 
 #endif

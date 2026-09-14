@@ -171,4 +171,14 @@ TEST(SpacesRuntime, SelfConsistentButUnapprovedImagesCannotBeUsed) {
     EXPECT_EQ(spaces::install_runtime(host, r.id, {r}).code, "runtime_verification_failed");
   }
 }
+
+TEST(SpacesRuntime, CancelledDownloadDoesNotReachDocker) {
+  download_host_t host;
+  std::stop_source stop;
+  stop.request_stop();
+  const auto result = spaces::install_runtime(host, runtime().id, {runtime()}, stop.get_token());
+  EXPECT_EQ(result.code, "download_cancelled");
+  EXPECT_FALSE(result.ready);
+  EXPECT_TRUE(host.calls.empty());
+}
 #endif

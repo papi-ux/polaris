@@ -89,6 +89,7 @@
   #include "platform/linux/session_media.h"
   #include "platform/linux/multiseat_launch_service.h"
 #include "platform/linux/spaces_setup.h"
+#include "platform/linux/spaces_setup_service.h"
   #include <pwd.h>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -3645,6 +3646,39 @@ namespace confighttp {
     const auto service = multiseat::installed_profile_service();
     const bool available = service && service->admin_snapshot().available;
     send_response(response, multiseat::spaces::inspect_setup(host, config::multiseat.enabled, available));
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void getSpacesSetupJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    if (const auto service = multiseat::spaces::installed_setup_service()) {
+      send_response(response, service->snapshot());
+      return;
+    }
+#endif
+    not_found(response, request);
+  }
+
+  void updateSpacesSetupJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::spaces::installed_setup_service();
+    if (!service) { not_found(response, request); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Setup request is too large"); return; }
+    const auto action = multiseat::spaces::decode_setup_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!action) { bad_request(response, request, "Invalid Spaces setup request"); return; }
+    const auto status = service->submit(*action);
+    auto output = service->snapshot();
+    output["accepted"] = status == 200 || status == 202;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(status), output.dump(), headers);
 #else
     not_found(response, request);
 #endif
@@ -7593,6 +7627,8 @@ namespace confighttp {
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;
     server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
+    server.resource["^/api/spaces/setup/job$"]["GET"] = getSpacesSetupJob;
+    server.resource["^/api/spaces/setup/job$"]["POST"] = updateSpacesSetupJob;
     server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
     server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);

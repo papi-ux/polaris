@@ -43,6 +43,7 @@
   #include "platform/linux/multiseat_moonlight_runtime.h"
   #include "platform/linux/multiseat_profile_catalog.h"
   #include "platform/linux/spaces_runtime.h"
+  #include "platform/linux/spaces_setup_service.h"
   #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
@@ -522,6 +523,13 @@ int main(int argc, char *argv[]) {
 
 #ifdef __linux__
   std::shared_ptr<multiseat::profile_launch_service_t> profile_service;
+  auto spaces_setup = multiseat::spaces::make_setup_service(platf::appdata(),
+    !config::multiseat.enabled && config::multiseat.config_file.empty() && !config::input.multiseat_moonlight_input);
+  auto spaces_setup_guard = util::fail_guard([&] {
+    spaces_setup->shutdown();
+    multiseat::spaces::uninstall_setup_service(spaces_setup);
+  });
+  if (!multiseat::spaces::install_setup_service(spaces_setup)) return 1;
   auto profile_service_guard = util::fail_guard([&] {
     if (profile_service) {
       profile_service->stop_admission();
@@ -694,6 +702,7 @@ int main(int argc, char *argv[]) {
 
 #ifdef __linux__
   if (profile_service) profile_service->stop_admission();
+  spaces_setup->shutdown();
 #endif
 
   httpThread.join();

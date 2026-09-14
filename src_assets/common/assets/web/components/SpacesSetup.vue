@@ -77,13 +77,14 @@
               Open Doctor &amp; Support
             </router-link>
             <p v-if="check.id === 'spaces' && !setup.configured" class="mt-3 text-sm text-storm">
-              First space setup and the verified gaming runtime download are still being integrated into this preview.
-              Installing Docker completes host preparation; it does not create a space yet.
+              After the host checks pass, prepare your first space below.
+              The preview will show whether a verified gaming runtime is available for download.
             </p>
           </li>
         </ol>
       </details>
       <p v-if="!setup.available" class="mt-4 text-xs text-storm">These checks do not install packages, restart services, or interrupt games. Game and stream quality are checked when you play.</p>
+      <SpacesFirstSetup v-if="!setup.configured" :host-ready="setup.host_prerequisites_ready" />
     </template>
     <p v-if="copyStatus" class="mt-3 text-sm text-silver" role="status">{{ copyStatus }}</p>
   </section>
@@ -92,6 +93,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { dockerAccessCommand, installGuide, startDocker, validSetup } from '../spaces-setup.js'
+import SpacesFirstSetup from './SpacesFirstSetup.vue'
 
 const setup = ref(null), loading = ref(false), error = ref(''), copyStatus = ref('')
 const guide = computed(() => installGuide(setup.value))

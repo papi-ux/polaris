@@ -18,14 +18,14 @@ afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 describe('Spaces setup', () => {
   it('offers host commands and rechecks actual state without a system mutation', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(snapshot())).mockResolvedValueOnce(reply(snapshot(true))))
-    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link'] } })
+    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
     expect(wrapper.text()).toContain('sudo dnf install')
     expect(wrapper.text()).toContain('administrator password stays in that terminal')
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('Host prerequisites checked.')
-    expect(wrapper.text()).toContain('does not create a space yet')
+    expect(wrapper.text()).toContain('prepare your first space below')
     expect(fetch).toHaveBeenCalledTimes(2)
     for (const [url, options] of fetch.mock.calls) {
       expect(url).toBe('./api/spaces/setup')
@@ -35,7 +35,7 @@ describe('Spaces setup', () => {
 
   it('clears old successful checks when a refresh fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(snapshot(true))).mockRejectedValueOnce(new Error('Offline')))
-    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link'] } })
+    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
     await wrapper.get('button').trigger('click')
     await flushPromises()
@@ -54,7 +54,7 @@ describe('Spaces setup', () => {
 
   it('never offers mutable Fedora commands for an immutable host', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply({ ...snapshot(), immutable_host: true })))
-    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link'] } })
+    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
     expect(wrapper.text()).not.toContain('sudo dnf')
     expect(wrapper.text()).toContain('system image')

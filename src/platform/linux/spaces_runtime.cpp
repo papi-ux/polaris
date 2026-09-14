@@ -112,19 +112,25 @@ namespace multiseat::spaces {
   }
 
   runtime_install_result_t install_runtime(container::host_t &host, std::string_view id,
-    const std::vector<runtime_t> &catalog) {
+    const std::vector<runtime_t> &catalog, std::stop_token stop) {
+    const auto cancelled = [] { return runtime_install_result_t {false, "download_cancelled",
+      "Setup stopped. Docker may keep verified download layers for a later retry.", {}}; };
     const auto found = std::find_if(catalog.begin(), catalog.end(), [&](const auto &r) { return r.id == id; });
     if (found == catalog.end() || !valid(*found))
       return {false, "runtime_not_published", "This Polaris build has no approved download for that runtime.", {}};
 #if !defined(__x86_64__)
     return {false, "unsupported_platform", "This runtime requires a Linux x86-64 host.", {}};
 #endif
-    if (!local_engine(host))
+    if (stop.stop_requested()) return cancelled();
+    const bool engine_ready = local_engine(host);
+    if (stop.stop_requested()) return cancelled();
+    if (!engine_ready)
       return {false, "docker_unavailable", "Polaris needs access to the system Docker Engine and runc.", {}};
     const auto &runtime = *found;
     auto inspect = container::command_prefix({});
     inspect.insert(inspect.end(), {"image", "inspect", runtime.reference()});
     const auto before = host.run(inspect, std::chrono::seconds(5), 65536);
+    if (stop.stop_requested()) return cancelled();
     if (succeeded(before)) {
       if (matches_runtime_image(runtime, before.output))
         return {true, "runtime_ready", "The approved gaming runtime is available.", runtime.config_digest};
@@ -135,9 +141,11 @@ namespace multiseat::spaces {
     // No mutable tags, credentials, remote Docker contexts or caller-provided
     // URLs. The daemon checks the registry digest and content-addressed layers.
     const auto downloaded = host.run(pull, std::chrono::minutes(30), 65536);
+    if (stop.stop_requested()) return cancelled();
     if (!succeeded(downloaded))
       return {false, "download_incomplete", "The runtime download did not finish. Retry the same runtime to reuse verified layers.", {}};
     const auto after = host.run(inspect, std::chrono::seconds(5), 65536);
+    if (stop.stop_requested()) return cancelled();
     if (!succeeded(after) || !matches_runtime_image(runtime, after.output))
       return {false, "runtime_verification_failed", "The downloaded runtime could not be verified. No space was created.", {}};
     return {true, "runtime_ready", "The approved gaming runtime is available.", runtime.config_digest};

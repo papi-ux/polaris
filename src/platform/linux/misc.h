@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <stop_token>
 #include <unistd.h>
 #include <vector>
 
@@ -104,6 +105,7 @@ namespace platf {
     bool timed_out = false;
     bool truncated = false;
     std::string output;
+    bool cancelled = false;
   };
 
   /**
@@ -116,7 +118,8 @@ namespace platf {
   process_output_t run_process_argv_capture(
     const std::vector<std::string> &argv,
     std::chrono::milliseconds timeout = std::chrono::seconds {2},
-    std::size_t max_output_bytes = 1024 * 1024
+    std::size_t max_output_bytes = 1024 * 1024,
+    std::stop_token stop = {}
   );
 
 }  // namespace platf

@@ -73,6 +73,7 @@ namespace multiseat::profiles {
   struct first_steam_request_t {
     std::string request_id, name;
   };
+  [[nodiscard]] bool valid_first_steam_request(const first_steam_request_t &request);
   // First-space storage transaction. Only a missing or empty private catalog
   // can gain its first entry. Matching retries preserve assignments and homes.
   // The caller must obtain image from the approved runtime installer; this does

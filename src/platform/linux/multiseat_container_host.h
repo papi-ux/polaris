@@ -7,11 +7,13 @@
 #ifdef __linux__
 
 #include "multiseat_container_backend.h"
+#include <stop_token>
 
 namespace multiseat::container {
 
   class local_host_t final : public host_t {
   public:
+    explicit local_host_t(std::stop_token stop = {}) : stop_(stop) {}
     [[nodiscard]] std::uint64_t effective_uid() const override;
     [[nodiscard]] std::uint64_t effective_gid() const override;
     [[nodiscard]] bool executable_file(const std::filesystem::path &path) const override;
@@ -40,6 +42,8 @@ namespace multiseat::container {
       std::chrono::milliseconds timeout,
       std::size_t max_output_bytes
     ) override;
+  private:
+    std::stop_token stop_;
   };
 
 }  // namespace multiseat::container

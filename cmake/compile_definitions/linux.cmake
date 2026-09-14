@@ -573,6 +573,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

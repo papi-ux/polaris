@@ -21,7 +21,7 @@ namespace multiseat::spaces {
   // Always re-inspects the exact digest. Retrying after interruption can reuse
   // Docker's verified layers; a failed pull never starts or activates anything.
   [[nodiscard]] runtime_install_result_t install_runtime(container::host_t &host,
-    std::string_view id, const std::vector<runtime_t> &catalog);
+    std::string_view id, const std::vector<runtime_t> &catalog, std::stop_token stop = {});
   int runtime_command(int argc, char **argv);
 }
 #endif

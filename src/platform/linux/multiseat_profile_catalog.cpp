@@ -408,6 +408,10 @@ namespace multiseat::profiles {
     });
   }
 
+  bool valid_first_steam_request(const first_steam_request_t &request) {
+    return valid_new_steam(request.request_id, request.name);
+  }
+
   change_result_t create_first_steam(const std::filesystem::path &path,
     const first_steam_request_t &request, std::string_view image, container::host_t &host) {
     if (!valid_new_steam(request.request_id, request.name) || !image_id(image))

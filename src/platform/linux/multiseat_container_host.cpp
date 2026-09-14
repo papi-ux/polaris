@@ -218,7 +218,7 @@ namespace multiseat::container {
     std::chrono::milliseconds timeout,
     std::size_t max_output_bytes
   ) {
-    auto result = platf::run_process_argv_capture(argv, timeout, max_output_bytes);
+    auto result = platf::run_process_argv_capture(argv, timeout, max_output_bytes, stop_);
     return {
       .exit_status = result.exit_status,
       .timed_out = result.timed_out,
