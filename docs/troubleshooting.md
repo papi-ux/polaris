@@ -312,6 +312,21 @@ desktop environment variables such as `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and
 is logged as a limited desktop-preview/portal warning instead of a stream startup failure because
 Polaris starts its own `labwc` Wayland socket for the client session.
 
+## KMS capture refused for a missing capability
+
+KMS/DRM capture reads framebuffers straight from the kernel, which needs `CAP_SYS_ADMIN` on the
+Polaris binary. That is deliberately opt-in: the package does not grant it, the host setup step
+does. With `capture = kms` and no capability, Polaris finds the display, logs
+`Failed to gain CAP_SYS_ADMIN` and `Couldn't get handle for DRM Framebuffer`, and then either
+substitutes another backend or, when nothing else can capture, serves with no capture at all and
+H.264 as the only codec. The Doctor reports both cases as `kms_capture_needs_capability`.
+
+```
+sudo -H polaris --setup-host --enable-kms
+```
+
+then restart Polaris. KMS capture is the path that carries HDR, so keep it if HDR is the goal.
+
 ## NVIDIA KMS capture issues
 
 If KMS capture gives a black screen on NVIDIA, confirm the kernel is using:
@@ -391,6 +406,25 @@ If `stream_hdr_enabled=false`, Polaris is being conservative: the client may hav
 but the active Linux display path did not provide enough metadata to advertise a real HDR stream.
 If `usable=false`, the display path exposed an HDR metadata blob, but Polaris rejected it because core
 static metadata such as display primaries or max display luminance was missing.
+
+## HDR never engages
+
+`stream_hdr_enabled=false` on every launch, whatever you toggle, is five independent gates and
+any one of them is enough. Check them in this order; each has a line in
+`journalctl --user -u polaris` that names it.
+
+| gate | what the journal says | fix |
+|---|---|---|
+| capture backend cannot report HDR | `HDR decision: ... display_hdr=false` with `capture = wlr` or unset on a private mode | `capture = kms` |
+| stream mode captures Polaris' own compositor | `session_runtime: ... effective_headless=true` | Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope |
+| binary lacks `CAP_SYS_ADMIN` | `Failed to gain CAP_SYS_ADMIN`, `Couldn't get handle for DRM Framebuffer [...]: Probably not permitted` | `sudo -H polaris --setup-host --enable-kms`, restart |
+| client forced off on the host | Doctor `hdr_disabled_by_saved_setting`; `client_profiles.json` `hdr: false` or `device_db.json` `hdr_capable: false` | clear both, or let the client's own HDR10 report win (1.4.8) |
+| client never asked | `portal HDR force -> 0 from enable_hdr=false`, `client_dynamic_range=0` | turn on Request HDR in the client; in Nova it is off by default |
+
+When all five pass, the session logs `HDR metadata: available=true usable=true`,
+`Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)` and `stream_hdr_enabled=true` after
+`Session started for [...]`. The encoder probe logs the same lines earlier even when the session
+will not, so read the ones after the session starts.
 
 ## Quick recovery ladder
 

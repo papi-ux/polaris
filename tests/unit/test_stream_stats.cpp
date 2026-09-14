@@ -957,6 +957,124 @@ TEST(StreamStatsDoctorTests, SaysNothingWhenTheConfiguredCaptureBackendWasUsed) 
   }
 }
 
+TEST(StreamStatsDoctorTests, NamesTheCapabilityWhenKmsWasRefusedAndNothingElseCaptures) {
+  // capture = kms on a binary without CAP_SYS_ADMIN: kmsgrab finds the display, cannot read a
+  // framebuffer, and the host serves with no capture at all. The journal says which command to
+  // run, once, at boot. The Doctor has to say it where the person is standing.
+  LinuxDisplayConfigGuard guard;
+  config::video.capture = "kms";
+  platf::set_capture_sources_missing_for_tests(true);
+  platf::set_kms_capture_refused_for_tests(true);
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "kms_capture_needs_capability") {
+      continue;
+    }
+    saw_warning = true;
+    EXPECT_EQ(warning.at("severity"), "fail");
+    EXPECT_NE(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
+    EXPECT_NE(warning.at("action").get<std::string>().find("--setup-host --enable-kms"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+
+  platf::set_kms_capture_refused_for_tests(false);
+  platf::set_capture_sources_missing_for_tests(false);
+}
+
+TEST(StreamStatsDoctorTests, ASubstitutedKmsNamesTheCapabilityNotTheCompositor) {
+  // The substitution text was written for wlr on KDE. Read for kms it blames compositor
+  // protocols and tells the user to stop using the one backend that carries HDR.
+  LinuxDisplayConfigGuard guard;
+  config::video.capture = "kms";
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  platf::set_kms_capture_refused_for_tests(true);
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_substituted = false;
+  bool saw_capability = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    const auto id = warning.at("id").get<std::string>();
+    if (id == "capture_backend_substituted") {
+      saw_substituted = true;
+      EXPECT_NE(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
+      EXPECT_EQ(warning.at("message").get<std::string>().find("wlroots capture protocols"), std::string::npos);
+      EXPECT_NE(warning.at("action").get<std::string>().find("--enable-kms"), std::string::npos);
+    }
+    if (id == "kms_capture_needs_capability") {
+      saw_capability = true;
+      EXPECT_EQ(warning.at("severity"), "warning");
+    }
+  }
+  EXPECT_TRUE(saw_substituted);
+  EXPECT_TRUE(saw_capability);
+
+  platf::set_kms_capture_refused_for_tests(false);
+  platf::set_capture_backend_substitution_for_tests("");
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingAboutTheKmsCapabilityUnlessKmsWasRefused) {
+  LinuxDisplayConfigGuard guard;
+  config::video.capture = "wlr";
+  platf::set_capture_backend_substitution_for_tests("wlr -> portal");
+  platf::set_kms_capture_refused_for_tests(false);
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "kms_capture_needs_capability");
+    if (warning.at("id") == "capture_backend_substituted") {
+      EXPECT_EQ(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
+    }
+  }
+
+  platf::set_capture_backend_substitution_for_tests("");
+}
+
+TEST(StreamStatsDoctorTests, HdrFindingNamesTheRecipeAndTheCapabilityWhenKmsWasRefused) {
+  // Explaining why HDR did not engage is only half of it; the person wants to know what to
+  // change. Now that the recipe is proven (kms capture on a mode that shows the real HDR
+  // output), the finding can name it, and name the capability when that is what stopped it.
+  LinuxDisplayConfigGuard guard;
+  config::video.capture = "wlr";
+  config::video.linux_display.use_cage_compositor = true;
+  platf::set_kms_capture_refused_for_tests(true);
+
+  stream_stats::stats_t stats {};
+  stats.dynamic_range = 1;
+  stats.runtime_effective_headless = true;
+  stats.display_hdr = false;
+  stats.hdr_metadata_available = false;
+  stats.stream_hdr_enabled = false;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_hdr = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "hdr_capture_path_cannot_report_hdr") {
+      continue;
+    }
+    saw_hdr = true;
+    const auto action = warning.at("action").get<std::string>();
+    EXPECT_NE(action.find("capture = kms"), std::string::npos);
+    EXPECT_NE(action.find("Mirror Desktop"), std::string::npos);
+    EXPECT_NE(action.find("--enable-kms"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_hdr);
+
+  platf::set_kms_capture_refused_for_tests(false);
+}
+
 TEST(StreamStatsDoctorTests, NamesTheCapturePathWhenHdrWasAskedForAndNotDelivered) {
   // The host already knew why and only ever said so over the session-status route, while a
   // stream was live. A person who ticks "request HDR", sees SDR and goes looking for a reason

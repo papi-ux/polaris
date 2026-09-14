@@ -1807,6 +1807,9 @@ std::string get_local_ip_for_gateway() {
 
   /// Non-empty when the configured backend found nothing and auto-selection was used instead.
   static std::string capture_backend_substitution;
+  // Set by kmsgrab when a DRM framebuffer handle could not be read for want of
+  // CAP_SYS_ADMIN; cleared at the start of every evaluation.
+  static bool kms_capability_refused = false;
 
   /// False until an evaluation has actually run, so this can never report a problem it has not
   /// looked for. Doctor asks this on every report, including before startup finishes.
@@ -1908,6 +1911,7 @@ std::string get_local_ip_for_gateway() {
   void reevaluate_capture_sources() {
     capture_backend_override.reset();
     capture_backend_substitution.clear();
+    kms_capability_refused = false;
     capture_sources_evaluated = true;
     evaluate_capture_sources();
 
@@ -1964,10 +1968,31 @@ std::string get_local_ip_for_gateway() {
     return capture_sources_evaluated && sources.none();
   }
 
+  bool kms_capture_refused_for_capability() {
+    return kms_capability_refused;
+  }
+
+  void note_kms_capture_refused_for_capability() {
+    // kmsgrab found the connector and could not read a framebuffer handle. That
+    // is the capability, not the hardware, and the remedy is one command; the
+    // startup log says so once and scrolls away, so keep it where the Doctor
+    // can read it for as long as this evaluation stands (#686 follow-up).
+    kms_capability_refused = true;
+    verified_action::confirm(
+      "video.kms_capability",
+      "Read a DRM framebuffer handle for KMS capture",
+      false
+    );
+  }
+
 #ifdef POLARIS_TESTS
   void set_capture_sources_missing_for_tests(bool missing) {
     capture_sources_evaluated = missing;
     sources.reset();
+  }
+
+  void set_kms_capture_refused_for_tests(bool refused) {
+    kms_capability_refused = refused;
   }
 #endif
 

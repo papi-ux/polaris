@@ -1820,6 +1820,8 @@ namespace platf {
 
         if (!fb->handles[0]) {
           BOOST_LOG(error) << "Couldn't get handle for DRM Framebuffer ["sv << plane->fb_id << "]: Probably not permitted"sv;
+          // The probe, not the capture loop: this is the evaluation the Doctor reports on.
+          note_kms_capture_refused_for_capability();
           BOOST_LOG(config::video.capture == "kms" ? fatal : warning)
             << "KMS display capture requires CAP_SYS_ADMIN. "sv
             << "Run [sudo setcap cap_sys_admin+ep $(readlink -f $(which polaris))] only when explicitly using KMS capture.\n"sv
