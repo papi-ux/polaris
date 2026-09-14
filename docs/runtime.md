@@ -135,6 +135,30 @@ If the log says `HDR metadata: available=true usable=false`, Polaris found an HD
 
 Headless labwc/wlroots sessions are treated as SDR until the headless display path can truthfully provide HDR metadata. In that mode, a client can still request a 10-bit HEVC/Main10 or P010 encode path for SDR, but Polaris will not advertise true HDR without metadata.
 
+### The recipe that works today
+
+Verified end to end on a Linux host with an HDR10 monitor and an HDR10 handheld client. Every one
+of these has to be true at once; each one on its own was enough to keep HDR off on the host this was
+proven on.
+
+1. **`capture = kms`.** It is the only Linux capture path that reads the connector's
+   `HDR_OUTPUT_METADATA`. `wlr` does not report HDR at all, and `portal` only does with the
+   Gamescope force file.
+2. **A stream mode that shows the real HDR output**: Mirror Desktop, Host Virtual Display, Desktop
+   Takeover or Gamescope. Private Stream captures Polaris' own labwc, which is SDR.
+3. **`CAP_SYS_ADMIN` on the binary**, granted once with `sudo -H polaris --setup-host --enable-kms`.
+   Without it kms finds the display and then cannot read a framebuffer; the Doctor reports
+   `kms_capture_needs_capability`.
+4. **No per-client HDR force-off**: the paired client's `hdr` in `client_profiles.json` and its
+   `hdr_capable` in `device_db.json`. Both are honoured, so clearing one is not enough. Since 1.4.8
+   a client that reports an HDR10 display outranks a device record that was never edited.
+5. **The client actually asks.** In Nova that is Settings, "Request HDR when host supports it",
+   which is off by default. When it is off the host logs `portal HDR force -> 0 from
+   enable_hdr=false` and streams at `client_dynamic_range=0`, whatever else is set.
+
+Read the `HDR decision:` line that follows `Session started for [...]`. The encoder probe logs
+`stream_hdr_enabled=true` even when the session that follows will not.
+
 ## Useful Log Markers
 
 These lines are good first checks when validating a stream:

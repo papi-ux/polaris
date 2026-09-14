@@ -360,6 +360,20 @@ Headless labwc/wlroots sessions are intentionally treated as SDR until the headl
 truthfully provide HDR metadata. In that mode, `hdr_mode = 2` can still be useful to test Main10/P010
 encode support, but Polaris will not advertise true HDR to the client without metadata.
 
+The configuration that carries true HDR today, verified end to end:
+
+```ini
+capture = kms
+linux_stream_mode = desktop_display
+```
+
+`host_virtual_display`, `desktop_takeover` and `gamescope_stream` also show the real output;
+`headless_stream` and `windowed_stream` do not. KMS capture needs `CAP_SYS_ADMIN` on the binary,
+granted once with `sudo -H polaris --setup-host --enable-kms`. The paired client must not have HDR
+forced off in `client_profiles.json` (`hdr`) or `device_db.json` (`hdr_capable`), and the client has
+to request HDR itself. The full checklist with the log line for each step is in
+[runtime.md](runtime.md#the-recipe-that-works-today).
+
 For AMD VAAPI hosts, validate SDR first:
 
 ```ini
