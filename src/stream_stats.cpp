@@ -775,18 +775,48 @@ namespace stream_stats {
     // The configured capture backend could not capture anything and Polaris used another one.
     // Without this the only trace is a warning in the middle of startup, while the host goes on
     // serving with a backend nobody chose.
+    const bool kms_refused = platf::kms_capture_refused_for_capability();
+    constexpr auto enable_kms_command = "sudo -H polaris --setup-host --enable-kms";
     if (const auto substitution = platf::capture_backend_substitution_note(); !substitution.empty()) {
+      // A substituted kms is a different story from a substituted wlr. wlr fails
+      // because the compositor lacks a protocol; kms fails because the binary
+      // lacks a capability that one command grants. Telling the kms case to
+      // "set capture to the substituted backend" walks a user away from the only
+      // path that carries HDR.
+      const bool kms_for_capability = kms_refused && substitution.rfind("kms -> ", 0) == 0;
       configuration_warnings.push_back({
         {"id", "capture_backend_substituted"},
         {"severity", "warning"},
-        {"message", "The capture backend this host is configured to use cannot capture anything "
-                    "in the current stream mode, so Polaris substituted another one (" +
-                    substitution + "). Capture backends are not interchangeable across "
-                    "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
-                    "do not have, so only the private-compositor modes can use it there."},
-        {"action", "Either set capture to the substituted backend so the configuration matches "
-                   "what is running, or go back to a private-compositor stream mode if you want "
-                   "the configured one."}
+        {"message", kms_for_capability ?
+           "This host is configured for KMS capture, but the Polaris binary does not hold "
+           "CAP_SYS_ADMIN, so it could not read a framebuffer and Polaris substituted another "
+           "backend (" + substitution + "). Nothing is wrong with the display or the GPU." :
+           "The capture backend this host is configured to use cannot capture anything "
+           "in the current stream mode, so Polaris substituted another one (" +
+           substitution + "). Capture backends are not interchangeable across "
+           "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
+           "do not have, so only the private-compositor modes can use it there."},
+        {"action", kms_for_capability ?
+           std::string {"Run "} + enable_kms_command + " once, then restart Polaris; KMS "
+           "capture is what carries HDR, so keep it if HDR is the goal." :
+           "Either set capture to the substituted backend so the configuration matches "
+           "what is running, or go back to a private-compositor stream mode if you want "
+           "the configured one."}
+      });
+    }
+
+    // The refusal on its own, whatever happened next. With capture = kms and nothing to
+    // substitute, the host serves with no capture at all and this is the one line that says
+    // why; with a substitute, it is why the stream cannot carry HDR.
+    if (kms_refused) {
+      const bool nothing_else = platf::capture_sources_missing();
+      configuration_warnings.push_back({
+        {"id", "kms_capture_needs_capability"},
+        {"severity", nothing_else ? "fail" : "warning"},
+        {"message", "KMS capture found the display but could not read a DRM framebuffer handle, "
+                    "because the Polaris binary does not hold CAP_SYS_ADMIN. That capability is "
+                    "opt-in and is granted by the host setup step, not by the package."},
+        {"action", std::string {"Run "} + enable_kms_command + " once, then restart Polaris."}
       });
     }
 
@@ -882,9 +912,15 @@ namespace stream_stats {
            "it whatever the monitor, GPU or client can do." :
            "A client asked for HDR and Polaris streamed 10-bit SDR instead, because the active "
            "capture display did not report HDR."},
-        {"action", "True HDR needs a capture path that reads the display's HDR metadata, which "
-                   "today means a KMS/DRM path on an HDR-capable output. Private Stream on "
-                   "headless labwc is always SDR. See docs/runtime.md."}
+        {"action", std::string {
+           "True HDR needs a capture path that reads the display's HDR metadata, which today "
+           "means the KMS/DRM path: capture = kms with a stream mode that shows the real HDR "
+           "output (Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope). "
+           "Private Stream on headless labwc is always SDR. See docs/runtime.md."} +
+           (kms_refused ?
+              std::string {" On this host KMS capture was refused for a missing capability; run "} +
+                enable_kms_command + " first." :
+              std::string {})}
       });
     }
 

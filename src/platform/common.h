@@ -805,9 +805,18 @@ namespace platf {
    */
   bool capture_sources_missing();
 
+  /**
+   * @brief KMS capture was refused during the last evaluation because the
+   * binary lacks CAP_SYS_ADMIN, which is one setup-host step away rather than a
+   * broken host. Reported by kmsgrab, read by the Doctor.
+   */
+  bool kms_capture_refused_for_capability();
+  void note_kms_capture_refused_for_capability();
+
   #ifdef POLARIS_TESTS
   /// Drive the missing-capture state directly, so the reporting can be tested without a compositor.
   void set_capture_sources_missing_for_tests(bool missing);
+  void set_kms_capture_refused_for_tests(bool refused);
   #endif
 
   #ifdef POLARIS_TESTS
