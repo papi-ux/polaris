@@ -188,3 +188,89 @@ previous 60 FPS preference was restored. An ordinary build from
 `15555ac1eab3ca72edb0bc1d1d7964ab604225cc` was installed with both diagnostic
 flags false, preserving application data. Its native library hash matched the
 ordinary priority build.
+
+
+## Kernel receive timing and host egress comparison, September 14
+
+The audio failure is still open. A diagnostic run located several large gaps
+before audio left the host. It did not establish a repair or explain every
+previous failure.
+
+The worker image and native host remained at `091bd3dd`; the temporary enforcing
+worker policy was from `22b56f64`. The first Android observer was built from
+`8423c75a` with a retained source patch. That patch added a Linux socket timestamp
+query to the existing optional audio observer. The final observer in Nova
+`d63390c4` additionally records the preceding RTP sequence. A separate physical
+connection verified those final fields. No receive wrapper is compiled into an
+ordinary build.
+
+A loopback probe running with the debug app's permissions distinguished
+immediate reads from deliberate 40 ms delayed reads. On the real stream,
+`SIOCGSTAMPNS` provided timestamps for every returned audio data packet in the
+contained measurement windows. An external Android packet capture was not
+available without additional device privileges.
+
+The comparison used PEAK's unpaused offline airport scene, periodic controller
+camera movement, a 1080p H.264 stream requested at 120 FPS and 8 Mbps, and the
+existing stereo 48 kHz, 5 ms Opus contract. This is stream delivery evidence;
+it does not measure unique game frames or input to photon latency.
+
+| Measurement | Ten minute gameplay interval |
+| --- | --- |
+| Fully contained playback and receive windows | 59 each |
+| Contained playback time | 590.219 seconds |
+| Audio queue skips | 24 |
+| Short writes, write errors, writes over 20 ms | 0, 0, 0 |
+| Maximum AudioTrack write | 9.079 ms |
+| Maximum time outside playback callback | 51.201 ms |
+| Underruns at first and last window ends | 18 to 40 |
+| Returned audio data packets with valid kernel timestamps | 118,025 |
+| Maximum application receive gap | 76.928 ms |
+| Maximum kernel arrival gap | 76.890 ms |
+| Maximum kernel timestamp age at observation | 3.502 ms |
+| Worker domain SELinux denials | 0 |
+
+The complete connection also retained an 83 ms receive gap outside those
+contained windows. Matching the current packet's RTP sequence to host egress
+showed an 83.184 ms host gap and an 83.187 ms device kernel gap; Nova read that
+packet about 0.199 ms after its kernel timestamp. Another event had a 76.779 ms
+host gap, a 76.890 ms kernel gap, and a 0.137 ms kernel age. Those events were
+already delayed on the host. Enlarging the Android audio buffer would not
+remove their source.
+
+The host capture retained Ethernet, IPv4, UDP and RTP headers with a 54 byte
+snapshot limit. It covered 899.573 seconds, including startup and exit, and
+contained 179,879 audio data packets. Tcpdump reported zero kernel drops. The
+first observer recorded the current sequence only, so its comparison uses the
+preceding captured host data packet, rather than proving the client's preceding
+sequence. The final observer closes that diagnostic limitation for future runs.
+
+Heavy compiler and linker activity was observed on the host during several
+stalls. Both the host and worker cgroups showed CPU pressure, with no configured
+CPU quota and no recorded quota throttling. Gaps became smaller after the
+compiler processes ended, although a later burst still occurred. This is an
+uncontrolled load observation, not proof that a particular build caused all
+stalls. A controlled host load comparison is the next experiment. The worker's
+Pulse capture, shared audio/video output pipe, media reader, and audio sender
+need to be distinguished before changing scheduling or queue behavior.
+
+The full connection also recorded a 48.593 ms AudioTrack write during startup.
+It remains a separate observation from the large host egress gaps. Host/device
+clock offsets were measured at both ends; they differed by about 26 ms across
+the connection. Absolute one way delay estimates based on a single offset are
+therefore unsuitable here. Monotonic application gaps and consecutive kernel
+and host packet gaps provide the event comparison above.
+
+Nova `b4e4e123` also presents the versioned Spaces response with explicit
+`live_tuning: null` as **Fixed bitrate**, rather than indefinitely waiting for a
+setting. Missing, malformed and unrecognized tuning status retains the unknown
+state. The final APK displayed the corrected label on the physical client at
+120 FPS. The focused UI, live tuning and API parsing suites passed 98 tests.
+The observer built for ARM64, ARMv7 and x86-64. The ordinary ARM64 build's native
+library exactly matched the original native library with diagnostics disabled.
+
+The game exited through its controller menu. All profile homes were retained.
+The temporary host and workers stopped, original client APK and display
+preferences were restored, and the original enforcing worker policy was
+restored. The normal Polaris service was not restarted. No runtime image was
+signed, published or admitted to the download catalog by this experiment.
