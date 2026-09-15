@@ -114,6 +114,9 @@
               <option v-for="preset in romPresets" :key="preset.id" :value="preset.id">{{ preset.label }} ({{ preset.platform }})</option>
               <option :value="CUSTOM_EMULATOR">Custom command</option>
             </select>
+            <div v-for="check in selectedRomPreset?.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-preset-check>
+              {{ check.message }} <span class="font-mono">{{ check.action }}</span>
+            </div>
           </div>
           <template v-if="romSourceIsCustom">
             <div class="app-editor-field">
@@ -146,6 +149,9 @@
               </div>
               <div class="mt-1 break-all font-mono text-xs text-storm">{{ source.path }}</div>
               <div v-if="source.warning" class="mt-1 text-xs text-warning-bright">{{ source.warning }}</div>
+              <div v-for="check in source.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-folder-check>
+                {{ check.message }} <span class="font-mono break-all">{{ check.action }}</span>
+              </div>
             </div>
             <Button variant="ghost" size="sm" :disabled="romSourceSaving" data-rom-folder-remove @click="removeRomSource(source)">Remove</Button>
           </article>
@@ -635,6 +641,10 @@
             <span>Published</span>
             <strong>{{ appCount }}</strong>
           </div>
+          <div v-if="romSourceCards.length" class="library-health-chip" data-rom-readiness-chip>
+            <span>Emulators ready</span>
+            <strong>{{ romSourceReadyCount }}/{{ romSourceCards.length }}</strong>
+          </div>
         </div>
 
         <div class="mt-5 space-y-3">
@@ -649,6 +659,18 @@
               </div>
               <div v-if="!importSources.length" class="rounded-xl border border-storm/15 bg-void/40 px-3 py-3 text-sm text-storm">
                 Scan libraries to see import candidates here.
+              </div>
+            </div>
+          </article>
+
+          <article v-if="romSourceCards.length" class="surface-subtle p-4" data-rom-readiness>
+            <div class="section-title-row">
+              <div class="text-sm font-semibold text-silver">Emulator readiness</div>
+            </div>
+            <div class="mt-3 grid gap-2">
+              <div v-for="source in romSourceCards" :key="source.id" class="flex items-start justify-between gap-3 rounded-xl border border-storm/15 bg-void/40 px-3 py-2">
+                <span class="text-sm text-silver">{{ romSourceInstallLabel(source) }}</span>
+                <span class="text-right text-xs" :class="romSourceReady(source) ? 'text-success' : 'text-warning-bright'">{{ romSourceStatus(source) }}</span>
               </div>
             </div>
           </article>
@@ -1126,7 +1148,8 @@ import { isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickL
 import { filterImportGames, summarizeImportGames } from '../library-imports'
 import { useRomSources } from '../composables/useRomSources'
 import {
-  CUSTOM_EMULATOR, blankRomSourceForm, romSourceCountLabel, romSourceInstallLabel, romSourcePayload, validateRomSourceForm
+  CUSTOM_EMULATOR, blankRomSourceForm, romSourceCountLabel, romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus,
+  validateRomSourceForm
 } from '../rom-sources'
 
 const { toast: showToast } = useToast()
@@ -1149,6 +1172,8 @@ const showRomSourceForm = ref(false)
 const romSourceFormError = ref('')
 const romSourceForm = ref(blankRomSourceForm())
 const romSourceIsCustom = computed(() => romSourceForm.value.emulator === CUSTOM_EMULATOR)
+const selectedRomPreset = computed(() => romPresets.value.find((preset) => preset.id === romSourceForm.value.emulator) || null)
+const romSourceReadyCount = computed(() => romSourceCards.value.filter((source) => romSourceReady(source)).length)
 const romSourceError = computed(() => romSourceFormError.value || romSourceRequestError.value || '')
 // The registered folders, with what the last scan learned about each (games found, warnings).
 const romSourceCards = computed(() => romSources.value.map((source) => {

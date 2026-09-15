@@ -245,6 +245,102 @@ TEST(EmulatorLibraryCovers, CopiedCoversGetSafeUniqueNames) {
   EXPECT_LE(emulator_library::cover_stem(std::string(300, 'a') + ".nsp", "eden").size(), std::string_view("emulator_eden_").size() + 96 + 9);
 }
 
+TEST(EmulatorLibraryPrerequisites, FlatpakGrantsAreReadInOrderWithNegationsAndXdgNames) {
+  const auto grants = emulator_library::flatpak_filesystem_grants(
+    "[Application]\nname=dev.eden_emu.eden\n\n[Context]\nshared=network;\nfilesystems=home;!~/Private;/mnt/roms:ro;xdg-download/roms;\n\n[Session Bus Policy]\nfilesystems=ignored\n");
+  EXPECT_EQ(grants, (std::vector<std::string> {"home", "!~/Private", "/mnt/roms", "xdg-download/roms"}));
+
+  const std::vector<fs::path> homes {"/accounts/x"};
+  using emulator_library::flatpak_can_read;
+  EXPECT_TRUE(flatpak_can_read(grants, "/accounts/x/Games/switch", homes));
+  EXPECT_FALSE(flatpak_can_read(grants, "/accounts/x/Private/roms", homes));
+  EXPECT_TRUE(flatpak_can_read(grants, "/mnt/roms/switch", homes));
+  EXPECT_FALSE(flatpak_can_read(grants, "/mnt/romsx", homes));
+  EXPECT_FALSE(flatpak_can_read(grants, "/srv/roms", homes));
+  EXPECT_TRUE(flatpak_can_read(grants, "/accounts/x/Downloads/roms/gba", homes));
+  EXPECT_TRUE(flatpak_can_read({"host"}, "/srv/roms", homes));
+  EXPECT_FALSE(flatpak_can_read({}, "/accounts/x/Games", homes));
+  // The later grant wins, which is how an override re-allows a folder the metadata took away.
+  EXPECT_TRUE(flatpak_can_read({"home", "!~/Games", "~/Games/switch"}, "/accounts/x/Games/switch/a", homes));
+}
+
+TEST(EmulatorLibraryPrerequisites, EdenNeedsKeysWhereverItIsInstalled) {
+  const auto root = fresh_root("prereq-eden");
+  const auto home = root / "home";
+  fs::create_directories(home);
+  const auto *eden = emulator_library::find_preset("eden");
+  ASSERT_NE(eden, nullptr);
+  using install_e = emulator_library::install_e;
+  using install_t = emulator_library::install_t;
+
+  auto checks = emulator_library::prerequisites(*eden, install_t {install_e::native, "/usr/bin/eden"}, root / "roms", {home}, root / "flatpak");
+  ASSERT_EQ(checks.size(), 1u);
+  EXPECT_EQ(checks[0].id, "eden_keys_missing");
+  EXPECT_EQ(checks[0].severity, "warning");
+  EXPECT_NE(checks[0].action.find("prod.keys"), std::string::npos);
+
+  // Not installed at all: the folder says so itself, nothing is checked here.
+  EXPECT_TRUE(emulator_library::prerequisites(*eden, install_t {}, root / "roms", {home}, root / "flatpak").empty());
+
+  touch(home / ".var" / "app" / "dev.eden_emu.eden" / "data" / "eden" / "keys" / "prod.keys");
+  EXPECT_TRUE(emulator_library::prerequisites(*eden, install_t {install_e::native, "/usr/bin/eden"}, root / "roms", {home}, root / "flatpak").empty());
+
+  // A portable launcher keeps its keys next to itself.
+  const auto portable_home = root / "home2";
+  fs::create_directories(portable_home);
+  touch(root / "apps" / "user" / "keys" / "prod.keys");
+  EXPECT_TRUE(emulator_library::prerequisites(*eden, install_t {install_e::launcher, (root / "apps" / "Eden.AppImage").string()}, root / "roms", {portable_home}, root / "flatpak").empty());
+
+  const auto *dolphin = emulator_library::find_preset("dolphin");
+  ASSERT_NE(dolphin, nullptr);
+  EXPECT_TRUE(emulator_library::prerequisites(*dolphin, install_t {install_e::native, "/usr/bin/dolphin-emu"}, root / "roms", {portable_home}, root / "flatpak").empty());
+
+  const auto *duckstation = emulator_library::find_preset("duckstation");
+  ASSERT_NE(duckstation, nullptr);
+  auto bios = emulator_library::prerequisites(*duckstation, install_t {install_e::native, "/usr/bin/duckstation-qt"}, root / "roms", {portable_home}, root / "flatpak");
+  ASSERT_EQ(bios.size(), 1u);
+  EXPECT_EQ(bios[0].id, "duckstation_bios_missing");
+  touch(portable_home / ".local" / "share" / "duckstation" / "bios" / "scph1001.BIN");
+  EXPECT_TRUE(emulator_library::prerequisites(*duckstation, install_t {install_e::native, "/usr/bin/duckstation-qt"}, root / "roms", {portable_home}, root / "flatpak").empty());
+}
+
+TEST(EmulatorLibraryPrerequisites, AFlatpakThatCannotSeeTheFolderIsNamedWithTheOverride) {
+  const auto root = fresh_root("prereq-flatpak");
+  const auto home = root / "home";
+  const auto system_root = root / "var-lib-flatpak";
+  touch(home / ".var" / "app" / "dev.eden_emu.eden" / "data" / "eden" / "keys" / "prod.keys");
+  const auto *eden = emulator_library::find_preset("eden");
+  ASSERT_NE(eden, nullptr);
+  const emulator_library::install_t flatpak {emulator_library::install_e::flatpak, "dev.eden_emu.eden"};
+
+  // No metadata readable: nothing can be said, so nothing is claimed.
+  EXPECT_TRUE(emulator_library::prerequisites(*eden, flatpak, "/mnt/roms/switch", {home}, system_root).empty());
+
+  const auto metadata = system_root / "app" / "dev.eden_emu.eden" / "current" / "active" / "metadata";
+  fs::create_directories(metadata.parent_path());
+  {
+    std::ofstream out(metadata);
+    out << "[Application]\nname=dev.eden_emu.eden\n\n[Context]\nfilesystems=home;\n";
+  }
+  auto checks = emulator_library::prerequisites(*eden, flatpak, "/mnt/roms/switch", {home}, system_root);
+  ASSERT_EQ(checks.size(), 1u);
+  EXPECT_EQ(checks[0].id, "flatpak_folder_not_visible");
+  EXPECT_EQ(checks[0].action, "flatpak override --user --filesystem='/mnt/roms/switch' dev.eden_emu.eden");
+  EXPECT_TRUE(emulator_library::prerequisites(*eden, flatpak, (home / "Games" / "switch").string(), {home}, system_root).empty());
+
+  // The user's override grants it, and the override is read after the metadata.
+  const auto overrides = home / ".local" / "share" / "flatpak" / "overrides" / "dev.eden_emu.eden";
+  fs::create_directories(overrides.parent_path());
+  {
+    std::ofstream out(overrides);
+    out << "[Context]\nfilesystems=/mnt/roms:ro;\n";
+  }
+  EXPECT_TRUE(emulator_library::prerequisites(*eden, flatpak, "/mnt/roms/switch", {home}, system_root).empty());
+  const auto grants = emulator_library::flatpak_effective_grants("dev.eden_emu.eden", {home}, system_root);
+  ASSERT_TRUE(grants.has_value());
+  EXPECT_EQ(*grants, (std::vector<std::string> {"home", "/mnt/roms"}));
+}
+
 TEST(EmulatorLibrarySources, RoundTripThroughJsonAndSurviveGarbage) {
   std::vector<emulator_library::source_t> sources {
     {"one", "/roms/switch", "eden", "", "", {}},
