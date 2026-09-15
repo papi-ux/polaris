@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <set>
@@ -45,6 +47,8 @@ namespace emulator_library {
     std::string_view arguments;  ///< carries rom_placeholder; empty means the path alone
     std::vector<std::string_view> extensions;  ///< lower case, no dot
     std::string_view gamepad;  ///< per-app Emulated Gamepad Type; empty keeps the host default
+    std::vector<std::string_view> es_systems;  ///< ES-DE system folders whose downloaded media may hold covers
+    std::vector<std::string_view> retroarch_systems;  ///< RetroArch thumbnail system names for the same games
   };
 
   /**
@@ -57,13 +61,13 @@ namespace emulator_library {
    */
   inline const std::vector<preset_t> &presets() {
     static const std::vector<preset_t> list {
-      {"eden", "Eden", "Nintendo Switch", "switch", {"eden"}, "dev.eden_emu.eden", "-f -g {rom}", {"nsp", "xci", "nca", "nro", "nso"}, "switch"},
-      {"dolphin", "Dolphin", "GameCube and Wii", "gamecube-wii", {"dolphin-emu"}, "org.DolphinEmu.dolphin-emu", "-b -e {rom}", {"iso", "gcm", "wbfs", "rvz", "ciso", "gcz", "wia", "wad", "dol", "elf"}, ""},
-      {"cemu", "Cemu", "Wii U", "wiiu", {"Cemu", "cemu"}, "info.cemu.Cemu", "-f -g {rom}", {"wua", "wud", "wux", "rpx"}, ""},
-      {"duckstation", "DuckStation", "PlayStation", "psx", {"duckstation-qt"}, "org.duckstation.DuckStation", "-batch -fullscreen {rom}", {"cue", "chd", "iso", "pbp", "m3u", "img", "ecm", "mds"}, "ds5"},
-      {"pcsx2", "PCSX2", "PlayStation 2", "ps2", {"pcsx2-qt"}, "net.pcsx2.PCSX2", "-batch -fullscreen {rom}", {"iso", "chd", "cso", "zso", "gz", "bin", "elf"}, "ds5"},
-      {"ppsspp", "PPSSPP", "PlayStation Portable", "psp", {"PPSSPPSDL", "PPSSPPQt"}, "org.ppsspp.PPSSPP", "{rom}", {"iso", "cso", "chd", "pbp"}, "ds5"},
-      {"mgba", "mGBA", "Game Boy Advance", "gba", {"mgba-qt"}, "io.mgba.mGBA", "-f {rom}", {"gba", "gb", "gbc", "sgb"}, ""},
+      {"eden", "Eden", "Nintendo Switch", "switch", {"eden"}, "dev.eden_emu.eden", "-f -g {rom}", {"nsp", "xci", "nca", "nro", "nso"}, "switch", {"switch"}, {}},
+      {"dolphin", "Dolphin", "GameCube and Wii", "gamecube-wii", {"dolphin-emu"}, "org.DolphinEmu.dolphin-emu", "-b -e {rom}", {"iso", "gcm", "wbfs", "rvz", "ciso", "gcz", "wia", "wad", "dol", "elf"}, "", {"gc", "wii"}, {"Nintendo - GameCube", "Nintendo - Wii"}},
+      {"cemu", "Cemu", "Wii U", "wiiu", {"Cemu", "cemu"}, "info.cemu.Cemu", "-f -g {rom}", {"wua", "wud", "wux", "rpx"}, "", {"wiiu"}, {"Nintendo - Wii U"}},
+      {"duckstation", "DuckStation", "PlayStation", "psx", {"duckstation-qt"}, "org.duckstation.DuckStation", "-batch -fullscreen {rom}", {"cue", "chd", "iso", "pbp", "m3u", "img", "ecm", "mds"}, "ds5", {"psx"}, {"Sony - PlayStation"}},
+      {"pcsx2", "PCSX2", "PlayStation 2", "ps2", {"pcsx2-qt"}, "net.pcsx2.PCSX2", "-batch -fullscreen {rom}", {"iso", "chd", "cso", "zso", "gz", "bin", "elf"}, "ds5", {"ps2"}, {"Sony - PlayStation 2"}},
+      {"ppsspp", "PPSSPP", "PlayStation Portable", "psp", {"PPSSPPSDL", "PPSSPPQt"}, "org.ppsspp.PPSSPP", "{rom}", {"iso", "cso", "chd", "pbp"}, "ds5", {"psp"}, {"Sony - PlayStation Portable"}},
+      {"mgba", "mGBA", "Game Boy Advance", "gba", {"mgba-qt"}, "io.mgba.mGBA", "-f {rom}", {"gba", "gb", "gbc", "sgb"}, "", {"gba", "gb", "gbc"}, {"Nintendo - Game Boy Advance", "Nintendo - Game Boy", "Nintendo - Game Boy Color"}},
     };
     return list;
   }
@@ -577,6 +581,103 @@ namespace emulator_library {
       return left != right ? left < right : a.path < b.path;
     });
     return roms;
+  }
+
+
+  /// The image types a cover next to a game may use, in the order they are tried.
+  inline constexpr std::string_view cover_extensions[] = {".png", ".jpg", ".jpeg", ".webp"};
+
+  /// libretro names its thumbnails after the game with `&*/:`<>?\|` replaced by `_`.
+  inline std::string libretro_thumbnail_stem(std::string_view stem) {
+    std::string result(stem);
+    for (auto &ch : result) {
+      if (std::string_view("&*/:`<>?\\|").find(ch) != std::string_view::npos) {
+        ch = '_';
+      }
+    }
+    return result;
+  }
+
+  /**
+   * @brief Where a cover for this game may already sit, in priority order, by the raw file stem.
+   *
+   * Next to the game first (`<stem>.png`, then `covers`, `boxart` and `media` beside it), then
+   * the ES-DE media the folder's systems download, then RetroArch's boxarts for those systems
+   * under both the native and the Flatpak config roots. Nothing is checked for existence here.
+   */
+  inline std::vector<std::filesystem::path> cover_candidates(
+    const std::filesystem::path &rom,
+    const preset_t *preset,
+    const std::vector<std::filesystem::path> &home_roots
+  ) {
+    std::vector<std::filesystem::path> candidates;
+    const auto stem = rom.stem().string();
+    const auto directory = rom.parent_path();
+    const auto with_extensions = [&](const std::filesystem::path &base) {
+      for (const auto extension : cover_extensions) {
+        candidates.emplace_back(base.string() + std::string(extension));
+      }
+    };
+    with_extensions(directory / stem);
+    for (const auto sub : {"covers", "boxart", "media"}) {
+      with_extensions(directory / sub / stem);
+    }
+    if (preset == nullptr) {
+      return candidates;
+    }
+    const auto libretro_stem = libretro_thumbnail_stem(stem);
+    for (const auto &home : home_roots) {
+      for (const auto system : preset->es_systems) {
+        with_extensions(home / "ES-DE" / "downloaded_media" / std::filesystem::path(system) / "covers" / stem);
+        with_extensions(home / ".var" / "app" / "org.es_de.frontend" / "ES-DE" / "downloaded_media" / std::filesystem::path(system) / "covers" / stem);
+      }
+      std::vector<std::string> boxart_names {stem};
+      if (libretro_stem != stem) {
+        boxart_names.push_back(libretro_stem);
+      }
+      for (const auto system : preset->retroarch_systems) {
+        for (const auto &name : boxart_names) {
+          candidates.push_back(home / ".config" / "retroarch" / "thumbnails" / std::filesystem::path(system) / "Named_Boxarts" / (name + ".png"));
+          candidates.push_back(home / ".var" / "app" / "org.libretro.RetroArch" / "config" / "retroarch" / "thumbnails" / std::filesystem::path(system) / "Named_Boxarts" / (name + ".png"));
+        }
+      }
+    }
+    return candidates;
+  }
+
+  /// The first candidate that exists and passes the caller's image test.
+  template<typename Predicate>
+  inline std::optional<std::filesystem::path> find_local_cover(
+    const std::filesystem::path &rom,
+    const preset_t *preset,
+    const std::vector<std::filesystem::path> &home_roots,
+    Predicate is_image
+  ) {
+    for (const auto &candidate : cover_candidates(rom, preset, home_roots)) {
+      std::error_code error;
+      if (std::filesystem::is_regular_file(candidate, error) && is_image(candidate)) {
+        return candidate;
+      }
+    }
+    return std::nullopt;
+  }
+
+  /// A filesystem-safe name for the copied cover: the emulator, the stem, and a hash of the path.
+  inline std::string cover_stem(const std::filesystem::path &rom, std::string_view emulator) {
+    std::string safe;
+    for (const char ch : rom.stem().string()) {
+      const auto byte = static_cast<unsigned char>(ch);
+      safe += std::isalnum(byte) || ch == '.' || ch == '_' || ch == '-' ? ch : '_';
+    }
+    if (safe.size() > 96) {
+      safe.resize(96);
+    }
+    if (safe.empty()) {
+      safe = "rom";
+    }
+    char hash[17];
+    std::snprintf(hash, sizeof(hash), "%08zx", static_cast<std::size_t>(std::hash<std::string> {}(rom.lexically_normal().string())) & 0xffffffffu);
+    return "emulator_" + std::string(emulator) + "_" + safe + "_" + hash;
   }
 
   /// One registered folder, as stored in library_sources.json.

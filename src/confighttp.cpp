@@ -3050,6 +3050,58 @@ namespace confighttp {
       return list;
     }
 
+    // A cover that already sits next to the game, or in ES-DE or RetroArch media for the
+    // folder's system, copied into the covers directory so the console, Nova and the artwork
+    // cache all see it, the way the Heroic importer's download does.
+    std::optional<std::string> copy_rom_cover(
+      const emulator_library::source_t &source,
+      const rom_folder_plan_t &plan,
+      const std::filesystem::path &rom,
+      const std::filesystem::path &coverdir
+    ) {
+      const auto is_image = [](const std::filesystem::path &path) {
+        std::error_code error;
+        const auto size = std::filesystem::file_size(path, error);
+        return !error && size > 0 && size <= game_artwork::maximum_asset_bytes && game_artwork::image_mime_type(path).has_value();
+      };
+      const auto found = emulator_library::find_local_cover(rom, plan.preset, game_library::library_home_roots(), is_image);
+      if (!found) {
+        return std::nullopt;
+      }
+      const auto mime = game_artwork::image_mime_type(*found);
+      const std::string extension = !mime ? "" :
+        *mime == "image/jpeg" ? ".jpg" :
+        *mime == "image/png" ? ".png" :
+        *mime == "image/webp" ? ".webp" : "";
+      if (extension.empty()) {
+        return std::nullopt;
+      }
+      std::error_code error;
+      std::filesystem::create_directories(coverdir, error);
+      if (error) {
+        return std::nullopt;
+      }
+      const auto final_path = coverdir / (emulator_library::cover_stem(rom, source.emulator) + extension);
+      const auto temporary = coverdir / (final_path.filename().string() + ".tmp");
+      std::filesystem::remove(temporary, error);
+      error.clear();
+      std::filesystem::copy_file(*found, temporary, std::filesystem::copy_options::overwrite_existing, error);
+      if (error || !game_artwork::image_mime_type(temporary)) {
+        std::filesystem::remove(temporary, error);
+        return std::nullopt;
+      }
+      std::filesystem::remove(final_path, error);
+      error.clear();
+      std::filesystem::rename(temporary, final_path, error);
+      if (error) {
+        std::error_code cleanup;
+        std::filesystem::remove(temporary, cleanup);
+        return std::nullopt;
+      }
+      BOOST_LOG(info) << "ROM folder import: cover for [" << rom.filename().string() << "] taken from " << found->string();
+      return final_path.string();
+    }
+
     // The file an import names, once it is proven to be a game inside its own folder.
     std::optional<std::filesystem::path> rom_import_target(
       const emulator_library::source_t &source,
@@ -3892,6 +3944,9 @@ namespace confighttp {
           app["emulator"] = folder->emulator;
           app["rom-folder"] = folder->id;
           app["rom-path"] = rom->string();
+          if (const auto cover = copy_rom_cover(*folder, plan, *rom, library_sources_path().parent_path() / "covers"); cover) {
+            app["image-path"] = *cover;
+          }
           if (plan.preset != nullptr && !plan.preset->gamepad.empty()) {
             app["gamepad"] = std::string(plan.preset->gamepad);
           }
