@@ -39,9 +39,9 @@ filter_allowed_content_hits() {
         "scripts/ci/run-steamos-build.sh:chroot \"\$STEAMOS_ROOT\" chown -R builder:builder /home/builder /opt")
         ;;
       # These exact paths describe the public runtime image account.
-      "containers/multiseat/initialize-root.py:subprocess.run(['usermod', '--login=polaris', '--home=/home/polaris', '--groups=', 'ubuntu'], check=True)" | \
-        "containers/multiseat/initialize-root.py:for name in ['/home/polaris', '/run/polaris-seat', '/var/lib/polaris-seat']:" | \
-        "containers/multiseat/initialize-root.py:    if name == '/home/polaris':")
+      "containers/multiseat/initialize-root.py:    subprocess.run(['usermod', '--login=polaris', '--home=/home/polaris', '--groups=', 'ubuntu'], check=True)" | \
+        "containers/multiseat/initialize-root.py:    for name in ['/home/polaris', '/run/polaris-seat', '/var/lib/polaris-seat']:" | \
+        "containers/multiseat/initialize-root.py:        if name == '/home/polaris':")
         ;;
       *)
         printf '%s\n' "$hit"
