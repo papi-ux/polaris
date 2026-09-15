@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <mutex>
 
 // platform includes
 #include <drm_fourcc.h>
@@ -59,6 +60,16 @@ namespace wl {
 
   bool enumeration_is_quiet() {
     return quiet_enumeration_depth > 0;
+  }
+
+  namespace {
+    std::mutex compositor_main_device_mutex;
+    std::string compositor_main_device;
+  }  // namespace
+
+  std::string last_compositor_main_device() {
+    std::lock_guard<std::mutex> lock {compositor_main_device_mutex};
+    return compositor_main_device;
   }
 
   namespace {
@@ -1989,6 +2000,14 @@ namespace wl {
     }
 
     display.roundtrip();
+
+    // The host desktop's main render device, kept for the Doctor: on a hybrid laptop this is
+    // the iGPU while the encoder defaults to the NVIDIA card, and that split is worth naming
+    // before a stream ever starts.
+    if (display_name == nullptr && !interface.dmabuf_feedback.main_device_path.empty()) {
+      std::lock_guard<std::mutex> lock {compositor_main_device_mutex};
+      compositor_main_device = interface.dmabuf_feedback.main_device_path;
+    }
 
     return std::move(interface.monitors);
   }

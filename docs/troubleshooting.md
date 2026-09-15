@@ -410,6 +410,30 @@ state, and GPU-native override state.
 
 For LTS distro expectations and package caveats, see the [Linux LTS Headless Fallback Matrix](runtime.md#linux-lts-headless-fallback-matrix). Xvfb or gamescope should be treated as investigation-only unless this supported labwc path cannot cover a confirmed target environment.
 
+## Whole-machine freeze on a hybrid laptop
+
+A freeze that needs the power button is a kernel or GPU driver lockup, not a Polaris crash, and
+the journal usually has nothing after it. On a laptop with an integrated GPU and an NVIDIA card
+there are three drivers in play during a Mirror Desktop stream: the iGPU reading the screen back
+for the compositor's screencast, the NVIDIA card taking the frames for NVENC, and the compositor
+serving both. Test in this order, one change at a time, and stream after each:
+
+1. Is the machine dead or only the screen? Toggle Caps Lock, or ping the host from a phone. A
+   live host can be reached over SSH during the "freeze" and `journalctl -k -f` names the driver.
+2. Keep the web console closed during the test. It used to poll the display list through the
+   compositor every three seconds; current releases cache it, older ones do not.
+3. Intel iGPU: add `intel_iommu=igfx_off` to the kernel command line and reboot. Comet Lake and
+   nearby generations are known to hard-freeze with VT-d active for graphics.
+4. Take the NVIDIA card out: `adapter_name = /dev/dri/renderD128` (the compositor's node, the
+   Doctor names it) and `encoder = vaapi`. No freeze means the NVIDIA side is the trigger.
+5. Keep NVENC but stop the sleep/wake cycle: `options nvidia NVreg_DynamicPowerManagement=0x00`
+   in `/etc/modprobe.d/nvidia-pm.conf`, rebuild the initramfs, reboot.
+
+Unload any other streaming stack's virtual display module first (`lsmod | grep -E 'hermes|vibeshine|evdi'`),
+so there is one variable fewer. After the next freeze, before starting Polaris again, keep
+`~/.config/polaris/polaris.log.backup`: it is the run that was streaming, and Polaris overwrites it
+at the next start.
+
 ## Capture is on the CPU
 
 Mission Control reads `SHM` or `system memory`, the Doctor's capture row says `shm_cpu_capture`,

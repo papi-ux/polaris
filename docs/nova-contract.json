@@ -328,9 +328,12 @@
         "adapter_pairing_status",
         "capture_device",
         "capture_forecast",
+        "compositor_render_device",
         "configuration_warnings",
         "cross_gpu_dmabuf_risk",
         "encoder_adapter",
+        "encoder_adapter_effective",
+        "encoder_adapter_source",
         "encoder_api",
         "gpu_native_attempted",
         "gpu_native_requested",
@@ -344,7 +347,10 @@
         "adapter_pairing_device_source",
         "adapter_pairing_status",
         "capture_forecast",
+        "compositor_render_device",
         "configuration_warnings",
+        "encoder_adapter_effective",
+        "encoder_adapter_source",
         "wayland_main_device"
       ],
       "nova_reader": {
