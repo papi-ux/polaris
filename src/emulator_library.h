@@ -15,10 +15,12 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iterator>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -678,6 +680,288 @@ namespace emulator_library {
     char hash[17];
     std::snprintf(hash, sizeof(hash), "%08zx", static_cast<std::size_t>(std::hash<std::string> {}(rom.lexically_normal().string())) & 0xffffffffu);
     return "emulator_" + std::string(emulator) + "_" + safe + "_" + hash;
+  }
+
+
+  /// One thing an emulator still needs before a game boots, in the words the console shows.
+  struct prerequisite_t {
+    std::string id;
+    std::string severity;  ///< "warning" when no game will boot, "info" when only some will
+    std::string message;
+    std::string action;
+  };
+
+  inline std::optional<std::string> read_text_file(const std::filesystem::path &path) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error)) {
+      return std::nullopt;
+    }
+    std::ifstream in {path, std::ios::binary};
+    if (!in) {
+      return std::nullopt;
+    }
+    std::stringstream text;
+    text << in.rdbuf();
+    return text.str();
+  }
+
+  /// The `filesystems=` grants of a Flatpak metadata or overrides file, in order, suffixes dropped.
+  inline std::vector<std::string> flatpak_filesystem_grants(std::string_view text) {
+    std::vector<std::string> grants;
+    bool in_context = false;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+      const auto end = text.find('\n', start);
+      const auto line = trim_view(text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start));
+      if (!line.empty() && line.front() == '[') {
+        in_context = line == "[Context]";
+      } else if (in_context && line.rfind("filesystems=", 0) == 0) {
+        const auto values = line.substr(std::string_view("filesystems=").size());
+        std::size_t value_start = 0;
+        while (value_start <= values.size()) {
+          const auto value_end = values.find(';', value_start);
+          auto value = trim_view(values.substr(value_start, value_end == std::string_view::npos ? std::string_view::npos : value_end - value_start));
+          for (const std::string_view suffix : {":ro", ":rw", ":create"}) {
+            if (value.size() > suffix.size() && value.substr(value.size() - suffix.size()) == suffix) {
+              value.remove_suffix(suffix.size());
+              break;
+            }
+          }
+          if (!value.empty()) {
+            grants.emplace_back(value);
+          }
+          if (value_end == std::string_view::npos) {
+            break;
+          }
+          value_start = value_end + 1;
+        }
+      }
+      if (end == std::string_view::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+    return grants;
+  }
+
+  /// Lexical containment, no filesystem access: `/a/b/c` is under `/a/b`, not under `/a/bc`.
+  inline bool path_is_under(const std::filesystem::path &path, const std::filesystem::path &root) {
+    const auto normal_path = path.lexically_normal();
+    auto normal_root = root.lexically_normal();
+    if (!normal_root.empty() && !normal_root.has_filename()) {
+      normal_root = normal_root.parent_path();
+    }
+    if (normal_root.empty()) {
+      return false;
+    }
+    const auto root_count = std::distance(normal_root.begin(), normal_root.end());
+    const auto path_count = std::distance(normal_path.begin(), normal_path.end());
+    if (path_count < root_count) {
+      return false;
+    }
+    return std::equal(normal_root.begin(), normal_root.end(), normal_path.begin());
+  }
+
+  /**
+   * @brief Whether a Flatpak with these grants may read the folder.
+   *
+   * Grants apply in order, so an override read after the app's metadata wins, and a `!path`
+   * takes a folder away again. `host` is everything; `home` and `~/...` follow each home
+   * root; `xdg-*` names map to their usual folders under each home.
+   */
+  inline bool flatpak_can_read(const std::vector<std::string> &grants, const std::filesystem::path &folder, const std::vector<std::filesystem::path> &home_roots) {
+    static constexpr std::pair<std::string_view, std::string_view> xdg_names[] = {
+      {"xdg-download", "Downloads"}, {"xdg-documents", "Documents"}, {"xdg-music", "Music"},
+      {"xdg-pictures", "Pictures"}, {"xdg-videos", "Videos"}, {"xdg-desktop", "Desktop"},
+      {"xdg-public-share", "Public"}, {"xdg-templates", "Templates"},
+      {"xdg-data", ".local/share"}, {"xdg-config", ".config"}, {"xdg-cache", ".cache"},
+    };
+    bool allowed = false;
+    for (const auto &grant : grants) {
+      const bool negate = !grant.empty() && grant.front() == '!';
+      const std::string_view value = negate ? std::string_view(grant).substr(1) : std::string_view(grant);
+      bool matches = false;
+      if (value == "host") {
+        matches = true;
+      } else if (value == "home" || value == "~") {
+        for (const auto &home : home_roots) {
+          matches = matches || path_is_under(folder, home);
+        }
+      } else if (value.rfind("~/", 0) == 0) {
+        for (const auto &home : home_roots) {
+          matches = matches || path_is_under(folder, home / std::filesystem::path(value.substr(2)));
+        }
+      } else if (!value.empty() && value.front() == '/') {
+        matches = path_is_under(folder, std::filesystem::path(value));
+      } else if (value.rfind("xdg-", 0) == 0) {
+        const auto slash = value.find('/');
+        const auto name = value.substr(0, slash);
+        const auto rest = slash == std::string_view::npos ? std::string_view {} : value.substr(slash + 1);
+        for (const auto &[xdg, directory] : xdg_names) {
+          if (name != xdg) {
+            continue;
+          }
+          for (const auto &home : home_roots) {
+            auto base = home / std::filesystem::path(directory);
+            if (!rest.empty()) {
+              base /= std::filesystem::path(rest);
+            }
+            matches = matches || path_is_under(folder, base);
+          }
+        }
+      }
+      if (matches) {
+        allowed = !negate;
+      }
+    }
+    return allowed;
+  }
+
+  /**
+   * @brief The grants a Flatpak actually runs with: its metadata, then the global and per-app
+   * overrides of its installation, then the user's overrides. Nothing when no metadata is readable.
+   */
+  inline std::optional<std::vector<std::string>> flatpak_effective_grants(
+    std::string_view flatpak_id,
+    const std::vector<std::filesystem::path> &home_roots,
+    const std::filesystem::path &system_flatpak_root = "/var/lib/flatpak"
+  ) {
+    const std::filesystem::path id {flatpak_id};
+    std::vector<std::filesystem::path> roots;
+    for (const auto &home : home_roots) {
+      roots.push_back(home / ".local" / "share" / "flatpak");
+    }
+    roots.push_back(system_flatpak_root);
+    for (const auto &root : roots) {
+      const auto metadata = read_text_file(root / "app" / id / "current" / "active" / "metadata");
+      if (!metadata) {
+        continue;
+      }
+      auto grants = flatpak_filesystem_grants(*metadata);
+      const auto append_overrides = [&](const std::filesystem::path &overrides) {
+        for (const auto &name : {std::filesystem::path("global"), id}) {
+          if (const auto text = read_text_file(overrides / name); text) {
+            for (auto &grant : flatpak_filesystem_grants(*text)) {
+              grants.push_back(std::move(grant));
+            }
+          }
+        }
+      };
+      append_overrides(root / "overrides");
+      for (const auto &home : home_roots) {
+        const auto user_overrides = home / ".local" / "share" / "flatpak" / "overrides";
+        if (user_overrides != root / "overrides") {
+          append_overrides(user_overrides);
+        }
+      }
+      return grants;
+    }
+    return std::nullopt;
+  }
+
+  /**
+   * @brief What the emulator still lacks before a game in this folder boots.
+   *
+   * Keys and BIOS images are looked for where each emulator keeps them, native, Flatpak and
+   * next to a portable launcher; a Flatpak is also checked for permission to read the folder.
+   * An emulator that is not installed at all is reported by the folder itself, not here.
+   */
+  inline std::vector<prerequisite_t> prerequisites(
+    const preset_t &preset,
+    const install_t &install,
+    const std::filesystem::path &folder,
+    const std::vector<std::filesystem::path> &home_roots,
+    const std::filesystem::path &system_flatpak_root = "/var/lib/flatpak"
+  ) {
+    std::vector<prerequisite_t> found;
+    if (install.kind == install_e::missing) {
+      return found;
+    }
+    const auto launcher_dir = install.kind == install_e::launcher ? std::filesystem::path(install.location).parent_path() : std::filesystem::path();
+    const auto any_file = [](const std::vector<std::filesystem::path> &paths) {
+      std::error_code error;
+      return std::any_of(paths.begin(), paths.end(), [&](const std::filesystem::path &path) {
+        return std::filesystem::is_regular_file(path, error);
+      });
+    };
+    const auto any_file_in = [](const std::vector<std::filesystem::path> &directories, std::string_view extension) {
+      std::error_code error;
+      for (const auto &directory : directories) {
+        if (!std::filesystem::is_directory(directory, error)) {
+          continue;
+        }
+        for (const auto &entry : std::filesystem::directory_iterator(directory, error)) {
+          if (!entry.is_regular_file(error)) {
+            continue;
+          }
+          if (extension.empty() || lower_copy(entry.path().extension().string()) == extension) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    std::vector<std::filesystem::path> files;
+    std::vector<std::filesystem::path> directories;
+    if (preset.id == "eden") {
+      for (const auto &home : home_roots) {
+        files.push_back(home / ".local/share/eden/keys/prod.keys");
+        files.push_back(home / ".var/app/dev.eden_emu.eden/data/eden/keys/prod.keys");
+      }
+      if (!launcher_dir.empty()) {
+        files.push_back(launcher_dir / "user/keys/prod.keys");
+      }
+      if (!any_file(files)) {
+        found.push_back({"eden_keys_missing", "warning", "Eden has no prod.keys, so no game will boot.",
+                         "Copy your prod.keys to ~/.local/share/eden/keys/ (Flatpak: ~/.var/app/dev.eden_emu.eden/data/eden/keys/)."});
+      }
+    } else if (preset.id == "cemu") {
+      for (const auto &home : home_roots) {
+        files.push_back(home / ".local/share/Cemu/keys.txt");
+        files.push_back(home / ".config/Cemu/keys.txt");
+        files.push_back(home / ".var/app/info.cemu.Cemu/data/Cemu/keys.txt");
+      }
+      if (!launcher_dir.empty()) {
+        files.push_back(launcher_dir / "keys.txt");
+      }
+      if (!any_file(files)) {
+        found.push_back({"cemu_keys_missing", "info", "Cemu has no keys.txt, so encrypted dumps (wud, wux) will not load; wua and rpx will.",
+                         "Put keys.txt in ~/.local/share/Cemu/ (Flatpak: ~/.var/app/info.cemu.Cemu/data/Cemu/)."});
+      }
+    } else if (preset.id == "duckstation") {
+      for (const auto &home : home_roots) {
+        directories.push_back(home / ".local/share/duckstation/bios");
+        directories.push_back(home / ".var/app/org.duckstation.DuckStation/data/duckstation/bios");
+      }
+      if (!launcher_dir.empty()) {
+        directories.push_back(launcher_dir / "bios");
+      }
+      if (!any_file_in(directories, ".bin")) {
+        found.push_back({"duckstation_bios_missing", "warning", "DuckStation has no BIOS image, so no game will boot.",
+                         "Copy a PlayStation BIOS (.bin) to ~/.local/share/duckstation/bios/ (Flatpak: ~/.var/app/org.duckstation.DuckStation/data/duckstation/bios/)."});
+      }
+    } else if (preset.id == "pcsx2") {
+      for (const auto &home : home_roots) {
+        directories.push_back(home / ".config/PCSX2/bios");
+        directories.push_back(home / ".var/app/net.pcsx2.PCSX2/config/PCSX2/bios");
+      }
+      if (!launcher_dir.empty()) {
+        directories.push_back(launcher_dir / "bios");
+      }
+      if (!any_file_in(directories, "")) {
+        found.push_back({"pcsx2_bios_missing", "warning", "PCSX2 has no BIOS image, so no game will boot.",
+                         "Copy a PlayStation 2 BIOS to ~/.config/PCSX2/bios/ (Flatpak: ~/.var/app/net.pcsx2.PCSX2/config/PCSX2/bios/)."});
+      }
+    }
+    if (install.kind == install_e::flatpak && !folder.empty()) {
+      if (const auto grants = flatpak_effective_grants(preset.flatpak_id, home_roots, system_flatpak_root);
+          grants && !flatpak_can_read(*grants, folder, home_roots)) {
+        found.push_back({"flatpak_folder_not_visible", "warning",
+                         std::string(preset.label) + "'s Flatpak cannot see " + folder.string() + ", so it cannot open the games.",
+                         "flatpak override --user --filesystem=" + shell_quote(folder.string()) + " " + std::string(preset.flatpak_id)});
+      }
+    }
+    return found;
   }
 
   /// One registered folder, as stored in library_sources.json.
