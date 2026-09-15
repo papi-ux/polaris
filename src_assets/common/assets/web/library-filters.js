@@ -1,4 +1,4 @@
-const FILTERS = new Set(['all', 'steam', 'manual', 'fast_action', 'running'])
+const FILTERS = new Set(['all', 'steam', 'manual', 'emulator', 'fast_action', 'running'])
 
 function normalize(value = '') {
   return String(value).toLowerCase().trim()
@@ -8,6 +8,7 @@ function searchableText(app) {
   return [
     app.name,
     app.source,
+    app.emulator,
     app['game-category'],
     app.cmd,
   ].map(normalize).join(' ')
@@ -19,6 +20,8 @@ function matchesFilter(app, filter, currentApp) {
       return app.source === 'steam'
     case 'manual':
       return !app.source || app.source === 'manual'
+    case 'emulator':
+      return app.source === 'emulator'
     case 'fast_action':
       return app['game-category'] === 'fast_action'
     case 'running':

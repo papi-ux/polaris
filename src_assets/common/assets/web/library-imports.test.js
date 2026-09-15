@@ -28,4 +28,14 @@ describe('Library import filtering', () => {
     expect(filterImportGames(games, { query: 'legendary', status: 'all' }).map((game) => game.name)).toEqual(['Alan Wake 2'])
     expect(filterImportGames(games, { query: 'fast action', status: 'all' }).map((game) => game.name)).toEqual(['ARC Raiders'])
   })
+
+  it('searches ROM folder metadata too', () => {
+    const emulatorGames = [
+      { name: 'Hades', source: 'emulator', emulator: 'eden', emulator_label: 'Eden', platform: 'Nintendo Switch', rom_path: '/roms/switch/Hades.nsp', already_imported: false },
+      { name: 'Metroid Prime', source: 'emulator', emulator: 'dolphin', emulator_label: 'Dolphin', platform: 'GameCube and Wii', rom_path: '/roms/gc/Metroid Prime.rvz', already_imported: false },
+    ]
+    expect(filterImportGames(emulatorGames, { query: 'switch', status: 'all' }).map((game) => game.name)).toEqual(['Hades'])
+    expect(filterImportGames(emulatorGames, { query: 'dolphin', status: 'all' }).map((game) => game.name)).toEqual(['Metroid Prime'])
+    expect(filterImportGames(emulatorGames, { query: 'hades.nsp', status: 'all' }).map((game) => game.name)).toEqual(['Hades'])
+  })
 })
