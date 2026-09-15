@@ -63,6 +63,7 @@
 #include "system_tray.h"
 #include "stream.h"
 #include "utility.h"
+#include "emulator_library.h"
 #include "launch_failure.h"
 #include "video.h"
 #include "uuid.h"
@@ -460,6 +461,26 @@ namespace proc {
       return {"", "steam"};
     }
     return {"", ""};
+  }
+
+  emulator_identity_t launcher_identity_from_emulator(const std::string &emulator) {
+    const auto normalized = boost::to_lower_copy(boost::trim_copy(emulator));
+    if (normalized.empty()) {
+      return {};
+    }
+    if (normalized == emulator_library::custom_emulator_id) {
+      return {"", "", std::string(emulator_library::custom_emulator_id), "Custom emulator"};
+    }
+    const auto *preset = emulator_library::find_preset(normalized);
+    if (preset == nullptr) {
+      return {};
+    }
+    return {
+      std::string(preset->platform_id),
+      std::string(preset->platform),
+      std::string(preset->id),
+      std::string(preset->label),
+    };
   }
 
   std::string normalize_steam_launch_mode(std::string mode) {
@@ -11959,6 +11980,8 @@ namespace proc {
           ctx.game_category = app_node.value("game-category", "");
           ctx.source = app_node.value("source", ctx.steam_appid.empty() ? "manual" : "steam");
           ctx.lutris_runner = app_node.value("lutris-runner", "");
+          ctx.emulator = app_node.value("emulator", "");
+          ctx.rom_path = app_node.value("rom-path", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {

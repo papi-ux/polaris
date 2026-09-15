@@ -44,6 +44,8 @@ TEST(EmulatorLibraryPresets, EveryPresetIsCompleteAndUnique) {
     EXPECT_TRUE(ids.insert(preset.id).second) << preset.id;
     EXPECT_FALSE(preset.label.empty()) << preset.id;
     EXPECT_FALSE(preset.platform.empty()) << preset.id;
+    EXPECT_FALSE(preset.platform_id.empty()) << preset.id;
+    EXPECT_EQ(preset.platform_id.find(' '), std::string_view::npos) << preset.id;
     EXPECT_FALSE(preset.binaries.empty()) << preset.id;
     EXPECT_FALSE(preset.flatpak_id.empty()) << preset.id;
     EXPECT_FALSE(preset.extensions.empty()) << preset.id;

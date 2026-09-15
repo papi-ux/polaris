@@ -25,6 +25,7 @@
         "category",
         "cover_url",
         "display_planner",
+        "emulator",
         "genres",
         "hdr_supported",
         "id",
@@ -34,17 +35,22 @@
         "mangohud",
         "name",
         "platform",
+        "platform_label",
         "play_time",
         "runtime",
+        "runtime_label",
         "source",
         "steam_appid",
         "steam_launch"
       ],
       "optional": [
         "beat_time",
+        "emulator",
         "platform",
+        "platform_label",
         "play_time",
-        "runtime"
+        "runtime",
+        "runtime_label"
       ],
       "nova_reader": {
         "$comment": [
@@ -637,9 +643,7 @@
       "$comment": "Nova defaults each of these, so platform and runtime resolve to \"unknown\" and the labels to empty strings rather than failing.",
       "game": [
         "launcher_source",
-        "launcher_detail",
-        "platform_label",
-        "runtime_label"
+        "launcher_detail"
       ],
       "optimization": [
         "ai_recommended_mode",
@@ -653,11 +657,15 @@
     },
     "polaris_sends_nova_never_reads": {
       "$comment": [
-        "None. display_planner sat here for the day it was served ahead of its consumer;",
+        "emulator is the ROM folder preset id, served ahead of a client reader for a later",
+        "per-game readiness cue; Nova reads platform_label and runtime_label for the badge",
+        "instead. display_planner sat here for the day it was served ahead of its consumer;",
         "papi-ux/nova#197 wired the adapter and the records moved back out, with the",
         "nova_reader entries above repointed at the functions that now read it."
       ],
-      "game": [],
+      "game": [
+        "emulator"
+      ],
       "session_capture": [],
       "client_settings_mode_option": [
         "badge",
@@ -685,13 +693,14 @@
         "served in this object, which is what names the driver generation in a crash report."
       ],
       "game": [
-        "platform and runtime are now served, derived from the Lutris runner persisted at",
-        "import; they are omitted for apps whose runtime is not recorded, which Nova renders",
-        "as no badge. The remaining four are deliberate: launcher_source falls back to source",
-        "in Nova and would only matter if Polaris distinguished imported-from vs launched-via;",
-        "launcher_detail has no host-side value to serve; platform_label and runtime_label",
-        "exist so a server can label a value the client cannot map, and every value served",
-        "today is one Nova already maps."
+        "platform and runtime are served from the Lutris runner persisted at import, and for",
+        "ROM folder entries from the emulator preset (switch, gamecube-wii, wiiu, psx, ps2,",
+        "psp, gba as platform; the preset id as runtime), with platform_label and",
+        "runtime_label carrying the console and emulator names so Nova renders a value it",
+        "does not map. All are omitted where nothing is recorded, which Nova renders as no",
+        "badge. launcher_source and launcher_detail stay unserved: the first falls back to",
+        "source in Nova and would only matter if Polaris distinguished imported-from vs",
+        "launched-via, the second has no host-side value."
       ],
       "optimization": [
         "The containment resolver serves resolved_profile directly from deterministic",
