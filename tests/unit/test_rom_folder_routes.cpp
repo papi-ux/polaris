@@ -175,6 +175,12 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     EXPECT_EQ(code(request("POST", "/api/games/import", import_body((roms / "notes.txt").string()))), 400);
     EXPECT_EQ(code(request("POST", "/api/games/import", import_body(rom_path, "not-a-folder"))), 400);
 
+    // A cover beside the game is copied in at import, so the entry has art without any key.
+    {
+      std::ofstream png(roms / "Game One (USA).png", std::ios::binary);
+      png << "\x89PNG\r\n\x1a\n" << std::string(16, '\0') << "IHDR" << std::string(32, '\0');
+    }
+
     // The import writes the entry from the folder, not from the browser, and publishes Eden once.
     auto imported = request("POST", "/api/games/import", import_body(rom_path));
     ASSERT_EQ(code(imported), 200);
@@ -189,6 +195,11 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     EXPECT_EQ(game["rom-folder"], source_id);
     EXPECT_EQ(game["rom-path"], rom_path);
     EXPECT_EQ(game["gamepad"], "switch");
+    ASSERT_TRUE(game.contains("image-path")) << game.dump();
+    const auto image_path = game["image-path"].get<std::string>();
+    EXPECT_EQ(image_path.rfind((directory / "covers").string(), 0), 0u) << image_path;
+    EXPECT_NE(image_path.find("emulator_eden_Game_One__USA__"), std::string::npos) << image_path;
+    EXPECT_TRUE(fs::is_regular_file(image_path)) << image_path;
     EXPECT_FALSE(game["uuid"].get<std::string>().empty());
     const auto &eden = apps[1];
     EXPECT_EQ(eden["name"], "Eden");
