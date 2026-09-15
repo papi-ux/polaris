@@ -1259,7 +1259,7 @@ describe('silent failure reporting', () => {
       silent_failures: silentFailures,
     })
 
-    expect(bundle.support_bundle_version).toBe(3)
+    expect(bundle.support_bundle_version).toBe(4)
     expect(bundle.crash.outcome).toBe('crashed')
     expect(bundle.silent_failures).toHaveLength(1)
     expect(bundle.issue_draft).toContain('SIGSEGV')

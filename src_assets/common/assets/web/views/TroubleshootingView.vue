@@ -1118,19 +1118,26 @@ function cleanupStaleVirtualDisplay() {
 }
 
 async function collectSupportContext() {
-  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs] = await Promise.all([
+  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs, olderRunLogs, kernelGpuMessages] = await Promise.all([
     safeFetchJson('./api/stats/system'),
     safeFetchJson('./api/ai/status'),
     safeFetchJson('./api/ai/cache'),
     safeFetchJson('./api/ai/history'),
     safeFetchJson('./api/config'),
     // The run that crashed cannot serve its own log. This is the retained copy.
-    safeFetchText('./polaris/v1/diagnostics/logs/previous')
+    safeFetchText('./polaris/v1/diagnostics/logs/previous'),
+    // And the run before it: a freeze, a reboot and an export take one restart, and that
+    // restart used to overwrite the run that had been streaming.
+    safeFetchText('./polaris/v1/diagnostics/logs/previous?generation=1'),
+    // The kernel's own GPU lines for this boot and the previous one, when readable.
+    safeFetchJson('./polaris/v1/diagnostics/kernel-gpu')
   ])
 
   return {
     crash: lastRun.value || {},
     previous_run_logs: previousRunLogs,
+    older_run_logs: olderRunLogs,
+    kernel_gpu_messages: kernelGpuMessages,
     silent_failures: streamStats.value?.doctor?.silent_failures || [],
     user_notes: userNotes.value,
     generated_at: new Date().toISOString(),

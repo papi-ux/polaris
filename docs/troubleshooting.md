@@ -578,6 +578,12 @@ runtime already answered. Attach the bundle to that issue.
 Nothing is sent anywhere on its own. The bundle lands on your machine and the issue opens as a
 draft you complete, so you see exactly what you are sharing before anyone else does.
 
+The bundle carries the current run's log, the two runs before it (`polaris.log.backup` and
+`polaris.log.backup.1` next to the log), and the kernel's GPU-related lines for this boot and the
+previous one when the journal is readable by your account. A freeze, a reboot and an export used
+to cost the run that had been streaming; it is now the second retained run. When the journal is
+closed to your account the bundle says so and names the command to run instead.
+
 If you would rather assemble it yourself, the same screen offers the bundle and the issue draft as
 separate downloads, and describing the active route, capture backend, encoder, and client device by
 hand is still useful.

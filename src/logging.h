@@ -124,6 +124,13 @@ namespace logging {
   std::string backup_log_path(const std::string &log_file);
 
   /**
+   * @brief The run before the one in backup_log_path(): `<log_file>.backup.1`.
+   * @details A freeze, a reboot and an export take one restart, and with a single retained
+   *          run that restart overwrote the run that had been streaming. Empty for an empty log_file.
+   */
+  std::string older_backup_log_path(const std::string &log_file);
+
+  /**
    * @brief Print help to stdout.
    * @param name The name of the program.
    * @examples

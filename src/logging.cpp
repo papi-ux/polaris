@@ -252,6 +252,13 @@ namespace logging {
     return log_file + ".backup";
   }
 
+  std::string older_backup_log_path(const std::string &log_file) {
+    if (log_file.empty()) {
+      return {};
+    }
+    return log_file + ".backup.1";
+  }
+
   [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file) {
     if (sink || file_sink) {
       // Deinitialize the logging system before reinitializing it. This can probably only ever be hit in tests.
@@ -271,6 +278,16 @@ namespace logging {
         std::cout << "Another Polaris process owns the runtime log; continuing with console-only logging." << std::endl;
         runtime_log_owner_lock.reset();
         file_logging_ready = false;
+      }
+    }
+    if (file_logging_ready) {
+      // Keep the run before the previous one as well. Best effort: a failed rename
+      // costs one generation of history, never the current log.
+      std::error_code rotate_error;
+      const auto older_backup_file = older_backup_log_path(log_file);
+      if (std::filesystem::exists(backup_log_file, rotate_error) && !rotate_error) {
+        std::filesystem::remove(older_backup_file, rotate_error);
+        std::filesystem::rename(backup_log_file, older_backup_file, rotate_error);
       }
     }
     if (file_logging_ready && !bounded_log_file_t::preserve_existing(

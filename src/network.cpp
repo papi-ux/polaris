@@ -5,6 +5,9 @@
 // standard includes
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 
 // local includes
@@ -266,5 +269,113 @@ namespace net {
       {"video_udp", "Video stream", static_cast<std::uint16_t>(base_port + 9), "udp"},
       {"audio_udp", "Audio stream", static_cast<std::uint16_t>(base_port + 11), "udp"},
     };
+  }
+
+  std::vector<unsigned long> listening_socket_inodes(std::string_view proc_net_tcp, std::uint16_t port) {
+    // Each line: "sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ..."
+    // local_address is hex "addr:port"; state 0A is LISTEN. The first line is the header.
+    std::vector<unsigned long> inodes;
+    std::size_t start = 0;
+    bool header = true;
+    while (start < proc_net_tcp.size()) {
+      auto end = proc_net_tcp.find('\n', start);
+      if (end == std::string_view::npos) {
+        end = proc_net_tcp.size();
+      }
+      const auto line = proc_net_tcp.substr(start, end - start);
+      start = end + 1;
+      if (header) {
+        header = false;
+        continue;
+      }
+      std::vector<std::string_view> fields;
+      std::size_t pos = 0;
+      while (pos < line.size()) {
+        while (pos < line.size() && line[pos] == ' ') {
+          ++pos;
+        }
+        const auto field_end = line.find(' ', pos);
+        if (pos >= line.size()) {
+          break;
+        }
+        fields.push_back(line.substr(pos, field_end == std::string_view::npos ? std::string_view::npos : field_end - pos));
+        if (field_end == std::string_view::npos) {
+          break;
+        }
+        pos = field_end;
+      }
+      if (fields.size() < 10) {
+        continue;
+      }
+      const auto colon = fields[1].rfind(':');
+      if (colon == std::string_view::npos || fields[3] != "0A") {
+        continue;
+      }
+      const auto port_hex = fields[1].substr(colon + 1);
+      unsigned int local_port = 0;
+      if (std::from_chars(port_hex.data(), port_hex.data() + port_hex.size(), local_port, 16).ec != std::errc {} ||
+          local_port != port) {
+        continue;
+      }
+      unsigned long inode = 0;
+      if (std::from_chars(fields[9].data(), fields[9].data() + fields[9].size(), inode).ec == std::errc {} && inode != 0) {
+        inodes.push_back(inode);
+      }
+    }
+    return inodes;
+  }
+
+  std::string describe_port_holder(std::uint16_t port) {
+#ifdef __linux__
+    std::vector<unsigned long> inodes;
+    for (const auto *table : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+      std::ifstream in(table);
+      if (!in) {
+        continue;
+      }
+      std::stringstream buffer;
+      buffer << in.rdbuf();
+      const auto found = listening_socket_inodes(buffer.str(), port);
+      inodes.insert(inodes.end(), found.begin(), found.end());
+    }
+    if (inodes.empty()) {
+      return {};
+    }
+
+    // Only this account's processes expose their descriptors; another user's
+    // Polaris, Sunshine, Apollo or Hermes shows up as an inode nobody owns.
+    std::error_code ec;
+    for (const auto &process : std::filesystem::directory_iterator("/proc", ec)) {
+      const auto pid = process.path().filename().string();
+      if (pid.empty() || !std::all_of(pid.begin(), pid.end(), [](unsigned char c) { return std::isdigit(c); })) {
+        continue;
+      }
+      std::error_code fd_ec;
+      for (const auto &fd : std::filesystem::directory_iterator(process.path() / "fd", fd_ec)) {
+        std::error_code link_ec;
+        const auto target = std::filesystem::read_symlink(fd.path(), link_ec).string();
+        if (link_ec || target.rfind("socket:[", 0) != 0) {
+          continue;
+        }
+        unsigned long inode = 0;
+        const auto digits = std::string_view {target}.substr(8, target.size() - 9);
+        if (std::from_chars(digits.data(), digits.data() + digits.size(), inode).ec != std::errc {}) {
+          continue;
+        }
+        if (std::find(inodes.begin(), inodes.end(), inode) == inodes.end()) {
+          continue;
+        }
+        std::string comm = "unknown";
+        if (std::ifstream comm_in(process.path() / "comm"); comm_in) {
+          std::getline(comm_in, comm);
+        }
+        return "held by " + comm + " (pid " + pid + ")";
+      }
+    }
+    return "held by a process this account cannot inspect; another user's Polaris, Sunshine, Apollo and Hermes all use this port";
+#else
+    (void) port;
+    return {};
+#endif
   }
 }  // namespace net

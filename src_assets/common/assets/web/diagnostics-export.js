@@ -1293,7 +1293,8 @@ export function buildAnonymizedDiagnosticsBundle(input = {}) {
       'bare key assignment is also redacted, because a log line carries no surrounding context to',
       'say whether it names a label or a secret.',
     ].join(' '),
-    support_bundle_version: 3,
+    // 4: older_run_logs and kernel_gpu_messages ride along.
+    support_bundle_version: 4,
     ...input,
     stream_evidence: streamEvidence,
     issue_draft: issueDraft,

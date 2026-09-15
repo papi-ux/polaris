@@ -56,6 +56,7 @@
 #include "game_artwork_manual.h"
 #include "globals.h"
 #include "httpcommon.h"
+#include "kernel_gpu_lines.h"
 #include "logging.h"
 #include "log_tail_api.h"
 #include "network.h"
@@ -5129,7 +5130,21 @@ namespace confighttp {
     }
     print_req(request);
 
-    const auto backup_path = logging::backup_log_path(config::sunshine.log_file);
+    // generation=0 (default) is the previous run, generation=1 the one before it.
+    std::string backup_path = logging::backup_log_path(config::sunshine.log_file);
+    const auto query = request->parse_query_string();
+    for (const auto &entry : query) {
+      if (entry.first != "generation") {
+        bad_request(response, request, "Unknown query parameter: " + entry.first);
+        return;
+      }
+      if (entry.second == "1") {
+        backup_path = logging::older_backup_log_path(config::sunshine.log_file);
+      } else if (entry.second != "0") {
+        bad_request(response, request, "generation must be 0 or 1");
+        return;
+      }
+    }
     std::error_code exists_error;
     const bool present = !backup_path.empty() && std::filesystem::exists(backup_path, exists_error);
 
@@ -5154,6 +5169,61 @@ namespace confighttp {
     headers.emplace("X-Polaris-Log-Truncated", tail.truncated ? "true" : "false");
     append_common_security_headers(headers);
     response->write(SimpleWeb::StatusCode::success_ok, tail.content, headers);
+  }
+
+  /**
+   * @brief The kernel's GPU-related lines for this boot and the previous one.
+   * @details A whole-machine freeze writes nothing to Polaris' log; the kernel journal is
+   *          where an NVIDIA Xid, an i915 GPU hang or a hung task shows up seconds before.
+   *          Read through journalctl when this account may, and said plainly when it may not.
+   * @api_examples{/polaris/v1/diagnostics/kernel-gpu| GET| null}
+   */
+  void getKernelGpuMessages(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    const auto boot_json = [](const char *boot) {
+      nlohmann::json out;
+      out["lines"] = nlohmann::json::array();
+      out["readable"] = false;
+#ifdef __linux__
+      const std::string command = std::string {"journalctl -k -q --no-pager -o short-iso -n 4000 -b "} + boot + " 2>&1";
+      FILE *pipe = popen(command.c_str(), "r");
+      if (!pipe) {
+        out["note"] = "journalctl could not be started";
+        return out;
+      }
+      std::string text;
+      char buffer[4096];
+      while (fgets(buffer, sizeof(buffer), pipe) && text.size() < (4u << 20)) {
+        text += buffer;
+      }
+      const int status = pclose(pipe);
+      const bool unreadable = kernel_gpu_lines::journal_unreadable(text) || (status != 0 && text.empty());
+      out["readable"] = !unreadable;
+      if (unreadable) {
+        out["note"] = "The kernel journal is not readable by this account (systemd-journal or adm group, or "
+                      "kernel.dmesg_restrict). From a shell that can: journalctl -k -b -1 --no-pager | "
+                      "grep -iE 'nvidia|amdgpu|i915|drm|xid|hung' | tail -80";
+      }
+      for (const auto &line : kernel_gpu_lines::filter(text)) {
+        out["lines"].push_back(line);
+      }
+#else
+      (void) boot;
+      out["note"] = "Kernel journal lines are collected on Linux hosts only";
+#endif
+      return out;
+    };
+
+    nlohmann::json output;
+    output["status"] = true;
+    output["filter"] = "nvidia, nvrm, amdgpu, radeon, i915, xe, drm, xid, gpu hang, hung task, oops, bug, kernel panic, watchdog, lockup, evdi, vkms, hermes-kms, vibeshine";
+    output["current_boot"] = boot_json("0");
+    output["previous_boot"] = boot_json("-1");
+    send_response(response, output);
   }
 
   /**
@@ -7518,6 +7588,7 @@ namespace confighttp {
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
     server.resource["^/polaris/v1/diagnostics/logs/tail$"]["GET"] = getLogTail;
     server.resource["^/polaris/v1/diagnostics/logs/previous$"]["GET"] = getPreviousLogs;
+    server.resource["^/polaris/v1/diagnostics/kernel-gpu$"]["GET"] = getKernelGpuMessages;
     server.resource["^/polaris/v1/diagnostics/last-run$"]["GET"] = getLastRun;
     server.resource["^/polaris/v1/diagnostics/client-reports$"]["GET"] = getClientSupportReports;
     server.resource["^/api/logs$"]["GET"] = getLogs;
