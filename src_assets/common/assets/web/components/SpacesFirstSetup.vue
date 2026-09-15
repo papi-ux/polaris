@@ -44,8 +44,8 @@
     </div>
     <form v-else-if="snapshot?.available" class="mt-4 max-w-xl space-y-3" @submit.prevent="start">
       <div>
-        <label for="spaces-first-name" class="block text-sm font-medium text-silver">Space name</label>
-        <input id="spaces-first-name" v-model="name" type="text" maxlength="128" autocomplete="off" placeholder="Living room"
+        <label for="spaces-first-name" class="block text-sm font-medium text-silver">Who Is This Space For?</label>
+        <input id="spaces-first-name" v-model="name" type="text" maxlength="128" autocomplete="off" placeholder="e.g. Alex’s Space"
                :disabled="busy || !connected" class="focus-ring mt-2 w-full rounded-lg border border-storm/30 bg-void px-3 py-2.5 text-silver" />
       </div>
       <div v-if="snapshot.runtimes.length > 1">

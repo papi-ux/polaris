@@ -1,4 +1,5 @@
 #include "src/platform/linux/multiseat_profile_catalog.h"
+#include "src/platform/linux/spaces_library.h"
 #include "src/platform/linux/multiseat_profile_network.h"
 
 #include <algorithm>
@@ -46,6 +47,7 @@ namespace {
   public:
     std::vector<std::vector<std::string>> calls;
     std::size_t fail_call = 0;
+    bool library_mode = false;
     bool timeout = false, truncated = false, wrong_label = false, rootless = false, implicit_volume = false;
     std::uint64_t uid = 1000;
     std::string volume, profile, image;
@@ -64,8 +66,8 @@ namespace {
     container::command_result_t run(const std::vector<std::string> &argv,
                                     std::chrono::milliseconds duration, std::size_t bound) override {
       calls.push_back(argv);
-      EXPECT_EQ(duration, std::chrono::seconds(30));
-      EXPECT_EQ(bound, profiles::maximum_catalog_bytes);
+      EXPECT_EQ(duration, std::chrono::seconds(library_mode ? 15 : 30));
+      EXPECT_EQ(bound, library_mode ? 2 * 1024 * 1024 : profiles::maximum_catalog_bytes);
       const auto prefix = container::command_prefix({});
       EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), argv.begin()));
       if (calls.size() == fail_call) return {.exit_status = timeout || truncated ? 0 : 1, .timed_out = timeout, .output_truncated = truncated};
@@ -100,6 +102,17 @@ namespace {
           {"EnableIPv6", false}, {"Labels", {{"io.polaris.multiseat.profile", profile}}},
           {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
           {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}}, {"Containers", json::object()}}});
+      } else if (args[0] == "run" && library_mode) {
+        for (const auto *required : {"--network=none", "--userns=host", "--read-only", "--cap-drop=ALL",
+              "--security-opt=no-new-privileges", "--pull=never", "--runtime=runc", "--user=1000:1000"})
+          EXPECT_NE(std::find(args.begin(), args.end(), required), args.end());
+        EXPECT_NE(std::find(args.begin(), args.end(), "--mount=type=volume,src=" + volume + ",dst=/profile,readonly,volume-nocopy"), args.end());
+        EXPECT_EQ(args.back(), spaces::steam_library_scanner());
+        for (const auto &arg : args) {
+          EXPECT_FALSE(arg.starts_with("--device") || arg.starts_with("--privileged") ||
+            arg.starts_with("--gpus") || arg.starts_with("--cap-add") || arg == "--security-opt=label=disable");
+        }
+        return {.exit_status = 0, .output = R"({"schema":1,"games":[{"target":"870780","name":"Control"}]})"};
       } else if (args[0] == "run") {
         for (const auto *required : {"--network=none", "--userns=host", "--read-only", "--cap-drop=ALL",
               "--cap-add=CHOWN", "--cap-add=FOWNER", "--security-opt=no-new-privileges", "--pull=never",
@@ -725,6 +738,40 @@ namespace {
     auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
     EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
     EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-b"});
+  }
+
+  TEST_F(MultiseatProfileCatalog, DesktopAccessIsExplicitAtomicAndBackwardsCompatible) {
+    save(sample());
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-a", true));
+    {
+      const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string>{"client-a"}));
+      EXPECT_EQ(json::parse(profiles::encode(loaded->catalog))["schema"], 4);
+      auto malformed = json::parse(profiles::encode(loaded->catalog));
+      malformed["desktop_clients"].push_back("client-a");
+      EXPECT_FALSE(profiles::decode(malformed.dump()));
+      malformed["desktop_clients"] = "client-a"; EXPECT_FALSE(profiles::decode(malformed.dump()));
+    }
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-a", false));
+    const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.desktop_clients.empty());
+    EXPECT_EQ(json::parse(profiles::encode(loaded->catalog))["schema"], 1);
+  }
+
+  TEST(SpacesLibraryHost, UsesOnlyItsOwnedVolumeWithAnIsolatedReadOnlyHelper) {
+    provisioning_host_t host; host.library_mode = true; host.volume = "pv-alex";
+    host.profile = "alex"; host.image_family = "steam";
+    container::profile_t profile{"alex", "pv-alex", runtime_profile_e::steam, "sha256:" + std::string(64, 'a')};
+    const auto result = spaces::read_steam_library(host, profile);
+    ASSERT_TRUE(result.available); ASSERT_EQ(result.games.size(), 1U);
+    EXPECT_EQ(result.games[0].target, "870780"); EXPECT_EQ(host.calls.size(), 4U);
+    for (int mode = 0; mode < 5; ++mode) {
+      host.calls.clear(); host.rootless = mode == 0; host.wrong_label = mode == 1;
+      host.implicit_volume = mode == 2; host.fail_call = mode >= 3 ? 4 : 0;
+      host.timeout = mode == 3; host.truncated = mode == 4;
+      EXPECT_FALSE(spaces::read_steam_library(host, profile).available);
+      if (mode < 3) { EXPECT_LT(host.calls.size(), 4U); }
+    }
   }
 
 }  // namespace

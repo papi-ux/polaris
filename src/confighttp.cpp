@@ -3709,6 +3709,7 @@ namespace confighttp {
       output["creation_available"] = state.creation_available;
       output["management_available"] = state.management_available;
       output["access_available"] = state.management_available;
+      output["desktop_clients"] = state.desktop_clients;
       for (const auto &profile : state.profiles)
         output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
           {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}});

@@ -380,11 +380,29 @@ Space streams to stop because it reloads the host's permission catalog.
 Status refreshes while Nova's Space screen is open and is checked again before
 opening. If it cannot be verified, Nova keeps opening and switching unavailable
 until a fresh check succeeds. Older hosts without this API retain the single-Space
-flow. Stream Settings stay associated with the device and host, not each Space.
+flow. Library game settings stay associated with that game and environment on the device.
 
-For administrators: catalogs with extra access grants use schema 3. Archived-only
+For administrators: catalogs with explicit Desktop Access use schema 4. Catalogs with extra Space access grants use schema 3. Archived-only
 catalogs use schema 2; catalogs with neither use schema 1. Older builds reject new
 schemas instead of guessing their permissions. Selections live in a private file
 beside the catalog with a `.selections` suffix. A selection is never an access
 grant: it is revalidated against the catalog before use. Keep the catalog,
 selections, and volume backups together.
+
+## Choose A Player And A Game In Nova
+
+A Space is a saved gaming environment for a person or purpose. Name it **Alex’s Space**, **Family Space**, or another name your players recognize. Its name identifies the environment in Nova; it does not sign into a Steam account. Each Space keeps its own Steam sign-in, installed games, settings, and saves.
+
+1. In Polaris, open **Spaces**, create a Space, and name it for the player.
+2. Under that Space’s **Device Access**, allow the paired handhelds or TVs that may use it. A device can access more than one Space. One device can play in a given Space at a time.
+3. In Nova, select your computer. **Spaces Available** identifies computers offering Spaces to your paired device.
+4. Open **Library**, then use **Playing In** to choose your Space. The same Nova artwork library shows games installed in that environment.
+5. Choose **Open Steam** to sign in or install games in Steam Big Picture. After installing, return to Nova and refresh the library. Library reads are cached briefly, so a newly installed title may take up to 15 seconds to appear.
+6. Choose a game, review **Play Setup**, and press **Play**. **Play In** shows the environments available to your device and whether that title can launch there. Choosing another player’s Space uses that Space’s Steam sign-in and saves.
+7. End your stream before changing environments. Your selected Space is remembered for the next visit.
+
+**Desktop** uses the host computer’s usual account and applications. Devices assigned to Spaces gain that choice only when the host owner enables **Desktop Access** in Polaris. Granting access to a Space alone does not grant desktop access.
+
+The Steam library currently detects completed installations in the Space’s standard Steam home. Compatibility tools such as Proton are excluded. External library folders are not imported from host paths. If a library cannot be read, **Open Steam** remains available and Nova does not substitute the desktop’s games. Older hosts retain the original **Open Space** screen until they support the Space library API.
+
+Steam artwork is fetched through the paired Polaris host and cached separately from desktop artwork. Space artwork editing and pinned game shortcuts are not available in this first library version.

@@ -592,6 +592,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_production.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_production.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_library.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_library.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_catalog.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_catalog.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_network.h"

@@ -289,6 +289,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_worker_adapter.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_runtime.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_production.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_library.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_profile_catalog.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_launch_service.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup.cpp

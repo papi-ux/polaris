@@ -2,6 +2,9 @@
 export function validSnapshot(next) {
   if (!next || ['enabled', 'available', 'changing', 'failed'].some(key => typeof next[key] !== 'boolean') ||
       !Array.isArray(next.profiles) || ['creation_available', 'management_available', 'access_available'].some(key => next[key] !== undefined && typeof next[key] !== 'boolean')) return false
+  if (next.desktop_clients !== undefined && (!Array.isArray(next.desktop_clients) ||
+      next.desktop_clients.some(id => typeof id !== 'string' || !id) ||
+      new Set(next.desktop_clients).size !== next.desktop_clients.length)) return false
   const profiles = new Set(), clients = new Set()
   for (const profile of next.profiles) {
     if (!profile || typeof profile.id !== 'string' || !profile.id || profiles.has(profile.id) ||

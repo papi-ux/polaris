@@ -33,6 +33,8 @@ namespace multiseat {
     virtual bool routes_client(std::string_view client) const = 0;
     virtual std::optional<std::string> profile_for_client(std::string_view client) const { return std::nullopt; }
     virtual std::vector<profile_summary_t> profile_catalog() const { return {}; }
+    virtual spaces::library_reader_t library_reader() const { return {}; }
+    virtual std::vector<std::string> desktop_clients() const { return {}; }
     virtual std::vector<profile_activity_t> profile_activity() const { return {}; }
     virtual bool idle() const { return false; }
     virtual void reconcile() = 0;
@@ -57,23 +59,31 @@ namespace multiseat {
     bool available = false, changing = false, failed = false;
     std::vector<profile_summary_t> profiles;
     bool creation_available = false, management_available = false;
+    std::vector<std::string> desktop_clients;
   };
   struct profile_session_snapshot_t {
     bool active = false;
     std::string token;
     int width = 0, height = 0, fps = 0;
+    std::string game_identity, game_name;
   };
 
   struct profile_client_space_t {
     std::string id, name, state;
     bool selected = false;
+    bool library_enabled = false;
   };
   struct profile_client_spaces_t {
     bool available = false, can_switch = false;
     std::string selected;
     std::vector<profile_client_space_t> spaces;
+    bool desktop_allowed = false;
   };
 
+  struct profile_library_snapshot_t {
+    std::string id, name;
+    spaces::library_t library;
+  };
   class profile_launch_service_t final {
   public:
     explicit profile_launch_service_t(std::unique_ptr<profile_controller_t> controller,
@@ -82,11 +92,14 @@ namespace multiseat {
     profile_launch_service_t(const profile_launch_service_t &) = delete;
     profile_launch_service_t &operator=(const profile_launch_service_t &) = delete;
     [[nodiscard]] bool routes_client(std::string_view client) const;
+    [[nodiscard]] bool track_host_launch(const std::shared_ptr<rtsp_stream::launch_session_t> &launch);
     [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client) const;
     // Only the assigned profile name, read from one controller snapshot.
     [[nodiscard]] std::optional<std::string> profile_name_for_client(std::string_view client) const;
     [[nodiscard]] profile_launch_result_t prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
-      std::string_view expected_profile = {});
+      std::string_view expected_profile = {}, std::string_view target = {});
+    [[nodiscard]] std::optional<profile_library_snapshot_t> library_for_client(
+      std::string_view client, std::string_view profile) const;
     [[nodiscard]] profile_admin_snapshot_t admin_snapshot() const;
     [[nodiscard]] profile_launch_result_t set_assignment(std::string profile, std::string client);
     [[nodiscard]] profile_launch_result_t set_access(std::string profile, std::string client, bool allowed);

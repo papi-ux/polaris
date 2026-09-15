@@ -38,6 +38,8 @@ namespace multiseat {
         return runtime_->profile_for_client(client);
       }
       std::vector<profile_summary_t> profile_catalog() const override { return runtime_->profile_catalog(); }
+      spaces::library_reader_t library_reader() const override { return runtime_->library_reader(); }
+      std::vector<std::string> desktop_clients() const override { return runtime_->desktop_clients(); }
       std::vector<profile_activity_t> profile_activity() const override { return runtime_->profile_activity(); }
       bool idle() const override {
         return runtime_->seats() == 0 && runtime_->managed_workers() == 0 &&
@@ -180,6 +182,7 @@ namespace multiseat {
       std::optional<seat_handle_t> seat;
     };
     std::unique_ptr<profile_controller_t> controller;
+    std::uint64_t controller_revision = 0;
     profile_admin_options_t admin;
     std::shared_ptr<admin_request_t> queued_admin;
     std::shared_ptr<admin_request_t> active_admin;
@@ -194,10 +197,14 @@ namespace multiseat {
     }
     std::optional<std::string> selected_for(std::string_view client) const {
       if (!controller || stopping || reconfiguring || admin_failed || selection_failed) return std::nullopt;
+      const auto desktops = controller->desktop_clients();
+      const bool desktop = std::find(desktops.begin(), desktops.end(), client) != desktops.end();
       const auto saved = selections.find(std::string(client));
+      if (saved != selections.end() && saved->second == "desktop" && desktop) return "desktop";
       if (saved != selections.end()) for (const auto &profile : controller->profile_catalog())
         if (profile.id == saved->second && permitted(profile, client)) return profile.id;
-      return controller->profile_for_client(client);
+      const auto assigned = controller->profile_for_client(client);
+      return assigned ? assigned : desktop ? std::optional<std::string>{"desktop"} : std::nullopt;
     }
     static std::map<std::string, std::string> decode_selections(std::string_view payload) {
       using json = nlohmann::json;
@@ -245,6 +252,7 @@ namespace multiseat {
     bool stopping = false, stopped = false;
     std::deque<std::shared_ptr<request_t>> queued;
     std::vector<std::weak_ptr<rtsp_stream::launch_session_t>> tracked;
+    std::vector<std::weak_ptr<rtsp_stream::launch_session_t>> host_launches;
     std::jthread thread;
 
     impl_t(std::unique_ptr<profile_controller_t> value, std::chrono::milliseconds timeout_value,
@@ -262,7 +270,7 @@ namespace multiseat {
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
       if (!admin.access && !admin.catalog.empty())
-        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed) { return profiles::set_access(path, profile, client, allowed); };
+        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed) : profiles::set_access(path, profile, client, allowed); };
       if (!admin.catalog.empty()) {
         selection_path = admin.catalog; selection_path += ".selections";
         if (std::filesystem::exists(selection_path)) {
@@ -277,7 +285,10 @@ namespace multiseat {
     void change_profiles(const std::shared_ptr<admin_request_t> &request, bool pending) noexcept {
       profile_launch_result_t result {503, "Profile configuration could not be restored. Restart Polaris after reviewing the catalog."};
       try {
-        if (pending || !controller || !controller->idle()) {
+        bool host_active;
+        { std::lock_guard lock(mutex); host_active = std::any_of(host_launches.begin(), host_launches.end(),
+            [](const auto &weak) { const auto p = weak.lock(); return p && !p->is_cancelled(); }); }
+        if (pending || host_active || !controller || !controller->idle()) {
           { std::lock_guard lock(mutex); blocked_clients.clear(); }
           result = {409, request->edit ? "Stop space streams and wait for cleanup before renaming or removing a space" : request->creation ? "Stop profile sessions and wait for cleanup before creating a profile" :
             "Stop profile sessions and wait for cleanup before changing assignments"};
@@ -293,7 +304,7 @@ namespace multiseat {
           } else {
             // Closing proves that no stream owns this catalog. Destruction
             // releases the old global input owner before the replacement is built.
-            { std::lock_guard lock(mutex); controller.reset(); admin_failed = true; }
+            { std::lock_guard lock(mutex); ++controller_revision; controller.reset(); admin_failed = true; }
             const auto persisted = request->access ? admin.access(request->profile, request->client, *request->access) :
               request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
               admin.persist(request->profile, request->client);
@@ -397,17 +408,37 @@ namespace multiseat {
     impl_->wake.notify_all();
     impl_->thread.join();
   }
+  bool profile_launch_service_t::track_host_launch(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
+    if (!launch) return false;
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->blocked_clients.contains(launch->unique_id)) return false;
+    if (!impl_->controller) return !impl_->admin_failed;
+    const auto desktops = impl_->controller->desktop_clients();
+    const bool relevant = impl_->controller->routes_client(launch->unique_id) ||
+      std::find(desktops.begin(), desktops.end(), launch->unique_id) != desktops.end();
+    if (!relevant) return true;
+    if (impl_->selected_for(launch->unique_id) != std::optional<std::string>{"desktop"}) return false;
+    std::erase_if(impl_->host_launches, [](const auto &weak) { const auto p = weak.lock(); return !p || p->is_cancelled(); });
+    if (impl_->host_launches.size() >= 64) return false;
+    impl_->host_launches.push_back(launch);
+    return true;
+  }
+
   bool profile_launch_service_t::routes_client(std::string_view client) const {
     std::lock_guard lock(impl_->mutex);
     if (impl_->blocked_clients.contains(std::string(client))) return true;
-    if (impl_->controller) return impl_->controller->routes_client(client);
+    if (impl_->controller) {
+      if (impl_->selected_for(client) == std::optional<std::string>{"desktop"}) return false;
+      return impl_->controller->routes_client(client);
+    }
     for (const auto &profile : impl_->fallback_catalog)
       if (impl_t::permitted(profile, client)) return true;
     return false;
   }
   std::optional<std::string> profile_launch_service_t::profile_for_client(std::string_view client) const {
     std::lock_guard lock(impl_->mutex);
-    return impl_->selected_for(client);
+    const auto selected = impl_->selected_for(client);
+    return selected == std::optional<std::string>{"desktop"} ? std::nullopt : selected;
   }
 
   std::optional<std::string> profile_launch_service_t::profile_name_for_client(std::string_view client) const {
@@ -421,13 +452,26 @@ namespace multiseat {
   }
 
   profile_launch_result_t profile_launch_service_t::prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
-                                                         std::string_view expected_profile) {
+                                                         std::string_view expected_profile, std::string_view target) {
     if (!launch || !routes_client(launch->unique_id)) return {404, "No profile is assigned to this device"};
     launch->require_worker_connection();
     if (launch->is_cancelled() || launch->lifecycle_generation || launch->watch_only || launch->input_only ||
         launch->temporary_authorization || !(launch->perm & crypto::PERM::launch) ||
         launch->width <= 0 || launch->height <= 0 || launch->fps <= 0 || launch->fps % 1000 != 0 || launch->enable_hdr) {
       return {400, "Profile launch requires a new authorized SDR session with a whole frame rate"};
+    }
+    std::string target_name;
+    if (!target.empty()) {
+      const auto snapshot = library_for_client(launch->unique_id, expected_profile);
+      if (!snapshot) return {409, "This Space library is no longer available. Refresh the library."};
+      if (target == "big-picture-v1") target_name = "Steam Big Picture";
+      else {
+        const auto game = std::find_if(snapshot->library.games.begin(), snapshot->library.games.end(),
+          [&](const auto &item) { return item.target == target; });
+        if (!snapshot->library.available || game == snapshot->library.games.end())
+          return {409, "This game is no longer installed in the selected Space. Open Steam or refresh the library."};
+        target_name = game->name;
+      }
     }
     auto request = std::make_shared<impl_t::request_t>();
     request->launch = launch;
@@ -445,6 +489,8 @@ namespace multiseat {
       const auto selected = impl_->selected_for(launch->unique_id);
       if (!selected) return {409, "Choose an available space before launching"};
       launch->worker_profile_key = *selected;
+      launch->worker_library_target = std::string(target);
+      launch->worker_library_name = std::move(target_name);
       const auto generation = next_generation.fetch_add(1);
       if (generation < (1ULL << 63) || generation == std::numeric_limits<std::uint64_t>::max()) return {};
       launch->lifecycle_generation = generation;
@@ -463,13 +509,44 @@ namespace multiseat {
     return future.get();
   }
 
+  std::optional<profile_library_snapshot_t> profile_launch_service_t::library_for_client(
+    std::string_view client, std::string_view profile) const {
+    spaces::library_reader_t reader;
+    profile_library_snapshot_t result;
+    std::uint64_t epoch = 0;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (!impl_->controller || impl_->stopping || impl_->reconfiguring || impl_->admin_failed || impl_->selection_failed) return {};
+      const auto catalog = impl_->controller->profile_catalog();
+      const auto entry = std::find_if(catalog.begin(), catalog.end(), [&](const auto &p) {
+        return p.id == profile && p.library_enabled && impl_t::permitted(p, client);
+      });
+      if (entry == catalog.end()) return {};
+      result.id = entry->id; result.name = entry->name;
+      reader = impl_->controller->library_reader(); epoch = impl_->controller_revision;
+    }
+    // The reader owns a copy of the immutable storage catalog. No service lock
+    // is held while Docker reads manifests, so active streams keep reconciling.
+    result.library = reader ? reader(profile) : spaces::library_t{};
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (!impl_->controller || impl_->controller_revision != epoch || impl_->stopping || impl_->reconfiguring || impl_->admin_failed) return {};
+      const auto catalog = impl_->controller->profile_catalog();
+      if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &p) {
+        return p.id == profile && p.library_enabled && impl_t::permitted(p, client);
+      })) return {};
+    }
+    return result;
+  }
+
   profile_admin_snapshot_t profile_launch_service_t::admin_snapshot() const {
     std::lock_guard lock(impl_->mutex);
     return {static_cast<bool>(impl_->admin.reload && impl_->admin.persist), impl_->reconfiguring,
       impl_->admin_failed && !impl_->reconfiguring,
       impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog,
       static_cast<bool>(impl_->admin.reload && impl_->admin.create),
-      static_cast<bool>(impl_->admin.reload && impl_->admin.edit)};
+      static_cast<bool>(impl_->admin.reload && impl_->admin.edit),
+      impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
@@ -506,6 +583,8 @@ namespace multiseat {
     const auto selected = impl_->selected_for(client);
     result.available = selected.has_value(); result.selected = selected.value_or("");
     result.can_switch = result.available;
+    const auto desktops = impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{};
+    result.desktop_allowed = std::find(desktops.begin(), desktops.end(), client) != desktops.end();
     auto activity = impl_->controller ? impl_->controller->profile_activity() : std::vector<profile_activity_t>{};
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock(); launch && !launch->is_cancelled()) {
       if (std::none_of(activity.begin(), activity.end(), [&](const auto &item) { return item.client == launch->unique_id; }))
@@ -513,6 +592,8 @@ namespace multiseat {
           launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started ? "running" : "starting"});
     }
     for (const auto &item : activity) if (item.client == client) result.can_switch = false;
+    for (const auto &weak : impl_->host_launches) if (const auto launch = weak.lock();
+        launch && launch->unique_id == client && !launch->is_cancelled()) result.can_switch = false;
     const auto catalog = impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog;
     for (const auto &profile : catalog) {
       if (!impl_t::permitted(profile, client)) continue;
@@ -520,7 +601,7 @@ namespace multiseat {
       for (const auto &item : activity) if (item.profile == profile.id) {
         state = item.client == client ? item.state : "in_use"; break;
       }
-      result.spaces.push_back({profile.id, profile.name, state, selected == profile.id});
+      result.spaces.push_back({profile.id, profile.name, state, selected == profile.id, profile.library_enabled});
     }
     return result;
   }
@@ -533,10 +614,15 @@ namespace multiseat {
     if (client.empty() || client.size() > 128 || profile.empty() || profile.size() > 128 || previous.size() > 128)
       return {400, "Invalid space selection"};
     const auto catalog = impl_->controller->profile_catalog();
-    if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+    const auto desktops = impl_->controller->desktop_clients();
+    const bool desktop = profile == "desktop" && std::find(desktops.begin(), desktops.end(), client) != desktops.end();
+    if (!desktop && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
           return entry.id == profile && impl_t::permitted(entry, client);
-        })) return {404, "This space is not available to this device"};
+        })) return {404, "This environment is not available to this device"};
     if (*selected != previous) return {409, "Your selected space changed. Refresh before choosing again."};
+    for (const auto &weak : impl_->host_launches) if (const auto launch = weak.lock();
+        launch && launch->unique_id == client && !launch->is_cancelled() && *selected != profile)
+      return {409, "End your desktop stream before switching environments"};
     // Re-selecting the same Space is harmless while it is active.
     if (*selected == profile) return {200, "Space selected"};
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock();
@@ -561,7 +647,7 @@ namespace multiseat {
       if (request->client.empty() || request->client.size() > 128 || request->profile.empty() || request->profile.size() > 128)
         return {400, "Invalid space or paired device"};
       const auto catalog = impl_->controller->profile_catalog();
-      if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == request->profile && !entry.archived; }))
+      if (request->profile != "desktop" && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == request->profile && !entry.archived; }))
         return {404, "Unknown space"};
       if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
         [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
@@ -676,7 +762,9 @@ namespace multiseat {
       const auto launch = weak.lock();
       if (launch && !launch->is_cancelled() && launch->unique_id == client &&
           launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started)
-        return {true, launch->session_token, launch->width, launch->height, launch->fps / 1000};
+        return {true, launch->session_token, launch->width, launch->height, launch->fps / 1000,
+          launch->worker_library_target.empty() ? std::string(profile_app_uuid) :
+            spaces::game_identity(launch->worker_profile_key, launch->worker_library_target), launch->worker_library_name};
     }
     return {};
   }

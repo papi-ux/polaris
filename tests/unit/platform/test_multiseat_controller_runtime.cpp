@@ -858,6 +858,27 @@ namespace {
     ASSERT_EQ(activity.size(), 1U); EXPECT_EQ(activity[0].state, "stopping");
   }
 
+  TEST_F(MultiseatControllerRuntimeTest, SteamLibraryLaunchCarriesTheValidatedTitleIntoItsSeat) {
+    auto route = shared_profile_route(); route.library_enabled = true;
+    create_ready_controller(true, {route});
+    auto launch = controller_launch(2001, 3001);
+    launch->worker_library_target = "870780";
+    const auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    ASSERT_TRUE(admitted.admitted());
+    EXPECT_EQ(admitted.admission.seat->workload, (workload_plan_t{workload_kind_e::steam, "870780"}));
+    EXPECT_EQ(admitted.admission.seat->profile_key, route.profile_key);
+    launch->cancel();
+  }
+
+  TEST_F(MultiseatControllerRuntimeTest, LegacyProfileNeverAcceptsAnAlternateLibraryTarget) {
+    create_ready_controller(true, {shared_profile_route()});
+    auto launch = controller_launch(2001, 3001);
+    launch->worker_library_target = "870780";
+    const auto rejected = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
+    EXPECT_FALSE(rejected.admitted()); EXPECT_FALSE(rejected.use_host_launch());
+    EXPECT_EQ(controller_->seats(), 0U);
+  }
+
   TEST_F(MultiseatControllerRuntimeTest, RoutesPairedDevicesToOneProfileAndReleasesItsReservation) {
     create_ready_controller(true, {shared_profile_route()});
     auto launch = controller_launch(2001, 3001);

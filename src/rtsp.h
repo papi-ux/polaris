@@ -75,6 +75,9 @@ namespace rtsp_stream {
     std::string session_token;
     // Set by the profile service after checking this paired device's access.
     std::string worker_profile_key;
+    // Validated against this Space library before controller admission.
+    std::string worker_library_target;
+    std::string worker_library_name;
     // Lifecycle generation admitted by authenticated /launch or /resume.
     // RTSP SETUP must claim this exact generation before starting media.
     std::optional<std::uint64_t> lifecycle_generation;

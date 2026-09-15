@@ -207,6 +207,7 @@ namespace multiseat {
     }
     std::shared_ptr<void> catalog_lease;
     std::vector<profile_summary_t> catalog_summary;
+    std::vector<std::string> desktop_clients;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> catalog_owner;
     if (!options.profile_catalog.empty()) {
       if (!options.container.profiles.empty() || !options.container.workloads.empty() ||
@@ -218,11 +219,13 @@ namespace multiseat {
       auto loaded = profiles::load(options.profile_catalog);
       if (!loaded) return {.status = controller_runtime_create_status_e::invalid_dependencies};
       catalog_lease = std::move(loaded->lease);
+      desktop_clients = loaded->catalog.desktop_clients;
       catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
       for (auto &entry : loaded->catalog.profiles) {
+        entry.storage.steam_library_enabled = !entry.archived && entry.storage.runtime_profile == runtime_profile_e::steam;
         catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
           entry.storage.runtime_profile == runtime_profile_e::steam &&
-            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients});
+            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients, entry.storage.steam_library_enabled});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
           options.container.workloads.push_back(entry.workload);
@@ -245,6 +248,7 @@ namespace multiseat {
     controller_runtime_options_t runtime_options {
       .enabled = true, .worker_media_enabled = options.container.media_enabled,
       .profile_catalog = std::move(catalog_summary),
+      .desktop_clients = std::move(desktop_clients),
     };
     // Resolve profile storage/image and workload from the same trusted catalog
     // the backend will enforce. No second GPU or image allowlist is accepted.
@@ -267,11 +271,16 @@ namespace multiseat {
         .runtime_profile = profile->runtime_profile,
         .workload = route.workload,
         .access_clients = route.access_clients,
+        .library_enabled = profile->steam_library_enabled,
       };
       for (const auto &gpu : options.gpus) {
         resolved.logical_gpu_ids.push_back(gpu.logical_gpu_id);
       }
       runtime_options.profile_routes.push_back(std::move(resolved));
+    }
+    if (!options.profile_catalog.empty()) {
+      runtime_options.library_reader = spaces::make_library_reader(options.container.profiles,
+        factories.container_host ? factories.container_host : [] { return std::make_unique<container::local_host_t>(); });
     }
     return controller_runtime_t::create(
       std::move(runtime_options),

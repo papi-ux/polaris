@@ -29,6 +29,8 @@
     <MultiseatProfileCreate v-if="state.enabled && state.creation_available" :profiles="state.profiles"
                            :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError"
                            :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
+    <DesktopAccess v-if="Array.isArray(state.desktop_clients)" :clients="clients" :allowed="state.desktop_clients"
+                   :locked="locked" :refresh="refresh" @busy="managing = $event" />
     <details v-if="state.enabled && devices.length" class="mt-5 border-t border-storm/20 pt-3" open>
       <summary class="focus-ring cursor-pointer rounded py-2 font-semibold text-silver">Default Space</summary>
       <p class="mt-2 text-sm text-storm">Devices are the handhelds, TVs, and computers paired with Polaris. Choose the Space each device starts with. Allow additional Spaces using Device Access on a Space card.
@@ -78,6 +80,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import SpacesList from './SpacesList.vue'
+import DesktopAccess from './DesktopAccess.vue'
 import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
 import { validSnapshot } from '../spaces-access.js'
 

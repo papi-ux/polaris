@@ -13,12 +13,12 @@
       <p class="mt-1 text-sm text-storm">
         Starts with its own Steam sign-in, saves, and settings. After creating it, assign a device and open Big Picture to sign in.
       </p>
-      <label for="new-steam-profile-name" class="mt-4 block text-sm text-silver">Space name</label>
+      <label for="new-steam-profile-name" class="mt-4 block text-sm text-silver">Who Is This Space For?</label>
       <input id="new-steam-profile-name" ref="nameInput" v-model="name" type="text" autocomplete="off" maxlength="128"
              class="focus-ring mt-2 w-full rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver"
-             placeholder="e.g. Player 2" :disabled="locked || !!pending" aria-describedby="new-steam-name-help">
+             placeholder="e.g. Alex’s Space" :disabled="locked || !!pending" aria-describedby="new-steam-name-help">
       <p id="new-steam-name-help" class="mt-1 text-xs text-storm">
-        {{ name.trim() && !validName ? 'Use a shorter name without control characters.' : 'Use a player or room name, such as Alex or Living room.' }}
+        {{ name.trim() && !validName ? 'Use a shorter name without control characters.' : 'This name appears in Nova’s player selection. Use a name such as Alex’s Space or Family Space.' }}
       </p>
       <details v-if="sources.length > 1" class="mt-4">
         <summary class="focus-ring cursor-pointer rounded text-sm text-storm">Advanced setup</summary>

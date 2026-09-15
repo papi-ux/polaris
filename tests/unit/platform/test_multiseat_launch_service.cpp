@@ -43,6 +43,8 @@ namespace {
     std::atomic<unsigned> begins {0}, reconciles {0}, polls {0}, shutdowns {0};
     std::atomic<bool> select {true}, close {true}, fail {false}, idle {true};
     std::atomic<unsigned> destroyed {0};
+    spaces::library_reader_t library;
+    std::vector<std::string> desktops;
     void called() { std::lock_guard lock(mutex); owners.push_back(std::this_thread::get_id()); }
     bool await_begin() {
       std::unique_lock lock(mutex);
@@ -63,6 +65,8 @@ namespace {
       return std::nullopt;
     }
     std::vector<profile_summary_t> profile_catalog() const override { return catalog_; }
+    spaces::library_reader_t library_reader() const override { return state_->library; }
+    std::vector<std::string> desktop_clients() const override { return state_->desktops; }
     bool idle() const override { return state_->idle; }
     void reconcile() override { state_->called(); ++state_->reconciles; }
     profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
@@ -354,7 +358,7 @@ namespace {
     EXPECT_EQ(service->profile_for_client("client-b"), "profile-b");
     EXPECT_EQ(service->profile_name_for_client("client-a"), "Sam");
     EXPECT_EQ(service->prepare(launch(), "profile-a").status, 409);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
     ASSERT_EQ(service->set_assignment("", "client-a").status, 200);
     EXPECT_FALSE(service->routes_client("client-a"));
     EXPECT_TRUE(service->routes_client("client-b"));
@@ -558,7 +562,7 @@ namespace {
     EXPECT_EQ(service->prepare(value).status, 404);
     EXPECT_FALSE(value->worker_connection_requirement()->load());
     EXPECT_FALSE(value->lifecycle_generation);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatLaunchService, RejectsInvalidOrReusedRequestsBeforeStartingResources) {
@@ -576,7 +580,7 @@ namespace {
       EXPECT_EQ(service->prepare(value).status, 400) << kind;
       EXPECT_TRUE(value->worker_connection_requirement()->load());
     }
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatLaunchService, WorkerStreamsSurviveHostExitIncludingLateStickyRequirement) {
@@ -835,7 +839,7 @@ namespace {
     EXPECT_EQ(fields["hdr"]["value"], false);
     EXPECT_EQ(fields["hdr"]["normalized"], true);
     EXPECT_EQ(fields["target_bitrate_kbps"]["value"], 8000);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, HighRefreshProfileLaunchKeepsTheOtherSessionAtItsOwnRate) {
@@ -905,7 +909,7 @@ namespace {
     nvhttp::args_t duplicate {{"game", std::string(profile_app_uuid)}, {"fps", "60"}, {"fps", "120"}};
     EXPECT_EQ(nvhttp::resolve_profile_request(client, duplicate)->status, 400);
     EXPECT_EQ(nvhttp::resolve_profile_request({}, {})->status, 401);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, LowerLockedBitrateIsResolvedAndCarriedToTheLaunch) {
@@ -915,7 +919,7 @@ namespace {
     ASSERT_TRUE(resolved);
     ASSERT_EQ(resolved->status, 200);
     EXPECT_EQ(resolved->body["resolved_profile"]["fields"]["target_bitrate_kbps"]["value"], 4000);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
     auto launch_args = args();
     launch_args.emplace("workerProfile", *service->profile_for_client(client->uuid));
     launch_args.emplace("resolvedProfile", "1"); launch_args.emplace("expectedTopology", "gamescope_stream");
@@ -940,7 +944,7 @@ namespace {
       ASSERT_TRUE(result);
       EXPECT_NE(result->status, 200) << key;
     }
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
     const auto valid = nvhttp::launch_profile_request(client, request, false, [](const auto &) { return true; });
     ASSERT_TRUE(valid);
     EXPECT_EQ(valid->status, 200);
@@ -1010,14 +1014,14 @@ namespace {
       ASSERT_TRUE(result) << key;
       EXPECT_NE(result->status, 200) << key << '=' << value;
     }
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, UnmappedDeviceUsesOrdinaryRequestPath) {
     uninstall_profile_launch_service(service);
     const auto result = nvhttp::launch_profile_request(client, args(), false, [](const auto &) { return true; });
     EXPECT_FALSE(result);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
   TEST_F(MultiseatLaunchService, ClientSelectionOnlyUsesGrantedSpacesAndRejectsStaleChoices) {
     ASSERT_TRUE(service->shutdown(2s));
@@ -1065,7 +1069,7 @@ namespace {
     for (const auto payload : {R"({"space_id":"a","space_id":"b","previous_space_id":"a"})",
       R"({"space_id":"a","previous_space_id":"a","client_id":"client-b"})", R"({"space_id":true,"previous_space_id":"a"})"})
       EXPECT_EQ(nvhttp::profile_spaces_request(client, payload).status, 400);
-    EXPECT_EQ(state->begins, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, SpaceSelectionRejectsReplacedPermissions) {
@@ -1096,6 +1100,97 @@ namespace {
     catalog[1].access_clients.clear(); restart();
     EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
     EXPECT_EQ(service->select_space("client-a", "profile-b", "profile-a").status, 404);
+  }
+
+
+  TEST_F(MultiseatLaunchService, GameLaunchRequiresTheSelectedSpacesCatalog) {
+    ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view id) { return spaces::library_t{true,
+      {{id == "profile-a" ? "3527290" : "870780", "Installed Game"}}}; };
+    std::vector<profile_summary_t> catalog{{"profile-a", "Alex", {"client-a"}, true, false, {}, true},
+      {"profile-b", "Sam", {"client-b"}, true, false, {"client-a"}, true}};
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
+    EXPECT_FALSE(service->library_for_client("stranger", "profile-a"));
+    EXPECT_FALSE(service->library_for_client("client-a", "missing"));
+    ASSERT_TRUE(service->library_for_client("client-a", "profile-b"));
+    EXPECT_EQ(service->prepare(launch(), "profile-a", "870780").status, 409);
+    EXPECT_EQ(service->prepare(launch(), "profile-b", "870780").status, 409);
+    EXPECT_EQ(state->begins.load(), 0U);
+    auto accepted = launch();
+    EXPECT_EQ(service->prepare(accepted, "profile-a", "3527290").status, 200);
+    EXPECT_EQ(accepted->worker_profile_key, "profile-a");
+    EXPECT_EQ(accepted->worker_library_target, "3527290");
+    accepted->cancel();
+  }
+
+  TEST_F(MultiseatLaunchService, SteamLauncherRemainsAvailableWhenCatalogReadFails) {
+    ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view) { return spaces::library_t{}; };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+    EXPECT_EQ(service->prepare(launch(), "profile-a", "3527290").status, 409);
+    auto steam = launch();
+    EXPECT_EQ(service->prepare(steam, "profile-a", "big-picture-v1").status, 200);
+    EXPECT_EQ(steam->worker_library_target, "big-picture-v1");
+    steam->cancel();
+  }
+
+  TEST_F(MultiseatLaunchService, DesktopRequiresAnExplicitGrantAndCannotSwitchDuringLaunch) {
+    EXPECT_EQ(service->select_space("client-a", "desktop", "12345678-1234-4234-8234-123456789abc").status, 404);
+    state->desktops = {"client-a"};
+    EXPECT_EQ(service->select_space("client-a", "desktop", "12345678-1234-4234-8234-123456789abc").status, 200);
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_TRUE(service->routes_client("client-b"));
+    auto host = launch();
+    ASSERT_TRUE(service->track_host_launch(host));
+    EXPECT_FALSE(service->client_spaces("client-a").can_switch);
+    EXPECT_EQ(service->select_space("client-a", "12345678-1234-4234-8234-123456789abc", "desktop").status, 409);
+    host->cancel();
+    EXPECT_EQ(service->select_space("client-a", "12345678-1234-4234-8234-123456789abc", "desktop").status, 200);
+    EXPECT_FALSE(service->track_host_launch(launch()));
+    EXPECT_TRUE(service->routes_client("client-a"));
+  }
+
+  TEST_F(MultiseatProfileHttp, SpaceLibrariesAndArtworkRequireCurrentPerSpaceAccess) {
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view id) { return spaces::library_t{true,
+      {{id == "profile-a" ? "870780" : "3527290", "Installed Game"}}}; };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true},
+                                    {"profile-b", "Sam", {"client-b"}, true, false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    const auto result = nvhttp::profile_library_request(client, "profile-a");
+    ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
+    EXPECT_EQ(result.body["games"][0]["name"], "Open Steam");
+    EXPECT_EQ(result.body["games"][1]["id"], "space.profile-a.870780");
+    EXPECT_EQ(nvhttp::profile_library_request(client, "profile-b").status, 404);
+    EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.870780"), "870780");
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-b.3527290"));
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.3527290"));
+    EXPECT_FALSE(nvhttp::profile_artwork_target(nullptr, "space.profile-a.870780"));
+    const auto resolved = nvhttp::resolve_profile_request(client, {{"game", "space.profile-a.870780"},
+      {"width", "1920"}, {"height", "1080"}, {"fps", "120"}, {"client_max_fps", "120"}});
+    ASSERT_TRUE(resolved); ASSERT_EQ(resolved->status, 200);
+    EXPECT_EQ(resolved->body["worker_profile"]["target"], "870780");
+    EXPECT_EQ(resolved->body["worker_profile"]["game_identity"], "space.profile-a.870780");
+    auto start = args(); start.emplace("workerProfile", "profile-a"); start.emplace("workerTarget", "870780");
+    start.emplace("resolvedProfile", "1"); start.emplace("expectedTopology", "gamescope_stream");
+    start.emplace("resolvedHdr", "0"); start.emplace("bitrateKbps", "8000");
+    start.erase("mode"); start.emplace("mode", "1920x1080x120");
+    const auto started = nvhttp::launch_profile_request(client, start, false, [](const auto &) { return true; });
+    ASSERT_TRUE(started); ASSERT_EQ(started->status, 200); ASSERT_TRUE(started->launch);
+    EXPECT_EQ(started->launch->worker_library_target, "870780");
+    started->launch->cancel();
+    const auto began = state->begins.load();
+    start.erase("workerTarget"); start.emplace("workerTarget", "3527290");
+    EXPECT_EQ(nvhttp::launch_profile_request(client, start, false, [](const auto &) { return true; })->status, 409);
+    EXPECT_EQ(state->begins.load(), began);
+    auto replacement = std::make_shared<crypto::named_cert_t>();
+    replacement->uuid = client->uuid; replacement->name = client->name; replacement->cert = client->cert;
+    ASSERT_TRUE(nvhttp::add_authorized_client_for_tests(replacement, crypto::PERM::_default));
+    EXPECT_EQ(nvhttp::profile_library_request(client, "profile-a").status, 403);
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.870780"));
+    EXPECT_EQ(state->begins.load(), began);
   }
 
 }  // namespace

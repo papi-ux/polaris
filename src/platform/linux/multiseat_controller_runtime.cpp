@@ -3,6 +3,7 @@
  * @brief Default-off owner for trusted multiseat launch composition.
  */
 #include "multiseat_controller_runtime.h"
+#include "multiseat_profile_network.h"
 #include "src/rtsp.h"
 
 #ifdef __linux__
@@ -128,6 +129,8 @@ namespace multiseat {
         profile_routes(std::move(options.profile_routes)),
         profile_catalog(std::move(options.profile_catalog)),
         profile_launch_timeout(options.profile_launch_timeout),
+         library_reader(std::move(options.library_reader)),
+         desktop_clients(std::move(options.desktop_clients)),
         now(dependencies.now) {
       if (!now) now = [] { return worker_broker_t::monotonic_clock_t::now(); };
       profile_launches.reserve(input::maximum_input_allocations);
@@ -161,6 +164,8 @@ namespace multiseat {
     const std::vector<controller_profile_route_t> profile_routes;
     const std::vector<profile_summary_t> profile_catalog;
     const std::chrono::milliseconds profile_launch_timeout;
+    const spaces::library_reader_t library_reader;
+    const std::vector<std::string> desktop_clients;
     worker_broker_t::now_fn_t now;
     std::vector<owned_profile_launch_t> profile_launches;
     bool admission_ready = false;
@@ -443,10 +448,16 @@ namespace multiseat {
     if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
       return {.status = status_e::controller_not_ready};
     }
+    auto workload = route->workload;
+    if (!launch->worker_library_target.empty()) {
+      if (!route->library_enabled || route->runtime_profile != runtime_profile_e::steam ||
+          !container::valid_steam_target(launch->worker_library_target)) return {.status = status_e::invalid_launch};
+      workload = {workload_kind_e::steam, launch->worker_library_target};
+    }
     const seat_request_t request {
       .client_key = launch->unique_id,
       .profile_key = route->profile_key,
-      .workload = route->workload,
+      .workload = workload,
       .logical_gpu_id = {},
       .runtime_profile = route->runtime_profile,
       .data_plane = {
@@ -867,6 +878,8 @@ namespace multiseat {
   }
 
   std::vector<profile_summary_t> controller_runtime_t::profile_catalog() const { return impl_->profile_catalog; }
+  spaces::library_reader_t controller_runtime_t::library_reader() const { return impl_->library_reader; }
+  std::vector<std::string> controller_runtime_t::desktop_clients() const { return impl_->desktop_clients; }
 
   std::vector<profile_activity_t> controller_runtime_t::profile_activity() const {
     std::scoped_lock lock {impl_->state_mutex};

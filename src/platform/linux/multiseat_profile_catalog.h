@@ -24,6 +24,7 @@ namespace multiseat::profiles {
     std::uint32_t owner_uid = 0;
     std::uint32_t owner_gid = 0;
     std::vector<entry_t> profiles;
+    std::vector<std::string> desktop_clients;
   };
 
   struct loaded_catalog_t {
@@ -58,6 +59,8 @@ namespace multiseat::profiles {
   [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key);
   // Additional access does not change the default assignment.
+  [[nodiscard]] change_result_t set_desktop_access(const std::filesystem::path &path,
+    std::string_view client_key, bool allowed);
   [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key, bool allowed);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh

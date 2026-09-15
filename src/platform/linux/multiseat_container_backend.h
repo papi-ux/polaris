@@ -150,6 +150,7 @@ namespace multiseat::container {
     std::string opaque_volume_name;
     runtime_profile_e runtime_profile = runtime_profile_e::unknown;
     std::string image_reference;
+    bool steam_library_enabled = false;
   };
 
   struct shared_game_mount_t {

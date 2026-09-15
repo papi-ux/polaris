@@ -5,6 +5,7 @@
 #pragma once
 
 #ifdef __linux__
+#include "spaces_library.h"
 
   #include "multiseat_moonlight_worker_adapter.h"
   #include "multiseat_worker_coordinator.h"
@@ -26,6 +27,7 @@ namespace multiseat {
     bool steam = false;
     bool archived = false;
     std::vector<std::string> access_clients;
+    bool library_enabled = false;
   };
 
   struct profile_activity_t {
@@ -40,6 +42,7 @@ namespace multiseat {
     workload_plan_t workload;
     std::vector<std::string> logical_gpu_ids;
     std::vector<std::string> access_clients;
+    bool library_enabled = false;
   };
 
   struct controller_runtime_options_t {
@@ -50,6 +53,8 @@ namespace multiseat {
     std::vector<profile_summary_t> profile_catalog;
     /** Deadline from profile reservation through successful RTSP setup. */
     std::chrono::milliseconds profile_launch_timeout {30000};
+    spaces::library_reader_t library_reader;
+    std::vector<std::string> desktop_clients;
   };
 
   /**
@@ -274,6 +279,8 @@ namespace multiseat {
     [[nodiscard]] bool routes_client(std::string_view client_key) const;
     [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client_key) const;
     [[nodiscard]] std::vector<profile_summary_t> profile_catalog() const;
+    [[nodiscard]] spaces::library_reader_t library_reader() const;
+    [[nodiscard]] std::vector<std::string> desktop_clients() const;
     [[nodiscard]] std::vector<profile_activity_t> profile_activity() const;
     [[nodiscard]] std::optional<seat_state_e> seat_state(const seat_handle_t &handle) const;
     [[nodiscard]] bool shutting_down() const;

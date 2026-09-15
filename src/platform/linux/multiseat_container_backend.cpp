@@ -1481,7 +1481,9 @@ namespace multiseat::container {
     return gpu && profile &&
            spec.encoder_sessions <= gpu->max_encoder_sessions &&
            profile->runtime_profile == spec.runtime_profile &&
-           workload_allowed(spec.workload);
+           (workload_allowed(spec.workload) ||
+            (profile->steam_library_enabled && profile->runtime_profile == runtime_profile_e::steam &&
+             spec.workload.kind == workload_kind_e::steam && valid_steam_target(spec.workload.target_id)));
   }
 
   std::vector<std::string> backend_t::launch_argv(
