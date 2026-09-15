@@ -268,6 +268,17 @@ namespace wl {
 
   void monitor_t::xdg_size(zxdg_output_v1 *, std::int32_t width, std::int32_t height) {
     BOOST_LOG(info) << "Logical size: "sv << width << 'x' << height;
+
+    // wl_output.mode is the preferred source because it is in output pixels,
+    // which is what the capture hands back. But a compositor is only required to
+    // describe its outputs through xdg-output, and one that sends no current
+    // mode used to leave this monitor sized 0x0 while the desktop extents were
+    // known, which is the state that silently kills absolute input. Take the
+    // logical size when nothing better has arrived; a later mode overwrites it.
+    if (viewport.width <= 0 || viewport.height <= 0) {
+      viewport.width = width;
+      viewport.height = height;
+    }
   }
 
   void monitor_t::wl_mode(
@@ -277,6 +288,14 @@ namespace wl {
     std::int32_t height,
     std::int32_t refresh
   ) {
+    // A compositor may describe every mode the output supports. Only the
+    // current one describes what is on screen, and kwingrab.cpp already filters
+    // on it; taking whichever arrived last sized the monitor from an arbitrary
+    // mode.
+    if (!(flags & WL_OUTPUT_MODE_CURRENT)) {
+      return;
+    }
+
     viewport.width = width;
     viewport.height = height;
 

@@ -56,6 +56,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | Key | Typical value | What it controls |
 | --- | --- | --- |
 | `headless_mode` | `enabled` | Request a stream-only session instead of the visible desktop |
+| `headless_max_refresh_rate` | `240` | Refresh ceiling in Hz for launches where Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope). Advertised to clients and enforced at launch from the same value; `0` uses the built-in default of 240 |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
 | `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
@@ -358,6 +359,20 @@ as HDR with unusable metadata.
 Headless labwc/wlroots sessions are intentionally treated as SDR until the headless display path can
 truthfully provide HDR metadata. In that mode, `hdr_mode = 2` can still be useful to test Main10/P010
 encode support, but Polaris will not advertise true HDR to the client without metadata.
+
+The configuration that carries true HDR today, verified end to end:
+
+```ini
+capture = kms
+linux_stream_mode = desktop_display
+```
+
+`host_virtual_display`, `desktop_takeover` and `gamescope_stream` also show the real output;
+`headless_stream` and `windowed_stream` do not. KMS capture needs `CAP_SYS_ADMIN` on the binary,
+granted once with `sudo -H polaris --setup-host --enable-kms`. The paired client must not have HDR
+forced off in `client_profiles.json` (`hdr`) or `device_db.json` (`hdr_capable`), and the client has
+to request HDR itself. The full checklist with the log line for each step is in
+[runtime.md](runtime.md#the-recipe-that-works-today).
 
 For AMD VAAPI hosts, validate SDR first:
 

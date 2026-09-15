@@ -136,6 +136,8 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kms_capture_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_preallocated_gamepad_source.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_capture_backend_fallback_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_egl_ctx_release_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_labwc_render_device_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_platform_hardening_source.cpp
@@ -187,6 +189,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_gl_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_ram_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_helper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_labwc_startup_diagnostics.cpp
@@ -549,6 +552,11 @@ configure_polaris_test_target(${PROJECT_NAME}
     $<TARGET_OBJECTS:test_polaris_main_objects>
     ${TEST_SUPPORT_SOURCES}
     ${TEST_FAST_SOURCES}
+)
+
+add_test(
+    NAME polaris_prepared_ffmpeg_cmake
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/tests/cmake/test_prepared_ffmpeg.cmake
 )
 
 if (UNIX AND NOT APPLE)

@@ -3,7 +3,9 @@
  * @brief Tests for the Polaris v1 game launch-mode recommendation contract.
  */
 
+#include <src/config.h>
 #include <src/crypto.h>
+#include <src/launch_profile.h>
 #include <src/nvhttp.h>
 #include <src/video.h>
 
@@ -518,3 +520,43 @@ TEST(SessionStreamMode, ExactResolvedLaunchRequiresTopologyAssertion) {
   );
 }
 #endif
+
+// A client reads ServerMaxLaunchRefreshRate before it connects. If that number
+// is not the ceiling the launch will be validated against, Nova rejects a
+// request the host would have honoured, or honours one the host then clamps.
+TEST(LaunchModeContractTests, ServerInfoAdvertisesTheCeilingTheLaunchWillEnforce) {
+  const auto previous_mode = config::video.linux_display.stream_mode;
+  const auto previous_ceiling = config::video.linux_display.headless_max_refresh_rate;
+  const auto previous_output = config::video.output_name;
+  const auto restore = [&]() {
+    config::video.linux_display.stream_mode = previous_mode;
+    config::video.linux_display.headless_max_refresh_rate = previous_ceiling;
+    config::video.output_name = previous_output;
+  };
+
+  // No such output, so the physical-refresh hint has nothing to say and the
+  // difference between the two branches is the whole test.
+  config::video.output_name = "polaris-test-no-such-output";
+  config::video.linux_display.headless_max_refresh_rate = 165;
+
+#ifdef __linux__
+  config::video.linux_display.stream_mode = "headless_stream";
+  EXPECT_EQ(nvhttp::advertised_max_launch_refresh_rate_for_tests(), 165);
+
+  config::video.linux_display.headless_max_refresh_rate = 0;
+  EXPECT_EQ(nvhttp::advertised_max_launch_refresh_rate_for_tests(),
+            launch_profile::k_default_owned_display_refresh_ceiling_hz);
+
+  // A host that streams its real desktop is bounded by that desktop, never by
+  // the owned-display ceiling, however high it is configured.
+  config::video.linux_display.headless_max_refresh_rate = 165;
+  config::video.linux_display.stream_mode = "desktop_display";
+  const auto desktop = nvhttp::advertised_max_launch_refresh_rate_for_tests();
+  EXPECT_NE(desktop, 165);
+  EXPECT_LE(desktop, launch_profile::k_default_owned_display_refresh_ceiling_hz);
+#else
+  EXPECT_NE(nvhttp::advertised_max_launch_refresh_rate_for_tests(), 165);
+#endif
+
+  restore();
+}

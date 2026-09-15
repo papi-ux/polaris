@@ -10,6 +10,7 @@
 
 // standard includes
 #include "process_environment.h"
+#include "src/verified_action.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1814,14 +1815,55 @@ std::string get_local_ip_for_gateway() {
     );
   }
 
-  void reevaluate_capture_sources() {
+  /// Set while re-evaluating as if no backend were configured, so the auto-selection branches
+  /// below are reachable without mutating the user's saved configuration.
+  static std::optional<std::string> capture_backend_override;
+
+  /// Non-empty when the configured backend found nothing and auto-selection was used instead.
+  static std::string capture_backend_substitution;
+  // Set by kmsgrab when a DRM framebuffer handle could not be read for want of
+  // CAP_SYS_ADMIN; cleared at the start of every evaluation.
+  static bool kms_capability_refused = false;
+
+  /// False until an evaluation has actually run, so this can never report a problem it has not
+  /// looked for. Doctor asks this on every report, including before startup finishes.
+  static bool capture_sources_evaluated = false;
+
+#ifdef POLARIS_TESTS
+  static std::optional<std::string> selected_capture_backend_override;
+#endif
+
+  const std::string &requested_capture() {
+    return capture_backend_override ? *capture_backend_override : config::video.capture;
+  }
+
+  std::string describe_selected_sources() {
+#ifdef POLARIS_BUILD_CUDA
+    if (sources[source::NVFBC]) return "nvfbc";
+#endif
+#ifdef POLARIS_BUILD_WAYLAND
+    if (sources[source::WAYLAND]) return "wlr";
+#endif
+#ifdef POLARIS_BUILD_PORTAL
+    if (sources[source::PORTAL]) return "portal";
+#endif
+#ifdef POLARIS_BUILD_DRM
+    if (sources[source::KMS]) return "kms";
+#endif
+#ifdef POLARIS_BUILD_X11
+    if (sources[source::X11]) return "x11";
+#endif
+    return "none";
+  }
+
+  void evaluate_capture_sources() {
     sources.reset();
 
 #ifdef POLARIS_BUILD_CUDA
     const bool force_cage_wlr_capture = config::video.linux_display.use_cage_compositor
-                                     && (config::video.capture.empty() || config::video.capture == "wlr");
+                                     && (requested_capture().empty() || requested_capture() == "wlr");
 
-    if (!force_cage_wlr_capture && ((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc")) {
+    if (!force_cage_wlr_capture && ((requested_capture().empty() && sources.none()) || requested_capture() == "nvfbc")) {
       if (verify_nvfbc()) {
         sources[source::NVFBC] = true;
       }
@@ -1829,8 +1871,8 @@ std::string get_local_ip_for_gateway() {
 #endif
 #ifdef POLARIS_BUILD_WAYLAND
     const bool virtual_output_needs_portal = host_virtual_display_needs_portal();
-    if (((config::video.capture.empty() && sources.none() && !virtual_output_needs_portal)
-         || config::video.capture == "wlr"
+    if (((requested_capture().empty() && sources.none() && !virtual_output_needs_portal)
+         || requested_capture() == "wlr"
          || config::video.linux_display.use_cage_compositor)) {
       // When cage/labwc is configured, prefer direct wlr capture over portal
       // and connect to labwc's socket instead of the desktop compositor.
@@ -1849,22 +1891,22 @@ std::string get_local_ip_for_gateway() {
     }
 #endif
 #ifdef POLARIS_BUILD_DRM
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "kms") {
+    if ((requested_capture().empty() && sources.none()) || requested_capture() == "kms") {
       if (verify_kms()) {
         sources[source::KMS] = true;
       }
     }
 #endif
 #ifdef POLARIS_BUILD_PORTAL
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "portal") {
+    if ((requested_capture().empty() && sources.none()) || requested_capture() == "portal") {
       if (verify_portal()) {
         sources[source::PORTAL] = true;
       }
-      else if (config::video.capture == "portal") {
+      else if (requested_capture() == "portal") {
         BOOST_LOG(warning) << "Portal capture requested but XDG Desktop Portal ScreenCast interface is not available"sv;
       }
     }
-    else if (config::video.capture.empty() && sources.any()) {
+    else if (requested_capture().empty() && sources.any()) {
       // Another source was already selected via auto-detection; log Portal as an alternative if available
       if (verify_portal()) {
         BOOST_LOG(info) << "XDG Desktop Portal ScreenCast is available. Set capture = portal to use it."sv;
@@ -1875,17 +1917,124 @@ std::string get_local_ip_for_gateway() {
 #ifdef POLARIS_BUILD_X11
     // We enumerate this capture backend regardless of other suitable sources,
     // since it may be needed as a NvFBC fallback for software encoding on X11.
-    if (config::video.capture.empty() || config::video.capture == "x11") {
+    if (requested_capture().empty() || requested_capture() == "x11") {
       if (verify_x11()) {
         sources[source::X11] = true;
       }
     }
 #endif
 
-    if (sources.none()) {
-      BOOST_LOG(warning) << "reevaluate_capture_sources: no capture method available for the current mode"sv;
-    }
   }
+
+  void reevaluate_capture_sources() {
+    capture_backend_override.reset();
+    capture_backend_substitution.clear();
+    kms_capability_refused = false;
+    capture_sources_evaluated = true;
+    evaluate_capture_sources();
+
+    if (!sources.none()) {
+      return;
+    }
+    if (config::video.capture.empty()) {
+      BOOST_LOG(warning) << "reevaluate_capture_sources: no capture method available for the current mode"sv;
+      return;
+    }
+
+    // A configured backend found nothing. That is usually not a broken host: several capture
+    // backends only exist on some compositors, and the stream mode decides which compositor gets
+    // enumerated at all. wlr capture, for instance, needs zwlr_export_dmabuf_manager_v1, which
+    // only wlroots compositors have; a cage mode enumerates Polaris' own labwc and works, while
+    // every non-cage mode has to enumerate the host desktop and finds nothing on KDE or GNOME.
+    //
+    // Leaving sources empty means no encoder can be probed, and Polaris goes on serving with no
+    // capture at all and H.264 as the only advertised codec. Auto-selection can usually still
+    // find a working backend, so take it and say loudly that the configured one was not used.
+    const auto requested = config::video.capture;
+    capture_backend_override = std::string {};
+    evaluate_capture_sources();
+    capture_backend_override.reset();
+
+    if (sources.none()) {
+      BOOST_LOG(error) << "capture = "sv << requested
+                       << " found no usable capture path, and neither did auto-selection. "sv
+                       << "No encoder can be probed in this state."sv;
+      return;
+    }
+
+    const auto selected = describe_selected_sources();
+    capture_backend_substitution = requested + " -> " + selected;
+    BOOST_LOG(warning) << "capture = "sv << requested
+                       << " cannot capture anything in the current stream mode, so Polaris is "sv
+                       << "using "sv << selected << " instead. On a compositor without the "sv
+                       << "wlroots capture protocols, only the private-compositor modes can use "sv
+                       << "wlr; every other mode has to capture the desktop. Set capture = "sv
+                       << selected << " to make this the configured choice."sv;
+    verified_action::confirm(
+      "video.configured_capture",
+      "Capture with the backend this host is configured to use",
+      requested,
+      selected
+    );
+  }
+
+  std::string capture_backend_substitution_note() {
+    return capture_backend_substitution;
+  }
+
+  bool capture_sources_missing() {
+    return capture_sources_evaluated && sources.none();
+  }
+
+  std::string selected_capture_backend() {
+#ifdef POLARIS_TESTS
+    if (selected_capture_backend_override) {
+      return *selected_capture_backend_override;
+    }
+#endif
+    if (!capture_sources_evaluated) {
+      return {};
+    }
+    return describe_selected_sources();
+  }
+
+  bool kms_capture_refused_for_capability() {
+    return kms_capability_refused;
+  }
+
+  void note_kms_capture_refused_for_capability() {
+    // kmsgrab found the connector and could not read a framebuffer handle. That
+    // is the capability, not the hardware, and the remedy is one command; the
+    // startup log says so once and scrolls away, so keep it where the Doctor
+    // can read it for as long as this evaluation stands (#686 follow-up).
+    kms_capability_refused = true;
+    verified_action::confirm(
+      "video.kms_capability",
+      "Read a DRM framebuffer handle for KMS capture",
+      false
+    );
+  }
+
+#ifdef POLARIS_TESTS
+  void set_capture_sources_missing_for_tests(bool missing) {
+    capture_sources_evaluated = missing;
+    sources.reset();
+  }
+
+  void set_kms_capture_refused_for_tests(bool refused) {
+    kms_capability_refused = refused;
+  }
+
+  void set_selected_capture_backend_for_tests(std::optional<std::string> backend) {
+    selected_capture_backend_override = std::move(backend);
+  }
+#endif
+
+#ifdef POLARIS_TESTS
+  void set_capture_backend_substitution_for_tests(const std::string &note) {
+    capture_backend_substitution = note;
+  }
+#endif
 
   std::unique_ptr<deinit_t> init() {
     // enable low latency mode for AMD

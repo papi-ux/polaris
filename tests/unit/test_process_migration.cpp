@@ -406,7 +406,8 @@ TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunc
   ASSERT_NE(prep_loop, std::string::npos);
   EXPECT_LT(credential, prep_loop);
   EXPECT_NE(body.find("critical nested gamescope prep command failed"), std::string::npos);
-  EXPECT_NE(body.find("return 503;", prep_loop), std::string::npos);
+  // Fails closed and says why: the refusal names the nested gamescope session.
+  EXPECT_NE(body.find("return launch_failure::refuse(503, \"gamescope_session_failed\"", prep_loop), std::string::npos);
   const auto app_env_loop = body.find("for (const auto &[key, val] : _app.env_vars)", prep_loop);
   ASSERT_NE(app_env_loop, std::string::npos);
   const auto reserved_filter = body.find("is_reserved_session_env_key(key)", app_env_loop);
@@ -3397,7 +3398,7 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_LT(retain_detached_pidfd, detach_child);
 
   const auto pidfd_authority_failure = execute.find("could not retain pidfd authority for detached-only child");
-  const auto pidfd_authority_return = execute.find("return 503;", pidfd_authority_failure);
+  const auto pidfd_authority_return = execute.find("return launch_failure::refuse(503, \"child_tracking_failed\"", pidfd_authority_failure);
   ASSERT_NE(pidfd_authority_failure, std::string::npos);
   ASSERT_NE(pidfd_authority_return, std::string::npos);
   const auto pidfd_failure_cleanup = execute.substr(

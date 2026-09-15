@@ -193,6 +193,7 @@ namespace confighttp::validation {
       "global_prep_cmd"sv,
       "global_state_cmd"sv,
       "hdr_mode"sv,
+      "headless_max_refresh_rate"sv,
       "headless_mode"sv,
       "hevc_mode"sv,
       "hide_tray_controls"sv,

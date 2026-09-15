@@ -213,6 +213,10 @@ namespace input {
 
     input::touch_port_t touch_port;
 
+    // Last reason an absolute coordinate was refused, so the warning is raised
+    // on a change rather than on every packet.
+    touchport_reject_e last_touchport_reject = touchport_reject_e::none;
+
     int32_t accumulated_vscroll_delta;
     int32_t accumulated_hscroll_delta;
   };
@@ -251,7 +255,7 @@ namespace input {
     return true;
   }
 
-  void preallocate_gamepad() {
+  void preallocate_gamepad(int client_controller_type) {
     if (!config::input.controller) {
       return;
     }
@@ -272,7 +276,12 @@ namespace input {
     }
 
     constexpr int controller_number = 0;
-    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, {}, preallocated_gamepad_feedback_queue)) {
+    const platf::gamepad_arrival_t remembered {
+      static_cast<std::uint8_t>(client_controller_type),
+      0,
+      0
+    };
+    if (platf::alloc_gamepad(platf_input, {id, static_cast<std::uint8_t>(controller_number)}, remembered, preallocated_gamepad_feedback_queue)) {
       free_id(gamepadMask, id);
       update_controller_diagnostics(false, controller_number, "ControllerNumber [0] could not be preallocated before app launch.");
       BOOST_LOG(warning) << "ControllerNumber [0] could not be preallocated before app launch"sv;
@@ -541,19 +550,94 @@ namespace input {
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
   }
 
+  touch_port_t make_touch_port(
+    const platf::touch_port_t &capture,
+    int env_width,
+    int env_height,
+    int stream_width,
+    int stream_height
+  ) {
+    // A capture's own viewport and the desktop extents come from different
+    // places on Linux: wlgrab takes the viewport from wl_output and the extents
+    // from the compositor's globals, and kmsgrab takes them from the CRTC, so
+    // either viewport can come back empty while the extents are known. Dividing
+    // by an empty viewport gives an infinite scalar, which refuses every
+    // absolute packet for the rest of the session and leaves the pointer
+    // parked. Absolute input is injected against the desktop extents anyway,
+    // in passthrough()'s abs_port below, so map against those rather than lose
+    // the pointer. On a single output they are the same rectangle.
+    float wd = capture.width;
+    float hd = capture.height;
+    if (wd <= 0.0f || hd <= 0.0f) {
+      // An encode session is rebuilt whenever the bitrate is retargeted, so say
+      // this when it changes rather than on every rebuild.
+      static std::pair<int, int> last_reported {-1, -1};
+      const std::pair<int, int> reported {capture.width, capture.height};
+      if (reported != last_reported) {
+        last_reported = reported;
+        BOOST_LOG(warning) << "Capture reported no viewport of its own ("sv << capture.width << 'x'
+                           << capture.height << "); mapping absolute input against the desktop ("sv
+                           << env_width << 'x' << env_height << ") instead"sv;
+      }
+      wd = static_cast<float>(env_width);
+      hd = static_cast<float>(env_height);
+    }
+
+    const float wt = stream_width;
+    const float ht = stream_height;
+
+    const auto scalar = std::fminf(wt / wd, ht / hd);
+
+    const auto w2 = scalar * wd;
+    const auto h2 = scalar * hd;
+
+    const auto offsetX = (stream_width - w2) * 0.5f;
+    const auto offsetY = (stream_height - h2) * 0.5f;
+
+    return touch_port_t {
+      {
+        capture.offset_x,
+        capture.offset_y,
+        stream_width,
+        stream_height,
+      },
+      env_width,
+      env_height,
+      offsetX,
+      offsetY,
+      1.0f / scalar,
+    };
+  }
+
   std::optional<std::pair<float, float>> map_client_to_touchport(
     const touch_port_t &touch_port,
     const std::pair<float, float> &val,
-    const std::pair<float, float> &size
+    const std::pair<float, float> &size,
+    touchport_reject_e *reason
   ) {
-    if (!touch_port || size.first <= 0.0f || size.second <= 0.0f || touch_port.scalar_inv <= 0.0f) {
-      return std::nullopt;
+    const auto reject = [&](touchport_reject_e which) {
+      if (reason) {
+        *reason = which;
+      }
+      return std::optional<std::pair<float, float>> {};
+    };
+    if (reason) {
+      *reason = touchport_reject_e::none;
+    }
+
+    if (size.first <= 0.0f || size.second <= 0.0f) {
+      return reject(touchport_reject_e::client_surface_empty);
+    }
+    // scalar_inv is 1/min(stream/capture), so a capture that reported no size
+    // of its own leaves it at zero and nothing can be placed on screen.
+    if (!touch_port || touch_port.scalar_inv <= 0.0f) {
+      return reject(touchport_reject_e::capture_viewport_empty);
     }
 
     const auto scalarX = touch_port.width / size.first;
     const auto scalarY = touch_port.height / size.second;
     if (!std::isfinite(scalarX) || !std::isfinite(scalarY) || scalarX <= 0.0f || scalarY <= 0.0f) {
-      return std::nullopt;
+      return reject(touchport_reject_e::capture_viewport_empty);
     }
 
     const auto offsetX = touch_port.client_offsetX;
@@ -562,7 +646,7 @@ namespace input {
     const auto upperY = touch_port.height - offsetY;
     if (!std::isfinite(offsetX) || !std::isfinite(offsetY) || !std::isfinite(upperX) || !std::isfinite(upperY) ||
         offsetX < 0.0f || offsetY < 0.0f || offsetX > upperX || offsetY > upperY) {
-      return std::nullopt;
+      return reject(touchport_reject_e::letterbox_bounds_inverted);
     }
 
     float x = std::clamp(val.first, 0.0f, size.first) * scalarX;
@@ -592,11 +676,37 @@ namespace input {
       return std::nullopt;
     }
 
-    auto mapped = map_client_to_touchport(touch_port, val, size);
-    if (!mapped) {
-      BOOST_LOG(warning) << "Ignoring absolute input with invalid touch port bounds"sv;
+    auto reason = touchport_reject_e::none;
+    auto mapped = map_client_to_touchport(touch_port, val, size, &reason);
+    // Absolute packets arrive at the client's poll rate, so logging each refusal
+    // buries the session log and still says nothing. Report a reason once, and
+    // again only when it changes.
+    if (reason != input->last_touchport_reject) {
+      input->last_touchport_reject = reason;
+      if (reason != touchport_reject_e::none) {
+        BOOST_LOG(warning) << "Ignoring absolute input: "sv << touchport_reject_name(reason)
+                           << ". Client surface "sv << size.first << 'x' << size.second
+                           << ", stream "sv << touch_port.width << 'x' << touch_port.height
+                           << ", desktop "sv << touch_port.env_width << 'x' << touch_port.env_height
+                           << ", letterbox offset "sv << touch_port.client_offsetX << 'x'
+                           << touch_port.client_offsetY << ", inverse scale "sv << touch_port.scalar_inv;
+      }
     }
     return mapped;
+  }
+
+  std::string_view touchport_reject_name(touchport_reject_e reason) {
+    switch (reason) {
+      case touchport_reject_e::client_surface_empty:
+        return "the client described a surface with no area"sv;
+      case touchport_reject_e::capture_viewport_empty:
+        return "the capture never reported a size of its own"sv;
+      case touchport_reject_e::letterbox_bounds_inverted:
+        return "the letterbox offsets do not bracket the frame"sv;
+      case touchport_reject_e::none:
+        break;
+    }
+    return "no reason"sv;
   }
 
   /**
@@ -961,6 +1071,11 @@ namespace input {
     }
 
     if (input->gamepads[packet->controllerNumber].id >= 0) {
+      // The pad was preallocated before the app launched, which is the only way a game sees a
+      // controller at startup, so this arrival is too late to change it. Remember what the
+      // client asked for instead, and say so, because silently emulating the wrong pad for a
+      // whole session used to leave nothing in the log at all.
+      stream_stats::update_client_declared_controller_type(packet->type);
       BOOST_LOG(debug) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }

@@ -15,6 +15,10 @@
 #include <string_view>
 #include <vector>
 
+#ifdef __linux__
+  #include "platform/linux/user_unit_override.h"
+#endif
+
 namespace update_status {
   namespace {
     std::string trim(std::string value) {
@@ -300,6 +304,27 @@ namespace update_status {
 #endif
   }
 
+  // The binary this process runs from, and whether it is the packaged one.
+  // The Update Center's "installed but not running" state tells the user to
+  // restart; when the service runs a copy outside the package, a restart
+  // changes nothing and the advice has to be the copy.
+  nlohmann::json running_binary_json() {
+#ifdef __linux__
+    const auto running = platf::user_unit::running_executable();
+    if (!running) {
+      return nullptr;
+    }
+    const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
+    return {
+      {"path", binary.path},
+      {"packaged_path", binary.packaged_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(binary.packaged_path)},
+      {"matches_package", binary.matches_package ? nlohmann::json(*binary.matches_package) : nlohmann::json(nullptr)},
+    };
+#else
+    return nullptr;
+#endif
+  }
+
   nlohmann::json host_update_status() {
     const auto distro = detect_host_distro();
 
@@ -315,6 +340,7 @@ namespace update_status {
       // The package database can be ahead of the running process after an
       // install without a restart; the console turns that into a plain hint.
       {"installed_package_version", installed_package_version(distro)},
+      {"running_binary", running_binary_json()},
       // A host with the repository configured is no longer on the download-a-
       // file path, so this stops claiming otherwise.
       {"manual_install_only", !repository},

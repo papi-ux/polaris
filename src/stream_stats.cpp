@@ -10,10 +10,12 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 // lib includes
@@ -27,8 +29,13 @@
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
+
+namespace video {
+  std::string active_encoder_name();
+}
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/user_unit_override.h"
   #include "platform/linux/stream_display_policy.h"
 #endif
 
@@ -568,6 +575,8 @@ namespace stream_stats {
     j["convert_path"] = encode_target_device.empty() ? "unknown" : encode_target_device;
     j["dynamic_range"] = dynamic_range;
     j["display_hdr"] = display_hdr;
+    j["hdr_policy_reason"] = hdr_policy_reason;
+    j["hdr_policy_hdr"] = hdr_policy_hdr;
     j["hdr_metadata_available"] = hdr_metadata_available;
     j["stream_hdr_enabled"] = stream_hdr_enabled;
     j["color_coding"] = color_coding;
@@ -711,6 +720,182 @@ namespace stream_stats {
 #endif
   }
 
+
+  namespace {
+    std::optional<bool> build_has_cuda_override;
+  }
+
+  bool build_has_cuda() {
+    if (build_has_cuda_override) {
+      return *build_has_cuda_override;
+    }
+#ifdef POLARIS_BUILD_CUDA
+    return true;
+#else
+    return false;
+#endif
+  }
+
+#ifdef POLARIS_TESTS
+  void set_build_has_cuda_for_tests(std::optional<bool> has_cuda) {
+    build_has_cuda_override = has_cuda;
+  }
+#endif
+
+  capture_forecast_t forecast_capture_path(const capture_forecast_inputs_t &in) {
+    capture_forecast_t out;
+    out.residency = "unknown";
+
+    const auto system_memory = [&out](std::string cause, std::string severity, std::string message, std::string action) {
+      out.residency = "system_memory";
+      out.cause = std::move(cause);
+      out.severity = std::move(severity);
+      out.message = std::move(message);
+      out.action = std::move(action);
+    };
+
+    const auto &backend = in.capture_backend;
+    const bool nvidia = in.encoder == "nvenc";
+    const bool vaapi = in.encoder == "vaapi";
+    const bool vulkan = in.encoder == "vulkan";
+
+    // Nothing has been looked at yet, or nothing captures at all; both have their own findings.
+    if (backend.empty() || backend == "none") {
+      return out;
+    }
+    // A software encoder reads system memory whatever the capture did; that is the encoder's
+    // own story, not a capture one.
+    if (in.encoder == "software") {
+      out.residency = "system_memory";
+      return out;
+    }
+    if (backend == "nvfbc") {
+      out.residency = "gpu";
+      return out;
+    }
+    if (backend == "x11") {
+      system_memory(
+        "x11_capture",
+        "warning",
+        "Capture is running through X11 (x11grab), which copies every frame through system "
+        "memory before the encoder. That is the X11 path itself, not a fault in the driver or "
+        "the GPU.",
+        "Stream from a Wayland session, or use a Private Stream mode, which captures Polaris' "
+        "own compositor and can keep frames on the GPU. capture = nvfbc keeps X11 capture on "
+        "the GPU on NVIDIA cards that expose NvFBC."
+      );
+      return out;
+    }
+    if (nvidia && !in.build_has_cuda) {
+      system_memory(
+        "build_without_cuda",
+        "warning",
+        "This Polaris binary was built without CUDA, so on NVIDIA every capture path copies "
+        "each frame through system memory before NVENC sees it, whatever stream mode or "
+        "GPU-native setting is chosen. The startup log says Build features: cuda=disabled and "
+        "each session logs Attempting to use NVENC without CUDA support. Reverting back to "
+        "GPU -> RAM -> GPU.",
+        "Install a Polaris package built with CUDA: the official Fedora, Arch and Ubuntu "
+        "packages all are (polaris --version reports cuda=enabled), or build from source with "
+        "-DPOLARIS_ENABLE_CUDA=ON. Only the NVIDIA driver is needed at run time, not the CUDA "
+        "toolkit."
+      );
+      return out;
+    }
+    if (backend == "kms") {
+      out.residency = (nvidia || vaapi || vulkan) ? "gpu" : "unknown";
+      return out;
+    }
+    if (vaapi && (backend == "portal" || backend == "wlr")) {
+      // Every VA-API capture path stays on the copy route until the DMA-BUF import boundary has
+      // proof from affected hosts (#367). Say so before the first stream, because a fresh AMD
+      // host reads SHM in Mission Control and assumes something is broken.
+      if (backend == "portal" && in.portal_vaapi_dmabuf_opted_in) {
+        return out;
+      }
+      const bool private_stream = backend == "wlr" && in.use_cage_compositor;
+      const std::string path =
+        backend == "portal" ? "Desktop capture through the desktop portal (Mirror Desktop, Host Virtual Display)" :
+        private_stream ? "Private Stream capture" :
+                         "wlroots capture";
+      system_memory(
+        "vaapi_system_memory_by_design",
+        "info",
+        path + " on VA-API keeps frames in system memory by design: the DMA-BUF import into the "
+        "encoder has crashed or stalled on AMD hosts, so every VA-API capture path takes one copy "
+        "per frame until affected hosts prove it safe. This is the expected path on AMD and "
+        "Intel, not a fault.",
+        std::string {"Nothing to change for a stable stream. If throughput falls short at high "
+                     "resolution or refresh, lower resolution, frame rate or bitrate first."} +
+          (backend == "portal" ?
+             " POLARIS_PORTAL_DMABUF=1 in Polaris' environment opts into the unvalidated DMA-BUF "
+             "path, with no automatic fallback if it stalls." :
+             "")
+      );
+      return out;
+    }
+    if (backend == "portal") {
+      // With CUDA or Vulkan the portal is asked for DMA-BUF and the compositor decides; KDE
+      // handed over system memory in the lab. Nothing to say until a stream shows which.
+      return out;
+    }
+    if (backend == "wlr" && vulkan) {
+      out.residency = "gpu";
+      return out;
+    }
+    if (backend == "wlr" && nvidia) {
+      if (!in.use_cage_compositor) {
+        // A wlroots desktop captured directly: GPU-native when it offers wlr-export-dmabuf.
+        return out;
+      }
+      const bool hidden_headless = in.headless_mode && !in.prefer_gpu_native_capture;
+      if (hidden_headless) {
+        if (in.headless_extcopy_dmabuf_probe == std::optional<bool> {false}) {
+          system_memory(
+            "headless_dmabuf_unavailable",
+            "warning",
+            "Private Stream runs the hidden headless compositor, and the last time this host "
+            "tried, that compositor could not hand frames over as DMA-BUF, so capture fell back "
+            "to system memory (SHM) and each frame is copied before NVENC.",
+            "Pick Private Stream (GPU-native) in Play Setup for one launch, or set "
+            "linux_prefer_gpu_native_capture = enabled and restart Polaris to make it the "
+            "default: Polaris then runs the private compositor windowed, where DMA-BUF capture "
+            "works."
+          );
+        } else if (in.headless_extcopy_dmabuf_probe == std::optional<bool> {true}) {
+          out.residency = "gpu";
+        }
+        return out;
+      }
+      if (in.windowed_gpu_native_probe == std::optional<bool> {false}) {
+        system_memory(
+          "windowed_dmabuf_unavailable",
+          "warning",
+          "The private compositor runs windowed so capture can stay on the GPU, but the last "
+          "DMA-BUF probe on this host failed, so frames are copied through system memory (SHM) "
+          "before NVENC.",
+          "Check the NVIDIA driver and the compositor under it: this path needs wlr-export-dmabuf "
+          "from labwc and a driver that can import the buffer. A support bundle from one stream "
+          "shows the import error."
+        );
+      } else if (in.windowed_gpu_native_probe == std::optional<bool> {true}) {
+        out.residency = "gpu";
+      }
+      return out;
+    }
+    return out;
+  }
+
+  nlohmann::json capture_forecast_json(const capture_forecast_inputs_t &in, const capture_forecast_t &forecast) {
+    return {
+      {"backend", in.capture_backend.empty() ? "unevaluated" : in.capture_backend},
+      {"encoder", in.encoder.empty() ? "unknown" : in.encoder},
+      {"build_has_cuda", in.build_has_cuda},
+      {"residency", forecast.residency},
+      {"cause", forecast.cause}
+    };
+  }
+
   nlohmann::json linux_gpu_profile_json(const stats_t &stats) {
     const auto &linux_display = config::video.linux_display;
     const bool gpu_native_requested =
@@ -751,12 +936,82 @@ namespace stream_stats {
       stats.encode_target_residency != platf::frame_residency_e::unknown;
 
     nlohmann::json configuration_warnings = nlohmann::json::array();
+    nlohmann::json capture_forecast = nullptr;
 #ifdef __linux__
+    // No capture at all. Polaris logs this fatally at startup and then carries on serving, so a
+    // host in this state pairs normally, accepts launches and advertises H.264 as the only codec
+    // it has, while Doctor reports nothing. The log line is the only trace and it scrolls past
+    // once, at boot, which is the worst possible place for it.
+    if (platf::capture_sources_missing()) {
+      configuration_warnings.push_back({
+        {"id", "no_capture_backend"},
+        {"severity", "fail"},
+        {"message", "This host has no working capture backend, so no encoder could be probed and "
+                    "it is advertising H.264 as the only codec it has. Streams will connect and "
+                    "look far worse than this hardware can manage, or fail outright."},
+        {"action", "Check the capture setting against the stream mode. Capture backends are not "
+                   "interchangeable across compositors: wlr needs the wlroots capture protocols, "
+                   "which KDE and GNOME do not have. Leaving capture unset lets Polaris pick one "
+                   "that works. The startup log names the protocol that was missing."}
+      });
+    }
+
+    // The configured capture backend could not capture anything and Polaris used another one.
+    // Without this the only trace is a warning in the middle of startup, while the host goes on
+    // serving with a backend nobody chose.
+    const bool kms_refused = platf::kms_capture_refused_for_capability();
+    constexpr auto enable_kms_command = "sudo -H polaris --setup-host --enable-kms";
+    if (const auto substitution = platf::capture_backend_substitution_note(); !substitution.empty()) {
+      // A substituted kms is a different story from a substituted wlr. wlr fails
+      // because the compositor lacks a protocol; kms fails because the binary
+      // lacks a capability that one command grants. Telling the kms case to
+      // "set capture to the substituted backend" walks a user away from the only
+      // path that carries HDR.
+      const bool kms_for_capability = kms_refused && substitution.rfind("kms -> ", 0) == 0;
+      configuration_warnings.push_back({
+        {"id", "capture_backend_substituted"},
+        {"severity", "warning"},
+        {"message", kms_for_capability ?
+           "This host is configured for KMS capture, but the Polaris binary does not hold "
+           "CAP_SYS_ADMIN, so it could not read a framebuffer and Polaris substituted another "
+           "backend (" + substitution + "). Nothing is wrong with the display or the GPU." :
+           "The capture backend this host is configured to use cannot capture anything "
+           "in the current stream mode, so Polaris substituted another one (" +
+           substitution + "). Capture backends are not interchangeable across "
+           "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
+           "do not have, so only the private-compositor modes can use it there."},
+        {"action", kms_for_capability ?
+           std::string {"Run "} + enable_kms_command + " once, then restart Polaris; KMS "
+           "capture is what carries HDR, so keep it if HDR is the goal." :
+           "Either set capture to the substituted backend so the configuration matches "
+           "what is running, or go back to a private-compositor stream mode if you want "
+           "the configured one."}
+      });
+    }
+
+    // The refusal on its own, whatever happened next. With capture = kms and nothing to
+    // substitute, the host serves with no capture at all and this is the one line that says
+    // why; with a substitute, it is why the stream cannot carry HDR.
+    if (kms_refused) {
+      const bool nothing_else = platf::capture_sources_missing();
+      configuration_warnings.push_back({
+        {"id", "kms_capture_needs_capability"},
+        {"severity", nothing_else ? "fail" : "warning"},
+        {"message", "KMS capture found the display but could not read a DRM framebuffer handle, "
+                    "because the Polaris binary does not hold CAP_SYS_ADMIN. That capability is "
+                    "opt-in and is granted by the host setup step, not by the package."},
+        {"action", std::string {"Run "} + enable_kms_command + " once, then restart Polaris."}
+      });
+    }
+
+    // Without CUDA the GPU-native advice below is a dead end; the capture forecast names the
+    // build instead.
     if (
       linux_display.headless_mode &&
       linux_display.use_cage_compositor &&
       !linux_display.prefer_gpu_native_capture &&
-      config::video.encoder == "nvenc"
+      config::video.encoder == "nvenc" &&
+      build_has_cuda()
     ) {
       configuration_warnings.push_back({
         {"id", "nvidia_headless_gpu_native_disabled"},
@@ -764,6 +1019,40 @@ namespace stream_stats {
         {"message", "NVIDIA true-headless labwc is configured with GPU-native capture disabled; cold or missing encoder cache can fail launch with 503 encoder initialization even when NVENC is healthy."},
         {"action", "Set linux_prefer_gpu_native_capture = enabled, restart Polaris, and retry Private Stream (GPU-native) before chasing CUDA/NVENC driver issues."}
       });
+    }
+
+    // Where capture will land for the configured mode on this host, before any stream. The
+    // capture reasons carried by a session say what happened after it happened, which is
+    // exactly when a first-time host gives up. The forecast reads configuration, the build and
+    // the last capture-source evaluation, and stays silent until the host has looked.
+    {
+      std::string encoder = config::video.encoder;
+      if (encoder.empty() || encoder == "auto") {
+        encoder = video::active_encoder_name();
+      }
+      const char *portal_dmabuf_env = std::getenv("POLARIS_PORTAL_DMABUF");
+      const capture_forecast_inputs_t inputs {
+        .capture_backend = platf::selected_capture_backend(),
+        .encoder = encoder,
+        .build_has_cuda = build_has_cuda(),
+        .use_cage_compositor = linux_display.use_cage_compositor,
+        .headless_mode = linux_display.headless_mode,
+        .prefer_gpu_native_capture = linux_display.prefer_gpu_native_capture,
+        .headless_extcopy_dmabuf_probe = stream_runtime::labwc::cached_headless_extcopy_dmabuf_probe_result(),
+        .windowed_gpu_native_probe = stream_runtime::labwc::cached_windowed_gpu_native_probe_result(),
+        .portal_vaapi_dmabuf_opted_in = portal_dmabuf_env != nullptr && std::string_view {portal_dmabuf_env} == "1",
+      };
+      const auto forecast = forecast_capture_path(inputs);
+      capture_forecast = capture_forecast_json(inputs, forecast);
+      if (!forecast.cause.empty()) {
+        configuration_warnings.push_back({
+          {"id", "capture_copies_through_system_memory"},
+          {"cause", forecast.cause},
+          {"severity", forecast.severity},
+          {"message", forecast.message},
+          {"action", forecast.action}
+        });
+      }
     }
   #ifdef POLARIS_BUILD_VULKAN
     auto vaapi_vendor = stats.vaapi_vendor;
@@ -789,6 +1078,73 @@ namespace stream_stats {
     }
   #endif
 #endif
+    // A client asked for HDR and did not get it. hdr_downgrade_message already says why, but
+    // only over the session status route, and only while a stream is live. Put it where someone
+    // looking for a reason will actually stand. The wlroots capture classes never override
+    // is_hdr(), so on that path the answer is permanent and worth saying out loud rather than
+    // leaving the user to re-toggle a switch that cannot work.
+    // HDR turned off by something the user saved, rather than by what the hardware can do.
+    // This one has to speak without a client ever asking for HDR, because that is the whole
+    // shape of it: the saved setting stops the request being made at all, so dynamic_range stays
+    // zero and every capability-based check below stays quiet. Name the file, because nothing in
+    // a normal log does.
+    if (!stats.hdr_policy_hdr && !stats.hdr_policy_reason.empty()) {
+      const auto &reason = stats.hdr_policy_reason;
+      const auto device = stats.hdr_policy_device.empty() ? std::string {"this device"} : stats.hdr_policy_device;
+      std::string message;
+      std::string action;
+      if (reason == "paired_device_hdr_unsupported") {
+        message = "HDR is switched off for " + device + " in device_db.json, where hdr_capable is "
+                  "false. Polaris will not ask for HDR for that device however the client is set.";
+        action = "If the device's display really does support HDR, set hdr_capable for it in "
+                 "device_db.json, restart Polaris, and check the HDR row again.";
+      } else if (reason == "client_profile_hdr_lock") {
+        message = "HDR is switched off for " + device + " in its saved client profile, which "
+                  "overrides what the client asks for.";
+        action = "Turn Enable HDR back on for that device on the Devices page, or delete its "
+                 "saved profile, then start a stream and check the HDR row again.";
+      } else if (reason == "host_encoder_hdr_unsupported") {
+        message = "HDR was refused because this host's encoder did not advertise a 10-bit "
+                  "profile when the stream was resolved.";
+        action = "Check the encoder row. If NVENC or VA-API fell back, fix that first; HDR "
+                 "follows the encoder.";
+      }
+      if (!message.empty()) {
+        configuration_warnings.push_back({
+          {"id", "hdr_disabled_by_saved_setting"},
+          {"severity", "info"},
+          {"message", message},
+          {"action", action}
+        });
+      }
+    }
+
+    if (const auto hdr_reason = hdr_downgrade_reason(stats);
+        hdr_reason == "headless_hdr_unavailable" || hdr_reason == "display_not_hdr") {
+      const bool wlroots_capture =
+        config::video.capture == "wlr" ||
+        (config::video.capture.empty() && linux_display.use_cage_compositor);
+      configuration_warnings.push_back({
+        {"id", "hdr_capture_path_cannot_report_hdr"},
+        {"severity", "info"},
+        {"message", wlroots_capture ?
+           "A client asked for HDR and Polaris streamed 10-bit SDR instead. The wlroots capture "
+           "path this host is using does not report display HDR at all, so HDR cannot engage on "
+           "it whatever the monitor, GPU or client can do." :
+           "A client asked for HDR and Polaris streamed 10-bit SDR instead, because the active "
+           "capture display did not report HDR."},
+        {"action", std::string {
+           "True HDR needs a capture path that reads the display's HDR metadata, which today "
+           "means the KMS/DRM path: capture = kms with a stream mode that shows the real HDR "
+           "output (Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope). "
+           "Private Stream on headless labwc is always SDR. See docs/runtime.md."} +
+           (kms_refused ?
+              std::string {" On this host KMS capture was refused for a missing capability; run "} +
+                enable_kms_command + " first." :
+              std::string {})}
+      });
+    }
+
     if (adapter_pairing_status == "mismatched") {
       configuration_warnings.push_back({
         {"id", "linux_gpu_adapter_mismatch"},
@@ -809,6 +1165,7 @@ namespace stream_stats {
       {"adapter_pairing_device", adapter_pairing_device},
       {"adapter_pairing_device_source", adapter_pairing_device_source},
       {"vaapi_vendor", stats.vaapi_vendor},
+      {"capture_forecast", std::move(capture_forecast)},
       {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
       {"gpu_native_requested", gpu_native_requested},
       {"gpu_native_attempted", stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted || (gpu_native_requested && capture_metadata_reported)},
@@ -1499,6 +1856,24 @@ namespace stream_stats {
 
     nlohmann::json evidence = nlohmann::json::array();
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
+#ifdef __linux__
+    // Which binary produced this report. The Bazzite DRM/KMS recipe runs a copy
+    // outside the package, and that copy stays on the old version across
+    // updates while the console says nothing; a support thread needs this on
+    // its first line.
+    if (const auto running = platf::user_unit::running_executable()) {
+      const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
+      const bool outside_package = binary.matches_package == std::optional<bool> {false};
+      std::string detail = std::string {"Polaris "} + PROJECT_VERSION + " is running from " + binary.path + ".";
+      if (outside_package) {
+        detail += " That is not the packaged " + binary.packaged_path +
+                  "; package updates do not change a copy, so refresh it from the package or remove the service drop-in after updating.";
+      } else if (binary.matches_package) {
+        detail += " This is the packaged binary.";
+      }
+      append_doctor_evidence(evidence, "running_binary", "Running binary", binary.path, "", outside_package ? "watch" : "pass", "process", detail);
+    }
+#endif
     append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
     const auto encoder_selection = health.value("encoder_selection", nlohmann::json::object());
@@ -1656,6 +2031,22 @@ namespace stream_stats {
       stats.input_steam_input_detail.empty() ?
         (strict_gamepad_isolation ? "Steam Input compatibility has not been inspected yet." : "Strict gamepad isolation is not active.") :
         stats.input_steam_input_detail
+    );
+
+    const auto hdr_reason = hdr_downgrade_reason(stats);
+    append_doctor_evidence(
+      evidence,
+      "hdr",
+      "HDR",
+      hdr_effective_mode(stats),
+      "",
+      stats.stream_hdr_enabled ? "pass" : stats.dynamic_range > 0 ? "watch" : "info",
+      "capture_display",
+      hdr_reason == "none" ?
+        (stats.stream_hdr_enabled ?
+           "Streaming HDR10." :
+           "No client has asked for HDR on this host.") :
+        hdr_downgrade_message(stats)
     );
 
     auto advanced = nlohmann::json::object();
@@ -1829,6 +2220,17 @@ namespace stream_stats {
       const auto steam_opt_in = current_stats.input_steam_profiles_with_xbox_support;
       const auto steam_forced = current_stats.input_steam_forced_app_count;
       const auto steam_detail = current_stats.input_steam_input_detail;
+      // The HDR facts describe the host's capture path, not the stream that just ended, and the
+      // person who wants to know why HDR did not engage goes looking for the answer after
+      // disconnecting, not during. Same reasoning as the controller-input fields above.
+      const auto hdr_dynamic_range = current_stats.dynamic_range;
+      const auto hdr_display = current_stats.display_hdr;
+      const auto hdr_metadata = current_stats.hdr_metadata_available;
+      const auto hdr_stream_enabled = current_stats.stream_hdr_enabled;
+      const auto hdr_effective_headless = current_stats.runtime_effective_headless;
+      const auto hdr_policy_reason = current_stats.hdr_policy_reason;
+      const auto hdr_policy_hdr = current_stats.hdr_policy_hdr;
+      const auto hdr_policy_device = current_stats.hdr_policy_device;
 
       current_stats = stats_t {};
       clear_capture_profile_buckets();
@@ -1841,6 +2243,15 @@ namespace stream_stats {
       current_stats.input_steam_profiles_with_xbox_support = steam_opt_in;
       current_stats.input_steam_forced_app_count = steam_forced;
       current_stats.input_steam_input_detail = steam_detail;
+
+      current_stats.dynamic_range = hdr_dynamic_range;
+      current_stats.display_hdr = hdr_display;
+      current_stats.hdr_metadata_available = hdr_metadata;
+      current_stats.stream_hdr_enabled = hdr_stream_enabled;
+      current_stats.runtime_effective_headless = hdr_effective_headless;
+      current_stats.hdr_policy_reason = hdr_policy_reason;
+      current_stats.hdr_policy_hdr = hdr_policy_hdr;
+      current_stats.hdr_policy_device = hdr_policy_device;
     }
   }
 
@@ -2575,6 +2986,23 @@ namespace stream_stats {
   void update_dynamic_range(int dynamic_range) {
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.dynamic_range = dynamic_range;
+  }
+
+  void update_client_declared_controller_type(int controller_type) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.client_declared_controller_type = controller_type;
+  }
+
+  int client_declared_controller_type() {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    return current_stats.client_declared_controller_type;
+  }
+
+  void update_hdr_policy(bool hdr, const std::string &reason_code, const std::string &device) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.hdr_policy_hdr = hdr;
+    current_stats.hdr_policy_reason = reason_code;
+    current_stats.hdr_policy_device = device;
   }
 
   void update_hdr_state(bool display_hdr,

@@ -74,6 +74,7 @@ namespace crypto {
     _all_actions     = list | view | launch,
 
     _default         = view | list,      // Browse and watch without launch or input
+    _gamepad_only    = view | input_controller, // Watch a stream and play, nothing else
     _game_control    = _all_inputs | _all_actions, // Game launch/control without operations
     _no              = 0,                // No permissions are granted
     _all             = _all_inputs | _all_opeiations | _all_actions, // All current permissions
@@ -107,6 +108,14 @@ namespace crypto {
     std::string uuid;
     std::string cert;
     std::string client_family;
+    /// Last controller type this client declared on arrival (an LI_CTYPE_* value), so the
+    /// pad preallocated before the app launches can be the one it actually asked for.
+    /// Zero means never observed, which is what a first session from a new device looks like.
+    int controller_type = 0;
+    /// Whether this client reported its own display can do HDR10. A device record's
+    /// hdr_capable is a curated default that is false until somebody edits it; the client
+    /// measured the actual panel, so it outranks the record.
+    bool client_reports_hdr10_display = false;
     std::string display_mode;
     int target_bitrate_kbps = 0;
     std::int64_t paired_at = 0;

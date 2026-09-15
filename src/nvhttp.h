@@ -224,6 +224,7 @@ namespace nvhttp {
   };
 
   enum class pairing_access_preset_t {
+    gamepad,
     standard,
     game_control,
     full
@@ -375,6 +376,20 @@ namespace nvhttp {
 
   /** Return whether the current live authorization is memory-only. */
   bool is_temporary_client_authorization(std::string_view uuid);
+
+  /**
+   * @brief Remember the controller type a paired client declared, for its next launch.
+   * @param uuid The paired client.
+   * @param controller_type An LI_CTYPE_* value.
+   * @return True when the stored value changed and was persisted.
+   */
+  bool remember_client_controller_type(std::string_view uuid, int controller_type);
+
+  /**
+   * @brief Remember that a paired client reported an HDR10-capable display.
+   * @return True when the stored value changed and was persisted.
+   */
+  bool remember_client_hdr10_display(std::string_view uuid, bool supports_hdr10_display);
 
   /**
    * @brief Remove single client.
@@ -572,6 +587,10 @@ namespace nvhttp {
   );
   bool save_pairing_state_for_tests();
   void load_pairing_state_for_tests();
+  int advertised_max_launch_refresh_rate_for_tests();
+  /// Put a recorded launch refusal (or the fallback text) on a response tree; see launch_failure.h.
+  void put_launch_refusal_for_tests(boost::property_tree::ptree &tree, int status, const std::string &fallback_message);
+
   void ensure_response_status_code_for_tests(
     boost::property_tree::ptree &tree,
     int fallback_code,

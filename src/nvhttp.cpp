@@ -73,6 +73,7 @@
 #include "game_artwork_provider.h"
 #include "globals.h"
 #include "httpcommon.h"
+#include "launch_failure.h"
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
@@ -385,6 +386,24 @@ namespace nvhttp {
         return;
       }
       tree.put("root.<xmlattr>.status_code", fallback_code);
+      tree.put("root.<xmlattr>.status_message", fallback_message);
+    }
+
+    // A refused launch reaches the client as one status_message. When the code
+    // that refused said why, that is the message, followed by the one change
+    // that fixes it; error_code and error_action ride along as root attributes
+    // that Moonlight ignores and Nova reads. Without a record, the old generic
+    // text stands, so nothing gets vaguer than before.
+    void put_launch_refusal(pt::ptree &tree, int status, const std::string &fallback_message) {
+      tree.put("root.<xmlattr>.status_code", status);
+      if (const auto refusal = launch_failure::take(); refusal && !refusal->message.empty()) {
+        tree.put("root.<xmlattr>.status_message", launch_failure::status_message(*refusal));
+        tree.put("root.<xmlattr>.error_code", refusal->code);
+        if (!refusal->action.empty()) {
+          tree.put("root.<xmlattr>.error_action", refusal->action);
+        }
+        return;
+      }
       tree.put("root.<xmlattr>.status_message", fallback_message);
     }
 
@@ -2489,6 +2508,10 @@ namespace nvhttp {
   void ensure_response_status_code_for_tests(pt::ptree &tree, int fallback_code, const std::string &fallback_message) {
     ensure_response_status_code(tree, fallback_code, fallback_message);
   }
+
+  void put_launch_refusal_for_tests(pt::ptree &tree, int status, const std::string &fallback_message) {
+    put_launch_refusal(tree, status, fallback_message);
+  }
 #endif
 
 #ifdef __linux__
@@ -2580,9 +2603,12 @@ namespace nvhttp {
         bool launch_owned_display,
         std::string_view output_name = {}) {
       if (launch_owned_display) {
-        // Virtual/headless display creation owns the future mode. Keep the
-        // containment contract bounded to Nova's stock high-FPS ceiling.
-        return 120;
+        // Virtual/headless display creation owns the future mode, so the
+        // ceiling is a policy bound, not a panel's limit. It used to be a
+        // literal 120 here, another in process.cpp, and a third feeding
+        // /serverinfo, all pinned to Nova's dropdown from before Native FPS
+        // could ask for the panel's real rate (#686). One function now.
+        return launch_profile::owned_display_refresh_ceiling_hz();
       }
       const std::string selected_output = output_name.empty() ?
         config::video.output_name : std::string {output_name};
@@ -2590,7 +2616,37 @@ namespace nvhttp {
     }
 
     int advertised_max_launch_refresh_rate_for_http() {
-      return topology_max_launch_refresh_rate_for_http(false).value_or(120);
+      // The launch that follows is validated against the same ceiling, so
+      // advertise the one it will actually meet. This always passed false, so a
+      // headless host advertised its physical monitor's rate and Nova rejected
+      // a 165 Hz request before connecting while other clients were silently
+      // clamped at launch (#686). Whether the host's configured stream mode
+      // creates its own display is the same question launch validation asks.
+      bool configured_mode_owns_display = false;
+#ifdef __linux__
+      configured_mode_owns_display = stream_display_policy::selection_owns_launch_refresh_rate(
+        stream_display_policy::configured_selection()
+      );
+#else
+      bool virtual_display_supported = false;
+      bool host_requires_virtual_display = false;
+#if defined(_WIN32)
+      virtual_display_supported = settings_metadata::host_virtual_display_available();
+      host_requires_virtual_display =
+        config::video.linux_display.headless_mode ||
+        !video::allow_encoder_probing();
+#endif
+      configured_mode_owns_display = launch_profile::resolve_non_linux_topology(
+        {},
+        false,
+        false,
+        false,
+        virtual_display_supported,
+        host_requires_virtual_display
+      ).launch_owns_refresh_rate;
+#endif
+      return topology_max_launch_refresh_rate_for_http(configured_mode_owns_display)
+        .value_or(launch_profile::k_unknown_output_refresh_fallback_hz);
     }
 
     std::string_view codec_name_for_video_format(int video_format) {
@@ -3022,6 +3078,9 @@ namespace nvhttp {
   using PERM = crypto::PERM;
 
   std::optional<pairing_access_preset_t> pairing_access_preset_from_view(std::string_view preset) {
+    if (preset == "gamepad"sv) {
+      return pairing_access_preset_t::gamepad;
+    }
     if (preset == "standard"sv) {
       return pairing_access_preset_t::standard;
     }
@@ -3036,6 +3095,8 @@ namespace nvhttp {
 
   PERM pairing_access_preset_perm(pairing_access_preset_t preset) {
     switch (preset) {
+      case pairing_access_preset_t::gamepad:
+        return PERM::_gamepad_only;
       case pairing_access_preset_t::standard:
         return PERM::_default;
       case pairing_access_preset_t::game_control:
@@ -3048,6 +3109,8 @@ namespace nvhttp {
 
   std::string_view pairing_access_preset_name(pairing_access_preset_t preset) {
     switch (preset) {
+      case pairing_access_preset_t::gamepad:
+        return "gamepad"sv;
       case pairing_access_preset_t::standard:
         return "standard"sv;
       case pairing_access_preset_t::game_control:
@@ -4006,6 +4069,8 @@ namespace nvhttp {
         named_cert_node["paired_at"] = named_cert_p->paired_at;
         named_cert_node["last_seen_at"] = named_cert_p->last_seen_at.load(std::memory_order_relaxed);
         named_cert_node["client_family"] = named_cert_p->client_family;
+        named_cert_node["controller_type"] = named_cert_p->controller_type;
+        named_cert_node["client_reports_hdr10_display"] = named_cert_p->client_reports_hdr10_display;
         named_cert_node["display_mode"] = named_cert_p->display_mode;
         named_cert_node["target_bitrate_kbps"] = named_cert_p->target_bitrate_kbps;
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
@@ -4055,6 +4120,12 @@ namespace nvhttp {
     std::lock_guard lock(client_state_mutex);
     const std::filesystem::path state_path {config::nvhttp.file_state};
     state_file_lock_t interprocess_lock {state_path};
+    const auto start_unpaired = [&]() {
+      clear_authorization_state_locked();
+      http::uuid = uuid_util::uuid_t::generate();
+      http::unique_id = http::uuid.string();
+      return false;
+    };
     const auto fail_closed = [&](std::string_view reason) {
       // This reads as fatal and is not: the host carries on with a fresh
       // identity. A reporter on discussion #637 hit it right after fixing a
@@ -4062,10 +4133,7 @@ namespace nvhttp {
       BOOST_LOG(error) << "Refusing authorization state from "sv << state_path << ": "sv << reason
                        << ". Continuing with a new host identity, so any client paired before "
                           "now has to pair again."sv;
-      clear_authorization_state_locked();
-      http::uuid = uuid_util::uuid_t::generate();
-      http::unique_id = http::uuid.string();
-      return false;
+      return start_unpaired();
     };
 
     if (!interprocess_lock) {
@@ -4073,10 +4141,7 @@ namespace nvhttp {
     }
     if (!fs::exists(state_path)) {
       BOOST_LOG(info) << "File "sv << state_path << " doesn't exist"sv;
-      clear_authorization_state_locked();
-      http::uuid = uuid_util::uuid_t::generate();
-      http::unique_id = http::uuid.string();
-      return false;
+      return start_unpaired();
     }
 
     try {
@@ -4086,7 +4151,22 @@ namespace nvhttp {
         return fail_closed("couldn't open the file");
       }
       input >> tree;
-      if (!tree.is_object() || !tree.contains("root") || !tree["root"].is_object()) {
+      if (!tree.is_object()) {
+        return fail_closed("the file does not hold a JSON object");
+      }
+      if (!tree.contains("root")) {
+        // The web credentials live in this same file (config.cpp points
+        // credentials_file at file_state), and pairing is the only writer that
+        // ever creates "root". Setting a password on a fresh install therefore
+        // leaves a state file with no "root" in it at all. That is a host that
+        // has not paired anything yet, not a damaged file. Reporting it as
+        // damage on every start sends its owner looking for corruption that is
+        // not there.
+        BOOST_LOG(info) << "No client has paired with this host yet, so "sv << state_path
+                        << " holds no pairing state"sv;
+        return start_unpaired();
+      }
+      if (!tree["root"].is_object()) {
         return fail_closed("root must be an object");
       }
 
@@ -4167,6 +4247,8 @@ namespace nvhttp {
           named_cert->last_seen_at.store(last_seen_at, std::memory_order_relaxed);
           named_cert->last_seen_persisted_at.store(last_seen_at, std::memory_order_relaxed);
           named_cert->client_family = entry.value("client_family", "");
+          named_cert->controller_type = entry.value("controller_type", 0);
+          named_cert->client_reports_hdr10_display = entry.value("client_reports_hdr10_display", false);
           named_cert->display_mode = entry.value("display_mode", "");
           named_cert->target_bitrate_kbps = util::get_non_string_json_value<int>(entry, "target_bitrate_kbps", 0);
           named_cert->perm = (PERM)(util::get_non_string_json_value<uint32_t>(entry, "perm", (uint32_t)PERM::_all)) & PERM::_all;
@@ -4212,6 +4294,8 @@ namespace nvhttp {
     clone->uuid = source->uuid;
     clone->cert = source->cert;
     clone->client_family = source->client_family;
+    clone->controller_type = source->controller_type;
+    clone->client_reports_hdr10_display = source->client_reports_hdr10_display;
     clone->display_mode = source->display_mode;
     clone->target_bitrate_kbps = source->target_bitrate_kbps;
     clone->paired_at = source->paired_at;
@@ -4482,6 +4566,8 @@ namespace nvhttp {
     launch_session->requested_fps = launch_session->fps;
 
     launch_session->device_name = named_cert_p->name.empty() ? "PolarisDisplay"s : named_cert_p->name;
+    launch_session->controller_type = named_cert_p->controller_type;
+    launch_session->client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display;
     launch_session->unique_id = named_cert_p->uuid;
     launch_session->temporary_authorization = named_cert_p->temporary_authorization;
     launch_session->profile_preference = launch_profile::normalize_preset(
@@ -6133,6 +6219,7 @@ namespace nvhttp {
 
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
+    launch_failure::clear();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -6420,8 +6507,8 @@ namespace nvhttp {
                 launch_session->encoder_backend_explicit &&
                 launch_session->encoder_backend != "auto")) {
             tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+            video::note_launch_refused_by_probe(false);
+            put_launch_refusal(tree, 503, "Failed to initialize video capture/encoding. Is a display connected and turned on?");
 
             return;
           }
@@ -6501,7 +6588,7 @@ namespace nvhttp {
                              << launch_policy.physicalDisplayRisk;
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 409);
-          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.");
+          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close desktop Steam for private launches\" for this app so Polaris closes it for you, or retry with explicit desktop mirroring.");
           tree.put("root.error_code", "desktop_active_private_stream_refused");
           tree.put("root.gamesession", 0);
           return;
@@ -6531,9 +6618,9 @@ namespace nvhttp {
         });
         launch_session_raised = err == 0;
         if (err) {
-          tree.put("root.<xmlattr>.status_code", err);
-          tree.put(
-            "root.<xmlattr>.status_message",
+          put_launch_refusal(
+            tree,
+            err,
             err == 503
             ? "Video capture or encoding could not start. If prompted, approve screen sharing on the host."
             : (err == 401 || err == 403 || err == 409)
@@ -6553,8 +6640,7 @@ namespace nvhttp {
     if (!launch_session_raised) {
       if (const auto capture_error = proc::proc.prepare_capture_for_admitted_launch(launch_session)) {
         tree.put("root.gamesession", 0);
-        tree.put("root.<xmlattr>.status_code", capture_error);
-        tree.put("root.<xmlattr>.status_message", "Desktop screen sharing was cancelled or capture could not be prepared");
+        put_launch_refusal(tree, capture_error, "Desktop screen sharing was cancelled or capture could not be prepared");
         return;
       }
     }
@@ -6591,6 +6677,7 @@ namespace nvhttp {
 
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
+    launch_failure::clear();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -6737,8 +6824,8 @@ namespace nvhttp {
             launch_session->encoder_backend_explicit &&
             launch_session->encoder_backend != "auto")) {
         tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+        video::note_launch_refused_by_probe(false);
+        put_launch_refusal(tree, 503, "Failed to initialize video capture/encoding. Is a display connected and turned on?");
 
         return;
       }
@@ -6822,8 +6909,7 @@ namespace nvhttp {
 
     if (const auto capture_error = proc::proc.prepare_capture_for_admitted_launch(launch_session)) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", capture_error);
-      tree.put("root.<xmlattr>.status_message", "Desktop screen sharing was cancelled or capture could not be prepared");
+      put_launch_refusal(tree, capture_error, "Desktop screen sharing was cancelled or capture could not be prepared");
       return;
     }
     if (const auto publish_error = publish_authorized_launch(named_cert_p, PERM::_allow_view, [&]() {
@@ -8114,6 +8200,15 @@ namespace nvhttp {
               write_json({{"error", error}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
+            // The client just told us what its own panel can do. Keep it, so the answer outlives
+            // this process and the next launch does not fall back to an uncorrected record.
+            if (const auto capabilities = body.value("device_capabilities", nlohmann::json::object());
+                capabilities.is_object()) {
+              remember_client_hdr10_display(
+                named_cert_p->uuid,
+                capabilities.value("supports_hdr10_display", false)
+              );
+            }
           }
 
           if (stream_display_mode) {
@@ -8990,7 +9085,7 @@ namespace nvhttp {
                              << " physical_display_risk="sv
                              << launch_policy.physicalDisplayRisk;
           nlohmann::json err;
-          err["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit the desktop session or retry with explicit desktop mirroring.";
+          err["error"] = "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close desktop Steam for private launches\" for this app so Polaris closes it for you, or retry with explicit desktop mirroring.";
           err["error_code"] = "desktop_active_private_stream_refused";
           err["launchPolicy"] = launch_policy_json;
           SimpleWeb::CaseInsensitiveMultimap headers;
@@ -10856,6 +10951,10 @@ namespace nvhttp {
   void load_pairing_state_for_tests() {
     load_state();
   }
+
+  int advertised_max_launch_refresh_rate_for_tests() {
+    return advertised_max_launch_refresh_rate_for_http();
+  }
 #endif
 
   bool erase_all_clients() {
@@ -10998,6 +11097,64 @@ namespace nvhttp {
     }
     BOOST_LOG(info) << "Expired temporary authorization for client ["sv << uuid << ']';
     rtsp_stream::finish_cancelled_launch(cancelled_launch);
+    return true;
+  }
+
+  bool remember_client_controller_type(const std::string_view uuid, const int controller_type) {
+    if (controller_type == 0) {
+      return false;
+    }
+    {
+      std::lock_guard lock(client_state_mutex);
+      const auto client = std::find_if(
+        client_root.named_devices.begin(),
+        client_root.named_devices.end(),
+        [&](const crypto::p_named_cert_t &candidate) {
+          return candidate->uuid == uuid;
+        }
+      );
+      if (client == client_root.named_devices.end() ||
+          (*client)->controller_type == controller_type) {
+        return false;
+      }
+      (*client)->controller_type = controller_type;
+      if (!save_state()) {
+        return false;
+      }
+    }
+    BOOST_LOG(info) << "Remembered controller type ["sv << controller_type
+                    << "] for client ["sv << uuid
+                    << "]; the pad created before the next launch will match it"sv;
+    return true;
+  }
+
+  bool remember_client_hdr10_display(const std::string_view uuid, const bool supports_hdr10_display) {
+    if (!supports_hdr10_display) {
+      // A client that says no, or says nothing, must not clear a capability already observed.
+      // Nova reports false for an external display it cannot inspect, among other things.
+      return false;
+    }
+    {
+      std::lock_guard lock(client_state_mutex);
+      const auto client = std::find_if(
+        client_root.named_devices.begin(),
+        client_root.named_devices.end(),
+        [&](const crypto::p_named_cert_t &candidate) {
+          return candidate->uuid == uuid;
+        }
+      );
+      if (client == client_root.named_devices.end() ||
+          (*client)->client_reports_hdr10_display) {
+        return false;
+      }
+      (*client)->client_reports_hdr10_display = true;
+      if (!save_state()) {
+        return false;
+      }
+    }
+    BOOST_LOG(info) << "Client ["sv << uuid
+                    << "] reported an HDR10-capable display; it will no longer be refused HDR "
+                       "because of an uncorrected device record"sv;
     return true;
   }
 

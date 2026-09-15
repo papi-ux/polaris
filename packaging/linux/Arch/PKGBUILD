@@ -101,8 +101,10 @@ if [[ "${_use_cuda::1}" == "t" ]]; then
     'cuda'
   )
 
+  # The toolkit is a build dependency; at run time the binary dlopens the driver's
+  # libcuda, libnvidia-encode and libnvidia-fbc, all of which nvidia-utils provides.
   optdepends+=(
-    'cuda: Nvidia GPU encoding support'
+    'nvidia-utils: NVIDIA GPU capture and NVENC encoding'
   )
 fi
 

@@ -63,6 +63,7 @@
 #include "system_tray.h"
 #include "stream.h"
 #include "utility.h"
+#include "launch_failure.h"
 #include "video.h"
 #include "uuid.h"
 #include "verified_action.h"
@@ -6620,7 +6621,9 @@ namespace proc {
 #endif
       launch_session->host_max_fps.reset();
       if (launch_owns_refresh_rate) {
-        launch_session->host_max_fps = 120000;
+        // Same ceiling the Optimize API resolved and /serverinfo advertised
+        // (#686); a launch must not be clamped below what it was promised.
+        launch_session->host_max_fps = launch_profile::owned_display_refresh_ceiling_hz() * 1000;
       } else if (const auto refresh_rate =
                    display_device::active_refresh_rate_hz_hint(selected_output_name)) {
         launch_session->host_max_fps = *refresh_rate * 1000;
@@ -6696,7 +6699,7 @@ namespace proc {
       bool exact_private_refresh_reapply_will_run) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
-    if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return 503;
+    if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return launch_failure::refuse(503, "no_active_session", "There is no running app on the host to validate this resume against.", "Start the app again from the library.");
     if (launch_session->watch_only) {
       // A viewer attaches to the already-running capture generation. Pin its
       // topology semantics to the owner before validating capabilities so a
@@ -6805,7 +6808,7 @@ namespace proc {
   int proc_t::prepare_capture_for_admitted_launch(
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session) {
     if (_session_lifecycle_gate->stop_in_progress()) {
-      return 503;
+      return launch_failure::refuse(503, "session_stopping", "The previous session is still stopping on the host.", "Wait a few seconds and launch again.");
     }
     // Resume keeps the authoritative app/owner record and admits a new capture
     // attempt. Bind that record before exposing an interactive cancellation.
@@ -6817,7 +6820,7 @@ namespace proc {
       std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
       authoritative_launch = _launch_session;
       if (!authoritative_launch) {
-        return 503;
+        return launch_failure::refuse(503, "session_state_changed", "The session changed on the host while this launch was being admitted.", "Launch again.");
       }
       capture_owner = sync.capture_owner.load();
       sync.metadata_capture_owner = capture_owner;
@@ -6831,7 +6834,7 @@ namespace proc {
     }
     session_media::pending_start_owner_scope_t pending_owner {capture_owner.get()};
     if (session_media::pending_start_cancelled(capture_owner.get())) {
-      return 503;
+      return launch_failure::refuse(503, "launch_cancelled", "The launch was cancelled on the host before capture started.", "Launch again.");
     }
     capture_config.width = launch_session->width;
     capture_config.height = launch_session->height;
@@ -6844,23 +6847,23 @@ namespace proc {
     std::shared_ptr<void> preparation;
     if (!video::prepare_capture_for_launch(capture_config, preparation)) {
       BOOST_LOG(warning) << "process: Desktop capture preparation failed or screen sharing was cancelled"sv;
-      return 503;
+      return launch_failure::refuse(503, "desktop_capture_not_prepared", "Desktop capture could not be prepared, or the screen sharing prompt on the host was declined.", "Approve the screen sharing prompt on the host desktop, or pick a Private Stream mode, which needs no prompt.");
     }
     if (session_media::pending_start_cancelled(capture_owner.get())) {
-      return 503;
+      return launch_failure::refuse(503, "launch_cancelled", "The launch was cancelled on the host before capture started.", "Launch again.");
     }
     {
       std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
       if (_launch_session != authoritative_launch ||
           capture_generation != capture_config.capture_generation ||
           sync.capture_owner.load() != capture_owner) {
-        return 503;
+        return launch_failure::refuse(503, "session_state_changed", "Another session took over the host while this launch was being prepared.", "Launch again.");
       }
     }
     launch_session->capture_preparation.store(std::move(preparation));
     if (launch_session->is_cancelled()) {
       launch_session->cancel();
-      return 503;
+      return launch_failure::refuse(503, "launch_cancelled", "The launch was cancelled before capture started.", "Launch again.");
     }
 #endif
     return 0;
@@ -7073,15 +7076,15 @@ namespace proc {
 #ifdef __linux__
     if (linux_desktop_takeover && linux_desktop_takeover->active) {
       BOOST_LOG(error) << "process: refusing launch while Desktop Takeover recovery remains incomplete"sv;
-      return 503;
+      return launch_failure::refuse(503, "desktop_takeover_recovery_pending", "The previous Desktop Takeover session has not finished restoring the host display.", "Wait for the host display to come back, then launch again; if it never does, restart Polaris on the host.");
     }
     if (linux_vdisplay) {
       BOOST_LOG(error) << "process: refusing launch while a prior Linux virtual display still has recovery authority"sv;
-      return 503;
+      return launch_failure::refuse(503, "virtual_display_recovery_pending", "The previous Host Virtual Display has not finished tearing down.", "Wait a few seconds and launch again; if it persists, restart Polaris on the host.");
     }
     if (_retained_steam_shutdown) {
       BOOST_LOG(error) << "process: refusing launch while a retained Steam singleton shutdown remains incomplete"sv;
-      return 503;
+      return launch_failure::refuse(503, "steam_shutdown_pending", "Desktop Steam is still shutting down on the host from the previous launch.", "Wait for Steam to exit on the host, then launch again.");
     }
     if (isolated_session_generation_blocks_launch(
           _session_used_cage_compositor,
@@ -7103,7 +7106,7 @@ namespace proc {
                           (retained_session_owned_cage || _detached_child_authority_complete);
       if (!reaped) {
         BOOST_LOG(error) << "process: refusing launch while an incompletely cleaned isolated session generation remains"sv;
-        return 503;
+        return launch_failure::refuse(503, "previous_session_cleanup_pending", "Processes from the previous private session are still running on the host.", "Wait a moment and launch again; if it persists, restart Polaris on the host.");
       }
       BOOST_LOG(warning) << "process: reaped a retained isolated session generation at launch"sv;
       if (retained_session_owned_cage) {
@@ -7117,7 +7120,7 @@ namespace proc {
     }
     if (!_detached_child_pidfds.empty()) {
       BOOST_LOG(error) << "process: refusing launch while tracked detached child authority remains"sv;
-      return 503;
+      return launch_failure::refuse(503, "previous_session_cleanup_pending", "Processes from the previous session are still being tracked on the host.", "Wait a moment and launch again; if it persists, restart Polaris on the host.");
     }
 #endif
 
@@ -7439,6 +7442,8 @@ namespace proc {
     preset_request.hdr_requested = launch_session->enable_hdr;
     preset_request.hdr_locked = launch_session->resolved_profile_from_client;
     preset_request.client_profile_hdr = client_profile_hdr;
+    preset_request.client_reports_hdr10_display =
+      launch_session && launch_session->client_reports_hdr10_display;
     preset_request.host_hdr_capable = launch_session->host_hdr_capable;
     if (resolved_optimization.color_range) {
       preset_request.color_range = resolved_optimization.color_range;
@@ -7450,6 +7455,19 @@ namespace proc {
       return it != preset_resolution.fields.end() && it->is_object() ?
         it->value("source", std::string {}) : std::string {};
     };
+    const auto resolved_field_reason = [&](std::string_view field) -> std::string {
+      const auto it = preset_resolution.fields.find(std::string {field});
+      return it != preset_resolution.fields.end() && it->is_object() ?
+        it->value("reason_code", std::string {}) : std::string {};
+    };
+    // Record why HDR ended up where it did, so Doctor can say so later. A saved setting that
+    // turns HDR off stops the client ever requesting it, which means every capability-based
+    // check downstream stays silent and the user is left with no explanation at all.
+    stream_stats::update_hdr_policy(
+      preset_resolution.hdr,
+      resolved_field_reason("hdr"),
+      launch_session->device_name
+    );
     resolved_optimization.display_mode = parsed_display_mode_t {
       preset_resolution.width,
       preset_resolution.height,
@@ -8024,6 +8042,7 @@ namespace proc {
                 takeover.error;
               BOOST_LOG(error) << warning;
               stream_stats::update_runtime_display_warning(warning);
+              launch_failure::refuse(503, "desktop_takeover_failed", warning, "Check the host display and the Doctor display warning, or use Mirror Desktop.");
               return 503;
             }
           }
@@ -8037,6 +8056,7 @@ namespace proc {
               warning += " " + reason;
             }
             stream_stats::update_runtime_display_warning(warning);
+            launch_failure::refuse(503, "virtual_display_failed", warning, "The Doctor display warning on the host names the reason; Private Stream needs no virtual display.");
           }
           return 503;
         }
@@ -8050,6 +8070,7 @@ namespace proc {
             warning += " " + reason;
           }
           stream_stats::update_runtime_display_warning(warning);
+          launch_failure::refuse(503, "virtual_display_unavailable", warning, "Load the evdi module on the host or use Private Stream, which needs no virtual display.");
         }
         return 503;
       }
@@ -8135,6 +8156,7 @@ namespace proc {
             config::video.encoder != "vulkan"sv) {
           BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
         } else {
+          video::note_launch_refused_by_probe(false);
           return 503;
         }
       }
@@ -8337,7 +8359,7 @@ namespace proc {
         if (critical_nested_session_prep) {
           BOOST_LOG(error) << "session_manager: critical nested gamescope prep command failed to execute"sv;
           confighttp::emit_session_event("error", "Nested gamescope session failed to start");
-          return 503;
+          return launch_failure::refuse(503, "gamescope_session_failed", "The nested gamescope session did not start.", "Check that gamescope is installed on the host; the host journal has its own error, and the Doctor has a Gamescope helper report.");
         }
         // Non-fatal: continue session even if ordinary prep-cmd fails
         continue;
@@ -8362,7 +8384,7 @@ namespace proc {
           "Nested gamescope startup timed out after " + std::to_string(prep_timeout.count()) + "s"
         );
         confighttp::emit_session_event("error", "Nested gamescope session failed to start");
-        return 503;
+        return launch_failure::refuse(503, "gamescope_session_failed", "The nested gamescope session did not start in time.", "Check that gamescope is installed on the host; the host journal has its own error, and the Doctor has a Gamescope helper report.");
       }
       auto ret = child.exit_code();
       if (ret != 0) {
@@ -8374,7 +8396,7 @@ namespace proc {
           ++_app_prep_it;
           BOOST_LOG(error) << "session_manager: critical nested gamescope prep command failed"sv;
           confighttp::emit_session_event("error", "Nested gamescope session failed to start");
-          return 503;
+          return launch_failure::refuse(503, "gamescope_session_failed", "The nested gamescope session did not start.", "Check that gamescope is installed on the host; the host journal has its own error, and the Doctor has a Gamescope helper report.");
         }
         // Non-fatal: continue session for ordinary prep commands. Continuing is
         // the right call and also the reason this needs recording: nothing
@@ -8485,6 +8507,12 @@ namespace proc {
           BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
           return true;
         }
+        launch_failure::refuse(
+          503,
+          "private_runtime_socket_missing",
+          "The private stream compositor started without a Wayland socket, so no encoder could be probed against it.",
+          "Restart Polaris on the host and launch again; if it repeats, the host journal has the compositor error."
+        );
         return false;
       }
 
@@ -8513,6 +8541,7 @@ namespace proc {
         return true;
       }
 
+      video::note_launch_refused_by_probe(true);
       return false;
     };
 
@@ -8583,7 +8612,7 @@ namespace proc {
     if (need_private_runtime && !private_runtime) {
       BOOST_LOG(error) << "session_manager: Private stream runtime is not available for path ["sv
                        << path_policy.selection << "] backend=["sv << path_policy.backend_name << ']';
-      return 503;
+      return launch_failure::refuse(503, "private_runtime_unavailable", "The private stream runtime (" + std::string {path_policy.backend_name} + ") is not available on this host for " + std::string {path_policy.selection} + ".", "Install labwc on the host, or gamescope for Gamescope Stream, or use Mirror Desktop.");
     }
 
     auto log_runtime_state = [&]() {
@@ -8961,7 +8990,7 @@ namespace proc {
     start_steam_big_picture_input_guard(_env, steam_guard_snapshot);
 
     if (has_launch_commands) {
-      input::preallocate_gamepad();
+      input::preallocate_gamepad(launch_session ? launch_session->controller_type : 0);
     }
 
     // Start private runtime, then launch detached app commands into it.
@@ -9035,7 +9064,7 @@ namespace proc {
         if (!start_cage_with_runtime_fallback("")) {
           BOOST_LOG(error) << "session_manager: Failed to start gamescope runtime for detached app"sv;
           confighttp::emit_session_event("error", "Failed to start gamescope runtime");
-          return 503;
+          return launch_failure::refuse_if_unexplained(503, "private_runtime_start_failed", "The gamescope runtime did not start on the host.", "Check that gamescope is installed on the host; the host journal has its own error.");
         }
         _session_used_cage_compositor = true;
         cage_started_with_detached_client = true;
@@ -9055,7 +9084,7 @@ namespace proc {
         if (!start_cage_with_runtime_fallback(game_cmd)) {
           BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
           confighttp::emit_session_event("error", "Failed to start cage compositor");
-          return 503;
+          return launch_failure::refuse_if_unexplained(503, "private_runtime_start_failed", "The private stream compositor did not start on the host.", "Check that labwc is installed on the host; the host journal has the compositor error, and the Doctor names the private runtime.");
         } else {
           _session_used_cage_compositor = true;
           cage_started_with_detached_client = true;
@@ -9071,7 +9100,7 @@ namespace proc {
       // No detached commands — start cage empty, game will use _app.cmd
       if (!start_cage_with_runtime_fallback("")) {
         BOOST_LOG(error) << "session_manager: Failed to start cage compositor"sv;
-        return 503;
+        return launch_failure::refuse_if_unexplained(503, "private_runtime_start_failed", "The private stream compositor did not start on the host.", "Check that labwc is installed on the host; the host journal has the compositor error, and the Doctor names the private runtime.");
       }
       _session_used_cage_compositor = true;
     } else if (nested_wsi_session) {
@@ -9136,7 +9165,7 @@ namespace proc {
               (void) cleanup_tracked_detached_children_after_launch_failure();
               terminate_isolated_session_generation();
               child.detach();
-              return 503;
+              return launch_failure::refuse(503, "child_tracking_failed", "The app started but the host could not track its process, so the launch was rolled back.", "Launch again; if it repeats, send a support bundle from the host.");
             }
             _detached_child_pidfds.emplace_back(std::move(*child_pidfd));
           }

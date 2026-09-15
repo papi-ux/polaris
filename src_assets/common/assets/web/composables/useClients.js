@@ -22,6 +22,7 @@ export const permissionMapping = {
   _allow_view: 0x06000000,
   _all_actions: 0x07000000,
   _default: 0x03000000,
+  _gamepad_only: 0x02000100,
   _game_control: 0x07001F00,
   _no: 0x00000000,
   _all: 0x071F1F00
@@ -29,6 +30,7 @@ export const permissionMapping = {
 
 export const permissionPresetMasks = {
   viewer: permissionMapping.view,
+  gamepad: permissionMapping._gamepad_only,
   standard: permissionMapping._default,
   game_control: permissionMapping._game_control,
   full: permissionMapping._all,
@@ -44,6 +46,7 @@ export function permissionPresetKey(perm) {
   if ((perm & permissionMapping._all) === permissionMapping._all) return 'full'
   if (perm === permissionMapping._game_control) return 'game_control'
   if (perm === permissionMapping._default) return 'standard'
+  if (perm === permissionMapping._gamepad_only) return 'gamepad'
   if (perm === permissionMapping.view || perm === permissionMapping.list || perm === permissionMapping._allow_view) return 'viewer'
   return 'custom'
 }
