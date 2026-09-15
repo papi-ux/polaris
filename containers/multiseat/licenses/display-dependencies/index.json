@@ -104,6 +104,32 @@
           "url": "https://github.com/bytecodealliance/wit-bindgen/blob/f2393e6e98fa5f9236cac580db8a3fc9de6a4b70/LICENSE-MIT"
         }
       ]
+    },
+    {
+      "package": "drm-fourcc-2.2.0",
+      "repository": "https://github.com/danielzfranklin/drm-fourcc-rs",
+      "vcs_revision": "7b9f80060ffd4b35cd236437e65a17fb517d163c",
+      "files": [
+        {
+          "path": "LICENSE",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "url": "https://github.com/danielzfranklin/drm-fourcc-rs/blob/bb1b81f184650e1418e1dce512e34071675206d7/LICENSE",
+          "notice_revision": "bb1b81f184650e1418e1dce512e34071675206d7"
+        }
+      ]
+    },
+    {
+      "package": "input-event-codes-sys-0.1.0",
+      "repository": "https://github.com/yshui/runa",
+      "vcs_revision": "65ab2b1b2b0e937c6077cf06b6db01480a79d7ec",
+      "files": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "license_id": "Apache-2.0"
+        }
+      ]
     }
   ]
 }

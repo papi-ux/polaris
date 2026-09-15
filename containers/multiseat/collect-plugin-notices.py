@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import tomllib
 
@@ -44,6 +45,17 @@ def collect(source, destination, supplements=None):
             if vcs['git']['sha1'] != entry['vcs_revision']:
                 raise ValueError('supplemental notices belong to another source revision')
             for notice in entry['files']:
+                # Package identity stays pinned even when upstream adds a notice
+                # later, or a declared license uses its canonical published text.
+                license_id = notice.get('license_id')
+                notice_revision = notice.get('notice_revision', entry['vcs_revision'])
+                if license_id is not None:
+                    if (not isinstance(license_id, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9.+-]*', license_id) or
+                            'notice_revision' in notice or license_id not in (package.get('license') or '').split(' OR ')):
+                        raise ValueError('supplemental license is not an offered package license')
+                    notice_revision = None
+                elif not isinstance(notice_revision, str) or not re.fullmatch('[0-9a-f]{40}', notice_revision):
+                    raise ValueError('supplemental notice revision must be an exact commit')
                 relative = Path(notice['path'])
                 if relative.is_absolute() or '..' in relative.parts:
                     raise ValueError('unsafe supplemental notice path')
@@ -60,7 +72,9 @@ def collect(source, destination, supplements=None):
                 target.write_bytes(data)
                 notices.append({'path': str(target.relative_to(destination)),
                                 'sha256': notice['sha256'], 'source_url': notice['url'],
-                                'source_revision': entry['vcs_revision']})
+                                'source_revision': notice_revision,
+                                'package_source_revision': entry['vcs_revision'],
+                                **({'license_id': license_id} if license_id is not None else {})})
         records.append({'name': package['name'], 'version': package['version'],
                         'declared_license': package.get('license'),
                         'declared_license_file': package.get('license-file'),

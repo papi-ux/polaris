@@ -50,5 +50,41 @@ class PluginNotices(unittest.TestCase):
                         notices.collect(root / 'source', root / 'out', supplement)
 
 
+    def test_notice_origin_does_not_replace_package_identity(self):
+        cases = ('later', 'canonical', 'wrong_package', 'mutable_notice',
+                 'unoffered_license', 'empty_license', 'compound_license', 'ambiguous_origin')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); package = root / 'source/vendor/pkg-1.0'; package.mkdir(parents=True)
+                (package / 'Cargo.toml').write_text('[package]\nname="pkg"\nversion="1.0"\nlicense="MIT OR Apache-2.0"\n')
+                (package / '.cargo_vcs_info.json').write_text(json.dumps({'git': {'sha1': 'a' * 40}}))
+                supplement = root / 'extra'; (supplement / 'pkg-1.0').mkdir(parents=True)
+                data = b'reviewed notice bytes'
+                (supplement / 'pkg-1.0/LICENSE').write_bytes(data)
+                notice = {'path': 'LICENSE', 'sha256': hashlib.sha256(data).hexdigest(),
+                          'url': 'https://example.invalid/LICENSE', 'notice_revision': 'b' * 40}
+                entry = {'package': 'pkg-1.0', 'vcs_revision': 'a' * 40, 'files': [notice]}
+                if case == 'wrong_package': entry['vcs_revision'] = 'c' * 40
+                elif case == 'mutable_notice': notice['notice_revision'] = 'master'
+                elif case in ('canonical', 'unoffered_license', 'empty_license', 'compound_license'):
+                    notice.pop('notice_revision')
+                    notice['license_id'] = {'canonical': 'Apache-2.0', 'unoffered_license': 'BSD-3-Clause',
+                                            'empty_license': '', 'compound_license': 'MIT OR Apache-2.0'}[case]
+                elif case == 'ambiguous_origin': notice['license_id'] = 'Apache-2.0'
+                (supplement / 'index.json').write_text(json.dumps({'schema': 1, 'packages': [entry]}))
+                if case in ('later', 'canonical'):
+                    notices.collect(root / 'source', root / 'out', supplement)
+                    record = json.loads((root / 'out/index.json').read_text())['packages'][0]
+                    self.assertEqual(record['declared_license'], 'MIT OR Apache-2.0')
+                    copied = record['notices'][0]
+                    self.assertEqual(copied['package_source_revision'], 'a' * 40)
+                    self.assertEqual(copied['source_revision'], 'b' * 40 if case == 'later' else None)
+                    if case == 'canonical': self.assertEqual(copied['license_id'], 'Apache-2.0')
+                    self.assertEqual((root / 'out/pkg-1.0/LICENSE').read_bytes(), data)
+                else:
+                    with self.assertRaises(ValueError):
+                        notices.collect(root / 'source', root / 'out', supplement)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -8,6 +8,10 @@ monitor, or share one space between a handheld and a TV at different times.
 Spaces are optional. If you already stream your usual desktop and games, keep
 using the Library in Nova. You do not need Docker for ordinary streaming.
 
+![Spaces with player cards and a default Space for a handheld](images/spaces/spaces-overview.png)
+
+Example with sample player and device names.
+
 ## What to install
 
 Install the Polaris host package for your Linux distribution, and Nova on the

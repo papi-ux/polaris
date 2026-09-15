@@ -64,12 +64,21 @@ with the existing display, Gamescope, codec and NVIDIA notices. The display
 plugin's vendored notices and declared license metadata are retained in
 `polaris-seat-display/dependencies/index.json`. This complete vendor inventory
 also includes dependencies used only during development or compilation.
-Where a crate omits a standalone notice, reviewed supplemental texts come from
-its exact recorded upstream source revision. The collector verifies that revision
+Where a crate omits a standalone notice, reviewed supplements retain its license
+text and provenance. The collector verifies the pinned package source revision
 and each notice hash before copying them. `AUTHORS` files are retained too because
-some projects put their license grants there. Two current crates, drm-fourcc and
-input-event-codes-sys, declare licenses but provide no standalone notice at their
-recorded revisions; their metadata remains visible for distribution review.
+some projects put their license grants there.
+
+The drm-fourcc 2.2.0 source declares MIT but predates its standalone license
+file. Its supplement retains the license added by upstream commit
+`bb1b81f184650e1418e1dce512e34071675206d7`; the notice index records that commit
+separately from the unchanged package source revision. The input-event-codes-sys
+0.1.0 source declares `MIT OR Apache-2.0` without a standalone license file.
+Its supplement selects the offered Apache-2.0 option and retains the
+[canonical Apache license text](https://www.apache.org/licenses/LICENSE-2.0.txt).
+The index identifies this as a license text, without attributing it to an
+upstream source commit. These supplements do not change dependency versions,
+license declarations, source patches or authorship.
 
 Before distributing an image, review the actual notices and preserve matching
 source, patches and build scripts for all components whose terms require them.
@@ -78,6 +87,21 @@ corresponding source packages. A notice index or a URL list alone does not close
 that obligation. Review the included NVIDIA agreement for the intended binary
 redistribution and hardware/deployment scope. Do not remove third-party
 provenance to change product branding. See [ownership](OWNERSHIP.md).
+
+## NVIDIA distribution scope
+
+The packaged NVIDIA Driver License Agreement is dated February 25, 2025.
+[Section 1.1.d](https://www.nvidia.com/en-us/drivers/nvidia-license/) permits
+redistribution for open source kernels with unmodified binaries and delivery
+of the agreement. The packaging step copies the selected vendor files without
+rewriting them, retains their SHA-256 hashes, and includes the agreement in
+`/usr/share/licenses/polaris-nvidia/LICENSE`.
+
+The same agreement limits the software to NVIDIA hardware, restricts commercial
+hosting, and excludes GeForce and Titan datacenter deployment. The home gaming
+preview must not be presented as permission to operate a commercial cloud
+gaming service. Components with separate notices retain their own terms.
+Review the agreement shipped with each driver revision when updating it.
 
 ## Signing and verification
 
