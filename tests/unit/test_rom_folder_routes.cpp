@@ -6,6 +6,7 @@
 #include "src/config.h"
 #include "src/crypto.h"
 #include "src/private_state_file.h"
+#include "src/process.h"
 
 #include <Simple-Web-Server/client_https.hpp>
 #include <Simple-Web-Server/server_https.hpp>
@@ -198,6 +199,17 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     EXPECT_FALSE(game["auto-detach"].get<bool>());
     EXPECT_EQ(game["exit-timeout"], 10);
     EXPECT_TRUE(eden["auto-detach"].get<bool>());
+
+    // The import refreshed the running app list, so the entry knows what it is.
+    const auto loaded = proc::proc.get_apps();
+    const auto entry = std::find_if(loaded.begin(), loaded.end(), [](const proc::ctx_t &candidate) {
+      return candidate.name == "Game One";
+    });
+    ASSERT_NE(entry, loaded.end());
+    EXPECT_EQ(entry->source, "emulator");
+    EXPECT_EQ(entry->emulator, "eden");
+    EXPECT_EQ(entry->rom_path, rom_path);
+    EXPECT_EQ(entry->gamepad, "switch");
 
     // Importing it again is a no-op, and the scan now reports it as imported.
     auto repeat = request("POST", "/api/games/import", import_body(rom_path));
