@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <fstream>
 #include <set>
 #include <thread>
@@ -52,9 +53,19 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
   const auto directory = fs::temp_directory_path() /
     ("polaris-rom-folders-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   fs::create_directory(directory);
+  // The keys checks look under the home roots; point the runtime home at the temp directory
+  // so this host's own emulator files cannot change the answer.
+  const char *old_home_env = std::getenv("HOME");
+  const std::string old_home = old_home_env ? old_home_env : "";
+  setenv("HOME", directory.string().c_str(), 1);
   auto restore = util::fail_guard([&] {
     config::sunshine = old_config;
     config::stream.file_apps = old_file_apps;
+    if (old_home_env) {
+      setenv("HOME", old_home.c_str(), 1);
+    } else {
+      unsetenv("HOME");
+    }
     fs::remove_all(directory);
   });
 
@@ -135,6 +146,15 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     EXPECT_EQ(added_body["source"]["install"]["location"], launcher);
     EXPECT_TRUE(added_body["source"]["warning"].get<std::string>().empty());
     EXPECT_TRUE(fs::exists(directory / "library_sources.json"));
+    // Eden is installed (the launcher) but has no keys yet: the folder says so, with the fix.
+    ASSERT_EQ(added_body["source"]["prerequisites"].size(), 1u) << added_body.dump();
+    EXPECT_EQ(added_body["source"]["prerequisites"][0]["id"], "eden_keys_missing");
+    EXPECT_EQ(added_body["source"]["prerequisites"][0]["severity"], "warning");
+    touch(directory / ".local" / "share" / "eden" / "keys" / "prod.keys");
+    auto relisted = body(request("GET", "/api/library/sources", ""));
+    ASSERT_EQ(relisted["sources"].size(), 1u);
+    EXPECT_TRUE(relisted["sources"][0]["prerequisites"].empty()) << relisted.dump();
+    EXPECT_TRUE(relisted["presets"][0].contains("prerequisites"));
 
     // The same folder for the same emulator updates in place rather than duplicating.
     auto again = request("POST", "/api/library/sources", nlohmann::json {{"path", roms.string()}, {"emulator", "eden"}}.dump());
