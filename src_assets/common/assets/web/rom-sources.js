@@ -80,6 +80,25 @@ export function romSourceInstallLabel(source = {}) {
   }
 }
 
+/** Everything that stops a game in this folder from booting: the folder's own warning first. */
+export function romSourceProblems(source = {}) {
+  const problems = []
+  if (source.warning) problems.push(source.warning)
+  for (const check of source.prerequisites || []) {
+    if (check?.severity === 'warning' && check.message) problems.push(check.message)
+  }
+  return problems
+}
+
+export function romSourceReady(source = {}) {
+  return romSourceProblems(source).length === 0
+}
+
+export function romSourceStatus(source = {}) {
+  const problems = romSourceProblems(source)
+  return problems.length ? problems[0] : 'Ready'
+}
+
 export function romSourceCountLabel(source = {}) {
   if (typeof source.rom_count !== 'number') return 'Scan to count'
   return `${source.rom_count} game${source.rom_count === 1 ? '' : 's'}`

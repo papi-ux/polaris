@@ -7,6 +7,9 @@ import {
   romSourceCountLabel,
   romSourceInstallLabel,
   romSourcePayload,
+  romSourceProblems,
+  romSourceReady,
+  romSourceStatus,
   validateRomSourceForm,
 } from './rom-sources'
 
@@ -48,6 +51,20 @@ describe('ROM folder forms', () => {
       .toEqual({ path: '/roms/wiiu', emulator: 'cemu', launcher: '~/Apps/Cemu.AppImage', extensions: ['wua'] })
     expect(romSourcePayload({ path: '/roms/snes', emulator: CUSTOM_EMULATOR, launcher: '/ignored', command: ' retroarch -f {rom} ', extensions: 'sfc, smc' }))
       .toEqual({ path: '/roms/snes', emulator: CUSTOM_EMULATOR, command: 'retroarch -f {rom}', extensions: ['sfc', 'smc'] })
+  })
+
+  it('names what stops a folder from booting games, warnings before hints', () => {
+    const ready = { label: 'Eden', prerequisites: [] }
+    const missingKeys = { label: 'Eden', prerequisites: [{ id: 'eden_keys_missing', severity: 'warning', message: 'Eden has no prod.keys, so no game will boot.', action: 'Copy them' }] }
+    const hintOnly = { label: 'Cemu', prerequisites: [{ id: 'cemu_keys_missing', severity: 'info', message: 'Cemu has no keys.txt', action: 'Put keys.txt' }] }
+    const gone = { label: 'Eden', warning: 'Folder not found: /roms', prerequisites: [{ id: 'eden_keys_missing', severity: 'warning', message: 'no keys', action: '' }] }
+    expect(romSourceReady(ready)).toBe(true)
+    expect(romSourceStatus(ready)).toBe('Ready')
+    expect(romSourceReady(missingKeys)).toBe(false)
+    expect(romSourceStatus(missingKeys)).toBe('Eden has no prod.keys, so no game will boot.')
+    expect(romSourceReady(hintOnly)).toBe(true)
+    expect(romSourceProblems(gone)).toEqual(['Folder not found: /roms', 'no keys'])
+    expect(romSourceStatus({})).toBe('Ready')
   })
 
   it('starts a blank form on the first preset', () => {

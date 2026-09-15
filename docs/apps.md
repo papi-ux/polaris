@@ -42,7 +42,10 @@ next to its games so its own UI stays reachable from a stream.
 
 Polaris looks for each emulator in this order: the emulator file you set on the folder (an
 AppImage, say), a binary on the service's `PATH`, then the Flatpak. A folder whose emulator is not
-installed still imports; the entries launch once it is.
+installed still imports; the entries launch once it is. The folder card also names what the
+emulator still lacks before a game boots, with the fix: Eden's `prod.keys`, Cemu's `keys.txt`, a
+BIOS image for DuckStation or PCSX2, or a Flatpak that has not been allowed to read the folder.
+Library health counts the folders that are ready.
 
 | Emulator | Files | Command Polaris writes |
 | --- | --- | --- |
