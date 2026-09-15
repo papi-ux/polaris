@@ -105,6 +105,7 @@
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/display_topology.h"
   #include "platform/linux/wayland.h"
+  #include "display_inventory_policy.h"
 #endif
 
 using namespace std::literals;
@@ -6894,118 +6895,152 @@ namespace confighttp {
     if (vendor == "nvidia")      output["gpu"] = query_nvidia_gpu();
     else if (vendor == "amd")    output["gpu"] = query_amd_gpu();
 
-    // Prefer live Wayland monitor telemetry from the active runtime.
+    // Prefer live Wayland monitor telemetry from the active runtime, from a cache: this
+    // route is polled every three seconds while the console is open, and each enumeration
+    // is a fresh Wayland client with a DMA-BUF feedback round trip against a compositor
+    // that may be screencasting for a stream. See display_inventory_policy.h.
     {
-      nlohmann::json displays = nlohmann::json::array();
-      auto push_display = [&displays](
-                            const std::string &name,
-                            const std::string &friendly_name,
-                            const std::string &device_id,
-                            bool primary,
-                            std::optional<int> width = std::nullopt,
-                            std::optional<int> height = std::nullopt) {
-        nlohmann::json display;
-        display["name"] = name;
-        display["friendly_name"] = friendly_name;
-        display["device_id"] = device_id;
-
-        if (!name.empty() && !friendly_name.empty()) {
-          display["label"] = name + ": " + friendly_name;
-        } else if (!friendly_name.empty()) {
-          display["label"] = friendly_name;
-        } else if (!name.empty()) {
-          display["label"] = name;
-        } else {
-          display["label"] = device_id;
-        }
-
-        display["primary"] = primary;
-        if (width) {
-          display["width"] = *width;
-        }
-        if (height) {
-          display["height"] = *height;
-        }
-        displays.push_back(display);
+      struct inventory_cache_t {
+        std::mutex mutex;
+        std::string key;
+        nlohmann::json displays = nlohmann::json::array();
+        std::optional<std::chrono::steady_clock::time_point> taken;
       };
+      static inventory_cache_t inventory_cache;
 
       auto live_stats = stream_stats::get_current();
-      std::vector<std::unique_ptr<wl::monitor_t>> wayland_monitors;
-      if (live_stats.streaming && config::video.linux_display.use_cage_compositor) {
+      const bool private_compositor_stream = live_stats.streaming && config::video.linux_display.use_cage_compositor;
+      std::string private_socket;
+      if (private_compositor_stream) {
         const auto labwc = snapshot_labwc();
-        if (labwc.running && !labwc.socket.empty()) {
-          wayland_monitors = wl::monitors(labwc.socket.c_str());
+        if (labwc.running) {
+          private_socket = labwc.socket;
         }
       }
+      const auto inventory_key = display_inventory::cache_key(private_compositor_stream, private_socket);
 
-      if (wayland_monitors.empty() && has_wayland_display) {
-        wayland_monitors = wl::monitors();
-      }
+      std::lock_guard<std::mutex> inventory_lock {inventory_cache.mutex};
+      const auto now = std::chrono::steady_clock::now();
+      const bool enumerate_now = display_inventory::should_enumerate(
+        inventory_cache.taken.has_value(),
+        inventory_cache.key == inventory_key,
+        live_stats.streaming,
+        inventory_cache.taken ? now - *inventory_cache.taken : std::chrono::steady_clock::duration::zero()
+      );
+      if (!enumerate_now) {
+        output["displays"] = inventory_cache.displays;
+      } else {
+        wl::quiet_enumeration_scope_t quiet_enumeration;
+        nlohmann::json displays = nlohmann::json::array();
+        auto push_display = [&displays](
+                              const std::string &name,
+                              const std::string &friendly_name,
+                              const std::string &device_id,
+                              bool primary,
+                              std::optional<int> width = std::nullopt,
+                              std::optional<int> height = std::nullopt) {
+          nlohmann::json display;
+          display["name"] = name;
+          display["friendly_name"] = friendly_name;
+          display["device_id"] = device_id;
 
-      for (std::size_t index = 0; index < wayland_monitors.size(); ++index) {
-        const auto &monitor = wayland_monitors[index];
-        push_display(
-          monitor->name,
-          monitor->description,
-          monitor->name,
-          index == 0,
-          static_cast<int>(monitor->viewport.width),
-          static_cast<int>(monitor->viewport.height)
-        );
-      }
+          if (!name.empty() && !friendly_name.empty()) {
+            display["label"] = name + ": " + friendly_name;
+          } else if (!friendly_name.empty()) {
+            display["label"] = friendly_name;
+          } else if (!name.empty()) {
+            display["label"] = name;
+          } else {
+            display["label"] = device_id;
+          }
 
-      // Fallback to Polaris's configured display device registry.
-      if (displays.empty()) {
-        const auto enumerated_devices = display_device::enumerate_devices();
-        for (const auto &device : enumerated_devices) {
+          display["primary"] = primary;
+          if (width) {
+            display["width"] = *width;
+          }
+          if (height) {
+            display["height"] = *height;
+          }
+          displays.push_back(display);
+        };
+
+        std::vector<std::unique_ptr<wl::monitor_t>> wayland_monitors;
+        if (private_compositor_stream && !private_socket.empty()) {
+          wayland_monitors = wl::monitors(private_socket.c_str());
+        }
+
+        if (wayland_monitors.empty() && has_wayland_display) {
+          wayland_monitors = wl::monitors();
+        }
+
+        for (std::size_t index = 0; index < wayland_monitors.size(); ++index) {
+          const auto &monitor = wayland_monitors[index];
           push_display(
-            device.m_display_name,
-            device.m_friendly_name,
-            device.m_device_id,
-            device.m_info ? device.m_info->m_primary : false
+            monitor->name,
+            monitor->description,
+            monitor->name,
+            index == 0,
+            static_cast<int>(monitor->viewport.width),
+            static_cast<int>(monitor->viewport.height)
           );
         }
-      }
 
-      // Final fallback to xrandr when richer telemetry is unavailable.
-      if (displays.empty()) {
-        FILE *xpipe = popen("xrandr --query 2>/dev/null | grep ' connected'", "r");
-        if (xpipe) {
-          char buf[512];
-          while (fgets(buf, sizeof(buf), xpipe)) {
-            std::string line(buf);
-            if (!line.empty() && line.back() == '\n') line.pop_back();
-            // Format: "DP-3 connected primary 7680x2160+0+0 ..."
-            std::istringstream iss(line);
-            std::string name, status;
-            iss >> name >> status;
-            bool primary = false;
-            std::optional<int> width;
-            std::optional<int> height;
+        // Fallback to Polaris's configured display device registry.
+        if (displays.empty()) {
+          const auto enumerated_devices = display_device::enumerate_devices();
+          for (const auto &device : enumerated_devices) {
+            push_display(
+              device.m_display_name,
+              device.m_friendly_name,
+              device.m_device_id,
+              device.m_info ? device.m_info->m_primary : false
+            );
+          }
+        }
 
-            // Check for "primary" keyword and resolution
-            std::string token;
-            while (iss >> token) {
-              if (token == "primary") {
-                primary = true;
-              } else if (token.find('x') != std::string::npos && token.find('+') != std::string::npos) {
-                // Resolution like "7680x2160+0+0"
-                auto xpos = token.find('x');
-                auto plus = token.find('+');
-                if (xpos != std::string::npos && plus != std::string::npos) {
-                  try {
-                    width = std::stoi(token.substr(0, xpos));
-                    height = std::stoi(token.substr(xpos + 1, plus - xpos - 1));
-                  } catch (...) {}
+        // Final fallback to xrandr when richer telemetry is unavailable.
+        if (displays.empty()) {
+          FILE *xpipe = popen("xrandr --query 2>/dev/null | grep ' connected'", "r");
+          if (xpipe) {
+            char buf[512];
+            while (fgets(buf, sizeof(buf), xpipe)) {
+              std::string line(buf);
+              if (!line.empty() && line.back() == '\n') line.pop_back();
+              // Format: "DP-3 connected primary 7680x2160+0+0 ..."
+              std::istringstream iss(line);
+              std::string name, status;
+              iss >> name >> status;
+              bool primary = false;
+              std::optional<int> width;
+              std::optional<int> height;
+
+              // Check for "primary" keyword and resolution
+              std::string token;
+              while (iss >> token) {
+                if (token == "primary") {
+                  primary = true;
+                } else if (token.find('x') != std::string::npos && token.find('+') != std::string::npos) {
+                  // Resolution like "7680x2160+0+0"
+                  auto xpos = token.find('x');
+                  auto plus = token.find('+');
+                  if (xpos != std::string::npos && plus != std::string::npos) {
+                    try {
+                      width = std::stoi(token.substr(0, xpos));
+                      height = std::stoi(token.substr(xpos + 1, plus - xpos - 1));
+                    } catch (...) {}
+                  }
                 }
               }
+              push_display(name, "", name, primary, width, height);
             }
-            push_display(name, "", name, primary, width, height);
+            pclose(xpipe);
           }
-          pclose(xpipe);
         }
+        inventory_cache.displays = displays;
+        inventory_cache.key = inventory_key;
+        inventory_cache.taken = now;
+        output["displays"] = displays;
       }
-      output["displays"] = displays;
     }
 
     // Query audio via pactl (PipeWire/PulseAudio)

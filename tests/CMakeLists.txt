@@ -247,6 +247,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_response_status.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_display_inventory_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_session_key.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_otp_claim.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_stop_contract.cpp
