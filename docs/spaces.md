@@ -56,7 +56,10 @@ completes publication and review, so this build shows that the download is
 unavailable. The next step now selects a detected graphics card, saves Spaces
 configuration and offers an explicit restart. The initial configuration permits
 one active Space; simultaneous Spaces still need a separately reviewed graphics
-budget. Registry publication and clean-host package acceptance remain release gates.
+budget. Fresh Fedora package and Docker installation passed in a VM without GPU
+passthrough; gameplay was checked on an existing NVIDIA host. Registry publication
+and first runtime download remain release gates. A fresh NVIDIA graphics
+installation has not been validated.
 The current runtime also requires the Polaris service account to use UID and
 GID 1000. Do not change an existing Linux account's identity to work around this
 preview limitation.
@@ -268,7 +271,7 @@ Host package availability and Spaces validation are separate:
 
 | Host packaging | Spaces evidence in this preview |
 | --- | --- |
-| Fedora RPM | Fedora with NVIDIA has retained physical Steam, controller, and simultaneous-stream evidence |
+| Fedora RPM | Fresh Fedora 44 VM package, Docker, security setup, reboot, and removal checks passed without a GPU; an existing Fedora NVIDIA host has Steam, controller, and simultaneous-stream evidence |
 | Arch package | Docker installation guidance; equivalent physical Spaces acceptance still needed |
 | Ubuntu DEB | Docker installation guidance; equivalent physical Spaces acceptance still needed |
 | SteamOS package | Native host packaging does not imply Spaces installation support on the system image |
@@ -277,6 +280,7 @@ Host package availability and Spaces validation are separate:
 | --- | --- |
 | NVIDIA encoding | Exercised in the development Steam runtime |
 | AMD encoding | Do not infer Spaces support from native Polaris VA-API support; equivalent runtime acceptance is still needed |
+| 60 FPS | Two 1080p streams completed 15 minutes; Shield Ethernet listening passed, while RP6 Wi-Fi audio underruns remain unresolved |
 | 120 FPS | Two streams stayed connected through a 15 minute test with one at 120 FPS; uneven presentation and audio gaps remain unresolved |
 | Browser Stream | Separate experiment; it does not yet open a space's isolated stream |
 | Automatic recovery | Do not apply global host adjustments to a space; isolated telemetry and verified session-scoped repair are still needed |
@@ -290,8 +294,10 @@ If a graphics or input check fails, use Doctor & Support and resolve the named
 host permission or driver issue before trying another launch. Keep SELinux
 enabled. Do not add privileged container flags or mount the entire device tree.
 
-The [sustained streaming report](research/container-multiseat-sustained-streaming.md)
-records the current test configuration, measurements, and remaining limits.
+The [September 15 acceptance report](research/container-multiseat-acceptance-20260915.md)
+records fresh Fedora installation, simultaneous 60 FPS streams, Shield listening,
+and Space reopening. The [sustained streaming report](research/container-multiseat-sustained-streaming.md)
+records earlier frame rate measurements. Both reports state their remaining limits.
 
 If a space stops on its own or loses sound, retain the time of the failure and
 the space name for diagnosis. A successful setup check is not evidence that
