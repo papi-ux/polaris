@@ -188,3 +188,24 @@ TEST(DefaultRenderDevice, LinuxOnly) {
 }
 
 #endif  // __linux__
+
+TEST(DefaultRenderDevice, VirtualDisplayDriversAreNotEncoderCandidates) {
+  // The CachyOS laptop from the freeze thread: i915, nvidia, and a third node from another
+  // streaming stack's virtual display module. Two GPUs, not three.
+  for (const auto driver : {"evdi", "vkms", "hermes-kms", "hermes_kms", "vibeshine_drm", "udl"}) {
+    EXPECT_TRUE(platf::is_virtual_display_driver(driver)) << driver;
+  }
+  for (const auto driver : {"i915", "xe", "amdgpu", "nvidia", "nouveau", ""}) {
+    EXPECT_FALSE(platf::is_virtual_display_driver(driver)) << "'" << driver << "'";
+  }
+
+  const auto kept = platf::without_virtual_display_nodes({
+    node("/dev/dri/renderD128", "i915", 0, true),
+    node("/dev/dri/renderD129", "nvidia", 0),
+    node("/dev/dri/renderD130", "hermes-kms", 0),
+  });
+  ASSERT_EQ(kept.size(), 2u);
+  EXPECT_EQ(kept[0].path, "/dev/dri/renderD128");
+  EXPECT_EQ(kept[1].path, "/dev/dri/renderD129");
+  EXPECT_EQ(platf::choose_default_render_device(kept), "/dev/dri/renderD129");
+}

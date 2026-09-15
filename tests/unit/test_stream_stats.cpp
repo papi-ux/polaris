@@ -24,6 +24,7 @@
 #include <string>
 #include <thread>
 #ifdef __linux__
+  #include <src/platform/linux/misc.h>
   #include <src/platform/linux/user_unit_override.h>
   #include <unistd.h>
 #endif
@@ -48,6 +49,7 @@ namespace {
       config::video.linux_display.prefer_gpu_native_capture = prefer_gpu_native_capture;
 #ifdef __linux__
       platf::set_selected_capture_backend_for_tests(std::nullopt);
+      platf::set_effective_encoder_render_device_for_tests(std::string {});
 #endif
       stream_stats::set_build_has_cuda_for_tests(std::nullopt);
     }
@@ -5982,5 +5984,79 @@ TEST(StreamStatsDoctorTests, NamesTheBinaryThatProducedTheReport) {
     EXPECT_EQ(detail.find("outside") != std::string::npos || detail.find("not the packaged") != std::string::npos, outside_package);
   }
   EXPECT_TRUE(saw_row);
+}
+#endif
+
+#ifdef __linux__
+TEST(StreamStatsLinuxGpuProfileTests, NamesTheHybridSplitWhenPolarisChoseTheEncoderNodeItself) {
+  // adapter_name unset, the desktop renders on one node and Polaris auto-picked another:
+  // the reporter's laptop. Before this the Doctor called the pairing "unknown".
+  LinuxDisplayConfigGuard guard;
+  TempFileGuard igpu_node("hybrid-igpu");
+  TempFileGuard dgpu_node("hybrid-dgpu");
+  config::video.adapter_name.clear();
+  platf::set_effective_encoder_render_device_for_tests(dgpu_node.string());
+
+  stream_stats::stats_t stats {};
+  stats.wayland_main_device = igpu_node.string();
+
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+
+  EXPECT_EQ(profile.at("encoder_adapter"), "");
+  EXPECT_EQ(profile.at("encoder_adapter_effective"), dgpu_node.string());
+  EXPECT_EQ(profile.at("encoder_adapter_source"), "auto");
+  EXPECT_EQ(profile.at("compositor_render_device"), igpu_node.string());
+  EXPECT_EQ(profile.at("adapter_pairing_status"), "mismatched");
+  EXPECT_EQ(profile.at("adapter_pairing_device_source"), "wayland_main_device");
+
+  const auto &warnings = profile.at("configuration_warnings");
+  const auto mismatch = std::find_if(warnings.begin(), warnings.end(), [](const auto &warning) {
+    return warning.value("id", std::string {}) == "linux_gpu_adapter_mismatch";
+  });
+  ASSERT_NE(mismatch, warnings.end());
+  const auto message = mismatch->at("message").get<std::string>();
+  const auto action = mismatch->at("action").get<std::string>();
+  EXPECT_NE(message.find("Polaris chose " + dgpu_node.string()), std::string::npos);
+  EXPECT_NE(message.find(igpu_node.string()), std::string::npos);
+  EXPECT_NE(message.find("whole-machine freezes"), std::string::npos);
+  EXPECT_NE(action.find("adapter_name = " + igpu_node.string()), std::string::npos);
+  EXPECT_NE(action.find("NVreg_DynamicPowerManagement=0x00"), std::string::npos);
+}
+
+TEST(StreamStatsLinuxGpuProfileTests, StaysUnknownWhenNeitherSideNamesANode) {
+  // The test build's automatic choice is pinned to empty, so a fixture never sees the
+  // host's real render nodes; with no compositor device either, nothing is compared.
+  LinuxDisplayConfigGuard guard;
+  config::video.adapter_name.clear();
+
+  stream_stats::stats_t stats {};
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+
+  EXPECT_EQ(profile.at("encoder_adapter_effective"), "");
+  EXPECT_EQ(profile.at("encoder_adapter_source"), "auto");
+  EXPECT_EQ(profile.at("adapter_pairing_status"), "unknown");
+  for (const auto &warning : profile.at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "linux_gpu_adapter_mismatch");
+  }
+}
+
+TEST(StreamStatsLinuxGpuProfileTests, AConfiguredAdapterKeepsTheOriginalMismatchText) {
+  LinuxDisplayConfigGuard guard;
+  TempFileGuard adapter_node("configured-adapter");
+  TempFileGuard wayland_node("configured-wayland");
+  config::video.adapter_name = adapter_node.string();
+
+  stream_stats::stats_t stats {};
+  stats.wayland_main_device = wayland_node.string();
+
+  const auto profile = stream_stats::linux_gpu_profile_json(stats);
+  EXPECT_EQ(profile.at("encoder_adapter_source"), "configured");
+  EXPECT_EQ(profile.at("encoder_adapter_effective"), adapter_node.string());
+  const auto &warnings = profile.at("configuration_warnings");
+  const auto mismatch = std::find_if(warnings.begin(), warnings.end(), [](const auto &warning) {
+    return warning.value("id", std::string {}) == "linux_gpu_adapter_mismatch";
+  });
+  ASSERT_NE(mismatch, warnings.end());
+  EXPECT_NE(mismatch->at("message").get<std::string>().find("The configured encoder adapter"), std::string::npos);
 }
 #endif

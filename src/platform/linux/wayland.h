@@ -491,6 +491,29 @@ namespace wl {
   };
 
   std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name = nullptr);
+
+  /**
+   * @brief While alive on this thread, output enumeration logs at debug instead of info.
+   * @details The console's stats poll enumerates outputs on a timer; the nine info lines that
+   *          describe a capture start are noise when they repeat every refresh, and they drowned
+   *          the evidence in a support bundle. Capture initialisation stays at info.
+   */
+  class quiet_enumeration_scope_t {
+  public:
+    quiet_enumeration_scope_t();
+    ~quiet_enumeration_scope_t();
+    quiet_enumeration_scope_t(const quiet_enumeration_scope_t &) = delete;
+    quiet_enumeration_scope_t &operator=(const quiet_enumeration_scope_t &) = delete;
+  };
+  bool enumeration_is_quiet();
+
+  /**
+   * @brief The render node the host compositor last reported as its DMA-BUF main device.
+   * @details Recorded by monitors() when it enumerates the host desktop (not a private
+   *          compositor socket). Empty until an enumeration has run. This is how the Doctor
+   *          knows which GPU the desktop renders on before any stream has started.
+   */
+  std::string last_compositor_main_device();
 #ifdef POLARIS_TESTS
   std::string render_node_from_drm_device_for_tests(dev_t device);
 #endif
@@ -521,6 +544,16 @@ namespace wl {
   };
 
   inline std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name = nullptr) {
+    return {};
+  }
+
+  class quiet_enumeration_scope_t {};
+
+  inline bool enumeration_is_quiet() {
+    return false;
+  }
+
+  inline std::string last_compositor_main_device() {
     return {};
   }
 

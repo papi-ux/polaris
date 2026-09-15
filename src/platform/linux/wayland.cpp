@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <mutex>
 
 // platform includes
 #include <drm_fourcc.h>
@@ -41,6 +42,35 @@ using namespace std::literals;
 #pragma GCC diagnostic ignored "-Wpmf-conversions"
 
 namespace wl {
+  namespace {
+    thread_local int quiet_enumeration_depth = 0;
+
+    auto &enumeration_log() {
+      return quiet_enumeration_depth > 0 ? debug : info;
+    }
+  }  // namespace
+
+  quiet_enumeration_scope_t::quiet_enumeration_scope_t() {
+    ++quiet_enumeration_depth;
+  }
+
+  quiet_enumeration_scope_t::~quiet_enumeration_scope_t() {
+    --quiet_enumeration_depth;
+  }
+
+  bool enumeration_is_quiet() {
+    return quiet_enumeration_depth > 0;
+  }
+
+  namespace {
+    std::mutex compositor_main_device_mutex;
+    std::string compositor_main_device;
+  }  // namespace
+
+  std::string last_compositor_main_device() {
+    std::lock_guard<std::mutex> lock {compositor_main_device_mutex};
+    return compositor_main_device;
+  }
 
   namespace {
     struct format_modifier_blob_t {
@@ -186,7 +216,7 @@ namespace wl {
       return -1;
     }
 
-    BOOST_LOG(info) << "Found display ["sv << display_name << ']';
+    BOOST_LOG(enumeration_log()) << "Found display ["sv << display_name << ']';
 
     return 0;
   }
@@ -250,24 +280,24 @@ namespace wl {
   inline void monitor_t::xdg_name(zxdg_output_v1 *, const char *name) {
     this->name = name;
 
-    BOOST_LOG(info) << "Name: "sv << this->name;
+    BOOST_LOG(enumeration_log()) << "Name: "sv << this->name;
   }
 
   void monitor_t::xdg_description(zxdg_output_v1 *, const char *description) {
     this->description = description;
 
-    BOOST_LOG(info) << "Found monitor: "sv << this->description;
+    BOOST_LOG(enumeration_log()) << "Found monitor: "sv << this->description;
   }
 
   void monitor_t::xdg_position(zxdg_output_v1 *, std::int32_t x, std::int32_t y) {
     viewport.offset_x = x;
     viewport.offset_y = y;
 
-    BOOST_LOG(info) << "Offset: "sv << x << 'x' << y;
+    BOOST_LOG(enumeration_log()) << "Offset: "sv << x << 'x' << y;
   }
 
   void monitor_t::xdg_size(zxdg_output_v1 *, std::int32_t width, std::int32_t height) {
-    BOOST_LOG(info) << "Logical size: "sv << width << 'x' << height;
+    BOOST_LOG(enumeration_log()) << "Logical size: "sv << width << 'x' << height;
 
     // wl_output.mode is the preferred source because it is in output pixels,
     // which is what the capture hands back. But a compositor is only required to
@@ -299,7 +329,7 @@ namespace wl {
     viewport.width = width;
     viewport.height = height;
 
-    BOOST_LOG(info) << "Resolution: "sv << width << 'x' << height;
+    BOOST_LOG(enumeration_log()) << "Resolution: "sv << width << 'x' << height;
   }
 
   void monitor_t::listen(zxdg_output_manager_v1 *output_manager) {
@@ -382,7 +412,7 @@ namespace wl {
       dmabuf_feedback.main_device_path = render_node_from_drm_device(dmabuf_feedback.main_device);
     }
 
-    BOOST_LOG(info) << "Wayland DMA-BUF feedback ready: main_device_valid="sv
+    BOOST_LOG(enumeration_log()) << "Wayland DMA-BUF feedback ready: main_device_valid="sv
                     << dmabuf_feedback.main_device_valid
                     << " main_device="sv
                     << (dmabuf_feedback.main_device_path.empty() ? "unresolved" : dmabuf_feedback.main_device_path)
@@ -532,7 +562,7 @@ namespace wl {
     BOOST_LOG(debug) << "Available interface: "sv << interface << '(' << id << ") version "sv << version;
 
     if (!std::strcmp(interface, wl_output_interface.name)) {
-      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      BOOST_LOG(enumeration_log()) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
       output_registry_state.add_output(id);
       monitors.emplace_back(
         std::make_unique<monitor_t>(
@@ -541,17 +571,17 @@ namespace wl {
         )
       );
     } else if (!std::strcmp(interface, zxdg_output_manager_v1_interface.name)) {
-      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      BOOST_LOG(enumeration_log()) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
       output_manager = (zxdg_output_manager_v1 *) wl_registry_bind(registry, id, &zxdg_output_manager_v1_interface, version);
 
       this->interface[XDG_OUTPUT] = true;
     } else if (!std::strcmp(interface, zwlr_screencopy_manager_v1_interface.name)) {
-      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      BOOST_LOG(enumeration_log()) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
       screencopy_manager = (zwlr_screencopy_manager_v1 *) wl_registry_bind(registry, id, &zwlr_screencopy_manager_v1_interface, version);
 
       this->interface[WLR_EXPORT_DMABUF] = true;
     } else if (!std::strcmp(interface, zwp_linux_dmabuf_v1_interface.name)) {
-      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      BOOST_LOG(enumeration_log()) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
       dmabuf_interface = (zwp_linux_dmabuf_v1 *) wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, version);
 
       this->interface[LINUX_DMABUF] = true;
@@ -563,12 +593,12 @@ namespace wl {
         }
       }
     } else if (!std::strcmp(interface, ext_output_image_capture_source_manager_v1_interface.name)) {
-      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      BOOST_LOG(enumeration_log()) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
       output_capture_source_manager =
         (ext_output_image_capture_source_manager_v1 *) wl_registry_bind(registry, id, &ext_output_image_capture_source_manager_v1_interface, version);
       this->interface[EXT_OUTPUT_CAPTURE_SOURCE] = true;
     } else if (!std::strcmp(interface, ext_image_copy_capture_manager_v1_interface.name)) {
-      BOOST_LOG(info) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      BOOST_LOG(enumeration_log()) << "Found interface: "sv << interface << '(' << id << ") version "sv << version;
       copy_capture_manager =
         (ext_image_copy_capture_manager_v1 *) wl_registry_bind(registry, id, &ext_image_copy_capture_manager_v1_interface, version);
       this->interface[EXT_IMAGE_COPY_CAPTURE] = true;
@@ -1970,6 +2000,14 @@ namespace wl {
     }
 
     display.roundtrip();
+
+    // The host desktop's main render device, kept for the Doctor: on a hybrid laptop this is
+    // the iGPU while the encoder defaults to the NVIDIA card, and that split is worth naming
+    // before a stream ever starts.
+    if (display_name == nullptr && !interface.dmabuf_feedback.main_device_path.empty()) {
+      std::lock_guard<std::mutex> lock {compositor_main_device_mutex};
+      compositor_main_device = interface.dmabuf_feedback.main_device_path;
+    }
 
     return std::move(interface.monitors);
   }

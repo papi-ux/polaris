@@ -2178,6 +2178,12 @@ std::string get_local_ip_for_gateway() {
               read_sysfs_number(device_dir / "lmem_total_bytes")
             );
             candidate.boot_vga = read_sysfs_number(device_dir / "boot_vga") == 1;
+            if (is_virtual_display_driver(candidate.driver)) {
+              BOOST_LOG(info) << "render_device: skipping ["sv << candidate.path
+                              << "] driver="sv << candidate.driver
+                              << ", a virtual display with no encoder"sv;
+              continue;
+            }
             candidates.push_back(std::move(candidate));
           }
           if (ec) {
@@ -2207,6 +2213,44 @@ std::string get_local_ip_for_gateway() {
     }
 
   }  // namespace
+
+  bool is_virtual_display_driver(std::string_view driver) {
+    for (const auto known : {"evdi"sv, "vkms"sv, "hermes-kms"sv, "hermes_kms"sv, "vibeshine_drm"sv, "vibeshine-drm"sv, "udl"sv}) {
+      if (driver == known) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::vector<render_device_candidate_t> without_virtual_display_nodes(std::vector<render_device_candidate_t> candidates) {
+    std::erase_if(candidates, [](const auto &candidate) {
+      return is_virtual_display_driver(candidate.driver);
+    });
+    return candidates;
+  }
+
+#ifdef POLARIS_TESTS
+  namespace {
+    std::optional<std::string> effective_encoder_render_device_override = std::string {};
+  }
+
+  void set_effective_encoder_render_device_for_tests(std::optional<std::string> node) {
+    effective_encoder_render_device_override = std::move(node);
+  }
+#endif
+
+  std::string effective_encoder_render_device() {
+    if (!config::video.adapter_name.empty()) {
+      return config::video.adapter_name;
+    }
+#ifdef POLARIS_TESTS
+    if (effective_encoder_render_device_override) {
+      return *effective_encoder_render_device_override;
+    }
+#endif
+    return default_render_device();
+  }
 
   std::string choose_default_render_device(std::vector<render_device_candidate_t> candidates) {
     if (candidates.empty()) {

@@ -34,8 +34,10 @@ namespace video {
   std::string active_encoder_name();
 }
 #ifdef __linux__
+  #include "platform/linux/misc.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/user_unit_override.h"
+  #include "platform/linux/wayland.h"
   #include "platform/linux/stream_display_policy.h"
 #endif
 
@@ -902,8 +904,23 @@ namespace stream_stats {
       stats.gpu_native_probe.requested ||
       stats.runtime_gpu_native_override_active ||
       linux_display.prefer_gpu_native_capture;
-    const auto capture_device_pairing = device_nodes_match(stats.capture_device, config::video.adapter_name);
-    const auto wayland_device_pairing = device_nodes_match(stats.wayland_main_device, config::video.adapter_name);
+    // The encoder node that is actually in use: adapter_name when set, otherwise the node
+    // Polaris chose. The old comparison only knew the configured name, so a hybrid laptop
+    // whose desktop renders on the iGPU while Polaris auto-picked the NVIDIA card looked
+    // "unknown" to the Doctor, the exact case where the split matters.
+    std::string effective_adapter = config::video.adapter_name;
+    const std::string encoder_adapter_source = effective_adapter.empty() ? "auto" : "configured";
+    std::string compositor_device = stats.wayland_main_device;
+#ifdef __linux__
+    if (effective_adapter.empty()) {
+      effective_adapter = platf::effective_encoder_render_device();
+    }
+    if (compositor_device.empty()) {
+      compositor_device = wl::last_compositor_main_device();
+    }
+#endif
+    const auto capture_device_pairing = device_nodes_match(stats.capture_device, effective_adapter);
+    const auto wayland_device_pairing = device_nodes_match(compositor_device, effective_adapter);
     nlohmann::json adapter_matches_capture_device = nullptr;
     nlohmann::json adapter_matches_wayland_main_device = nullptr;
     if (capture_device_pairing.has_value()) {
@@ -920,8 +937,8 @@ namespace stream_stats {
       adapter_pairing_device = stats.capture_device;
       adapter_pairing_device_source = "capture_device";
       adapter_pairing = capture_device_pairing;
-    } else if (!stats.wayland_main_device.empty()) {
-      adapter_pairing_device = stats.wayland_main_device;
+    } else if (!compositor_device.empty()) {
+      adapter_pairing_device = compositor_device;
       adapter_pairing_device_source = "wayland_main_device";
       adapter_pairing = wayland_device_pairing;
     }
@@ -1146,19 +1163,51 @@ namespace stream_stats {
     }
 
     if (adapter_pairing_status == "mismatched") {
-      configuration_warnings.push_back({
-        {"id", "linux_gpu_adapter_mismatch"},
-        {"severity", "warning"},
-        {"message", "The configured encoder adapter " + config::video.adapter_name + " differs from the " + adapter_pairing_device_source + " render node " + adapter_pairing_device + "; cross-GPU DMA-BUF import can fail or fall back to system memory."},
-        {"action", "Verify the render-node mapping under /dev/dri/by-path, then select the adapter used by the compositor or keep the conservative SHM fallback."}
-      });
+      const auto driver_of = [](const std::string &node) {
+        std::string driver;
+#ifdef __linux__
+        driver = platf::render_device_driver(node);
+#endif
+        return driver.empty() ? std::string {"driver unknown"} : driver;
+      };
+      if (encoder_adapter_source == "auto") {
+        // Nobody chose this split; Polaris did, by preferring the discrete card. On a
+        // laptop that means the desktop renders on the iGPU, frames cross to the NVIDIA
+        // card through system memory, and the card is woken for every stream, which is
+        // where whole-machine freezes have come from.
+        configuration_warnings.push_back({
+          {"id", "linux_gpu_adapter_mismatch"},
+          {"severity", "warning"},
+          {"message", "Polaris chose " + effective_adapter + " (" + driver_of(effective_adapter) +
+                        ") for encoding, while the compositor renders on " + adapter_pairing_device +
+                        " (" + driver_of(adapter_pairing_device) + "). Frames cross between the two "
+                        "through system memory, and the discrete card is woken for every stream; on a "
+                        "laptop with NVIDIA runtime power management that split is where whole-machine "
+                        "freezes have come from."},
+          {"action", "To keep everything on the compositor's GPU, set adapter_name = " + adapter_pairing_device +
+                       " and encoder = vaapi. To keep NVENC, turn off NVIDIA runtime power management "
+                       "(options nvidia NVreg_DynamicPowerManagement=0x00 in /etc/modprobe.d, then rebuild "
+                       "the initramfs and reboot). A split you chose on purpose can stay; set adapter_name "
+                       "to make it explicit."}
+        });
+      } else {
+        configuration_warnings.push_back({
+          {"id", "linux_gpu_adapter_mismatch"},
+          {"severity", "warning"},
+          {"message", "The configured encoder adapter " + config::video.adapter_name + " differs from the " + adapter_pairing_device_source + " render node " + adapter_pairing_device + "; cross-GPU DMA-BUF import can fail or fall back to system memory."},
+          {"action", "Verify the render-node mapping under /dev/dri/by-path, then select the adapter used by the compositor or keep the conservative SHM fallback."}
+        });
+      }
     }
 
     nlohmann::json profile = {
       {"encoder_api", stats.encode_target_device},
       {"encoder_adapter", config::video.adapter_name},
+      {"encoder_adapter_effective", effective_adapter},
+      {"encoder_adapter_source", encoder_adapter_source},
       {"capture_device", stats.capture_device},
       {"wayland_main_device", stats.wayland_main_device},
+      {"compositor_render_device", compositor_device},
       {"adapter_matches_capture_device", adapter_matches_capture_device},
       {"adapter_matches_wayland_main_device", adapter_matches_wayland_main_device},
       {"adapter_pairing_status", adapter_pairing_status},

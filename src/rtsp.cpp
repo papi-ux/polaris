@@ -29,6 +29,7 @@ extern "C" {
 
 // local includes
 #include "config.h"
+#include "entry_handler.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
@@ -1877,7 +1878,20 @@ namespace rtsp_stream {
 
     boost::system::error_code ec;
     if (server.bind(net::af_from_enum_string(config::sunshine.address_family), net::map_port(rtsp_stream::RTSP_SETUP_PORT), ec)) {
-      BOOST_LOG(fatal) << "Couldn't bind RTSP server to port ["sv << net::map_port(rtsp_stream::RTSP_SETUP_PORT) << "], " << ec.message();
+      // Every Sunshine-family host listens here, so the usual reason is another
+      // one running: a second Polaris launched from the desktop next to the
+      // service, or a fork on the same machine. Name the holder while the
+      // process that can see it still exists, and keep the reason in the crash
+      // record, where the bundle shows "unspecified" otherwise.
+      const auto port = net::map_port(rtsp_stream::RTSP_SETUP_PORT);
+      const auto holder = net::describe_port_holder(port);
+      BOOST_LOG(fatal) << "Couldn't bind RTSP server to port ["sv << port << "], " << ec.message()
+                       << (holder.empty() ? std::string {} : "; " + holder)
+                       << ". Only one streaming host can own this port; stop the other one "
+                          "(systemctl --user stop polaris, or the other program) and start Polaris again."sv;
+      static std::string rtsp_port_reason;
+      rtsp_port_reason = "RTSP port " + std::to_string(port) + " in use" + (holder.empty() ? std::string {} : ", " + holder);
+      lifetime::note_shutdown_reason(rtsp_port_reason.c_str());
       shutdown_event->raise(true);
 
       return;

@@ -126,4 +126,19 @@ namespace net {
    * @param base_port Configured Sunshine/Polaris base port, normally config::sunshine.port.
    */
   std::vector<network_path_probe_port_t> network_path_probe_ports(std::uint16_t base_port);
+
+  /**
+   * @brief Socket inodes listening on a TCP port, parsed from /proc/net/tcp or /proc/net/tcp6 text.
+   * @param proc_net_tcp The file's content: a header line, then one socket per line.
+   * @param port The local port, host byte order.
+   */
+  std::vector<unsigned long> listening_socket_inodes(std::string_view proc_net_tcp, std::uint16_t port);
+
+  /**
+   * @brief Who holds a TCP port this process could not bind, as far as this account can see.
+   * @return "held by <comm> (pid N)" when the owner is visible, a sentence naming the usual
+   *         suspects when a listener exists but belongs to another account, empty when nothing
+   *         listens on the port (the bind failed for another reason). Linux only; empty elsewhere.
+   */
+  std::string describe_port_holder(std::uint16_t port);
 }  // namespace net
