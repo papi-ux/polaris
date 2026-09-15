@@ -48,6 +48,63 @@ TEST(GameArtworkProviderSteam, PlansOnlyDeterministicAllowlistedOfficialAssets) 
   EXPECT_TRUE(game_artwork::providers::plan_steam_assets("620/../10").empty());
 }
 
+TEST(GameArtworkProviderSteam, UsesCurrentAppScopedLibraryFilenamesWithoutTrustingUrlTemplates) {
+  using namespace game_artwork::providers;
+  const std::string digest(40, 'a');
+  const nlohmann::json assets{
+    {"asset_url_format", "https://private.example/${FILENAME}"},
+    {"library_capsule", digest + "/library_600x900.jpg"},
+    {"library_hero", digest + "/library_hero.jpg"}, {"community_icon", digest}};
+  nlohmann::json payload;
+  payload["response"]["store_items"] = nlohmann::json::array({{{"appid", 3527290}, {"assets", assets}}});
+  auto plan = parse_steam_library_assets("3527290", payload.dump());
+  ASSERT_EQ(plan.size(), 3U);
+  const auto *poster = find_kind(plan, kind_e::poster);
+  ASSERT_NE(poster, nullptr);
+  EXPECT_EQ(poster->url, "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/3527290/" + digest + "/library_600x900.jpg");
+  EXPECT_NE(find_kind(plan, kind_e::icon), nullptr);
+  EXPECT_EQ(find_kind(plan, kind_e::logo), nullptr); // Not advertised by this game.
+  for (const auto &request : plan) EXPECT_TRUE(game_artwork::is_allowed_provider_url(provider_e::steam, request.url));
+  for (const auto &unsafe : {"../library_600x900.jpg", "https://evil.example/library_600x900.jpg",
+       "other-game/library_600x900.jpg", "library_600x900.jpg?redirect=private", "%2e%2e/library_600x900.jpg"}) {
+    auto changed = payload; changed["response"]["store_items"][0]["assets"]["library_capsule"] = unsafe;
+    EXPECT_TRUE(parse_steam_library_assets("3527290", changed.dump()).empty());
+  }
+  EXPECT_TRUE(parse_steam_library_assets("620", payload.dump()).empty());
+  EXPECT_TRUE(parse_steam_library_assets("99999999999999999999", payload.dump()).empty());
+  EXPECT_TRUE(parse_steam_library_assets("3527290", std::string(1024U * 1024U + 1, 'x')).empty());
+  unsigned calls = 0;
+  plan = plan_steam_library_assets("3527290", [&](const request_t &request, std::uintmax_t maximum)
+      -> std::optional<transport_response_t> {
+    ++calls;
+    EXPECT_EQ(maximum, 1024U * 1024U);
+    EXPECT_EQ(request.operation, operation_e::list);
+    EXPECT_FALSE(request.requires_authorization);
+    EXPECT_TRUE(request.url.starts_with("https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json="));
+    EXPECT_NE(request.url.find("%22ids%22%3A%5B%7B%22appid%22%3A3527290%7D%5D"), std::string::npos);
+    const auto body = payload.dump();
+    return transport_response_t{200, {body.begin(), body.end()}, request.url};
+  });
+  EXPECT_EQ(calls, 1U);
+  ASSERT_EQ(plan.size(), 3U);
+  EXPECT_NE(find_kind(plan, kind_e::poster), nullptr);
+}
+
+TEST(GameArtworkProviderSteam, MetadataFailureRetainsLegacyDownloadsAndRejectsRedirects) {
+  using namespace game_artwork::providers;
+  for (auto status : {200U, 404U, 503U}) {
+    auto plan = plan_steam_library_assets("620", [=](const request_t &, std::uintmax_t)
+        -> std::optional<transport_response_t> {
+      return transport_response_t{status, {'{', '}'}, "https://private.example/redirect"};
+    });
+    ASSERT_EQ(plan.size(), 3U);
+    EXPECT_EQ(find_kind(plan, kind_e::poster)->url, "https://cdn.cloudflare.steamstatic.com/steam/apps/620/library_600x900.jpg");
+  }
+  EXPECT_TRUE(plan_steam_library_assets("620/../10", {}).empty());
+  EXPECT_FALSE(game_artwork::is_allowed_provider_url(provider_e::steam,
+    "https://api.steampowered.com.evil.example/IStoreBrowseService/GetItems/v1/"));
+}
+
 TEST(GameArtworkProviderSteamGridDb, EscapesSearchTitlesWithoutPuttingSecretsInUrls) {
   const auto search = game_artwork::providers::plan_steamgriddb_search("  NieR: Automata/2?  ");
   ASSERT_TRUE(search.has_value());

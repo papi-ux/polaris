@@ -189,11 +189,13 @@ namespace nvhttp {
       if (!game_artwork::is_allowed_provider_url(request.provider, request.url)) return false;
 
       if (request.provider == provider_e::steam) {
-        return request.operation == operation_e::download && !request.requires_authorization &&
-               artwork_url_starts_with(
-                 request.url,
-                 "https://cdn.cloudflare.steamstatic.com/steam/apps/"
-               );
+        if (request.requires_authorization) return false;
+        if (request.operation == operation_e::list) return artwork_url_starts_with(request.url,
+          "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json=");
+        return request.operation == operation_e::download &&
+          (artwork_url_starts_with(request.url, "https://cdn.cloudflare.steamstatic.com/steam/apps/") ||
+           artwork_url_starts_with(request.url, "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/") ||
+           artwork_url_starts_with(request.url, "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/"));
       }
       if (request.operation == operation_e::search || request.operation == operation_e::list) {
         return request.requires_authorization && artwork_url_starts_with(
@@ -5211,7 +5213,7 @@ namespace nvhttp {
     if (!target) return reject();
     const auto cache = appdata / "spaces-library-artwork";
     const auto cache_id = profile_artwork_cache_id(*target);
-    auto plan = game_artwork::providers::plan_steam_assets(*target);
+    auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
     nlohmann::json requested = nlohmann::json::array();
     std::erase_if(plan, [&](const auto &item) {
       if (!item.kind || game_artwork::find_cached_asset(cache, cache_id, *item.kind)) return true;
@@ -8651,9 +8653,10 @@ namespace nvhttp {
       const auto cache_id = profile_artwork_cache_id(*target);
       auto asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
       if (!asset) {
-        auto plan = game_artwork::providers::plan_steam_assets(*target);
+        const auto transport = make_artwork_transport("");
+        auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
         std::erase_if(plan, [&](const auto &item) { return item.kind != kind; });
-        (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, make_artwork_transport(""));
+        (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
         asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
       }
       // Permission can change while downloading. Do not publish stale access.

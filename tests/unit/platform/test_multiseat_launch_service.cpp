@@ -1167,6 +1167,7 @@ namespace {
     bool fail_hero = true;
     providers::transport_t transport = [&](const providers::request_t &request, std::uintmax_t limit)
         -> std::optional<providers::transport_response_t> {
+      if (request.operation == providers::operation_e::list) return std::nullopt;
       EXPECT_EQ(limit, maximum_asset_bytes);
       calls.push_back(*request.kind);
       if (fail_hero && request.kind == kind_e::hero) return std::nullopt;
@@ -1219,6 +1220,7 @@ namespace {
     const auto result = nvhttp::profile_artwork_resolve_request(client, "space.profile-a.870780", root,
       [&](const game_artwork::providers::request_t &request, std::uintmax_t)
           -> std::optional<game_artwork::providers::transport_response_t> {
+        if (request.operation == game_artwork::providers::operation_e::list) return std::nullopt;
         if (!revoked) { EXPECT_TRUE(nvhttp::unpair_client(client->uuid)); revoked = true; }
         return game_artwork::providers::transport_response_t{200, {0xff, 0xd8, 0xff, 0xe0, 1}, request.url};
       });
