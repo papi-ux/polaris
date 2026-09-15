@@ -218,7 +218,7 @@ namespace emulator_library {
     return {};
   }
 
-  /// Single quotes for the launch line, which process.cpp splits like a POSIX shell.
+  /// Single quotes for the launch line; platf::run_command splits a quoted command like a POSIX shell.
   inline std::string shell_quote(std::string_view value) {
     std::string quoted = "'";
     for (const char ch : value) {
@@ -289,8 +289,35 @@ namespace emulator_library {
     return command != rom_placeholder;
   }
 
-  inline std::string custom_launch_command(std::string_view command, const std::filesystem::path &rom) {
-    return substitute_rom(trim_view(command), rom);
+  /**
+   * @brief `~` and `~/...` at the start of a token expand against the account home.
+   *
+   * The command runs without a shell, so nothing else would expand them; a token starts
+   * the line, follows whitespace, a quote, or an `=` (for `--option=~/path`).
+   */
+  inline std::string expand_home_tokens(std::string_view command, std::string_view home) {
+    if (home.empty()) {
+      return std::string(command);
+    }
+    std::string result;
+    result.reserve(command.size() + home.size());
+    for (std::size_t i = 0; i < command.size(); ++i) {
+      const char ch = command[i];
+      const bool token_start = i == 0 || std::isspace(static_cast<unsigned char>(command[i - 1])) ||
+                               command[i - 1] == '\'' || command[i - 1] == '"' || command[i - 1] == '=';
+      const bool token_end = i + 1 == command.size() || command[i + 1] == '/' || command[i + 1] == '\'' ||
+                             command[i + 1] == '"' || std::isspace(static_cast<unsigned char>(command[i + 1]));
+      if (ch == '~' && token_start && token_end) {
+        result.append(home);
+        continue;
+      }
+      result += ch;
+    }
+    return result;
+  }
+
+  inline std::string custom_launch_command(std::string_view command, const std::filesystem::path &rom, std::string_view home = {}) {
+    return substitute_rom(expand_home_tokens(trim_view(command), home), rom);
   }
 
   /// The contents of every `(...)`, `[...]` and `{...}` group, in order.

@@ -120,6 +120,14 @@ TEST(EmulatorLibraryCommands, CustomTemplateCarriesThePlaceholderOnce) {
             "retroarch -f -L /cores/snes9x_libretro.so '/roms/Game (USA).sfc'");
 }
 
+TEST(EmulatorLibraryCommands, HomeExpandsAtTokenStartsSinceNoShellRuns) {
+  EXPECT_EQ(emulator_library::expand_home_tokens("retroarch -L ~/cores/x.so --config=~/ra.cfg '~/my cores/y.so' ~ a~b", "/accounts/x"),
+            "retroarch -L /accounts/x/cores/x.so --config=/accounts/x/ra.cfg '/accounts/x/my cores/y.so' /accounts/x a~b");
+  EXPECT_EQ(emulator_library::expand_home_tokens("~/emu {rom}", ""), "~/emu {rom}");
+  EXPECT_EQ(emulator_library::expand_home_tokens("emu ~other/x {rom}", "/accounts/x"), "emu ~other/x {rom}");
+  EXPECT_EQ(emulator_library::custom_launch_command(" ~/emu -f {rom} ", "/roms/Game.sfc", "/accounts/x"), "/accounts/x/emu -f '/roms/Game.sfc'");
+}
+
 TEST(EmulatorLibraryNames, FilenamesBecomeGridNames) {
   using emulator_library::display_name;
   EXPECT_EQ(display_name("/roms/Legend of Zelda, The - Breath of the Wild [0100F2C0115B6000][v0].nsp"), "The Legend of Zelda - Breath of the Wild");

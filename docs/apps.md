@@ -55,7 +55,8 @@ A Flatpak runs as `flatpak run <app id>` with the same arguments, and it has to 
 the folder: Flatseal, or `flatpak override --user --filesystem=<folder> <app id>`. For any other
 emulator choose **Custom command**, give the command with `{rom}` where the file goes, for example
 `retroarch -f -L ~/.config/retroarch/cores/snes9x_libretro.so {rom}`, and the extensions to look
-for. The file path is single-quoted when it is substituted.
+for. The file path is single-quoted when it is substituted, and `~/` at the start of an argument is
+expanded; the command runs without a shell, so nothing else is.
 
 **Library health** shows import coverage and the host context the library depends on. Keep
 entries short and recognisable on a handheld screen, use per-app overrides only where a launcher,

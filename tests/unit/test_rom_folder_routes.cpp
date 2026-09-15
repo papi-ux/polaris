@@ -194,6 +194,10 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     EXPECT_EQ(eden["cmd"], "'" + launcher + "'");
     EXPECT_EQ(eden["source"], "emulator");
     EXPECT_FALSE(eden.contains("rom-path"));
+    // The emulator is the game: a fast death ends the session, and a save gets its time.
+    EXPECT_FALSE(game["auto-detach"].get<bool>());
+    EXPECT_EQ(game["exit-timeout"], 10);
+    EXPECT_TRUE(eden["auto-detach"].get<bool>());
 
     // Importing it again is a no-op, and the scan now reports it as imported.
     auto repeat = request("POST", "/api/games/import", import_body(rom_path));
@@ -201,6 +205,30 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     EXPECT_EQ(body(repeat)["imported"], 0);
     EXPECT_EQ(nlohmann::json::parse(read_text(config::stream.file_apps))["apps"].size(), 2u);
     EXPECT_TRUE(confighttp::rom_folder_scan_for_tests({}, {rom_path})["emulator_games"][0]["already_imported"].get<bool>());
+
+    // A custom template runs without a shell, so ~/ is expanded when the command is built.
+    touch(directory / "roms" / "snes" / "Game Two.sfc");
+    auto custom = request("POST", "/api/library/sources", nlohmann::json {
+      {"path", (directory / "roms" / "snes").string()},
+      {"emulator", "custom"},
+      {"command", "'~/fake emu' -L ~/cores/snes9x_libretro.so {rom}"},
+      {"extensions", "sfc, smc"}
+    }.dump());
+    ASSERT_EQ(code(custom), 200);
+    EXPECT_EQ(body(custom)["sources"].size(), 2u);
+    auto custom_scan = confighttp::rom_folder_scan_for_tests({}, {});
+    ASSERT_EQ(custom_scan["emulator_games"].size(), 2u);
+    const auto game_two = std::find_if(custom_scan["emulator_games"].begin(), custom_scan["emulator_games"].end(), [](const nlohmann::json &entry) {
+      return entry["name"] == "Game Two";
+    });
+    ASSERT_NE(game_two, custom_scan["emulator_games"].end());
+    const auto custom_command = (*game_two)["cmd"].get<std::string>();
+    EXPECT_EQ(custom_command.find("~/"), std::string::npos) << custom_command;
+    EXPECT_EQ(custom_command.rfind("'/", 0), 0u) << custom_command;
+    EXPECT_NE(custom_command.find("/cores/snes9x_libretro.so '" + (directory / "roms" / "snes" / "Game Two.sfc").string() + "'"), std::string::npos) << custom_command;
+    EXPECT_EQ((*game_two)["emulator_label"], "Custom command");
+    const auto custom_id = body(custom)["source"]["id"].get<std::string>();
+    ASSERT_EQ(code(request("DELETE", "/api/library/sources/" + custom_id, "")), 200);
 
     // Removal leaves the imported entries alone.
     auto unknown = request("DELETE", "/api/library/sources/nope", "");

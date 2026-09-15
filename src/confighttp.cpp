@@ -2993,7 +2993,7 @@ namespace confighttp {
       if (plan.preset != nullptr) {
         return emulator_library::launch_command(*plan.preset, plan.install, rom);
       }
-      return emulator_library::custom_launch_command(source.command, rom);
+      return emulator_library::custom_launch_command(source.command, rom, account_home());
     }
 
     // One spelling per file, so a symlinked library or a trailing slash is not a second game.
@@ -3884,6 +3884,11 @@ namespace confighttp {
             continue;
           }
           app["cmd"] = command;
+          // The emulator is the game: when it dies within seconds the session should end and
+          // the client return to its library, not stream an empty compositor; and a save
+          // flush deserves more than the default grace.
+          app["auto-detach"] = false;
+          app["exit-timeout"] = 10;
           app["emulator"] = folder->emulator;
           app["rom-folder"] = folder->id;
           app["rom-path"] = rom->string();
