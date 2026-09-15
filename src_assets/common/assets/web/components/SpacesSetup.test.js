@@ -16,6 +16,18 @@ let wrapper
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 
 describe('Spaces setup', () => {
+  it('collapses a configured healthy host and reopens setup when a check fails', async () => {
+    const ready = snapshot(true)
+    ready.configured = true; ready.available = true
+    ready.checks.find(check => check.id === 'spaces').state = 'ready'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(ready)).mockRejectedValueOnce(new Error('Offline')))
+    wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
+    await flushPromises()
+    expect(wrapper.element.open).toBe(false)
+    await wrapper.get('button').trigger('click'); await flushPromises()
+    expect(wrapper.element.open).toBe(true)
+    expect(wrapper.get('summary').text()).toContain('Needs Attention')
+  })
   it('offers host commands and rechecks actual state without a system mutation', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(snapshot())).mockResolvedValueOnce(reply(snapshot(true))))
     wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })

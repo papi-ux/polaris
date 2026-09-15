@@ -178,7 +178,7 @@ describe('profile assignments', () => {
     await wrapper.findAll('button').at(-1).trigger('click')
     await flushPromises()
     expect(wrapper.get('select').element.value).toBe('')
-    expect(wrapper.text()).toContain('No spaces yet.')
+    expect(wrapper.text()).toContain('No active Spaces.')
     expect(wrapper.text()).not.toContain('Unsaved change')
   })
 

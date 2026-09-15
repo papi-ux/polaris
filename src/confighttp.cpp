@@ -3700,7 +3700,7 @@ namespace confighttp {
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
-      {"failed", false}, {"profiles", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}, {"access_available", false}};
+      {"failed", false}, {"profiles", nlohmann::json::array()}, {"activity", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}, {"access_available", false}};
 #ifdef __linux__
     if (const auto service = multiseat::installed_profile_service()) {
       const auto state = service->admin_snapshot();
@@ -3710,6 +3710,8 @@ namespace confighttp {
       output["management_available"] = state.management_available;
       output["access_available"] = state.management_available;
       output["desktop_clients"] = state.desktop_clients;
+      for (const auto &activity : state.activity)
+        output["activity"].push_back({{"profile_id", activity.profile}, {"client_id", activity.client}, {"state", activity.state}});
       for (const auto &profile : state.profiles)
         output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
           {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}});

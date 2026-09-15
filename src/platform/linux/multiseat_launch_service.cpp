@@ -541,12 +541,18 @@ namespace multiseat {
 
   profile_admin_snapshot_t profile_launch_service_t::admin_snapshot() const {
     std::lock_guard lock(impl_->mutex);
+    auto activity = impl_->controller ? impl_->controller->profile_activity() : std::vector<profile_activity_t>{};
+    for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock(); launch && !launch->is_cancelled()) {
+      if (std::none_of(activity.begin(), activity.end(), [&](const auto &item) { return item.client == launch->unique_id; }))
+        activity.push_back({launch->worker_profile_key, launch->unique_id,
+          launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started ? "running" : "starting"});
+    }
     return {static_cast<bool>(impl_->admin.reload && impl_->admin.persist), impl_->reconfiguring,
       impl_->admin_failed && !impl_->reconfiguring,
       impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog,
       static_cast<bool>(impl_->admin.reload && impl_->admin.create),
       static_cast<bool>(impl_->admin.reload && impl_->admin.edit),
-      impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}};
+      impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}, std::move(activity)};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {

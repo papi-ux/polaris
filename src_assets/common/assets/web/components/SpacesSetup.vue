@@ -1,14 +1,18 @@
 <template>
-  <section class="section-card" aria-labelledby="spaces-setup-title" :aria-busy="loading">
+  <details class="section-card" :open="!setup?.available || !setup?.host_prerequisites_ready || !!error" :aria-busy="loading">
+    <summary class="focus-ring cursor-pointer rounded py-2 font-semibold text-silver">
+      Host Setup
+      <span class="ml-2 text-sm font-normal text-storm">{{ error ? 'Needs Attention' : setup?.available && setup?.host_prerequisites_ready ? 'Configured' : setup?.configured ? 'Needs Attention' : 'Set Up Spaces' }}</span>
+    </summary>
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <h2 id="spaces-setup-title" class="section-title">{{ setup?.available ? 'Host setup' : 'Set up this host' }}</h2>
+        <h2 id="spaces-setup-title" class="section-title">Check Host</h2>
         <p v-if="!setup?.available" class="mt-2 max-w-2xl text-sm text-storm">
           Polaris runs on your Linux PC. Docker runs the separate gaming spaces on that same PC.
         </p>
       </div>
       <button type="button" class="focus-ring rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
-              :disabled="loading" @click="refresh">{{ loading ? 'Checking…' : 'Recheck setup' }}</button>
+              :disabled="loading" @click="refresh">{{ loading ? 'Checking…' : 'Recheck Setup' }}</button>
     </div>
     <p v-if="error" class="mt-4 text-sm text-warning-bright" role="alert">{{ error }}</p>
     <p v-else-if="loading" class="mt-4 text-sm text-storm" role="status">Checking Docker, graphics, controls, and host security…</p>
@@ -109,10 +113,10 @@
         </ol>
       </details>
       <p v-if="!setup.available" class="mt-4 text-xs text-storm">These checks do not install packages, restart services, or interrupt games. Game and stream quality are checked when you play.</p>
-      <SpacesFirstSetup v-if="!setup.configured" :host-ready="setup.host_prerequisites_ready" />
+      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" :host-ready="setup.host_prerequisites_ready" />
     </template>
     <p v-if="copyStatus" class="mt-3 text-sm text-silver" role="status">{{ copyStatus }}</p>
-  </section>
+  </details>
 </template>
 
 <script setup>
@@ -127,7 +131,7 @@ let request
 onUnmounted(() => request?.abort())
 async function refresh() {
   if (loading.value) return
-  loading.value = true; error.value = ''; setup.value = null
+  loading.value = true; error.value = ''
   request = new AbortController()
   const timeout = setTimeout(() => request.abort(), 12000)
   try {
@@ -139,6 +143,7 @@ async function refresh() {
     if (!validSetup(next)) throw new Error('The host setup response could not be verified. Recheck setup before continuing.')
     setup.value = next
   } catch (cause) {
+    setup.value = null
     error.value = cause.name === 'AbortError' ? 'The host check timed out. Recheck setup to try again.' :
       cause.message || 'Could not check this host. Recheck setup to try again.'
   } finally { clearTimeout(timeout); loading.value = false }

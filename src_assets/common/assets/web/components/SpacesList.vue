@@ -4,32 +4,39 @@
     <p v-if="error" class="mt-3 text-sm text-warning-bright" role="alert">{{ error }}</p>
     <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       <article v-for="space in active" :key="space.id" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
-        <h3 class="break-words font-semibold text-silver">{{ space.name }}</h3>
-        <p class="mt-1 text-sm text-storm">{{ space.steam ? 'Steam' : 'Gaming space' }}</p>
+        <div class="flex items-center gap-3">
+          <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-ice/10 font-semibold text-ice" aria-hidden="true">{{ initials(space.name) }}</span>
+          <div class="min-w-0">
+            <h3 class="break-words font-semibold text-silver">{{ space.name }}</h3>
+            <p class="mt-1 text-sm" :class="ready && activity && !spaceActivity(space).length ? 'text-success' : 'text-storm'" role="status">{{ activitySummary(space) }}</p>
+          </div>
+        </div>
+        <p class="mt-3 text-xs text-storm">{{ space.steam ? 'Steam Account: Check Or Change In Steam Big Picture' : 'Gaming Space' }}</p>
         <p class="mt-3 break-words text-sm text-storm">{{ deviceSummary(space) }}</p>
         <div v-if="manageable" class="mt-4 flex flex-wrap gap-3">
           <button type="button" class="focus-ring rounded py-2 text-sm text-ice disabled:opacity-40" :disabled="locked"
                   :aria-label="'Rename ' + space.name" @click="open(space, 'rename')">Rename</button>
           <button type="button" class="focus-ring rounded py-2 text-sm text-storm disabled:opacity-40" :disabled="locked"
-                  :aria-label="'Remove ' + space.name" @click="open(space, 'remove')">Remove space</button>
+                  :aria-label="'Archive ' + space.name" @click="open(space, 'remove')">Archive Space</button>
         </div>
         <SpaceAccess v-if="accessAvailable" :space="space" :clients="clients" :locked="locked"
                      :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" />
       </article>
     </div>
-    <p v-if="!active.length" class="mt-3 text-sm text-storm">No spaces yet. Create one below, or restore a removed space.</p>
-    <p v-else class="mt-3 text-xs text-storm">One device can play in a space at a time. Use separate spaces for players who play together.</p>
+    <p v-if="!active.length" class="mt-3 text-sm text-storm">No active Spaces. Create one below, or restore an archived Space.</p>
+    <p v-else class="mt-3 text-xs text-storm">One device can play in a Space at a time. Use separate Spaces for players who play together. Archiving keeps installed games and saves; it does not free storage.</p>
     <form v-if="selected" ref="panel" tabindex="-1" class="mt-4 rounded-xl border border-ice/30 bg-deep p-4"
-          :aria-label="operation === 'rename' ? 'Rename space' : operation === 'restore' ? 'Restore space' : 'Remove space'" @submit.prevent="submit">
-      <h3 class="break-words font-semibold text-silver">{{ operation === 'rename' ? 'Rename ' : operation === 'restore' ? 'Restore ' : 'Remove ' }}{{ selected.name }}{{ operation === 'rename' ? '' : '?' }}</h3>
+          :aria-label="operation === 'rename' ? 'Rename Space' : operation === 'restore' ? 'Restore Space' : 'Archive Space'" @submit.prevent="submit">
+      <h3 class="break-words font-semibold text-silver">{{ operation === 'rename' ? 'Rename ' : operation === 'restore' ? 'Restore ' : 'Archive ' }}{{ selected.name }}{{ operation === 'rename' ? '' : '?' }}</h3>
       <template v-if="operation === 'rename'">
-        <label for="space-edit-name" class="mt-3 block text-sm text-silver">Space name</label>
+        <label for="space-edit-name" class="mt-3 block text-sm text-silver">Space Name</label>
         <input id="space-edit-name" v-model="name" maxlength="128" autocomplete="off" :disabled="working"
                class="focus-ring mt-2 w-full rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver">
+        <p class="mt-2 text-xs text-storm">Use a player or room name, such as Alex’s Space or Living Room. Renaming does not change the Steam account.</p>
       </template>
       <p v-else-if="operation === 'remove'" class="mt-3 text-sm text-storm">
-        This removes the space from your play list. Devices lose access to this Space. Other allowed Spaces remain available; devices with none return to this PC’s desktop and apps.
-        Installed games, saves, and Steam sign-in stay on this PC. Restore it from Removed spaces whenever you need it.
+        This hides the Space from your play list and removes its device access. Other allowed Spaces remain available; devices with none return to this PC’s desktop and apps.
+        Installed games, saves, and Steam sign-in stay on this PC. Restore it from Archived Spaces whenever you need it.
         This does not free disk space.
       </p>
       <p v-else class="mt-3 text-sm text-storm">Your games, saves, and Steam sign-in will be available again. Choose which devices can use the space after restoring it.</p>
@@ -37,13 +44,13 @@
       <div class="mt-4 flex flex-wrap gap-3">
         <button type="submit" class="focus-ring rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
                 :disabled="locked || working || (operation === 'rename' && !validName)">
-          {{ working ? 'Saving…' : operation === 'rename' ? 'Save name' : operation === 'restore' ? 'Restore space' : 'Remove space' }}
+          {{ working ? 'Saving…' : operation === 'rename' ? 'Save Name' : operation === 'restore' ? 'Restore Space' : 'Archive Space' }}
         </button>
         <button type="button" class="focus-ring rounded-lg px-3 py-2.5 text-sm text-storm" :disabled="working" @click="close">{{ submitted ? 'Close' : 'Cancel' }}</button>
       </div>
     </form>
     <details v-if="removed.length" class="mt-4 text-sm text-storm">
-      <summary class="focus-ring cursor-pointer rounded py-2">Removed spaces ({{ removed.length }})</summary>
+      <summary class="focus-ring cursor-pointer rounded py-2">Archived Spaces ({{ removed.length }})</summary>
       <p class="mt-2">These spaces keep their games and saves but cannot be opened from a device.</p>
       <div v-for="space in removed" :key="space.id" class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-storm/20 p-3">
         <span class="min-w-0 break-words">{{ space.name }}</span>
@@ -58,6 +65,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import SpaceAccess from './SpaceAccess.vue'
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
+  activity: { type: Array, default: null }, refreshing: Boolean,
   accessAvailable: Boolean, manageable: Boolean, locked: Boolean, ready: Boolean, refresh: { type: Function, required: true } })
 const emit = defineEmits(['busy'])
 const active = computed(() => props.profiles.filter(space => !space.archived))
@@ -67,11 +75,24 @@ let opener = null
 const pending = ref(null), submitted = ref(false)
 const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 && !/[\u0000-\u001f\u007f]/u.test(name.value))
 function deviceSummary(space) {
-  if (!space.clients.length) return 'No device assigned yet. Choose a device below.'
-  return 'Opens on: ' + space.clients.map(id => {
+  const allowed = [...new Set([...space.clients, ...(space.access_clients || [])])]
+  if (!allowed.length) return 'No device access yet. Choose devices under Device Access.'
+  return 'Available To: ' + allowed.map(id => {
     const device = props.clients.find(client => client.uuid === id)
     return device?.friendly_name || device?.name || 'Paired device'
   }).join(', ')
+}
+function initials(name) { return name.trim().split(/\s+/u).slice(0, 2).map(word => [...word][0] || '').join('').toLocaleUpperCase() }
+function spaceActivity(space) { return (props.activity || []).filter(item => item.profile_id === space.id) }
+function activitySummary(space) {
+  if (!props.activity) return props.refreshing ? 'Checking Status…' : 'Status Unavailable'
+  const activity = spaceActivity(space)
+  if (!activity.length) return props.ready ? 'Available' : 'Needs Attention'
+  return activity.map(item => {
+    const device = props.clients.find(client => client.uuid === item.client_id)
+    const name = device?.friendly_name || device?.name || 'Paired Device'
+    return (item.state === 'running' ? 'Playing On ' : item.state === 'starting' ? 'Starting On ' : 'Stopping On ') + name
+  }).join(' · ')
 }
 async function open(space, action) {
   if (props.locked || !props.manageable) return
@@ -88,7 +109,7 @@ function confirmChange() {
   if (!current || !(request.operation === 'rename' ? current.name === request.name : current.archived === (request.operation === 'remove'))) return false
   error.value = ''
   message.value = request.operation === 'rename' ? 'Space renamed to ' + request.name + '. Refresh the library in Nova.' :
-    request.operation === 'remove' ? request.previousName + ' was removed. Games and saves are kept in Removed spaces.' :
+    request.operation === 'remove' ? request.previousName + ' was archived. Games and saves are kept in Archived Spaces.' :
       request.previousName + ' was restored. Choose its devices below.'
   pending.value = null
   close()

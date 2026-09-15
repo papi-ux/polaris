@@ -22,5 +22,9 @@ export function validSnapshot(next) {
       clients.add(id)
     }
   }
+  if (next.activity !== undefined && (!Array.isArray(next.activity) || next.activity.length > 4096 ||
+      next.activity.some(item => !item || !profiles.has(item.profile_id) ||
+        typeof item.client_id !== 'string' || !item.client_id ||
+        !['starting', 'running', 'stopping'].includes(item.state)))) return false
   return true
 }

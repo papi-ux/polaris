@@ -46,6 +46,7 @@ namespace {
     std::atomic<unsigned> destroyed {0};
     spaces::library_reader_t library;
     std::vector<std::string> desktops;
+    std::vector<profile_activity_t> activity;
     void called() { std::lock_guard lock(mutex); owners.push_back(std::this_thread::get_id()); }
     bool await_begin() {
       std::unique_lock lock(mutex);
@@ -68,6 +69,7 @@ namespace {
     std::vector<profile_summary_t> profile_catalog() const override { return catalog_; }
     spaces::library_reader_t library_reader() const override { return state_->library; }
     std::vector<std::string> desktop_clients() const override { return state_->desktops; }
+    std::vector<profile_activity_t> profile_activity() const override { std::lock_guard lock(state_->mutex); return state_->activity; }
     bool idle() const override { return state_->idle; }
     void reconcile() override { state_->called(); ++state_->reconciles; }
     profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
@@ -368,6 +370,31 @@ namespace {
     EXPECT_EQ(service->admin_snapshot().profiles[1].clients, std::vector<std::string> {"client-b"});
     EXPECT_EQ(writes, 2U);
     EXPECT_EQ(reloads, 2U);
+  }
+
+  TEST_F(MultiseatAssignments, AdminActivityIncludesPendingLaunchAndPreservesCleanup) {
+    const auto active = launch();
+    ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
+    auto snapshot = service->admin_snapshot();
+    ASSERT_EQ(snapshot.activity.size(), 1U);
+    EXPECT_EQ(snapshot.activity[0].profile, "profile-a");
+    EXPECT_EQ(snapshot.activity[0].client, "client-a");
+    EXPECT_EQ(snapshot.activity[0].state, "starting");
+    active->setup_state.store(rtsp_stream::launch_session_t::setup_state_e::started);
+    EXPECT_EQ(service->admin_snapshot().activity[0].state, "running");
+    {
+      std::lock_guard lock(state->mutex);
+      state->activity = {{"profile-a", "client-a", "stopping"}};
+    }
+    active->cancel();
+    snapshot = service->admin_snapshot();
+    ASSERT_EQ(snapshot.activity.size(), 1U);
+    EXPECT_EQ(snapshot.activity[0].state, "stopping");
+    {
+      std::lock_guard lock(state->mutex);
+      state->activity.clear();
+    }
+    EXPECT_TRUE(service->admin_snapshot().activity.empty());
   }
 
   TEST_F(MultiseatAssignments, ActiveAndStartingLaunchesRejectChangesWithoutCancellation) {

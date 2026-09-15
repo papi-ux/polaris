@@ -12,6 +12,42 @@ using the Library in Nova. You do not need Docker for ordinary streaming.
 
 Example with sample player and device names.
 
+## Your first game
+
+1. **Check Host.** Open **Spaces → Host Setup** in Polaris. Follow the checks for
+   Docker, graphics, controller access, and security on the Linux PC running
+   Polaris. Once configured, Host Setup is collapsed; reopen it to recheck.
+2. **Prepare Space.** Download the offered runtime and create a Space with a
+   recognizable player or room name, such as **Alex’s Space** or **Living Room**.
+   Under **Device Access**, allow your paired handheld or TV. Choose its
+   **Default Space** if it can access more than one.
+3. **Sign In To Steam.** Open the host’s Library in Nova. The **Playing In** bar
+   shows your current Space. Use **Change Space** when another permitted Space
+   is available, then select **Steam Big Picture → Open Steam Big Picture**.
+   Sign in through Steam and install a game. A Space name is a label, not proof
+   of which Steam account is signed in; check or switch accounts inside Steam.
+4. **Test Controls And Sound.** Return to Nova’s library and refresh it after
+   installing games. Choose a game and select **Play**. Start at 60 FPS, check
+   picture, sound, both sticks, and buttons, then increase settings if desired.
+   Use **Play Setup → Change Space** to choose another permitted Space where
+   that title is installed. Changing a Space does not copy games or saves.
+
+With one permitted Space, Nova opens its library without a mandatory player
+selection screen. The device remembers its selected Space. Ordinary desktop
+streaming keeps its existing Library flow.
+
+**Save before leaving.** In this preview, disconnecting ends the Space’s running
+Steam/game session. **Leave Space** asks you to confirm and keeps saved files,
+installed games, and Steam sign-in. An interrupted connection may also end the
+session. **Resume** is offered only for an existing matching session; it does
+not promise that a disconnected game stayed running. Other Spaces keep running.
+
+While opening a Space, Nova reports the worker startup request and observed
+stream connection stages. It does not estimate download progress or claim that
+Steam is ready without a signal. If launch fails, the screen shows the host’s
+explanation when available, **View Details**, and **Back To Library** so the next
+attempt checks the Space again.
+
 ## What to install
 
 Install the Polaris host package for your Linux distribution, and Nova on the
@@ -241,7 +277,7 @@ existing player data while diagnosing the failure.
 A device needs permission to launch apps. Temporary guests cannot be assigned
 these persistent spaces. Devices assigned to the same space share that space's
 Steam login and saved data, and take turns streaming it. Assign separate spaces
-for simultaneous players. Devices with more than one permitted Space can use **Choose Space** in Nova.
+for simultaneous players. Devices with more than one permitted Space can use **Change Space** in Nova.
 To allow another Space, expand **Device Access** on its card and select the device.
 Wait for the saved access to be confirmed before returning to Nova.
 
@@ -331,7 +367,7 @@ reliable. Audio reliability remains under investigation.
 See the [audio timing investigation](research/container-multiseat-audio-timing.md)
 for measured results and their limits.
 
-## Names, device access, and removal
+## Names, device access, and archiving
 
 Give a space a player or room name, such as Alex or Living room. In **Spaces**,
 use **Rename** on its card to change that name without changing its Steam account
@@ -343,23 +379,23 @@ apps** clears all of that device’s Space grants and uses the host’s usual de
 **Devices**. Nova’s **Streaming presets** change picture quality and performance;
 they do not select a Steam account or space.
 
-To remove a space:
+To archive a Space:
 
 1. Stop space streams and wait for cleanup.
-2. Select **Remove space** on its card, then confirm the displayed space name.
-3. The space moves to **Removed spaces**. Devices lose access to it. Other allowed Spaces remain available;
+2. Select **Archive Space** on its card, then confirm the displayed space name.
+3. The space moves to **Archived Spaces**. Devices lose access to it. Other allowed Spaces remain available;
    devices with none return to the host’s usual desktop and apps.
 
 Removal keeps installed games, saves, settings, and Steam sign-in on the host.
 It does not free disk space or delete Docker volumes. Select **Restore** under
-**Removed spaces** to use it again, then assign its devices. Restoring never
+**Archived Spaces** to use it again, then assign its devices. Restoring never
 restores device permissions or assignments automatically. You can restore the
-last removed space or create another one using the retained runtime setup.
+last archived Space or create another one using the retained runtime setup.
 
 ## Choose And Check Spaces In Nova
 
 With one allowed Space, Nova shows **Your Space** and **Open Space** directly.
-With several, it also offers **Choose Space**. The chooser lists only the Spaces
+With several, it also offers **Change Space**. The chooser lists only the Spaces
 allowed for that paired device. Choosing does not start a game or change another
 device's selection. The host remembers each device's last choice across restarts;
 Default Space is used when there is no saved permitted choice.
@@ -406,3 +442,16 @@ A Space is a saved gaming environment for a person or purpose. Name it **Alex’
 The Steam library currently detects completed installations in the Space’s standard Steam home. Compatibility tools such as Proton are excluded. External library folders are not imported from host paths. If a library cannot be read, **Steam Big Picture** remains available and Nova does not substitute the desktop’s games. Older hosts retain the original **Open Space** screen until they support the Space library API.
 
 Steam artwork is fetched through the paired Polaris host and cached separately from desktop artwork. Use **Options → Update Artwork Library** to check the selected Space's game artwork and retry missing or invalid images. **Steam Big Picture** keeps its bundled launcher artwork. Space artwork editing and pinned game shortcuts are not available in this first library version.
+
+### Space status and networking
+
+Polaris Space cards show **Available**, **Starting On**, **Playing On**, or
+**Stopping On**, with the paired device name when known. Status refreshes while
+Spaces is open. **Status Unavailable** means the host did not provide a current
+activity report; it does not imply that a Space is free. Device Access shows
+which devices may use a Space, not which Steam account is signed in.
+
+Each running Steam Space has a private Docker address on its own bridge
+network. Nova connects to the Polaris host address and selects a Space by name;
+there is no extra IP address to enter for each player. Outbound connections
+normally share the host network’s public internet address.

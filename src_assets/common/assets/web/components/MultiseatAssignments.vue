@@ -2,7 +2,7 @@
   <section v-if="state.enabled || loadError" class="section-card" aria-labelledby="profile-assignment-title" :aria-busy="loading || creating || managing || !!saving">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0">
-        <h2 id="profile-assignment-title" class="section-title">Your spaces</h2>
+        <h2 id="profile-assignment-title" class="section-title">Your Spaces</h2>
         <p class="mt-2 max-w-2xl text-sm text-storm">
           A space keeps its own Steam sign-in, games, and saves. Open your assigned space from Library in Nova.
         </p>
@@ -25,6 +25,7 @@
       Pair a device with permission to launch apps to assign a space. Temporary guests cannot use these spaces.
     </p>
     <SpacesList v-if="state.enabled" :profiles="state.profiles" :clients="clients" :manageable="state.management_available" :access-available="state.access_available"
+                :activity="loadError ? null : state.activity" :refreshing="loading"
                 :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError" :refresh="loadProfiles" @busy="managing = $event" />
     <MultiseatProfileCreate v-if="state.enabled && state.creation_available" :profiles="state.profiles"
                            :locked="locked" :ready="state.available && !state.changing && !state.failed && !loadError"
@@ -78,7 +79,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import SpacesList from './SpacesList.vue'
 import DesktopAccess from './DesktopAccess.vue'
 import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
@@ -89,9 +90,10 @@ const props = defineProps({
   clients: { type: Array, default: () => [] },
   clientsReady: { type: Boolean, default: true },
 })
-const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], creation_available: false, management_available: false, access_available: false })
+const state = reactive({ enabled: false, available: false, changing: false, failed: false, profiles: [], activity: null, creation_available: false, management_available: false, access_available: false })
 const choices = reactive({})
 const saving = ref(''), loading = ref(false)
+let request, disposed = false
 const creating = ref(false), managing = ref(false)
 const activeSpaces = computed(() => state.profiles.filter(space => !space.archived))
 const loadError = ref(''), actionError = ref(''), message = ref('')
@@ -135,14 +137,20 @@ watch(() => props.clients, () => reconcileChoices(), { deep: true })
 
 
 async function loadProfiles(resetClient = '') {
+  if (disposed) return false
   loading.value = true
+  request?.abort()
+  const current = new AbortController()
+  request = current
+  const timeout = setTimeout(() => current.abort(), 12000)
   try {
-    const response = await fetch('./api/multiseat/profiles', { credentials: 'include' })
+    const response = await fetch('./api/multiseat/profiles', { credentials: 'include', cache: 'no-store', signal: current.signal })
     if (!response.ok) throw new Error('Could not load space assignments. Refresh spaces to try again.')
     const next = await response.json()
+    if (disposed || request !== current) return false
     if (!validSnapshot(next)) throw new Error('Could not verify space assignments. Refresh spaces to try again.')
     const edited = new Set(props.clients.filter(client => dirty(client.uuid) && choices[client.uuid] !== undefined).map(client => client.uuid))
-    Object.assign(state, { creation_available: false, management_available: false, access_available: false }, next)
+    Object.assign(state, { activity: null, creation_available: false, management_available: false, access_available: false }, next)
     emit('snapshot', { ...next })
     for (const client of props.clients) {
       if (!edited.has(client.uuid)) choices[client.uuid] = assigned(client.uuid)
@@ -151,10 +159,11 @@ async function loadProfiles(resetClient = '') {
     loadError.value = ''
     return true
   } catch (cause) {
+    if (disposed || request !== current) return false
     emit('snapshot', null)
     loadError.value = cause.message || 'Could not load space assignments. Refresh spaces to try again.'
     return false
-  } finally { loading.value = false }
+  } finally { clearTimeout(timeout); if (request === current) loading.value = false }
 }
 
 async function refresh() {
@@ -192,5 +201,12 @@ async function save(client) {
     await loadProfiles(client)
   } finally { saving.value = '' }
 }
-onMounted(refresh)
+let poll
+onMounted(() => {
+  refresh()
+  poll = setInterval(() => {
+    if (document.visibilityState === 'visible' && !saving.value && !creating.value && !managing.value && !loading.value) loadProfiles()
+  }, 10000)
+})
+onUnmounted(() => { disposed = true; clearInterval(poll); request?.abort() })
 </script>

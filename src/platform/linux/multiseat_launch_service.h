@@ -60,6 +60,7 @@ namespace multiseat {
     std::vector<profile_summary_t> profiles;
     bool creation_available = false, management_available = false;
     std::vector<std::string> desktop_clients;
+    std::vector<profile_activity_t> activity;
   };
   struct profile_session_snapshot_t {
     bool active = false;
