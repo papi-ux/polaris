@@ -2097,10 +2097,14 @@ namespace proc {
       return exhausted;
     }
 
+    // graceful_timeout is how long the first SIGTERM pass waits before SIGKILL; an emulator
+    // writing its save on exit needs the app's own exit timeout here, not the two seconds the
+    // second pass keeps for whatever the first one left behind.
     bool terminate_isolated_session_processes(
       std::string_view session_instance_id,
       std::string_view reason,
-      std::vector<pidfd_handle_t> *tracked_detached_children = nullptr
+      std::vector<pidfd_handle_t> *tracked_detached_children = nullptr,
+      std::chrono::milliseconds graceful_timeout = std::chrono::milliseconds(2s)
     ) {
       if (session_instance_id.empty()) {
         return false;
@@ -2135,7 +2139,8 @@ namespace proc {
 
         BOOST_LOG(info) << "process: terminating "sv << snapshot.owned.size()
                         << " exact-generation isolated process(es) "sv << reason;
-        const bool terminated = terminate_pidfds(snapshot.owned, 2s, 1s, "isolated session process"sv);
+        const auto pass_timeout = pass == 0 ? graceful_timeout : std::chrono::milliseconds(2s);
+        const bool terminated = terminate_pidfds(snapshot.owned, pass_timeout, 1s, "isolated session process"sv);
         if (tracked_detached_children != nullptr) {
           direct_child_reap_complete = reap_exited_direct_children(
                                          snapshot.owned,
@@ -5633,6 +5638,10 @@ namespace proc {
 
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id) {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
+  }
+
+  bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id, std::chrono::milliseconds graceful_timeout) {
+    return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv, nullptr, graceful_timeout);
   }
 
   bool exact_generation_transient_capture_failure_retries_for_tests(
@@ -9979,10 +9988,16 @@ namespace proc {
     const auto reason = _session_used_cage_compositor ?
                           "after private Steam pre-cage termination"sv :
                           "during non-cage detached-only shutdown"sv;
+    // The app's Exit Timeout is the grace the first SIGTERM gets, floored at the two seconds
+    // this path always allowed and capped so a stuck process cannot hold End Session for long.
+    const auto graceful_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::clamp(std::chrono::seconds(_app.exit_timeout), std::chrono::seconds(2), std::chrono::seconds(30))
+    );
     const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
       reason,
-      (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr
+      (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr,
+      graceful_timeout
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;

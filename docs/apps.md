@@ -106,7 +106,7 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 
 | Field | What it does |
 | --- | --- |
-| **Exit Timeout** | Seconds to wait for every app process to exit gracefully when quitting; five by default. Zero or below terminates immediately. |
+| **Exit Timeout** | Seconds to wait for every app process to exit gracefully when quitting; five by default. Zero or below terminates immediately. In a private-compositor session the wait is at least two seconds and at most thirty, so an emulator can finish writing its save. |
 | **Resolution Scale Factor** | Scales the client-requested resolution: 2000x1000 at 120 percent becomes 2400x1200. Only a value other than 100 percent overrides the client's own factor; the stream mode itself is not affected. |
 | **Continue streaming until all app processes exit** | Keeps streaming until every process the app started has ended, instead of stopping when the first one does. |
 | **Continue streaming if the application exits quickly** | Detects launcher-type apps that close right after starting something else and treats them as detached. |
