@@ -39,6 +39,7 @@ namespace emulator_library {
     std::string_view id;
     std::string_view label;
     std::string_view platform;
+    std::string_view platform_id;  ///< the console as a client-facing id: switch, psx, gba
     std::vector<std::string_view> binaries;  ///< PATH candidates, first match wins
     std::string_view flatpak_id;
     std::string_view arguments;  ///< carries rom_placeholder; empty means the path alone
@@ -56,13 +57,13 @@ namespace emulator_library {
    */
   inline const std::vector<preset_t> &presets() {
     static const std::vector<preset_t> list {
-      {"eden", "Eden", "Nintendo Switch", {"eden"}, "dev.eden_emu.eden", "-f -g {rom}", {"nsp", "xci", "nca", "nro", "nso"}, "switch"},
-      {"dolphin", "Dolphin", "GameCube and Wii", {"dolphin-emu"}, "org.DolphinEmu.dolphin-emu", "-b -e {rom}", {"iso", "gcm", "wbfs", "rvz", "ciso", "gcz", "wia", "wad", "dol", "elf"}, ""},
-      {"cemu", "Cemu", "Wii U", {"Cemu", "cemu"}, "info.cemu.Cemu", "-f -g {rom}", {"wua", "wud", "wux", "rpx"}, ""},
-      {"duckstation", "DuckStation", "PlayStation", {"duckstation-qt"}, "org.duckstation.DuckStation", "-batch -fullscreen {rom}", {"cue", "chd", "iso", "pbp", "m3u", "img", "ecm", "mds"}, "ds5"},
-      {"pcsx2", "PCSX2", "PlayStation 2", {"pcsx2-qt"}, "net.pcsx2.PCSX2", "-batch -fullscreen {rom}", {"iso", "chd", "cso", "zso", "gz", "bin", "elf"}, "ds5"},
-      {"ppsspp", "PPSSPP", "PlayStation Portable", {"PPSSPPSDL", "PPSSPPQt"}, "org.ppsspp.PPSSPP", "{rom}", {"iso", "cso", "chd", "pbp"}, "ds5"},
-      {"mgba", "mGBA", "Game Boy Advance", {"mgba-qt"}, "io.mgba.mGBA", "-f {rom}", {"gba", "gb", "gbc", "sgb"}, ""},
+      {"eden", "Eden", "Nintendo Switch", "switch", {"eden"}, "dev.eden_emu.eden", "-f -g {rom}", {"nsp", "xci", "nca", "nro", "nso"}, "switch"},
+      {"dolphin", "Dolphin", "GameCube and Wii", "gamecube-wii", {"dolphin-emu"}, "org.DolphinEmu.dolphin-emu", "-b -e {rom}", {"iso", "gcm", "wbfs", "rvz", "ciso", "gcz", "wia", "wad", "dol", "elf"}, ""},
+      {"cemu", "Cemu", "Wii U", "wiiu", {"Cemu", "cemu"}, "info.cemu.Cemu", "-f -g {rom}", {"wua", "wud", "wux", "rpx"}, ""},
+      {"duckstation", "DuckStation", "PlayStation", "psx", {"duckstation-qt"}, "org.duckstation.DuckStation", "-batch -fullscreen {rom}", {"cue", "chd", "iso", "pbp", "m3u", "img", "ecm", "mds"}, "ds5"},
+      {"pcsx2", "PCSX2", "PlayStation 2", "ps2", {"pcsx2-qt"}, "net.pcsx2.PCSX2", "-batch -fullscreen {rom}", {"iso", "chd", "cso", "zso", "gz", "bin", "elf"}, "ds5"},
+      {"ppsspp", "PPSSPP", "PlayStation Portable", "psp", {"PPSSPPSDL", "PPSSPPQt"}, "org.ppsspp.PPSSPP", "{rom}", {"iso", "cso", "chd", "pbp"}, "ds5"},
+      {"mgba", "mGBA", "Game Boy Advance", "gba", {"mgba-qt"}, "io.mgba.mGBA", "-f {rom}", {"gba", "gb", "gbc", "sgb"}, ""},
     };
     return list;
   }

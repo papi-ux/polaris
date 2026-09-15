@@ -50,3 +50,33 @@ TEST(LauncherIdentityTests, InputIsNormalizedBeforeMapping) {
   EXPECT_EQ("windows", identity.platform);
   EXPECT_EQ("wine", identity.runtime);
 }
+
+TEST(LauncherIdentityTests, EmulatorEntriesNameTheirConsoleAndEmulator) {
+  const auto eden = proc::launcher_identity_from_emulator("eden");
+  EXPECT_EQ(eden.platform, "switch");
+  EXPECT_EQ(eden.platform_label, "Nintendo Switch");
+  EXPECT_EQ(eden.runtime, "eden");
+  EXPECT_EQ(eden.runtime_label, "Eden");
+
+  const auto duckstation = proc::launcher_identity_from_emulator(" DuckStation ");
+  EXPECT_EQ(duckstation.platform, "psx");
+  EXPECT_EQ(duckstation.platform_label, "PlayStation");
+  EXPECT_EQ(duckstation.runtime, "duckstation");
+  EXPECT_EQ(duckstation.runtime_label, "DuckStation");
+}
+
+TEST(LauncherIdentityTests, CustomAndUnknownEmulatorsStayHonest) {
+  const auto custom = proc::launcher_identity_from_emulator("custom");
+  EXPECT_TRUE(custom.platform.empty());
+  EXPECT_TRUE(custom.platform_label.empty());
+  EXPECT_EQ(custom.runtime, "custom");
+  EXPECT_EQ(custom.runtime_label, "Custom emulator");
+
+  for (const auto *unknown : {"", "ryujinx", "  "}) {
+    const auto identity = proc::launcher_identity_from_emulator(unknown);
+    EXPECT_TRUE(identity.platform.empty()) << unknown;
+    EXPECT_TRUE(identity.platform_label.empty()) << unknown;
+    EXPECT_TRUE(identity.runtime.empty()) << unknown;
+    EXPECT_TRUE(identity.runtime_label.empty()) << unknown;
+  }
+}
