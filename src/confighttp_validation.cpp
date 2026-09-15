@@ -538,6 +538,7 @@ namespace confighttp::validation {
     };
     constexpr std::array source_values {
       ""sv,
+      "emulator"sv,
       "heroic"sv,
       "lutris"sv,
       "manual"sv,
@@ -634,7 +635,7 @@ namespace confighttp::validation {
         }
 
         if (!contains(source_values, std::string_view {value.get<std::string>()})) {
-          error = "source must be one of manual, steam, lutris, or heroic";
+          error = "source must be one of manual, steam, lutris, heroic, or emulator";
           return false;
         }
         continue;

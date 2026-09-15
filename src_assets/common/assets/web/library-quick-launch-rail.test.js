@@ -10,6 +10,8 @@ const scannerState = {
   steamGames: ref([]),
   lutrisGames: ref([]),
   heroicGames: ref([]),
+  emulatorGames: ref([]),
+  librarySources: ref([]),
   error: ref(null),
   scan: vi.fn(),
   importSelected: vi.fn(() => Promise.resolve(0)),

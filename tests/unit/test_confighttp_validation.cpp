@@ -335,3 +335,21 @@ TEST(ConfigValidationTests, AcceptsVaapiSessionControlKeysForPersistence) {
     {"vaapi_blbrc", "enabled"}, {"vaapi_strict_rc_buffer", "disabled"}
   }, error)) << error;
 }
+
+TEST(AppValidationTests, AcceptsAnEmulatorSourceWithItsRomKeys) {
+  nlohmann::json payload {
+    {"name", "Game One"},
+    {"cmd", "eden -f -g '/roms/Game One (USA).nsp'"},
+    {"source", "emulator"},
+    {"emulator", "eden"},
+    {"rom-folder", "folder-id"},
+    {"rom-path", "/roms/Game One (USA).nsp"},
+    {"gamepad", "switch"}
+  };
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_app_payload(payload, error)) << error;
+
+  payload["source"] = "retroarch";
+  EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
+  EXPECT_NE(error.find("emulator"), std::string::npos) << error;
+}
