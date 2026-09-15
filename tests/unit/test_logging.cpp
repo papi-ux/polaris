@@ -248,6 +248,50 @@ TEST(LoggingGeneration, AutomaticRotationAdvancesGenerationAndKeepsBothFilesBoun
   EXPECT_FALSE(std::filesystem::exists(backup));
 }
 
+TEST(LoggingGeneration, TheRunBeforeThePreviousOneSurvivesARestart) {
+  // A freeze, a reboot and an export take one restart; with a single retained run that
+  // restart overwrote the run that had been streaming. Three inits: the first run must
+  // still be readable after the third.
+  namespace fs = std::filesystem;
+  const auto root = fs::temp_directory_path() / "polaris-logging-two-generations";
+  std::error_code error;
+  fs::remove_all(root, error);
+  fs::create_directories(root);
+  const auto active = root / "polaris.log";
+  const auto backup = active.string() + ".backup";
+  const auto older = active.string() + ".backup.1";
+  EXPECT_EQ(logging::older_backup_log_path(active.string()), older);
+  EXPECT_EQ(logging::older_backup_log_path(""), "");
+
+  const auto run = [&](const char *marker) {
+    auto guard = logging::init(2, active.string());
+    ASSERT_TRUE(guard);
+    BOOST_LOG(info) << marker;
+    logging::log_flush();
+    guard.reset();
+  };
+  const auto contents = [](const fs::path &path) {
+    std::ifstream in {path, std::ios::binary};
+    std::stringstream text;
+    text << in.rdbuf();
+    return text.str();
+  };
+
+  run("run-one-streaming");
+  run("run-two-crashed-at-startup");
+  EXPECT_NE(contents(backup).find("run-one-streaming"), std::string::npos);
+  EXPECT_FALSE(fs::exists(older));
+
+  run("run-three-exporting");
+  EXPECT_NE(contents(active).find("run-three-exporting"), std::string::npos);
+  EXPECT_NE(contents(backup).find("run-two-crashed-at-startup"), std::string::npos);
+  EXPECT_NE(contents(older).find("run-one-streaming"), std::string::npos);
+  EXPECT_EQ(contents(older).find("run-two"), std::string::npos);
+
+  PolarisEnvironment::restore_logging();
+  fs::remove_all(root, error);
+}
+
 TEST(LoggingOwnerLock, SecondInitFallsBackToConsoleAndLeavesOwnedFilesUntouched) {
   namespace fs = std::filesystem;
   const auto root = fs::temp_directory_path() / "polaris-logging-owner-lock";
