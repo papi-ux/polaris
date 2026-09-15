@@ -1,2 +1,6 @@
-# Explicit defaults prevent discovery of unrelated configuration files.
-{}
+# Explicit configuration prevents discovery of unrelated configuration files.
+# Lutris has a verified runtime layer larger than Syft's default 2 GiB limit.
+# Keep extraction bounded while inventorying the complete image.
+source:
+  image:
+    max-layer-size: 4GiB

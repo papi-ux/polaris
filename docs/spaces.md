@@ -249,6 +249,12 @@ Steam sign-in and saves. A **streaming preset** in Nova saves stream settings,
 such as resolution, frame rate, and bitrate. Switching a preset does not switch
 Steam accounts or create a new space.
 
+Nova offers frame rates up to **240 FPS** when the client display supports them.
+Choose a rate your host can sustain while all intended Spaces are running.
+A selectable rate is a target, not a measured result: the game, GPU, encoder,
+network, decoder, and display all affect delivery. Start at 60 FPS, then increase
+the target and check gameplay, sound, and frame pacing.
+
 **This PC’s desktop and apps** opens the usual apps on the host. Select it under
 Default Space to clear all Space access for that device and return to ordinary streaming.
 

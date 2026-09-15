@@ -31,8 +31,11 @@ include build and development inputs; their presence is not proof of runtime
 reachability. Preserve both reports rather than discarding one to lower the count.
 
 Scanner containers have no host service socket, GPU, input device or network
-during analysis. The separate database update can use the network. A missing,
-invalid, future-dated or more than five-day-old database fails the audit. High and
+during analysis. Syft permits each image archive member up to a bounded 4 GiB,
+because the verified Lutris runtime includes a layer larger than its default
+2 GiB read limit. This permits complete inventory without excluding image paths
+or vulnerability matches. The separate database update can use the network.
+A missing, invalid, future-dated or more than five-day-old database fails the audit. High and
 Critical matches block signing, including matches without available fixes. Other
 matches remain in the report and still need review before publication.
 
