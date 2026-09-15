@@ -6,6 +6,7 @@ const apps = [
   { uuid: 'steam-bpm', name: 'Steam Big Picture', source: 'steam', cmd: 'steam -gamepadui' },
   { uuid: 'raiders', name: 'ARC Raiders', source: 'steam', 'game-category': 'fast_action', cmd: 'steam steam://rungameid/1808500' },
   { uuid: 'heroic-game', name: 'Alan Wake 2', source: 'heroic', 'game-category': 'story', cmd: 'heroic launch' },
+  { uuid: 'zelda', name: 'The Legend of Zelda', source: 'emulator', emulator: 'eden', cmd: "eden -f -g '/roms/switch/zelda.xci'" },
   { name: 'Unsaved Draft' },
 ]
 
@@ -21,6 +22,12 @@ describe('Library filters', () => {
       .toEqual(['steam-bpm', 'raiders'])
     expect(filterLibraryApps(apps, { query: '', filter: 'fast_action', currentApp: '' }).map((app) => app.uuid))
       .toEqual(['raiders'])
+  })
+
+  it('filters to emulator entries and searches the emulator name', () => {
+    expect(filterLibraryApps(apps, { query: '', filter: 'emulator', currentApp: '' }).map((app) => app.uuid)).toEqual(['zelda'])
+    expect(filterLibraryApps(apps, { query: 'eden', filter: 'all', currentApp: '' }).map((app) => app.uuid)).toEqual(['zelda'])
+    expect(filterLibraryApps(apps, { query: '', filter: 'manual', currentApp: '' }).map((app) => app.uuid)).toEqual(['desktop'])
   })
 
   it('filters to the running app when requested', () => {

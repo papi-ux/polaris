@@ -46,7 +46,11 @@
 #include <boost/process/v1/group.hpp>
 #include <boost/process/v1/handles.hpp>
 #include <boost/process/v1/io.hpp>
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/exe.hpp>
+#include <boost/process/v1/search_path.hpp>
 #include <boost/process/v1/start_dir.hpp>
+#include <boost/program_options/parsers.hpp>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -748,7 +752,52 @@ std::string get_local_ip_for_gateway() {
   return local_ip;
 }
 
+  std::optional<std::vector<std::string>> posix_command_argv(const std::string &cmd) {
+    if (cmd.find('\'') == std::string::npos && cmd.find('\\') == std::string::npos) {
+      return std::nullopt;
+    }
+    try {
+      auto argv = boost::program_options::split_unix(cmd);
+      if (argv.empty() || argv.front().empty()) {
+        return std::nullopt;
+      }
+      return argv;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "Command line could not be split like a shell, running it as written: "sv << e.what();
+      return std::nullopt;
+    }
+  }
+
   bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+    // A single-quoted argument (a ROM path with a space, an AppImage under a folder with a
+    // space, the gamepad-isolation wrapper) has to reach the child as one token without its
+    // quotes, and Boost's own splitter keeps them. Split such a command the way a shell would
+    // and exec the tokens directly, so no shell ever interprets a filename.
+    if (const auto argv = posix_command_argv(cmd); argv) {
+      boost::filesystem::path exe {argv->front()};
+      if (argv->front().find('/') == std::string::npos) {
+        exe = bp::search_path(argv->front());
+        if (exe.empty()) {
+          BOOST_LOG(warning) << "Couldn't find ["sv << argv->front() << "] on PATH"sv;
+          ec = std::make_error_code(std::errc::no_such_file_or_directory);
+          return bp::child();
+        }
+      }
+      const std::vector<std::string> args(argv->begin() + 1, argv->end());
+      BOOST_LOG(debug) << "Executing ["sv << exe.string() << "] with "sv << args.size() << " shell-split arguments"sv;
+      // clang-format off
+      if (!group) {
+        if (!file) {
+          return bp::child(bp::exe = exe, bp::args = args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > bp::null, bp::std_err > bp::null, bp::limit_handles, ec);
+        }
+        return bp::child(bp::exe = exe, bp::args = args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > file, bp::std_err > file, bp::limit_handles, ec);
+      }
+      if (!file) {
+        return bp::child(bp::exe = exe, bp::args = args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > bp::null, bp::std_err > bp::null, bp::limit_handles, ec, *group);
+      }
+      return bp::child(bp::exe = exe, bp::args = args, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > file, bp::std_err > file, bp::limit_handles, ec, *group);
+      // clang-format on
+    }
     // clang-format off
     if (!group) {
       if (!file) {

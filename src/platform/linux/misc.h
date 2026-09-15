@@ -67,6 +67,18 @@ namespace platf {
   std::vector<render_device_candidate_t> without_virtual_display_nodes(std::vector<render_device_candidate_t> candidates);
 
   /**
+   * @brief The argv a launch command yields when it carries POSIX shell quoting.
+   *
+   * Boost.Process splits a command string on unquoted spaces, strips only double quotes and
+   * ignores single quotes, so a single-quoted path reaches the child with its quotes attached
+   * and a path with a space arrives in two pieces. A command that uses single quotes or
+   * backslashes is split the way a shell would instead; anything else is left to Boost so
+   * plain commands keep their exact behaviour.
+   * @return The tokens, or nothing when the command needs no shell-style split or cannot be split.
+   */
+  std::optional<std::vector<std::string>> posix_command_argv(const std::string &cmd);
+
+  /**
    * @brief The render node the encoder actually runs on: adapter_name when it is set,
    *        otherwise the automatic choice. Empty when neither names a node.
    */

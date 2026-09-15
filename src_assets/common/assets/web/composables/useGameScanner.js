@@ -1,7 +1,14 @@
 import { ref } from 'vue'
 
+function staged(list = []) {
+  return (list || []).map(g => ({
+    ...g,
+    selected: !g.already_imported
+  }))
+}
+
 /**
- * Composable for scanning and importing Steam/Lutris/Heroic games.
+ * Composable for scanning and importing Steam, Lutris, Heroic and ROM folder games.
  *
  * @returns Reactive scanning state and import functions.
  */
@@ -11,7 +18,12 @@ export function useGameScanner() {
   const steamGames = ref([])
   const lutrisGames = ref([])
   const heroicGames = ref([])
+  const emulatorGames = ref([])
+  // The ROM folders as the scan saw them: emulator install state and how many games each holds.
+  const librarySources = ref([])
   const error = ref(null)
+
+  const lists = { steam: steamGames, lutris: lutrisGames, heroic: heroicGames, emulator: emulatorGames }
 
   async function scan() {
     scanning.value = true
@@ -20,18 +32,11 @@ export function useGameScanner() {
       const res = await fetch('./api/games/scan', { credentials: 'include' })
       if (res.ok) {
         const data = await res.json()
-        steamGames.value = (data.steam_games || []).map(g => ({
-          ...g,
-          selected: !g.already_imported
-        }))
-        lutrisGames.value = (data.lutris_games || []).map(g => ({
-          ...g,
-          selected: !g.already_imported
-        }))
-        heroicGames.value = (data.heroic_games || []).map(g => ({
-          ...g,
-          selected: !g.already_imported
-        }))
+        steamGames.value = staged(data.steam_games)
+        lutrisGames.value = staged(data.lutris_games)
+        heroicGames.value = staged(data.heroic_games)
+        emulatorGames.value = staged(data.emulator_games)
+        librarySources.value = data.library_sources || []
       } else {
         error.value = 'Failed to scan for games'
       }
@@ -42,9 +47,12 @@ export function useGameScanner() {
     }
   }
 
+  function allGames() {
+    return [...steamGames.value, ...lutrisGames.value, ...heroicGames.value, ...emulatorGames.value]
+  }
+
   async function importSelected() {
-    const allGames = [...steamGames.value, ...lutrisGames.value, ...heroicGames.value]
-    const selected = allGames.filter(g => g.selected && !g.already_imported)
+    const selected = allGames().filter(g => g.selected && !g.already_imported)
     if (selected.length === 0) return 0
 
     importing.value = true
@@ -67,7 +75,10 @@ export function useGameScanner() {
             cmd: g.cmd || '',
             image_path: g.image_path || g['image-path'] || g.cover_path || '',
             game_category: g.game_category || '',
-            genres: g.genres || []
+            genres: g.genres || [],
+            // ROM folder entries: the host rebuilds the command from these two, never from cmd.
+            source_id: g.source_id || '',
+            rom_path: g.rom_path || ''
           }))
         })
       })
@@ -87,9 +98,8 @@ export function useGameScanner() {
   }
 
   function toggleAll(val, source) {
-    const lists = { steam: steamGames, lutris: lutrisGames, heroic: heroicGames }
     const target = source ? lists[source] : null
-    const targets = target ? [target.value] : [steamGames.value, lutrisGames.value, heroicGames.value]
+    const targets = target ? [target.value] : Object.values(lists).map(list => list.value)
     targets.forEach(list => {
       list.forEach(g => {
         if (!g.already_imported) g.selected = val
@@ -97,5 +107,8 @@ export function useGameScanner() {
     })
   }
 
-  return { scanning, importing, steamGames, lutrisGames, heroicGames, error, scan, importSelected, toggleAll }
+  return {
+    scanning, importing, steamGames, lutrisGames, heroicGames, emulatorGames, librarySources,
+    error, scan, importSelected, toggleAll
+  }
 }

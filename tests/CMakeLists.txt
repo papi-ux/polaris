@@ -251,6 +251,8 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_inventory_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kernel_gpu_lines.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_port_holder.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_emulator_library.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_rom_folder_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_session_key.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_otp_claim.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_stop_contract.cpp
