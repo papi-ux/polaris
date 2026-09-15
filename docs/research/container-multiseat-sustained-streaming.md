@@ -193,8 +193,11 @@ physical controller transports remain separate acceptance requirements.
 Browser streaming, AMD Spaces acceptance, other distributions, package publication,
 and unattended resumable game sessions are not established by this run.
 
-Next, repeat the pacing comparison with equal durations and reversed ordering,
-and compare the same audio workload over a controlled alternative network path.
-Keep host egress and client receive observation together so a quieter run is not
-mistaken for an identified repair. Runtime publication and clean-host installation
-acceptance remain necessary before admitting an image to the download catalog.
+The [pacing and network followup](container-multiseat-pacing-network.md) completes
+the equal duration comparison in reversed order and records a separate alternative
+network trial. Balanced again presented more evenly, while the degraded direct
+wireless path did not resolve the audio cause. The report also measures a 240 FPS
+request under two game workloads; accepting the request did not mean sustaining it.
+Stage timing and a wired handheld comparison are the next diagnostic steps.
+Runtime publication and clean-host installation acceptance remain necessary before
+admitting an image to the download catalog.

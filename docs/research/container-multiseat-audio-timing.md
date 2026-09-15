@@ -286,3 +286,10 @@ Android's kernel as much as 65.889 ms apart. Nova read those packets within
 0.481 ms of their kernel timestamps. These events locate delay after host egress;
 they do not identify a particular network component or supersede the earlier host
 stalls. Audio reliability remains an acceptance gate.
+
+The [equal duration pacing and network comparison](container-multiseat-pacing-network.md)
+reproduces delayed Android kernel arrival on the normal wireless path while host
+packet spacing remains regular. A temporary direct wireless path was worse and
+cannot serve as a clean reference. It also records the requested 240 FPS extension
+and its measured delivery shortfall. Audio reliability and causal isolation remain
+open; a wired handheld comparison is still needed.
