@@ -297,6 +297,34 @@ If a space stops on its own or loses sound, retain the time of the failure and
 the space name for diagnosis. A successful setup check is not evidence that
 120 FPS, every game, or every GPU is reliable.
 
+### Check Sound And Stuttering
+
+For a comparison, set the device's display settings in Polaris to 1920 × 1080
+at 60 FPS. In Nova, open **Stream Settings**, choose **Auto** for **Frame Rate**
+and **Device Settings** for **Resolution**. Check the game during play with one
+Space, then repeat with the other intended Spaces running.
+
+If sound crackles, drops out, or falls behind:
+
+1. Note the time, Space name, game, frame rate, bitrate, and whether the client
+   uses Wi-Fi or Ethernet. Note whether picture or controls also paused.
+2. Save your game before reconnecting. The current runtime ends the game session
+   when its stream disconnects.
+3. Compare the same game and settings using Ethernet on the same client, when
+   available. Otherwise, try another access point. Change one thing at a time.
+4. Repeat with heavy downloads, builds, and updates paused on the host. Then
+   compare one Space with the intended number of simultaneous players.
+5. If the problem remains, retain the observations for **Doctor & Support**.
+
+A low average latency or zero reported video packet loss does not rule out brief
+audio delivery pauses. The preview has recorded both host scheduling stalls and
+delays on wireless client paths. A quiet wired comparison helps narrow the
+investigation; it does not identify a specific router or prove every client is
+reliable. Audio reliability remains under investigation.
+
+See the [audio timing investigation](research/container-multiseat-audio-timing.md)
+for measured results and their limits.
+
 ## Names, device access, and removal
 
 Give a space a player or room name, such as Alex or Living room. In **Spaces**,

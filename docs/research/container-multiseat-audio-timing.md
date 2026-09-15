@@ -293,3 +293,59 @@ packet spacing remains regular. A temporary direct wireless path was worse and
 cannot serve as a clean reference. It also records the requested 240 FPS extension
 and its measured delivery shortfall. Audio reliability and causal isolation remain
 open; a wired handheld comparison is still needed.
+
+## Wired Android Reference, September 15
+
+A simultaneous four minute network probe sent 48,000 generated UDP datagrams to
+each of two Wi-Fi handhelds and an Ethernet Shield. Each flow used 200 packets
+per second, a 94 byte payload and CS6 priority. All 144,000 packets arrived
+exactly once. The host retained software transmit timestamps and each client
+recorded kernel and immediate application receive timestamps.
+
+| Measurement | First Wi-Fi handheld | Second Wi-Fi handheld | Ethernet Shield |
+| --- | ---: | ---: | ---: |
+| Maximum kernel receive gap | 33.346 ms | 60.112 ms | 6.140 ms |
+| Kernel receive gaps above 20 ms | 3 | 4 | 0 |
+| Maximum driver transmit gap | 5.233 ms | 5.244 ms | 5.300 ms |
+| Missing or duplicate packets | 0 | 0 | 0 |
+
+Three consecutive packet pairs had matching 21 to 33 ms receive gaps on both
+handhelds while the Shield received the corresponding pairs about 5 ms apart.
+A separate 60 ms gap affected only the second handheld. Matching transmit
+timestamps across all three flows were within 0.304 ms throughout the test.
+Both wireless flows reordered their first two packets at startup; the delayed
+pairs above exclude those reordered packets.
+
+This strengthens the wireless branch as the lead for those pauses. It does not
+distinguish the access point, radio conditions or client Wi-Fi behavior. It also
+does not supersede the earlier host scheduling stalls. The handhelds were awake
+on the same access point without active Wi-Fi locks; the Shield was asleep on
+Ethernet. These were generated probes, not game streams. Different hardware,
+power states and the absence of streaming load limit the comparison.
+
+The next component comparison needs the same handheld on Ethernet or another
+access point. The [Linux timestamping contract](https://docs.kernel.org/networking/timestamping.html)
+places software transmit timestamps before physical transmission and receive
+timestamps after driver delivery into the kernel. They do not measure wire or
+radio arrival times. Comparisons use gaps within each clock, not absolute one
+way latency.
+
+A subsequent ordinary Nova build from
+`06f549e8613cb051840fe95496897cc368c8b085` opened Control on the Shield using the
+native host and Steam NVIDIA image from
+`1e7c847d06bc84e62591825a0d3fe9fb225f9cc6`. The image configuration digest was
+`sha256:cbf7d00e145e8b30082be97ba06bfc4988e9a91b5d8f941a8ae69a922ed26d1d`.
+The stream requested 1080p60 and 8 Mbps and reached a saved gameplay scene.
+Its 333 second session included startup and menus. Thirty two full playback
+reports after the first report covered 320.083 seconds, with two queue skips,
+no short writes or write errors, and an 8.116 ms maximum write. The first and
+last reported underrun counters both read 2. The initial report separately
+contained 17 queue skips and those two underruns.
+
+The Shield became unavailable for testing during normal household use. Nova
+lost foreground focus and shut down its stream. The sustained two-client
+gameplay interval, reconnect exercise, physical Shield controller check and
+audible acceptance were not completed. This partial observation is not an
+audio pass. The second Space reached PEAK gameplay on the handheld and
+responded to input from its controller device. Neither observation closes the
+remaining audio reliability gate.
