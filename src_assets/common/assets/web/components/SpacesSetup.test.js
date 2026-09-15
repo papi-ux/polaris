@@ -28,12 +28,12 @@ describe('Spaces setup', () => {
     expect(wrapper.element.open).toBe(true)
     expect(wrapper.get('summary').text()).toContain('Needs Attention')
   })
-  it('offers host commands and rechecks actual state without a system mutation', async () => {
+  it('links to setup instructions and rechecks actual state without a system mutation', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(snapshot())).mockResolvedValueOnce(reply(snapshot(true))))
     wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
-    expect(wrapper.text()).toContain('sudo dnf install')
-    expect(wrapper.text()).toContain('administrator password stays in that terminal')
+    expect(wrapper.get('[data-setup-check=docker] a').attributes('href')).toContain('docs/spaces.md#prepare-docker-from-spaces')
+    expect(wrapper.find('pre').exists()).toBe(false)
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('Host prerequisites checked.')
@@ -69,12 +69,12 @@ describe('Spaces setup', () => {
     wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
     expect(wrapper.text()).not.toContain('sudo dnf')
-    expect(wrapper.text()).toContain('system image')
+    expect(wrapper.get('[data-setup-check=docker] a').text()).toBe('Docker Setup Guide')
     expect(wrapper.text()).not.toContain('sudo -H /usr/bin/polaris-spaces-setup')
     expect(installGuide({ distribution: 'constructor', immutable_host: false })).toBeNull()
   })
 
-  it('gates first setup on security readiness and offers only fixed terminal commands', async () => {
+  it('gates first setup on security readiness and uses a fixed documentation destination', async () => {
     const result = snapshot(true)
     const security = result.checks.find(check => check.id === 'security')
     security.state = 'required'
@@ -82,9 +82,8 @@ describe('Spaces setup', () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(result)))
     wrapper = mount(SpacesSetup, { global: { stubs: ['router-link', 'SpacesFirstSetup'] } })
     await flushPromises()
-    expect(wrapper.text()).toContain('sudo -H /usr/bin/polaris-spaces-setup install')
-    expect(wrapper.text()).toContain('stop Spaces streams, and quit Polaris')
-    expect(wrapper.text()).toContain('selinux-policy-devel container-selinux make')
+    expect(wrapper.get('[data-setup-check=security] a').attributes('href')).toContain('docs/spaces.md#prepare-spaces-security-support')
+    expect(wrapper.find('pre').exists()).toBe(false)
     expect(wrapper.find('spaces-first-setup-stub').attributes('hostready')).toBe('false')
     const old = snapshot(true); old.version = 1
     expect(validSetup(old)).toBe(false)

@@ -3,9 +3,6 @@
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0">
         <h2 id="profile-assignment-title" class="section-title">Your Spaces</h2>
-        <p class="mt-2 max-w-2xl text-sm text-storm">
-          A space keeps its own Steam sign-in, games, and saves. Open your assigned space from Library in Nova.
-        </p>
       </div>
       <span v-if="state.enabled" class="meta-pill">{{ activeSpaces.length }} {{ activeSpaces.length === 1 ? 'space' : 'spaces' }}</span>
     </div>
@@ -32,10 +29,9 @@
                            :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
     <DesktopAccess v-if="Array.isArray(state.desktop_clients)" :clients="clients" :allowed="state.desktop_clients"
                    :locked="locked" :refresh="refresh" @busy="managing = $event" />
-    <details v-if="state.enabled && devices.length" class="mt-5 border-t border-storm/20 pt-3" open>
+    <details v-if="state.enabled && devices.length" class="mt-5 border-t border-storm/20 pt-3">
       <summary class="focus-ring cursor-pointer rounded py-2 font-semibold text-silver">Default Space</summary>
-      <p class="mt-2 text-sm text-storm">Devices are the handhelds, TVs, and computers paired with Polaris. Choose the Space each device starts with. Allow additional Spaces using Device Access on a Space card.
-        Rename a device in Devices if its name is hard to recognize.</p>
+      <p class="mt-2 text-sm text-storm">Choose the Space each device opens first.</p>
       <div class="mt-4 grid gap-3">
       <div v-for="client in devices" :key="client.uuid" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
         <div class="flex flex-wrap items-start justify-between gap-2">

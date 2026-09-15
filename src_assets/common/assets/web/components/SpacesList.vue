@@ -11,23 +11,21 @@
             <p class="mt-1 text-sm" :class="ready && activity && !spaceActivity(space).length ? 'text-success' : 'text-storm'" role="status">{{ activitySummary(space) }}</p>
           </div>
         </div>
-        <p class="mt-3 text-xs text-storm">{{ space.steam ? 'Steam Account: Check Or Change In Steam Big Picture' : 'Gaming Space' }}</p>
         <p class="mt-3 break-words text-sm text-storm">{{ deviceSummary(space) }}</p>
         <div v-if="manageable" class="mt-4 flex flex-wrap gap-3">
-          <button type="button" class="focus-ring rounded py-2 text-sm text-ice disabled:opacity-40" :disabled="locked"
+          <button type="button" class="focus-ring rounded-lg border border-ice/30 px-3 py-2 text-sm text-ice disabled:opacity-40" :disabled="locked"
                   :aria-label="'Rename ' + space.name" @click="open(space, 'rename')">Rename</button>
-          <button type="button" class="focus-ring rounded py-2 text-sm text-storm disabled:opacity-40" :disabled="locked"
-                  :aria-label="'Archive ' + space.name" @click="open(space, 'remove')">Archive Space</button>
+          <button type="button" class="focus-ring rounded-lg border border-warning/40 px-3 py-2 text-sm text-warning-bright disabled:opacity-40" :disabled="locked"
+                  :aria-label="'Remove ' + space.name" @click="open(space, 'remove')">Remove Space</button>
         </div>
         <SpaceAccess v-if="accessAvailable" :space="space" :clients="clients" :locked="locked"
                      :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" />
       </article>
     </div>
     <p v-if="!active.length" class="mt-3 text-sm text-storm">No active Spaces. Create one below, or restore an archived Space.</p>
-    <p v-else class="mt-3 text-xs text-storm">One device can play in a Space at a time. Use separate Spaces for players who play together. Archiving keeps installed games and saves; it does not free storage.</p>
     <form v-if="selected" ref="panel" tabindex="-1" class="mt-4 rounded-xl border border-ice/30 bg-deep p-4"
-          :aria-label="operation === 'rename' ? 'Rename Space' : operation === 'restore' ? 'Restore Space' : 'Archive Space'" @submit.prevent="submit">
-      <h3 class="break-words font-semibold text-silver">{{ operation === 'rename' ? 'Rename ' : operation === 'restore' ? 'Restore ' : 'Archive ' }}{{ selected.name }}{{ operation === 'rename' ? '' : '?' }}</h3>
+          :aria-label="operation === 'rename' ? 'Rename Space' : operation === 'restore' ? 'Restore Space' : 'Remove Space'" @submit.prevent="submit">
+      <h3 class="break-words font-semibold text-silver">{{ operation === 'rename' ? 'Rename ' : operation === 'restore' ? 'Restore ' : 'Remove ' }}{{ selected.name }}{{ operation === 'rename' ? '' : '?' }}</h3>
       <template v-if="operation === 'rename'">
         <label for="space-edit-name" class="mt-3 block text-sm text-silver">Space Name</label>
         <input id="space-edit-name" v-model="name" maxlength="128" autocomplete="off" :disabled="working"
@@ -44,7 +42,7 @@
       <div class="mt-4 flex flex-wrap gap-3">
         <button type="submit" class="focus-ring rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
                 :disabled="locked || working || (operation === 'rename' && !validName)">
-          {{ working ? 'Saving…' : operation === 'rename' ? 'Save Name' : operation === 'restore' ? 'Restore Space' : 'Archive Space' }}
+          {{ working ? 'Saving…' : operation === 'rename' ? 'Save Name' : operation === 'restore' ? 'Restore Space' : 'Remove Space' }}
         </button>
         <button type="button" class="focus-ring rounded-lg px-3 py-2.5 text-sm text-storm" :disabled="working" @click="close">{{ submitted ? 'Close' : 'Cancel' }}</button>
       </div>
@@ -109,7 +107,7 @@ function confirmChange() {
   if (!current || !(request.operation === 'rename' ? current.name === request.name : current.archived === (request.operation === 'remove'))) return false
   error.value = ''
   message.value = request.operation === 'rename' ? 'Space renamed to ' + request.name + '. Refresh the library in Nova.' :
-    request.operation === 'remove' ? request.previousName + ' was archived. Games and saves are kept in Archived Spaces.' :
+    request.operation === 'remove' ? request.previousName + ' was removed. Games and saves are kept in Archived Spaces.' :
       request.previousName + ' was restored. Choose its devices below.'
   pending.value = null
   close()

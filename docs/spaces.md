@@ -12,6 +12,22 @@ using the Library in Nova. You do not need Docker for ordinary streaming.
 
 Example with sample player and device names.
 
+## Using the Spaces page
+
+The page keeps everyday controls together. Each card shows its Space name,
+current activity, permitted devices, **Rename**, and **Remove Space**.
+Expand **Device Access** on a card to change its permitted devices. Expand
+**Default Space** to choose which Space each device opens first. Pair and rename
+devices in **Devices**.
+
+Open **Host Setup** for current prerequisite checks and first Space preparation.
+Checks that need attention link directly to the relevant section of this guide.
+Use **Recheck Setup** after completing the terminal steps. Healthy configured
+hosts keep this section collapsed.
+
+The **Spaces Guide** link at the top of the page opens this document, including
+installation, Steam accounts, first gameplay, troubleshooting, and removal.
+
 ## Your first game
 
 1. **Check Host.** Open **Spaces → Host Setup** in Polaris. Follow the checks for
@@ -21,7 +37,7 @@ Example with sample player and device names.
    recognizable player or room name, such as **Alex’s Space** or **Living Room**.
    Under **Device Access**, allow your paired handheld or TV. Choose its
    **Default Space** if it can access more than one.
-3. **Sign In To Steam.** Open the host’s Library in Nova. The **Playing In** bar
+3. **Sign In To Steam.** Open the host’s Library in Nova. **Playing In** in the library toolbar
    shows your current Space. Use **Change Space** when another permitted Space
    is available, then select **Steam Big Picture → Open Steam Big Picture**.
    Sign in through Steam and install a game. A Space name is a label, not proof
@@ -103,15 +119,14 @@ preview limitation.
 ## Prepare Docker from Spaces
 
 1. Open the Polaris web interface and select **Spaces**, beside **Devices**.
-2. Under **Set up this host**, select **Recheck setup**. Checks run on the PC
+2. Under **Host Setup**, select **Recheck Setup**. Checks run on the PC
    hosting Polaris, even if you opened the page on a phone or another computer.
-3. If Docker Engine needs attention, expand **Install Docker step by step**.
-   Run the displayed commands in a terminal on the Polaris host. Approve package
+3. If Docker Engine needs attention, open **Docker Setup Guide** and follow your
+   distribution's steps below in a terminal on the Polaris host. Approve package
    installation with your administrator password in that terminal.
-4. Expand **Start Docker and grant access**. Start the system Docker service,
-   then grant Docker access to the Linux account running Polaris. The displayed
-   access command uses the service's numeric user ID, rather than assuming that
-   your terminal account is the same user.
+4. Start the system Docker service, then grant Docker access to the Linux account
+   running Polaris. For a service installation, that account may differ from
+   your terminal account; grant access to the service account.
 5. Save your work and stop streams before signing out and back in. Start Polaris
    again and select **Recheck setup**. If Polaris runs as a system service, its
    administrator may need to restart that service to refresh group membership.
@@ -196,7 +211,7 @@ The helper installs only the dedicated worker policy, reserved controller policy
 version marker, and reserved input rule. It reloads policy and udev rules without
 changing SELinux enforcement or relabeling active controllers. It does not
 install Steam, change graphics drivers, start Docker, or restart Polaris.
-The browser only checks readiness and shows these terminal commands.
+The browser checks readiness and links to these terminal instructions.
 
 If interrupted, repeat the same command to finish the recorded operation. Existing
 manually installed Spaces policies or an input rule with no ownership record are
@@ -382,7 +397,7 @@ they do not select a Steam account or space.
 To archive a Space:
 
 1. Stop space streams and wait for cleanup.
-2. Select **Archive Space** on its card, then confirm the displayed space name.
+2. Select **Remove Space** on its card, then confirm the displayed space name.
 3. The space moves to **Archived Spaces**. Devices lose access to it. Other allowed Spaces remain available;
    devices with none return to the host’s usual desktop and apps.
 
