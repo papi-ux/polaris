@@ -326,7 +326,7 @@ func waitForDisplayArtifactCandidate(
 		}
 		if child.exited() {
 			return displayArtifactCandidate{},
-				errors.New("runtime display exited before readiness")
+				child.exitError("runtime display exited before readiness")
 		}
 		candidate, ready, err := findDisplayArtifactCandidate(runtime, mediaSocket)
 		if err != nil {
@@ -352,7 +352,7 @@ func waitForDisplayArtifactCandidate(
 				<-timer.C
 			}
 			return displayArtifactCandidate{},
-				errors.New("runtime display exited before readiness")
+				child.exitError("runtime display exited before readiness")
 		case <-timer.C:
 		}
 	}
@@ -610,7 +610,7 @@ func waitForWaylandDisplay(
 			return errors.New("runtime Wayland readiness wait is invalid")
 		}
 		if child.exited() {
-			return errors.New("runtime display exited before readiness")
+			return child.exitError("runtime display exited before readiness")
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -635,7 +635,7 @@ func waitForWaylandDisplay(
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return errors.New("runtime display exited before readiness")
+			return child.exitError("runtime display exited before readiness")
 		case <-timer.C:
 		}
 	}
@@ -795,7 +795,7 @@ func runDisplayCapture(
 		return errors.New("runtime display frame transport is unavailable")
 	}
 	if child.exited() {
-		return errors.New("runtime display exited before readiness")
+		return child.exitError("runtime display exited before readiness")
 	}
 	if err := verifyDisplayArtifacts(runtime, artifacts, targetSocket, mediaSocket); err != nil {
 		return err
@@ -809,7 +809,7 @@ func runDisplayCapture(
 		}
 	}
 	if child.exited() {
-		return errors.New("runtime display exited during input verification")
+		return child.exitError("runtime display exited during input verification")
 	}
 	if err := publishReadiness(ready); err != nil {
 		return err
@@ -823,7 +823,7 @@ func runDisplayCapture(
 		case <-parent.Done():
 			return nil
 		case <-child.done:
-			return errors.New("runtime display exited unexpectedly")
+			return child.exitError("runtime display exited unexpectedly")
 		case <-ticker.C:
 			if inputs != nil {
 				if err := inputs.VerifyConsumer(child.command.Process.Pid, int(child.pidFD.Fd())); err != nil {

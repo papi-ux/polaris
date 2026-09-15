@@ -405,6 +405,19 @@ namespace confighttp::validation {
     }
   }  // namespace
 
+  bool is_local_config_key(std::string_view key) {
+    return key == "multiseat_enabled" || key == "multiseat_config";
+  }
+
+  void preserve_local_config(const std::unordered_map<std::string, std::string> &existing,
+    nlohmann::json &payload) {
+    for (const auto *key : {"multiseat_enabled", "multiseat_config"}) {
+      payload.erase(key);
+      const auto found = existing.find(key);
+      if (found != existing.end() && !found->second.empty()) payload[key] = found->second;
+    }
+  }
+
   bool validate_config_payload(const nlohmann::json &payload, std::string &error) {
     if (!payload.is_object()) {
       error = "Config payload must be a JSON object";

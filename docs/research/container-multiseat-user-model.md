@@ -12,9 +12,15 @@ Whatever the person on the client is choosing has to be expressible in that
 contract. Getting it wrong is not a screen to redraw, it is a contract to
 rebuild, so it is cheaper to settle now than after.
 
-Nothing here proposes building a user interface yet. Multiseat cannot stream:
-there is no encoder provider, no streaming-capable worker image, and no
-activation key. A screen for any of that would be a screen for nothing.
+Nothing here proposes building a user interface yet. The continuous encoder has an explicit worker integration path, but client
+streaming has not been accepted and host activation and profile routing are
+still unfinished. See `container-multiseat-encoder-provider.md` for the current
+implementation and evidence boundary.
+
+The [paired client admission API](container-multiseat-profile-routing.md) now
+implements immutable profile assignments, atomic GPU placement and typed
+capacity refusals. Persistent configuration, automatic provisioning during
+pairing, public refusal fields and production launch integration remain pending.
 
 ## Two nouns, not one
 

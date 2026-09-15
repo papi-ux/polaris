@@ -3,15 +3,67 @@
  * @brief Default-off owner for trusted multiseat launch composition.
  */
 #include "multiseat_controller_runtime.h"
+#include "multiseat_profile_network.h"
+#include "src/rtsp.h"
 
 #ifdef __linux__
 
   #include <algorithm>
   #include <mutex>
+  #include <string_view>
+  #include <unordered_set>
   #include <utility>
 
 namespace multiseat {
   namespace {
+    bool routing_key(std::string_view key) {
+      return !key.empty() && key.size() <= 128 &&
+             key.find_first_not_of(
+               "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+             ) == std::string_view::npos;
+    }
+
+    bool valid_profile_routes(const controller_runtime_options_t &options) {
+      if (options.profile_routes.empty()) {
+        return true;
+      }
+      if (!options.worker_media_enabled || options.profile_routes.size() > 4096) {
+        return false;
+      }
+      if (options.profile_launch_timeout <= std::chrono::milliseconds::zero() ||
+          options.profile_launch_timeout > std::chrono::minutes {5}) {
+        return false;
+      }
+      std::unordered_set<std::string> profiles;
+      std::unordered_set<std::string> clients;
+      std::size_t grant_count = 0;
+      for (const auto &route : options.profile_routes) {
+        if (!routing_key(route.profile_key) ||
+            !profiles.insert(route.profile_key).second ||
+            !valid_workload_plan(route.workload) ||
+            !workload_matches_runtime_profile(route.workload, route.runtime_profile) ||
+            route.client_keys.size() > 4096 || route.access_clients.size() > 4096 || route.logical_gpu_ids.empty() ||
+            route.logical_gpu_ids.size() > 64) {
+          return false;
+        }
+        for (const auto &client : route.client_keys) {
+          if (!routing_key(client) || !clients.insert(client).second || clients.size() > 65536) {
+            return false;
+          }
+        }
+        std::unordered_set<std::string> access;
+        for (const auto &client : route.access_clients)
+          if (!routing_key(client) || !access.insert(client).second || ++grant_count > 65536) return false;
+        std::unordered_set<std::string> gpus;
+        for (const auto &gpu : route.logical_gpu_ids) {
+          if (!routing_key(gpu) || !gpus.insert(gpu).second) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
     bool valid_expectation_syntax(
       const std::vector<input::expectation_t> &expectations
     ) {
@@ -49,7 +101,19 @@ namespace multiseat {
   }  // namespace
 
   struct controller_runtime_t::impl_t {
-    explicit impl_t(controller_runtime_dependencies_t dependencies) :
+    struct owned_profile_launch_t {
+      std::weak_ptr<rtsp_stream::launch_session_t> launch;
+      input::moonlight_launch_selection_key_t key;
+      std::string client_key;
+      std::string profile_key;
+      seat_handle_t handle;
+      worker_broker_t::time_point_t deadline;
+      bool cleanup_requested = false;
+      bool selection_registered = false;
+    };
+
+    explicit impl_t(controller_runtime_dependencies_t dependencies, controller_runtime_options_t options) :
+        profile_catalog_lease(std::move(dependencies.profile_catalog_lease)),
         registry(std::move(dependencies.registry)),
         worker_authority_store(
           std::move(dependencies.worker_authority_store)
@@ -61,7 +125,15 @@ namespace multiseat {
         worker_backend(std::move(dependencies.worker_backend)),
         input_expectations(
           std::move(dependencies.recovered_input_expectations)
-        ) {
+        ), worker_media_enabled(options.worker_media_enabled),
+        profile_routes(std::move(options.profile_routes)),
+        profile_catalog(std::move(options.profile_catalog)),
+        profile_launch_timeout(options.profile_launch_timeout),
+         library_reader(std::move(options.library_reader)),
+         desktop_clients(std::move(options.desktop_clients)),
+        now(dependencies.now) {
+      if (!now) now = [] { return worker_broker_t::monotonic_clock_t::now(); };
+      profile_launches.reserve(input::maximum_input_allocations);
       workers = std::make_unique<worker_coordinator_t>(
         *registry,
         *worker_backend,
@@ -77,6 +149,7 @@ namespace multiseat {
     // Reverse destruction is deliberate: adapter, coordinator, worker
     // backend, its opaque dependencies, Moonlight input, authority store,
     // then the shared registry.
+    std::shared_ptr<void> profile_catalog_lease;
     std::unique_ptr<registry_t> registry;
     std::unique_ptr<worker_ipc::authority_store_t> worker_authority_store;
     std::unique_ptr<input::moonlight_session_runtime_t> moonlight_runtime;
@@ -87,9 +160,39 @@ namespace multiseat {
     mutable std::mutex state_mutex;
     std::mutex shutdown_mutex;
     std::vector<input::expectation_t> input_expectations;
+    const bool worker_media_enabled;
+    const std::vector<controller_profile_route_t> profile_routes;
+    const std::vector<profile_summary_t> profile_catalog;
+    const std::chrono::milliseconds profile_launch_timeout;
+    const spaces::library_reader_t library_reader;
+    const std::vector<std::string> desktop_clients;
+    worker_broker_t::now_fn_t now;
+    std::vector<owned_profile_launch_t> profile_launches;
     bool admission_ready = false;
     bool shutting_down = false;
     bool closed = false;
+
+    auto profile_launch(const seat_handle_t &handle) {
+      return std::find_if(profile_launches.begin(), profile_launches.end(),
+        [&handle](const auto &entry) { return entry.handle == handle; });
+    }
+
+    bool cleanup_needed(owned_profile_launch_t &entry) {
+      const auto launch = entry.launch.lock();
+      entry.cleanup_requested = entry.cleanup_requested || !launch ||
+        launch->is_cancelled() || launch->id != entry.key.launch_session_id ||
+        launch->lifecycle_generation != entry.key.lifecycle_generation ||
+        launch->unique_id != entry.client_key ||
+        ((!entry.selection_registered ||
+           launch->setup_state.load() != rtsp_stream::launch_session_t::setup_state_e::started) &&
+          now() >= entry.deadline);
+      return entry.cleanup_requested;
+    }
+
+    bool profile_cancelled(const seat_handle_t &handle) {
+      const auto entry = profile_launch(handle);
+      return entry != profile_launches.end() && cleanup_needed(*entry);
+    }
   };
 
   controller_runtime_t::controller_runtime_t(std::unique_ptr<impl_t> impl) :
@@ -120,6 +223,9 @@ namespace multiseat {
       return {
         .status = controller_runtime_create_status_e::ready_disabled,
       };
+    }
+    if (!valid_profile_routes(options)) {
+      return {.status = controller_runtime_create_status_e::invalid_dependencies};
     }
     if (!dependencies_factory) {
       return {
@@ -160,7 +266,7 @@ namespace multiseat {
         .status = controller_runtime_create_status_e::ready_enabled,
         .runtime = std::unique_ptr<controller_runtime_t> {
           new controller_runtime_t(
-            std::make_unique<impl_t>(std::move(*dependencies))
+            std::make_unique<impl_t>(std::move(*dependencies), std::move(options))
           )
         },
       };
@@ -186,6 +292,22 @@ namespace multiseat {
     }
 
     try {
+      // Network cancellation only marks the retained launch. Worker commands
+      // run here under the controller owner, never on an HTTP/RTSP timer thread.
+      for (auto &entry : impl_->profile_launches) {
+        if (!impl_->cleanup_needed(entry)) continue;
+        if (auto launch = entry.launch.lock()) launch->cancel();
+        const auto quiesced = impl_->moonlight_runtime->quiesce_seat(entry.handle);
+        if (quiesced == input::moonlight_runtime_lifecycle_status_e::retained_until_streams_close) {
+          continue;
+        }
+        if (quiesced != input::moonlight_runtime_lifecycle_status_e::retired &&
+            quiesced != input::moonlight_runtime_lifecycle_status_e::not_selected) {
+          result.status = controller_reconcile_status_e::input_reconciliation_required;
+          return result;
+        }
+        (void) impl_->workers->stop_seat(entry.handle);
+      }
       result.worker = impl_->workers->reconcile();
     } catch (...) {
       result.status =
@@ -261,6 +383,11 @@ namespace multiseat {
       return result;
     }
 
+    std::erase_if(impl_->profile_launches, [&](const auto &entry) {
+      return !impl_->registry->snapshot(entry.handle) &&
+        std::none_of(impl_->input_expectations.begin(), impl_->input_expectations.end(),
+          [&](const auto &expectation) { return expectation.handle == entry.handle; });
+    });
     impl_->admission_ready = true;
     result.status = controller_reconcile_status_e::ready;
     return result;
@@ -278,6 +405,97 @@ namespace multiseat {
     } catch (...) {
       impl_->admission_ready = false;
       return {.rejection = admission_rejection_e::invalid_request};
+    }
+  }
+
+  controller_profile_admission_result_t
+  controller_runtime_t::admit_authenticated_profile_launch(
+    const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+    seat_display_mode_t display_mode
+  ) {
+    using status_e = controller_profile_admission_status_e;
+    std::scoped_lock lock {impl_->state_mutex};
+    if (impl_->profile_routes.empty()) {
+      return {.status = status_e::unselected};
+    }
+    if (!launch || launch->unique_id.empty()) {
+      return {.status = status_e::invalid_launch};
+    }
+    const auto selected = launch->worker_profile_key.empty() ? profile_for_client(launch->unique_id) :
+      std::optional<std::string>{launch->worker_profile_key};
+    const auto route = std::find_if(impl_->profile_routes.begin(), impl_->profile_routes.end(),
+      [&](const auto &candidate) {
+        return selected == candidate.profile_key &&
+          (std::find(candidate.client_keys.begin(), candidate.client_keys.end(), launch->unique_id) != candidate.client_keys.end() ||
+           std::find(candidate.access_clients.begin(), candidate.access_clients.end(), launch->unique_id) != candidate.access_clients.end());
+      });
+    if (route == impl_->profile_routes.end()) {
+      if (!launch->worker_profile_key.empty() || routes_client(launch->unique_id)) {
+        launch->require_worker_connection();
+        return {.status = status_e::invalid_launch};
+      }
+      return {.status = status_e::unselected};
+    }
+    // Routing is sticky even if admission or a later worker step fails. Stream
+    // startup must never silently capture the host for a selected profile.
+    launch->require_worker_connection();
+    if (launch->id == 0 || !launch->lifecycle_generation ||
+        *launch->lifecycle_generation == 0 || !launch->is_pending() ||
+        launch->watch_only || launch->input_only || launch->temporary_authorization ||
+        !(launch->perm & crypto::PERM::launch)) {
+      return {.status = status_e::invalid_launch};
+    }
+    if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
+      return {.status = status_e::controller_not_ready};
+    }
+    auto workload = route->workload;
+    if (!launch->worker_library_target.empty()) {
+      if (!route->library_enabled || route->runtime_profile != runtime_profile_e::steam ||
+          !container::valid_steam_target(launch->worker_library_target)) return {.status = status_e::invalid_launch};
+      workload = {workload_kind_e::steam, launch->worker_library_target};
+    }
+    const seat_request_t request {
+      .client_key = launch->unique_id,
+      .profile_key = route->profile_key,
+      .workload = workload,
+      .logical_gpu_id = {},
+      .runtime_profile = route->runtime_profile,
+      .data_plane = {
+        .display_topology = display_topology_e::capture_host_with_nested_compositor,
+        .media_pipeline = media_pipeline_e::worker_local_capture_encode,
+      },
+      .display_mode = display_mode,
+      .requested_compositor = compositor_e::gamescope,
+      .encoder_sessions = 1,
+    };
+    try {
+      if (impl_->profile_launches.size() >= input::maximum_input_allocations) {
+        return {.status = status_e::controller_not_ready};
+      }
+      impl_t::owned_profile_launch_t owned {
+        .launch = launch,
+        .key = {launch->id, *launch->lifecycle_generation},
+        .client_key = launch->unique_id,
+        .profile_key = route->profile_key,
+        .deadline = impl_->now() + impl_->profile_launch_timeout,
+      };
+      auto admission = impl_->registry->admit_first_available(request, route->logical_gpu_ids);
+      if (admission.accepted()) {
+        try {
+          owned.handle = admission.seat->handle;
+          impl_->profile_launches.push_back(std::move(owned));
+        } catch (...) {
+          // No worker/input exists yet. A bookkeeping allocation failure must
+          // not strand an unowned reservation in the registry.
+          (void) impl_->workers->stop_seat(admission.seat->handle);
+          throw;
+        }
+      }
+      const auto status = admission.accepted() ? status_e::admitted : status_e::rejected;
+      return {.status = status, .admission = std::move(admission)};
+    } catch (...) {
+      impl_->admission_ready = false;
+      return {.status = status_e::controller_not_ready};
     }
   }
 
@@ -308,6 +526,36 @@ namespace multiseat {
   ) {
     std::scoped_lock lock {impl_->state_mutex};
     controller_start_result_t result;
+    const auto prior = impl_->profile_launch(handle);
+    if (prior != impl_->profile_launches.end() && !impl_->cleanup_needed(*prior)) {
+      const auto seat = impl_->registry->snapshot(handle);
+      if (seat && seat->state != seat_state_e::reserved) {
+        // A duplicate start is not a failure of the already running launch.
+        return result;
+      }
+    }
+    try {
+      result = start_seat_locked(handle, input_plan);
+    } catch (...) {
+      impl_->admission_ready = false;
+      result.status = controller_start_status_e::worker_indeterminate;
+    }
+    const auto entry = impl_->profile_launch(handle);
+    if (entry != impl_->profile_launches.end()) {
+      if (impl_->cleanup_needed(*entry)) result.status = controller_start_status_e::launch_cancelled;
+      if (!result.started()) entry->cleanup_requested = true;
+    }
+    return result;
+  }
+
+  controller_start_result_t controller_runtime_t::start_seat_locked(
+    const seat_handle_t &handle, input::plan_t input_plan
+  ) {
+    controller_start_result_t result;
+    if (impl_->profile_cancelled(handle)) {
+      result.status = controller_start_status_e::launch_cancelled;
+      return result;
+    }
     if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
       result.status = controller_start_status_e::controller_not_ready;
       return result;
@@ -373,6 +621,10 @@ namespace multiseat {
       }
     }
 
+    if (impl_->profile_cancelled(handle)) {
+      result.status = controller_start_status_e::launch_cancelled;
+      return result;
+    }
     try {
       result.worker = impl_->workers->start_seat(handle);
     } catch (...) {
@@ -420,6 +672,17 @@ namespace multiseat {
   ) {
     std::scoped_lock lock {impl_->state_mutex};
     input::moonlight_worker_selection_result_t rejected;
+    const auto owned = impl_->profile_launch(handle);
+    if (owned != impl_->profile_launches.end()) {
+      // The original retained launch owns this profile reservation. A second
+      // object, even with identical fields, cannot replace or cancel it.
+      if (owned->launch.lock() != launch) return rejected;
+      if (impl_->cleanup_needed(*owned)) return rejected;
+      if (owned->selection_registered) return rejected;
+    }
+    // A failed selected-media launch must retain its requirement so a caller
+    // cannot accidentally start ordinary host capture after selection failed.
+    if (impl_->worker_media_enabled && launch) launch->require_worker_connection();
     if (!impl_->admission_ready || impl_->shutting_down || impl_->closed) {
       rejected.status =
         input::moonlight_worker_selection_status_e::worker_not_authorized;
@@ -440,12 +703,20 @@ namespace multiseat {
       return rejected;
     }
     try {
-      return impl_->launch_adapter->select(launch, handle);
+      auto selected = impl_->worker_media_enabled ?
+        impl_->launch_adapter->select_with_connection(launch, handle) :
+        impl_->launch_adapter->select(launch, handle);
+      if (owned != impl_->profile_launches.end()) {
+        owned->selection_registered = selected.selected();
+        owned->cleanup_requested = !selected.selected();
+      }
+      return selected;
     } catch (...) {
       rejected.status =
         input::moonlight_worker_selection_status_e::worker_not_authorized;
       rejected.authority_status =
         worker_seat_authorization_status_e::action_failed;
+      if (owned != impl_->profile_launches.end()) owned->cleanup_requested = true;
       return rejected;
     }
   }
@@ -463,8 +734,23 @@ namespace multiseat {
       return result;
     }
 
-    impl_->admission_ready = false;
+    const auto owned = impl_->profile_launch(handle);
+    if (owned != impl_->profile_launches.end()) {
+      owned->cleanup_requested = true;
+      if (auto launch = owned->launch.lock()) launch->cancel();
+    }
     try {
+      const auto quiesced = impl_->moonlight_runtime->quiesce_seat(handle);
+      if (quiesced == input::moonlight_runtime_lifecycle_status_e::retained_until_streams_close) {
+        result.status = controller_stop_status_e::streams_pending;
+        return result;
+      }
+      if (quiesced != input::moonlight_runtime_lifecycle_status_e::retired &&
+          quiesced != input::moonlight_runtime_lifecycle_status_e::not_selected) {
+        result.status = controller_stop_status_e::cleanup_pending;
+        return result;
+      }
+      impl_->admission_ready = false;
       result.worker = impl_->workers->stop_seat(handle);
     } catch (...) {
       result.status = controller_stop_status_e::stopping;
@@ -563,12 +849,57 @@ namespace multiseat {
         return result;
       }
       impl_->input_expectations.clear();
+      impl_->profile_launches.clear();
       impl_->closed = true;
+      impl_->profile_catalog_lease.reset();
       result.status = controller_shutdown_status_e::closed;
       return result;
     } catch (...) {
       return result;
     }
+  }
+
+  bool controller_runtime_t::routes_client(std::string_view client_key) const {
+    // Routes are immutable for this owner's entire lifetime, including drain.
+    return std::any_of(impl_->profile_routes.begin(), impl_->profile_routes.end(), [&](const auto &route) {
+      return std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end() ||
+        std::find(route.access_clients.begin(), route.access_clients.end(), client_key) != route.access_clients.end();
+    });
+  }
+
+  std::optional<std::string> controller_runtime_t::profile_for_client(std::string_view client_key) const {
+    for (const auto &route : impl_->profile_routes)
+      if (std::find(route.client_keys.begin(), route.client_keys.end(), client_key) != route.client_keys.end())
+        return route.profile_key;
+    for (const auto &route : impl_->profile_routes)
+      if (std::find(route.access_clients.begin(), route.access_clients.end(), client_key) != route.access_clients.end())
+        return route.profile_key;
+    return std::nullopt;
+  }
+
+  std::vector<profile_summary_t> controller_runtime_t::profile_catalog() const { return impl_->profile_catalog; }
+  spaces::library_reader_t controller_runtime_t::library_reader() const { return impl_->library_reader; }
+  std::vector<std::string> controller_runtime_t::desktop_clients() const { return impl_->desktop_clients; }
+
+  std::vector<profile_activity_t> controller_runtime_t::profile_activity() const {
+    std::scoped_lock lock {impl_->state_mutex};
+    std::vector<profile_activity_t> result;
+    for (const auto &entry : impl_->profile_launches) {
+      const auto launch = entry.launch.lock();
+      const auto seat = impl_->registry->snapshot(entry.handle);
+      // Keep cleanup visible until reconciliation releases the owned record.
+      const auto state = entry.cleanup_requested || !launch || launch->is_cancelled() ||
+        (seat && seat->state == seat_state_e::stopping) ? "stopping" :
+        launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started ? "running" : "starting";
+      result.push_back({entry.profile_key, entry.client_key, state});
+    }
+    return result;
+  }
+
+  std::optional<seat_state_e> controller_runtime_t::seat_state(const seat_handle_t &handle) const {
+    std::scoped_lock lock {impl_->state_mutex};
+    const auto seat = impl_->registry->snapshot(handle);
+    return seat ? std::optional {seat->state} : std::nullopt;
   }
 
   bool controller_runtime_t::admission_ready() const {
@@ -604,6 +935,11 @@ namespace multiseat {
   std::size_t controller_runtime_t::tracked_launches() const {
     std::scoped_lock lock {impl_->state_mutex};
     return impl_->moonlight_runtime->tracked_launches();
+  }
+
+  std::size_t controller_runtime_t::owned_profile_launches() const {
+    std::scoped_lock lock {impl_->state_mutex};
+    return impl_->profile_launches.size();
   }
 
 }  // namespace multiseat

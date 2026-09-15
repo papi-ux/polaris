@@ -54,6 +54,7 @@ depends=(
   'openssl'
   'opus'
   'pipewire'
+  'python'
   'udev'
   'vulkan-icd-loader'
   'wayland'
@@ -262,6 +263,7 @@ check() {
 
 package() {
     DESTDIR="$pkgdir" cmake --install build
+    python "$srcdir/$pkgname/scripts/spaces/verify_package.py" "$pkgdir"
 
     # Host integration files have to be package-owned. When they regress back to
     # /usr/share only, uninstall leaves files behind and users are pushed into a

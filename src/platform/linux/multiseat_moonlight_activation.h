@@ -67,6 +67,8 @@ namespace multiseat::input {
     ) = delete;
 
     void cancel() noexcept;
+    /** Fence this selection immediately; false means activation is still running. */
+    [[nodiscard]] bool quiesce() noexcept;
     void close() noexcept;
     [[nodiscard]] bool active() const;
     [[nodiscard]] const moonlight_launch_selection_key_t &key() const;

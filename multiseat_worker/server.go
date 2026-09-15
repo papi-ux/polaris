@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -348,7 +349,7 @@ func (server *workerServer) serveConnection(
 			if err := writer.send(messageInputAck, nil); err != nil {
 				return
 			}
-		case messageMediaConfigAck, messageRequestIDR, messageInvalidateReferenceFrames:
+		case messageMediaConfigAck, messageSelectMediaBitrate, messageRequestIDR, messageInvalidateReferenceFrames:
 			// The contract messages reach the encoder through the same gate as
 			// input: the exact control channel of an attached data plane.
 			if selectedChannel != channelControl || !attached ||
@@ -358,6 +359,9 @@ func (server *workerServer) serveConnection(
 			control := routedMediaControl{
 				Identity: server.config.Identity,
 				Message:  value.Message,
+			}
+			if value.Message == messageSelectMediaBitrate {
+				control.BitrateKbps = binary.BigEndian.Uint32(value.Payload)
 			}
 			if value.Message == messageInvalidateReferenceFrames {
 				span, err := parseFrameRange(value.Payload)

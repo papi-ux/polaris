@@ -235,7 +235,9 @@ TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) 
 
   const auto conditional_stop = timeout.find("proc::proc.terminate_if(");
   const auto generation_check = timeout.find("disconnect_resume_timeout_generation.load");
-  const auto active_check = timeout.find("session::running_sessions.load");
+  // A worker stream does not own the paused host app and must not keep it alive.
+  const auto active_check = timeout.find("session::running_host_sessions.load");
+  EXPECT_EQ(timeout.find("session::running_sessions.load"), std::string::npos);
   ASSERT_NE(conditional_stop, std::string::npos);
   ASSERT_NE(generation_check, std::string::npos);
   ASSERT_NE(active_check, std::string::npos);

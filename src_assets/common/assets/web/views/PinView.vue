@@ -15,6 +15,11 @@
       </div>
     </section>
 
+    <div class="flex flex-wrap items-center justify-between gap-2 text-sm text-storm">
+      <span>Separate Steam sign-ins and saves are managed in Spaces.</span>
+      <router-link to="/spaces" class="focus-ring rounded px-1 py-2 text-ice hover:underline">Open Spaces</router-link>
+    </div>
+
     <section id="pair_device" class="section-card">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div class="min-w-0">
@@ -840,6 +845,11 @@
                   <div v-if="clientAliasName(client)" class="mt-2 text-xs text-storm">
                     {{ $t('pin.saved_as', { name: client.name }) }}
                   </div>
+                  <router-link v-if="spacesSummary?.enabled" to="/spaces"
+                               class="focus-ring mt-2 inline-block max-w-full break-words rounded py-1 text-xs text-ice hover:underline">
+                    {{ spacesSummary.available && !spacesSummary.changing && !spacesSummary.failed
+                      ? 'Opens: ' + spaceForClient(client.uuid) : 'Check space assignment' }}
+                  </router-link>
                   <div class="mt-3 font-mono text-xs text-storm">[ {{ permToStr(client.perm) }} ]</div>
                 </div>
 
@@ -961,6 +971,7 @@
 
 <script setup>
 import { computed, inject, nextTick, ref, watch } from 'vue'
+import { validSnapshot } from '../spaces-access.js'
 import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
 import Skeleton from '../components/Skeleton.vue'
@@ -1750,6 +1761,18 @@ watch(
   { immediate: true },
 )
 
+const spacesSummary = ref(null)
+function spaceForClient(id) {
+  return spacesSummary.value?.profiles.find(space => space.clients.includes(id))?.name || 'This PC’s desktop and apps'
+}
+async function refreshSpaceSummary() {
+  try {
+    const response = await fetch('./api/multiseat/profiles', { credentials: 'include', cache: 'no-store' })
+    const next = await response.json()
+    spacesSummary.value = response.ok && validSnapshot(next) ? next : null
+  } catch { spacesSummary.value = null }
+}
+refreshSpaceSummary()
 refreshClients()
 refreshProfiles()
 

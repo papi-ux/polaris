@@ -25,6 +25,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -83,6 +84,10 @@
 #include "private_state_file.h"
 #include "rtsp.h"
 #include "stream.h"
+#ifdef __linux__
+  #include "platform/linux/multiseat_launch_service.h"
+  #include "platform/linux/multiseat_profile_network.h"
+#endif
 #include "system_tray.h"
 #include "utility.h"
 #include "adaptive_bitrate.h"
@@ -184,11 +189,13 @@ namespace nvhttp {
       if (!game_artwork::is_allowed_provider_url(request.provider, request.url)) return false;
 
       if (request.provider == provider_e::steam) {
-        return request.operation == operation_e::download && !request.requires_authorization &&
-               artwork_url_starts_with(
-                 request.url,
-                 "https://cdn.cloudflare.steamstatic.com/steam/apps/"
-               );
+        if (request.requires_authorization) return false;
+        if (request.operation == operation_e::list) return artwork_url_starts_with(request.url,
+          "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json=");
+        return request.operation == operation_e::download &&
+          (artwork_url_starts_with(request.url, "https://cdn.cloudflare.steamstatic.com/steam/apps/") ||
+           artwork_url_starts_with(request.url, "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/") ||
+           artwork_url_starts_with(request.url, "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/"));
       }
       if (request.operation == operation_e::search || request.operation == operation_e::list) {
         return request.requires_authorization && artwork_url_starts_with(
@@ -4382,7 +4389,7 @@ namespace nvhttp {
     return true;
   }
 
-  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
@@ -4423,6 +4430,64 @@ namespace nvhttp {
       uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
       auto prepend_iv_p = (uint8_t *) &prepend_iv;
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
+    }
+
+    if (profile_worker) {
+      // Worker display and encoder ownership come from the saved profile. Do
+      // not probe host capture or apply a host optimizer envelope to this seat.
+      const bool worker_contract = args.contains("workerProfile") &&
+        get_arg(args, "resolvedProfile", "0") == "1" &&
+        get_arg(args, "expectedTopology", "") == "gamescope_stream" &&
+        get_arg(args, "resolvedHdr", "") == "0" && args.count("bitrateKbps") == 1;
+      if ((!worker_contract && get_arg(args, "resolvedProfile", "0") != "0") ||
+          (args.contains("workerProfile") && !worker_contract) || get_arg(args, "hdrMode", "0") != "0" ||
+          get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder")) return nullptr;
+      const auto requested = named_cert_p->display_mode.empty() ?
+        get_arg(args, "mode", "1920x1080x60") : named_cert_p->display_mode;
+      if (requested.size() > 64 || std::count(requested.begin(), requested.end(), 'x') != 2) return nullptr;
+      std::istringstream mode(requested);
+      std::array<std::string, 3> parts;
+      for (auto &part : parts) if (!std::getline(mode, part, 'x')) return nullptr;
+      if (mode.peek() != std::char_traits<char>::eof()) return nullptr;
+      auto integer = [](std::string_view text) -> std::optional<unsigned> {
+        if (text.empty()) return std::nullopt;
+        unsigned value = 0;
+        for (const auto ch : text) {
+          if (ch < '0' || ch > '9' || value > (std::numeric_limits<unsigned>::max() - (ch - '0')) / 10)
+            return std::nullopt;
+          value = value * 10 + (ch - '0');
+        }
+        return value;
+      };
+      const auto width = integer(parts[0]);
+      const auto height = integer(parts[1]);
+      const auto rate = integer(parts[2]);
+      if (!width || !height || !rate || *width < 320 || *width > 4096 || *width % 2 ||
+          *height < 240 || *height > 2160 || *height % 2 || *rate <= 0 || *rate > 240000) return nullptr;
+      const auto fps = *rate < 1000 ? *rate * 1000 : *rate;
+      if (fps > 240000 || fps % 1000 != 0) return nullptr;
+      const auto bitrate = integer(get_arg(args, "bitrateKbps", "8000"));
+      if (!bitrate || *bitrate == 0 || *bitrate > 8000 || args.count("bitrateKbps") > 1) return nullptr;
+      launch_session->target_bitrate_kbps = *bitrate;
+      if (named_cert_p->target_bitrate_kbps > 0)
+        launch_session->target_bitrate_kbps = std::min(*launch_session->target_bitrate_kbps, named_cert_p->target_bitrate_kbps);
+      if (config::video.max_bitrate > 0)
+        launch_session->target_bitrate_kbps = std::min(*launch_session->target_bitrate_kbps, config::video.max_bitrate);
+      const auto surround = integer(get_arg(args, "surroundAudioInfo", "196610"));
+      if (!surround || (*surround & 0xffff) != 2 || !get_arg(args, "surroundParams", "").empty()) return nullptr;
+      launch_session->width = launch_session->requested_width = *width;
+      launch_session->height = launch_session->requested_height = *height;
+      launch_session->fps = launch_session->requested_fps = fps;
+      launch_session->device_name = named_cert_p->name;
+      launch_session->unique_id = named_cert_p->uuid;
+      launch_session->temporary_authorization = named_cert_p->temporary_authorization;
+      launch_session->watch_only = watch_requested(args);
+      launch_session->perm = named_cert_p->perm & PERM::_game_control;
+      launch_session->host_audio = false;
+      launch_session->input_only = false;
+      launch_session->surround_info = *surround;
+      launch_session->require_worker_connection();
+      return launch_session;
     }
 
     launch_session->resolved_profile_from_client =
@@ -4656,6 +4721,12 @@ namespace nvhttp {
 
     launch_session->input_only = input_only;
 
+#ifdef __linux__
+    if (const auto service = multiseat::installed_profile_service(); service && !service->track_host_launch(launch_session)) {
+      launch_session->cancel();
+      return {};
+    }
+#endif
     return launch_session;
   }
 
@@ -5043,6 +5114,380 @@ namespace nvhttp {
     }
     return publish() ? 0 : 409;
   }
+
+#ifdef __linux__
+  profile_api_response_t profile_spaces_request(const crypto::p_named_cert_t &candidate,
+                                               std::optional<std::string_view> selection) {
+    auto reject = [](int status, std::string_view message) {
+      return profile_api_response_t{status, {{"status", false}, {"error", message}, {"code", "space_request_rejected"}}};
+    };
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return reject(401, "Pair this device with Polaris again");
+    if (!(current->perm & PERM::launch) || current->temporary_authorization)
+      return reject(403, "Spaces require permanent pairing and permission to launch");
+    std::string profile, previous;
+    if (selection) {
+      if (selection->empty() || selection->size() > 4096) return reject(400, "Invalid space selection");
+      try {
+        std::set<std::string> keys;
+        const auto body = nlohmann::json::parse(*selection, [&](int depth, auto event, auto &value) {
+          if (depth > 2) throw std::invalid_argument("selection nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.template get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+        if (!body.is_object() || body.size() != 2 || !body.contains("space_id") || !body.contains("previous_space_id"))
+          throw std::invalid_argument("selection fields");
+        profile = body.at("space_id").get<std::string>(); previous = body.at("previous_space_id").get<std::string>();
+        if (profile.empty() || profile.size() > 128 || previous.empty() || previous.size() > 128)
+          throw std::invalid_argument("selection identity");
+      } catch (...) { return reject(400, "Invalid space selection"); }
+    }
+    profile_api_response_t response{200, {{"schema", 1}, {"status", true}, {"enabled", false},
+      {"available", false}, {"can_switch", false}, {"selected_space_id", ""}, {"spaces", nlohmann::json::array()}}};
+    // Revalidate the exact paired identity and permission at the mutation point.
+    // A caller cannot transplant another device ID into this request.
+    const auto auth = publish_authorized_launch(current, PERM::launch, [&] {
+      const auto service = multiseat::installed_profile_service();
+      if (!service) {
+        if (selection) response = reject(503, "Spaces are unavailable on this host");
+        return true;
+      }
+      if (selection) {
+        if (profile != previous && rtsp_stream::find_session(current->uuid)) {
+          response = reject(409, "End your stream before switching environments"); return true;
+        }
+        const auto result = service->select_space(current->uuid, profile, previous);
+        if (!result.prepared()) { response = reject(result.status, result.message); return true; }
+      }
+      const auto state = service->client_spaces(current->uuid);
+      response.body["enabled"] = true; response.body["available"] = state.available;
+      response.body["can_switch"] = state.can_switch && !rtsp_stream::find_session(current->uuid);
+      response.body["selected_space_id"] = state.selected;
+      response.body["desktop_allowed"] = state.desktop_allowed;
+      for (const auto &space : state.spaces)
+        response.body["spaces"].push_back({{"id", space.id}, {"name", space.name}, {"state", space.state}, {"selected", space.selected}, {"library_enabled", space.library_enabled}});
+      return true;
+    });
+    if (auth) return reject(auth, "Pairing or permissions changed. Refresh before retrying.");
+    return response;
+  }
+
+  std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity) {
+    const auto game = multiseat::spaces::parse_game_identity(identity);
+    const auto current = resolve_authorized_client(candidate);
+    if (!game || game->target == "big-picture-v1" || !current ||
+        !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
+    const auto service = multiseat::installed_profile_service();
+    const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
+    if (!snapshot || !snapshot->library.available ||
+        std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
+          [&](const auto &entry) { return entry.target == game->target; })) return std::nullopt;
+    if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service) return std::nullopt;
+    const auto access = service->client_spaces(current->uuid);
+    if (std::none_of(access.spaces.begin(), access.spaces.end(),
+        [&](const auto &space) { return space.id == game->profile; })) return std::nullopt;
+    return game->target;
+  }
+
+  namespace {
+    std::string profile_artwork_cache_id(std::string_view target) {
+      return "53504143-4553-4000-8000-" + std::string(12 - target.size(), '0') + std::string(target);
+    }
+
+    nlohmann::json profile_artwork_manifest(const std::filesystem::path &appdata,
+        std::string_view identity, std::string_view target) {
+      auto manifest = game_artwork::current_manifest(appdata / "spaces-library-artwork", profile_artwork_cache_id(target));
+      for (auto &[kind, asset] : manifest["assets"].items()) {
+        asset["url"] = "/polaris/v1/games/" + std::string(identity) + "/space-artwork/" + kind;
+      }
+      return manifest;
+    }
+  }
+
+  profile_api_response_t profile_artwork_resolve_request(const crypto::p_named_cert_t &candidate,
+      std::string_view identity, const std::filesystem::path &appdata,
+      const game_artwork::providers::transport_t &transport) {
+    const auto target = profile_artwork_target(candidate, identity);
+    auto reject = [] { return profile_api_response_t{404, {{"status", false}}}; };
+    if (!target) return reject();
+    const auto cache = appdata / "spaces-library-artwork";
+    const auto cache_id = profile_artwork_cache_id(*target);
+    auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
+    nlohmann::json requested = nlohmann::json::array();
+    std::erase_if(plan, [&](const auto &item) {
+      if (!item.kind || game_artwork::find_cached_asset(cache, cache_id, *item.kind)) return true;
+      const auto kind = std::string(game_artwork::kind_name(*item.kind));
+      if (std::find(requested.begin(), requested.end(), kind) == requested.end()) requested.push_back(kind);
+      return false;
+    });
+    // The existing bounded executor preserves valid bytes on partial provider failures.
+    (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
+    if (profile_artwork_target(candidate, identity) != target) return reject();
+    auto manifest = profile_artwork_manifest(appdata, identity, *target);
+    nlohmann::json remaining = nlohmann::json::array();
+    for (const auto &kind : requested) {
+      if (!manifest["assets"].contains(kind.get<std::string>())) remaining.push_back(kind);
+    }
+    manifest["resolution"] = {
+      {"status", requested.empty() ? "healthy" : remaining.empty() ? "updated" : "partial_failure"},
+      {"requested_kinds", requested}, {"remaining_kinds", remaining},
+    };
+    return {200, std::move(manifest)};
+  }
+
+  profile_api_response_t profile_library_request(const crypto::p_named_cert_t &candidate, std::string_view profile) {
+    const auto current = resolve_authorized_client(candidate);
+    auto reject = [](int status) { return profile_api_response_t{status, {{"status", false},
+      {"error", "This Space library is unavailable. Refresh Spaces and try again."}}}; };
+    if (!current) return reject(401);
+    if (!(current->perm & PERM::launch) || current->temporary_authorization) return reject(403);
+    const auto service = multiseat::installed_profile_service();
+    if (!service) return reject(503);
+    const auto snapshot = service->library_for_client(current->uuid, profile);
+    if (!snapshot) return reject(404);
+    nlohmann::json games = nlohmann::json::array();
+    auto add = [&](std::string_view target, std::string_view name) {
+      const bool steam = target == "big-picture-v1";
+      const auto identity = multiseat::spaces::game_identity(profile, target);
+      const auto appid = steam ? "" : std::string(target);
+      games.push_back({{"id", identity}, {"app_id", multiseat::profile_app_id}, {"name", name},
+        {"source", "steam"}, {"steam_appid", appid}, {"installed", true}, {"hdr_supported", false},
+        {"space", {{"id", snapshot->id}, {"name", snapshot->name}, {"target", target}}},
+        {"cover_url", steam ? "" : "/polaris/v1/games/" + identity + "/space-artwork/poster"},
+        {"launch_mode", {{"preferred_mode", "gamescope_stream"}, {"recommended_mode", "gamescope_stream"},
+          {"allowed_modes", {"gamescope_stream"}}, {"mode_reason", "Runs in " + snapshot->name}}}});
+      if (!steam) games.back()["artwork"] = profile_artwork_manifest(platf::appdata(), identity, target);
+    };
+    add("big-picture-v1", "Steam Big Picture");
+    if (snapshot->library.available) for (const auto &game : snapshot->library.games) add(game.target, game.name);
+    // Re-check permission after the potentially slow read, and reject an owner
+    // replacement rather than publishing data from an obsolete access catalog.
+    const auto access = service->client_spaces(current->uuid);
+    if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service ||
+        std::none_of(access.spaces.begin(), access.spaces.end(), [&](const auto &space) { return space.id == profile; })) return reject(409);
+    return {200, {{"schema", 1}, {"status", true}, {"space_id", profile}, {"space_name", snapshot->name},
+      {"library_available", snapshot->library.available}, {"games", games}, {"total", games.size()}}};
+  }
+
+  std::optional<profile_api_response_t> profile_session_status(const crypto::p_named_cert_t &candidate) {
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return profile_api_response_t {401, {{"status", false}}};
+    const auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    const auto session = service->session_snapshot(current->uuid);
+    const auto name = service->profile_name_for_client(current->uuid).value_or("Polaris Profile");
+    // These are the worker's admitted settings and the requesting device's
+    // lifecycle. Global host capture counters and Doctor findings are unrelated.
+    nlohmann::json output {
+      {"source", "worker_profile_v1"}, {"state", session.active ? "streaming" : "idle"},
+      {"streaming_active", session.active}, {"owned_by_client", session.active},
+      {"client_role", session.active ? "owner" : "none"}, {"viewer_count", 0},
+      {"session_token", session.token}, {"app_session_id", session.token},
+      {"game", session.active ? (session.game_name.empty() ? name : session.game_name) : ""},
+      {"game_id", session.active ? multiseat::profile_app_id : 0},
+      {"game_uuid", session.active ? session.game_identity : ""},
+      {"controls", {{"host_tuning_allowed", false}, {"quit_allowed", session.active}, {"stop_allowed", session.active},
+        {"client_commands_enabled", false}, {"device_commands_enabled", false}, {"shutdown_in_progress", false}}},
+      {"display_mode", {{"selection", "gamescope_stream"}, {"label", name},
+        {"mirror_desktop", false}, {"virtual_display", false}, {"force_private_after_steam_close", false}}},
+      {"capture", {{"backend", "worker"}, {"resolution", session.active ?
+        std::to_string(session.width) + "x" + std::to_string(session.height) : ""}}},
+      {"encoder", {{"active_backend", "unknown"}, {"effective_backend", "unknown"}, {"codec", "h264"},
+        // The profile snapshot does not measure encoder bitrate. Publish the
+        // capability separately rather than presenting its ceiling as telemetry.
+        {"bitrate_kbps", 0}, {"bitrate_ceiling_kbps", 8000}, {"session_target_fps", session.fps}}},
+      {"health", {{"grade", "unknown"}, {"summary", "Profile performance diagnostics are not available yet."}}},
+      {"live_tuning", nullptr}
+    };
+    return profile_api_response_t {200, std::move(output)};
+  }
+
+  std::optional<profile_api_response_t> stop_profile_session(
+    const crypto::p_named_cert_t &candidate, std::string_view expected_token) {
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return profile_api_response_t {401, {{"status", false}}};
+    const auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    if (expected_token.empty() || expected_token.size() > 128)
+      return profile_api_response_t {400, {{"status", false}, {"error", "A current profile session token is required"}}};
+    const auto status = publish_authorized_launch(current, PERM::launch, [&] {
+      return service->cancel_client(current->uuid, expected_token);
+    });
+    if (status) return profile_api_response_t {status, {{"status", false}, {"error", "Profile session is no longer current"}}};
+    rtsp_stream::cancel_pending_launch_for_client(current->uuid, expected_token);
+    if (auto session = rtsp_stream::find_session(current->uuid);
+        session && stream::session::session_token(*session) == expected_token)
+      stream::session::graceful_stop(*session);
+    return profile_api_response_t {200, {{"status", true}, {"stopped", true}, {"shutdown_requested", true}}};
+  }
+
+  std::optional<profile_api_response_t> resolve_profile_request(
+    const crypto::p_named_cert_t &candidate, const args_t &args) {
+    auto reject = [](int status, const char *message) {
+      return profile_api_response_t {status, {{"status", false}, {"code", "worker_profile_rejected"}, {"error", message}}};
+    };
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return reject(401, "The client is no longer authorized");
+    const auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) return std::nullopt;
+    if (candidate != current) return reject(409, "Client settings changed; reconnect to retry");
+    if (!(current->perm & PERM::launch) || current->temporary_authorization)
+      return reject(403, "A profile requires permanent launch permission");
+    const auto profile = service->profile_for_client(current->uuid);
+    if (!profile) return reject(503, "The assigned profile is unavailable");
+    try {
+      auto number = [&](const char *key, double fallback) {
+        if (!args.contains(key)) return fallback;
+        const auto value = get_arg(args, key);
+        if (args.count(key) != 1 || value.empty() || value.size() > 32 ||
+            value.find_first_not_of("0123456789.") != std::string::npos)
+          throw std::invalid_argument("numeric field");
+        const auto parsed = util::parse_decimal<double>(value);
+        if (!parsed) throw std::invalid_argument("numeric field");
+        return *parsed;
+      };
+      for (const auto *key : {"game", "encoder", "mode", "preference", "mirrorDesktop",
+                              "closeDesktopSteamForPrivate", "launchMode"})
+        if (args.count(key) > 1) return reject(400, "Duplicate profile request field");
+      const auto game = get_arg(args, "game", "");
+      const auto identity = multiseat::spaces::parse_game_identity(game);
+      if (identity) {
+        if (identity->profile != *profile) return reject(409, "The selected Space changed. Refresh the library.");
+        const auto library = service->library_for_client(current->uuid, *profile);
+        if (!library || (identity->target != "big-picture-v1" &&
+            (!library->library.available || std::none_of(library->library.games.begin(), library->library.games.end(),
+              [&](const auto &item) { return item.target == identity->target; }))))
+          return reject(409, "This title is unavailable in the selected Space. Open Steam Big Picture or refresh the library.");
+      } else if (game != multiseat::profile_app_uuid && game != std::to_string(multiseat::profile_app_id))
+        return reject(400, "Select a title from this Space library");
+      if (get_arg(args, "encoder", "auto") != "auto" ||
+          get_arg(args, "mirrorDesktop", "0") != "0" ||
+          get_arg(args, "closeDesktopSteamForPrivate", "0") != "0" ||
+          !get_arg(args, "launchMode", "").empty())
+        return reject(400, "Profile streams use their own display and allocated hardware encoder");
+      auto width = number("width", 1920), height = number("height", 1080);
+      auto fps = number("fps", 60);
+      const auto requested_width = width, requested_height = height, requested_fps = fps;
+      const auto ceiling = number("client_max_fps", 240);
+      const auto hdr = number("hdr", 0), display_locked = number("display_locked", 0),
+        bitrate_locked = number("bitrate_locked", 0), bitrate = number("bitrate_kbps", 8000);
+      if ((hdr != 0 && hdr != 1) || (display_locked != 0 && display_locked != 1) ||
+          (bitrate_locked != 0 && bitrate_locked != 1) || width != std::floor(width) ||
+          height != std::floor(height) || width < 320 || width > 4096 || height < 240 || height > 2160 ||
+          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < 1000 || bitrate > 300000 || bitrate != std::floor(bitrate))
+        return reject(400, "Unsupported profile stream limits");
+      if (!current->display_mode.empty()) {
+        std::istringstream input(current->display_mode);
+        std::string w, h, f;
+        if (!std::getline(input, w, 'x') || !std::getline(input, h, 'x') || !std::getline(input, f) ||
+            w.find_first_not_of("0123456789") != std::string::npos ||
+            h.find_first_not_of("0123456789") != std::string::npos ||
+            f.find_first_not_of("0123456789") != std::string::npos)
+          return reject(409, "The paired display override is unsupported for profile streams");
+        const auto parsed_width = util::parse_decimal<double>(w);
+        const auto parsed_height = util::parse_decimal<double>(h);
+        const auto parsed_fps = util::parse_decimal<double>(f);
+        if (!parsed_width || !parsed_height || !parsed_fps)
+          return reject(409, "The paired display override is unsupported for profile streams");
+        width = *parsed_width; height = *parsed_height; fps = *parsed_fps;
+        if (fps >= 1000) fps /= 1000;
+        if (fps != std::floor(fps) || fps < 15 || fps > 240 || fps > ceiling + .5 ||
+            width < 320 || width > 4096 || height < 240 || height > 2160 ||
+            std::fmod(width, 2) != 0 || std::fmod(height, 2) != 0)
+          return reject(409, "The paired display override exceeds the profile or client limits");
+      } else {
+        width = std::floor(width / 2) * 2; height = std::floor(height / 2) * 2;
+        fps = std::min(std::floor(fps + .5), std::floor(ceiling + .5));
+      }
+      if (display_locked && (width != requested_width || height != requested_height))
+        return reject(409, "This profile cannot honor the locked display limit");
+      // This is the total client budget. RTSP reserves audio and packet
+      // recovery overhead before the worker selects its video encoder target.
+      auto target_bitrate = std::min(static_cast<int>(bitrate), 8000);
+      if (current->target_bitrate_kbps > 0)
+        target_bitrate = std::min(target_bitrate, current->target_bitrate_kbps);
+      if (config::video.max_bitrate > 0)
+        target_bitrate = std::min(target_bitrate, config::video.max_bitrate);
+      nlohmann::json fields;
+      auto field = [&](const char *key, nlohmann::json value, bool normalized = false) {
+        fields[key] = {{"value", std::move(value)}, {"source", "capability_validation"},
+          {"locked", true}, {"normalized", normalized}, {"reason_code", "worker_media_contract"}};
+      };
+      const auto display = std::to_string(static_cast<int>(width)) + "x" +
+        std::to_string(static_cast<int>(height)) + "x" + std::to_string(static_cast<int>(fps));
+      field("display_mode", display);
+      field("display_width", static_cast<int>(width), width != requested_width);
+      field("display_height", static_cast<int>(height), height != requested_height);
+      field("target_fps", static_cast<int>(fps), fps != requested_fps);
+      field("target_bitrate_kbps", target_bitrate, bitrate != target_bitrate);
+      field("hdr", false, hdr != 0);
+      field("preferred_codec", "h264");
+      nlohmann::json body {
+        {"status", true}, {"source", "worker_profile_v1"},
+        {"worker_profile", {{"version", 1}, {"id", *profile}, {"app_uuid", multiseat::profile_app_uuid},
+          {"app_id", multiseat::profile_app_id}, {"codec", "h264"}, {"audio_channels", 2},
+          {"target", identity ? identity->target : ""}, {"game_identity", game}}},
+        {"resolved_profile", {{"policy_version", 1}, {"preset", "worker"}, {"fields", std::move(fields)}}},
+        {"topology_resolution", {{"resolved", "gamescope_stream"}}},
+        {"reasoning", "Your assigned profile uses H.264, SDR and stereo audio."}
+      };
+      return profile_api_response_t {200, std::move(body)};
+    } catch (const std::exception &) {
+      return reject(400, "Malformed profile stream limits");
+    }
+  }
+
+  std::optional<profile_launch_response_t> launch_profile_request(
+    const crypto::p_named_cert_t &candidate, const args_t &args, bool resume,
+    const std::function<bool(const std::shared_ptr<rtsp_stream::launch_session_t> &)> &publish
+  ) {
+    const auto current = resolve_authorized_client(candidate);
+    if (!current) return profile_launch_response_t {401, "The client is no longer authorized", {}};
+    auto service = multiseat::profile_service_for(current->uuid);
+    if (!service) {
+      if (args.contains("workerProfile") || args.contains("workerTarget"))
+        return profile_launch_response_t {409, "The profile assignment changed; refresh the library", {}};
+      return std::nullopt;
+    }
+    if (candidate != current) return profile_launch_response_t {409, "Client settings changed; reconnect to retry", {}};
+    if (!(current->perm & PERM::launch) || current->temporary_authorization || watch_requested(args))
+      return profile_launch_response_t {403, "A profile requires permanent launch permission", {}};
+    if (args.contains("workerProfile") &&
+        (args.count("workerProfile") != 1 ||
+         service->profile_for_client(current->uuid) != std::optional<std::string>{get_arg(args, "workerProfile")}))
+      return profile_launch_response_t {409, "The profile assignment changed; refresh the library", {}};
+    const auto appid = get_arg(args, "appid", "");
+    const auto appuuid = get_arg(args, "appuuid", "");
+    if (!resume && ((appid.empty() && appuuid.empty()) ||
+        (!appid.empty() && appid != std::to_string(multiseat::profile_app_id)) ||
+        (!appuuid.empty() && appuuid != multiseat::profile_app_uuid)))
+      return profile_launch_response_t {400, "Launch the assigned Polaris profile from the app list", {}};
+    if (!args.contains("rikey") || !args.contains("rikeyid"))
+      return profile_launch_response_t {400, "Missing profile launch key material", {}};
+    auto launch = make_launch_session(false, false, args, current.get(), true);
+    if (!launch) return profile_launch_response_t {400, "Unsupported profile display or media options", {}};
+    if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Encrypted RTSP is required for profile streaming", {}};
+    if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)
+      return profile_launch_response_t{400, "Duplicate Space launch identity", {}};
+    const auto target = get_arg(args, "workerTarget", "");
+    if (args.contains("workerTarget") && (!multiseat::container::valid_steam_target(target) || !args.contains("workerProfile")))
+      return profile_launch_response_t{400, "Select the Space for this title", {}};
+    auto prepared = service->prepare(launch, get_arg(args, "workerProfile", ""), target);
+    if (!prepared.prepared()) {
+      launch->cancel();
+      return profile_launch_response_t {prepared.status, std::string(prepared.message), std::move(launch)};
+    }
+    const auto status = publish_authorized_launch(current, PERM::launch, [&] {
+      return !launch->is_cancelled() && publish && publish(launch);
+    });
+    if (status) {
+      launch->cancel();
+      return profile_launch_response_t {status, "Authorization or launch state changed; reconnect to retry", std::move(launch)};
+    }
+    return profile_launch_response_t {200, "Profile launch accepted", std::move(launch)};
+  }
+#endif
 
   inline crypto::p_named_cert_t get_verified_cert(
     const crypto::p_named_cert_t &candidate,
@@ -5480,8 +5925,14 @@ namespace nvhttp {
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       named_cert_p = get_verified_cert(request);
     }
+    bool profile_client = false;
+#ifdef __linux__
+    const auto profile_service = named_cert_p ? multiseat::profile_service_for(named_cert_p->uuid) : nullptr;
+    profile_client = static_cast<bool>(profile_service);
+#endif
     const int pair_status = named_cert_p ? 1 : 0;
-    const auto advertised_codec_support = advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
+    const auto advertised_codec_support = profile_client ? video::codec_capability_state_t {1, 1, {}} :
+      advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
 
     pt::ptree tree;
 
@@ -5499,7 +5950,7 @@ namespace nvhttp {
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
       tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
-      if (named_cert_p && !!(named_cert_p->perm & PERM::server_cmd)) {
+      if (named_cert_p && !profile_client && !!(named_cert_p->perm & PERM::server_cmd)) {
         pt::ptree& root_node = tree.get_child("root");
 
         if (config::sunshine.server_cmds.size() > 0) {
@@ -5514,7 +5965,14 @@ namespace nvhttp {
         BOOST_LOG(debug) << "Permission Get ServerCommand denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
       }
 
-      tree.put("root.Permission", std::to_string(named_cert_p ? (uint32_t) named_cert_p->perm : 0U));
+#ifdef __linux__
+      if (named_cert_p && !named_cert_p->temporary_authorization && !!(named_cert_p->perm & PERM::launch)) {
+        const auto owner = multiseat::installed_profile_service();
+        tree.put("root.PolarisSpacesAvailable", owner && !owner->client_spaces(named_cert_p->uuid).spaces.empty() ? 1 : 0);
+      }
+#endif
+      tree.put("root.Permission", std::to_string(named_cert_p ? static_cast<uint32_t>(
+        profile_client ? named_cert_p->perm & PERM::_game_control : named_cert_p->perm) : 0U));
 
     #ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
@@ -5578,11 +6036,24 @@ namespace nvhttp {
       }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
-    tree.put("root.ServerMaxLaunchRefreshRate", advertised_max_launch_refresh_rate_for_http());
+    tree.put("root.ServerMaxLaunchRefreshRate", profile_client ? 240 : advertised_max_launch_refresh_rate_for_http());
 
     tree.put("root.PairStatus", pair_status);
 
     if constexpr (std::is_same_v<PolarisHTTPS, T>) {
+#ifdef __linux__
+      if (profile_service) {
+        const auto token = profile_service->session_token(named_cert_p->uuid);
+        tree.put("root.currentgame", token ? multiseat::profile_app_id : 0);
+        tree.put("root.currentgameuuid", token ? std::string(multiseat::profile_app_uuid) : "");
+        tree.put("root.state", token ? "POLARIS_SERVER_BUSY" : "POLARIS_SERVER_FREE");
+        tree.put("root.currentgamesessiontoken", token.value_or(""));
+        tree.put("root.currentgameowner", token ? named_cert_p->name : "");
+        tree.put("root.currentgameviewercount", 0);
+        tree.put("root.currentgameowned", token ? 1 : 0);
+      } else
+#endif
+      {
       int current_appid = proc::proc.running();
       // When input only mode is enabled, the only resume method should be launching the same app again.
       if (config::input.enable_input_only_mode && current_appid != proc::input_only_app_id) {
@@ -5592,6 +6063,7 @@ namespace nvhttp {
       tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
       tree.put("root.state", current_appid > 0 ? "POLARIS_SERVER_BUSY" : "POLARIS_SERVER_FREE");
       append_current_game_session_fields(tree, named_cert_p.get());
+      }
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
@@ -5754,7 +6226,6 @@ namespace nvhttp {
 
   void applist(resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
-    const auto advertised_codec_support = advertised_codec_support_for_http(true);
 
     pt::ptree tree;
 
@@ -5776,6 +6247,22 @@ namespace nvhttp {
     }
 
     apps.put("<xmlattr>.status_code", 200);
+
+#ifdef __linux__
+    if (const auto service = multiseat::profile_service_for(named_cert_p->uuid)) {
+      if (!!(named_cert_p->perm & PERM::_all_actions)) {
+        pt::ptree app;
+        app.put("IsHdrSupported", 0);
+        app.put("AppTitle", service->profile_name_for_client(named_cert_p->uuid).value_or("Polaris Profile"));
+        app.put("UUID", std::string(multiseat::profile_app_uuid));
+        app.put("IDX", 0);
+        app.put("ID", multiseat::profile_app_id);
+        apps.push_back({"App", std::move(app)});
+      }
+      return;
+    }
+#endif
+    const auto advertised_codec_support = advertised_codec_support_for_http(true);
 
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
       auto current_appid = proc::proc.running();
@@ -5841,6 +6328,26 @@ namespace nvhttp {
 
   }
 
+#ifdef __linux__
+  bool handle_profile_launch(pt::ptree &tree, req_https_t request,
+                            const crypto::p_named_cert_t &client, const args_t &args, bool resume) {
+    auto result = launch_profile_request(client, args, resume, [](const auto &launch) {
+      return rtsp_stream::launch_session_raise(launch);
+    });
+    if (!result) return false;
+    tree.put("root.<xmlattr>.status_code", result->status);
+    tree.put("root.<xmlattr>.status_message", result->message);
+    tree.put(resume ? "root.resume" : "root.gamesession", result->status == 200 ? 1 : 0);
+    if (result->status == 200) {
+      tree.put("root.sessionToken", result->launch->session_token);
+      tree.put("root.sessionUrl0", std::format("{}{}:{}", result->launch->rtsp_url_scheme,
+        net::addr_to_url_escaped_string(request->local_endpoint().address()),
+        static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))));
+    }
+    return true;
+  }
+#endif
+
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
@@ -5870,6 +6377,9 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    if (handle_profile_launch(tree, request, named_cert_p, args, false)) return;
+#endif
     const auto launch_generation = proc::proc.capture_session_launch_generation();
     if (!launch_generation || !proc::proc.try_begin_session_launch(*launch_generation)) {
       tree.put("root.resume", 0);
@@ -6329,6 +6839,9 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    if (handle_profile_launch(tree, request, named_cert_p, request->parse_query_string(), true)) return;
+#endif
     const auto launch_generation = proc::proc.capture_session_launch_generation();
     if (!launch_generation || !proc::proc.try_begin_session_launch(*launch_generation)) {
       tree.put("root.resume", 0);
@@ -6600,6 +7113,24 @@ namespace nvhttp {
       return;
     }
 
+#ifdef __linux__
+    if (auto service = multiseat::profile_service_for(named_cert_p->uuid)) {
+      const auto token = get_arg(args, "sessiontoken", "");
+      const auto status = publish_authorized_launch(named_cert_p, PERM::launch, [&] {
+        return service->cancel_client(named_cert_p->uuid, token);
+      });
+      tree.put("root.cancel", status == 0 ? 1 : 0);
+      tree.put("root.<xmlattr>.status_code", status == 0 ? 200 : status);
+      if (status == 0) {
+        rtsp_stream::cancel_pending_launch_for_client(named_cert_p->uuid, token);
+        if (auto session = rtsp_stream::find_session(named_cert_p->uuid);
+            session && (token.empty() || stream::session::session_token(*session) == token))
+          stream::session::graceful_stop(*session);
+      }
+      return;
+    }
+#endif
+
     const auto session_token = get_arg(args, "sessiontoken", "");
     auto pending_capture_cancel = proc::proc.cancel_capture_preparation_for_shutdown(
       named_cert_p->uuid, session_token, true, false);
@@ -6729,6 +7260,14 @@ namespace nvhttp {
       response->close_connection_after_response = true;
       return;
     }
+
+#ifdef __linux__
+    if (multiseat::profile_service_for(named_cert_p->uuid)) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      response->close_connection_after_response = true;
+      return;
+    }
+#endif
 
     if (
       !(named_cert_p->perm & PERM::_allow_view)
@@ -6918,6 +7457,23 @@ namespace nvhttp {
         return;
       }
 
+#ifdef __linux__
+      if (multiseat::profile_service_for(named_cert_p->uuid)) {
+        const nlohmann::json output {{"server", "polaris"}, {"version", PROJECT_VERSION},
+          {"features", {{"worker_profile_v1", true}, {"game_library", true},
+            {"deterministic_launch_presets_v1", true}, {"resolved_profile_provenance_v1", true},
+            {"expected_topology_assertion_v1", true}, {"session_lifecycle", true},
+            {"disconnect_resume_v1", false}, {"session_stop_v1", true},
+            {"client_settings_v1", false}, {"live_tuning_v1", false},
+            {"live_media_telemetry_v1", false}, {"diagnostics_doctor_v1", false},
+            {"doctor_actions_v1", false}, {"doctor_trials_v1", false}}}};
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+        return;
+      }
+#endif
+
       nlohmann::json output;
       output["server"] = "polaris";
       output["version"] = PROJECT_VERSION;
@@ -7048,6 +7604,42 @@ namespace nvhttp {
       response->write(output.dump(), headers);
     };
 
+    auto polarisSpaces = [](resp_https_t response, req_https_t request) {
+#ifdef __linux__
+      std::optional<std::string> body;
+      if (request->method == "POST") {
+        const auto type = request->header.find("Content-Type");
+        if (type == request->header.end() || type->second.substr(0, type->second.find(';')) != "application/json") {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request); return;
+        }
+        std::array<char, 4097> bytes;
+        request->content.read(bytes.data(), bytes.size());
+        const auto size = request->content.gcount();
+        if (size > 4096) { response->write(SimpleWeb::StatusCode::client_error_bad_request); return; }
+        body = std::string(bytes.data(), static_cast<std::size_t>(size));
+      }
+      const auto result = profile_spaces_request(get_verified_cert(request),
+        body ? std::optional<std::string_view>{*body} : std::nullopt);
+      SimpleWeb::CaseInsensitiveMultimap headers{{"Content-Type", "application/json"}, {"Cache-Control", "no-store"},
+        {"X-Content-Type-Options", "nosniff"}};
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(), headers);
+#else
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+#endif
+    };
+
+    auto polarisSpaceLibrary = [](resp_https_t response, req_https_t request) {
+#ifdef __linux__
+      const auto query = request->parse_query_string();
+      if (query.count("space_id") != 1) { response->write(SimpleWeb::StatusCode::client_error_bad_request); return; }
+      const auto result = profile_library_request(get_verified_cert(request), get_arg(query, "space_id"));
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(),
+        SimpleWeb::CaseInsensitiveMultimap{{"Content-Type", "application/json"}, {"Cache-Control", "no-store"}});
+#else
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+#endif
+    };
+
     auto polarisSessionStatus = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
 
@@ -7056,6 +7648,15 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+
+#ifdef __linux__
+      if (const auto result = profile_session_status(named_cert_p)) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(static_cast<SimpleWeb::StatusCode>(result->status), result->body.dump(), headers);
+        return;
+      }
+#endif
 
       nlohmann::json output;
 
@@ -7868,10 +8469,72 @@ namespace nvhttp {
     // Game library — returns games with metadata, covers, categories
     auto polarisGames = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
-      if (!get_verified_cert(request)) {
+      const auto client = get_verified_cert(request);
+      if (!client) {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+#ifdef __linux__
+      const auto environment_query = request->parse_query_string();
+      const bool desktop_catalog = get_arg(environment_query, "environment", "") == "desktop";
+      if (desktop_catalog) {
+        if (const auto owner = multiseat::installed_profile_service(); owner && owner->routes_client(client->uuid) &&
+            !owner->client_spaces(client->uuid).desktop_allowed) {
+          response->write(SimpleWeb::StatusCode::client_error_forbidden); return;
+        }
+      }
+      if (const auto service = multiseat::profile_service_for(client->uuid); service && !desktop_catalog) {
+        const auto query = request->parse_query_string();
+        const auto spaces = service->client_spaces(client->uuid);
+        const auto selected = std::find_if(spaces.spaces.begin(), spaces.spaces.end(), [](const auto &space) { return space.selected; });
+        if (selected != spaces.spaces.end() && selected->library_enabled) {
+          auto result = profile_library_request(client, selected->id);
+          if (result.status == 200) {
+            auto &games = result.body["games"];
+            auto search = get_arg(query, "search", "");
+            std::transform(search.begin(), search.end(), search.begin(), [](unsigned char c) { return std::tolower(c); });
+            const auto source = get_arg(query, "source", "");
+            nlohmann::json filtered = nlohmann::json::array();
+            for (const auto &game : games) {
+              auto name = game.at("name").get<std::string>();
+              std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+              if (name.find(search) != std::string::npos && (source.empty() || source == "steam")) filtered.push_back(game);
+            }
+            result.body["total"] = filtered.size();
+            int offset = 0, limit = 50;
+            try { offset = std::max(0, std::stoi(get_arg(query, "offset", "0"))); limit = std::clamp(std::stoi(get_arg(query, "limit", "50")), 0, 4097); } catch (...) {}
+            games = nlohmann::json::array();
+            for (std::size_t i = static_cast<std::size_t>(offset); i < filtered.size() && games.size() < static_cast<std::size_t>(limit); ++i) games.push_back(filtered[i]);
+          }
+          response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(),
+            SimpleWeb::CaseInsensitiveMultimap{{"Content-Type", "application/json"}, {"Cache-Control", "no-store"}});
+          return;
+        }
+        const auto name = service->profile_name_for_client(client->uuid).value_or("Polaris Profile");
+        auto searchable_name = name + " Polaris Profile";
+        std::transform(searchable_name.begin(), searchable_name.end(), searchable_name.begin(),
+          [](unsigned char c) { return std::tolower(c); });
+        auto search = get_arg(query, "search", "");
+        std::transform(search.begin(), search.end(), search.begin(), [](unsigned char c) { return std::tolower(c); });
+        const auto source = get_arg(query, "source", "");
+        const bool matches = searchable_name.find(search) != std::string::npos &&
+          (source.empty() || source == "other" || source == "polaris") &&
+          !!(client->perm & PERM::launch) && !client->temporary_authorization;
+        nlohmann::json games = nlohmann::json::array();
+        if (matches && get_arg(query, "offset", "0") == "0" && get_arg(query, "limit", "50") != "0") {
+          games.push_back({{"id", multiseat::profile_app_uuid}, {"app_id", multiseat::profile_app_id},
+            {"name", name}, {"source", "polaris"}, {"installed", true}, {"hdr_supported", false},
+            {"worker_profile", true}, {"launch_mode", {{"preferred_mode", "gamescope_stream"},
+              {"recommended_mode", "gamescope_stream"}, {"allowed_modes", {"gamescope_stream"}},
+              {"mode_reason", "Assigned profile with its own display and encoder"}}}, {"cover_url", ""}});
+        }
+        const nlohmann::json output {{"games", games}, {"total", matches ? 1 : 0}};
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(output.dump(), headers);
+        return;
+      }
+#endif
       const auto advertised_codec_support = advertised_codec_support_for_http(true);
       // Per-host, not per-game: every game plans from the same host display,
       // so the planner is computed once and attached to each game unchanged.
@@ -7987,6 +8650,62 @@ namespace nvhttp {
       headers.emplace("Content-Type", "application/json");
       response->write(output.dump(), headers);
     };
+
+#ifdef __linux__
+    // Space artwork is requested explicitly by the client. Library enumeration
+    // remains local-only. Only installed, permitted Steam IDs reach the existing
+    // allowlisted provider and bounded image cache; no profile paths are served.
+    auto polarisSpaceArtwork = [](resp_https_t response, req_https_t request) {
+      const auto client = get_verified_cert(request);
+      const std::string prefix = "/polaris/v1/games/";
+      const auto split = request->path.find("/space-artwork/", prefix.size());
+      if (split == std::string::npos) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request); return;
+      }
+      const auto identity = request->path.substr(prefix.size(), split - prefix.size());
+      const auto kind = game_artwork::parse_kind(request->path.substr(split + 15));
+      const auto target = profile_artwork_target(client, identity);
+      if (!kind || !target) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found); return;
+      }
+      // A separate cache namespace cannot replace host library overrides. The
+      // decimal Steam ID is already canonical and bounded to uint32.
+      const auto cache = platf::appdata() / "spaces-library-artwork";
+      const auto cache_id = profile_artwork_cache_id(*target);
+      auto asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
+      if (!asset) {
+        const auto transport = make_artwork_transport("");
+        auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
+        std::erase_if(plan, [&](const auto &item) { return item.kind != kind; });
+        (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
+        asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
+      }
+      // Permission can change while downloading. Do not publish stale access.
+      if (!asset || profile_artwork_target(client, identity) != target) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found); return;
+      }
+      std::ifstream input(asset->path, std::ios::binary);
+      if (!input.is_open()) { response->write(SimpleWeb::StatusCode::client_error_not_found); return; }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", asset->mime_type);
+      headers.emplace("X-Content-Type-Options", "nosniff");
+      headers.emplace("Cache-Control", "private, max-age=86400");
+      response->write(SimpleWeb::StatusCode::success_ok, input, headers);
+    };
+    https_server.resource["^/polaris/v1/games/space[.][^/]+/space-artwork/(poster|hero|logo|icon)$"]["GET"] = polarisSpaceArtwork;
+    https_server.resource["^/polaris/v1/games/space[.][^/]+/space-artwork/resolve$"]["POST"] = [](resp_https_t response, req_https_t request) {
+      const auto client = get_verified_cert(request);
+      if (!client) { response->write(SimpleWeb::StatusCode::client_error_unauthorized); return; }
+      const std::string prefix = "/polaris/v1/games/";
+      const auto split = request->path.find("/space-artwork/", prefix.size());
+      const auto identity = request->path.substr(prefix.size(), split - prefix.size());
+      const auto result = profile_artwork_resolve_request(client, identity, platf::appdata(), make_artwork_transport(""));
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(), headers);
+    };
+#endif
 
     // Game cover art
     auto polarisGameCover = [](resp_https_t response, req_https_t request) {
@@ -9598,6 +10317,12 @@ namespace nvhttp {
         return;
       }
 
+#ifdef __linux__
+      if (const auto result = stop_profile_session(named_cert_p, expected_token)) {
+        write_json(result->body, static_cast<SimpleWeb::StatusCode>(result->status));
+        return;
+      }
+#endif
       const auto shutdown = proc::proc.request_session_shutdown(
         named_cert_p->uuid,
         expected_token,
@@ -9930,6 +10655,15 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+
+#ifdef __linux__
+      if (const auto result = resolve_profile_request(named_cert_p, request->parse_query_string())) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(static_cast<SimpleWeb::StatusCode>(result->status), result->body.dump(), headers);
+        return;
+      }
+#endif
 
       auto args = request->parse_query_string();
       std::string device = args.count("device") ? args.find("device")->second : "";
@@ -10265,6 +10999,9 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/spaces$"]["GET"] = polarisSpaces;
+    https_server.resource["^/polaris/v1/spaces/select$"]["POST"] = polarisSpaces;
+    https_server.resource["^/polaris/v1/spaces/library$"]["GET"] = polarisSpaceLibrary;
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;

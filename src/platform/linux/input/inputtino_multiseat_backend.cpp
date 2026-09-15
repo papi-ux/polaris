@@ -601,6 +601,11 @@ namespace multiseat::input {
         return std::nullopt;
       }
     }
+    if (expectation.plan.steam_input &&
+        !add_single(managed_device_kind_e::steam_gamepad, device_kind_e::steam_gamepad,
+                    0, 0x28DE, 0x11FF, 0, true)) {
+      return std::nullopt;
+    }
     return result;
   }
 
@@ -633,6 +638,7 @@ namespace multiseat::input {
         return create_inputtino_device<inputtino::PenTablet>(spec, {}, [&]() {
           return inputtino::PenTablet::create(definition);
         });
+      case managed_device_kind_e::steam_gamepad:
       case managed_device_kind_e::gamepad:
         return create_inputtino_device<inputtino::XboxOneJoypad>(
           spec,
@@ -1239,7 +1245,7 @@ namespace multiseat::input {
               .kind = expected.kind,
               .slot = expected.slot,
               .host_path = snapshot.host_path,
-              .worker_path = expected.worker_path,
+              .worker_path = expected.kind == device_kind_e::steam_gamepad ? snapshot.host_path : expected.worker_path,
               .filesystem_device = snapshot.filesystem_device,
               .inode = snapshot.inode,
               .character_major = snapshot.character_major,
@@ -1568,7 +1574,8 @@ namespace multiseat::input {
           [gate = std::weak_ptr {feedback_gate}, expected_kind, expected_slot](
             const feedback_event_t &event
           ) {
-            if (expected_kind != managed_device_kind_e::gamepad ||
+            if ((expected_kind != managed_device_kind_e::gamepad &&
+                 expected_kind != managed_device_kind_e::steam_gamepad) ||
                 event.gamepad_slot != expected_slot) {
               return;
             }

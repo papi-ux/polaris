@@ -341,6 +341,6 @@ func runSessionBus(
 	case <-parent.Done():
 		return nil
 	case <-child.done:
-		return errors.New("runtime session bus exited unexpectedly")
+		return child.exitError("runtime session bus exited unexpectedly")
 	}
 }

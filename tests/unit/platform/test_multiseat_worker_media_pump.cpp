@@ -139,6 +139,26 @@ TEST(MultiseatWorkerMediaPump, RefusesWithoutAConnectionOrSinks) {
   EXPECT_FALSE(describe(pump_status_e::transport_lost).empty());
 }
 
+TEST(MultiseatWorkerMediaPump, SelectsTheNegotiatedVideoBudgetBeforeAcknowledgement) {
+  for (const auto requested : {4000U, 20000U}) {
+    temporary_root_t root;
+    authority_store_t store {root.path(), deterministic_capability(0x41)};
+    auto authority = create_authority(store, identity_for(), "generation-pump-bitrate");
+    fake_worker_t worker {authority, fake_behavior_e::media_contract};
+    controller_client_t client;
+    ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+    delivered_t delivered;
+    auto expected = matching_expectation();
+    expected.bitrate_kbps = requested;
+    const auto report = run(client.lease_connection(), expected, delivered.sinks(), quiet_host());
+    EXPECT_EQ(report.selected_bitrate_kbps, std::min(requested, 15000U));
+    EXPECT_EQ(worker.selected_bitrate(), report.selected_bitrate_kbps);
+    EXPECT_EQ(worker.contract_messages(),
+      (std::vector<message_e> {message_e::select_media_bitrate, message_e::media_config_ack}));
+    EXPECT_EQ(report.video_frames, 1U);
+  }
+}
+
 TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x41)};
@@ -170,6 +190,28 @@ TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream)
   ASSERT_EQ(delivered.audio.size(), 1U);
   EXPECT_EQ(std::string(delivered.audio[0].begin(), delivered.audio[0].end()), "audio");
 
+  worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerMediaPump, RejectsVariableAudioPacketSizesBeforeDelivery) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x41)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-variable-audio");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract_variable_audio};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+  delivered_t delivered;
+  const auto report = run(
+    client.lease_connection(), matching_expectation(), delivered.sinks(), quiet_host()
+  );
+  EXPECT_EQ(report.status, pump_status_e::malformed_frame);
+  EXPECT_EQ(report.audio_frames, 1U);
+  {
+    std::scoped_lock lock {delivered.mutex};
+    ASSERT_EQ(delivered.audio.size(), 1U);
+  }
   worker.stop();
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
@@ -281,11 +323,11 @@ TEST(MultiseatWorkerMediaPump, AStoppingSessionEndsTheStreamAndClosesItsTranspor
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 
-TEST(MultiseatWorkerMediaPump, CarriesTheHostsKeyframeAndInvalidationAsks) {
+TEST(MultiseatWorkerMediaPump, DefersEarlyKeyframeAndInvalidationAsksUntilAcknowledgement) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x46)};
   auto authority = create_authority(store, identity_for(), "generation-pump-asks");
-  fake_worker_t worker {authority, fake_behavior_e::media_contract};
+  fake_worker_t worker {authority, fake_behavior_e::media_contract, true, {}, 100ms};
   controller_client_t client;
   ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
   ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
@@ -317,6 +359,8 @@ TEST(MultiseatWorkerMediaPump, CarriesTheHostsKeyframeAndInvalidationAsks) {
   EXPECT_EQ(report.idr_requests, 1U);
   EXPECT_EQ(report.invalidations, 1U);
   const auto seen = worker.contract_messages();
+  ASSERT_EQ(seen.size(), 3U);
+  EXPECT_EQ(seen.front(), message_e::media_config_ack);
   EXPECT_NE(std::find(seen.begin(), seen.end(), message_e::request_idr), seen.end());
   EXPECT_NE(std::find(seen.begin(), seen.end(), message_e::invalidate_ref_frames), seen.end());
   const auto invalidated = worker.invalidated();
@@ -325,6 +369,33 @@ TEST(MultiseatWorkerMediaPump, CarriesTheHostsKeyframeAndInvalidationAsks) {
   EXPECT_EQ(invalidated->last, 9U);
 
   worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerMediaPump, ShutdownDuringContractWaitDoesNotConsumeQueuedControls) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x47)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-wait");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract, true, {}, 150ms};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  std::atomic<bool> stopping {false};
+  std::atomic<unsigned> consumed {0};
+  auto host = quiet_host();
+  host.stop_requested = [&] { return stopping.load(); };
+  host.take_idr_request = [&] { ++consumed; return true; };
+  host.take_invalidation = [&]() -> std::optional<std::pair<std::int64_t, std::int64_t>> {
+    ++consumed;
+    return std::pair<std::int64_t, std::int64_t> {1, 2};
+  };
+  delivered_t delivered;
+  std::jthread stopper {[&] { std::this_thread::sleep_for(30ms); stopping = true; }};
+  const auto report = run(client.lease_connection(), matching_expectation(), delivered.sinks(), host);
+  EXPECT_EQ(report.status, pump_status_e::ended_on_shutdown);
+  EXPECT_EQ(report.video_frames, 0U);
+  EXPECT_EQ(consumed.load(), 0U);
+  worker.stop();
+  EXPECT_TRUE(worker.contract_messages().empty());
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 

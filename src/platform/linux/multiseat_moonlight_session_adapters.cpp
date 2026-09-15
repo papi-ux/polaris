@@ -329,6 +329,16 @@ namespace multiseat::input {
     );
   }
 
+  std::size_t moonlight_session_binding_registry_t::claimed_sessions(
+    const seat_handle_t &handle
+  ) const {
+    std::scoped_lock lock {state_->mutex};
+    return std::count_if(state_->entries.begin(), state_->entries.end(),
+      [&handle](const auto &entry) {
+        return entry->claimed && entry->binding.handle == handle;
+      });
+  }
+
   bool moonlight_session_binding_registry_t::closed() const {
     std::scoped_lock lock {state_->mutex};
     return state_->closed;

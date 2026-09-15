@@ -301,6 +301,9 @@ func TestManagedChildReportsAnUnexpectedExit(t *testing.T) {
 	if !child.exited() {
 		t.Fatal("exited child still appeared active")
 	}
+	if got := child.exitError("runtime display exited unexpectedly").Error(); got != "runtime display exited unexpectedly (exit status 88)" {
+		t.Fatalf("trusted child lost its termination status: %q", got)
+	}
 	if err := child.stop(time.Second); err != nil {
 		t.Fatal(err)
 	}

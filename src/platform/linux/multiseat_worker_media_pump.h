@@ -30,6 +30,8 @@ namespace multiseat::media {
     /** Moonlight's video format index. Only 0, H.264, can be served today. */
     int video_format = 0;
     std::uint8_t audio_channels = 0;
+    /** Video budget after transport reservations; zero retains the contract default for harnesses. */
+    std::uint32_t bitrate_kbps = 0;
   };
 
   enum class pump_status_e {
@@ -47,6 +49,7 @@ namespace multiseat::media {
     unrepresentable_contract,
     /** The contract is representable but is not what the client negotiated. */
     mismatched_contract,
+    bitrate_refused,
     acknowledgement_refused,
     /** A frame whose prefix, index or payload the contract does not allow. */
     malformed_frame,
@@ -84,6 +87,7 @@ namespace multiseat::media {
   struct pump_report_t {
     pump_status_e status = pump_status_e::no_connection;
     worker_ipc::media_config_t contract {};
+    std::uint32_t selected_bitrate_kbps = 0;
     std::uint64_t video_frames = 0;
     std::uint64_t audio_frames = 0;
     std::uint64_t discontinuities = 0;

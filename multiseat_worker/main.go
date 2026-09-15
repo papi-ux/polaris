@@ -30,7 +30,7 @@ func run(arguments []string) error {
 		}
 		return checkHealth(config, paths, uid)
 	case "run":
-		workload, err := parseRunArguments(arguments[1:])
+		workload, mediaEnabled, err := parseWorkerRunMode(arguments[1:])
 		if err != nil {
 			return err
 		}
@@ -41,6 +41,9 @@ func run(arguments []string) error {
 		syscall.Umask(0o077)
 		context, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
+		if mediaEnabled {
+			return runProductionSeatWorker(context, config, paths, uid)
+		}
 		return runWorker(context, config, paths, uid)
 	default:
 		return errors.New("unknown worker command")

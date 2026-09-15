@@ -6,6 +6,7 @@
 
   #include "multiseat_worker_media_pump.h"
 
+  #include <algorithm>
   #include <atomic>
   #include <chrono>
   #include <limits>
@@ -78,6 +79,10 @@ namespace multiseat::media {
         return stopped_.load();
       }
 
+      void enable_media_controls() {
+        media_controls_ready_.store(true);
+      }
+
     private:
       void join() {
         finished_.store(true);
@@ -95,6 +100,14 @@ namespace multiseat::media {
             // returns it, so a stopping session never waits for the worker.
             connection_.close();
             return;
+          }
+          // Clients can request their first keyframe as soon as control opens.
+          // Leave those requests queued until the worker accepts the contract;
+          // its encoder must reject controls before that acknowledgement.
+          // Shutdown remains observable while receive_media waits for it.
+          if (!media_controls_ready_.load()) {
+            std::this_thread::sleep_for(request_tick);
+            continue;
           }
           if (requests_.take_invalidation) {
             if (const auto span = requests_.take_invalidation()) {
@@ -122,6 +135,7 @@ namespace multiseat::media {
       std::uint64_t invalidations_ = 0;
       std::atomic<bool> finished_ {false};
       std::atomic<bool> stopped_ {false};
+      std::atomic<bool> media_controls_ready_ {false};
       std::thread thread_;
     };
 
@@ -163,6 +177,8 @@ namespace multiseat::media {
         return "the worker announced a contract this host cannot represent";
       case pump_status_e::mismatched_contract:
         return "the worker announced a contract the client did not negotiate";
+      case pump_status_e::bitrate_refused:
+        return "the worker refused the negotiated video bitrate";
       case pump_status_e::acknowledgement_refused:
         return "the worker refused the contract acknowledgement";
       case pump_status_e::malformed_frame:
@@ -223,11 +239,20 @@ namespace multiseat::media {
                       std::to_string(contract->audio_channels) + " audio channels";
       return finish(pump_status_e::mismatched_contract);
     }
+    const auto bitrate = expected.bitrate_kbps == 0 ? contract->bitrate_ceiling_kbps :
+      std::min(expected.bitrate_kbps, contract->bitrate_ceiling_kbps);
+    if (expected.bitrate_kbps != 0 &&
+        connection.select_media_bitrate(bitrate) != transport_status_e::applied) {
+      return finish(pump_status_e::bitrate_refused);
+    }
+    report.selected_bitrate_kbps = bitrate;
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
       return finish(pump_status_e::acknowledgement_refused);
     }
+    request_side.enable_media_controls();
 
     std::vector<std::uint8_t> bytes;
+    std::optional<std::size_t> audio_packet_size;
     while (true) {
       const auto received = connection.receive_media(packet);
       if (received != transport_status_e::applied) {
@@ -246,6 +271,13 @@ namespace multiseat::media {
             ++report.video_frames;
             sinks.video(std::move(bytes), static_cast<std::int64_t>(frame.frame_index), frame.idr);
           } else {
+            // Moonlight audio FEC requires equal shard sizes. Refuse a legacy
+            // or faulty worker before its variable packet can reach the client.
+            if (audio_packet_size && *audio_packet_size != bytes.size()) {
+              report.detail = "the worker changed its Opus packet size";
+              return finish(pump_status_e::malformed_frame);
+            }
+            audio_packet_size = bytes.size();
             ++report.audio_frames;
             sinks.audio(std::move(bytes));
           }

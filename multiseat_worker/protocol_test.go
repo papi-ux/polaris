@@ -336,3 +336,13 @@ func TestMediaContractMessagesAreControlOnlyAndFixedSize(t *testing.T) {
 		}
 	}
 }
+
+func TestBitrateControlHasAnExactBoundedWireBody(t *testing.T) {
+	for _, ch := range []channel{channelControl, channelMedia} {
+		for _, size := range []int{0, 1, 3, 4, 5, 65536} {
+			if got, want := validMessage(ch, messageSelectMediaBitrate, size), ch == channelControl && size == 4; got != want {
+				t.Fatalf("bitrate frame channel %v size %v: got %v want %v", ch, size, got, want)
+			}
+		}
+	}
+}

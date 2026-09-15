@@ -113,6 +113,11 @@ namespace multiseat::input {
       moonlight_launch_selection_key_t key
     );
 
+    /** Fence one exact seat without waiting for its activation or bound stream. */
+    [[nodiscard]] moonlight_runtime_lifecycle_status_e quiesce_seat(
+      const seat_handle_t &handle
+    );
+
     /** Close new launch selection and activation without waiting for streams. */
     [[nodiscard]] moonlight_coordinator_quiesce_report_t quiesce() noexcept;
     [[nodiscard]] moonlight_coordinator_shutdown_report_t shutdown() noexcept;

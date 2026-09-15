@@ -1,0 +1,7 @@
+#pragma once
+#include <string_view>
+
+namespace multiseat::spaces {
+  // Reviewed with the host package. Downloaded metadata cannot add trust roots.
+  inline constexpr std::string_view runtime_catalog_json = R"catalog(@POLARIS_SPACES_RUNTIME_CATALOG@)catalog";
+}

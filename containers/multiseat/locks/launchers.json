@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "heroic": {
+    "name": "heroic",
+    "version": "2.22.1",
+    "architecture": "amd64",
+    "filename": "heroic_2.22.1_amd64.deb",
+    "url": "https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/download/v2.22.1/Heroic-2.22.1-linux-amd64.deb",
+    "sha256": "2f3bdb663b48144b7804c30724765dc4bdc76357b7cd5f35a5dadf3030f6a948",
+    "source": "https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/tag/v2.22.1"
+  }
+}

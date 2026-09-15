@@ -564,6 +564,65 @@ namespace {
     EXPECT_FALSE(build_device_specs(invalid).has_value());
   }
 
+  TEST(InputtinoMultiseatBackend, SteamOutputIsPreallocatedAndRetiresWithOnlyItsSeat) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    inputtino_host_backend_t backend {factory, probe, fast_options()};
+    const auto first = expectation_for(0, 200, {.steam_input = true});
+    const auto second = expectation_for(1, 201, {.steam_input = true});
+    const auto a = backend.create(first);
+    const auto b = backend.create(second);
+    ASSERT_TRUE(a.allocation);
+    ASSERT_TRUE(b.allocation);
+    ASSERT_EQ(a.allocation->nodes.size(), 5U);
+    ASSERT_EQ(b.allocation->nodes.size(), 5U);
+    const auto &output = a.allocation->nodes.back();
+    EXPECT_EQ(output.kind, device_kind_e::steam_gamepad);
+    EXPECT_EQ(output.worker_path, output.host_path);
+    EXPECT_NE(output.host_path, b.allocation->nodes.back().host_path);
+    ASSERT_EQ(factory.created_specs.size(), 8U);
+    EXPECT_EQ(factory.created_specs[3].kind, managed_device_kind_e::steam_gamepad);
+    EXPECT_EQ(factory.created_specs[3].vendor_id, 0x28DE);
+    EXPECT_EQ(factory.created_specs[3].product_id, 0x11FF);
+    EXPECT_NE(factory.created_specs[2].kernel_name, factory.created_specs[3].kernel_name);
+    EXPECT_EQ(backend.destroy(first.handle, first.input_seat), backend_result_e::applied);
+    const auto remaining = backend.inventory();
+    ASSERT_EQ(remaining.size(), 1U);
+    EXPECT_EQ(remaining.front(), *b.allocation);
+    EXPECT_EQ(backend.destroy(second.handle, second.input_seat), backend_result_e::applied);
+    EXPECT_TRUE(backend.inventory().empty());
+  }
+
+  TEST(InputtinoMultiseatBackend, SteamTranslationCannotReceiveRawInputOrLeakFeedbackAcrossGenerations) {
+    fake_kernel_probe_t probe;
+    fake_device_factory_t factory {probe};
+    std::vector<controller_feedback_t> feedback;
+    inputtino_host_backend_t backend {factory, probe, fast_options(), {},
+      [&feedback](const controller_feedback_t &packet) { feedback.push_back(packet); }};
+    const auto first = expectation_for(0, 210, {.steam_input = true});
+    ASSERT_EQ(backend.create(first).result, backend_result_e::applied);
+    ASSERT_EQ(factory.feedback_callbacks.size(), 4U);
+    const input_event_t packet {.payload = gamepad_state_event_t {.buttons = 0x1000}};
+    ASSERT_EQ(backend.route(first.handle, first.input_seat, 1, packet), backend_result_e::applied);
+    ASSERT_EQ(factory.apply_calls.size(), 1U);
+    EXPECT_EQ(factory.apply_calls.back().spec.kind, managed_device_kind_e::gamepad);
+    auto retired = factory.feedback_callbacks.back();
+    retired({.kind = feedback_kind_e::rumble, .gamepad_slot = 0, .low_frequency = 10});
+    ASSERT_EQ(feedback.size(), 1U);
+    EXPECT_EQ(feedback.back().handle, first.handle);
+    retired({.kind = feedback_kind_e::rumble, .gamepad_slot = 1, .low_frequency = 20});
+    EXPECT_EQ(feedback.size(), 1U);
+    ASSERT_EQ(backend.destroy(first.handle, first.input_seat), backend_result_e::applied);
+    const auto next = expectation_for(0, 211, {.steam_input = true});
+    ASSERT_EQ(backend.create(next).result, backend_result_e::applied);
+    retired({.kind = feedback_kind_e::rumble, .gamepad_slot = 0, .low_frequency = 30});
+    EXPECT_EQ(feedback.size(), 1U);
+    factory.feedback_callbacks.back()({.kind = feedback_kind_e::rumble, .gamepad_slot = 0, .low_frequency = 40});
+    ASSERT_EQ(feedback.size(), 2U);
+    EXPECT_EQ(feedback.back().handle, next.handle);
+    EXPECT_EQ(backend.destroy(next.handle, next.input_seat), backend_result_e::applied);
+  }
+
   TEST(InputtinoMultiseatBackend, CreatesExactManifestWithoutExposingJoystickNode) {
     fake_kernel_probe_t probe;
     fake_device_factory_t factory {probe};

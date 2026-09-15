@@ -1,14 +1,16 @@
 # Locked runtime images
 
-The four `linux/amd64` profiles retain their existing Games on Whales launcher
-roots. A source-root digest is never a produced-worker digest. Schema 2 in
+The four `linux/amd64` profiles are Polaris builds from one pinned official
+Ubuntu 26.04 LTS base. Steam and Lutris come from the signed Ubuntu snapshot;
+Heroic comes from its publisher release with a pinned asset checksum. No launcher
+image or startup script is inherited from another streaming project. A source-root digest is never a produced-worker digest. Schema 2 in
 `images.lock.json` binds each source root to its package lock and names the
 location of its produced artifact manifest. Production catalog promotion and
 registry publication require separate review and are absent from this job.
 
 ## Build and inspect
 
-Use Linux/amd64, Python 3.11 or newer, Git, GNU tar, and rootless Podman. Prepare
+Use Linux/amd64, Python 3.11 or newer, Git, GNU tar, Docker Engine, and Buildx. Prepare
 inputs with network access, then build with network access disabled:
 
 ```sh
@@ -16,13 +18,14 @@ python3 containers/multiseat/prepare-inputs.py gamescope
 python3 containers/multiseat/build-image.py gamescope
 ```
 
-Repeat for `steam`, `heroic`, and `lutris`. Both commands accept `--nvidia` for
+Repeat for `steam`, `heroic`, and `lutris`. Both commands default to Docker and
+accept `--engine=podman` for the retained legacy lane. Both accept `--nvidia` for
 the driver-matched physical lane. The build command requires a clean commit and materializes sources and locks
 from that exact Git object into a private build context. Ignored files and edits
 made during a build cannot enter the image or change its later provenance.
 Only independently copied and hash-verified locked inputs enter that context.
 The CI matrix fetches exact locked inputs, runs integrity tests, builds with
-`--network=none --pull=never`, validates dependencies, and exercises the real
+`--network=none` and pre-inspected locked roots, validates dependencies, and exercises the real
 session-bus, private-audio, and software-display providers. Dependency skips fail
 the job. Worker binaries use the pinned Go toolchain root, only the standard
 library, and disabled module-network access.
@@ -30,6 +33,7 @@ library, and disabled module-network access.
 Each `build/worker-artifacts/<profile>/<default|nvidia>/` contains:
 
 - `worker.oci.tar`, a downloadable image with no registry publication;
+- `worker.docker.tar`, the Docker build's native archive for `docker image load`;
 - `artifact.json`, binding source revision, profile, architecture, source root,
   dependency locks, validation scope, and file hashes to that archive;
 - `packages.tsv`, the final root's complete installed package manifest;
@@ -37,9 +41,19 @@ Each `build/worker-artifacts/<profile>/<default|nvidia>/` contains:
   Rust dependency closure (including build/dev dependencies);
 - `providers.json`, sanitized names and scope of completed real-provider tests.
 
+NVIDIA variants also export `nvidia-files.json` and `nvidia-runtime.json`. The
+first records every selected vendor file's hash, ELF ABI and SONAME, plus
+configuration files, notices and symbolic links. The second records the ABIs
+that passed loader checks and binds the file manifest by SHA-256. The artifact
+manifest hashes both records, and the SBOM records their architecture scope.
+
 The private `providers.log` is retained locally and is excluded from uploads.
-`worker_digest` is the exported OCI manifest digest. Podman's local storage
-manifest may differ. Export verification hashes every referenced blob, checks
+`worker_digest` is the exported OCI manifest digest. An engine's local storage
+manifest may differ. Docker's `worker_reference` is its full configuration image
+ID, permitting immutable offline launch after loading `worker.docker.tar`. The
+OCI conversion verifies that configuration and the ordered layer contents. See
+the [Docker backend notes](../../docs/research/container-multiseat-docker.md) for
+import and profile initialization. Export verification hashes every referenced blob, checks
 sizes and Linux/amd64 configuration, and requires the same configuration digest
 as the validated image. Use the exported digest when importing/promoting that
 artifact; no source root or cached local tag establishes its identity.
@@ -48,10 +62,16 @@ artifact; no source root or cached local tag establishes its identity.
 
 Package locks include exact versions, architecture, HTTPS URLs, SHA-256 values,
 and full added runtime/build dependency closures resolved inside each immutable
-source root. Resolution uses Ubuntu's signed 2026-01-20 snapshot. Historical
+source root. Resolution uses Ubuntu's signed 2026-09-11 snapshot. Historical
 snapshot expiry is disabled only during this explicit resolution step; final
 builds neither resolve packages nor contact repositories. Every `.deb` is
-verified before installation, and `dpkg --audit` must be empty afterward.
+verified before installation, and `dpkg --audit` must be empty afterward. The
+private build context generates coreutils checksum manifests from committed
+JSON locks, allowing verification before Python is installed. The resolver
+requires a public CA bundle mounted read-only at `/resolver-ca.crt`; TLS and
+Ubuntu archive-signature checks remain enabled. An index download failure
+terminates resolution. The installer uses only verified local files with
+`--no-download --no-remove --no-install-recommends`.
 
 `locks/rust.json` pins the compiler archive. `locks/plugin.json` pins the
 Wayland plugin revision, Cargo.lock, Rust version, and canonical vendored archive.
@@ -68,14 +88,25 @@ The installed system plugin directory also supplies `unixfdsink`, `unixfdsrc`,
 H.264/Opus encoders and decoders, Pulse capture, appsink, and the GL import,
 conversion, and download elements. Their presence does not establish that a
 particular GPU's DMA-BUF format can be imported or that game frames encode.
-The GL plugin and its dependencies use the same signed snapshot and each root's
-GStreamer ABI; Steam already includes that package in its pinned source root.
+The GL plugin and its dependencies use the same signed snapshot and GStreamer ABI
+in every profile. Launcher profiles explicitly include i386 Mesa/Vulkan support.
 Fixed provider executables, plugin files, and
 PipeWire configurations must be trusted regular files; dynamic library checks
-must resolve. The custom Gamescope executable is `/usr/bin/gamescope`; the
-source root's packaged `/usr/games/gamescope` remains recorded in the package
-manifest but is not selected by the provider. The custom source lock and SBOM
-identify the executable that the provider uses.
+must resolve. The custom Gamescope executable is `/usr/bin/gamescope`. Its source lock,
+license and SBOM identify the executable selected by the provider. A recorded source patch
+ignores libinput switch types that the pinned wlroots ABI cannot represent;
+compiler warnings remain errors and patch application uses no fuzz. The image
+checks each launcher package version and executable separately from provider
+readiness. The default account is locked, named `polaris`, and has no inherited
+supplementary groups; the controller supplies the admitted UID/GID and groups.
+
+The NVIDIA variant adds `locks/nvcodec.json`, the upstream GStreamer 1.26.0
+archive and its published SHA-256 checksum. The build installs only the nvcodec
+plugin and its missing CUDA support library, preserving the root's other
+GStreamer libraries. It needs no CUDA toolkit and builds without GPU devices.
+The final image checks dynamic symbols against the installed ABI and records
+the source lock, installed file hashes, license and SBOM component. Plugin
+registration without GPU devices does not establish working hardware encoding.
 
 Lock refresh is explicit: run `resolve-packages.sh` in each disposable pinned
 root, review `write-package-lock.py` output and source manifests, reconstruct
@@ -84,7 +115,7 @@ dependency before rebuilding all four profiles. Never replace a failed hash
 with the downloaded value without investigating the difference. Byte identity
 does not establish publisher trust or a vulnerability policy. Final OCI metadata
 uses the source commit timestamp; input reproducibility does not promise identical
-image bytes across different Podman versions or compression implementations.
+image bytes across different engine versions or compression implementations.
 
 ## NVIDIA physical lane
 
@@ -94,6 +125,22 @@ explicit set of vendor graphics, CUDA, and codec userspace libraries, SONAME
 links, EGL/Vulkan configuration, license, and per-file hashes. Generic GLVND
 frontends remain from the root. Kernel modules, firmware, host configuration,
 and host installer execution are absent. The host driver must match this version.
+
+Steam, Heroic and Lutris variants include both amd64 and i386 vendor libraries.
+Their Ubuntu closures explicitly supply i386 GLVND OpenGL, EGL and GLES2
+frontends and the Wayland server library used by NVIDIA's EGL platform plugin.
+The Gamescope validation workload uses amd64 only, so its NVIDIA layer omits
+unused i386 files.
+
+Packaging rejects a library whose ELF class, byte order, machine, object type or
+SONAME does not match its destination. The final image verifies file hashes,
+trusted directories, SONAME and GBM aliases, and EGL/Vulkan vendor selection.
+It runs `ldd -r` on every packaged vendor library and the generic OpenGL, GLX,
+EGL, GLES2 and Vulkan frontends for each required ABI. Missing dependencies and
+unresolved symbols fail the image even when `ldd` returns exit status zero.
+These checks open no GPU devices and establish loader compatibility only.
+They do not establish real 32 bit game rendering, Proton compatibility, optional
+driver feature support, or latency.
 
 Physical provider tests require an explicitly admitted render node and the
 matching GPU catalog's device set. Resolve DRM primary/render nodes by their
@@ -115,7 +162,7 @@ It requires the dedicated input-device type from the input-access policy. Inspec
 the expanded policy and verify the module is absent before temporary installation.
 Record the installed module checksum from `semodule -l -m`. Explicit physical
 containers select `--security-opt=label=type:polaris_nvidia_worker_t` and retain
-Podman's fresh MCS categories, private namespaces, dropped capabilities, and exact
+the engine's fresh MCS categories, private namespaces, dropped capabilities, and exact
 catalog devices. Verify the effective process label and distinct MCS categories.
 Ordinary `container_t`, existing device labels, and broad device booleans remain
 unchanged. The standard template includes file-management permissions; Linux
@@ -146,13 +193,13 @@ aliases, reject symlinks, and fail closed at their descriptor limit. Private
 runtime directories remain part of the trust boundary: inode retention does not
 make a pathname check followed by unlink atomic against a concurrent writer.
 
-None of these receipts proves successful game streaming. Production `run` still
-injects no lifecycle adapters, so no worker announces a media contract. The
-controller now carries an announced contract's frames to the client that
-negotiated it, which leaves worker-local encoding, launcher process management,
-seat-aware status, and real concurrent game streams as the next milestone. Runtime
-startup must also establish the private X11 directory ownership expected by the
-provider before production wiring; the isolated tests provide their own fixture.
+Worker-local H.264/Opus encoding and authenticated continuous media routing are
+implemented behind explicit `--media=enabled` selection. Production profile and
+client activation remain default-off. The physical live-media harness exercises
+two workers, decoded frames/audio, input isolation, requested IDRs and survivor
+teardown. It must be repeated for a changed image before carrying forward any
+physical receipt. Actual client playback, AMD execution and launcher process
+integration are separate acceptance requirements. See [runtime ownership](OWNERSHIP.md).
 
 ### Isolated physical game probe
 
@@ -161,8 +208,8 @@ with keyboard, pointer and controller counters plus a private audio tone. The
 opt-in native physical harness can select it with `POLARIS_PHYSICAL_GAME=1`.
 This requires the Gamescope profile, newly initialized private profile volumes,
 the exact GPU/input catalog, and the separately reviewed NVIDIA SELinux domain
-on the matching physical validation lane. The harness applies that fixed domain
-only after the normal backend has admitted the worker's mounts and devices.
+on the matching physical validation lane. The Docker backend explicitly admits that fixed domain along with the worker's
+mounts and devices. The retained Podman harness applies it for its legacy lane.
 
 The worker's `physical-game-probe start|state|finish TOKEN` command accepts a
 32-character lowercase hexadecimal token. It requires the existing validated

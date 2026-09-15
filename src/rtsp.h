@@ -24,6 +24,7 @@
 // Resolve circular dependencies
 namespace stream {
   struct session_t;
+  struct config_t;
 }
 
 namespace rtsp_stream {
@@ -72,6 +73,11 @@ namespace rtsp_stream {
     std::optional<int> host_max_fps;
     std::optional<bool> host_hdr_capable;
     std::string session_token;
+    // Set by the profile service after checking this paired device's access.
+    std::string worker_profile_key;
+    // Validated against this Space library before controller admission.
+    std::string worker_library_target;
+    std::string worker_library_name;
     // Lifecycle generation admitted by authenticated /launch or /resume.
     // RTSP SETUP must claim this exact generation before starting media.
     std::optional<std::uint64_t> lifecycle_generation;
@@ -206,8 +212,8 @@ namespace rtsp_stream {
   };
 
   bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
-  void cancel_pending_launch_for_client(std::string_view unique_id);
-  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id);
+  void cancel_pending_launch_for_client(std::string_view unique_id, std::string_view token = {});
+  std::shared_ptr<launch_session_t> take_pending_launch_for_client(std::string_view unique_id, std::string_view token = {});
   void finish_cancelled_launch(const std::shared_ptr<launch_session_t> &launch);
 
   /**
@@ -238,7 +244,11 @@ namespace rtsp_stream {
 
   session_snapshot_t session_snapshot(const std::string_view& uuid);
 
+  /** Advertise the input features implemented by this launch's consumer. */
+  std::uint32_t session_feature_flags(const launch_session_t &launch, std::uint32_t host_flags);
+
 #ifdef POLARIS_TESTS
+  bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config);
   std::int64_t bound_session_bitrate_for_tests(
     std::int64_t requested_bitrate_kbps,
     std::size_t warp_factor,

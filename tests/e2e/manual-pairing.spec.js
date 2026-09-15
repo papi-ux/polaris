@@ -3,6 +3,45 @@ import { test, expect } from '@playwright/test'
 const first = { id: 'a'.repeat(32), name: 'Same name', address: '192.0.2.1' }
 const second = { id: 'b'.repeat(32), name: 'Same name', address: '192.0.2.2' }
 
+test('profile assignments preserve the confirmed route when an active stream refuses a save', async ({ page }, testInfo) => {
+  let assignment = null
+  const clients = [
+    { uuid: 'device-a', name: 'Living room handheld', perm: 0x07001F00, temporary_authorization: false },
+    { uuid: 'device-b', name: 'Bedroom TV', perm: 0x07001F00, temporary_authorization: false },
+  ]
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/multiseat/profiles') return route.fulfill({ json: {
+      enabled: true, available: true, changing: false, failed: false,
+      profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'] },
+        { id: 'profile-b', name: 'Sam', clients: ['device-b'] }],
+    } })
+    if (path === '/api/multiseat/assign') {
+      assignment = route.request().postDataJSON()
+      return route.fulfill({ status: 409, json: { status: false,
+        message: 'Stop profile sessions and wait for cleanup before changing assignments' } })
+    }
+    if (path === '/api/clients/list') return route.fulfill({ json: { status: true, platform: 'linux', named_certs: clients } })
+    if (path === '/api/pin') return route.fulfill({ json: { pairings: [] } })
+    if (path === '/api/config') return route.fulfill({ json: { status: true, platform: 'linux' } })
+    return route.fulfill({ json: {} })
+  })
+  await page.goto('/#/pin')
+  const panel = page.getByRole('region', { name: 'Separate gaming profiles' })
+  await expect(panel).toBeVisible()
+  await panel.getByLabel('Living room handheld').selectOption('profile-b')
+  await panel.getByRole('button', { name: 'Save assignment' }).first().click()
+  await expect.poll(() => assignment).toEqual({ client_id: 'device-a', profile_id: 'profile-b' })
+  await expect(panel.getByRole('alert')).toContainText('Stop profile sessions')
+  await expect(panel.getByLabel('Living room handheld')).toHaveValue('profile-a')
+  await expect(panel.getByLabel('Bedroom TV')).toHaveValue('profile-b')
+  await panel.screenshot({ path: testInfo.outputPath('profile-assignments-desktop.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(panel).toBeVisible()
+  expect(await panel.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true)
+  await panel.screenshot({ path: testInfo.outputPath('profile-assignments-mobile.png') })
+})
+
 test('approves only the explicitly selected request and preserves access settings', async ({ page }) => {
   let requests = [first, second]
   let approval = null

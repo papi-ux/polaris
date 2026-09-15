@@ -176,6 +176,15 @@ func (child *managedChild) exited() bool {
 	}
 }
 
+func (child *managedChild) exitError(message string) error {
+	if child == nil || child.command == nil || child.done == nil || !child.exited() {
+		return errors.New(message)
+	}
+	// Wait publishes ProcessState before closing done. Never read it while
+	// the wait goroutine could still be updating the command.
+	return childExitError(message, child.command.ProcessState)
+}
+
 func (child *managedChild) stop(timeout time.Duration) error {
 	if child == nil || child.command == nil || child.command.Process == nil ||
 		child.done == nil || timeout <= 0 {
@@ -213,6 +222,26 @@ func (child *managedChild) stop(timeout time.Duration) error {
 	case <-timer.C:
 		return errors.New("runtime provider child did not exit")
 	}
+}
+
+// stopChecked preserves bounded termination but reports a child's failed cleanup.
+// A successful exit and the requested TERM/KILL signals are expected; a crash or
+// nonzero exit during a requested stop must not become a successful teardown.
+func (child *managedChild) stopChecked(timeout time.Duration, message string) error {
+	if err := child.stop(timeout); err != nil {
+		return err
+	}
+	state := child.command.ProcessState
+	if state != nil && state.Success() {
+		return nil
+	}
+	if state != nil {
+		if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() &&
+			(status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL) {
+			return nil
+		}
+	}
+	return child.exitError(message)
 }
 
 // Exhausting a shared wait budget must never skip the termination request for

@@ -449,7 +449,7 @@ namespace {
     );
   }
 
-  TEST(MultiseatMoonlightRuntime, LastSelectedStopSweepsConservativeTombstones) {
+  TEST(MultiseatMoonlightRuntime, SelectedSeatRetiresWhileAnotherSeatKeepsStreaming) {
     auto factory = std::make_shared<runtime_factory_state_t>();
     auto created = ready_runtime(factory);
     ASSERT_TRUE(created.runtime);
@@ -496,8 +496,11 @@ namespace {
 
     stream::session::stop(*first_stream);
     EXPECT_EQ(created.runtime->claimed_sessions(), 1U);
-    EXPECT_EQ(created.runtime->tracked_launches(), 2U);
+    EXPECT_EQ(created.runtime->tracked_launches(), 1U);
     EXPECT_EQ(created.runtime->active_launches(), 1U);
+    EXPECT_EQ(created.runtime->release_input(first_expectation.handle).input_status, status_e::applied);
+    EXPECT_TRUE(stream::session::multiseat_input_bound(*second_stream));
+    EXPECT_FALSE(second_launch->is_cancelled());
     stream::session::stop(*second_stream);
     EXPECT_EQ(created.runtime->claimed_sessions(), 0U);
     EXPECT_EQ(created.runtime->tracked_launches(), 0U);

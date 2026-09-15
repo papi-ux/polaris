@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 
 namespace multiseat {
   namespace {
@@ -178,6 +179,48 @@ namespace multiseat {
     }
 
     std::scoped_lock lock {mutex_};
+    return admit_locked(request);
+  }
+
+  admission_result_t registry_t::admit_first_available(
+    const seat_request_t &request,
+    const std::vector<std::string> &logical_gpu_ids
+  ) {
+    if (!request.logical_gpu_id.empty() || logical_gpu_ids.empty() ||
+        logical_gpu_ids.size() > 64) {
+      return {.rejection = admission_rejection_e::invalid_request};
+    }
+    auto selected = request;
+    selected.logical_gpu_id = logical_gpu_ids.front();
+    if (!valid_request(selected)) {
+      return {.rejection = admission_rejection_e::invalid_request};
+    }
+    std::scoped_lock lock {mutex_};
+    std::unordered_set<std::string> seen;
+    for (const auto &id : logical_gpu_ids) {
+      if (!seen.insert(id).second) {
+        return {.rejection = admission_rejection_e::invalid_request};
+      }
+      if (!gpus_.contains(id)) {
+        return {.rejection = admission_rejection_e::unknown_gpu};
+      }
+    }
+    auto rejection = admission_rejection_e::seat_capacity_reached;
+    for (const auto &id : logical_gpu_ids) {
+      selected.logical_gpu_id = id;
+      auto result = admit_locked(selected);
+      if (result.rejection == admission_rejection_e::encoder_capacity_reached) {
+        // At least one GPU has a free seat, but lacks enough encoders. Report
+        // encoder exhaustion even if a later candidate has no seat at all.
+        rejection = result.rejection;
+      } else if (result.rejection != admission_rejection_e::seat_capacity_reached) {
+        return result;
+      }
+    }
+    return {.rejection = rejection};
+  }
+
+  admission_result_t registry_t::admit_locked(const seat_request_t &request) {
     for (const auto &gpu_entry : gpus_) {
       const auto &gpu = gpu_entry.second;
       for (const auto &slot : gpu.slots) {

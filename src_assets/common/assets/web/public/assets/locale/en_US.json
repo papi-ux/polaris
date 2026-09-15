@@ -380,6 +380,7 @@
     "welcome": "Hello, Polaris!"
   },
   "navbar": {
+    "spaces": "Spaces",
     "applications": "Applications",
     "configuration": "Configuration",
     "home": "Home",

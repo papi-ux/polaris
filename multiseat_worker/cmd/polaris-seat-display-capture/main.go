@@ -11,7 +11,7 @@ import (
 
 func main() {
 	if err := seatprovider.RunDisplayCapture(os.Args[1:], os.Environ()); err != nil {
-		fmt.Fprintln(os.Stderr, "runtime provider failed:", err)
+		fmt.Fprintln(os.Stderr, "polaris-seat-display-capture:", err)
 		os.Exit(1)
 	}
 }

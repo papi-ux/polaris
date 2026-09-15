@@ -41,7 +41,9 @@ const (
 	DisplayTopologyCaptureHostNested = "capture-host-with-nested-compositor"
 	MediaPipelineWorkerLocal         = "worker-local-capture-encode"
 	captureMediaSocketDomain         = "polaris-capture-media-v1\x00"
+	encodedMediaSocketDomain         = "polaris-encoded-media-v1\x00"
 	captureMediaSocketPrefix         = "polaris-frames-"
+	encodedMediaSocketPrefix         = "polaris-encoded-"
 )
 
 // CaptureMediaSocketName derives the fixed worker-local raw-frame endpoint
@@ -54,6 +56,18 @@ func CaptureMediaSocketName(runtimeNamespace string) (string, error) {
 	}
 	digest := sha256.Sum256([]byte(captureMediaSocketDomain + runtimeNamespace))
 	return captureMediaSocketPrefix + hex.EncodeToString(digest[:]), nil
+}
+
+// EncodedMediaSocketName derives the fixed worker-local encoded-packet endpoint
+// the encoder provider publishes and the worker's data plane reads. Raw frames
+// never cross it; only encoded packets do, which is what keeps a seat's capture
+// inside its own worker.
+func EncodedMediaSocketName(runtimeNamespace string) (string, error) {
+	if !validNameToken(runtimeNamespace, 128) {
+		return "", errors.New("runtime namespace is invalid")
+	}
+	digest := sha256.Sum256([]byte(encodedMediaSocketDomain + runtimeNamespace))
+	return encodedMediaSocketPrefix + hex.EncodeToString(digest[:]), nil
 }
 
 // Request is the complete least-authority contract for exactly one runtime
@@ -212,7 +226,16 @@ func validateRequest(request Request) error {
 		base.RenderNode = request.RenderNode
 		base.EncoderSessions = request.EncoderSessions
 		base.MediaPipeline = request.MediaPipeline
+		base.AudioSink = request.AudioSink
+		base.DisplayWidth = request.DisplayWidth
+		base.DisplayHeight = request.DisplayHeight
+		base.DisplayRefreshMillihertz = request.DisplayRefreshMillihertz
+		base.DisplayHDR = request.DisplayHDR
 		if request != base ||
+			!validNameToken(request.AudioSink, 128) ||
+			request.DisplayWidth < 16 || request.DisplayWidth > 3840 || request.DisplayWidth%2 != 0 ||
+			request.DisplayHeight < 16 || request.DisplayHeight > 3840 || request.DisplayHeight%2 != 0 ||
+			request.DisplayRefreshMillihertz < 1000 || request.DisplayRefreshMillihertz > 240000 || request.DisplayHDR ||
 			!validNameToken(request.LogicalGPU, 128) ||
 			!validRenderNode(request.RenderNode) ||
 			request.EncoderSessions == 0 || request.EncoderSessions > 64 ||
@@ -302,6 +325,10 @@ func Arguments(request Request) ([]string, error) {
 			"--render-node="+request.RenderNode,
 			"--sessions="+canonicalUint(request.EncoderSessions),
 			"--media-pipeline="+request.MediaPipeline,
+			"--audio-sink="+request.AudioSink,
+			"--display-width="+canonicalUint(request.DisplayWidth),
+			"--display-height="+canonicalUint(request.DisplayHeight),
+			"--display-refresh-millihz="+canonicalUint(request.DisplayRefreshMillihertz),
 		), nil
 	case StageLauncher:
 		return append(arguments,
@@ -353,7 +380,8 @@ func Environment(request Request) ([]string, error) {
 			"POLARIS_INPUT_SEAT="+request.InputSeat,
 		), nil
 	case StageEncoder:
-		return []string{"POLARIS_RENDER_NODE=" + request.RenderNode}, nil
+		return append(runtime, "POLARIS_RENDER_NODE="+request.RenderNode,
+			"PULSE_SERVER=unix:/run/polaris/pulse/native", "PULSE_SINK="+request.AudioSink), nil
 	case StageLauncher:
 		return append(runtime,
 			"HOME=/var/lib/polaris-seat",
@@ -547,7 +575,7 @@ func parseArguments(arguments []string) (Request, error) {
 		}
 		request.InputSeat, err = value(3, "--input-seat=")
 	case StageEncoder:
-		if len(arguments) != 7 {
+		if len(arguments) != 11 {
 			return Request{}, errors.New("runtime helper argv is invalid")
 		}
 		if request.LogicalGPU, err = value(3, "--logical-gpu-id="); err == nil {
@@ -564,6 +592,21 @@ func parseArguments(arguments []string) (Request, error) {
 		}
 		if err == nil {
 			request.MediaPipeline, err = value(6, "--media-pipeline=")
+		}
+		if err == nil {
+			request.AudioSink, err = value(7, "--audio-sink=")
+		}
+		for index, field := range []*uint32{&request.DisplayWidth, &request.DisplayHeight, &request.DisplayRefreshMillihertz} {
+			if err != nil {
+				break
+			}
+			var raw string
+			raw, err = value(8+index, []string{"--display-width=", "--display-height=", "--display-refresh-millihz="}[index])
+			if err == nil {
+				var parsed uint64
+				parsed, err = parseCanonicalUint(raw, 32)
+				*field = uint32(parsed)
+			}
 		}
 	case StageLauncher:
 		if len(arguments) != 9 {

@@ -146,3 +146,32 @@ func TestAudioPolicyClientUsesServerCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestAudioPolicyExportConnectionRetainsExactAuthority(t *testing.T) {
+	const primary = `{"id":33,"type":"PipeWire:Interface:Client","info":{"props":{"application.name":"WirePlumber (polaris)","wireplumber.profile":"polaris","wireplumber.daemon":true,"pipewire.sec.pid":123,"pipewire.sec.uid":1000}}}`
+	const export = `{"id":34,"type":"PipeWire:Interface:Client","info":{"props":{"application.name":"WirePlumber (polaris) [export]","wireplumber.profile":"polaris","wireplumber.daemon":true,"wireplumber.export-core":true,"pipewire.sec.pid":123,"pipewire.sec.uid":1000}}}`
+	for _, value := range []string{"[" + primary + "," + export + "]", "[" + export + "," + primary + "]"} {
+		if err := parseAudioPolicyClient([]byte(value), 123, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, value := range []string{
+		"[" + export + "]",
+		"[" + primary + "," + export + "," + strings.Replace(export, `"id":34`, `"id":35`, 1) + "]",
+		"[" + primary + "," + strings.Replace(export, `"pipewire.sec.uid":1000`, `"pipewire.sec.uid":1001`, 1) + "]",
+		"[" + primary + "," + strings.Replace(export, `"wireplumber.profile":"polaris"`, `"wireplumber.profile":"other"`, 1) + "]",
+		"[" + primary + "," + strings.Replace(export, `"wireplumber.daemon":true`, `"wireplumber.daemon":false`, 1) + "]",
+		"[" + primary + "," + strings.Replace(export, `"wireplumber.export-core":true`, `"wireplumber.export-core":"true"`, 1) + "]",
+		"[" + primary + "," + strings.Replace(export, `"wireplumber.export-core":true`, `"wireplumber.export-core":false`, 1) + "]",
+		"[" + primary + "," + strings.Replace(export, `WirePlumber (polaris) [export]`, `unrecognized`, 1) + "]",
+	} {
+		if err := parseAudioPolicyClient([]byte(value), 123, 1000); err == nil {
+			t.Fatalf("accepted an invalid policy export: %s", value)
+		}
+	}
+	// An export owned by another PID cannot stand in for the launched policy.
+	other := strings.Replace(export, `"pipewire.sec.pid":123`, `"pipewire.sec.pid":456`, 1)
+	if err := parseAudioPolicyClient([]byte("["+other+"]"), 123, 1000); err == nil {
+		t.Fatal("accepted another process as policy authority")
+	}
+}

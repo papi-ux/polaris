@@ -76,3 +76,20 @@ TEST(StreamPacketSessionTests, AbortedAllocationDrainsSendsAndRejectsRetainedPac
   EXPECT_FALSE(queued.acquire());
   EXPECT_EQ(current.acquire().get(), reconnected.get());
 }
+
+TEST(StreamPacketSessionTests, StopRequestCannotAcknowledgeControlThreadCompletion) {
+  for (const auto graceful : {false, true}) {
+    auto session = make_session();
+    stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
+    EXPECT_FALSE(stream::session::control_ended_for_tests(*session));
+    if (graceful) {
+      stream::session::graceful_stop(*session);
+    } else {
+      stream::session::stop(*session);
+    }
+    EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPING);
+    // The control thread can still hold this session while decrypting a
+    // packet. Only that thread may acknowledge its final use.
+    EXPECT_FALSE(stream::session::control_ended_for_tests(*session));
+  }
+}

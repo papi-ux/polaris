@@ -1,0 +1,16 @@
+--- a/sys/nvcodec/gstnvh264encoder.cpp
++++ b/sys/nvcodec/gstnvh264encoder.cpp
+@@ -1632,6 +1632,13 @@
+   h264_config = &config->encodeCodecConfig.h264Config;
+   vui = &h264_config->h264VUIParameters;
+ 
++  /* Polaris workers serve single-reference H.264 clients. Configure the
++   * encoder itself: rewriting the SPS cannot remove prediction dependencies
++   * already present in encoded slices. This plugin is private to the worker. */
++  h264_config->maxNumRefFrames = 1;
++  h264_config->numRefL0 = NV_ENC_NUM_REF_FRAMES_1;
++  h264_config->numRefL1 = NV_ENC_NUM_REF_FRAMES_1;
++
+   h264_config->level = NV_ENC_LEVEL_AUTOSELECT;
+   h264_config->chromaFormatIDC = 1;
+   if (selected_profile == NV_ENC_H264_PROFILE_HIGH_444_GUID)

@@ -83,6 +83,10 @@ namespace game_artwork::providers {
   /** Plan deterministic downloads from Steam's public app-art CDN. */
   std::vector<request_t> plan_steam_assets(std::string_view appid);
 
+  /** Resolve current Steam library asset filenames, falling back to legacy URLs on metadata failure. */
+  std::vector<request_t> plan_steam_library_assets(std::string_view appid, const transport_t &transport);
+  std::vector<request_t> parse_steam_library_assets(std::string_view appid, std::string_view response_body);
+
   /** Plan the first SteamGridDB lookup without embedding the API key. */
   std::optional<request_t> plan_steamgriddb_search(std::string_view title);
 

@@ -1,0 +1,42 @@
+--- a/wayland-display-core/src/comp/mod.rs
++++ b/wayland-display-core/src/comp/mod.rs
+@@ -336,7 +336,7 @@
+             "HEADLESS-1".into(),
+             PhysicalProperties {
+                 make: "Virtual".into(),
+-                model: "Wolf".into(),
++                model: "Polaris".into(),
+                 size: (0, 0).into(),
+                 subpixel: Subpixel::Unknown,
+             },
+--- a/wayland-display-core/src/comp/input.rs
++++ b/wayland-display-core/src/comp/input.rs
+@@ -672,7 +672,7 @@
+             "HEADLESS-1".into(),
+             PhysicalProperties {
+                 make: "Virtual".into(),
+-                model: "Wolf".into(),
++                model: "Polaris".into(),
+                 size: (0, 0).into(),
+                 subpixel: Subpixel::Unknown,
+             },
+@@ -719,7 +719,7 @@
+             "HEADLESS-1".into(),
+             PhysicalProperties {
+                 make: "Virtual".into(),
+-                model: "Wolf".into(),
++                model: "Polaris".into(),
+                 size: (0, 0).into(),
+                 subpixel: Subpixel::Unknown,
+             },
+--- a/wayland-display-core/src/tests/fixture.rs
++++ b/wayland-display-core/src/tests/fixture.rs
+@@ -94,7 +94,7 @@
+                 "HEADLESS-1".into(),
+                 PhysicalProperties {
+                     make: "Virtual".into(),
+-                    model: "Wolf".into(),
++                    model: "Polaris".into(),
+                     size: (0, 0).into(),
+                     subpixel: Subpixel::Unknown,
+                 },

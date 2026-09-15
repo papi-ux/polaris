@@ -63,6 +63,8 @@ namespace multiseat::worker_ipc {
     [[nodiscard]] transport_status_e send_input(std::span<const std::uint8_t> payload) const;
     /** Release the worker's media after its announced contract was accepted. */
     [[nodiscard]] transport_status_e acknowledge_media_config() const;
+    /** Select a video bitrate within the announced ceiling, before acknowledgement. */
+    [[nodiscard]] transport_status_e select_media_bitrate(std::uint32_t bitrate_kbps) const;
     /** Ask the worker's encoder to make the next frame an IDR. */
     [[nodiscard]] transport_status_e request_idr() const;
     /** Retire an inclusive span of frames the client can no longer reference. */

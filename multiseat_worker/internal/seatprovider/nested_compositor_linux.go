@@ -984,7 +984,7 @@ func runNestedCompositor(
 	defer func() {
 		defer func() { lifetime.close() }()
 		_ = readyFIFO.Close()
-		stopError := child.stop(options.stopTimeout)
+		stopError := child.stopChecked(options.stopTimeout, "runtime Gamescope failed during shutdown")
 		if !readyPublished && len(knownX11) == 0 {
 			capturedX11, captureError := capturePartialGamescopeX11Artifacts(
 				x11Sockets,
@@ -1128,6 +1128,6 @@ func runNestedCompositor(
 	case <-parent.Done():
 		return nil
 	case <-child.done:
-		return errors.New("runtime Gamescope exited unexpectedly")
+		return child.exitError("runtime Gamescope exited unexpectedly")
 	}
 }

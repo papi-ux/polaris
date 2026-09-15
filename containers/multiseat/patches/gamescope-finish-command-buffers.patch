@@ -1,0 +1,66 @@
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -401,6 +401,7 @@
+
+ VkInstance vulkan_get_instance(void);
+ bool vulkan_init(VkInstance instance, VkSurfaceKHR surface);
++void vulkan_finish();
+ bool vulkan_init_formats(void);
+ bool vulkan_make_output();
+
+@@ -775,6 +776,7 @@
+ 	uint64_t submitInternal( CVulkanCmdBuffer* cmdBuf );
+ 	void wait(uint64_t sequence, bool reset = true);
+ 	void waitIdle(bool reset = true);
++	void finishCommandBuffers();
+ 	void garbageCollect();
+ 	inline VkDescriptorSet descriptorSet()
+ 	{
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1496,6 +1496,34 @@
+ 	wait(m_submissionSeqNo, reset);
+ }
+
++void CVulkanDevice::finishCommandBuffers()
++{
++	// Retire GPU work and its references before backend cleanup and process-exit
++	// destructors can invalidate dynamically loaded Vulkan dispatch code.
++	if (!m_bInitialized)
++		return;
++	waitIdle(false);
++	m_pendingCmdBufs.clear();
++	m_unusedCmdBufs.clear();
++}
++
++void vulkan_finish()
++{
++	g_device.finishCommandBuffers();
++
++	// Output images also own Vulkan objects. Release overlays before their base
++	// images, and retire every retained texture while the backend is still alive.
++	g_output.outputImagesPartialOverlay.clear();
++	g_output.outputImages.clear();
++	g_output.temporaryHackyBlankImage = nullptr;
++	for (auto &image : g_output.pScreenshotImages)
++		image = nullptr;
++	g_output.tmpOutput = nullptr;
++	g_output.nisScalerImage = nullptr;
++	g_output.nisUsmImage = nullptr;
++	g_output.swapchainHDRMetadata = nullptr;
++}
++
+ void CVulkanDevice::resetCmdBuffers(uint64_t sequence)
+ {
+ 	auto last = m_pendingCmdBufs.find(sequence);
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -6532,6 +6532,8 @@
+ 	}
+
+ 	g_VirtualConnectorFocuses.clear();
++
++	vulkan_finish();
+
+     gamescope::IBackend::Set( nullptr );
+

@@ -326,8 +326,14 @@ namespace platf {
   process_output_t run_process_argv_capture(
       const std::vector<std::string> &argv,
       std::chrono::milliseconds timeout,
-      std::size_t max_output_bytes) {
+      std::size_t max_output_bytes,
+      std::stop_token stop) {
     process_output_t result;
+    if (stop.stop_requested()) {
+      result.cancelled = true;
+      result.exit_status = 125;
+      return result;
+    }
     if (argv.empty() || argv.front().empty()) {
       return result;
     }
@@ -340,6 +346,12 @@ namespace platf {
     }
     file_t read_end {output_pipe[0]};
     file_t write_end {output_pipe[1]};
+
+    // A failed nonblocking setup must not bypass the timeout or cancellation.
+    const int current_flags = fcntl(read_end.el, F_GETFL, 0);
+    if (current_flags < 0 || fcntl(read_end.el, F_SETFL, current_flags | O_NONBLOCK) < 0) {
+      return result;
+    }
 
     std::vector<char *> native_argv;
     native_argv.reserve(argv.size() + 1);
@@ -384,20 +396,18 @@ namespace platf {
     }
     close(write_end.release());
 
-    const int current_flags = fcntl(read_end.el, F_GETFL, 0);
-    if (current_flags >= 0) {
-      fcntl(read_end.el, F_SETFL, current_flags | O_NONBLOCK);
-    }
-
     const auto deadline = std::chrono::steady_clock::now() +
                           std::max(timeout, std::chrono::milliseconds {0});
     bool child_reaped = false;
+    bool wait_failed = false;
     bool output_closed = false;
     int wait_status = 0;
     std::array<char, 4096> buffer {};
 
     while (!child_reaped || !output_closed) {
-      while (!output_closed) {
+      // Bound each drain pass so a continuously writing child cannot starve
+      // waitpid, the deadline or a stop request.
+      for (unsigned reads = 0; !output_closed && reads < 16; ++reads) {
         const auto bytes = read(read_end.el, buffer.data(), buffer.size());
         if (bytes > 0) {
           const auto available = max_output_bytes > result.output.size() ?
@@ -424,6 +434,7 @@ namespace platf {
           child_reaped = true;
         } else if (waited < 0 && errno != EINTR) {
           child_reaped = true;
+          wait_failed = true;
         }
       }
 
@@ -432,8 +443,9 @@ namespace platf {
       }
 
       const auto now = std::chrono::steady_clock::now();
-      if (now >= deadline && (!child_reaped || !output_closed)) {
-        result.timed_out = true;
+      if (stop.stop_requested() || now >= deadline) {
+        result.cancelled = stop.stop_requested();
+        result.timed_out = !result.cancelled;
         if (!child_reaped) {
           kill(child, SIGKILL);
           while (waitpid(child, &wait_status, 0) < 0 && errno == EINTR) {
@@ -455,11 +467,13 @@ namespace platf {
       poll(&descriptor, 1, wait_ms);
     }
 
-    if (result.timed_out) {
+    if (result.cancelled) {
+      result.exit_status = 125;
+    } else if (result.timed_out) {
       result.exit_status = 124;
-    } else if (WIFEXITED(wait_status)) {
+    } else if (!wait_failed && WIFEXITED(wait_status)) {
       result.exit_status = WEXITSTATUS(wait_status);
-    } else if (WIFSIGNALED(wait_status)) {
+    } else if (!wait_failed && WIFSIGNALED(wait_status)) {
       result.exit_status = 128 + WTERMSIG(wait_status);
     }
     return result;

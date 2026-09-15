@@ -16,6 +16,8 @@ type fixtureMediaSource struct {
 	keyframes    chan struct{}
 	invalidated  chan frameRange
 	contractAsks int
+	bitrate      uint32
+	bitrateErr   error
 }
 
 type fixtureFrame struct {
@@ -36,6 +38,14 @@ func newFixtureMediaSource() *fixtureMediaSource {
 func (source *fixtureMediaSource) Contract(context.Context) (mediaConfig, error) {
 	source.contractAsks++
 	return source.contract, source.contractErr
+}
+
+func (source *fixtureMediaSource) SelectBitrate(ctx context.Context, bitrate uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	source.bitrate = bitrate
+	return source.bitrateErr
 }
 
 func (source *fixtureMediaSource) Next(ctx context.Context) (message, mediaFrame, []byte, error) {
@@ -169,6 +179,13 @@ func TestSeatDataPlaneCarriesControllerAsksToItsOwnEncoder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if _, err := plane.NextMedia(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := plane.RouteMediaControl(ctx, routedMediaControl{Identity: testSeatIdentity(), Message: messageMediaConfigAck}); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := plane.RouteMediaControl(ctx, routedMediaControl{
 		Identity: testSeatIdentity(),
 		Message:  messageRequestIDR,
@@ -248,5 +265,71 @@ func TestSeatDataPlaneFeedbackWaitsRatherThanRetiringTheChannel(t *testing.T) {
 	defer cancel()
 	if _, err := plane.NextFeedback(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("feedback returned something other than its own cancellation: %v", err)
+	}
+}
+
+func TestSeatDataPlaneRefusesControlBeforeItsContractAndNilSource(t *testing.T) {
+	plane := newSeatDataPlane(testSeatIdentity(), newFixtureMediaSource(), nil)
+	for _, kind := range []message{messageMediaConfigAck, messageRequestIDR, messageInvalidateReferenceFrames} {
+		if err := plane.RouteMediaControl(t.Context(), routedMediaControl{Identity: testSeatIdentity(), Message: kind}); err == nil {
+			t.Fatal("early media control accepted")
+		}
+	}
+	plane = newSeatDataPlane(testSeatIdentity(), nil, nil)
+	if _, err := plane.NextMedia(t.Context()); err == nil {
+		t.Fatal("missing encoder accepted")
+	}
+}
+
+func TestSeatBitrateSelectionIsBoundedAndSeatLocal(t *testing.T) {
+	for _, scenario := range []string{"valid", "early", "other-seat", "zero", "above-ceiling", "after-ack", "encoder-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			source, otherSource := newFixtureMediaSource(), newFixtureMediaSource()
+			plane := newSeatDataPlane(testSeatIdentity(), source, nil)
+			other := testSeatIdentity()
+			other.Generation++
+			_ = newSeatDataPlane(other, otherSource, nil)
+			if scenario != "early" {
+				if _, err := plane.NextMedia(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			control := routedMediaControl{Identity: testSeatIdentity(), Message: messageSelectMediaBitrate, BitrateKbps: 4000}
+			switch scenario {
+			case "other-seat":
+				control.Identity = other
+			case "zero":
+				control.BitrateKbps = 0
+			case "above-ceiling":
+				control.BitrateKbps = source.contract.BitrateCeilingKbps + 1
+			case "after-ack":
+				if err := plane.RouteMediaControl(t.Context(), routedMediaControl{Identity: testSeatIdentity(), Message: messageMediaConfigAck}); err != nil {
+					t.Fatal(err)
+				}
+			case "encoder-failure":
+				source.bitrateErr = errors.New("encoder rejected")
+			}
+			err := plane.RouteMediaControl(t.Context(), control)
+			if (err == nil) != (scenario == "valid") {
+				t.Fatalf("unexpected result: %v", err)
+			}
+			if otherSource.bitrate != 0 {
+				t.Fatal("another seat encoder was changed")
+			}
+			if scenario == "valid" || scenario == "encoder-failure" {
+				if source.bitrate != 4000 {
+					t.Fatal("selection did not reach the intended source")
+				}
+				if err := plane.RouteMediaControl(t.Context(), control); err == nil {
+					t.Fatal("duplicate selection accepted")
+				}
+				ack := plane.RouteMediaControl(t.Context(), routedMediaControl{Identity: testSeatIdentity(), Message: messageMediaConfigAck})
+				if (ack == nil) != (scenario == "valid") {
+					t.Fatalf("unexpected acknowledgement: %v", ack)
+				}
+			} else if source.bitrate != 0 {
+				t.Fatal("rejected selection changed the encoder")
+			}
+		})
 	}
 }

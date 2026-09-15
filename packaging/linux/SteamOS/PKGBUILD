@@ -51,6 +51,7 @@ depends=(
   'openssl'
   'opus'
   'pipewire'
+  'python'
   'udev'
   'vulkan-icd-loader'
   'wayland'
@@ -165,6 +166,7 @@ check() {
 package() {
   cd "$srcdir"
   DESTDIR="$pkgdir" cmake --install build
+  python "$srcdir/$pkgname/scripts/spaces/verify_package.py" "$pkgdir"
   test -x "$pkgdir/usr/bin/polaris-$pkgver"
   test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"
   test -f "$pkgdir/usr/lib/udev/rules.d/60-polaris.rules"

@@ -92,6 +92,7 @@ func protocolTestRequests() []Request {
 			Stage: StageEncoder, RuntimeNamespace: namespace,
 			LogicalGPU: "gpu-amd-0", RenderNode: "/dev/dri/renderD128",
 			EncoderSessions: 1, MediaPipeline: MediaPipelineWorkerLocal,
+			AudioSink: "polaris-seat-7", DisplayWidth: 1920, DisplayHeight: 1080, DisplayRefreshMillihertz: 60000,
 		},
 		{
 			Stage: StageLauncher, RuntimeNamespace: namespace,

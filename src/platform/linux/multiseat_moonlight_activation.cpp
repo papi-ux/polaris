@@ -52,6 +52,7 @@ namespace multiseat::input {
     const worker_connection_selection_t worker_connection;
     std::uint64_t bound_stream_generation = 0;
     selection_phase_e phase = selection_phase_e::pending;
+    bool cancellation_requested = false;
 
     void retire_connection() const noexcept {
       if (worker_connection.connection) worker_connection.connection->retire();
@@ -154,6 +155,18 @@ namespace multiseat::input {
     state_->changed.notify_all();
   }
 
+  bool moonlight_launch_selection_t::quiesce() noexcept {
+    std::scoped_lock lock {state_->mutex};
+    entry_->cancellation_requested = true;
+    entry_->retire_connection();
+    if (entry_->phase == selection_phase_e::activating) {
+      return false;
+    }
+    entry_->phase = selection_phase_e::cancelled;
+    state_->changed.notify_all();
+    return true;
+  }
+
   void moonlight_launch_selection_t::close() noexcept {
     std::unique_lock lock {state_->mutex};
     state_->changed.wait(lock, [this]() {
@@ -166,7 +179,7 @@ namespace multiseat::input {
 
   bool moonlight_launch_selection_t::active() const {
     std::scoped_lock lock {state_->mutex};
-    return entry_->phase != selection_phase_e::cancelled &&
+    return !entry_->cancellation_requested && entry_->phase != selection_phase_e::cancelled &&
            std::find(state_->entries.begin(), state_->entries.end(), entry_) !=
              state_->entries.end();
   }
@@ -336,6 +349,9 @@ namespace multiseat::input {
         return moonlight_session_activation_status_e::unselected;
       }
       entry = *found;
+      if (entry->cancellation_requested) {
+        return moonlight_session_activation_status_e::selection_cancelled;
+      }
       switch (entry->phase) {
         case selection_phase_e::pending:
           entry->phase = selection_phase_e::activating;
@@ -372,13 +388,17 @@ namespace multiseat::input {
       bound = false;
     }
 
+    bool cancelled = false;
     {
       std::scoped_lock lock {state_->mutex};
       if (bound) entry->bound_stream_generation = stream::session::generation(session);
-      entry->phase = bound ? selection_phase_e::bound : selection_phase_e::failed;
-      if (!bound || state_->closed) entry->retire_connection();
+      cancelled = entry->cancellation_requested;
+      entry->phase = cancelled ? selection_phase_e::cancelled :
+        (bound ? selection_phase_e::bound : selection_phase_e::failed);
+      if (!bound || state_->closed || cancelled) entry->retire_connection();
       state_->changed.notify_all();
     }
+    if (cancelled) return moonlight_session_activation_status_e::selection_cancelled;
     return bound ? moonlight_session_activation_status_e::bound :
                    moonlight_session_activation_status_e::selected_binding_failed;
   }

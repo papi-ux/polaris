@@ -221,6 +221,16 @@ namespace multiseat {
 
     admission_result_t admit(const seat_request_t &request);
 
+    /**
+     * Reserve the first eligible GPU in trusted catalog order under one lock.
+     * request.logical_gpu_id must be empty. Every candidate is validated before
+     * reservation; capacity failure never widens the caller's GPU allowlist.
+     */
+    admission_result_t admit_first_available(
+      const seat_request_t &request,
+      const std::vector<std::string> &logical_gpu_ids
+    );
+
     mutation_result_e bind_runtime(
       const seat_handle_t &handle,
       compositor_e selected,
@@ -236,6 +246,8 @@ namespace multiseat {
     [[nodiscard]] std::optional<gpu_usage_t> gpu_usage(const std::string &logical_gpu_id) const;
 
   private:
+    admission_result_t admit_locked(const seat_request_t &request);
+
     struct seat_record_t {
       seat_snapshot_t snapshot;
     };

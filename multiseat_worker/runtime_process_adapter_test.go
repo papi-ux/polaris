@@ -57,7 +57,7 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 	config.DisplayWidth = 3840
 	config.DisplayHeight = 2160
 	config.RefreshMillihz = 97000
-	config.DisplayHDR = true
+	config.DisplayHDR = false
 	config.Workload = workloadPlan{Kind: workloadKindHeroic, TargetID: "heroic-game"}
 	runtime, err := startWorkerRuntime(
 		context.Background(),
@@ -133,7 +133,7 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 		"--display-width=3840",
 		"--display-height=2160",
 		"--display-refresh-millihz=97000",
-		"--display-hdr=1",
+		"--display-hdr=0",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("display capture argv mismatch: %#v", got)
 	}
@@ -147,7 +147,7 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 		"--display-width=3840",
 		"--display-height=2160",
 		"--display-refresh-millihz=97000",
-		"--display-hdr=1",
+		"--display-hdr=0",
 		"--compositor=gamescope",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("nested compositor argv mismatch: %#v", got)
@@ -168,6 +168,10 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 		"--render-node=" + config.RenderNode,
 		"--sessions=1",
 		"--media-pipeline=worker-local-capture-encode",
+		"--audio-sink=" + config.AudioSink,
+		"--display-width=3840",
+		"--display-height=2160",
+		"--display-refresh-millihz=97000",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("encoder argv mismatch: %#v", got)
 	}
@@ -207,7 +211,10 @@ func TestProcessRuntimeAdaptersBuildLeastAuthorityLiteralCommands(t *testing.T) 
 		t.Fatalf("session bus environment was over-broad: %#v", specs[0].Environment)
 	}
 	if !reflect.DeepEqual(specs[5].Environment, []string{
+		"XDG_RUNTIME_DIR=/run/polaris",
 		"POLARIS_RENDER_NODE=" + config.RenderNode,
+		"PULSE_SERVER=unix:/run/polaris/pulse/native",
+		"PULSE_SINK=" + config.AudioSink,
 	}) {
 		t.Fatalf("encoder environment was over-broad: %#v", specs[5].Environment)
 	}

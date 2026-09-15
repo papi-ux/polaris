@@ -221,6 +221,7 @@ namespace multiseat_test {
     oversized_handshake_payload,
     stall,
     media_contract,
+    media_contract_variable_audio,
   };
 
   inline media_config_t fake_media_config() {
@@ -246,13 +247,15 @@ namespace multiseat_test {
       const authority_handle_t &authority,
       fake_behavior_e behavior = fake_behavior_e::healthy,
       bool include_media = true,
-      std::function<bool(int, channel_e)> script = {}
+      std::function<bool(int, channel_e)> script = {},
+      std::chrono::milliseconds contract_delay = {}
     ):
         identity_(authority.identity()),
         paths_(authority.paths()),
         behavior_(behavior),
         include_media_(include_media),
-        script_(std::move(script)) {
+        script_(std::move(script)),
+        contract_delay_(contract_delay) {
       std::copy(
         authority.capability().begin(),
         authority.capability().end(),
@@ -324,6 +327,11 @@ namespace multiseat_test {
     [[nodiscard]] std::vector<message_e> contract_messages() const {
       std::scoped_lock lock {contract_mutex_};
       return contract_messages_;
+    }
+
+    [[nodiscard]] std::uint32_t selected_bitrate() const {
+      std::scoped_lock lock {contract_mutex_};
+      return selected_bitrate_;
     }
 
     [[nodiscard]] std::optional<frame_range_t> invalidated() const {
@@ -433,7 +441,12 @@ namespace multiseat_test {
             if (behavior_ == fake_behavior_e::cross_routed_media) {
               ++output_identity.generation;
             }
-            if (behavior_ == fake_behavior_e::media_contract &&
+            const bool has_contract = behavior_ == fake_behavior_e::media_contract ||
+                                      behavior_ == fake_behavior_e::media_contract_variable_audio;
+            if (has_contract) {
+              std::this_thread::sleep_for(contract_delay_);
+            }
+            if (has_contract &&
                 !send_test_frame(connection, {
                                                .channel = channel,
                                                .message = message_e::media_config,
@@ -447,11 +460,11 @@ namespace multiseat_test {
             // Under the contract every payload carries the frame prefix; the
             // plain behavior keeps sending bare bytes, which is what the
             // transport suite asserts on.
-            const auto media_payload = [this](const std::string_view bytes, const std::uint64_t index, const bool idr) {
+            const auto media_payload = [has_contract](const std::string_view bytes, const std::uint64_t index, const bool idr) {
               const std::span<const std::uint8_t> encoded {
                 reinterpret_cast<const std::uint8_t *>(bytes.data()), bytes.size()
               };
-              if (behavior_ != fake_behavior_e::media_contract) {
+              if (!has_contract) {
                 return std::vector<std::uint8_t> {encoded.begin(), encoded.end()};
               }
               return encode_media_frame({.frame_index = index, .idr = idr}, encoded);
@@ -471,6 +484,17 @@ namespace multiseat_test {
                                                .generation = output_identity.generation,
                                                .sequence = outgoing++,
                                                .payload = media_payload("audio", 1, false),
+                                             })) {
+              break;
+            }
+            if (behavior_ == fake_behavior_e::media_contract_variable_audio &&
+                !send_test_frame(connection, {
+                                               .channel = channel,
+                                               .message = message_e::audio,
+                                               .slot = output_identity.slot,
+                                               .generation = output_identity.generation,
+                                               .sequence = outgoing++,
+                                               .payload = media_payload("longer audio", 2, false),
                                              })) {
               break;
             }
@@ -504,11 +528,17 @@ namespace multiseat_test {
         }
         if (channel == channel_e::control && attached &&
             (request.message == message_e::media_config_ack ||
+             request.message == message_e::select_media_bitrate ||
              request.message == message_e::request_idr ||
              request.message == message_e::invalidate_ref_frames)) {
           {
             std::scoped_lock lock {contract_mutex_};
             contract_messages_.push_back(request.message);
+            if (request.message == message_e::select_media_bitrate) {
+              selected_bitrate_ = (std::uint32_t(request.payload[0]) << 24) |
+                (std::uint32_t(request.payload[1]) << 16) |
+                (std::uint32_t(request.payload[2]) << 8) | request.payload[3];
+            }
             if (request.message == message_e::invalidate_ref_frames) {
               invalidated_ = parse_frame_range(request.payload);
             }
@@ -618,6 +648,7 @@ namespace multiseat_test {
     fake_behavior_e behavior_;
     bool include_media_ = true;
     std::function<bool(int, channel_e)> script_;
+    std::chrono::milliseconds contract_delay_;
     int control_listener_ = -1;
     int media_listener_ = -1;
     std::thread control_thread_;
@@ -626,6 +657,7 @@ namespace multiseat_test {
     std::vector<std::uint8_t> input_;
     mutable std::mutex contract_mutex_;
     std::vector<message_e> contract_messages_;
+    std::uint32_t selected_bitrate_ = 0;
     std::optional<frame_range_t> invalidated_;
     std::atomic<bool> stopped_ = false;
     std::atomic<bool> failed_ = false;

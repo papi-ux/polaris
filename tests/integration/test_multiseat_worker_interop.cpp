@@ -852,6 +852,27 @@ TEST_F(WorkerLaunchConnection, StartedLaunchBindsOriginalConnectionAndIndependen
   EXPECT_FALSE(other->bound_to(stream::session::generation(*second)));
 }
 
+TEST_F(WorkerLaunchConnection, TabletPermissionDoesNotRequireUnsupportedWorkerDevices) {
+  const auto seat = prepare("client-a");
+  auto value = launch(490, 590);
+  value->perm = static_cast<crypto::PERM>(static_cast<std::uint32_t>(value->perm) |
+    static_cast<std::uint32_t>(crypto::PERM::input_touch) |
+    static_cast<std::uint32_t>(crypto::PERM::input_pen));
+  const auto authorized_permissions = value->perm;
+  select(value, seat);
+  auto session = allocate(*value);
+  ASSERT_TRUE(session);
+  // The fixture exports a real authenticated worker connection and allocates
+  // keyboard/mouse only, matching the current compositor's descriptor roles.
+  ASSERT_EQ(activate_registered_moonlight_session(*session), moonlight_session_activation_status_e::bound);
+  const auto owner = stream::session::worker_connection_for_tests(*session);
+  ASSERT_TRUE(owner);
+  EXPECT_TRUE(owner->bound_to(stream::session::generation(*session)));
+  EXPECT_EQ(value->perm, authorized_permissions);
+  stream::session::stop(*session);
+  EXPECT_FALSE(owner->bound_to(stream::session::generation(*session)));
+}
+
 TEST_F(WorkerLaunchConnection, RetiredConnectionCannotBeReplacedAtActivation) {
   const auto a = prepare("client-a");
   auto value = launch(403, 503);

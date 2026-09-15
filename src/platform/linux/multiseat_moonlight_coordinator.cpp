@@ -382,13 +382,14 @@ namespace multiseat::input {
     if (!launch->is_cancelled()) {
       return moonlight_coordinator_retire_status_e::launch_still_admissible;
     }
-    // The registry currently exposes a process-wide claim count. Refuse
-    // conservatively while any selected stream can still reference authority;
-    // a later seat-keyed teardown edge can narrow this without weakening it.
-    if (impl_->binding_registry_.claimed_sessions() != 0) {
+    // Fence new binding before observing claims. An activation already entered
+    // may still publish a claim; retry after it leaves instead of waiting while
+    // the lifecycle owner holds its lock. Other seats do not block this one.
+    found->cancelled = true;
+    if (!found->selection->quiesce() ||
+        impl_->binding_registry_.claimed_sessions(found->handle) != 0) {
       return moonlight_coordinator_retire_status_e::stream_still_bound;
     }
-    found->selection->cancel();
     found->selection->close();
     impl_->selections_.erase(found);
     return moonlight_coordinator_retire_status_e::retired;

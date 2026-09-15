@@ -221,7 +221,13 @@ func TestRealPrivateAudioGraphRoutesExactlyAndCleansUp(t *testing.T) {
 func TestRealAudioReadinessFailureCleansPartialArtifacts(t *testing.T) {
 	runtimePath := privateRuntimeDirectoryForTest(t)
 	options := realProviderOptions(t, runtimePath, true)
-	options.pactlPath = "/usr/bin/false"
+	// Distribution coreutils may expose this test fixture through a symlink.
+	// Resolve the fixture before applying the normal executable trust checks.
+	failurePath, err := filepath.EvalSymlinks("/usr/bin/false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.pactlPath = failurePath
 	requireTrustedBinary(t, options.pactlPath, options.executableOwnerUID)
 	options.startupTimeout = 150 * time.Millisecond
 	options.probeTimeout = 30 * time.Millisecond
