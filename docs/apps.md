@@ -33,8 +33,11 @@ entry. The folder is remembered, so **Rescan Sources** finds games you add later
 
 An imported entry launches the emulator straight into the game, fullscreen where the emulator has
 a switch for it, with the **Emulated Gamepad Type** set for the platform: a Switch Pro pad for
-Eden, a DualSense for the PlayStation emulators. Covers come from SteamGridDB when an API key is
-set in Settings, like any entry without artwork of its own. The emulator itself is published once
+Eden, a DualSense for the PlayStation emulators. A cover that already sits next to the game
+(`<name>.png`, or in a `covers`, `boxart` or `media` folder beside it), in ES-DE's downloaded
+media for that system, or among RetroArch's boxarts for it, is copied in at import, so the entry
+has art without any key; otherwise covers come from SteamGridDB when an API key is set in Settings,
+like any entry without artwork of its own. The emulator itself is published once
 next to its games so its own UI stays reachable from a stream.
 
 Polaris looks for each emulator in this order: the emulator file you set on the folder (an
