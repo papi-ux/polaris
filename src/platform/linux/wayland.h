@@ -506,6 +506,14 @@ namespace wl {
     quiet_enumeration_scope_t &operator=(const quiet_enumeration_scope_t &) = delete;
   };
   bool enumeration_is_quiet();
+
+  /**
+   * @brief The render node the host compositor last reported as its DMA-BUF main device.
+   * @details Recorded by monitors() when it enumerates the host desktop (not a private
+   *          compositor socket). Empty until an enumeration has run. This is how the Doctor
+   *          knows which GPU the desktop renders on before any stream has started.
+   */
+  std::string last_compositor_main_device();
 #ifdef POLARIS_TESTS
   std::string render_node_from_drm_device_for_tests(dev_t device);
 #endif
@@ -543,6 +551,10 @@ namespace wl {
 
   inline bool enumeration_is_quiet() {
     return false;
+  }
+
+  inline std::string last_compositor_main_device() {
+    return {};
   }
 
   inline int init() {

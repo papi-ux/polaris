@@ -108,6 +108,15 @@ Two practical settings:
 
 Same advice as AMD: Private Stream, Mesa VA-API, expect SHM capture. On an Arc discrete card, set `adapter_name` so Polaris picks the Arc GPU rather than the integrated one.
 
+### Hybrid laptops (an Intel or AMD iGPU next to an NVIDIA card)
+
+On a laptop the desktop usually renders on the integrated GPU while Polaris, left on auto, picks the NVIDIA card for encoding because it is the discrete one. That split works, but know what it costs: Mirror Desktop captures into system memory (frames from the iGPU cannot be handed to the NVIDIA card as DMA-BUF), and the NVIDIA card is woken from its power-saving state for every stream. The Doctor names the split as `linux_gpu_adapter_mismatch` with both ways out:
+
+- Keep everything on the iGPU: `adapter_name = /dev/dri/renderD128` (or whichever node the Doctor names as the compositor's) and `encoder = vaapi`. Slower encoder, no cross-GPU traffic, the NVIDIA card stays asleep.
+- Keep NVENC: leave the split and turn off NVIDIA runtime power management (`options nvidia NVreg_DynamicPowerManagement=0x00` in `/etc/modprobe.d/nvidia-pm.conf`, rebuild the initramfs, reboot). Costs battery, removes the sleep/wake cycle that has frozen laptops.
+
+If the whole machine freezes during a stream, [Troubleshooting](troubleshooting.md#whole-machine-freeze-on-a-hybrid-laptop) has the order to test things in.
+
 ## Linux setup checklist
 
 The **Advanced & diagnostics** disclosure on the Video/Audio settings page shows a short checklist for the selected launch mode. Each checklist step is one line in the UI; this section carries the full detail behind each step.

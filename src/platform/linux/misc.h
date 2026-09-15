@@ -7,6 +7,7 @@
 // standard includes
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -49,6 +50,34 @@ namespace platf {
     long long vram_total_bytes = 0;  ///< amdgpu mem_info_vram_total or i915/xe lmem_total_bytes; 0 when neither is exposed
     bool boot_vga = false;  ///< Parent PCI function is the firmware boot display device
   };
+
+  /**
+   * @brief True for DRM drivers that expose a render node but no GPU.
+   * @details Virtual displays (evdi, vkms), other streaming stacks' virtual displays
+   *          (hermes-kms, vibeshine_drm) and USB display adapters (udl) all register a
+   *          renderD* node. None of them can encode, and a laptop that carries one next to
+   *          an iGPU and an NVIDIA card enumerates three "GPUs" where it has two.
+   */
+  bool is_virtual_display_driver(std::string_view driver);
+
+  /**
+   * @brief Drop virtual display nodes from an encoder candidate list.
+   */
+  std::vector<render_device_candidate_t> without_virtual_display_nodes(std::vector<render_device_candidate_t> candidates);
+
+  /**
+   * @brief The render node the encoder actually runs on: adapter_name when it is set,
+   *        otherwise the automatic choice. Empty when neither names a node.
+   */
+  std::string effective_encoder_render_device();
+
+#ifdef POLARIS_TESTS
+  /**
+   * @brief Pin what the automatic choice returns; the test build defaults it to empty so a
+   *        host's real render nodes never leak into a fixture, nullopt restores the probe.
+   */
+  void set_effective_encoder_render_device_for_tests(std::optional<std::string> node);
+#endif
 
   /**
    * @brief Pick the render node games and capture should default to when
