@@ -45,6 +45,7 @@ TEST(EmulatorLibraryPresets, EveryPresetIsCompleteAndUnique) {
     EXPECT_FALSE(preset.label.empty()) << preset.id;
     EXPECT_FALSE(preset.platform.empty()) << preset.id;
     EXPECT_FALSE(preset.platform_id.empty()) << preset.id;
+    EXPECT_FALSE(preset.es_systems.empty()) << preset.id;
     EXPECT_EQ(preset.platform_id.find(' '), std::string_view::npos) << preset.id;
     EXPECT_FALSE(preset.binaries.empty()) << preset.id;
     EXPECT_FALSE(preset.flatpak_id.empty()) << preset.id;
@@ -186,6 +187,62 @@ TEST(EmulatorLibraryScan, FindsTheGamesAndNothingElse) {
   EXPECT_TRUE(emulator_library::scan_folder(root, {}).empty());
   EXPECT_TRUE(emulator_library::scan_folder(root / "missing", {"nsp"}).empty());
   EXPECT_EQ(emulator_library::scan_folder(root, {"nsp", "xci"}, emulator_library::max_scan_depth, 1).size(), 1u);
+}
+
+TEST(EmulatorLibraryCovers, NextToTheGameThenEsDeThenRetroArchByRawStem) {
+  const auto root = fresh_root("covers");
+  const auto home = root / "home";
+  const auto rom = root / "roms" / "switch" / "Game One (USA).nsp";
+  touch(rom);
+  const auto *eden = emulator_library::find_preset("eden");
+  ASSERT_NE(eden, nullptr);
+  const auto exists = [](const fs::path &) { return true; };
+
+  EXPECT_FALSE(emulator_library::find_local_cover(rom, eden, {home}, exists).has_value());
+
+  const auto esde = home / "ES-DE" / "downloaded_media" / "switch" / "covers" / "Game One (USA).jpg";
+  touch(esde);
+  EXPECT_EQ(emulator_library::find_local_cover(rom, eden, {home}, exists), esde);
+
+  const auto beside = root / "roms" / "switch" / "covers" / "Game One (USA).png";
+  touch(beside);
+  EXPECT_EQ(emulator_library::find_local_cover(rom, eden, {home}, exists), beside);
+
+  const auto adjacent = root / "roms" / "switch" / "Game One (USA).webp";
+  touch(adjacent);
+  EXPECT_EQ(emulator_library::find_local_cover(rom, eden, {home}, exists), adjacent);
+
+  // The caller's image test is the last word.
+  const auto never = [](const fs::path &) { return false; };
+  EXPECT_FALSE(emulator_library::find_local_cover(rom, eden, {home}, never).has_value());
+
+  // RetroArch names its boxarts after the game with the characters libretro forbids replaced.
+  const auto *dolphin = emulator_library::find_preset("dolphin");
+  ASSERT_NE(dolphin, nullptr);
+  const auto ratchet = root / "roms" / "gc" / "Ratchet & Clank (USA).rvz";
+  touch(ratchet);
+  const auto boxart = home / ".config" / "retroarch" / "thumbnails" / "Nintendo - GameCube" / "Named_Boxarts" / "Ratchet _ Clank (USA).png";
+  touch(boxart);
+  EXPECT_EQ(emulator_library::find_local_cover(ratchet, dolphin, {home}, exists), boxart);
+  EXPECT_EQ(emulator_library::libretro_thumbnail_stem("A: B/C*D?E"), "A_ B_C_D_E");
+
+  // A custom folder has no system to look up; only the game's own folder counts, so with
+  // the local copies gone the ES-DE cover is not consulted.
+  fs::remove(adjacent);
+  fs::remove(beside);
+  EXPECT_FALSE(emulator_library::find_local_cover(rom, nullptr, {home}, exists).has_value());
+  touch(beside);
+  EXPECT_EQ(emulator_library::find_local_cover(rom, nullptr, {home}, exists), beside);
+}
+
+TEST(EmulatorLibraryCovers, CopiedCoversGetSafeUniqueNames) {
+  const auto one = emulator_library::cover_stem("/roms/Game: One (USA).nsp", "eden");
+  EXPECT_EQ(one.rfind("emulator_eden_Game__One__USA__", 0), 0u) << one;
+  EXPECT_EQ(one.find(' '), std::string::npos);
+  EXPECT_EQ(one.find(':'), std::string::npos);
+  EXPECT_NE(one, emulator_library::cover_stem("/other/Game: One (USA).nsp", "eden"));
+  EXPECT_EQ(one, emulator_library::cover_stem("/roms/./Game: One (USA).nsp", "eden"));
+  EXPECT_LE(emulator_library::cover_stem(std::string(300, 'a') + ".nsp", "eden").size(), std::string_view("emulator_eden_").size() + 96 + 9);
 }
 
 TEST(EmulatorLibrarySources, RoundTripThroughJsonAndSurviveGarbage) {
