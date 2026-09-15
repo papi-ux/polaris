@@ -469,7 +469,7 @@ namespace multiseat {
         const auto game = std::find_if(snapshot->library.games.begin(), snapshot->library.games.end(),
           [&](const auto &item) { return item.target == target; });
         if (!snapshot->library.available || game == snapshot->library.games.end())
-          return {409, "This game is no longer installed in the selected Space. Open Steam or refresh the library."};
+          return {409, "This game is no longer installed in the selected Space. Open Steam Big Picture or refresh the library."};
         target_name = game->name;
       }
     }

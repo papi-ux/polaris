@@ -1240,7 +1240,7 @@ namespace {
     ASSERT_TRUE(install_profile_launch_service(service));
     const auto result = nvhttp::profile_library_request(client, "profile-a");
     ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
-    EXPECT_EQ(result.body["games"][0]["name"], "Open Steam");
+    EXPECT_EQ(result.body["games"][0]["name"], "Steam Big Picture");
     EXPECT_EQ(result.body["games"][1]["id"], "space.profile-a.870780");
     EXPECT_EQ(nvhttp::profile_library_request(client, "profile-b").status, 404);
     EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.870780"), "870780");

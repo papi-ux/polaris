@@ -5259,7 +5259,7 @@ namespace nvhttp {
           {"allowed_modes", {"gamescope_stream"}}, {"mode_reason", "Runs in " + snapshot->name}}}});
       if (!steam) games.back()["artwork"] = profile_artwork_manifest(platf::appdata(), identity, target);
     };
-    add("big-picture-v1", "Open Steam");
+    add("big-picture-v1", "Steam Big Picture");
     if (snapshot->library.available) for (const auto &game : snapshot->library.games) add(game.target, game.name);
     // Re-check permission after the potentially slow read, and reject an owner
     // replacement rather than publishing data from an obsolete access catalog.
@@ -5358,7 +5358,7 @@ namespace nvhttp {
         if (!library || (identity->target != "big-picture-v1" &&
             (!library->library.available || std::none_of(library->library.games.begin(), library->library.games.end(),
               [&](const auto &item) { return item.target == identity->target; }))))
-          return reject(409, "This title is unavailable in the selected Space. Open Steam or refresh the library.");
+          return reject(409, "This title is unavailable in the selected Space. Open Steam Big Picture or refresh the library.");
       } else if (game != multiseat::profile_app_uuid && game != std::to_string(multiseat::profile_app_id))
         return reject(400, "Select a title from this Space library");
       if (get_arg(args, "encoder", "auto") != "auto" ||
