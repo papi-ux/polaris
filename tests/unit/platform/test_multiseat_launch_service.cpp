@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <future>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
 #include <mutex>
@@ -1149,6 +1150,82 @@ namespace {
     EXPECT_EQ(service->select_space("client-a", "12345678-1234-4234-8234-123456789abc", "desktop").status, 200);
     EXPECT_FALSE(service->track_host_launch(launch()));
     EXPECT_TRUE(service->routes_client("client-a"));
+  }
+
+  TEST_F(MultiseatProfileHttp, SpaceArtworkRefreshPreservesCachedKindsAndRetriesOnlyFailures) {
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view) { return spaces::library_t{true, {{"870780", "Control"}}}; };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    char pattern[] = "/tmp/polaris-space-artwork-XXXXXX";
+    const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
+    const std::filesystem::path root(created);
+    const auto cleanup = util::fail_guard([&] { std::filesystem::remove_all(root); });
+    using namespace game_artwork;
+    std::vector<kind_e> calls;
+    bool fail_hero = true;
+    providers::transport_t transport = [&](const providers::request_t &request, std::uintmax_t limit)
+        -> std::optional<providers::transport_response_t> {
+      EXPECT_EQ(limit, maximum_asset_bytes);
+      calls.push_back(*request.kind);
+      if (fail_hero && request.kind == kind_e::hero) return std::nullopt;
+      return providers::transport_response_t{200, {0xff, 0xd8, 0xff, 0xe0, 1}, request.url};
+    };
+    for (const auto identity : {"space.profile-b.870780", "space.profile-a.620", "space.profile-a.big-picture-v1",
+        "space.profile-a.870780/../private", "space.profile-a.4294967296"}) {
+      EXPECT_EQ(nvhttp::profile_artwork_resolve_request(client, identity, root, transport).status, 404);
+    }
+    EXPECT_EQ(nvhttp::profile_artwork_resolve_request(nullptr, "space.profile-a.870780", root, transport).status, 404);
+    EXPECT_TRUE(calls.empty());
+    const auto first = nvhttp::profile_artwork_resolve_request(client, "space.profile-a.870780", root, transport);
+    ASSERT_EQ(first.status, 200);
+    EXPECT_EQ(first.body["resolution"]["status"], "partial_failure");
+    EXPECT_EQ(first.body["resolution"]["remaining_kinds"], nlohmann::json::array({"hero"}));
+    EXPECT_EQ(first.body["assets"]["poster"]["url"], "/polaris/v1/games/space.profile-a.870780/space-artwork/poster");
+    EXPECT_EQ(first.body.dump().find(root.string()), std::string::npos);
+    EXPECT_EQ(first.body.dump().find("53504143"), std::string::npos);
+    calls.clear(); fail_hero = false;
+    const auto second = nvhttp::profile_artwork_resolve_request(client, "space.profile-a.870780", root, transport);
+    EXPECT_EQ(second.body["resolution"]["status"], "updated");
+    EXPECT_EQ(calls, std::vector<kind_e>{kind_e::hero});
+    EXPECT_NE(first.body["revision"], second.body["revision"]);
+    calls.clear();
+    const auto third = nvhttp::profile_artwork_resolve_request(client, "space.profile-a.870780", root, transport);
+    EXPECT_EQ(third.body["resolution"]["status"], "healthy");
+    EXPECT_EQ(third.body["revision"], second.body["revision"]);
+    EXPECT_TRUE(calls.empty());
+    const auto poster = cache_asset_path(root / "spaces-library-artwork", "53504143-4553-4000-8000-000000870780",
+      kind_e::poster, source_e::steam, ".jpg");
+    ASSERT_TRUE(poster);
+    { std::ofstream output(*poster); output << "invalid image"; }
+    const auto repaired = nvhttp::profile_artwork_resolve_request(client, "space.profile-a.870780", root, transport);
+    EXPECT_EQ(repaired.body["resolution"]["status"], "updated");
+    EXPECT_EQ(calls, std::vector<kind_e>{kind_e::poster});
+    EXPECT_EQ(state->begins.load(), 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, SpaceArtworkRefreshRechecksPermissionAfterDownload) {
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view) { return spaces::library_t{true, {{"870780", "Control"}}}; };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    char pattern[] = "/tmp/polaris-space-artwork-revoke-XXXXXX";
+    const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
+    const std::filesystem::path root(created);
+    const auto cleanup = util::fail_guard([&] { std::filesystem::remove_all(root); });
+    bool revoked = false;
+    const auto result = nvhttp::profile_artwork_resolve_request(client, "space.profile-a.870780", root,
+      [&](const game_artwork::providers::request_t &request, std::uintmax_t)
+          -> std::optional<game_artwork::providers::transport_response_t> {
+        if (!revoked) { EXPECT_TRUE(nvhttp::unpair_client(client->uuid)); revoked = true; }
+        return game_artwork::providers::transport_response_t{200, {0xff, 0xd8, 0xff, 0xe0, 1}, request.url};
+      });
+    EXPECT_TRUE(revoked);
+    EXPECT_EQ(result.status, 404);
+    EXPECT_FALSE(result.body.contains("assets"));
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, SpaceLibrariesAndArtworkRequireCurrentPerSpaceAccess) {

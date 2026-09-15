@@ -5188,6 +5188,52 @@ namespace nvhttp {
     return game->target;
   }
 
+  namespace {
+    std::string profile_artwork_cache_id(std::string_view target) {
+      return "53504143-4553-4000-8000-" + std::string(12 - target.size(), '0') + std::string(target);
+    }
+
+    nlohmann::json profile_artwork_manifest(const std::filesystem::path &appdata,
+        std::string_view identity, std::string_view target) {
+      auto manifest = game_artwork::current_manifest(appdata / "spaces-library-artwork", profile_artwork_cache_id(target));
+      for (auto &[kind, asset] : manifest["assets"].items()) {
+        asset["url"] = "/polaris/v1/games/" + std::string(identity) + "/space-artwork/" + kind;
+      }
+      return manifest;
+    }
+  }
+
+  profile_api_response_t profile_artwork_resolve_request(const crypto::p_named_cert_t &candidate,
+      std::string_view identity, const std::filesystem::path &appdata,
+      const game_artwork::providers::transport_t &transport) {
+    const auto target = profile_artwork_target(candidate, identity);
+    auto reject = [] { return profile_api_response_t{404, {{"status", false}}}; };
+    if (!target) return reject();
+    const auto cache = appdata / "spaces-library-artwork";
+    const auto cache_id = profile_artwork_cache_id(*target);
+    auto plan = game_artwork::providers::plan_steam_assets(*target);
+    nlohmann::json requested = nlohmann::json::array();
+    std::erase_if(plan, [&](const auto &item) {
+      if (!item.kind || game_artwork::find_cached_asset(cache, cache_id, *item.kind)) return true;
+      const auto kind = std::string(game_artwork::kind_name(*item.kind));
+      if (std::find(requested.begin(), requested.end(), kind) == requested.end()) requested.push_back(kind);
+      return false;
+    });
+    // The existing bounded executor preserves valid bytes on partial provider failures.
+    (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
+    if (profile_artwork_target(candidate, identity) != target) return reject();
+    auto manifest = profile_artwork_manifest(appdata, identity, *target);
+    nlohmann::json remaining = nlohmann::json::array();
+    for (const auto &kind : requested) {
+      if (!manifest["assets"].contains(kind.get<std::string>())) remaining.push_back(kind);
+    }
+    manifest["resolution"] = {
+      {"status", requested.empty() ? "healthy" : remaining.empty() ? "updated" : "partial_failure"},
+      {"requested_kinds", requested}, {"remaining_kinds", remaining},
+    };
+    return {200, std::move(manifest)};
+  }
+
   profile_api_response_t profile_library_request(const crypto::p_named_cert_t &candidate, std::string_view profile) {
     const auto current = resolve_authorized_client(candidate);
     auto reject = [](int status) { return profile_api_response_t{status, {{"status", false},
@@ -5209,6 +5255,7 @@ namespace nvhttp {
         {"cover_url", steam ? "" : "/polaris/v1/games/" + identity + "/space-artwork/poster"},
         {"launch_mode", {{"preferred_mode", "gamescope_stream"}, {"recommended_mode", "gamescope_stream"},
           {"allowed_modes", {"gamescope_stream"}}, {"mode_reason", "Runs in " + snapshot->name}}}});
+      if (!steam) games.back()["artwork"] = profile_artwork_manifest(platf::appdata(), identity, target);
     };
     add("big-picture-v1", "Open Steam");
     if (snapshot->library.available) for (const auto &game : snapshot->library.games) add(game.target, game.name);
@@ -8601,7 +8648,7 @@ namespace nvhttp {
       // A separate cache namespace cannot replace host library overrides. The
       // decimal Steam ID is already canonical and bounded to uint32.
       const auto cache = platf::appdata() / "spaces-library-artwork";
-      const auto cache_id = "53504143-4553-4000-8000-" + std::string(12 - target->size(), '0') + *target;
+      const auto cache_id = profile_artwork_cache_id(*target);
       auto asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
       if (!asset) {
         auto plan = game_artwork::providers::plan_steam_assets(*target);
@@ -8622,6 +8669,18 @@ namespace nvhttp {
       response->write(SimpleWeb::StatusCode::success_ok, input, headers);
     };
     https_server.resource["^/polaris/v1/games/space[.][^/]+/space-artwork/(poster|hero|logo|icon)$"]["GET"] = polarisSpaceArtwork;
+    https_server.resource["^/polaris/v1/games/space[.][^/]+/space-artwork/resolve$"]["POST"] = [](resp_https_t response, req_https_t request) {
+      const auto client = get_verified_cert(request);
+      if (!client) { response->write(SimpleWeb::StatusCode::client_error_unauthorized); return; }
+      const std::string prefix = "/polaris/v1/games/";
+      const auto split = request->path.find("/space-artwork/", prefix.size());
+      const auto identity = request->path.substr(prefix.size(), split - prefix.size());
+      const auto result = profile_artwork_resolve_request(client, identity, platf::appdata(), make_artwork_transport(""));
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(), headers);
+    };
 #endif
 
     // Game cover art

@@ -405,4 +405,4 @@ A Space is a saved gaming environment for a person or purpose. Name it **Alex’
 
 The Steam library currently detects completed installations in the Space’s standard Steam home. Compatibility tools such as Proton are excluded. External library folders are not imported from host paths. If a library cannot be read, **Open Steam** remains available and Nova does not substitute the desktop’s games. Older hosts retain the original **Open Space** screen until they support the Space library API.
 
-Steam artwork is fetched through the paired Polaris host and cached separately from desktop artwork. Space artwork editing and pinned game shortcuts are not available in this first library version.
+Steam artwork is fetched through the paired Polaris host and cached separately from desktop artwork. Use **Options → Update Artwork Library** to check the selected Space's game artwork and retry missing or invalid images. **Open Steam** keeps its bundled launcher artwork. Space artwork editing and pinned game shortcuts are not available in this first library version.

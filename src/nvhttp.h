@@ -31,6 +31,7 @@ namespace stream_stats {
 }
 
 #if defined(__linux__)
+#include "game_artwork_provider.h"
 namespace proc {
   struct desktop_launch_safety_policy_t;
 }
@@ -126,6 +127,9 @@ namespace nvhttp {
   profile_api_response_t profile_spaces_request(const crypto::p_named_cert_t &candidate,
     std::optional<std::string_view> selection = std::nullopt);
   std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity);
+  profile_api_response_t profile_artwork_resolve_request(const crypto::p_named_cert_t &candidate,
+    std::string_view identity, const std::filesystem::path &appdata,
+    const game_artwork::providers::transport_t &transport);
   profile_api_response_t profile_library_request(const crypto::p_named_cert_t &candidate, std::string_view profile);
   std::optional<profile_api_response_t> resolve_profile_request(
     const crypto::p_named_cert_t &candidate, const args_t &args);
