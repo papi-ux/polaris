@@ -580,6 +580,8 @@ namespace proc {
     std::string game_category;  // "fast_action", "cinematic", "desktop", "vr", or ""
     std::string source;         // "steam", "lutris", "heroic", or "manual"
     std::string lutris_runner;  // Lutris runner id persisted at import ("wine", "linux", ...), or ""
+    std::string emulator;       // ROM folder imports: the emulator preset id ("eden") or "custom", or ""
+    std::string rom_path;       // ROM folder imports: the game file the entry launches, or ""
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
@@ -614,6 +616,21 @@ namespace proc {
   };
 
   launcher_identity_t launcher_identity_from_lutris_runner(const std::string &runner);
+
+  /**
+   * @brief What a ROM folder entry is, for the client's badges.
+   *
+   * The console travels as a machine id plus a label and the emulator as a runtime id
+   * plus a label, so a client that maps neither still renders "Nintendo Switch · Eden".
+   */
+  struct emulator_identity_t {
+    std::string platform;        ///< "switch", "gamecube-wii", "wiiu", "psx", "ps2", "psp", "gba", or "".
+    std::string platform_label;  ///< "Nintendo Switch" and friends, or "".
+    std::string runtime;         ///< the emulator preset id, "custom", or "".
+    std::string runtime_label;   ///< "Eden", "Custom emulator", or "".
+  };
+
+  emulator_identity_t launcher_identity_from_emulator(const std::string &emulator);
 
   enum class session_stop_outcome_t {
     allowed,

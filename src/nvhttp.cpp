@@ -7501,6 +7501,7 @@ namespace nvhttp {
 #endif
       features["adaptive_bitrate_control"] = true;
       features["game_library"] = true;
+      features["library_emulators_v1"] = true;
       // Declared so a client can light up the UI conditionally instead of
       // guessing from the presence of a field. Both landed in v1.3.5 and are
       // served on the game object as `play_time` and `beat_time`.
@@ -8573,6 +8574,8 @@ namespace nvhttp {
           bool is_steam = !app.steam_appid.empty();
           if (source_filter == "steam" && !is_steam) continue;
           if (source_filter == "other" && is_steam) continue;
+          // Any other value names a source the way apps.json spells it ("emulator", "lutris").
+          if (source_filter != "steam" && source_filter != "other" && !boost::iequals(app.source, source_filter)) continue;
         }
 
         // Pagination
@@ -8601,6 +8604,24 @@ namespace nvhttp {
             game["platform"] = identity.platform;
           }
           game["runtime"] = identity.runtime;
+        }
+        // A ROM folder entry names its console and its emulator; the labels let Nova render
+        // "Nintendo Switch · Eden" without knowing either id.
+        if (boost::iequals(app.source, "emulator")) {
+          const auto identity = proc::launcher_identity_from_emulator(app.emulator);
+          if (!identity.platform.empty()) {
+            game["platform"] = identity.platform;
+          }
+          if (!identity.platform_label.empty()) {
+            game["platform_label"] = identity.platform_label;
+          }
+          if (!identity.runtime.empty()) {
+            game["runtime"] = identity.runtime;
+          }
+          if (!identity.runtime_label.empty()) {
+            game["runtime_label"] = identity.runtime_label;
+          }
+          game["emulator"] = app.emulator;
         }
         if (const auto play_time = play_time_for_app(app)) {
           game["play_time"] = *play_time;
