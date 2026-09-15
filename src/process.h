@@ -391,6 +391,7 @@ namespace proc {
     std::chrono::milliseconds interruption_delay
   );
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
+  bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id, std::chrono::milliseconds graceful_timeout);
   bool exact_generation_transient_capture_failure_retries_for_tests(
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
