@@ -128,7 +128,7 @@ preview limitation.
    running Polaris. For a service installation, that account may differ from
    your terminal account; grant access to the service account.
 5. Save your work and stop streams before signing out and back in. Start Polaris
-   again and select **Recheck setup**. If Polaris runs as a system service, its
+   again and select **Recheck Setup**. If Polaris runs as a system service, its
    administrator may need to restart that service to refresh group membership.
 6. Resolve any controller or graphics access checks through **Doctor & Support**.
    These checks verify device access; a working game stream is a separate test.
@@ -174,9 +174,10 @@ saved your work and stopped games.
 
 ### Ubuntu
 
-Spaces presents the repository key, package repository, and installation steps
-from the [Docker Ubuntu guide](https://docs.docker.com/engine/install/ubuntu/).
-Complete those steps in order, then return to Spaces and recheck access.
+Follow the [Docker Ubuntu guide](https://docs.docker.com/engine/install/ubuntu/)
+to add Docker's repository key and package repository, then install the engine.
+Complete those steps in a terminal on the Polaris host, then return to Spaces
+and select **Recheck Setup**.
 
 ### Bazzite, SteamOS, and other system images
 
@@ -205,7 +206,7 @@ On a mutable Fedora installation:
    ```bash
    sudo -H /usr/bin/polaris-spaces-setup install
    ```
-4. Reopen Polaris, return to **Spaces**, and select **Recheck setup**.
+4. Reopen Polaris, return to **Spaces**, and select **Recheck Setup**.
 
 The helper installs only the dedicated worker policy, reserved controller policy,
 version marker, and reserved input rule. It reloads policy and udev rules without
@@ -409,11 +410,18 @@ last archived Space or create another one using the retained runtime setup.
 
 ## Choose And Check Spaces In Nova
 
-With one allowed Space, Nova shows **Your Space** and **Open Space** directly.
-With several, it also offers **Change Space**. The chooser lists only the Spaces
-allowed for that paired device. Choosing does not start a game or change another
-device's selection. The host remembers each device's last choice across restarts;
-Default Space is used when there is no saved permitted choice.
+Nova opens the selected Space's game library. **Playing In** names the Space in
+the same toolbar as the selected game, **Options**, and **System**. Select
+**Change Space** to see the Spaces allowed for that paired device. Choosing
+does not start a game or change another device's selection. The host remembers
+each device's last choice across restarts; Default Space is used when there is
+no saved permitted choice. Select **Steam Big Picture** to sign in or install
+games, or select an installed game's poster to play it.
+
+Older hosts without the Space library use a compatibility screen with
+**Your Space** and **Open Space**. See the
+[Nova Spaces guide](https://github.com/papi-ux/nova/blob/master/docs/spaces.md)
+for the library, Play Setup, and compatibility flows.
 
 **Ready To Play** means the Space is idle. **In Use** means another device is using
 it. **Starting** and **Stopping** mean Nova must wait before opening. An active
