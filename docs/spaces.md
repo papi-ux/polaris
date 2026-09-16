@@ -165,26 +165,42 @@ The helper installs the worker policy, the reserved controller policy, a
 version marker and the reserved input rule. It reloads policy and udev rules
 without changing enforcement or relabeling controllers, and it does not
 install Steam, change drivers, start Docker or restart Polaris. If it is
-interrupted, run the same command again. Policies you installed by hand, or an
-input rule with no ownership record, are reported for review rather than
-replaced.
+interrupted, run the same command again. Policies you installed by hand, and an
+input rule that differs from the packaged one, are reported with the command
+that clears them rather than replaced. An input rule identical to the packaged
+one is adopted.
 
-If the helper refuses, its message names the situation:
+If the helper refuses, its message names what it found and prints the command
+that clears it:
 
-- **"An existing Spaces policy is disabled, overridden or locally managed."** A
-  module with one of the helper's names is installed at another priority, for
-  example a copy installed by hand. `sudo semodule -lfull | grep polaris` shows
-  it with its priority. Remove that copy, for example
-  `sudo semodule -X 400 -r polaris_multiseat_input polaris_nvidia_worker`, then
-  run the install again. libsemanage may print "Failed!" while removing; trust
-  the list, not the message.
-- **"Quit Polaris and stop Spaces streams before changing security setup."** A
-  process named `polaris` or `polaris-something` is still running, a second
-  instance included. `pgrep -a polaris` names it; stop it and retry.
-- **"Existing Spaces input rule is not owned by this setup."**
-  `/etc/udev/rules.d/97-polaris-multiseat-input.rules` was placed there by hand,
-  so the helper has no record of it. Move it aside and run the install again;
-  the helper writes and records its own copy.
+- **"Spaces setup found SELinux modules it does not manage"** lists each copy of
+  a module with one of the helper's names that sits at another priority, is
+  disabled or was installed another way, for example a copy installed by hand,
+  and prints the command that removes those copies, such as
+  `sudo semodule -X 400 -r polaris_multiseat_input polaris_nvidia_worker`. Run
+  it, check `sudo semodule -lfull | grep polaris_`, then run the install again.
+  libsemanage may print "Failed!" while removing; trust the list, not the
+  message.
+- **"Spaces setup found SELinux modules at priority 200 that it has no record
+  of installing"** means the policies stayed installed after the helper's
+  records in `/var/lib/polaris/spaces-security` were deleted. Remove them with
+  the printed command and run the install again.
+- **"Quit Polaris and stop Spaces streams before changing security setup."**
+  names each Polaris process still running as `name (pid N)`, a second
+  instance included, and counts the Spaces input devices still present.
+  `systemctl status PID` shows which service started a process. Stop it and
+  retry.
+- **"is not owned by this setup and differs from the rule this package ships"**
+  means `/etc/udev/rules.d/97-polaris-multiseat-input.rules` was placed there by
+  hand or by an older build. Move it aside as the message shows and run the
+  install again. A rule identical to the one the package ships is adopted
+  instead: the install says so, records it as its own, and `remove` deletes it
+  later like any rule the helper installed.
+- **"changed after this setup installed it"** or **"is missing"** means a
+  policy or the input rule the helper installed was changed or deleted since.
+  The message prints the command that restores the installed copy from
+  `/var/lib/polaris/spaces-security`. Run it, then the same helper command
+  again.
 
 `polaris-spaces-setup status` shows readiness. `sudo -H /usr/bin/polaris-spaces-setup remove`
 removes only what the helper owns, after Polaris and every Space have stopped;

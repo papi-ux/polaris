@@ -140,17 +140,61 @@ def status():
             'Spaces SELinux setup needs attention. Quit Polaris, then run sudo -H @CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup install.'}
 
 
+def listing(items):
+    """Join a short list the way a sentence does: a, b and c."""
+    items = list(items)
+    return items[0] if len(items) == 1 else ', '.join(items[:-1]) + ' and ' + items[-1]
+
+
+def printable(text):
+    """Text read from the host, made safe to print on a terminal."""
+    return ''.join(character if character.isprintable() else '?' for character in text)
+
+
 def inventory(output):
-    result = {}
+    result, conflicts, seen = {}, [], set()
     for line in output.decode('ascii').splitlines():
         fields = line.split()
         if len(fields) < 2 or fields[1] not in NAMES:
             continue
-        require(len(fields) == 4 and fields[0] == PRIORITY and fields[2] == 'cil' and
-                re.fullmatch(r'sha256:[0-9a-f]{64}', fields[3]) and fields[1] not in result,
-                'An existing Spaces policy is disabled, overridden or locally managed. Review it before installation.')
-        result[fields[1]] = fields[3][7:]
+        # A module can exist once per priority; the same name and priority twice is a malformed listing.
+        repeated = (fields[1], fields[0]) in seen
+        seen.add((fields[1], fields[0]))
+        if not repeated and len(fields) == 4 and fields[0] == PRIORITY and fields[2] == 'cil' and \
+                re.fullmatch(r'sha256:[0-9a-f]{64}', fields[3]):
+            result[fields[1]] = fields[3][7:]
+        else:
+            conflicts.append((fields, repeated))
+    if conflicts:
+        raise SetupError(module_conflicts(conflicts))
     return result
+
+
+def module_conflicts(conflicts):
+    """Name each module copy this setup cannot manage, and the semodule commands that remove them."""
+    described, removals = [], {}
+    for fields, repeated in conflicts:
+        name = fields[1]
+        priority = int(fields[0]) if re.fullmatch(r'[0-9]{1,3}', fields[0]) and 0 < int(fields[0]) < 1000 else None
+        notes = []
+        if len(fields) > 2 and fields[2] != 'cil':
+            notes.append('as a ' + (fields[2] if re.fullmatch(r'[a-z0-9_]{1,16}', fields[2]) else 'different') + ' module')
+        if 'disabled' in fields[3:]:
+            notes.append('disabled')
+        if len(fields) < 4 or not re.fullmatch(r'sha256:[0-9a-f]{64}', fields[3]):
+            notes.append('without a checksum')
+        if repeated:
+            notes.append('listed more than once')
+        described.append(name + (' at priority ' + str(priority) if priority else ' at an unreadable priority') +
+                         (' (' + ', '.join(notes) + ')' if notes else ''))
+        if priority and name not in removals.setdefault(priority, []):
+            removals[priority].append(name)
+    commands = ['sudo semodule -X ' + str(priority) + ' -r ' + ' '.join(sorted(names, key=NAMES.index))
+                for priority, names in sorted(removals.items())]
+    return ('Spaces setup found SELinux modules it does not manage: ' + listing(described) +
+            '. It installs them itself at priority ' + PRIORITY + ', so remove those copies first' +
+            (': ' + '; '.join(commands) if commands else ' with sudo semodule -X PRIORITY -r NAME') +
+            '. Then check sudo semodule -lfull | grep polaris_ and run the same command again.')
 
 
 def decode_state(payload):
@@ -174,6 +218,17 @@ def decode_state(payload):
                 'Invalid module ownership record.')
     require(set(body['after']) == set(NAMES), 'Incomplete module ownership record.')
     return body
+
+
+def adopted_rule(state):
+    """Whether this installation took over an identical input rule it found instead of writing the first copy.
+
+    The journal needs no field of its own for this, so older helpers keep reading it. Outside an owned
+    installation the only existing rule an install accepts is one identical to the packaged rule, and an
+    owned installation always records the modules it replaces, so an empty 'before' together with a
+    recorded 'rule_before' can only come from adoption.
+    """
+    return not state['before'] and state['rule_before'] != ''
 
 
 class System:
@@ -218,27 +273,43 @@ class System:
     def modules(self):
         return inventory(self.run(['/usr/bin/semodule', '-lfull', '-m']))
 
-    def idle(self):
-        for process in Path('/proc').iterdir():
+    def activity(self, proc=Path('/proc'), inputs=Path('/sys/class/input')):
+        """What makes a policy change unsafe right now: Polaris processes and reserved input devices.
+
+        An entry that cannot be read counts as activity, as it always has; a process that exits while
+        it is being read does not.
+        """
+        processes, devices, unreadable = [], 0, 0
+        for process in proc.iterdir():
             if not process.name.isdecimal() or int(process.name) == os.getpid():
                 continue
             try:
                 command = (process / 'comm').read_text().strip()
-                if command == 'polaris' or command.startswith('polaris-'):
-                    return False
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             except (OSError, UnicodeError):
-                return False
-        for name in Path('/sys/class/input').glob('event*/device/name'):
+                unreadable += 1
+                continue
+            if command == 'polaris' or command.startswith('polaris-'):
+                processes.append((int(process.name), printable(command)))
+        for name in inputs.glob('event*/device/name'):
             try:
                 if name.read_text().startswith('Polaris multiseat '):
-                    return False
+                    devices += 1
             except FileNotFoundError:
                 continue
             except (OSError, UnicodeError):
-                return False
-        return True
+                unreadable += 1
+        found = [command + ' (pid ' + str(pid) + ')' for pid, command in sorted(processes)]
+        if len(found) > 4:
+            more = len(found) - 4
+            found = found[:4] + [str(more) + ' more Polaris process' + ('es' if more > 1 else '')]
+        if devices:
+            found.append(str(devices) + ' Polaris multiseat input device' + ('s' if devices > 1 else ''))
+        if unreadable:
+            found.append(str(unreadable) + (' process or input entry' if unreadable == 1 else ' process or input entries') +
+                         ' that could not be read')
+        return found
 
     def compile(self):
         payloads = {name: read(self.data / name) for name in EXPECTED}
@@ -265,6 +336,43 @@ class System:
         value = read(self.rule, optional=True)
         return digest(value) if value is not None else ''
 
+    def unrecorded_modules(self, observed):
+        names = [name for name in NAMES if name in observed]
+        return ('Spaces setup found SELinux modules at priority ' + PRIORITY + ' that it has no record of installing: ' +
+                listing(names) + '. They are usually left from an earlier setup whose records in ' + str(self.state) +
+                ' were deleted. Remove them with: sudo semodule -X ' + PRIORITY + ' -r ' + ' '.join(names) +
+                '. Then run the same command again.')
+
+    def changed_modules(self, observed, after):
+        changed = [name for name in NAMES if name in observed and observed[name] != after[name]]
+        missing = [name for name in NAMES if name not in observed]
+        found = []
+        if changed:
+            found.append(listing(changed) + (' has' if len(changed) == 1 else ' have') + ' a different checksum')
+        if missing:
+            found.append(listing(missing) + (' is' if len(missing) == 1 else ' are') + ' missing')
+        return ('The Spaces SELinux modules this setup installed changed outside it: ' + ' and '.join(found) +
+                '. Restore the installed copies with: sudo semodule -X ' + PRIORITY + ' -i ' +
+                ' '.join(str(self.state / (name + '.cil')) for name in NAMES) + '. Then run the same command again.')
+
+    def changed_rule(self, rule):
+        restore = 'sudo install -m 0644 ' + str(self.state / RULE.name) + ' ' + str(self.rule)
+        if not rule:
+            return ('The input rule this setup installed at ' + str(self.rule) + ' is missing. Restore it with: ' +
+                    restore + '. Then run the same command again.')
+        return ('The input rule at ' + str(self.rule) + ' changed after this setup installed it, so it is not owned by '
+                'this setup any more. Keep a copy of your version if you need it, then restore the installed rule with: ' +
+                restore + '. Then run the same command again.')
+
+    def unowned_rule(self, operation):
+        if operation == 'install':
+            return ('The input rule at ' + str(self.rule) + ' is not owned by this setup and differs from the rule this '
+                    'package ships. Move it aside, for example: sudo mv ' + str(self.rule) + ' /root/' + self.rule.name +
+                    '.bak. Then run install again.')
+        return ('No owned Spaces SELinux setup is installed. The input rule at ' + str(self.rule) + ' is not owned by '
+                'this setup, so remove leaves it in place. Delete it yourself if you no longer need it: sudo rm ' +
+                str(self.rule) + '.')
+
     def change(self, operation):
         payload = read(self.state / 'state.json', optional=True)
         state = decode_state(payload) if payload is not None else None
@@ -274,7 +382,12 @@ class System:
                 observed == state['after'] and rule == state['rule_after'] and kernel_ready():
             write(self.state / 'ready.json', ready_bytes(RELEASE), 0o644)
             return 'Spaces SELinux setup is already installed.'
-        require(self.idle(), 'Quit Polaris and stop Spaces streams before changing security setup. Reopen Polaris afterward.')
+        active = self.activity()
+        if active:
+            raise SetupError('Quit Polaris and stop Spaces streams before changing security setup. Still active: ' +
+                             listing(active) + '.' +
+                             (' systemctl status PID shows which service started a process.' if any(' (pid ' in item for item in active) else '') +
+                             ' Reopen Polaris afterward.')
         if state and state['phase'] in ('installing', 'removing'):
             require(operation == ('install' if state['phase'] == 'installing' else 'remove'),
                     'Finish the saved setup operation before requesting a different one.')
@@ -284,8 +397,16 @@ class System:
                     'Input rules changed outside the saved operation. No changes were made.')
         else:
             owned = state and state['phase'] == 'installed'
-            require(observed == (state['after'] if owned else {}), 'Existing Spaces policies are not owned by this setup. Review them before continuing.')
-            require(rule == (state['rule_after'] if owned else ''), 'Existing Spaces input rule is not owned by this setup. Review it before continuing.')
+            if owned and observed != state['after']:
+                raise SetupError(self.changed_modules(observed, state['after']))
+            if not owned and observed:
+                raise SetupError(self.unrecorded_modules(observed))
+            if owned and rule != state['rule_after']:
+                raise SetupError(self.changed_rule(rule))
+            # An unowned rule identical to the packaged one is adopted: the journal records it as the rule
+            # before installation, the install rewrites the same bytes, and remove deletes it like its own.
+            if not owned and rule and not (operation == 'install' and rule == EXPECTED[RULE.name]):
+                raise SetupError(self.unowned_rule(operation))
             if operation == 'remove' and not owned:
                 return 'No owned Spaces SELinux setup is installed.'
             if operation == 'install':
@@ -322,7 +443,10 @@ class System:
             if state['release'] == RELEASE:
                 require(kernel_ready(), 'Installed policy could not be confirmed in the enforcing kernel. Recheck SELinux and retry.')
                 write(self.state / 'ready.json', ready_bytes(RELEASE), 0o644)
-            return 'Spaces security files are installed. Reopen Polaris and select Recheck setup.'
+            adopted = ('Setup adopted the input rule already at ' + str(self.rule) + ', which is identical to the rule '
+                       'this package ships, and now manages it: remove deletes it with the rest of the setup. ') \
+                if adopted_rule(state) else ''
+            return adopted + 'Spaces security files are installed. Reopen Polaris and select Recheck setup.'
         remove_file(self.rule)
         self.run(['/usr/bin/udevadm', 'control', '--reload-rules'])
         if observed:

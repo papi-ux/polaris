@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -47,8 +48,8 @@ class Host(s.System):
     def modules(self):
         return copy.deepcopy(self.installed)
 
-    def idle(self):
-        return not self.active
+    def activity(self):
+        return ['polaris (pid 4242)'] if self.active else []
 
     def compile(self):
         self.compiles += 1
@@ -173,10 +174,136 @@ class Transaction(unittest.TestCase):
 
     def test_active_host_prevents_new_install(self):
         self.host.active = True
-        with self.assertRaises(s.SetupError):
+        with self.assertRaises(s.SetupError) as raised:
             self.host.change('install')
         self.assertEqual(self.host.calls, [])
         self.assertEqual(self.host.compiles, 0)
+        message = str(raised.exception)
+        self.assertTrue(message.startswith('Quit Polaris and stop Spaces streams before changing security setup.'))
+        self.assertIn('Still active: polaris (pid 4242).', message)
+        self.assertIn('systemctl status PID', message)
+
+    def test_identical_unowned_rule_is_adopted_and_removed_with_the_setup(self):
+        h = self.host
+        h.files[h.rule] = b'rule'
+        message = h.change('install')
+        state = h.state_value()
+        self.assertEqual(state['phase'], 'installed')
+        self.assertEqual((state['before'], state['rule_before'], state['rule_after']),
+                         ({}, s.EXPECTED[s.RULE.name], s.EXPECTED[s.RULE.name]))
+        self.assertTrue(s.adopted_rule(state))
+        self.assertIn('adopted the input rule already at ' + str(h.rule), message)
+        self.assertEqual(h.files[h.rule], b'rule')
+        self.assertEqual(h.change('install'), 'Spaces SELinux setup is already installed.')
+        h.change('remove')
+        self.assertNotIn(h.rule, h.files)
+        self.assertEqual(h.installed, {})
+        self.assertEqual(h.state_value()['phase'], 'removed')
+        self.assertTrue(s.adopted_rule(h.state_value()))
+        # With the rule gone, the next install writes its own and is not an adoption.
+        message = h.change('install')
+        self.assertFalse(s.adopted_rule(h.state_value()))
+        self.assertNotIn('adopted', message)
+
+    def test_interrupted_adoption_resumes_and_keeps_ownership(self):
+        for failure in ('before_commit', 'after_commit', 'rule', 'reload'):
+            with self.subTest(failure=failure):
+                h = self.host
+                h.files[h.rule] = b'rule'
+                h.fail = failure
+                with self.assertRaises(s.SetupError):
+                    h.change('install')
+                self.assertEqual(h.state_value()['phase'], 'installing')
+                self.assertTrue(s.adopted_rule(h.state_value()))
+                self.assertNotIn(h.state / 'ready.json', h.files)
+                h.fail = ''
+                with self.assertRaises(s.SetupError):
+                    h.change('remove')
+                compiles = h.compiles
+                h.change('install')
+                self.assertEqual(h.compiles, compiles)
+                self.assertEqual(h.state_value()['phase'], 'installed')
+                self.assertEqual(h.files[h.rule], b'rule')
+                h.change('remove')
+                self.assertNotIn(h.rule, h.files)
+                self.assertEqual(h.state_value()['phase'], 'removed')
+
+    def test_upgrade_with_a_new_rule_replaces_an_adopted_rule(self):
+        h = self.host
+        h.files[h.rule] = b'rule'
+        h.change('install')
+        h.files[h.data / s.RULE.name] = b'rule v2'
+        with patch.object(s, 'RELEASE', 'b' * 64), patch.object(s, 'EXPECTED', {s.RULE.name: s.digest(b'rule v2')}):
+            h.change('install')
+            state = h.state_value()
+            self.assertEqual(state['phase'], 'installed')
+            self.assertEqual((state['rule_before'], state['rule_after']), (s.digest(b'rule'), s.digest(b'rule v2')))
+            self.assertFalse(s.adopted_rule(state))
+            self.assertEqual(h.files[h.rule], b'rule v2')
+            self.assertEqual(h.files[h.state / 'ready.json'], s.ready_bytes('b' * 64))
+            h.change('remove')
+            self.assertNotIn(h.rule, h.files)
+
+    def test_unowned_rule_that_differs_is_refused_by_path(self):
+        h = self.host
+        # For example the rule an older package shipped, placed by hand.
+        h.files[h.rule] = b'older rule'
+        with self.assertRaises(s.SetupError) as raised:
+            h.change('install')
+        message = str(raised.exception)
+        self.assertIn('The input rule at ' + str(h.rule) + ' is not owned by this setup', message)
+        self.assertIn('differs from the rule this package ships', message)
+        self.assertIn('sudo mv ' + str(h.rule) + ' /root/' + s.RULE.name + '.bak', message)
+        for rule in (b'older rule', b'rule'):
+            h.files[h.rule] = rule
+            with self.assertRaises(s.SetupError) as raised:
+                h.change('remove')
+            self.assertIn('remove leaves it in place', str(raised.exception))
+            self.assertIn('sudo rm ' + str(h.rule), str(raised.exception))
+            self.assertEqual(h.files[h.rule], rule)
+        self.assertEqual((h.calls, h.compiles), ([], 0))
+        self.assertNotIn(h.state / 'state.json', h.files)
+
+    def test_owned_rule_changes_print_the_restore_command(self):
+        h = self.host
+        h.change('install')
+        restore = 'sudo install -m 0644 ' + str(h.state / s.RULE.name) + ' ' + str(h.rule)
+        h.files[h.rule] = b'local edit'
+        calls = len(h.calls)
+        for operation in ('install', 'remove'):
+            with self.assertRaises(s.SetupError) as raised:
+                h.change(operation)
+            self.assertIn('changed after this setup installed it, so it is not owned by this setup any more', str(raised.exception))
+            self.assertIn(restore, str(raised.exception))
+        del h.files[h.rule]
+        with self.assertRaises(s.SetupError) as raised:
+            h.change('remove')
+        self.assertIn('The input rule this setup installed at ' + str(h.rule) + ' is missing', str(raised.exception))
+        self.assertIn(restore, str(raised.exception))
+        self.assertEqual(len(h.calls), calls)
+        # Following the printed command restores ownership.
+        h.files[h.rule] = h.files[h.state / s.RULE.name]
+        h.change('remove')
+        self.assertEqual(h.state_value()['phase'], 'removed')
+
+    def test_unrecorded_and_changed_modules_print_the_command_that_clears_them(self):
+        h = self.host
+        h.installed = {name: 'b' * 64 for name in s.NAMES}
+        for operation in ('install', 'remove'):
+            with self.assertRaises(s.SetupError) as raised:
+                h.change(operation)
+            self.assertIn('no record of installing: ' + s.NAMES[0] + ', ' + s.NAMES[1] + ' and ' + s.NAMES[2], str(raised.exception))
+            self.assertIn('sudo semodule -X 200 -r ' + ' '.join(s.NAMES), str(raised.exception))
+        self.assertEqual(h.calls, [])
+        h.installed = {}
+        h.change('install')
+        after = h.state_value()['after']
+        h.installed = {s.NAMES[0]: 'c' * 64, s.NAMES[1]: after[s.NAMES[1]]}
+        with self.assertRaises(s.SetupError) as raised:
+            h.change('remove')
+        message = str(raised.exception)
+        self.assertIn(s.NAMES[0] + ' has a different checksum and ' + s.NAMES[2] + ' is missing', message)
+        self.assertIn('sudo semodule -X 200 -i ' + ' '.join(str(h.state / (name + '.cil')) for name in s.NAMES), message)
 
     def test_saved_candidates_and_external_changes_are_checked_on_retry(self):
         h = self.host; h.fail = 'before_commit'
@@ -243,6 +370,70 @@ class Boundaries(unittest.TestCase):
             with self.assertRaises(s.SetupError):
                 s.inventory(bad)
         self.assertEqual(s.inventory(b'100 unrelated pp ignored\n'), {})
+
+    def test_module_conflicts_name_each_copy_and_group_the_removal_commands(self):
+        checksum = 'sha256:' + 'a' * 64
+        listing = ('400 ' + s.NAMES[0] + '   cil   ' + checksum + '\n'
+                   '200 ' + s.NAMES[2] + ' cil ' + checksum + ' disabled\n'
+                   '400 ' + s.NAMES[1] + ' cil ' + checksum + '\n'
+                   '100 unrelated pp ' + checksum + '\n').encode()
+        with self.assertRaises(s.SetupError) as raised:
+            s.inventory(listing)
+        message = str(raised.exception)
+        self.assertTrue(message.startswith('Spaces setup found SELinux modules it does not manage: ' + s.NAMES[0] +
+                                           ' at priority 400, ' + s.NAMES[2] + ' at priority 200 (disabled) and ' +
+                                           s.NAMES[1] + ' at priority 400.'))
+        self.assertIn(': sudo semodule -X 200 -r ' + s.NAMES[2] + '; sudo semodule -X 400 -r ' + s.NAMES[0] + ' ' + s.NAMES[1] + '.', message)
+        self.assertIn('Then check sudo semodule -lfull | grep polaris_ and run the same command again.', message)
+        self.assertNotIn('unrelated', message)
+        good = '200 ' + s.NAMES[0] + ' cil ' + checksum + '\n'
+        for line, expected in [('200 ' + s.NAMES[1] + ' pp ' + checksum + '\n', s.NAMES[1] + ' at priority 200 (as a pp module)'),
+                               ('200 ' + s.NAMES[1] + ' cil\n', s.NAMES[1] + ' at priority 200 (without a checksum)'),
+                               (good, s.NAMES[0] + ' at priority 200 (listed more than once)'),
+                               ('9x9 ' + s.NAMES[1] + ' c\x1bil ' + checksum + '\n', s.NAMES[1] + ' at an unreadable priority (as a different module)')]:
+            with self.subTest(line=line), self.assertRaises(s.SetupError) as raised:
+                s.inventory((good + line).encode())
+            self.assertIn(expected, str(raised.exception))
+            self.assertNotIn('\x1b', str(raised.exception))
+        with self.assertRaises(s.SetupError) as raised:
+            s.inventory(('9x9 ' + s.NAMES[1] + ' cil ' + checksum + '\n').encode())
+        self.assertIn('remove those copies first with sudo semodule -X PRIORITY -r NAME.', str(raised.exception))
+        # A hand-installed copy next to the helper's own reads the same whichever line semodule prints first.
+        override = '400 ' + s.NAMES[0] + ' cil ' + 'sha256:' + 'b' * 64 + '\n'
+        messages = set()
+        for order in ((good, override), (override, good)):
+            with self.assertRaises(s.SetupError) as raised:
+                s.inventory(''.join(order).encode())
+            messages.add(str(raised.exception))
+        self.assertEqual(len(messages), 1)
+        self.assertIn(': ' + s.NAMES[0] + ' at priority 400. ', messages.pop())
+
+    def test_activity_names_polaris_processes_and_counts_reserved_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc, inputs = root / 'proc', root / 'input'
+            for pid, command in [(310, 'polaris'), (42, 'polaris-spaces-'), (43, 'bash'), (os.getpid(), 'polaris-spaces-'),
+                                 (44, 'polaris-\x1b[2J'), (45, 'polarisish')]:
+                (proc / str(pid)).mkdir(parents=True)
+                (proc / str(pid) / 'comm').write_text(command + '\n')
+            (proc / '46').mkdir()
+            (proc / 'self').mkdir()
+            for index, name in enumerate(['Polaris multiseat 1a2b keyboard', 'Polaris multiseat 1a2b pad', 'Ordinary pad']):
+                device = inputs / ('event' + str(index)) / 'device'
+                device.mkdir(parents=True)
+                (device / 'name').write_text(name + '\n')
+            host = s.System()
+            self.assertEqual(host.activity(proc, inputs), ['polaris-spaces- (pid 42)', 'polaris-?[2J (pid 44)', 'polaris (pid 310)',
+                                                           '2 Polaris multiseat input devices'])
+            for pid in range(50, 53):
+                (proc / str(pid)).mkdir()
+                (proc / str(pid) / 'comm').write_text('polaris\n')
+            (inputs / 'event1/device/name').unlink()
+            found = host.activity(proc, inputs)
+            self.assertEqual(found[4:], ['2 more Polaris processes', '1 Polaris multiseat input device'])
+            (proc / '50' / 'comm').unlink()
+            (proc / '50' / 'comm').mkdir()
+            self.assertIn('1 process or input entry that could not be read', host.activity(proc, inputs))
 
     def test_trusted_files_reject_mutable_parents_symlinks_links_and_owners(self):
         file_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_nlink=1)
