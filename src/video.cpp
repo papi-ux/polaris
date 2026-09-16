@@ -5896,7 +5896,7 @@ namespace video {
         "kms_capture_needs_capability",
         "No video capture could start: this host is configured for KMS capture, but the Polaris "
         "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
-        "On the host, run sudo -H polaris --setup-host --enable-kms once, then restart Polaris."
+        "On the host, run sudo -H polaris --setup-host --enable-kms, then restart Polaris. Every Polaris install or update needs this again."
       );
       return;
     }

@@ -21,6 +21,7 @@
 // local includes
 #include "cuda.h"
 #include "graphics.h"
+#include "misc.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -328,6 +329,7 @@ namespace platf {
 
         version_t ver {drmGetVersion(fd.el)};
         BOOST_LOG(info) << path << " -> "sv << ((ver && ver->name) ? ver->name : "UNKNOWN");
+        virtual_display_driver = ver && ver->name && platf::is_virtual_display_driver(ver->name);
 
         // Open the render node for this card to share with libva.
         // If it fails, we'll just share the primary node instead.
@@ -342,7 +344,8 @@ namespace platf {
           }
           free(rendernode_path);
         } else {
-          BOOST_LOG(warning) << "No render device name for: "sv << path;
+          // A virtual display driver has no render node by design; only a real GPU without one is worth a warning.
+          BOOST_LOG(virtual_display_driver ? debug : warning) << "No render device name for: "sv << path;
           render_fd.el = dup(fd.el);
         }
 
@@ -564,6 +567,7 @@ namespace platf {
       file_t fd;
       file_t render_fd;
       std::string render_node;
+      bool virtual_display_driver = false;  ///< evdi, vkms and similar: no render node, never a CUDA device
       plane_res_t plane_res;
     };
 
@@ -1793,7 +1797,11 @@ namespace platf {
       if (hwdevice_type == mem_type_e::cuda && !card.is_nvidia()) {
         BOOST_LOG(debug) << file << " is not a CUDA device"sv;
         if (config::video.encoder == "nvenc") {
-          BOOST_LOG(warning) << "Using NVENC with your display connected to a different GPU may not work properly!"sv;
+          if (card.virtual_display_driver) {
+            BOOST_LOG(debug) << file << " is a virtual display, not a CUDA device; NVENC keeps encoding on the NVIDIA GPU"sv;
+          } else {
+            BOOST_LOG(warning) << "Using NVENC with your display connected to a different GPU may not work properly!"sv;
+          }
         } else {
           continue;
         }
@@ -1823,8 +1831,9 @@ namespace platf {
           // The probe, not the capture loop: this is the evaluation the Doctor reports on.
           note_kms_capture_refused_for_capability();
           BOOST_LOG(config::video.capture == "kms" ? fatal : warning)
-            << "KMS display capture requires CAP_SYS_ADMIN. "sv
-            << "Run [sudo setcap cap_sys_admin+ep $(readlink -f $(which polaris))] only when explicitly using KMS capture.\n"sv
+            << "KMS display capture requires CAP_SYS_ADMIN, which this Polaris binary does not hold. "sv
+            << "Installing or updating the package replaces the binary without it; when using KMS capture, run "sv
+            << "[sudo -H polaris --setup-host --enable-kms] after each install or update, then restart Polaris.\n"sv
             << "KMS probe could not access DRM framebuffer handles; continuing with non-KMS capture backends when available.\n"sv
             << "Refer to the Polaris Linux build and troubleshooting docs for the supported setup path:\n"sv
             << "https://github.com/papi-ux/polaris/blob/master/docs/troubleshooting.md"sv;

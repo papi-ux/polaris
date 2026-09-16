@@ -14,7 +14,13 @@ echo "Polaris udev rules and modules-load configuration were installed as packag
 echo "Virtual input and controller support works after the next reboot with no further steps."
 echo "To use it without rebooting first, load the modules once:"
 echo "  sudo modprobe uinput uhid"
-echo "Only DRM/KMS capture still needs an explicit privileged step:"
+echo "Only DRM/KMS capture still needs an explicit privileged step, repeated after every"
+echo "update because an update replaces the binary that held the capability:"
 echo "  sudo -H polaris --setup-host --enable-kms"
+if [ -f /etc/udev/rules.d/60-polaris.rules ] || [ -f /etc/modules-load.d/60-polaris.conf ]; then
+    echo "An older Polaris left a copy of its udev rules or modules-load configuration in /etc,"
+    echo "which overrides the packaged files. Run host setup once to retire it:"
+    echo "  sudo -H polaris --setup-host"
+fi
 echo "Optional background autostart remains available via:"
 echo "  systemctl --user enable --now polaris"

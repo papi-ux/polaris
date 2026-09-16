@@ -360,7 +360,8 @@ Polaris starts its own `labwc` Wayland socket for the client session.
 
 KMS/DRM capture reads framebuffers straight from the kernel, which needs `CAP_SYS_ADMIN` on the
 Polaris binary. That is deliberately opt-in: the package does not grant it, the host setup step
-does. With `capture = kms` and no capability, Polaris finds the display, logs
+does. Installing or updating the package replaces the binary, and the new one does not carry the
+capability, so run the step again after every install or update. With `capture = kms` and no capability, Polaris finds the display, logs
 `Failed to gain CAP_SYS_ADMIN` and `Couldn't get handle for DRM Framebuffer`, and then either
 substitutes another backend or, when nothing else can capture, serves with no capture at all and
 H.264 as the only codec. The Doctor reports both cases as `kms_capture_needs_capability`.

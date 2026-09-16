@@ -998,7 +998,7 @@ namespace stream_stats {
            "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
            "do not have, so only the private-compositor modes can use it there."},
         {"action", kms_for_capability ?
-           std::string {"Run "} + enable_kms_command + " once, then restart Polaris; KMS "
+           std::string {"Run "} + enable_kms_command + " after each install or update, then restart Polaris; KMS "
            "capture is what carries HDR, so keep it if HDR is the goal." :
            "Either set capture to the substituted backend so the configuration matches "
            "what is running, or go back to a private-compositor stream mode if you want "
@@ -1016,8 +1016,9 @@ namespace stream_stats {
         {"severity", nothing_else ? "fail" : "warning"},
         {"message", "KMS capture found the display but could not read a DRM framebuffer handle, "
                     "because the Polaris binary does not hold CAP_SYS_ADMIN. That capability is "
-                    "opt-in and is granted by the host setup step, not by the package."},
-        {"action", std::string {"Run "} + enable_kms_command + " once, then restart Polaris."}
+                    "opt-in and is granted by the host setup step, not by the package, and installing or "
+                    "updating the package replaces the binary without it."},
+        {"action", std::string {"Run "} + enable_kms_command + " after each install or update, then restart Polaris."}
       });
     }
 
