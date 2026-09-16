@@ -461,11 +461,51 @@ TEST_F(SpacesSetupService, ConfigurationCommitsLastPreservesSettingsAndRecreates
   EXPECT_EQ(configuration_store::read(paths.native)->contents, committed->contents);
   worker_ipc::authority_store_t authority(paths.ipc);
   EXPECT_EQ(authority.status(), worker_ipc::authority_status_e::applied);
+  // Worker recovery at controller start inspects every entry inside the directory, so preparation
+  // leaves it empty and binds it with a marker beside it.
+  EXPECT_TRUE(authority.recover_inactive({}).inspected());
+  EXPECT_TRUE(std::filesystem::is_empty(paths.ipc));
+  EXPECT_TRUE(std::filesystem::is_regular_file(root / "ipc.owner"));
   std::filesystem::remove_all(paths.ipc);
   EXPECT_TRUE(spaces::prepare_managed_ipc(paths));
   auto wrong = paths; wrong.ipc = root / "unrelated";
   EXPECT_FALSE(spaces::prepare_managed_ipc(wrong));
   EXPECT_FALSE(std::filesystem::exists(wrong.ipc));
+}
+
+TEST_F(SpacesSetupService, PreparationMovesAnEarlierMarkerOutOfTheWorkerDirectory) {
+  activation_host_t host;
+  const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
+  ASSERT_TRUE(psf::write_atomic(paths.native, "port = 47989\n"));
+  const profiles::catalog_t catalog {static_cast<unsigned>(geteuid()), static_cast<unsigned>(getegid()), {{
+    .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, runtime().config_digest},
+    .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+  }}};
+  ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
+  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
+  ASSERT_TRUE(spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host));
+  // The layout earlier builds left: the marker and its lock inside the worker directory, which
+  // blocked worker recovery, so no Space could start and every Space change failed.
+  const auto marker = json {{"controller", paths.controller.string()}}.dump();
+  std::filesystem::remove(root / "ipc.owner");
+  std::filesystem::remove(root / "ipc.owner.lock");
+  ASSERT_TRUE(psf::write_atomic(paths.ipc / ".owner", marker));
+  {
+    worker_ipc::authority_store_t blocked(paths.ipc);
+    EXPECT_EQ(blocked.recover_inactive({}).status, worker_ipc::authority_status_e::integrity_violation);
+  }
+  EXPECT_TRUE(spaces::prepare_managed_ipc(paths));
+  EXPECT_TRUE(std::filesystem::is_empty(paths.ipc));
+  EXPECT_TRUE(std::filesystem::is_regular_file(root / "ipc.owner"));
+  {
+    worker_ipc::authority_store_t recovered(paths.ipc);
+    EXPECT_TRUE(recovered.recover_inactive({}).inspected());
+  }
+  // A marker inside that names another controller is neither adopted nor removed.
+  const auto foreign = json {{"controller", (root / "other.json").string()}}.dump();
+  ASSERT_TRUE(psf::write_atomic(paths.ipc / ".owner", foreign));
+  EXPECT_FALSE(spaces::prepare_managed_ipc(paths));
+  EXPECT_EQ(psf::read_secure(paths.ipc / ".owner", 4096).payload, foreign);
 }
 
 TEST_F(SpacesSetupService, ConfigurationRefusesExistingAuthoritySymlinksAndUncertainWrites) {

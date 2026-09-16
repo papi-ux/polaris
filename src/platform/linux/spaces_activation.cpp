@@ -9,9 +9,11 @@
 #include "src/utility.h"
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <fstream>
 #include <regex>
 #include <set>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace multiseat::spaces {
@@ -34,6 +36,11 @@ namespace multiseat::spaces {
         if (old.status == psf::read_status_e::missing || (old && old.payload == payload)) return payload;
         return {};
       }));
+    }
+    // The worker authority owns every entry inside the IPC directory, and its startup recovery
+    // refuses any entry it did not create, so the marker that binds the directory sits beside it.
+    fs::path owner_marker(const fs::path &ipc) {
+      return ipc.parent_path() / (ipc.filename().string() + ".owner");
     }
     bool disabled(const std::unordered_map<std::string, std::string> &values, const std::string &key) {
       const auto found = values.find(key);
@@ -127,9 +134,30 @@ namespace multiseat::spaces {
     const auto options = load_controller_options(paths.controller);
     if (!options || options->profile_catalog != paths.profiles || options->container.ipc_root != paths.ipc) return false;
     // Secure persistence creates private parents and refuses symlink/ownership
-    // changes. A stable marker binds this directory to this managed controller.
-    return same_file(paths.ipc / ".owner", json {{"controller", paths.controller.string()}}.dump()) &&
-      host.private_read_write_directory(paths.ipc);
+    // changes. A stable marker beside the directory binds it to this managed controller.
+    const auto marker = json {{"controller", paths.controller.string()}}.dump();
+    // Earlier builds wrote the marker and its lock inside the directory, where worker recovery
+    // refused them and no Space could start or change. A marker there that names this controller
+    // moves out; one naming another controller, or anything but a regular file, is never adopted.
+    const auto inner = paths.ipc / ".owner", inner_lock = paths.ipc / ".owner.lock";
+    std::error_code error;
+    const auto inner_type = fs::symlink_status(inner, error).type();
+    if (inner_type != fs::file_type::not_found) {
+      if (inner_type != fs::file_type::regular) return false;
+      const auto earlier = psf::read_secure(inner, 65536);
+      if (!earlier || earlier.payload != marker) return false;
+    }
+    if (!same_file(owner_marker(paths.ipc), marker)) return false;
+    // Created private when missing; mkdir never follows a symlink in the last component, and an
+    // existing entry still has to be this account's private directory.
+    if (::mkdir(paths.ipc.c_str(), 0700) != 0 && errno != EEXIST) return false;
+    if (!host.private_read_write_directory(paths.ipc)) return false;
+    for (const auto &path : {inner, inner_lock}) {
+      const auto type = fs::symlink_status(path, error).type();
+      if (type == fs::file_type::not_found) continue;
+      if (type != fs::file_type::regular || !fs::remove(path, error)) return false;
+    }
+    return true;
   }
 
   bool configure_first_space(const activation_paths_t &paths,
