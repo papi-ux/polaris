@@ -35,8 +35,22 @@ configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security_data.h.in
                "${CMAKE_BINARY_DIR}/generated/spaces_security_data.h" @ONLY)
 configure_file("${CMAKE_SOURCE_DIR}/scripts/spaces/security_setup.py.in"
                "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup" @ONLY)
-# Only a catalog reviewed into the host build may authorize runtime downloads.
-set(POLARIS_SPACES_RUNTIME_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
+# Only a catalog reviewed into the host build may authorize runtime downloads. A lab build may
+# compile another catalog and pull from another repository to test Spaces end to end without
+# publishing; release workflows never set either, and a unit test fails if one does.
+set(POLARIS_SPACES_RUNTIME_REPOSITORY "ghcr.io/papi-ux/polaris-worker-steam" CACHE STRING
+    "Repository Spaces runtimes are pulled from. Change only for a lab build.")
+set(POLARIS_SPACES_RUNTIME_CATALOG_FILE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json" CACHE FILEPATH
+    "Spaces runtime catalog compiled into Polaris. Change only for a lab build.")
+if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY MATCHES "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$")
+    message(FATAL_ERROR "POLARIS_SPACES_RUNTIME_REPOSITORY must name a registry repository, such as ghcr.io/papi-ux/polaris-worker-steam")
+endif()
+if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY STREQUAL "ghcr.io/papi-ux/polaris-worker-steam" OR
+   NOT POLARIS_SPACES_RUNTIME_CATALOG_FILE STREQUAL "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
+    message(WARNING "Lab build: Spaces runtimes come from ${POLARIS_SPACES_RUNTIME_REPOSITORY} with the catalog "
+                    "${POLARIS_SPACES_RUNTIME_CATALOG_FILE}. Do not ship this build.")
+endif()
+set(POLARIS_SPACES_RUNTIME_SOURCE "${POLARIS_SPACES_RUNTIME_CATALOG_FILE}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_RUNTIME_SOURCE}")
 file(READ "${POLARIS_SPACES_RUNTIME_SOURCE}" POLARIS_SPACES_RUNTIME_CATALOG)
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_catalog.h.in"

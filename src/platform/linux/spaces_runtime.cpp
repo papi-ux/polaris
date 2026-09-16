@@ -57,7 +57,7 @@ namespace multiseat::spaces {
   }
 
   std::string runtime_t::reference() const {
-    return "ghcr.io/papi-ux/polaris-worker-steam@" + registry_digest;
+    return std::string {runtime_repository} + "@" + registry_digest;
   }
 
   bool runtime_t::matches_image_id(std::string_view image) const {

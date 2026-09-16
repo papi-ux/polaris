@@ -2,6 +2,7 @@
 #ifdef __linux__
 #include "spaces_setup.h"
 #include "spaces_activation.h"
+#include "spaces_runtime_catalog.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -128,7 +129,7 @@ namespace multiseat::spaces {
           body.at("reference"), body.at("image"), body.at("state"), body.at("code"), body.at("schema") == 2 ? body.at("gpu_id").get<std::string>() : std::string {}};
         const bool configuring = r.state == "configuring" || r.state == "restart_required" || r.state == "activation_failed";
         if (configuring ? !valid_gpu(r.gpu_id) : !r.gpu_id.empty()) throw std::invalid_argument("setup graphics");
-        const std::string prefix = "ghcr.io/papi-ux/polaris-worker-steam@";
+        const std::string prefix = std::string {runtime_repository} + "@";
         if (!valid_request(r.request) || r.request.operation != "start" ||
             !r.reference.starts_with(prefix) || !digest(r.reference.substr(prefix.size())) || !digest(r.image) ||
             !valid_stage(r.state, r.code))
