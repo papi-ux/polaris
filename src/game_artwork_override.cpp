@@ -21,6 +21,8 @@ namespace game_artwork {
     constexpr std::string_view temporary_suffix = ".tmp";
     constexpr std::string_view rollback_suffix = ".override-rollback";
     constexpr std::string_view transaction_marker_filename = "override.transaction";
+    // One dot, so the artwork scan never reads it as an image.
+    constexpr std::string_view automatic_lookup_off_filename = "automatic-lookup.off";
 
     std::shared_mutex &override_gate() {
       static std::shared_mutex gate;
@@ -600,24 +602,103 @@ namespace game_artwork {
     return recover_interrupted_artwork_override_unlocked(appdata, metadata.uuid);
   }
 
+  namespace {
+    bool clear_artwork_override_unlocked(const fs::path &appdata, const std::string_view uuid) {
+      if (!recover_interrupted_artwork_override_unlocked(appdata, uuid)) return false;
+      const auto path = metadata_path(appdata, uuid);
+      const auto temporary = temporary_path(path);
+      bool success = remove_metadata_path(path);
+      if (!remove_metadata_path(temporary)) success = false;
+      for (const auto kind : std::array {kind_e::poster, kind_e::hero, kind_e::logo, kind_e::icon}) {
+        for (const auto extension : std::array<std::string_view, 4> {".png", ".jpg", ".jpeg", ".webp"}) {
+          const auto candidate = cache_asset_path(appdata, uuid, kind, source_e::override, extension);
+          if (candidate && !remove_metadata_path(*candidate)) success = false;
+        }
+      }
+      return success;
+    }
+
+    fs::path automatic_lookup_off_path(const fs::path &appdata, const std::string_view uuid) {
+      return cache_root(appdata) / std::string(uuid) / automatic_lookup_off_filename;
+    }
+
+    bool write_automatic_lookup_off(const fs::path &appdata, const std::string_view uuid) {
+      const auto path = automatic_lookup_off_path(appdata, uuid);
+      std::error_code error;
+      const auto status = fs::symlink_status(path, error);
+      if (!error && fs::exists(status)) return !fs::is_symlink(status) && fs::is_regular_file(status);
+      if (error && error != std::errc::no_such_file_or_directory) return false;
+      const auto temporary = temporary_path(path);
+      if (!remove_metadata_path(temporary)) return false;
+      {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output.good()) return false;
+        output << "{\"automatic_lookup\":false}\n";
+        output.flush();
+        if (!output.good()) {
+          output.close();
+          fs::remove(temporary, error);
+          return false;
+        }
+      }
+      error.clear();
+      fs::rename(temporary, path, error);
+      if (!error) return true;
+      error.clear();
+      fs::remove(temporary, error);
+      return false;
+    }
+  }  // namespace
+
   bool clear_artwork_override(
     const fs::path &appdata,
     std::string_view uuid
   ) {
     if (!is_valid_uuid(uuid)) return false;
     std::unique_lock transaction_lock(override_gate());
-    if (!recover_interrupted_artwork_override_unlocked(appdata, uuid)) return false;
-    const auto path = metadata_path(appdata, uuid);
-    const auto temporary = temporary_path(path);
-    bool success = remove_metadata_path(path);
-    if (!remove_metadata_path(temporary)) success = false;
-    for (const auto kind : std::array {kind_e::poster, kind_e::hero, kind_e::logo, kind_e::icon}) {
-      for (const auto extension : std::array<std::string_view, 4> {".png", ".jpg", ".jpeg", ".webp"}) {
-        const auto candidate = cache_asset_path(appdata, uuid, kind, source_e::override, extension);
-        if (candidate && !remove_metadata_path(*candidate)) success = false;
-      }
+    return clear_artwork_override_unlocked(appdata, uuid);
+  }
+
+  bool automatic_artwork_lookup_enabled(
+    const fs::path &appdata,
+    std::string_view uuid
+  ) {
+    if (!is_valid_uuid(uuid)) return false;
+    const auto tree_state = safe_directory_tree_state(appdata, uuid);
+    if (tree_state == directory_tree_state_e::missing) return true;
+    if (tree_state == directory_tree_state_e::unsafe) return false;
+    std::error_code error;
+    const auto status = fs::symlink_status(automatic_lookup_off_path(appdata, uuid), error);
+    // Only a marker known to be absent lets a lookup run.
+    return error == std::errc::no_such_file_or_directory || (!error && !fs::exists(status));
+  }
+
+  bool remove_downloaded_artwork(
+    const fs::path &appdata,
+    std::string_view uuid
+  ) {
+    if (!is_valid_uuid(uuid)) return false;
+    std::unique_lock transaction_lock(override_gate());
+    if (!ensure_live_artwork_game_directory(appdata, uuid)) return false;
+    if (!write_automatic_lookup_off(appdata, uuid)) return false;
+    bool success = clear_artwork_override_unlocked(appdata, uuid);
+    for (const auto source : {source_e::steam, source_e::steamgriddb}) {
+      if (!remove_cached_source_assets(appdata, uuid, source)) success = false;
     }
     return success;
+  }
+
+  bool enable_automatic_artwork_lookup(
+    const fs::path &appdata,
+    std::string_view uuid
+  ) {
+    if (!is_valid_uuid(uuid)) return false;
+    std::unique_lock transaction_lock(override_gate());
+    const auto tree_state = safe_directory_tree_state(appdata, uuid);
+    if (tree_state == directory_tree_state_e::missing) return true;
+    if (tree_state == directory_tree_state_e::unsafe) return false;
+    const auto path = automatic_lookup_off_path(appdata, uuid);
+    return remove_metadata_path(temporary_path(path)) && remove_metadata_path(path);
   }
 
   nlohmann::json decorate_manifest_with_artwork_override(
