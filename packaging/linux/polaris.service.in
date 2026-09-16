@@ -17,6 +17,12 @@ PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG
 @POLARIS_SERVICE_STOP_COMMAND@
 Restart=on-failure
 RestartSec=5s
+# A restart asked for from the console or the tray exits with 75 (EX_TEMPFAIL)
+# instead of re-executing in place, so this unit, not the old process image,
+# starts the installed binary. Both lines are needed: the first keeps the unit
+# out of the failed state, the second restarts it although that exit was clean.
+SuccessExitStatus=75
+RestartForceExitStatus=75
 # Give capture, encode, and audio workers room to request realtime or
 # negative-nice priority when the user manager allows it.
 LimitRTPRIO=95

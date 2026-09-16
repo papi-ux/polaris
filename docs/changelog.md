@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Restart from the console and the tray works again and cooperates with systemd. The request no longer depends on a SIGINT that any shell command running at that moment could swallow, which is how a saved SteamGridDB key never reached the running host. Under `polaris.service` Polaris now exits with status 75 and the unit starts the installed binary, so a restart after an update runs the new version; other launch paths re-execute in place as before, and `systemctl stop` or `restart` always gets a real exit instead of a process that outlives the stop timeout.
 - AI explanations in Codex subscription mode follow the Codex CLI. The model list comes from the catalog the CLI caches for the signed-in account, the CLI's configured model is the default and replaces the hosted-API pre-fill in the settings tab, and a request Codex refuses shows Codex's own sentence (for example that a model is not supported with a ChatGPT account) in the test result and the log instead of a bare exit code. The Claude hints move to Sonnet 5 and Opus 5.
 - Docs: the README catches up with 1.4.8 (the Spaces preview and its limits, the ROM folder library, 240 FPS on created displays, refusals that say why, the capture forecast), and a [Spaces or regular streaming](spaces-or-regular.md) page puts the two side by side in one table, linked from the Spaces guide.
 ## v1.4.8 - 2026-09-16

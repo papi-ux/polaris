@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 
@@ -962,6 +963,12 @@ std::string get_local_ip_for_gateway() {
   }
 
   void restart_on_exit() {
+    if (!lifetime::restart_in_place_pending()) {
+      // An external stop arrived after the restart request, or the service
+      // manager is restarting Polaris: this exit has to be a real one.
+      return;
+    }
+
     char executable[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", executable, PATH_MAX - 1);
     if (len == -1) {
@@ -969,6 +976,19 @@ std::string get_local_ip_for_gateway() {
       return;
     }
     executable[len] = '\0';
+    std::string path {executable, static_cast<size_t>(len)};
+
+    // After a package update the running binary is unlinked and /proc/self/exe
+    // ends in " (deleted)". The path Polaris was started with, usually the
+    // /usr/bin/polaris symlink, already points at the installed version.
+    constexpr std::string_view deleted_suffix = " (deleted)";
+    if (path.size() > deleted_suffix.size() &&
+        path.compare(path.size() - deleted_suffix.size(), deleted_suffix.size(), deleted_suffix) == 0) {
+      path.erase(path.size() - deleted_suffix.size());
+      if (char **argv = lifetime::get_argv(); argv && argv[0] && argv[0][0] == '/') {
+        path = argv[0];
+      }
+    }
 
     // ASIO doesn't use O_CLOEXEC, so we have to close all fds ourselves
     int openmax = (int) sysconf(_SC_OPEN_MAX);
@@ -977,15 +997,30 @@ std::string get_local_ip_for_gateway() {
     }
 
     // Re-exec ourselves with the same arguments
-    if (execv(executable, lifetime::get_argv()) < 0) {
+    if (execv(path.c_str(), lifetime::get_argv()) < 0) {
       BOOST_LOG(fatal) << "execv() failed: "sv << errno;
       return;
     }
   }
 
   void restart() {
-    // Gracefully clean up and restart ourselves instead of exiting
-    atexit(restart_on_exit);
+    if (lifetime::restart_via_service_manager()) {
+      // Under the packaged unit the process exits and systemd starts the
+      // installed binary; re-executing in place would keep the old image
+      // and fight systemctl, which waits for this pid to go away.
+      BOOST_LOG(info) << "Restart requested under the service manager: exiting with status "sv
+                      << lifetime::RESTART_EXIT_STATUS << " so the unit starts the installed binary"sv;
+      lifetime::exit_sunshine(lifetime::RESTART_EXIT_STATUS, true, "restart requested");
+      return;
+    }
+
+    // Gracefully clean up and restart ourselves instead of exiting. The hook
+    // is registered once; the flag decides at exit whether it still applies.
+    static std::once_flag exit_hook_registered;
+    std::call_once(exit_hook_registered, []() {
+      atexit(restart_on_exit);
+    });
+    lifetime::set_restart_in_place_pending(true);
     lifetime::exit_sunshine(0, true, "restart requested");
   }
 

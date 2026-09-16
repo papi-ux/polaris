@@ -8,6 +8,7 @@
 
 // standard includes
 #include <atomic>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -133,6 +134,74 @@ namespace lifetime {
    * @brief Get the argv array passed to main().
    */
   char **get_argv();
+
+  /**
+   * @brief The handler main() registers to begin an orderly shutdown on the requesting thread.
+   */
+  using shutdown_request_handler_t = std::function<void()>;
+
+  /**
+   * @brief Register the handler exit_sunshine() calls instead of raising SIGINT.
+   *
+   * A thread-directed SIGINT is discarded whenever any thread is inside std::system(),
+   * which ignores SIGINT process-wide until its command returns. A restart or quit asked
+   * for from the console or the tray could therefore vanish. The registered handler runs
+   * the same shutdown the SIGINT handler runs, on the caller's thread, with no signal.
+   * Without a handler exit_sunshine() falls back to raising SIGINT.
+   */
+  void set_shutdown_request_handler(shutdown_request_handler_t handler);
+
+  /**
+   * @brief Exit status Polaris returns when its service manager should start it again.
+   *
+   * 75 is EX_TEMPFAIL. The packaged user unit lists it under RestartForceExitStatus and
+   * SuccessExitStatus, so a restart from the console or the tray under polaris.service
+   * exits and systemd starts the installed binary, which after an update is the new one.
+   */
+  constexpr int RESTART_EXIT_STATUS = 75;
+
+  /**
+   * @brief Whether an in-place re-exec is still wanted when the process exits.
+   *
+   * platf::restart() sets it. An external SIGTERM clears it, so `systemctl stop` and
+   * `systemctl restart` always get a real exit rather than a process that re-executes
+   * itself, keeps its pid and outlives the stop timeout.
+   */
+  bool restart_in_place_pending();
+
+  /**
+   * @brief Set whether the exit hook should re-execute Polaris.
+   */
+  void set_restart_in_place_pending(bool pending);
+
+  /**
+   * @brief The systemd service unit a process belongs to, from the contents of /proc/self/cgroup.
+   * @param cgroup_contents The file contents; the cgroup v2 line ("0::/...") is preferred.
+   * @return The unit name, such as "polaris.service", or empty when the leaf is not a service.
+   */
+  std::string systemd_service_unit_from_cgroup(std::string_view cgroup_contents);
+
+  /**
+   * @brief Whether a restart should exit with RESTART_EXIT_STATUS and let the service manager start Polaris.
+   * @param unit The managing service unit, empty when there is none.
+   * @param environment_override The POLARIS_SERVICE_RESTART environment value, empty when unset:
+   *        "1" or "true" opts a custom unit in, "0" or "false" keeps the in-place re-exec.
+   * @return true for the packaged user unit polaris.service unless overridden. Transient units such
+   *         as the app-…@.service a desktop launcher creates carry no Restart= and keep the re-exec.
+   */
+  bool restart_via_service_manager(std::string_view unit, std::string_view environment_override);
+
+  /**
+   * @brief restart_via_service_manager() for this process: /proc/self/cgroup and the environment.
+   */
+  bool restart_via_service_manager();
+
+#ifdef POLARIS_TESTS
+  /**
+   * @brief Forget the registered handler, the recorded reason, the exit code and the restart flag.
+   */
+  void reset_for_tests();
+#endif
 }  // namespace lifetime
 
 /**
