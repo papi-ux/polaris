@@ -311,6 +311,7 @@ function handleSteamGridDbKeyInput() {
                v-model="config.steamgriddb_api_key"
                @input="handleSteamGridDbKeyInput"
                :placeholder="$t('config.general_steamgriddb_placeholder')" />
+        <p class="mt-2 text-xs text-storm">{{ $t('config.general_steamgriddb_restart') }}</p>
         <div class="text-xs text-storm mt-1">{{ $t('config.general_steamgriddb_desc') }} <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" rel="noopener" class="focus-ring text-ice hover:text-ice/80">steamgriddb.com</a>.</div>
       </div>
     </section>

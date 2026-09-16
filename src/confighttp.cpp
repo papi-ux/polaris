@@ -5524,6 +5524,106 @@ namespace confighttp {
   }
 
   /**
+   * @brief One SteamGridDB autocomplete request with the given key.
+   * @return The upstream HTTP status, or nothing when the request itself failed.
+   */
+  static std::optional<long> steamgriddb_autocomplete(const std::string &api_key, const std::string &game_name, std::string &search_response) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      return std::nullopt;
+    }
+    const std::string search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" + http::url_escape(game_name);
+    struct curl_slist *headers = curl_slist_append(nullptr, ("Authorization: Bearer " + api_key).c_str());
+    curl_easy_setopt(curl, CURLOPT_URL, search_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &search_response);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
+    const CURLcode res = curl_easy_perform(curl);
+    long status = 0;
+    if (res == CURLE_OK) {
+      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    }
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    if (res != CURLE_OK) {
+      return std::nullopt;
+    }
+    return status;
+  }
+
+  /**
+   * @brief Check a SteamGridDB API key against SteamGridDB without storing it.
+   *
+   * The first-run wizard checks a typed key before saving it, or the stored
+   * key with `use_stored`. The running host only reads a saved key after a
+   * restart, so the check goes to SteamGridDB directly with the key given and
+   * answers with the same words the cover search uses.
+   *
+   * @api_examples{/api/covers/key/check| POST| {"steamgriddb_api_key":"..."}}
+   */
+  void checkCoversKey(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    std::string api_key;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      if (body.value("use_stored", false)) {
+        const auto saved = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+        const auto it = saved.find("steamgriddb_api_key");
+        api_key = it == saved.end() ? config::sunshine.steamgriddb_api_key : it->second;
+      } else {
+        api_key = body.value("steamgriddb_api_key", std::string {});
+      }
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+      return;
+    }
+
+    nlohmann::json output;
+    const auto answer_failure = [&](const game_artwork::manual::search_failure_t &failure) {
+      output["status"] = false;
+      output["code"] = failure.code;
+      output["error"] = failure.message;
+      send_response(response, output);
+    };
+    const bool key_present = std::any_of(api_key.begin(), api_key.end(), [](unsigned char ch) {
+      return !std::isspace(ch);
+    });
+    if (!key_present) {
+      answer_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
+      return;
+    }
+
+    std::string search_response;
+    const auto upstream = steamgriddb_autocomplete(api_key, "Portal", search_response);
+    if (!upstream || *upstream < 200 || *upstream >= 300) {
+      answer_failure(game_artwork::manual::classify_search_failure(true, upstream));
+      return;
+    }
+
+    std::size_t matches = 0;
+    try {
+      const auto search_data = nlohmann::json::parse(search_response);
+      if (search_data.contains("data") && search_data["data"].is_array()) {
+        matches = search_data["data"].size();
+      }
+    } catch (const std::exception &) {
+      matches = 0;
+    }
+    output["status"] = true;
+    output["code"] = "steamgriddb_ok";
+    output["matches"] = matches;
+    send_response(response, output);
+  }
+
+  /**
    * @brief Search SteamGridDB for cover art by game name.
    * Returns a list of cover art URLs that can be downloaded.
    * Requires `steamgriddb_api_key` to be set in config.
@@ -8383,6 +8483,7 @@ namespace confighttp {
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);
     server.resource["^/api/covers/image$"]["GET"] = getCoverImage;
     server.resource["^/api/covers/search$"]["GET"] = searchCovers;
+    server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
     server.resource["^/api/covers/download$"]["POST"] = withCsrf(downloadCover);
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;
     server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
