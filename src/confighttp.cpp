@@ -4232,7 +4232,7 @@ namespace confighttp {
 
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
-    nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
+    nlohmann::json output {{"schema", 1}, {"enabled", false}, {"available", false}, {"changing", false},
       {"failed", false}, {"profiles", nlohmann::json::array()}, {"activity", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}, {"access_available", false}};
 #ifdef __linux__
     if (const auto service = multiseat::installed_profile_service()) {
@@ -4243,6 +4243,8 @@ namespace confighttp {
       output["management_available"] = state.management_available;
       output["access_available"] = state.management_available;
       output["desktop_clients"] = state.desktop_clients;
+      if (state.capacity)
+        output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
       for (const auto &activity : state.activity)
         output["activity"].push_back({{"profile_id", activity.profile}, {"client_id", activity.client}, {"state", activity.state}});
       for (const auto &profile : state.profiles)
@@ -4257,13 +4259,13 @@ namespace confighttp {
     if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
 #ifdef __linux__
     const auto service = multiseat::installed_profile_service();
-    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
     std::array<char, 4097> bytes;
     request->content.read(bytes.data(), bytes.size());
     const auto count = request->content.gcount();
     if (count > 4096) { bad_request(response, request, "Creation request is too large"); return; }
     const auto creation = multiseat::profiles::decode_steam_create_request({bytes.data(), static_cast<std::size_t>(count)});
-    if (!creation) { bad_request(response, request, "Invalid profile creation request"); return; }
+    if (!creation) { bad_request(response, request, "Invalid Space creation request"); return; }
     const auto result = service->create_steam_profile(*creation);
     const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
       {"profile_id", creation->request_id}};
@@ -4300,7 +4302,7 @@ namespace confighttp {
     if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
 #ifdef __linux__
     const auto service = multiseat::installed_profile_service();
-    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
     try {
       std::array<char, 4097> bytes;
       request->content.read(bytes.data(), bytes.size());
@@ -4344,7 +4346,7 @@ namespace confighttp {
     if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
 #ifdef __linux__
     const auto service = multiseat::installed_profile_service();
-    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
     try {
       std::array<char, 4097> bytes;
       request->content.read(bytes.data(), bytes.size());

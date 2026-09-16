@@ -922,6 +922,11 @@ namespace multiseat {
     return impl_->registry->seats().size();
   }
 
+  gpu_usage_t controller_runtime_t::capacity() const {
+    std::scoped_lock lock {impl_->state_mutex};
+    return impl_->registry->usage();
+  }
+
   std::size_t controller_runtime_t::managed_workers() const {
     std::scoped_lock lock {impl_->state_mutex};
     return impl_->workers->managed_workers().size();

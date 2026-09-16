@@ -3,6 +3,7 @@ const runtimeId = /^[a-z0-9][a-z0-9-]{0,63}$/
 const states = ['downloading', 'preparing', 'prepared', 'cancelled', 'interrupted', 'failed', 'recovery_required', 'configuring', 'restart_required', 'activation_failed']
 const retryStates = ['cancelled', 'interrupted', 'failed']
 const text = value => typeof value === 'string' && value.length <= 1024
+const word = value => typeof value === 'string' && /^[a-z0-9_]{1,64}$/.test(value)
 export function validSetupStart(value) {
   return value?.operation === 'start' && uuid.test(value.request_id) && runtimeId.test(value.runtime_id) &&
     typeof value.name === 'string' && value.name.length > 0 && value.name === value.name.trim() &&
@@ -10,6 +11,7 @@ export function validSetupStart(value) {
 }
 export function validJobSnapshot(value) {
   if (!value || value.version !== 1 || typeof value.available !== 'boolean' || !text(value.message) ||
+      (value.unavailable_reason !== undefined && !word(value.unavailable_reason)) ||
       !Array.isArray(value.runtimes) || value.runtimes.length > 16) return false
   const ids = new Set()
   for (const runtime of value.runtimes) {
@@ -29,6 +31,10 @@ export function validJobSnapshot(value) {
   }
   if (value.job === null) return true
   const job = value.job
+  if (job && job.blocked_by !== undefined && (!Array.isArray(job.blocked_by) || job.blocked_by.length > 8 ||
+      !job.blocked_by.every(word))) return false
+  if (job && job.recovery !== undefined && (!job.recovery || typeof job.recovery !== 'object' ||
+      !/^#[a-z0-9-]{1,64}$/.test(job.recovery.doc_anchor))) return false
   return !!job && validSetupStart({ ...job, operation: 'start' }) && states.includes(job.state) &&
     (job.gpu_id === undefined || job.gpu_id === '' || validGpuId(job.gpu_id)) &&
     (job.can_activate === undefined || (typeof job.can_activate === 'boolean' && (!job.can_activate ||
