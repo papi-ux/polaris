@@ -41,11 +41,27 @@ explicit:
 
 - **Where games run is a real choice.** Private Stream, Gamescope Stream, Host
   Virtual Display, Headless Dongle, and Mirror Desktop are described by their
-  display and privacy impact, and unavailable modes fail closed.
+  display and privacy impact, unavailable modes fail closed, and the displays
+  Polaris creates for a stream go up to 240 FPS.
+- **Spaces, an early preview.** Each player gets their own Steam sign-in,
+  library and saves on one PC, chosen from Nova with the same words on every
+  surface and a reason whenever a Space cannot start. Configured hosts only,
+  one active Space, and no public runtime download yet; the
+  [Spaces guide](https://papi-ux.com/docs/spaces/) and
+  [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/)
+  say what that means for you.
+- **A library that fills from a folder of ROMs.** Import a ROM folder once and
+  rescan for new games. Eden, Dolphin, Cemu, DuckStation, PCSX2, PPSSPP and
+  mGBA are presets, covers come from your folders, ES-DE or RetroArch, and the
+  card names what an emulator still lacks before a game boots. The
+  [emulators guide](https://papi-ux.com/docs/emulators/) covers the whole path.
+- **Refusals say why.** A refused launch carries what went wrong and the one
+  change that fixes it, with a code Nova shows, instead of error 503.
 - **Doctor acts only when it can prove the step is safe.** It can make one
   reversible same-stream bitrate change, verify the encoder and fresh evidence,
   and restore the previous target when verification fails. Other findings stay
-  read-only guidance.
+  read-only guidance, including the forecast, before any stream, of when capture
+  on this host would copy frames through system memory and why.
 - **Launches are deterministic.** Auto, Quality, High FPS, and Stability resolve
   into one app- and topology-bound envelope that Nova sends back unchanged.
 - **The Library keeps identity intact.** Native and Flatpak Heroic GOG/Epic
@@ -78,8 +94,9 @@ validation record.
    client.
 2. **Resolve where this session runs.** Private and Gamescope modes get a
    session-owned compositor; Host Virtual Display gets an extra output; Mirror
-   Desktop deliberately uses the physical desktop. Polaris validates the
-   matching capture and encoder path before admitting the stream.
+   Desktop deliberately uses the physical desktop. A Space runs its own Steam
+   in a container, chosen per device. Polaris validates the matching capture
+   and encoder path before admitting the stream.
 3. **Observe and recover.** Mission Control reports what actually happened;
    Doctor suggests bounded corrections when live evidence needs attention.
 
@@ -133,8 +150,8 @@ needs it.
 ## Clients and compatibility
 
 [Nova](https://papi-ux.com/nova/) is the enhanced Android client. It adds a
-host-backed Library, Play Setup, Private Stream choices, Command Center,
-NovaHUD, session ownership, and tuning provenance. Install it from the [latest
+host-backed Library, the Space chooser, Play Setup, Private Stream choices,
+Command Center, NovaHUD, session ownership, and tuning provenance. Install it from the [latest
 Nova release](https://github.com/papi-ux/nova/releases/latest).
 
 Standard Moonlight-compatible clients remain supported for pairing, browsing,
@@ -151,7 +168,7 @@ Existing clients keep their saved access until it is changed under **Devices**.
 
 ## Documentation and project links
 
-- [Documentation](https://papi-ux.com/docs/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Doctor](https://papi-ux.com/docs/doctor/) · [FAQ](https://papi-ux.com/docs/faq/)
+- [Documentation](https://papi-ux.com/docs/) · [Spaces](https://papi-ux.com/docs/spaces/) · [Emulators](https://papi-ux.com/docs/emulators/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Doctor](https://papi-ux.com/docs/doctor/) · [FAQ](https://papi-ux.com/docs/faq/)
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [GitHub changelog](docs/changelog.md)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Releases](https://github.com/papi-ux/polaris/releases) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions)
 - [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md) · [Source](https://github.com/papi-ux/polaris)
