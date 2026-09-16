@@ -79,6 +79,19 @@ modules-load configuration and the virtual input nodes are usable.
 
 After the restart, return to `https://localhost:47990/#/login` with the existing web credentials.
 
+## Uninstall
+
+```bash
+systemctl --user disable --now polaris
+sudo apt remove polaris
+```
+
+Package-owned udev rules and modules-load configuration are removed with the package. Host
+configuration in `~/.config/polaris` is left in place.
+
+For a clean slate, or to remove what the package leaves behind, see
+[Uninstall Polaris, or start over](uninstall.md).
+
 ## Optional Setup
 
 Enable the user service if you want Polaris to start in the background:

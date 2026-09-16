@@ -169,10 +169,29 @@ interrupted, run the same command again. Policies you installed by hand, or an
 input rule with no ownership record, are reported for review rather than
 replaced.
 
+If the helper refuses, its message names the situation:
+
+- **"An existing Spaces policy is disabled, overridden or locally managed."** A
+  module with one of the helper's names is installed at another priority, for
+  example a copy installed by hand. `sudo semodule -lfull | grep polaris` shows
+  it with its priority. Remove that copy, for example
+  `sudo semodule -X 400 -r polaris_multiseat_input polaris_nvidia_worker`, then
+  run the install again. libsemanage may print "Failed!" while removing; trust
+  the list, not the message.
+- **"Quit Polaris and stop Spaces streams before changing security setup."** A
+  process named `polaris` or `polaris-something` is still running, a second
+  instance included. `pgrep -a polaris` names it; stop it and retry.
+- **"Existing Spaces input rule is not owned by this setup."**
+  `/etc/udev/rules.d/97-polaris-multiseat-input.rules` was placed there by hand,
+  so the helper has no record of it. Move it aside and run the install again;
+  the helper writes and records its own copy.
+
 `polaris-spaces-setup status` shows readiness. `sudo -H /usr/bin/polaris-spaces-setup remove`
 removes only what the helper owns, after Polaris and every Space have stopped;
 it never deletes player homes. Remove the policies before uninstalling the
-package if you no longer need them. Package installation and removal never
+package if you no longer need them: package removal alone leaves them installed with
+nothing left to remove them, and [Uninstall Polaris, or start over](uninstall.md)
+has the full order. Package installation and removal never
 change live SELinux policy. Other SELinux distributions need the compatible
 development interfaces and the container reference policy; system images are
 not supported by the helper in the preview.
