@@ -18,6 +18,8 @@
 #include <optional>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace ai_optimizer {
 
@@ -52,6 +54,35 @@ namespace ai_optimizer {
   std::optional<std::string> resolve_codex_home_for_subscription(
     const std::string &runtime_home,
     const std::string &configured_codex_home);
+
+  /**
+   * @brief One model the Codex CLI lists for the signed-in account.
+   */
+  struct codex_cli_model_t {
+    std::string slug;
+    std::string display_name;
+  };
+
+  /**
+   * @brief The model the Codex CLI is configured to use: the top-level `model = "..."` in its config.toml.
+   * @param codex_home The CODEX_HOME directory.
+   * @return The model slug, or nothing when the file or the key is absent.
+   */
+  std::optional<std::string> codex_cli_configured_model(const std::filesystem::path &codex_home);
+
+  /**
+   * @brief The models the Codex CLI lists for the signed-in account, from the catalog it caches itself, in its order.
+   * @param codex_home The CODEX_HOME directory.
+   * @return The visible models, empty when the CLI has not cached a catalog yet.
+   */
+  std::vector<codex_cli_model_t> codex_cli_model_catalog(const std::filesystem::path &codex_home);
+
+  /**
+   * @brief The provider's own error sentence from Codex CLI output, when the CLI printed one as a JSON error line.
+   * @param cli_output Combined stdout and stderr of a codex exec run.
+   * @return The message, whitespace collapsed and capped, or nothing.
+   */
+  std::optional<std::string> codex_cli_error_message(std::string_view cli_output);
 
   /**
    * @brief Initialize the AI optimizer (load cache, validate config).

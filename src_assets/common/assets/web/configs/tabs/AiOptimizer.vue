@@ -224,7 +224,8 @@ const providerModelCatalog = computed(() => {
 
 const canRefreshModels = computed(() => {
   if (!config.value.ai_base_url) return false
-  if (config.value.ai_auth_mode === 'subscription') return false
+  // Codex caches the account's model catalog locally, so its list can refresh without a key.
+  if (config.value.ai_auth_mode === 'subscription') return config.value.ai_provider === 'openai'
   if (config.value.ai_auth_mode === 'none') return true
   return !!config.value.ai_api_key || hasStoredApiKey.value
 })
@@ -366,6 +367,13 @@ const modelDiscoverySummary = computed(() => {
 
   if (providerModelCatalog.value?.discovered) {
     const count = providerModelCatalog.value.model_count || providerModelCatalog.value.models?.length || 0
+    if (providerModelCatalog.value.source === 'codex_cli') {
+      return {
+        tone: 'text-success',
+        badge: $t('config.ai_discovery_live_badge'),
+        text: $t('config.ai_discovery_codex_text', { count })
+      }
+    }
     return {
       tone: 'text-success',
       badge: $t('config.ai_discovery_live_badge'),
@@ -586,8 +594,20 @@ function syncProviderDefaults(previousProviderId) {
 
 async function refreshModelCatalog({ silent = false } = {}) {
   const result = await fetchModels(buildDraftPayload())
+  adoptCodexCliDefault(result)
   if (!silent && result?.discovered) {
     toast($t('config.ai_models_refreshed', { provider: currentProvider.value.name }), 'success')
+  }
+}
+
+function adoptCodexCliDefault(result) {
+  if (result?.source !== 'codex_cli' || !result.cli_default_model) return
+  if (config.value.ai_provider !== 'openai' || config.value.ai_auth_mode !== 'subscription') return
+  // The tab pre-fills the hosted API default, which a ChatGPT account cannot
+  // use through Codex. Replace only that pre-fill, never a model the user chose.
+  const preFilled = [currentProvider.value.defaultModel, ...currentProfiles.value.map(profile => profile.model)].filter(Boolean)
+  if (!config.value.ai_model || preFilled.includes(config.value.ai_model)) {
+    config.value.ai_model = result.cli_default_model
   }
 }
 

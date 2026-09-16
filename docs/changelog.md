@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- AI explanations in Codex subscription mode follow the Codex CLI. The model list comes from the catalog the CLI caches for the signed-in account, the CLI's configured model is the default and replaces the hosted-API pre-fill in the settings tab, and a request Codex refuses shows Codex's own sentence (for example that a model is not supported with a ChatGPT account) in the test result and the log instead of a bare exit code. The Claude hints move to Sonnet 5 and Opus 5.
 - Docs: the README catches up with 1.4.8 (the Spaces preview and its limits, the ROM folder library, 240 FPS on created displays, refusals that say why, the capture forecast), and a [Spaces or regular streaming](spaces-or-regular.md) page puts the two side by side in one table, linked from the Spaces guide.
 - Docs: an [uninstall page](uninstall.md) in the order that works: the Spaces policies first while the helper still exists, then the package, then what the package leaves behind (rule copies under `/etc`, a `/usr/share/polaris` that other files kept alive, the Spaces security record, your own additions) and `~/.config/polaris` with a keep-or-wipe table. Every distribution page links it.
 - Docs: the Spaces guide explains the security helper's three refusals (a policy at another priority, a Polaris process still running, an input rule it did not install) and the fix for each.
