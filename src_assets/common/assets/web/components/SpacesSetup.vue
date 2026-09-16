@@ -24,13 +24,13 @@
     <template v-if="setup">
       <p class="mt-4 text-sm text-silver" role="status" aria-live="polite">
         {{ setup.host_prerequisites_ready ? $t('spaces.host_ready') : $t('spaces.host_steps') }}
-        {{ setup.available ? $t('spaces.host_available') : $t('spaces.host_not_available') }}
+        {{ setup.available ? $t('spaces.host_available') : runtimeWaiting ? $t('spaces.host_waiting_runtime') : $t('spaces.host_not_available') }}
       </p>
       <details class="settings-disclosure mt-4" :open="checksOpen" @toggle="checksOpen = $event.target.open">
         <summary class="settings-disclosure-summary focus-ring cursor-pointer rounded py-2 text-sm text-ice">
           <span>{{ $t('spaces.setup_checks') }}</span>
           <span class="flex items-center gap-2">
-            <span class="control-chip">{{ readyCount }}/{{ setup.checks.length }}</span>
+            <span class="control-chip">{{ readyCount }}/{{ countedChecks.length }}</span>
             <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
             </svg>
@@ -38,13 +38,16 @@
         </summary>
         <ol class="mt-3 grid gap-3 md:grid-cols-2">
           <li v-for="check in setup.checks" :key="check.id" class="min-w-0 rounded-xl border bg-deep/40 p-4"
-              :class="statusTone(checkStatus(check)).card" :data-setup-check="check.id">
+              :class="waitingCheck(check) ? 'border-storm/20' : statusTone(checkStatus(check)).card" :data-setup-check="check.id">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <h3 class="text-sm font-semibold text-silver">{{ check.title }}</h3>
-              <StatusBadge :status="checkStatus(check)" :label="checkLabel(check)" />
+              <span v-if="waitingCheck(check)" class="meta-pill border border-storm/30 bg-deep/40 text-storm" data-check-waiting>
+                {{ $t('spaces.check_waiting_runtime') }}
+              </span>
+              <StatusBadge v-else :status="checkStatus(check)" :label="checkLabel(check)" />
             </div>
-            <p class="mt-2 text-sm text-storm">{{ check.detail }}</p>
-            <div v-if="check.state !== 'ready'" class="mt-3 flex flex-wrap gap-3">
+            <p class="mt-2 text-sm text-storm">{{ waitingCheck(check) ? $t('spaces.check_waiting_runtime_detail') : check.detail }}</p>
+            <div v-if="check.state !== 'ready' && !waitingCheck(check)" class="mt-3 flex flex-wrap gap-3">
               <a :href="guideHref(check)" target="_blank" rel="noopener noreferrer" class="focus-ring inline-block rounded py-2 text-sm text-ice hover:underline">
                 {{ guideLabel(check) }}
               </a>
@@ -65,27 +68,27 @@
                 <code class="mt-1 block whitespace-pre-wrap break-all font-mono text-xs text-silver">{{ step.command }}</code>
               </div>
             </div>
-            <p v-if="check.id === 'spaces' && !setup.configured" class="mt-3 text-sm text-storm">
+            <p v-if="check.id === 'spaces' && !setup.configured && !waitingCheck(check)" class="mt-3 text-sm text-storm">
               {{ $t('spaces.spaces_hint') }} {{ $t('spaces.spaces_hint_runtime') }}
             </p>
           </li>
         </ol>
       </details>
       <p v-if="!setup.available" class="mt-4 text-xs text-storm">{{ $t('spaces.no_mutation') }}</p>
-      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" :host-ready="setup.host_prerequisites_ready" />
+      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" :host-ready="setup.host_prerequisites_ready" @runtime="runtime = $event" />
     </template>
   </details>
 </template>
 
 <script setup>
-import { computed, inject, onMounted, onUnmounted, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import Button from './Button.vue'
 import StatusBadge from './StatusBadge.vue'
 import SpacesFirstSetup from './SpacesFirstSetup.vue'
 import { statusTone } from '../status-tones.js'
 import { guideHref, setupSteps, validSetup } from '../spaces-setup.js'
 
-const emit = defineEmits(['state'])
+const emit = defineEmits(['state', 'runtime-waiting'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const setup = ref(null), loading = ref(false), error = ref(''), copied = ref('')
@@ -95,11 +98,22 @@ const open = ref(true), checksOpen = ref(true)
 let request, seen = false, copyTimer
 onUnmounted(() => { request?.abort(); clearTimeout(copyTimer) })
 
-const readyCount = computed(() => (setup.value?.checks || []).filter(check => check.state === 'ready').length)
-const summaryTone = computed(() => error.value ? 'fail' : setup.value?.available && setup.value?.host_prerequisites_ready ? 'pass' : setup.value?.configured ? 'fail' : 'warning')
+// What the first-Space setup last heard from the host about the runtime download.
+const runtime = ref(null)
+// A build with no verified gaming runtime cannot create a Space, and nothing on
+// this PC can change that. The Spaces configuration check then waits instead of
+// asking for attention, and the count covers only the checks a person can act on.
+const runtimeWaiting = computed(() => !!setup.value && !setup.value.configured &&
+  runtime.value?.available === false && runtime.value?.reason === 'runtime_not_published')
+watch(runtimeWaiting, waiting => emit('runtime-waiting', waiting))
+const waitingCheck = check => runtimeWaiting.value && check.id === 'spaces' && check.state === 'not_configured'
+const countedChecks = computed(() => (setup.value?.checks || []).filter(check => !waitingCheck(check)))
+const readyCount = computed(() => countedChecks.value.filter(check => check.state === 'ready').length)
+const hostReadyAndWaiting = computed(() => runtimeWaiting.value && setup.value?.host_prerequisites_ready)
+const summaryTone = computed(() => error.value ? 'fail' : setup.value?.available && setup.value?.host_prerequisites_ready ? 'pass' : setup.value?.configured ? 'fail' : hostReadyAndWaiting.value ? 'pass' : 'warning')
 const summaryLabel = computed(() => error.value ? t('spaces.host_attention') :
   setup.value?.available && setup.value?.host_prerequisites_ready ? t('spaces.host_configured') :
-  setup.value?.configured ? t('spaces.host_attention') : t('spaces.host_set_up'))
+  setup.value?.configured ? t('spaces.host_attention') : hostReadyAndWaiting.value ? t('spaces.host_ready_badge') : t('spaces.host_set_up'))
 const checkStatus = check => check.state === 'ready' ? 'pass' : check.state === 'not_configured' ? 'warning' : 'fail'
 const checkLabel = check => t(check.state === 'ready' ? 'spaces.check_ready' : check.state === 'not_configured' ? 'spaces.check_not_configured' : 'spaces.check_required')
 const guideLabel = check => t(check.id === 'security' ? 'spaces.guide_security' : ['docker', 'docker_access'].includes(check.id) ? 'spaces.guide_docker' : 'spaces.guide_section')

@@ -36,8 +36,12 @@ describe('first-space preparation', () => {
     await flushPromises()
     const card = wrapper.get('[data-setup-unavailable]')
     expect(card.text()).toContain('Not available yet')
-    expect(card.text()).toContain('nothing to download until it is')
-    expect(card.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#prepare-your-first-space')
+    expect(card.text()).toContain('There is nothing to download until a Polaris build includes a verified gaming runtime.')
+    // The card sits under Host Setup even when a host check fails, so it must not claim the host is ready.
+    expect(card.text()).not.toContain('host checks above are ready')
+    expect(card.get('a').text()).toBe('Preview limits')
+    expect(card.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#preview-limits')
+    expect(wrapper.emitted('runtime').at(-1)).toEqual([{ available: false, reason: 'runtime_not_published' }])
   })
 
   it('reconnects to the host job after navigation and sends no duplicate request', async () => {
@@ -47,6 +51,7 @@ describe('first-space preparation', () => {
     expect(wrapper.text()).toContain('Living room')
     expect(wrapper.text()).toContain('Downloading')
     expect(wrapper.find('form').exists()).toBe(false)
+    expect(wrapper.emitted('runtime').at(-1)).toEqual([{ available: true, reason: '' }])
     wrapper.unmount()
     wrapper = start()
     await flushPromises()

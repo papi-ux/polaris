@@ -9,7 +9,7 @@ const clients = { status: true, platform: 'linux', named_certs: [{ uuid: 'device
 const reply = (body, ok = true) => ({ ok, status: ok ? 200 : 503, json: async () => body })
 const stubs = {
   MultiseatAssignments: { name: 'MultiseatAssignments', props: ['clients', 'clientsReady'], emits: ['snapshot'], template: '<div data-assignments>{{ clients.length }}</div>' },
-  SpacesSetup: { name: 'SpacesSetup', emits: ['state'], template: '<div data-setup></div>' },
+  SpacesSetup: { name: 'SpacesSetup', emits: ['state', 'runtime-waiting'], template: '<div data-setup></div>' },
   'router-link': true,
 }
 let wrapper
@@ -29,6 +29,24 @@ describe('the Spaces page', () => {
     wrapper.findComponent(MultiseatAssignments).vm.$emit('snapshot', { enabled: true, profiles: [{ id: 'a', name: 'Alex', clients: [] }] })
     await flushPromises()
     expect(wrapper.text()).not.toContain('Create your first Space')
+  })
+
+  it('speaks about getting the PC ready while the build has no runtime', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply(clients)))
+    wrapper = start()
+    await flushPromises()
+    wrapper.findComponent(MultiseatAssignments).vm.$emit('snapshot', { enabled: false, profiles: [] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Create your first Space')
+    wrapper.findComponent(SpacesSetup).vm.$emit('runtime-waiting', true)
+    await flushPromises()
+    const intro = wrapper.get('[aria-labelledby=spaces-intro-title]').text()
+    expect(intro).toContain('Get this PC ready for Spaces')
+    expect(intro).toContain('A Space needs a gaming runtime that this Polaris build does not include yet')
+    expect(intro).not.toContain('Create your first Space')
+    wrapper.findComponent(SpacesSetup).vm.$emit('runtime-waiting', false)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Create your first Space')
   })
 
   it('leads with Host Setup until the host can offer Spaces', async () => {

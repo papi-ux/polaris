@@ -10,7 +10,7 @@
       <h4 class="font-medium text-silver">{{ $t('spaces.unavailable_title') }}</h4>
       <p class="mt-2 text-sm text-storm">{{ unavailableCopy }}</p>
       <a v-if="unavailableAnchor" :href="docsUrl + unavailableAnchor" target="_blank" rel="noopener noreferrer"
-         class="focus-ring mt-3 inline-block rounded py-2 text-sm text-ice hover:underline">{{ $t('spaces.guide_section') }}</a>
+         class="focus-ring mt-3 inline-block rounded py-2 text-sm text-ice hover:underline">{{ unavailableLinkLabel }}</a>
     </div>
     <p v-else-if="snapshot?.message && !snapshot.job" class="mt-3 text-sm text-storm">{{ snapshot.message }}</p>
     <div v-if="snapshot?.job" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-setup-job>
@@ -102,6 +102,9 @@ import { docsUrl } from '../spaces-setup.js'
 import { requestHostRestart } from '../restart-host.js'
 
 defineProps({ hostReady: { type: Boolean, default: false } })
+// Host Setup reads the runtime state from here, so a build without a runtime is
+// not shown as a check the person has to fix.
+const emit = defineEmits(['runtime'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const snapshot = ref(null), busy = ref(false), connected = ref(false), error = ref(''), notice = ref('')
@@ -121,7 +124,8 @@ const unavailableCopy = computed(() => {
   const reason = snapshot.value?.unavailable_reason
   return unavailableReasons.includes(reason) ? t('spaces.unavailable_' + reason) : (snapshot.value?.message || t('spaces.unavailable_title'))
 })
-const unavailableAnchor = computed(() => ({ runtime_not_published: '#prepare-your-first-space', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
+const unavailableAnchor = computed(() => ({ runtime_not_published: '#preview-limits', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
+const unavailableLinkLabel = computed(() => t(snapshot.value?.unavailable_reason === 'runtime_not_published' ? 'spaces.preview_limits_link' : 'spaces.guide_section'))
 const blockedReasons = ['journal_fault', 'runtime_withdrawn', 'no_eligible_gpu', 'closing']
 const blockedBy = computed(() => (snapshot.value?.job?.blocked_by || []).filter(reason => blockedReasons.includes(reason)))
 const blockedCopy = reason => t('spaces.blocked_' + reason)
@@ -136,6 +140,7 @@ const jobTone = computed(() => {
 
 function adopt(next) {
   snapshot.value = next; connected.value = true
+  emit('runtime', { available: next.available, reason: next.unavailable_reason || '' })
   if (next.job?.gpu_id) gpuId.value = next.job.gpu_id
   else if (!next.graphics?.some(g => g.id === gpuId.value)) gpuId.value = next.graphics?.[0]?.id || ''
   if (!next.runtimes.some(runtime => runtime.id === runtimeId.value)) runtimeId.value = next.runtimes[0]?.id || ''

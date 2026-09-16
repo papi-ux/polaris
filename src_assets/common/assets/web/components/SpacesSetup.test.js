@@ -1,6 +1,7 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SpacesSetup from './SpacesSetup.vue'
+import SpacesFirstSetup from './SpacesFirstSetup.vue'
 import { dockerAccessCommand, fedoraSecurityPackages, installGuide, installSpacesSecurity, setupSteps, startDocker, validSetup } from '../spaces-setup.js'
 import { spacesGlobal } from './spaces-test-i18n.js'
 
@@ -43,6 +44,68 @@ describe('Spaces setup', () => {
     expect(wrapper.element.open).toBe(true)
     expect(wrapper.findAll('details').at(1).element.open).toBe(true)
     expect(wrapper.get('.control-chip').text()).toBe('6/7')
+  })
+
+  it('waits for a runtime instead of asking for configuration when the build has none', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot(true))))
+    wrapper = start()
+    await flushPromises()
+    expect(wrapper.get('.control-chip').text()).toBe('6/7')
+    wrapper.findComponent(SpacesFirstSetup).vm.$emit('runtime', { available: false, reason: 'runtime_not_published' })
+    await flushPromises()
+    const row = wrapper.get('[data-setup-check=spaces]')
+    expect(row.get('[data-check-waiting]').text()).toBe('Waiting for runtime')
+    expect(row.text()).toContain('This Polaris build has no verified gaming runtime yet, so there is nothing to configure here.')
+    expect(row.text()).not.toContain('Not configured')
+    expect(row.find('a').exists()).toBe(false)
+    expect(row.text()).not.toContain('prepare your first Space below')
+    expect(wrapper.get('.control-chip').text()).toBe('6/6')
+    const status = wrapper.get('[role=status]').text()
+    expect(status).toContain('Host prerequisites checked.')
+    expect(status).toContain('Spaces wait for a Polaris build that includes a verified gaming runtime.')
+    expect(status).not.toContain('still needs attention')
+    expect(wrapper.get('summary').text()).toContain('Host ready')
+    expect(wrapper.findAll('details').at(1).element.open).toBe(false)
+    expect(wrapper.emitted('runtime-waiting').at(-1)).toEqual([true])
+  })
+
+  it('keeps asking for the first Space when the build offers a runtime', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot(true))))
+    wrapper = start()
+    await flushPromises()
+    wrapper.findComponent(SpacesFirstSetup).vm.$emit('runtime', { available: true, reason: '' })
+    await flushPromises()
+    const row = wrapper.get('[data-setup-check=spaces]')
+    expect(row.find('[data-check-waiting]').exists()).toBe(false)
+    expect(row.text()).toContain('Not configured')
+    expect(row.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#prepare-your-first-space')
+    expect(row.text()).toContain('prepare your first Space below')
+    expect(wrapper.get('.control-chip').text()).toBe('6/7')
+    expect(wrapper.get('[role=status]').text()).toContain('Spaces configuration still needs attention.')
+    expect(wrapper.get('summary').text()).toContain('Set up Spaces')
+    expect(wrapper.emitted('runtime-waiting')).toBeUndefined()
+  })
+
+  it('still reads a failing host check as a failure while the build has no runtime', async () => {
+    const result = snapshot(true)
+    result.checks.find(check => check.id === 'security').state = 'required'
+    result.host_prerequisites_ready = false
+    vi.stubGlobal('fetch', vi.fn(async () => reply(result)))
+    wrapper = start()
+    await flushPromises()
+    wrapper.findComponent(SpacesFirstSetup).vm.$emit('runtime', { available: false, reason: 'runtime_not_published' })
+    await flushPromises()
+    const security = wrapper.get('[data-setup-check=security]')
+    expect(security.text()).toContain('Needs attention')
+    expect(security.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#prepare-spaces-security-support')
+    expect(wrapper.get('[data-setup-check=spaces] [data-check-waiting]').text()).toBe('Waiting for runtime')
+    expect(wrapper.get('.control-chip').text()).toBe('5/6')
+    const status = wrapper.get('[role=status]').text()
+    expect(status).toContain('Complete the steps below, then recheck setup.')
+    expect(status).toContain('Spaces wait for a Polaris build')
+    expect(wrapper.get('summary').text()).toContain('Set up Spaces')
+    expect(wrapper.get('summary').text()).not.toContain('Host ready')
+    expect(wrapper.findAll('details').at(1).element.open).toBe(true)
   })
 
   it('links each failing check to its guide section and shows the terminal steps for a mutable host', async () => {
