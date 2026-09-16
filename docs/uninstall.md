@@ -130,6 +130,31 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
   ```bash
   sudo rm -rf /var/lib/polaris
   ```
+- **KWin screencast permissions, on KDE hosts.** Polaris registers itself for KWin's screencast
+  permission by writing `~/.local/share/applications/dev.polaris-stream.app.Polaris.kwin.<id>.desktop`,
+  one per binary path, and never removes them, so they pile up across upgrades. Remove them:
+  ```bash
+  rm -f ~/.local/share/applications/dev.polaris-stream.app.Polaris.kwin.*.desktop
+  ```
+- **Installs from source.** If you ever installed a source build, its files live under `/usr/local`
+  and no package manager knows them: `/usr/local/bin/polaris*`,
+  `/usr/local/share/applications/dev.polaris-stream.app.Polaris*.desktop` (this is what keeps
+  "Polaris" in the application launcher after the package is gone), `/usr/local/share/polaris`,
+  `/usr/local/lib/systemd/user/polaris.service`, and the icons under
+  `/usr/local/share/icons/hicolor/scalable/apps/polaris.svg` and
+  `/usr/local/share/icons/hicolor/scalable/status/polaris-*.svg`. Because `/usr/local/share` comes
+  before `/usr/share` in `XDG_DATA_DIRS`, stale icons there shadow the packaged ones, so the panel
+  and the launcher keep showing an old Polaris icon even after a reinstall. Remove all of it, then
+  on KDE run `kbuildsycoca6 --noincremental` so the launcher forgets the entry, and restart the
+  panel or log out and in:
+  ```bash
+  sudo rm -rf /usr/local/bin/polaris* /usr/local/share/applications/dev.polaris-stream.app.Polaris*.desktop \
+    /usr/local/share/polaris /usr/local/lib/systemd/user/polaris.service \
+    /usr/local/share/icons/hicolor/scalable/apps/polaris.svg \
+    /usr/local/share/icons/hicolor/scalable/status/polaris-*.svg
+  kbuildsycoca6 --noincremental
+  systemctl --user restart plasma-plasmashell.service
+  ```
 - **Your own additions.** Unit overrides under `~/.config/systemd/user/`, udev rules you wrote for
   a virtual display, firewall openings for the Polaris ports, or an extra binary you copied into
   `/usr/bin` while testing. Only you know about these; `ls /usr/bin/polaris*` and
@@ -176,11 +201,13 @@ install finds it and shows the login page instead of the welcome page.
 pgrep -a polaris
 ls -d /usr/bin/polaris* /usr/share/polaris /etc/udev/rules.d/*polaris* \
   /etc/modules-load.d/*polaris* /var/lib/polaris ~/.config/polaris 2>/dev/null
+ls -d /usr/local/bin/polaris* /usr/local/share/applications/dev.polaris* \
+  /usr/local/share/icons/hicolor/*/*/polaris* ~/.local/share/applications/dev.polaris* 2>/dev/null
 systemctl --user status polaris
 ```
 
-The first two print nothing and the third says the unit could not be found. Anything that still
-shows up belongs to one of the sections above.
+Everything but the last line prints nothing, and the last says the unit could not be found.
+Anything that still shows up belongs to one of the sections above.
 
 ## 7. Install again
 
