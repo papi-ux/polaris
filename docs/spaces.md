@@ -11,7 +11,8 @@ the catalog in **Host Setup** stays empty until it is.
 
 Spaces are optional. If you stream your usual desktop and games today, keep
 using the Library in Nova; nothing here is required for that, and you do not
-need Docker.
+need Docker. [Spaces or regular streaming](spaces-or-regular.md) puts the two
+side by side.
 
 ![Spaces with player cards and a default Space for a handheld](images/spaces/spaces-overview.png)
 
