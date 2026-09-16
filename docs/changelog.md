@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.4.8 - 2026-09-16
+
+A Spaces preview matched with Nova v1.4.8, with a library that fills from a folder of emulator games, higher frame rates on the displays Polaris creates, and launch refusals that say why. Spaces is for configured hosts only and has no public runtime download yet. Existing configurations and paired devices remain valid.
+
 - A refused Space launch now says why, the way a refused host launch does: Nova shows the host's sentence and the one change that fixes it (the Space is being played on another device, this device already has a Space running, every Space slot or the encoder is taken, no Space is assigned or selected, the assignment changed) instead of "Space Could Not Start". Host messages about Spaces use the words the console and Nova use: Space, never profile or seat, and one sentence for "stop the Space streams first".
 - The Spaces list a device reads now says why, not just whether: `unavailable_reason` when the host cannot offer Spaces to it (the controller is missing, stopping or reconfiguring, or no Space is assigned to the device), `switch_blocked_reason` when a stream must end first, `default_space_id`, the host's Space budget as `capacity` (`concurrent_limit`, `concurrent_active`, also on the console's `/api/multiseat/profiles`), and per Space `can_open` with a `blocked_reason` (in use, starting, stopping, at capacity), so a second player sees "one Space at a time" before pressing Open instead of after. The capabilities route announces `spaces_v1` on any host with Spaces, whichever Space or Desktop the device has picked, and the Space session status says `starting` during the start window. All of it is optional keys on the existing schema.
 - First Space setup says what blocks it. The setup snapshot carries `unavailable_reason` (`already_configured`, `runtime_not_published`, `journal_fault`, `journal_locked`, `closing`), the job carries `blocked_by` (`journal_fault`, `runtime_withdrawn`, `no_eligible_gpu`, `closing`) and, when its journal could not be secured, a `recovery` record naming the retained image and reference, and every host check carries a `doc_anchor` into the Spaces guide, so the console can link the fix instead of showing a dead button. The one thing the job cannot report is download progress, and the docs stop claiming it.
@@ -31,6 +35,7 @@ starts at `v1.0.0`.
 - The Doctor now says when KMS capture was refused because the binary lacks `CAP_SYS_ADMIN`, and names the one command that grants it, instead of blaming compositor protocols and steering you off the only capture path that carries HDR. The HDR finding names the working recipe: `capture = kms` with a stream mode that shows the real HDR output.
 - Docs: the configuration that carries true HDR on Linux today, all five gates with the journal line that names each one, in `runtime.md`, `configuration.md` and `troubleshooting.md`; and how to point MoonDeck Buddy at Polaris' `apps.json` in `moonlight.md`.
 - Launches where Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope) were capped at 120 FPS by three separate literals, and `/serverinfo` advertised a different number again, so a 144 or 165 Hz client was either refused before connecting or quietly served 120. One ceiling now, 240 by default and settable with `headless_max_refresh_rate`, advertised and enforced from the same value (#686)
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
 
 ## v1.4.7 - 2026-09-12
 
