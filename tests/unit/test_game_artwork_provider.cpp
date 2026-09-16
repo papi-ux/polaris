@@ -305,3 +305,48 @@ TEST(GameArtworkProviderSteamGridDb, PrefersIconThumbnailButKeepsPosterUrl) {
   ASSERT_EQ(poster.size(), 1);
   EXPECT_EQ(poster[0].url, "https://cdn.steamgriddb.com/icon/raw.ico");
 }
+
+TEST(GameArtworkProviderSteamGridDb, ParsesBoundedChoicesThatPreviewThumbnailsAndStoreWhatAMatchStores) {
+  const auto body = R"({"success":true,"data":[
+    {"url":"https://evil.example/grid/a.png","thumb":"https://cdn2.steamgriddb.com/thumb/a.jpg"},
+    {"url":"https://cdn2.steamgriddb.com/grid/b.png","thumb":"https://cdn2.steamgriddb.com/thumb/b.jpg"},
+    {"url":"https://cdn2.steamgriddb.com/grid/b.png","thumb":"https://cdn2.steamgriddb.com/thumb/b2.jpg"},
+    {"url":"https://cdn.steamgriddb.com/grid/c.png"},
+    {"url":"https://cdn2.steamgriddb.com/grid/d.png","thumb":"https://evil.example/thumb/d.jpg"},
+    17,
+    {"url":"https://cdn2.steamgriddb.com/grid/e.png","thumb":"https://cdn2.steamgriddb.com/thumb/e.jpg"}
+  ]})";
+  const auto choices = game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, body, 5);
+  ASSERT_EQ(choices.size(), 4);
+  EXPECT_EQ(choices[0].asset_url, "https://cdn2.steamgriddb.com/grid/b.png");
+  EXPECT_EQ(choices[0].preview_url, "https://cdn2.steamgriddb.com/thumb/b.jpg");
+  EXPECT_EQ(choices[1].asset_url, "https://cdn.steamgriddb.com/grid/c.png");
+  EXPECT_EQ(choices[1].preview_url, "https://cdn.steamgriddb.com/grid/c.png");
+  EXPECT_EQ(choices[2].asset_url, "https://cdn2.steamgriddb.com/grid/d.png");
+  EXPECT_EQ(choices[2].preview_url, "https://cdn2.steamgriddb.com/grid/d.png");
+  EXPECT_EQ(choices[3].asset_url, "https://cdn2.steamgriddb.com/grid/e.png");
+  EXPECT_EQ(choices[3].preview_url, "https://cdn2.steamgriddb.com/thumb/e.jpg");
+
+  // A pick stores exactly the image a match by kinds would have stored from the same entry.
+  const auto assets = game_artwork::providers::parse_steamgriddb_assets(kind_e::poster, body);
+  ASSERT_EQ(assets.size(), choices.size());
+  for (std::size_t index = 0; index < choices.size(); ++index) {
+    EXPECT_EQ(choices[index].kind, kind_e::poster);
+    EXPECT_EQ(choices[index].asset_url, assets[index].url);
+  }
+
+  EXPECT_EQ(game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, body, 2).size(), 2);
+  EXPECT_TRUE(game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, body, 0).empty());
+  EXPECT_TRUE(game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, "not json", 5).empty());
+  EXPECT_TRUE(game_artwork::providers::parse_steamgriddb_choices(
+    kind_e::poster, R"({"success":false,"data":[{"url":"https://cdn.steamgriddb.com/grid/no.jpg"}]})", 5).empty());
+
+  const auto icons = game_artwork::providers::parse_steamgriddb_choices(
+    kind_e::icon,
+    R"({"success":true,"data":[{"url":"https://cdn.steamgriddb.com/icon/raw.ico","thumb":"https://cdn2.steamgriddb.com/icon/thumb.png"}]})",
+    5
+  );
+  ASSERT_EQ(icons.size(), 1);
+  EXPECT_EQ(icons[0].asset_url, "https://cdn2.steamgriddb.com/icon/thumb.png");
+  EXPECT_EQ(icons[0].preview_url, "https://cdn2.steamgriddb.com/icon/thumb.png");
+}

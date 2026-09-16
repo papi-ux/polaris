@@ -35,6 +35,13 @@ namespace game_artwork::providers {
     std::string url;
   };
 
+  /** One SteamGridDB image a player can pick for a kind. Both URLs are allowlisted. */
+  struct choice_candidate_t {
+    kind_e kind;
+    std::string asset_url;  ///< the image an apply stores, the one parse_steamgriddb_assets returns for this entry
+    std::string preview_url;  ///< SteamGridDB's thumbnail when it sends one, otherwise asset_url
+  };
+
   /** Sanitized metadata safe to expose for a caller-selected provider match. */
   struct match_candidate_t {
     std::string provider;
@@ -108,4 +115,14 @@ namespace game_artwork::providers {
 
   /** Parse and allowlist artwork URLs from a SteamGridDB metadata response. */
   std::vector<candidate_t> parse_steamgriddb_assets(kind_e kind, std::string_view response_body);
+
+  /**
+   * Parse the same metadata response into at most maximum_choices pickable images,
+   * in provider order, deduplicated by the image an apply would store.
+   */
+  std::vector<choice_candidate_t> parse_steamgriddb_choices(
+    kind_e kind,
+    std::string_view response_body,
+    std::size_t maximum_choices
+  );
 }

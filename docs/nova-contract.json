@@ -306,6 +306,53 @@
         "style": "subscript"
       }
     },
+    "artwork_choices": {
+      "$comment": [
+        "The response of POST /polaris/v1/games/<uuid>/artwork/choices/<kind>: up to five",
+        "SteamGridDB images of one kind for the match named in the body. Nova drops the whole",
+        "list unless status is true and kind is the kind it asked for, then keeps at most five."
+      ],
+      "fields": [
+        "choices",
+        "kind",
+        "status"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseArtworkChoices",
+        "receiver": "json"
+      },
+      "polaris_emitter": {
+        "file": "src/game_artwork_manual.cpp",
+        "function": "artwork_choices_json",
+        "declaration": "nlohmann::json body {",
+        "style": "initializer_list"
+      }
+    },
+    "artwork_choice": {
+      "$comment": [
+        "One entry of artwork_choices. selection_token is 32 lowercase hex characters and is the",
+        "only thing a pick sends back to POST .../artwork/match under selections. Nova drops an",
+        "entry whose preview is not exactly /polaris/v1/games/<uuid>/artwork/candidate/<token>/<kind>,",
+        "the host path the candidate preview route serves. expires_at is epoch milliseconds."
+      ],
+      "fields": [
+        "expires_at",
+        "preview",
+        "selection_token"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseArtworkChoices",
+        "receiver": "item"
+      },
+      "polaris_emitter": {
+        "file": "src/game_artwork_manual.cpp",
+        "function": "artwork_choice_json",
+        "declaration": "nlohmann::json body {",
+        "style": "initializer_list"
+      }
+    },
     "display_planner": {
       "$comment": [
         "Nested under game. Per-host, computed once per request from the same fallback",

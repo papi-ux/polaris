@@ -178,6 +178,22 @@ namespace game_artwork::providers {
       return static_cast<unsigned int>(*year);
     }
 
+    std::optional<std::string> allowlisted_steamgriddb_url(const json &asset, const char *field) {
+      if (!asset.contains(field) || !asset[field].is_string()) return std::nullopt;
+      auto url = asset[field].get<std::string>();
+      if (!is_allowed_provider_url(provider_e::steamgriddb, url)) return std::nullopt;
+      return url;
+    }
+
+    // Icons store SteamGridDB's thumbnail, as the match path always has: a full icon can
+    // be an .ico, which the cache does not accept. Every other kind stores the full image.
+    std::optional<std::string> steamgriddb_asset_url(kind_e kind, const json &asset) {
+      if (kind == kind_e::icon) {
+        if (auto thumb = allowlisted_steamgriddb_url(asset, "thumb")) return thumb;
+      }
+      return allowlisted_steamgriddb_url(asset, "url");
+    }
+
     request_t steamgriddb_request(operation_e operation, std::optional<kind_e> kind, std::string url) {
       return {
         provider_e::steamgriddb,
@@ -517,18 +533,37 @@ namespace game_artwork::providers {
     for (const auto &asset : response["data"]) {
       if (!asset.is_object()) continue;
 
-      std::optional<std::string> selected_url;
-      if (kind == kind_e::icon && asset.contains("thumb") && asset["thumb"].is_string()) {
-        const auto thumb = asset["thumb"].get<std::string>();
-        if (is_allowed_provider_url(provider_e::steamgriddb, thumb)) selected_url = thumb;
-      }
-      if (!selected_url && asset.contains("url") && asset["url"].is_string()) {
-        const auto url = asset["url"].get<std::string>();
-        if (is_allowed_provider_url(provider_e::steamgriddb, url)) selected_url = url;
-      }
+      const auto selected_url = steamgriddb_asset_url(kind, asset);
       if (!selected_url || !seen.emplace(*selected_url).second) continue;
       candidates.push_back({kind, source_e::steamgriddb, *selected_url});
     }
     return candidates;
+  }
+
+  std::vector<choice_candidate_t> parse_steamgriddb_choices(
+    const kind_e kind,
+    const std::string_view response_body,
+    const std::size_t maximum_choices
+  ) {
+    if (maximum_choices == 0) return {};
+    const auto response = parse_response(response_body);
+    if (!is_success_response(response) || !response.contains("data") || !response["data"].is_array()) {
+      return {};
+    }
+
+    std::vector<choice_candidate_t> choices;
+    std::unordered_set<std::string> seen;
+    for (const auto &asset : response["data"]) {
+      if (!asset.is_object()) continue;
+
+      const auto asset_url = steamgriddb_asset_url(kind, asset);
+      if (!asset_url || !seen.emplace(*asset_url).second) continue;
+      // The thumbnail is a smaller rendition of the same image, so a preview stays light
+      // and still shows what the apply stores.
+      auto preview_url = allowlisted_steamgriddb_url(asset, "thumb").value_or(*asset_url);
+      choices.push_back({kind, *asset_url, std::move(preview_url)});
+      if (choices.size() == maximum_choices) break;
+    }
+    return choices;
   }
 }

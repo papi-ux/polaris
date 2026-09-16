@@ -7605,6 +7605,10 @@ namespace nvhttp {
       features["artwork_manifest_v1"] = true;
       features["artwork_manual_match_v1"] = nonblank_artwork_api_key(
         config::steamgriddb_api_key());
+      // Choice lists and picks by selection token need the same SteamGridDB key as a
+      // manual match, so they are announced on the same condition.
+      features["artwork_choices_v1"] = nonblank_artwork_api_key(
+        config::steamgriddb_api_key());
       features["support_client_report_v1"] = true;
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
@@ -9194,6 +9198,61 @@ namespace nvhttp {
       response->write(SimpleWeb::StatusCode::success_ok, body, headers);
     };
 
+    // Alternatives for one kind of a chosen match. Each choice is an opaque, expiring
+    // token that the candidate preview route above serves; provider URLs stay on the host.
+    auto polarisListGameArtworkChoices = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      if (!get_verified_cert(request)) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      const auto route = game_artwork::manual::parse_route_target(request->path);
+      if (!route || route->route != game_artwork::manual::route_e::choices || !route->kind) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      const auto apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, route->uuid);
+      });
+      if (app == apps.end()) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      const auto api_key = config::steamgriddb_api_key();
+      if (!nonblank_artwork_api_key(api_key)) {
+        write_artwork_search_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt));
+        return;
+      }
+      const auto body = read_bounded_artwork_body(request->content, game_artwork::manual::maximum_match_body_bytes);
+      const auto identity = body ? game_artwork::manual::parse_choice_request(*body) : std::nullopt;
+      if (!identity) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+      try {
+        const auto listing = game_artwork::manual::list_artwork_choices(
+          artwork_preview_cache(),
+          app->uuid,
+          *route->kind,
+          *identity,
+          make_artwork_transport(api_key),
+          artwork_now_milliseconds()
+        );
+        if (listing.failure) {
+          write_artwork_search_failure(response, *listing.failure);
+          return;
+        }
+        const auto output = game_artwork::manual::artwork_choices_json(app->uuid, *route->kind, listing.choices);
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        headers.emplace("Cache-Control", "private, no-store");
+        response->write(output.dump(), headers);
+      } catch (...) {
+        write_artwork_search_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt));
+      }
+    };
+
     auto polarisApplyGameArtworkMatch = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
       if (!get_verified_cert(request)) {
@@ -9219,7 +9278,8 @@ namespace nvhttp {
       }
       const auto api_key = config::steamgriddb_api_key();
       if (!nonblank_artwork_api_key(api_key)) {
-        fail(SimpleWeb::StatusCode::server_error_service_unavailable, "configuration");
+        BOOST_LOG(warning) << "Artwork manual match failed at stage=configuration";
+        write_artwork_search_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt));
         return;
       }
       const auto body = read_bounded_artwork_body(request->content, game_artwork::manual::maximum_match_body_bytes);
@@ -9235,6 +9295,20 @@ namespace nvhttp {
         fail(SimpleWeb::StatusCode::client_error_bad_request, "request-validation");
         return;
       }
+      const bool picked = !selection->selections.empty();
+      std::vector<game_artwork::providers::request_t> downloads;
+      if (picked) {
+        // Picks resolve before anything touches the network or the disk, so an
+        // expired token costs nothing and says what to do next.
+        auto plan = game_artwork::manual::plan_selected_downloads(
+          artwork_preview_cache(), app->uuid, *selection, artwork_now_milliseconds());
+        if (plan.refusal) {
+          BOOST_LOG(warning) << "Artwork manual match failed at stage=selection";
+          write_artwork_search_failure(response, *plan.refusal);
+          return;
+        }
+        downloads = std::move(plan.downloads);
+      }
       const auto appdata = platf::appdata();
       auto staging = create_artwork_staging_root(appdata);
       if (!staging) {
@@ -9242,9 +9316,12 @@ namespace nvhttp {
         return;
       }
       const auto transport = make_artwork_transport(api_key);
-      std::vector<game_artwork::providers::request_t> downloads;
+      // A match by kinds lists SteamGridDB's images here. Picks already named theirs.
+      const auto list_requests = picked
+        ? std::vector<game_artwork::providers::request_t> {}
+        : game_artwork::providers::plan_steamgriddb_assets(provider_id);
       try {
-        for (const auto &list_request : game_artwork::providers::plan_steamgriddb_assets(provider_id)) {
+        for (const auto &list_request : list_requests) {
           if (!list_request.kind ||
               std::find(selection->kinds.begin(), selection->kinds.end(), *list_request.kind) == selection->kinds.end()) continue;
           const auto list_response = transport(list_request, artwork_metadata_bytes);
@@ -9272,30 +9349,19 @@ namespace nvhttp {
         fail(SimpleWeb::StatusCode::server_error_bad_gateway, "provider-list");
         return;
       }
-      std::size_t published = 0;
-      const game_artwork::providers::execution_options_t options {
-        .destination_source = game_artwork::source_e::override,
-        .force_replace = true,
-        .on_published = [&](const game_artwork::asset_t &) { ++published; },
-      };
-      (void) game_artwork::providers::execute_download_plan(
-        staging->path, app->uuid, downloads, transport, options);
-      if (published == 0) {
-        fail(SimpleWeb::StatusCode::server_error_bad_gateway, "asset-download");
-        return;
-      }
-      game_artwork::artwork_override_t metadata {
-        app->uuid,
-        selection->provider,
-        selection->provider_game_id,
-        selection->title,
-        selection->steam_appid,
-        true,
-        artwork_now_milliseconds(),
-      };
-      if (!game_artwork::commit_staged_artwork_override(appdata, staging->path, metadata)) {
-        fail(SimpleWeb::StatusCode::server_error_internal_server_error, "commit");
-        return;
+      switch (game_artwork::manual::publish_artwork_override(
+        appdata, staging->path, app->uuid, *selection, downloads, transport, artwork_now_milliseconds())) {
+        case game_artwork::manual::apply_stage_e::published:
+          break;
+        case game_artwork::manual::apply_stage_e::asset_download:
+          fail(SimpleWeb::StatusCode::server_error_bad_gateway, "asset-download");
+          return;
+        case game_artwork::manual::apply_stage_e::staging:
+          fail(SimpleWeb::StatusCode::server_error_internal_server_error, "staging");
+          return;
+        case game_artwork::manual::apply_stage_e::commit:
+          fail(SimpleWeb::StatusCode::server_error_internal_server_error, "commit");
+          return;
       }
       artwork_preview_cache().clear_game(app->uuid);
       const auto manifest = current_artwork_manifest(appdata, app->uuid);
@@ -11106,6 +11172,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/games/[^/]+/artwork/resolve$"]["POST"] = polarisResolveGameArtwork;
     https_server.resource["^/polaris/v1/games/[^/]+/artwork/candidates$"]["GET"] = polarisSearchGameArtworkMatches;
     https_server.resource["^/polaris/v1/games/[^/]+/artwork/candidate/[0-9a-f]{32}/(poster|hero|logo|icon)$"]["GET"] = polarisGameArtworkPreview;
+    https_server.resource["^/polaris/v1/games/[^/]+/artwork/choices/(poster|hero|logo|icon)$"]["POST"] = polarisListGameArtworkChoices;
     https_server.resource["^/polaris/v1/games/[^/]+/artwork/match$"]["POST"] = polarisApplyGameArtworkMatch;
     https_server.resource["^/polaris/v1/games/[^/]+/artwork/override$"]["DELETE"] = polarisClearGameArtworkOverride;
     https_server.resource["^/polaris/v1/games/.+/mangohud$"]["POST"] = polarisToggleMangoHud;
