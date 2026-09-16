@@ -4,6 +4,7 @@
 #include "multiseat_launch_service.h"
 #ifdef __linux__
 #include "multiseat_container_host.h"
+#include "spaces_host_admin.h"
 #include "src/logging.h"
 #include "src/private_state_file.h"
 #include "src/rtsp.h"
@@ -548,6 +549,7 @@ namespace multiseat {
       return {400, "A Space stream needs a new SDR session at a whole frame rate.", "space_stream_options",
         "Set Play Setup to Auto frame rate with HDR off."};
     }
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::string target_name;
     if (!target.empty()) {
       const auto snapshot = library_for_client(launch->unique_id, expected_profile);
@@ -648,6 +650,7 @@ namespace multiseat {
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client);
     auto future = request->future;
@@ -721,6 +724,7 @@ namespace multiseat {
 
   profile_launch_result_t profile_launch_service_t::select_space(std::string_view client, std::string_view profile,
                                                                 std::string_view previous) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::lock_guard lock(impl_->mutex);
     const auto selected = impl_->selected_for(client);
     if (!selected) return {503, "Spaces are unavailable. Refresh and try again.", "spaces_unavailable"};
@@ -751,6 +755,7 @@ namespace multiseat {
   }
 
   profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client); request->access = allowed;
     const auto future = request->future;
@@ -777,6 +782,7 @@ namespace multiseat {
 
   profile_launch_result_t profile_launch_service_t::create_steam_profile(profiles::steam_create_request_t creation) {
     if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);
@@ -811,6 +817,7 @@ namespace multiseat {
     // Removing for good has its own entry point, its own checks and its own result.
     if (!profiles::valid_edit_request(edit) || edit.operation == profiles::edit_operation_e::remove_for_good)
       return {400, "Enter a valid Space name and operation.", "invalid_request"};
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);
@@ -841,6 +848,7 @@ namespace multiseat {
   profile_removal_result_t profile_launch_service_t::remove_space_for_good(profiles::edit_request_t removal) {
     if (removal.operation != profiles::edit_operation_e::remove_for_good || !profiles::valid_edit_request(removal))
       return {{400, "Type the Space's name to remove it for good.", "invalid_request"}};
+    if (spaces::host_admin_running()) return {spaces_host_setup_running_result};
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);

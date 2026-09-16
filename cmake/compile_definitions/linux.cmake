@@ -637,6 +637,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

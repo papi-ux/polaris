@@ -93,6 +93,7 @@
   #include "platform/linux/multiseat_launch_service.h"
 #include "platform/linux/spaces_setup.h"
 #include "platform/linux/spaces_setup_service.h"
+  #include "platform/linux/spaces_host_admin.h"
   #include <pwd.h>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -4222,12 +4223,58 @@ namespace confighttp {
     if (count > 4096) { bad_request(response, request, "Setup request is too large"); return; }
     const auto action = multiseat::spaces::decode_setup_request({bytes.data(), static_cast<std::size_t>(count)});
     if (!action) { bad_request(response, request, "Invalid Spaces setup request"); return; }
-    const auto status = service->submit(*action);
+    // A change to this PC's setup that an administrator is approving finishes first.
+    const bool host_setup_running = action->operation != "cancel" && multiseat::spaces::host_admin_running();
+    const auto status = host_setup_running ? 409 : service->submit(*action);
     auto output = service->snapshot();
     output["accepted"] = status == 200 || status == 202;
+    if (host_setup_running) output["error"] = "Polaris is changing this PC's Spaces setup. Try again when it finishes.";
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
     response->write(static_cast<SimpleWeb::StatusCode>(status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void getSpacesHostAction(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    if (const auto service = multiseat::spaces::installed_host_admin_service()) {
+      send_response(response, service->snapshot());
+      return;
+    }
+#endif
+    not_found(response, request);
+  }
+
+  /**
+   * @brief Ask for administrator approval on this PC to fix one Spaces host check.
+   *
+   * The body names one action from a closed list and a request id:
+   * @code{.json}
+   * {"action": "security_install", "request_id": "<uuid>"}
+   * @endcode
+   * Polaris runs pkexec with the packaged helper; the password prompt opens on this PC's desktop.
+   */
+  void updateSpacesHostAction(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::spaces::installed_host_admin_service();
+    if (!service) { not_found(response, request); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Host setup request is too large"); return; }
+    const auto action = multiseat::spaces::decode_host_action_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!action) { bad_request(response, request, "Invalid host setup request"); return; }
+    const auto result = service->submit(*action);
+    auto output = service->snapshot();
+    output["accepted"] = result.status == 200 || result.status == 202;
+    if (result.refusal) output["refusal"] = {{"code", result.refusal->code}, {"message", result.refusal->message}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
 #else
     not_found(response, request);
 #endif
@@ -4237,6 +4284,8 @@ namespace confighttp {
     server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
     server.resource["^/api/spaces/setup/job$"]["GET"] = getSpacesSetupJob;
     server.resource["^/api/spaces/setup/job$"]["POST"] = withCsrf(updateSpacesSetupJob);
+    server.resource["^/api/spaces/setup/host-action$"]["GET"] = getSpacesHostAction;
+    server.resource["^/api/spaces/setup/host-action$"]["POST"] = withCsrf(updateSpacesHostAction);
   }
 
   void getMultiseatProfiles(resp_https_t response, req_https_t request) {

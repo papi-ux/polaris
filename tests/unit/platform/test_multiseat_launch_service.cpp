@@ -1,4 +1,5 @@
 #include "src/platform/linux/multiseat_launch_service.h"
+#include "src/platform/linux/spaces_host_admin.h"
 #include "src/config.h"
 #include "src/launch_failure.h"
 #include "src/nvhttp.h"
@@ -1502,6 +1503,60 @@ namespace {
     EXPECT_EQ(nvhttp::profile_library_request(client, "profile-a").status, 403);
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.870780"));
     EXPECT_EQ(state->begins.load(), began);
+  }
+
+  // While an administrator approves a change to this PC's setup, nothing starts or changes a Space.
+  TEST_F(MultiseatAssignments, HostSetupInProgressHoldsLaunchesAndSpacesChangesUntilItFinishes) {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool release = false;
+    auto admin = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+      .facts = [] {
+        spaces::host_admin_facts_t facts;
+        facts.helper = facts.pkexec = facts.policy = true;
+        return facts;
+      },
+      .run = [&](const std::vector<std::string> &, std::chrono::milliseconds, const std::function<void()> &, std::stop_token stop) {
+        std::unique_lock lock(mutex);
+        changed.wait(lock, stop, [&] { return release; });
+        return spaces::host_action_run_t {.exit_status = 0, .approved = true};
+      },
+    });
+    ASSERT_TRUE(spaces::install_host_admin_service(admin));
+    auto uninstall = util::fail_guard([&] {
+      {
+        std::lock_guard lock(mutex);
+        release = true;
+      }
+      changed.notify_all();
+      admin->shutdown();
+      spaces::uninstall_host_admin_service(admin);
+    });
+    ASSERT_EQ(admin->submit({spaces::host_action_e::security_install, "12345678-1234-4234-8234-123456789abc"}).status, 202);
+    const auto held = [](const profile_launch_result_t &result) {
+      EXPECT_EQ(result.status, 409);
+      EXPECT_EQ(result.code, "spaces_host_setup_running");
+      EXPECT_EQ(std::string(result.message), "Polaris is changing this PC's Spaces setup.");
+    };
+    held(service->prepare(launch(), "profile-a"));
+    held(service->set_assignment("profile-b", "client-a"));
+    held(service->set_access("profile-a", "client-b", true));
+    held(service->create_steam_profile(create_request));
+    held(service->edit_profile(remove_request));
+    held(service->remove_space_for_good(removal()).result);
+    held(service->select_space("client-a", "profile-b", "profile-a"));
+    EXPECT_EQ(writes + creates + edits + removals, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
+    {
+      std::lock_guard lock(mutex);
+      release = true;
+    }
+    changed.notify_all();
+    for (int attempt = 0; attempt < 300 && admin->running(); ++attempt) std::this_thread::sleep_for(10ms);
+    ASSERT_FALSE(admin->running());
+    const auto active = launch();
+    EXPECT_EQ(service->prepare(active, "profile-a").status, 200);
+    active->cancel();
   }
 
 }  // namespace

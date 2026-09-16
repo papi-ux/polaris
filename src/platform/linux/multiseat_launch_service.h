@@ -31,6 +31,10 @@ namespace multiseat {
   inline constexpr profile_launch_result_t space_start_timeout_result {
     504, "The Space did not start in time.", "space_start_timeout",
     "Try again. If it keeps happening, open Spaces in Polaris and check Host Setup."};
+  // While an administrator approves a change to this PC's setup from the Spaces page.
+  inline constexpr profile_launch_result_t spaces_host_setup_running_result {
+    409, "Polaris is changing this PC's Spaces setup.", "spaces_host_setup_running",
+    "Try again when Host Setup in Polaris finishes."};
   struct profile_begin_result_t {
     profile_launch_result_t result;
     std::optional<seat_handle_t> seat;
