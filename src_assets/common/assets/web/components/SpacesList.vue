@@ -127,7 +127,7 @@ const dialogOpen = ref(false), dialogSpace = ref(null), dialogOperation = ref(''
 const removeMode = ref('archive'), typedName = ref(''), requestId = ref('')
 let opener = null
 const pending = ref(null), submitted = ref(false)
-const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 && !/[ -]/u.test(name.value))
+const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 && !/[\u0000-\u001f\u007f]/u.test(name.value))
 const canLaunch = client => client && !client.temporary_authorization && (Number(client.perm) & permissionMapping.launch) !== 0
 const deviceName = device => device?.friendly_name || device?.name || t('spaces.paired_device')
 
