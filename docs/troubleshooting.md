@@ -70,6 +70,23 @@ To keep the copy, refresh it after every update as the
 also shows the old version until the new deployment is booted; `rpm-ostree status` marks the
 booted one with `●`.
 
+### Restart from the console or the tray
+
+Under `polaris.service`, a restart asked for from the console or the tray exits with status 75
+and the unit starts the installed binary again a few seconds later, so a restart after a package
+update runs the new version. Started any other way, Polaris re-executes itself in place and keeps
+its process id. `systemctl --user stop` and `restart` always win over a pending restart: the
+process exits instead of re-executing, so a stop cannot hang until systemd's timeout.
+
+A custom unit with its own `Restart=` can opt into the same behaviour with
+`Environment=POLARIS_SERVICE_RESTART=1`; `POLARIS_SERVICE_RESTART=0` keeps the in-place restart
+under any unit.
+
+In 1.4.8 a restart request could be lost when the host happened to be running a shell command at
+that moment. The console then kept the old settings and the log ended at
+"Shutdown requested: restart requested". On such a host, `systemctl --user restart polaris` still
+works.
+
 ## Web UI does not load
 
 1. Confirm Polaris is running.
