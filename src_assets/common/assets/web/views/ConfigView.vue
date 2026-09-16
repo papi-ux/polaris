@@ -653,6 +653,8 @@ const searchSummary = computed(() => i18n.t('config.search_results', { query: se
 const searchHasResults = computed(() => matchingTabs.value.length > 0)
 const sectionHashTabs = {
   encryption_and_trust: 'network',
+  artwork_integration: 'general',
+  ai_explanations: 'ai',
 }
 const sensitiveValuePattern = /(api[_-]?key|token|password|credential|secret|cert|pkey|private[_-]?key)/i
 const hasUnsavedChanges = computed(() => {
