@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentRelease = () => {
+const historicalRelease = () => {
   const changelog = read('docs/changelog.md')
   const start = changelog.indexOf('## v1.4.8 - 2026-09-16')
   const end = changelog.indexOf('## v1.4.7 - 2026-09-12')
@@ -13,7 +13,7 @@ const currentRelease = () => {
   return changelog.slice(start, end)
 }
 
-const currentNotes = () => read('docs/release-notes/v1.4.8.md')
+const historicalNotes = () => read('docs/release-notes/v1.4.8.md')
 
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
@@ -23,18 +23,9 @@ const expectedAssets = [
 ].sort()
 const withdrawnSysextAsset = 'Polaris-sysext-x86_64.raw'
 
-describe('v1.4.8 release contract', () => {
-  it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.8')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.8"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.8',
-    )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.8-1|x86_64'")
-  })
-
+describe('historical v1.4.8 release contract', () => {
   it('headlines Spaces as a preview and says what it cannot do yet in the first sentence', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const intro = notes.split('\n')[2]
     expect(intro).toMatch(/^Spaces arrives as an early preview/)
     expect(intro).toContain('configured hosts only')
@@ -54,14 +45,14 @@ describe('v1.4.8 release contract', () => {
     ]) {
       expect(notes, `v1.4.8 preview limits must include: ${fact}`).toContain(fact)
     }
-    expect(currentRelease()).toContain('Spaces preview')
-    expect(currentRelease()).toContain('First runtime download remains unavailable')
-    expect(currentRelease()).toContain('A refused Space launch now says why')
-    expect(currentRelease()).toContain("The Spaces console speaks the console's grammar")
+    expect(historicalRelease()).toContain('Spaces preview')
+    expect(historicalRelease()).toContain('First runtime download remains unavailable')
+    expect(historicalRelease()).toContain('A refused Space launch now says why')
+    expect(historicalRelease()).toContain("The Spaces console speaks the console's grammar")
   })
 
   it('says what the emulator library does, in the words a player would use', () => {
-    const evidence = `${currentRelease()}\n${currentNotes()}`
+    const evidence = `${historicalRelease()}\n${historicalNotes()}`
     for (const fact of [
       'ROM folder',
       'covers',
@@ -80,7 +71,7 @@ describe('v1.4.8 release contract', () => {
   })
 
   it('keeps the heads up honest about behaviour changes and what was not validated', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     for (const fact of [
       'split the way a shell would before it runs',
       'at least two seconds and at most thirty',
@@ -96,7 +87,7 @@ describe('v1.4.8 release contract', () => {
   })
 
   it('ships exactly the four supported packages and installs them from this tag', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const blocks = [...notes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
       .map((match) => match[1])
       .filter((block) => block.includes('wget --output-document='))
@@ -115,7 +106,7 @@ describe('v1.4.8 release contract', () => {
   })
 
   it('closes the changelog section with the exact four-asset sentence and no stray blank line', () => {
-    const lines = currentRelease().trimEnd().split('\n')
+    const lines = historicalRelease().trimEnd().split('\n')
     const bullets = lines.filter((line) => line.startsWith('- '))
     expect(bullets.at(-1)).toContain(
       'Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, ' +

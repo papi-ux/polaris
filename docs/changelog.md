@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.4.9 - 2026-09-16
+
+A setup update shaped by a fresh install: first-time setup covers artwork and AI explanations, saved settings apply without a restart, restart from the console and the tray works again, and host setup, the KMS guidance, the Spaces helper and the Spaces page say what they found. Polaris only; Nova stays at v1.4.8. Existing configurations and paired devices remain valid.
+
 - A saved SteamGridDB key or AI provider setting takes effect while Polaris runs: the cover search, Nova's artwork search and AI explanations use the new value at once. The save response carries `restart_required`, and the settings page and the first-run wizard ask for a restart only when a saved change still needs one.
 - Host setup removes an `/etc` copy of the udev rules or modules-load configuration that an older Polaris installed, recognising every version Polaris shipped, and its closing summary names a copy it keeps because that copy may hold a local edit.
 - Every Polaris install or update replaces the binary without the KMS capture capability. The startup log, the Doctor, a refused launch and the package notes now say to run `sudo -H polaris --setup-host --enable-kms` again after each one.
@@ -21,6 +25,8 @@ starts at `v1.0.0`.
 - Docs: the README catches up with 1.4.8 (the Spaces preview and its limits, the ROM folder library, 240 FPS on created displays, refusals that say why, the capture forecast), and a [Spaces or regular streaming](spaces-or-regular.md) page puts the two side by side in one table, linked from the Spaces guide.
 - Docs: an [uninstall page](uninstall.md) in the order that works: the Spaces policies first while the helper still exists, then the package, then what the package leaves behind (rule copies under `/etc`, a `/usr/share/polaris` that other files kept alive, the Spaces security record, your own additions) and `~/.config/polaris` with a keep-or-wipe table. Every distribution page links it.
 - Docs: the Spaces guide explains the security helper's three refusals (a policy at another priority, a Polaris process still running, an input rule it did not install) and the fix for each.
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
+
 ## v1.4.8 - 2026-09-16
 
 A Spaces preview matched with Nova v1.4.8, with a library that fills from a folder of emulator games, higher frame rates on the displays Polaris creates, and launch refusals that say why. Spaces is for configured hosts only and has no public runtime download yet. Existing configurations and paired devices remain valid.
