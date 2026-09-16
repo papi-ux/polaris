@@ -39,12 +39,15 @@ TEST(BuiltinArtworkContract, ResolvesThePackagedPosterAndRetiresOnlyAutomaticMat
   ASSERT_FALSE(promotion.empty());
 
   EXPECT_NE(policy.find("VIRTUAL_DISPLAY_UUID"), std::string::npos);
+  // Desktop entries are not games either (Low Res Desktop once took Low Magic Age's artwork).
+  EXPECT_NE(policy.find("app.desktop_mirror"), std::string::npos);
   EXPECT_NE(configured.find("proc::validate_app_image_path"), std::string::npos);
   EXPECT_NE(promotion.find("candidate_already_cached"), std::string::npos);
   EXPECT_NE(promotion.find("bundled_utility && !candidate_already_cached"), std::string::npos);
-  EXPECT_NE(promotion.find("game_artwork::source_e::local"), std::string::npos);
   EXPECT_NE(promotion.find("remove_cached_source_assets"), std::string::npos);
   EXPECT_NE(promotion.find("game_artwork::source_e::steamgriddb"), std::string::npos);
+  // The automatic cache is retired whether or not the bundled poster could be copied.
+  EXPECT_EQ(promotion.find("bundled_poster_ready"), std::string::npos);
   EXPECT_EQ(promotion.find("game_artwork::source_e::override"), std::string::npos);
 }
 
@@ -58,5 +61,29 @@ TEST(BuiltinArtworkContract, AutomaticResolutionDoesNotSearchGamesForUtilityEntr
 
   EXPECT_NE(body.find("bundled_utility && kind != game_artwork::kind_e::poster"), std::string::npos);
   EXPECT_NE(body.find("any_kind_missing && !bundled_utility"), std::string::npos);
-  EXPECT_NE(body.find("plan_steamgriddb_search(app->name)"), std::string::npos);
+  // The exact app id lookup, then only a result carrying the entry's own title; never the first hit.
+  EXPECT_NE(body.find("automatic_steamgriddb_game(app->name, app->steam_appid, transport)"), std::string::npos);
+  EXPECT_EQ(body.find("parse_steamgriddb_game_id"), std::string::npos);
+  // Remove artwork turns automatic lookup off for Steam and SteamGridDB alike.
+  EXPECT_NE(body.find("automatic_artwork_lookup_enabled(appdata, app->uuid)"), std::string::npos);
+  EXPECT_NE(body.find("automatic_lookup && game_artwork::is_valid_steam_appid"), std::string::npos);
+  EXPECT_NE(body.find("!automatic_lookup ||"), std::string::npos);
+  EXPECT_NE(body.find("artwork_manifest_for(appdata, *app)"), std::string::npos);
+}
+
+TEST(BuiltinArtworkContract, UtilityEntriesNeverAdvertiseOrServeAnAutomaticMatch) {
+  const auto source = read_nvhttp_source();
+  const auto manifest = function_body(source, "nlohmann::json artwork_manifest_for(");
+  ASSERT_FALSE(manifest.empty());
+  EXPECT_NE(manifest.find("uses_bundled_utility_artwork(app)"), std::string::npos);
+  EXPECT_NE(manifest.find("asset.source == game_artwork::source_e::steamgriddb"), std::string::npos);
+  EXPECT_NE(source.find("game[\"artwork\"] = artwork_manifest_for(platf::appdata(), app);"), std::string::npos);
+
+  const auto handler = source.find("auto polarisGameArtwork =");
+  ASSERT_NE(handler, std::string::npos);
+  const auto next_handler = source.find("auto polarisResolveGameArtwork =", handler);
+  ASSERT_NE(next_handler, std::string::npos);
+  const auto asset_route = source.substr(handler, next_handler - handler);
+  EXPECT_NE(asset_route.find("asset->source == game_artwork::source_e::steamgriddb && uses_bundled_utility_artwork(*app)"),
+            std::string::npos);
 }

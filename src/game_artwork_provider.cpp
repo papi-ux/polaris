@@ -431,28 +431,79 @@ namespace game_artwork::providers {
     return request;
   }
 
-  std::optional<std::uint64_t> parse_steamgriddb_game_id(const std::string_view response_body) {
+  namespace {
+    // Trademark, registered and copyright signs decorate a title; they never tell two games apart.
+    std::string automatic_title_key(std::string_view value) {
+      std::string plain(value.substr(0, maximum_match_title_bytes));
+      for (const std::string_view sign : {std::string_view {"\xE2\x84\xA2"}, std::string_view {"\xC2\xAE"}, std::string_view {"\xC2\xA9"}}) {
+        for (auto at = plain.find(sign); at != std::string::npos; at = plain.find(sign, at)) {
+          plain.replace(at, sign.size(), " ");
+        }
+      }
+      return normalized_match_title(plain);
+    }
+  }  // namespace
+
+  std::optional<std::uint64_t> select_steamgriddb_title_match(
+    const std::string_view title,
+    const std::string_view response_body
+  ) {
+    const auto wanted = automatic_title_key(title);
+    if (wanted.empty()) return std::nullopt;
     const auto response = parse_response(response_body);
     if (!is_success_response(response) || !response.contains("data") || !response["data"].is_array()) {
       return std::nullopt;
     }
-
     for (const auto &result : response["data"]) {
-      if (!result.is_object() || !result.contains("id")) {
-        continue;
+      if (!result.is_object() || !result.contains("id")) continue;
+      const auto id = positive_json_integer(result["id"]);
+      const auto candidate = sanitized_match_title(result);
+      if (id && candidate && automatic_title_key(*candidate) == wanted) return id;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<request_t> plan_steamgriddb_steam_game(const std::string_view steam_appid) {
+    if (!canonical_library_appid(steam_appid)) return std::nullopt;
+    auto request = steamgriddb_request(
+      operation_e::search,
+      std::nullopt,
+      std::string {steamgriddb_api_root} + "games/steam/" + std::string(steam_appid)
+    );
+    if (!is_allowed_provider_url(provider_e::steamgriddb, request.url)) return std::nullopt;
+    return request;
+  }
+
+  std::optional<std::uint64_t> parse_steamgriddb_steam_game_id(const std::string_view response_body) {
+    const auto response = parse_response(response_body);
+    if (!is_success_response(response) || !response.contains("data") || !response["data"].is_object() ||
+        !response["data"].contains("id")) {
+      return std::nullopt;
+    }
+    return positive_json_integer(response["data"]["id"]);
+  }
+
+  std::optional<std::uint64_t> automatic_steamgriddb_game(
+    const std::string_view title,
+    const std::string_view steam_appid,
+    const transport_t &transport
+  ) {
+    if (!transport) return std::nullopt;
+    const auto ask = [&](const request_t &request) -> std::optional<std::string> {
+      const auto response = transport(request, maximum_asset_bytes);
+      if (!response || response->status_code < 200 || response->status_code >= 300) return std::nullopt;
+      if (!response->final_url.empty() && !is_allowed_provider_url(request.provider, response->final_url)) {
+        return std::nullopt;
       }
-      const auto &id = result["id"];
-      if (id.is_number_unsigned()) {
-        const auto value = id.get<std::uint64_t>();
-        if (value != 0) {
-          return value;
-        }
-      } else if (id.is_number_integer()) {
-        const auto value = id.get<std::int64_t>();
-        if (value > 0) {
-          return static_cast<std::uint64_t>(value);
-        }
+      return std::string(response->body.begin(), response->body.end());
+    };
+    if (const auto request = plan_steamgriddb_steam_game(steam_appid)) {
+      if (const auto body = ask(*request)) {
+        if (const auto id = parse_steamgriddb_steam_game_id(*body)) return id;
       }
+    }
+    if (const auto request = plan_steamgriddb_search(title)) {
+      if (const auto body = ask(*request)) return select_steamgriddb_title_match(title, *body);
     }
     return std::nullopt;
   }

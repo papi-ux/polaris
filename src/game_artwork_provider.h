@@ -97,8 +97,30 @@ namespace game_artwork::providers {
   /** Plan the first SteamGridDB lookup without embedding the API key. */
   std::optional<request_t> plan_steamgriddb_search(std::string_view title);
 
-  /** Parse a ranked SteamGridDB search response, returning the first valid ID. */
-  std::optional<std::uint64_t> parse_steamgriddb_game_id(std::string_view response_body);
+  /**
+   * The SteamGridDB game an automatic lookup may take from a search answer: the first result
+   * whose title equals the entry's title once case, spacing, punctuation and trademark signs
+   * are ignored. A result that is only similar is never taken, so an entry SteamGridDB does not
+   * know, such as Low Res Desktop, gets no artwork instead of another game's (Low Magic Age).
+   */
+  std::optional<std::uint64_t> select_steamgriddb_title_match(std::string_view title, std::string_view response_body);
+
+  /** Plan SteamGridDB's exact game lookup for a Steam app id, without embedding the API key. */
+  std::optional<request_t> plan_steamgriddb_steam_game(std::string_view steam_appid);
+
+  /** The game id in a SteamGridDB answer for games/steam/{appid}. */
+  std::optional<std::uint64_t> parse_steamgriddb_steam_game_id(std::string_view response_body);
+
+  /**
+   * The SteamGridDB game automatic artwork may use for an entry, asking the transport at most
+   * twice: the exact lookup by Steam app id when the entry has one, then a title search whose
+   * result must match the title exactly. When neither finds the entry, nothing is downloaded.
+   */
+  std::optional<std::uint64_t> automatic_steamgriddb_game(
+    std::string_view title,
+    std::string_view steam_appid,
+    const transport_t &transport
+  );
 
   /**
    * Parse ranked SteamGridDB search metadata into a bounded, sanitized type.

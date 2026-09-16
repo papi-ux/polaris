@@ -3032,10 +3032,13 @@ namespace nvhttp {
     }
 
     bool uses_bundled_utility_artwork(const proc::ctx_t &app) {
+      // An entry that streams the desktop is not a game either. No provider has artwork for it,
+      // and a title search only finds a coincidental game (Low Res Desktop -> Low Magic Age).
       return app.uuid == VIRTUAL_DISPLAY_UUID ||
              app.uuid == FALLBACK_DESKTOP_UUID ||
              app.uuid == REMOTE_INPUT_UUID ||
-             app.uuid == TERMINATE_APP_UUID;
+             app.uuid == TERMINATE_APP_UUID ||
+             app.desktop_mirror;
     }
 
     fs::path configured_artwork_image(const proc::ctx_t &app) {
@@ -3084,20 +3087,32 @@ namespace nvhttp {
         (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
       }
       if (bundled_utility) {
-        const auto assets = game_artwork::scan_cached_assets(appdata, app.uuid);
-        const bool bundled_poster_ready = std::any_of(assets.begin(), assets.end(), [](const auto &asset) {
-          return asset.kind == game_artwork::kind_e::poster &&
-                 asset.source == game_artwork::source_e::local;
-        });
-        if (bundled_poster_ready) {
-          // Old builds searched utility titles as if they were games (for
-          // example Virtual Display -> Virtual Boy: Wario Land). Retire only
-          // that automatic cache; an explicit Artwork Studio override remains
-          // authoritative and can still be cleared back to the bundled image.
-          (void) game_artwork::remove_cached_source_assets(
-            appdata, app.uuid, game_artwork::source_e::steamgriddb);
-        }
+        // Old builds searched utility and desktop titles as if they were games (Virtual
+        // Display -> Virtual Boy: Wario Land, Low Res Desktop -> Low Magic Age). Retire only that
+        // automatic cache, whether or not the bundled image could be copied as the local poster:
+        // no game's artwork belongs on these entries. An explicit Artwork Studio override remains
+        // authoritative and can still be cleared back to the bundled image.
+        (void) game_artwork::remove_cached_source_assets(
+          appdata, app.uuid, game_artwork::source_e::steamgriddb);
       }
+    }
+
+    // The manifest Nova reads for an entry. A utility or desktop entry never advertises an
+    // automatic SteamGridDB match, even one whose file outlived its removal, so a stale file
+    // cannot stand in for the entry's own image.
+    nlohmann::json artwork_manifest_for(const std::filesystem::path &appdata, const proc::ctx_t &app) {
+      if (!uses_bundled_utility_artwork(app)) return current_artwork_manifest(appdata, app.uuid);
+      if (!game_artwork::recover_interrupted_artwork_override(appdata, app.uuid)) return nullptr;
+      auto lock = game_artwork::acquire_artwork_override_read_lock();
+      auto assets = game_artwork::scan_cached_assets(appdata, app.uuid);
+      std::erase_if(assets, [](const game_artwork::asset_t &asset) {
+        return asset.source == game_artwork::source_e::steamgriddb;
+      });
+      auto manifest = game_artwork::make_manifest(app.uuid, assets);
+      if (const auto metadata = game_artwork::load_artwork_override(appdata, app.uuid)) {
+        manifest = game_artwork::decorate_manifest_with_artwork_override(std::move(manifest), *metadata);
+      }
+      return manifest;
     }
   }  // namespace
 
@@ -8684,7 +8699,7 @@ namespace nvhttp {
         game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
         promote_local_artwork_poster(app);
-        game["artwork"] = current_artwork_manifest(platf::appdata(), app.uuid);
+        game["artwork"] = artwork_manifest_for(platf::appdata(), app);
         game["last_launched"] = app.last_launched;
         // Platform and runtime only where the stored Lutris runner determines
         // them; Nova renders nothing for a missing value, and no badge beats a
@@ -8889,7 +8904,9 @@ namespace nvhttp {
       }
       auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
       const auto asset = game_artwork::find_cached_asset(appdata, app->uuid, asset_request->kind);
-      if (!asset) {
+      // A utility or desktop entry never serves an automatic SteamGridDB match, even one whose
+      // file outlived its removal.
+      if (!asset || (asset->source == game_artwork::source_e::steamgriddb && uses_bundled_utility_artwork(*app))) {
         response->write(SimpleWeb::StatusCode::client_error_not_found);
         return;
       }
@@ -8938,8 +8955,11 @@ namespace nvhttp {
       const auto transport = make_artwork_transport(api_key);
       // Promote existing host artwork before attempting either remote provider.
       promote_local_artwork_poster(*app);
+      // Remove artwork in the console turns automatic lookup off for an entry. From then on only
+      // an explicit pick in Nova brings downloaded artwork back.
+      const bool automatic_lookup = game_artwork::automatic_artwork_lookup_enabled(appdata, app->uuid);
 
-      if (game_artwork::is_valid_steam_appid(app->steam_appid)) {
+      if (automatic_lookup && game_artwork::is_valid_steam_appid(app->steam_appid)) {
         (void) game_artwork::providers::execute_download_plan(
           appdata,
           app->uuid,
@@ -8963,7 +8983,7 @@ namespace nvhttp {
       // the response reports as requested.
       std::vector<game_artwork::kind_e> requested_kinds;
       for (const auto kind : resolvable_kinds) {
-        if (bundled_utility && kind != game_artwork::kind_e::poster) continue;
+        if (!automatic_lookup || (bundled_utility && kind != game_artwork::kind_e::poster)) continue;
         if (kind_is_missing(kind)) {
           requested_kinds.push_back(kind);
         }
@@ -8972,49 +8992,44 @@ namespace nvhttp {
 
       if (any_kind_missing && !bundled_utility && nonblank_artwork_api_key(api_key)) {
         try {
-          const auto search_request = game_artwork::providers::plan_steamgriddb_search(app->name);
-          if (search_request) {
-            const auto search_response = transport(*search_request, game_artwork::maximum_asset_bytes);
-            if (search_response && search_response->status_code >= 200 && search_response->status_code < 300) {
-              const std::string search_body(search_response->body.begin(), search_response->body.end());
-              const auto game_id = game_artwork::providers::parse_steamgriddb_game_id(search_body);
-              if (game_id) {
-                std::vector<game_artwork::providers::request_t> downloads;
-                for (const auto &list_request : game_artwork::providers::plan_steamgriddb_assets(*game_id)) {
-                  if (!list_request.kind || !kind_is_missing(*list_request.kind)) continue;
-                  const auto list_response = transport(list_request, game_artwork::maximum_asset_bytes);
-                  if (!list_response || list_response->status_code < 200 || list_response->status_code >= 300) {
-                    continue;
-                  }
-                  const std::string list_body(list_response->body.begin(), list_response->body.end());
-                  for (const auto &candidate : game_artwork::providers::parse_steamgriddb_assets(
-                         *list_request.kind,
-                         list_body
-                       )) {
-                    downloads.push_back({
-                      game_artwork::provider_e::steamgriddb,
-                      game_artwork::providers::operation_e::download,
-                      candidate.kind,
-                      candidate.url,
-                      false,
-                    });
-                  }
-                }
-                (void) game_artwork::providers::execute_download_plan(
-                  appdata,
-                  app->uuid,
-                  downloads,
-                  transport
-                );
+          // The exact Steam app id lookup first, then a title search whose result must carry the
+          // entry's title exactly. No match downloads nothing rather than another game's artwork.
+          const auto game_id = game_artwork::providers::automatic_steamgriddb_game(app->name, app->steam_appid, transport);
+          if (game_id) {
+            std::vector<game_artwork::providers::request_t> downloads;
+            for (const auto &list_request : game_artwork::providers::plan_steamgriddb_assets(*game_id)) {
+              if (!list_request.kind || !kind_is_missing(*list_request.kind)) continue;
+              const auto list_response = transport(list_request, game_artwork::maximum_asset_bytes);
+              if (!list_response || list_response->status_code < 200 || list_response->status_code >= 300) {
+                continue;
+              }
+              const std::string list_body(list_response->body.begin(), list_response->body.end());
+              for (const auto &candidate : game_artwork::providers::parse_steamgriddb_assets(
+                     *list_request.kind,
+                     list_body
+                   )) {
+                downloads.push_back({
+                  game_artwork::provider_e::steamgriddb,
+                  game_artwork::providers::operation_e::download,
+                  candidate.kind,
+                  candidate.url,
+                  false,
+                });
               }
             }
+            (void) game_artwork::providers::execute_download_plan(
+              appdata,
+              app->uuid,
+              downloads,
+              transport
+            );
           }
         } catch (...) {
           // Upstream and parsing failures preserve all previously valid cache entries.
         }
       }
 
-      auto manifest = current_artwork_manifest(appdata, app->uuid);
+      auto manifest = artwork_manifest_for(appdata, *app);
 
       // Clients cannot tell a successful no-op from a silent failure by diffing a manifest,
       // so the response says what this call actually did. Nova refuses a resolve response
