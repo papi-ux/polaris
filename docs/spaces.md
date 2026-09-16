@@ -359,11 +359,29 @@ switches accounts or Spaces.
 ## Rename, remove and restore
 
 **Rename** on a Space card changes its name without touching its account or
-files; refresh the library in Nova afterwards. **Remove Space** archives it
-after a confirmation: devices lose access, other Spaces stay available, and
-installed games, saves, settings and the sign-in stay on the host. It frees no
-disk space and deletes no Docker volume. **Restore** under **Archived Spaces**
-brings it back without its device access; assign devices again.
+files; refresh the library in Nova afterwards.
+
+**Remove Space** asks what happens to the Space's games and saves. Other Spaces
+stay available either way.
+
+- **Archive** is already selected. Devices lose access, and installed games,
+  saves, settings and the Steam sign-in stay on the host, so archiving frees no
+  disk space. **Restore** under **Archived Spaces** brings the Space back
+  without its device access; assign devices again.
+- **Remove for good** deletes the Space with its installed games, saves,
+  settings and sign-in, and frees their disk space. Type the Space's name
+  exactly as it is shown to confirm. It cannot be undone or restored. An
+  archived Space offers **Remove for good** beside **Restore**.
+
+Like every change to Spaces, removing for good needs every Space stream to end
+first. Polaris deletes only the storage it made for that Space, and only
+through Docker: if the storage is not the one Polaris created, or Docker does
+not answer, nothing is removed and the page says why. If Docker stops partway,
+the Space stays under **Archived Spaces**, the page names the Docker volume
+that may still hold its games and saves, and **Remove for good** again
+finishes the job. The last Space can be archived but not removed for good,
+because Polaris makes a new Space from an existing one; create another Space
+first.
 
 ## Check sound and stuttering
 

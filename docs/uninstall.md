@@ -10,12 +10,16 @@ lists all of it, in the order that works.
 ## Before you start
 
 1. Finish your games and end every stream from the client.
-2. Quit Polaris. If it runs as a service:
+2. If you want a Space's games and saves gone too, remove that Space for good now, while Polaris
+   still runs: **Remove Space**, then **Remove for good**, on the Spaces page, as
+   [Rename, remove and restore](spaces.md#rename-remove-and-restore) describes. The last Space can
+   only be archived there; section 1 below covers removing its home with Docker.
+3. Quit Polaris. If it runs as a service:
    ```bash
    systemctl --user disable --now polaris
    ```
    If you start it from the desktop or the tray, quit it from the tray icon.
-3. Check that nothing is left running:
+4. Check that nothing is left running:
    ```bash
    pgrep -a polaris
    ```
@@ -35,11 +39,12 @@ It removes only the SELinux policies and the input rule it installed, and it nev
 homes. If it refuses, [Prepare Spaces security support](spaces.md#prepare-spaces-security-support)
 explains each message.
 
-Docker keeps the gaming runtime image and each Space's Steam home after the package is gone, and
-Polaris never deletes a home on its own. The homes are Docker volumes with opaque names, listed by
-`docker volume ls` next to your other volumes. Leave them if you might come back; the games and
-saves live there. Remove one with `docker volume rm` only when you are sure which Space it belongs
-to and want its games and saves gone for good. The runtime image is safe to remove at any time:
+Docker keeps the gaming runtime image and each Space's Steam home after the package is gone.
+Polaris deletes a home only when you remove its Space for good. The homes left are Docker volumes
+with opaque names, listed by `docker volume ls` next to your other volumes. Leave them if you might
+come back; the games and saves live there. Remove one with `docker volume rm` only when you are sure
+which Space it belongs to and want its games and saves gone for good. The runtime image is safe to
+remove at any time:
 
 ```bash
 docker image ls 'ghcr.io/papi-ux/polaris-worker-steam'

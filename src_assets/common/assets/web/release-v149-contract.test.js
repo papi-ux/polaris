@@ -50,6 +50,7 @@ describe('v1.4.9 release contract', () => {
       'left in /etc',
       'cannot be created on this version yet',
       'New installs start in Private Stream',
+      'can be removed for good',
     ]) {
       expect(notes, `v1.4.9 notes must include: ${fact}`).toContain(fact)
     }
@@ -67,6 +68,7 @@ describe('v1.4.9 release contract', () => {
       'one per binary',
       'reads as ready and waiting',
       'uninstall page',
+      'Removing a Space can now delete it for good',
     ]) {
       expect(section, `v1.4.9 changelog must include: ${fact}`).toContain(fact)
     }
