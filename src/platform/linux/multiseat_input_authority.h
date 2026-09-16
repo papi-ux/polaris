@@ -59,6 +59,7 @@ namespace multiseat::input {
     touch,
     pen,
     gamepad,
+    steam_gamepad,
   };
 
   /** Devices created before a worker starts. Keyboard and mouse are mandatory. */
@@ -66,6 +67,9 @@ namespace multiseat::input {
     bool touch = false;
     bool pen = false;
     std::uint32_t gamepad_slots = 1;
+    // One translated output owned by this generation, without a creation FD.
+    // Steam profiles currently support one controller.
+    bool steam_input = false;
 
     bool operator==(const plan_t &) const = default;
   };

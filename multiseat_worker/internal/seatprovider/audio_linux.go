@@ -190,9 +190,10 @@ func waitForProbe(
 	children []*managedChild,
 	probe func(time.Duration) error,
 ) error {
+	var lastProbeError error
 	for {
 		if err := audioStartupActive(parent, deadline); err != nil {
-			return err
+			return errors.Join(err, lastProbeError)
 		}
 		for _, child := range children {
 			if child == nil || child.exited() {
@@ -201,10 +202,12 @@ func waitForProbe(
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return errors.New("runtime audio readiness timed out")
+			return errors.Join(errors.New("runtime audio readiness timed out"), lastProbeError)
 		}
 		if err := probe(remaining); err == nil {
 			return audioStartupActive(parent, deadline)
+		} else {
+			lastProbeError = err
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -212,7 +215,7 @@ func waitForProbe(
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return errors.New("runtime audio startup was canceled")
+			return errors.Join(errors.New("runtime audio startup was canceled"), lastProbeError)
 		case <-timer.C:
 		}
 	}
@@ -503,10 +506,10 @@ func runAudio(
 	case <-parent.Done():
 		return nil
 	case <-pipeWire.done:
-		return errors.New("runtime PipeWire core exited unexpectedly")
+		return pipeWire.exitError("runtime PipeWire core exited unexpectedly")
 	case <-pulse.done:
-		return errors.New("runtime Pulse service exited unexpectedly")
+		return pulse.exitError("runtime Pulse service exited unexpectedly")
 	case <-policy.done:
-		return errors.New("runtime audio policy exited unexpectedly")
+		return policy.exitError("runtime audio policy exited unexpectedly")
 	}
 }

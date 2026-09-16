@@ -679,6 +679,19 @@ namespace private_state_file {
     return read_locked(directory, max_bytes, permit_public_read);
   }
 
+  leased_read_result_t read_with_lease(const std::filesystem::path &target, std::size_t max_bytes) {
+    struct lease_t {
+      directory_handle_t directory;
+      state_file_lock_t lock;
+      explicit lease_t(const std::filesystem::path &path) : directory(path), lock(directory, false) {}
+    };
+    auto lease = std::make_shared<lease_t>(target);
+    if (!lease->directory || !lease->lock) return {};
+    auto result = read_locked(lease->directory, max_bytes, false);
+    if (!result) return {.read = std::move(result)};
+    return {.read = std::move(result), .lease = std::move(lease)};
+  }
+
   write_result_t write_atomic(const std::filesystem::path &target, std::string_view payload) {
     directory_handle_t directory {target, true};
     if (!directory) return {write_status_e::not_committed};

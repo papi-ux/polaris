@@ -103,6 +103,7 @@ if(NOT WIN32)
 endif()
 
 set(TEST_AUDIT_SUPPORT_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/src/file_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
@@ -290,7 +291,13 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_worker_adapter.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_runtime.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_controller_production.cpp
-        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_host.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_library.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_profile_catalog.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_launch_service.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_runtime.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup_service.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_container_host.cpp
         ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_physical.cpp
     )
 endif()
@@ -427,7 +434,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_session_bridge.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_session_adapters.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_moonlight_live_session.cpp
-        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_backend.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_network.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.cpp
         ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_media_pump.cpp
@@ -441,7 +449,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_session_adapters.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_moonlight_live_session.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_inputtino_multiseat_backend.cpp
-        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_podman_backend.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_container_backend.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_authority.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_client.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_worker_media_pump.cpp

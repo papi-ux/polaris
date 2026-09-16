@@ -1,7 +1,151 @@
 # Multiseat worker image inputs
 
-This directory defines an offline-reviewable image recipe. It does not enable
-multiseat or make the current Polaris process a container controller.
+Continuous H.264/Opus media is packaged with an explicit worker opt-in. See
+[`container-multiseat-encoder-provider.md`](../../docs/research/container-multiseat-encoder-provider.md)
+for its media contract and remaining acceptance. The
+[Steam profile adapter](../../docs/research/container-multiseat-steam.md) adds
+Big Picture or a typed game ID, private storage, and a dedicated Docker bridge.
+GPU seats select NVENC or VA-API on their allocated render device. NVIDIA
+variants include the pinned nvcodec plugin; software capture retains OpenH264.
+
+
+Docker is the default build and worker engine. See
+[the Docker backend decision](../../docs/research/container-multiseat-docker.md)
+for the host trust boundary, image import, profile initialization, and acceptance.
+The [saved profile catalog](../../docs/research/container-multiseat-profile-storage.md)
+provides private Docker volume provisioning and paired device assignments through
+the administrative CLI. The
+[host launch integration](../../docs/research/container-multiseat-launch-integration.md)
+owns the controller when explicitly enabled; production activation defaults off.
+
+Building these images does not enable multiseat in the running Polaris service.
+
+Steam images also build and test 32-bit and 64-bit controller compatibility
+libraries from Polaris source. With controller permission, a Steam seat receives
+one raw controller and one separately allocated Steam translation output. The
+launcher verifies both libraries and the exact output identity before starting
+Steam. Its private broker accepts bounded controller reports, releases held
+controls on disconnect, and retires with the seat. The container receives the
+output's exact event node; device creation stays on the host.
+
+The translated output currently supports one controller per Steam seat. Software
+tests cover both library ABIs, private broker admission, controller release, and
+Docker device reconciliation.
+
+On 2026-09-13, the Steam NVIDIA Docker image built from
+`4eec5ced8392ce98ff405fbe3c5cbcab6a13746e` passed a bounded PEAK DX12
+controller smoke through Nova on an RP6. Automated events on the RP6 controller
+device exercised movement, camera control, menu navigation, and pause/resume with
+Steam Input both enabled and disabled. The compatibility libraries loaded in
+Steam and Proton, and the original Enable Steam Input override was restored.
+A second bounded run with the same image reached Control Ultimate Edition
+gameplay and PEAK's offline airport scene concurrently under two saved Steam
+accounts. A local Moonlight client decoded Control at approximately 60 FPS at
+1080p, while Nova on the RP6 streamed PEAK. Each worker had distinct profile
+storage, a private network namespace, and five allocated input nodes with no
+overlap. RP6 controller events moved PEAK and operated its menus while Control
+remained paused; bounded writes to Control's verified seat keyboard moved its
+character while PEAK remained paused. This does not validate a second physical
+controller or keyboard transport through the local client.
+
+After Control exited normally, disconnecting its client retired only that
+worker. PEAK continued streaming and responding to the RP6 controller after the
+peer worker was removed. Both games returned to Steam through their normal exit
+menus. Final cleanup retained all three profile homes, preserved Enable Steam
+Input for PEAK, removed the test workers and IPC, and restored the original
+SELinux policy with enforcement and the regular Polaris service still active.
+
+Rumble, AMD hardware, and sustained streaming quality still require acceptance.
+The RP6's slow-connection warning also reproduced in Steam Big Picture before
+PEAK started. Client logs recorded decoder watchdog flushes and audio queue
+overruns while the local comparison stream remained stable during gameplay.
+A bounded host capture contained the expected packets for frames the RP6
+reported with incomplete data. That observation does not locate the loss or
+distinguish late delivery from client handling. Streaming quality remains open;
+screenshots, packet captures, and detailed receipts are retained privately.
+
+A follow-up Steam NVIDIA image from
+`1c25a2eb6e5ba5e9e73fdd00c70bf21f57f46b0e`, with Nova
+`de88f759c3363c009af0455f6210dacf65875259`, negotiated a 4000 kbps stream
+budget. NVIDIA confirmed a 3067 kbps video target after audio and transport
+reservations, and Nova requested the required 5 ms Opus packets. The bounded
+11 minute RP6 run reached PEAK's offline airport scene and verified controller
+menu navigation, forward movement and camera rotation. The stream ended at its
+configured test timeout with 39764 video frames, 133308 audio frames and no
+worker discontinuities. Cleanup retained all three profile volumes and restored
+the original policy. Client connection warnings, decoder watchdog flushes and
+audio queue overruns still occurred; this validates startup bitrate selection,
+not sustained streaming quality.
+
+A later RP6 delivery check isolated a degraded wireless link. With no stream
+running, a 30 second synthetic UDP test lost 46.2% of packets sent at 12 Mbps,
+and the device reported an 8 Mbps receive link rate. Reconnecting to the same
+saved network raised the reported receive rate to 648 Mbps; the identical
+31962 packet test then had no loss. A 1 Mbps probe alongside the worker stream
+went from 64.9% loss before reconnecting to no loss afterward.
+
+Using the same NVIDIA image and Nova
+`10a8389a5bd307630006b544783a27ab9dd5f19c` with
+`-PnovaNativeDebugChecks=false`, the subsequent 507 second stream delivered
+30431 video frames and 101438 audio frames. Native client logs recorded no
+unrecoverable video frames, network frame drops or decoder watchdog flushes.
+PEAK offline navigation, movement and camera input worked, and the game
+returned to Steam through its own menus before the bounded test expired.
+All three profile volumes remained and policy cleanup completed. There were
+33 pending-audio messages, so this does not establish prolonged audio quality.
+The cause of the degraded wireless state and its recurrence remain unproven.
+
+A subsequent 1800 second dual-game observation used the same image and Nova
+build. Control and PEAK remained unpaused in loaded scenes with periodic bounded
+input. Both workers kept their identities and separate profile storage; sampled
+streams delivered approximately 60 FPS. Nova recorded no unrecoverable video
+frames or decoder watchdog flushes during that interval, but 272 pending-audio
+warnings remained. This was a scene stability observation, not continuous human
+gameplay or a combat workload benchmark.
+
+The RP6 seat then disconnected and relaunched at 1920x1080x120 while Control's
+original worker stayed at 60 FPS. Nova requested 120 FPS, the worker received
+120000 millihertz, and the Android decoder and surface used 120 FPS. A further
+300 second observation in PEAK's offline airport delivered 120 FPS in sampled
+overlays, with controller camera input and approximately 6 ms reported decode
+time. Control continued at approximately 60 FPS. All 59 worker inventory
+samples within that interval retained both identities.
+
+Nova logged no unrecoverable video frames, decoder watchdog flushes or pending
+audio warnings within those 300 seconds. Its complete 120 FPS connection still
+had 15 pending-audio warnings during other phases. The full connection delivered
+85120 video frames and 141866 audio frames with no worker discontinuities.
+This validates a short mixed refresh streaming observation; it does not establish unique game-rendered
+frames, sustained high refresh gameplay, two 120 FPS seats, or audio quality.
+The stream budget remained 4000 kbps, so maximum image quality was not tested.
+Both games exited through their normal menus. PEAK finished cloud sync; Control
+returned to a Steam account-in-use-elsewhere prompt, which was left untouched,
+so its cloud sync was not verified. The temporary host expired cleanly, all
+three profile homes remained, the prior Nova FPS preference was restored, and
+the original SELinux policy and normal service were verified.
+
+For a 120 FPS check, both Nova's requested frame rate and any paired-device
+display-mode override must permit 120. Confirm the resolved contract, worker
+refresh, decoder configuration and delivered frame rate. A panel running at
+120 Hz alone is insufficient because a 60 FPS stream can use the same mode.
+
+A separate 119 second host audio capture had no reported capture drops. It
+contained 23791 data packets and 11894 FEC packets, totaling about 336 kbps at
+the IP layer. Data packet gaps reached 54.919 ms, with two gaps over 40 ms.
+Capture-point timing includes host scheduling and does not establish delivery
+timing at the handheld or the cause of its audio backlog. The offline audio
+timing reader below makes that analysis reproducible without publishing raw
+captures.
+
+A later capture batching change requests 5 ms Pulse audio capture and logs the
+backend's actual value. Bounded comparisons and a two-seat 120 FPS observation
+are recorded in [the audio timing report](../../docs/research/container-multiseat-audio-timing.md).
+The earlier high bitrate audio failure remains unresolved.
+
+Nova Debug normally enables native FEC validation that intentionally requires
+an extra parity packet. Quality checks now explicitly disable that mode and
+verify the packaged native library. The earlier comparison that accidentally
+reused a debug native library was excluded. Detailed evidence remains private.
 
 `images.lock.json` distinguishes immutable source roots, dependency locks, and
 produced worker artifacts. The Gamescope, Steam, Heroic, and Lutris source roots
@@ -30,7 +174,7 @@ signature, attestation, vulnerability policy, or complete license bundle is
 claimed by this milestone. A publishable image must add those gates and retain the
 resolved upstream manifests as provenance evidence before any lock refresh.
 
-The current entrypoint is intentionally a supervisor and IPC proof. It owns
+The entrypoint owns
 private control and media sockets, mutual authentication, explicit data-plane
 attachment, health state, and shutdown. The worker has an injectable lifecycle
 contract for a session bus, audio, capture-producing outer display, nested
@@ -44,8 +188,9 @@ and escalates to KILL at the component deadline.
 
 The image carries the dispatcher and private session-bus, audio, outer capture,
 nested Gamescope, verified input-reader, and experimental launcher providers.
-The launcher currently accepts only the image-owned `input-pong-v1` workload
-with the Gamescope profile. This small offline X11 game exercises keyboard,
+The launcher accepts the image-owned `input-pong-v1` workload
+with the Gamescope profile, and Steam Big Picture or a canonical numeric game
+ID with the Steam profile. The small offline X11 game exercises keyboard,
 pointer, optional gamepad, and private Pulse audio without launcher accounts.
 Its executable is compiled against each profile's locked X11/GStreamer ABI;
 image checks resolve its ELF dependencies and the SBOM records its source hash.
@@ -64,23 +209,21 @@ surviving seat after its peer's container is removed. These observations prove
 worker-local codec roundtrips; continuous media transport and client playback
 remain separate acceptance gates.
 
-The production `run` command still injects no adapters, so no worker announces
-a media contract yet. Worker-local encoding is still missing, and the Steam,
-Heroic, and Lutris launcher implementations remain outstanding. The controller
-side of the media path is now complete: a worker that announces a contract on
+The production `run --media=enabled` path supplies the implemented providers
+and continuous encoder media source for Gamescope and Steam allocations.
+Heroic and Lutris launcher implementations remain outstanding. A worker that announces a contract on
 its media channel has it held against what the client negotiated, acknowledged,
 and its frames carried to that client's own packet destination, with keyframe
-requests and reference invalidations travelling back on control. What is left
-between here and a streaming worker is the producer. Provider readiness proves a resource or
+requests and reference invalidations travelling back on control. Provider readiness proves a resource or
 supervised process is available; it does not prove game frames reached a client.
 Unit tests and isolated physical input receipts likewise do not establish
 compositor input delivery or successful game streaming.
 
-The controller now also has an injected host-brokered input authority and a
-Linux inputtino lifecycle backend, but neither is wired to this image or the
-singleton runtime. The backend creates virtual devices outside the untrusted
+The controller has a host-brokered input authority and a
+Linux inputtino lifecycle backend connected through the profile launch owner.
+The backend creates virtual devices outside the untrusted
 launcher boundary and derives the exact generation's event-node identity from
-`fstat`, sysfs, and udev before returning fixed worker-local paths. The Podman
+`fstat`, sysfs, and udev before returning fixed worker-local paths. The container
 adapter consumes that allocation through a separate injected source, verifies
 the full authority and kernel snapshot twice before command invocation, and
 maps each host event node to only its fixed worker alias. The former global
@@ -88,7 +231,7 @@ input-device option is gone; generated worker commands cannot receive raw
 `/dev/uinput`, `/dev/uhid`, or a host-wide `/dev/input` mapping.
 
 Each worker carries an opaque SHA-256 fingerprint of its complete generation
-manifest. Inventory compares that fingerprint and the inspected Podman device
+manifest. Inventory compares that fingerprint and the inspected container device
 bindings against the current authority. Podman may reconstruct a different
 host path from the stored major/minor pair, so reconciliation accepts that path
 only when the character-device identity and exact worker alias still match.
@@ -151,8 +294,7 @@ synchronously detaches feedback publication, waits for already-admitted work,
 clears queued feedback, and only then releases the authenticated lease. A
 closed or throwing sender fails the session closed.
 
-The first production ownership adapters remain inert but replace those three
-test doubles with bounded process-local implementations. An authenticated
+The production ownership adapters provide bounded process-local implementations. An authenticated
 session registry accepts at most 256 immutable bindings, rejects duplicate
 keys and any reuse of the same GPU seat slot, grants one exclusive bridge
 claim, and lets the session owner retire a registration while synchronously
@@ -164,18 +306,15 @@ flight, including a detach racing global shutdown.
 The matching concrete sender verifies the complete authenticated binding and
 bounded rumble shape before submitting to a typed, session-owned mailbox.
 Mailbox retry and close results map directly to the bridge without exposing an
-ENet peer or session secret. The actual `stream::session_t` mailbox endpoint
-and registration call site are intentionally still absent, so constructing
-these adapters opens no stream and changes no singleton behavior.
+ENet peer or session secret. The `stream::session_t` mailbox endpoint and
+profile launch owner connect this route only for an authenticated worker binding.
 
-This is still not a usable production input data plane. Nothing invokes this
-bridge from a live control stream, implements its trusted binding source from a
-real stream session, constructs the hub as the inputtino sink, or supplies the
-mailbox endpoint which reaches a client's control thread. The singleton runtime
-constructs none of these classes. The worker's older opaque input/feedback test adapter is
-deliberately not treated as injection authority. Mediated Steam Input also
-remains missing. Rootless launches now require trusted crun, the actual launching UID and
-`keep-groups`. The optional policy under `selinux/` labels only reserved
+Rumble delivery still needs acceptance through simultaneous client playback.
+The worker's older opaque input/feedback test adapter is
+deliberately not treated as injection authority. Steam controller translation
+and its current physical evidence are described above. The optional rootless
+Podman backend requires trusted crun, the actual launching UID and `keep-groups`.
+The optional policy under `selinux/` labels only reserved
 multiseat event nodes. Policy installation remains explicit; the isolated
 harness must establish device access for each selected final image.
 
@@ -308,12 +447,10 @@ generation: 35 seconds for seven serial five-second component bounds, plus the
 existing five-second authenticated-shutdown I/O budget and five-second
 backend-command budget.
 
-The locked Games on Whales images remain useful application roots, but their
-launcher scripts couple compositor and application startup and do not provide
-one uniform private session-bus, PipeWire, capture, encode, and virtual-input
-service contract. The Polaris helper must own those boundaries explicitly; the
-worker must not infer readiness from a GoW entrypoint or from the existence of
-a Wayland socket alone. The controller binds each opaque profile to one typed
+Polaris builds each application runtime from a pinned official Ubuntu base and
+owns session-bus, PipeWire, capture, encoding and input supervision. Readiness
+requires each provider's authenticated contract and live artifacts.
+The controller binds each opaque profile to one typed
 runtime and one exact final image digest, carries the requested display and
 data-plane topology through admission and reconciliation, and gives the worker
 canonical width, height, refresh, and HDR values. It also supplies an exact
@@ -323,17 +460,17 @@ shell fragment crosses that boundary. The dispatcher resolves the exact
 runtime kind and target through its trusted provider catalog and rejects any
 plan that does not match the selected runtime profile.
 
-Wolf's working data plane uses a capture-producing outer Wayland compositor
-with Gamescope nested beneath it, plus separate audio, virtual-input, and
-GStreamer services. This contract makes the same ownership edge explicit:
+The display provider owns the outer headless compositor and nests Gamescope
+beneath it. Audio, input and encoding have separate lifetimes. In this contract,
 applications use the nested compositor's inner Wayland socket, while capture
 uses the outer socket and raw frames remain worker-local through encoding.
 Only encoded video/audio and stream markers may cross the authenticated media
 channel. Controller input crosses the attached control channel and feedback
 returns there; every routed item repeats the exact seat generation and
-cross-seat output is rejected. This is still a supervision and routing proof.
-A placeholder helper that only creates socket nodes and reports ready would
-not make this image streaming-capable.
+cross-seat output is rejected. The concrete encoder emits H.264 and Opus only
+after both codecs produce valid media, and the controller binds that media to
+the exact selected worker connection. Production activation remains default-off;
+client playback and launcher integration still need their acceptance gates.
 
 Authentication does not attach either data channel. Health probes authenticate
 and heartbeat without consuming media. A streaming controller explicitly
@@ -382,43 +519,46 @@ The opt-in SELinux policies permit only the three evdev identity queries
 compositor capability queries and real game input delivery need separate
 physical verification; the new provider does not yet establish that acceptance.
 
-The Linux worker backend explicitly selects `/usr/bin/crun` and combines
-`--group-add=keep-groups` with `--userns=keep-id`. The runtime must be a
-root-owned regular executable below root-owned directories that are not
-writable by other users. Launch reads the calling process's supplementary
-groups with `getgroups()` and rechecks that snapshot and device access at
-invocation. Account membership alone is insufficient: a user service must
-actually inherit the needed groups. Runtime and group failures reject new
-launches; stopping an existing worker remains available.
+The Linux worker backend defaults to Docker with runc, explicit numeric UID/GID
+and supplementary groups, and private temporary filesystems. Launch rechecks
+actual process groups and exact device identities immediately before invocation.
+A user service must inherit the required groups. Stopping an existing worker
+remains available after input access disappears. SELinux stays enforcing.
 
-Authoritative inventory requires the selected crun path and the OCI
-`run.oci.keep_original_groups=1` annotation. Podman consumes `keep-groups`
-while creating the OCI specification, so its inspected `HostConfig.GroupAdd`
-is empty. OCI `additionalGids` describe namespace IDs and are not evidence
-that host supplementary groups were retained. The existing exact device and
-mount classifier still applies. SELinux stays enforcing.
+The retained Podman option explicitly selects crun and uses `keep-id` and
+`keep-groups`; its OCI annotation checks remain specific to that engine. Earlier
+rootless Podman receipts must be repeated on Docker before claiming physical
+acceptance for the default backend.
 
 `MultiseatPhysical.TwoWorkersReadOnlyTheirAllocatedInputAndStopIndependently`
-is an opt-in acceptance test. Set `POLARIS_MULTISEAT_PHYSICAL=1`, an exact
+is an opt-in acceptance test, defaulting to Docker. Set `POLARIS_MULTISEAT_PHYSICAL=1`, an exact
 `POLARIS_PHYSICAL_IMAGE`, a private `POLARIS_PHYSICAL_IPC_ROOT` parent, and
 two distinct pre-created profile volumes through `POLARIS_PHYSICAL_VOLUME`
 and `POLARIS_PHYSICAL_VOLUME_B`. `POLARIS_PHYSICAL_IMAGE` must be a manifest
-digest reference, `name@sha256:<64 hex>`; a tag is refused before launch.
+digest reference, `name@sha256:<64 hex>`, or a full Docker image ID
+`sha256:<64 hex>` matching the verified artifact; a tag is refused before launch.
+Always add `--gtest_output=xml:<private receipt path>` to retain RecordProperty
+diagnostics.
 
-Each profile volume must be private before a worker can use it. Podman creates
-a volume's data directory mode 0755, the image carries no `/var/lib/polaris-seat`
-for Podman to copy up from, and the worker requires its own profile directory to
-be exactly mode 0700 owned by its effective uid, so a correctly created volume
-otherwise fails with `private directory ownership or mode is unsafe` before any
-provider starts:
+Set `POLARIS_PHYSICAL_LIVE_MEDIA=1` to exercise continuous worker media on
+Docker with the Gamescope input game. Leave `POLARIS_PHYSICAL_ENCODED_GAME`
+and `POLARIS_PHYSICAL_ENCODED_AUDIO` unset: those flags run separate probes.
+The live mode starts the controller-owned worker runtime, obtains each launch's
+authenticated connection, and consumes its H.264 and Opus through the real host
+media pump. It decodes every video packet to 1080p SDR and every audio packet to
+5 ms stereo, checks changing frames and audible samples, requests keyframes,
+and repeats input isolation and continued decoding after the first seat stops.
+Missing frames fail acceptance. Opus is decoded continuously; bounded video
+receipts are decoded at stop using the system OpenH264 GStreamer plugin and
+Python 3. XML properties retain the counts and exact image identity. This isolated harness opens no network listener
+and does not establish client playback, latency, or production activation.
 
-```sh
-podman volume create pv-seat-a
-chmod 0700 "$(podman volume inspect pv-seat-a --format '{{.Mountpoint}}')"
-```
+Each profile volume must be mode 0700 and owned by the controller UID. See the
+[Docker profile initialization recipe](../../docs/research/container-multiseat-docker.md#images-and-profile-state).
+Missing volumes and driver redirection are refused by admission; private root
+ownership is enforced by the worker at startup.
 
-Admission should check this before launch rather than leaving it to the worker;
-until it does, it is an operator step. `POLARIS_PHYSICAL_PROFILE` selects gamescope,
+`POLARIS_PHYSICAL_PROFILE` selects gamescope,
 steam, heroic, or lutris. The image must contain the separately packaged
 `polaris-seat-input-probe` acceptance helper. GPU device paths must belong to
 the explicit catalog supplied through the physical harness environment.
@@ -442,9 +582,9 @@ Passing this test establishes isolated input and worker lifecycle. Production
 provider selection and multiseat activation remain off; it does not establish
 successful game streaming.
 
-The worker UID is passed explicitly, because an image `USER` can override
-Podman's implicit `keep-id` choice. Live inventory requires matching Config.User
-and OCI process.user.uid evidence. Use a short private IPC parent for the
+The worker UID is passed explicitly so an image `USER` cannot override it.
+Docker inventory requires the exact Config.User and numeric group list; Podman
+inventory also checks OCI process.user.uid and retained-group evidence. Use a short private IPC parent for the
 physical harness so both generated Unix socket paths fit Linux's 108-byte limit.
 
 Experimental compositor input uses the fixed native `capture-input` producer.
@@ -456,6 +596,9 @@ relative/absolute pointer, buttons, and wheel; gamepads remain direct workload
 readers. Touch and pen allocations fail this experimental admission until their
 mappings are implemented. Source retirement, dropped kernel events, excessive
 input backlog, or stalled capture fails the provider and tears down its stream.
+Capture allows up to five seconds between frames so a brief Steam launch or
+game presentation transition can recover. A longer stall still retires the
+seat, and input descriptor failures remain immediate during that interval.
 
 A post-creation X11 directory failure without a retained inode leaves cleanup
 unproven. Startup fails and the worker's private tmpfs must be destroyed before
@@ -477,3 +620,25 @@ archive URL in its lock entry; the existing January 20 snapshot inputs retain
 their versions and hashes. Offline installation against all four locked source
 roots and runtime package sets adds only WirePlumber: its library, Lua, and
 PipeWire dependencies are already covered. Final builds remain network-free.
+
+### Audio packet timing
+
+A private capture of one worker audio flow can be summarized offline:
+
+~~~sh
+python3 containers/multiseat/audio_packet_timing.py audio.pcap --source-port 48000
+~~~
+
+Use the audio source port from that test host and restrict the capture to one
+client destination. The reader accepts classic Ethernet PCAP with IPv4,
+including VLAN tags and captures truncated after the complete RTP header.
+It rejects incomplete records, fragmented UDP, mixed audio flows and backwards
+timestamps. Capture-tool drop counts must be checked separately.
+
+The summary separates data from audio FEC, measures packet intervals, and counts
+complete IP datagram bytes even when payload capture is truncated. It emits no
+addresses or payloads. Its bitrate includes IP, UDP, RTP, encryption and FEC
+overhead, but excludes Ethernet and wireless overhead. FEC packets are normally
+sent in groups, so their short intervals are distinct from data packet timing.
+These are measurements at the capture point; they do not establish receiver
+delivery, audible quality or end-to-end latency.

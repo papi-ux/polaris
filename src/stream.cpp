@@ -104,6 +104,7 @@ using namespace std::literals;
 namespace stream {
   namespace session {
     extern std::atomic_uint running_sessions;
+    extern std::atomic_uint running_host_sessions;
     extern std::mutex stream_generation_boundary_mutex;
   }
 
@@ -137,7 +138,7 @@ namespace stream {
         // timeout can atomically claim the lifecycle stop.
         const auto timeout_is_current_and_idle = [generation]() {
           return disconnect_resume_timeout_generation.load(std::memory_order_relaxed) == generation &&
-                 session::running_sessions.load(std::memory_order_relaxed) == 0;
+                 session::running_host_sessions.load(std::memory_order_relaxed) == 0;
         };
         const bool terminated = proc::proc.terminate_if(
           timeout_is_current_and_idle,
@@ -600,6 +601,9 @@ namespace stream {
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
     safe::signal_t controlEnd;
+    // Requested from RTSP or the control thread; only the control thread
+    // sends termination and acknowledges the session's final control use.
+    std::atomic_bool graceful_stop_requested {false};
 
     std::atomic<session::state_e> state;
 
@@ -609,15 +613,32 @@ namespace stream {
     stream_packets::owner_t packet_owner {this};
   };
 
+  namespace session {
+    bool uses_host_process(const session_t &session) {
+#ifdef __linux__
+      return !session.worker_connection_required &&
+        !(session.launch_worker_connection_required && session.launch_worker_connection_required->load());
+#else
+      return true;
+#endif
+    }
+    bool stops_when_host_exits(const session_t &session, bool host_running, bool peer_connected) {
+      return uses_host_process(session) && !host_running && peer_connected;
+    }
+  }
+
 #ifdef __linux__
   namespace {
     multiseat::input::moonlight_input_permissions_t
-    multiseat_permissions(const crypto::PERM permission) {
+    multiseat_permissions(const crypto::PERM permission, bool worker_media) {
       return {
         .keyboard = !!(permission & crypto::PERM::input_kbd),
         .mouse = !!(permission & crypto::PERM::input_mouse),
-        .touch = !!(permission & crypto::PERM::input_touch),
-        .pen = !!(permission & crypto::PERM::input_pen),
+        // The worker compositor consumes no native tablet descriptors. Apply
+        // the same capability bound as profile allocation and RTSP DESCRIBE
+        // without changing the client's retained authorization permissions.
+        .touch = !worker_media && !!(permission & crypto::PERM::input_touch),
+        .pen = !worker_media && !!(permission & crypto::PERM::input_pen),
         .controller = !!(permission & crypto::PERM::input_controller),
       };
     }
@@ -1232,6 +1253,26 @@ namespace stream {
     }
   }
 
+  // ENet, sequence numbers and control encryption are owned by the control
+  // thread. Stop callers only request termination; they never send it directly.
+  void send_control_termination(control_server_t *server, session_t *session) {
+    if (!session->control.peer) return;
+
+    control_terminate_t plaintext {};
+    plaintext.header.type = packetTypes[IDX_TERMINATION];
+    plaintext.header.payloadLength = sizeof(plaintext.ec);
+    plaintext.ec = util::endian::big<std::uint32_t>(0x80030023);
+    std::array<std::uint8_t, sizeof(control_encrypted_t) +
+      crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
+      crypto::cipher::tag_size> encrypted_payload;
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (server->send(payload, session->control.peer)) {
+      BOOST_LOG(warning) << "Couldn't send control termination";
+    }
+    // Flush before disconnecting the peer in the same control-thread turn.
+    server->flush();
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1358,6 +1399,7 @@ namespace stream {
 
     server->map(packetTypes[IDX_EXEC_SERVER_CMD], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_EXEC_SERVER_CMD]"sv;
+      if (!session::uses_host_process(*session)) return;
 
       if (!(session->permission & crypto::PERM::server_cmd)) {
         BOOST_LOG(debug) << "Permission Exec Server Cmd deined for [" << session->device_name << "]";
@@ -1498,8 +1540,8 @@ namespace stream {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
-      bool has_session_awaiting_peer = false;
       bool has_active_session = false;
+      const bool host_running = proc::proc.running() != 0;
 
       {
         auto lg = server->_sessions.lock();
@@ -1514,6 +1556,10 @@ namespace stream {
 
           auto session = *pos;
 
+          if (session::stops_when_host_exits(*session, host_running, session->control.peer != nullptr)) {
+            session::graceful_stop(*session);
+          }
+
           if (now > session->pingTimeout) {
             auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
             BOOST_LOG(info) << address << ": Ping Timeout"sv;
@@ -1521,6 +1567,9 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+            if (session->graceful_stop_requested.load(std::memory_order_acquire)) {
+              send_control_termination(server, session);
+            }
             pos = server->_sessions->erase(pos);
 
             if (session->control.peer) {
@@ -1536,12 +1585,7 @@ namespace stream {
             continue;
           }
 
-          // Remember if we have a session that's waiting for a peer to connect to the
-          // control stream. This ensures the clients are properly notified even when
-          // the app terminates before they finish connecting.
-          if (!session->control.peer) {
-            has_session_awaiting_peer = true;
-          } else {
+          if (session->control.peer) {
             has_active_session = true;
 
 #ifdef __linux__
@@ -1566,48 +1610,29 @@ namespace stream {
         })
       }
 
-      // Don't break until any pending sessions either expire or connect
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
-        BOOST_LOG(info) << "Process terminated"sv;
-        break;
-      }
+      // The broadcaster owns this loop's lifetime. Its first worker can be
+      // inserted after the thread starts, with no host process running. Stay
+      // available until broadcaster shutdown; host exit stops only its own
+      // connected sessions above, while pending peers retain their timeout.
 
       // Use a short timeout during active streaming for responsive feedback/HDR dispatch.
       // When idle, use a longer timeout to reduce unnecessary CPU wakeups.
       server->iterate(has_active_session ? 5ms : 100ms);
     }
 
-    // Let all remaining connections know the server is shutting down
-    // reason: graceful termination
-    std::uint32_t reason = 0x80030023;
-
-    control_terminate_t plaintext;
-    plaintext.header.type = packetTypes[IDX_TERMINATION];
-    plaintext.header.payloadLength = sizeof(plaintext.ec);
-    plaintext.ec = util::endian::big<uint32_t>(reason);
-
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
+    // Retire every remaining session before acknowledging final control use.
     auto lg = server->_sessions.lock();
-    for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
-      auto session = *pos;
-
-      // We may not have gotten far enough to have an ENet connection yet
+    while (!server->_sessions->empty()) {
+      auto session = server->_sessions->back();
+      send_control_termination(server, session);
+      server->_sessions->pop_back();
       if (session->control.peer) {
-        auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-
-        if (server->send(payload, session->control.peer)) {
-          TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
-          BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
-        }
+        auto peers = server->_peer_to_session.lock();
+        server->_peer_to_session->erase(session->control.peer);
       }
-
       session->shutdown_event->raise(true);
       session->controlEnd.raise(true);
     }
-
-    server->flush();
   }
 
   void recvThread(broadcast_ctx_t &ctx) {
@@ -2453,6 +2478,7 @@ namespace stream {
       .fps = static_cast<std::uint32_t>(session->config.monitor.framerate),
       .video_format = session->config.monitor.videoFormat,
       .audio_channels = static_cast<std::uint8_t>(session->config.audio.channels),
+      .bitrate_kbps = static_cast<std::uint32_t>(std::max(1, session->config.monitor.bitrate)),
     };
 
     BOOST_LOG(info) << "Carrying worker media for this session"sv;
@@ -2460,7 +2486,8 @@ namespace stream {
     const auto summary = [&] {
       return std::string {multiseat::media::describe(report.status)} +
              (report.detail.empty() ? std::string {} : " ("s + report.detail + ")"s) +
-             ": "s + std::to_string(report.video_frames) + " video frames, "s +
+             ": "s + std::to_string(report.selected_bitrate_kbps) + " kbps video target, "s +
+             std::to_string(report.video_frames) + " video frames, "s +
              std::to_string(report.audio_frames) + " audio frames, "s +
              std::to_string(report.discontinuities) + " discontinuities, "s +
              std::to_string(report.idr_requests) + " keyframe requests"s +
@@ -2536,6 +2563,7 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+    std::atomic_uint running_host_sessions;
     // The last old generation must finish retiring its Doctor scope and
     // clearing per-stream evidence before the first new generation can become
     // Auto-Fix eligible. Without one boundary lock, concurrent RTSP cleanup
@@ -2593,6 +2621,10 @@ namespace stream {
 
     stream_packets::destination_t packet_destination_for_tests(session_t &session) {
       return session.packet_owner.destination();
+    }
+
+    bool control_ended_for_tests(session_t &session) {
+      return session.controlEnd.peek();
     }
 
     void set_state_for_tests(session_t &session, state_e state) {
@@ -2728,7 +2760,7 @@ namespace stream {
             .launch_session_id = session.launch_session_id,
             .session_generation = session.session_generation,
           },
-          .input_permissions = multiseat_permissions(session.permission),
+          .input_permissions = multiseat_permissions(session.permission, worker_connection.required),
         },
         std::move(handle),
         std::move(feedback_hub),
@@ -2799,41 +2831,11 @@ namespace stream {
       session.shutdown_event->raise(true);
     }
 
-    void graceful_stop(session_t& session) {
-      while_starting_do_nothing(session.state);
-      session.packet_owner.close();
-#ifdef __linux__
-      close_multiseat_input(session);
-#endif
-      auto expected = state_e::RUNNING;
-      auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
-      if (already_stopping) {
-        return;
-      }
-
-      // reason: graceful termination
-      std::uint32_t reason = 0x80030023;
-
-      control_terminate_t plaintext;
-      plaintext.header.type = packetTypes[IDX_TERMINATION];
-      plaintext.header.payloadLength = sizeof(plaintext.ec);
-      plaintext.ec = util::endian::big<uint32_t>(reason);
-
-      // We may not have gotten far enough to have an ENet connection yet
-      if (session.control.peer) {
-        std::array<std::uint8_t,
-          sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-          encrypted_payload;
-        auto payload = stream::encode_control(&session, util::view(plaintext), encrypted_payload);
-
-        if (send(session, payload)) {
-          TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session.control.peer->address.address));
-          BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
-        }
-      }
-
-      session.shutdown_event->raise(true);
-      session.controlEnd.raise(true);
+    void graceful_stop(session_t &session) {
+      // controlEnd is an acknowledgement, not a stop request. Raising it here
+      // lets RTSP destroy the cipher while the control thread still decrypts.
+      session.graceful_stop_requested.store(true, std::memory_order_release);
+      stop(session);
     }
 
     void join(session_t &session) {
@@ -2928,9 +2930,9 @@ namespace stream {
         }
       }
 
-      if (remaining == 0) {
+      bool paused_for_resume = false;
+      if (uses_host_process(session) && --running_host_sessions == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
-        bool paused_for_resume = false;
         if (proc::proc.running()) {
           if (proc::proc.session_shutdown_requested()) {
             BOOST_LOG(info) << "Skipping pause because host shutdown is already in progress"sv;
@@ -2954,6 +2956,10 @@ namespace stream {
           display_device::revert_configuration();
         }
 
+        if (paused_for_resume) schedule_disconnect_resume_timeout(proc::proc.get_last_run_app_name());
+      }
+
+      if (remaining == 0) {
         platf::streaming_will_stop();
 
         // Clear stream stats when all sessions end
@@ -2961,9 +2967,8 @@ namespace stream {
         if (paused_for_resume) {
           confighttp::set_session_state(confighttp::session_state_e::paused);
           confighttp::emit_session_event("stream_paused", "Session paused; reconnect to resume");
-          schedule_disconnect_resume_timeout(proc::proc.get_last_run_app_name());
         } else {
-          session::cancel_disconnect_resume_timeout();
+          if (uses_host_process(session)) session::cancel_disconnect_resume_timeout();
           confighttp::set_session_state(confighttp::session_state_e::idle);
           confighttp::emit_session_event("stream_ended", "All sessions ended");
         }
@@ -3133,8 +3138,10 @@ namespace stream {
       // If this is the first session, invoke the platform callbacks
       auto session_num = ++running_sessions;
       if (session_num == 1) {
-        cancel_disconnect_resume_timeout();
         platf::streaming_will_start();
+      }
+      if (uses_host_process(session) && ++running_host_sessions == 1) {
+        cancel_disconnect_resume_timeout();
         proc::proc.resume();
       }
       generation_boundary_lock.unlock();

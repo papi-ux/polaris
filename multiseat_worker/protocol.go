@@ -83,7 +83,8 @@ const (
 	messageInvalidateReferenceFrames message = 28
 	// messageMediaControlAck is the one acknowledgement the worker returns for
 	// the three controller to worker contract messages above.
-	messageMediaControlAck message = 29
+	messageMediaControlAck    message = 29
+	messageSelectMediaBitrate message = 30
 
 	messageVideo         message = 32
 	messageAudio         message = 33
@@ -229,6 +230,8 @@ func validMessage(selectedChannel channel, selectedMessage message, payloadSize 
 		return selectedChannel == channelMedia && payloadSize == mediaConfigSize
 	case messageMediaConfigAck, messageRequestIDR, messageMediaControlAck:
 		return selectedChannel == channelControl && payloadSize == 0
+	case messageSelectMediaBitrate:
+		return selectedChannel == channelControl && payloadSize == 4
 	case messageInvalidateReferenceFrames:
 		return selectedChannel == channelControl && payloadSize == frameRangeSize
 	case messageInput, messageFeedback:

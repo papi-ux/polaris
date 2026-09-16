@@ -1,0 +1,9 @@
+#pragma once
+#include <string_view>
+namespace multiseat::spaces::security_data {
+inline constexpr std::string_view marker = "@POLARIS_SPACES_SECURITY_MARKER@";
+inline constexpr std::string_view rule_path = "/etc/udev/rules.d/97-polaris-multiseat-input.rules";
+inline constexpr std::string_view rule = R"SPACES_SECURITY(@POLARIS_SPACES_RULE_DATA@)SPACES_SECURITY";
+inline constexpr std::string_view receipt_path = "/var/lib/polaris/spaces-security/ready.json";
+inline constexpr std::string_view receipt = R"SPACES_SECURITY(@POLARIS_SPACES_READY_DATA@)SPACES_SECURITY";
+}

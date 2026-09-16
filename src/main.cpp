@@ -41,6 +41,11 @@
   #include "platform/windows/virtual_display.h"
 #elif __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
+  #include "platform/linux/multiseat_profile_catalog.h"
+  #include "platform/linux/spaces_runtime.h"
+  #include "platform/linux/spaces_setup_service.h"
+  #include "platform/linux/spaces_activation.h"
+  #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
@@ -78,6 +83,12 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
      return args::version();
    }},
 #ifdef __linux__
+  {"spaces-runtime"sv, [](const char *name, int argc, char **argv) {
+     return multiseat::spaces::runtime_command(argc, argv);
+   }},
+  {"multiseat-profiles"sv, [](const char *name, int argc, char **argv) {
+     return multiseat::profiles::command(argc, argv);
+   }},
   {"setup-host"sv, [](const char *name, int argc, char **argv) {
      return args::setup_host(name, argc, argv);
    }},
@@ -225,6 +236,16 @@ int main(int argc, char *argv[]) {
 #pragma GCC diagnostic pop
 
 #ifdef __linux__
+  // Profile administration must not start a streaming host or initialize its
+  // unrelated user configuration. Require the subcommand as the first argument.
+  if (argc > 1 && std::string_view(argv[1]) == "--spaces-runtime") {
+    auto log_deinit_guard = logging::init(2, "");
+    return multiseat::spaces::runtime_command(argc - 2, argv + 2);
+  }
+  if (argc > 1 && std::string_view(argv[1]) == "--multiseat-profiles") {
+    auto log_deinit_guard = logging::init(2, "");
+    return multiseat::profiles::command(argc - 2, argv + 2);
+  }
   if (const auto setup_host_result = dispatch_setup_host_before_user_state(argc, argv)) {
     return *setup_host_result;
   }
@@ -502,6 +523,51 @@ int main(int argc, char *argv[]) {
   auto input_deinit_guard = input::init();
 
 #ifdef __linux__
+  std::shared_ptr<multiseat::profile_launch_service_t> profile_service;
+  auto spaces_setup = multiseat::spaces::make_setup_service(platf::appdata(),
+    !config::multiseat.enabled && config::multiseat.config_file.empty() && !config::input.multiseat_moonlight_input);
+  auto spaces_setup_guard = util::fail_guard([&] {
+    spaces_setup->shutdown();
+    multiseat::spaces::uninstall_setup_service(spaces_setup);
+  });
+  if (!multiseat::spaces::install_setup_service(spaces_setup)) return 1;
+  auto profile_service_guard = util::fail_guard([&] {
+    if (profile_service) {
+      profile_service->stop_admission();
+      multiseat::uninstall_profile_launch_service(profile_service);
+    }
+  });
+  if (config::multiseat.enabled) {
+    const auto managed_paths = multiseat::spaces::activation_paths(platf::appdata(), config::sunshine.config_file);
+    const bool managed = config::multiseat.config_file == managed_paths.controller;
+    const bool ipc_ready = !managed || (multiseat::spaces::managed_graphics_current(managed_paths) &&
+      multiseat::spaces::prepare_managed_ipc(managed_paths));
+    const auto options = ipc_ready ? multiseat::load_controller_options(config::multiseat.config_file) : std::nullopt;
+    if (!options || config::input.multiseat_moonlight_input) {
+      BOOST_LOG(error) << "Multiseat configuration is invalid or conflicts with the separate input owner"sv;
+      if (!managed) return 1;
+    }
+    if (options && !config::input.multiseat_moonlight_input) {
+      auto created = multiseat::create_production_controller_runtime(*options);
+      if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
+        profile_service = std::make_shared<multiseat::profile_launch_service_t>(
+          multiseat::make_profile_controller(std::move(created.runtime)), std::chrono::seconds(25),
+          multiseat::profile_admin_options_t {
+            .catalog = options->profile_catalog,
+            .reload = [settings = *options]() -> std::unique_ptr<multiseat::profile_controller_t> {
+              auto replacement = multiseat::create_production_controller_runtime(settings);
+              return replacement.status == multiseat::controller_runtime_create_status_e::ready_enabled ?
+                multiseat::make_profile_controller(std::move(replacement.runtime)) : nullptr;
+            }
+          });
+        if (!multiseat::install_profile_launch_service(profile_service)) return 1;
+        BOOST_LOG(info) << "Multiseat profile controller started"sv;
+      } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {
+        BOOST_LOG(error) << "Multiseat controller could not establish its configured authority"sv;
+        if (!managed) return 1;
+      }
+    }
+  }
   auto multiseat_runtime_created =
     multiseat::input::create_production_moonlight_session_runtime({
       .enabled = config::input.multiseat_moonlight_input,
@@ -641,11 +707,21 @@ int main(int argc, char *argv[]) {
   // Wait for shutdown, this is not necessary when we're using the main event loop
   shutdown_event->view();
 
+#ifdef __linux__
+  if (profile_service) profile_service->stop_admission();
+  spaces_setup->shutdown();
+#endif
+
   httpThread.join();
   configThread.join();
   rtspThread.join();
 
 #ifdef __linux__
+  if (profile_service && !profile_service->shutdown(5s)) {
+    BOOST_LOG(error) << "Multiseat cleanup remains incomplete; retaining fenced authority until process exit"sv;
+  }
+  multiseat::uninstall_profile_launch_service(profile_service);
+  profile_service.reset();
   if (multiseat_runtime) {
     const auto report = multiseat_runtime->shutdown();
     if (report.status !=

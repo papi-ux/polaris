@@ -1,7 +1,8 @@
 //go:build linux
 
 // Package seatinput verifies read-only worker aliases against the host's
-// generation-specific input seat. Device creation and injection stay on the host.
+// generation-specific input seat. Device creation stays on the host. Steam may
+// translate gamepad input into its separately allocated output device.
 package seatinput
 
 import (
@@ -21,11 +22,12 @@ import (
 )
 
 const Directory = "/dev/input"
-const maximumDevices = 21 // keyboard, two mice, touch, pen, sixteen gamepads
+const maximumDevices = 22 // normal input set plus one Steam translation output
 
 type role struct {
 	name, kernel, phys string
 	compositor         bool
+	steamOutput        bool
 }
 
 func deviceRole(name string) (role, bool) {
@@ -42,6 +44,10 @@ func deviceRole(name string) (role, bool) {
 	case "polaris-pen":
 		r.kernel, r.phys = "pen", "pen"
 	default:
+		if _, ok := eventMinor(name); ok {
+			r.kernel, r.phys, r.compositor, r.steamOutput = "steam-gamepad-0", "steam-gamepad/0", false, true
+			return r, true
+		}
 		const prefix = "polaris-gamepad-"
 		value := strings.TrimPrefix(name, prefix)
 		slot, err := strconv.ParseUint(value, 10, 32)
@@ -51,6 +57,21 @@ func deviceRole(name string) (role, bool) {
 		r.kernel, r.phys, r.compositor = "gamepad-"+value, "gamepad/"+value, false
 	}
 	return r, true
+}
+
+// Proton discovers Steam's virtual controller through its canonical eventN
+// path and sysfs identity. A matching basename is only a candidate; Open also
+// requires the exact generation name, physical identity, evdev number and ID.
+func eventMinor(name string) (uint64, bool) {
+	value := strings.TrimPrefix(name, "event")
+	n, err := strconv.ParseUint(value, 10, 32)
+	if !strings.HasPrefix(name, "event") || err != nil || strconv.FormatUint(n, 10) != value {
+		return 0, false
+	}
+	if n < 32 {
+		return n + 64, true
+	}
+	return n, n >= 256
 }
 
 func validSeat(seat string) bool {
@@ -159,6 +180,15 @@ func Open(path, seat string) (_ *Set, result error) {
 		if device.status.Mode&syscall.S_IFMT != syscall.S_IFCHR || major != 13 || identities[device.status.Rdev] {
 			return nil, errors.New("invalid input device identity")
 		}
+		if r.steamOutput {
+			minor := (device.status.Rdev & 0xff) | ((device.status.Rdev >> 12) & 0xffffff00)
+			expectedMinor, ok := eventMinor(name)
+			var id [4]uint16
+			if !ok || minor != expectedMinor || ioctl(deviceFD, 0x80084502, unsafe.Pointer(&id[0])) != nil ||
+				id != [4]uint16{3, 0x28de, 0x11ff, 0} {
+				return nil, errors.New("Steam output device identity is invalid")
+			}
+		}
 		var version int32
 		if err := ioctl(deviceFD, 0x80044501, unsafe.Pointer(&version)); err != nil || version != 0x10001 {
 			return nil, errors.New("input alias is not evdev")
@@ -180,6 +210,15 @@ func Open(path, seat string) (_ *Set, result error) {
 		if !seen[name] {
 			return nil, errors.New("required input alias missing")
 		}
+	}
+	outputs := 0
+	for _, device := range s.devices {
+		if device.role.steamOutput {
+			outputs++
+		}
+	}
+	if outputs > 1 || (outputs == 1 && (!seen["polaris-gamepad-0"] || seen["polaris-gamepad-1"])) {
+		return nil, errors.New("Steam output requires one allocated source gamepad")
 	}
 	missing := false
 	for slot := 0; slot < 16; slot++ {
@@ -365,9 +404,17 @@ func consumerAlive(pidFD int) bool {
 		FD              int32
 		Events, Revents int16
 	}{FD: int32(pidFD), Events: 1}
-	timeout := syscall.Timespec{}
-	count, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&poll)), 1, uintptr(unsafe.Pointer(&timeout)), 0, 0, 0)
-	return errno == 0 && count == 0 && poll.Revents == 0
+	for {
+		// Runtime preemption signals can interrupt a zero-timeout poll too.
+		// Retry the same pinned lifetime; EINTR does not establish child death.
+		timeout := syscall.Timespec{}
+		poll.Revents = 0
+		count, _, errno := syscall.Syscall6(syscall.SYS_PPOLL, uintptr(unsafe.Pointer(&poll)), 1, uintptr(unsafe.Pointer(&timeout)), 0, 0, 0)
+		if errno == syscall.EINTR {
+			continue
+		}
+		return errno == 0 && count == 0 && poll.Revents == 0
+	}
 }
 
 func readableConsumerFD(path string) bool {
@@ -396,4 +443,80 @@ func readableConsumerFD(path string) bool {
 		}
 	}
 	return found
+}
+
+// SteamOutput returns only the retained, verified output owned by this seat.
+// No caller-supplied path or input creation endpoint is accepted.
+func (s *Set) SteamOutput() (string, string, error) {
+	if err := s.Verify(); err != nil {
+		return "", "", err
+	}
+	for _, device := range s.devices {
+		if device.role.steamOutput {
+			name, err := kernelString(int(device.file.Fd()), 0x06)
+			if err != nil {
+				return "", "", err
+			}
+			return filepath.Join(s.path, device.role.name), name, nil
+		}
+	}
+	return "", "", nil
+}
+
+// SteamOutputSysname obtains UI_GET_SYSNAME from the verified device's sysfs
+// entry. The workload cannot supply either the input identity or sysfs path.
+func (s *Set) SteamOutputSysname() (string, error) {
+	path, name, err := s.SteamOutput()
+	if err != nil || path == "" {
+		return "", errors.Join(err, errors.New("Steam output was not allocated"))
+	}
+	device, err := filepath.EvalSymlinks(filepath.Join("/sys/class/input", filepath.Base(path), "device"))
+	if err != nil {
+		return "", errors.New("Steam output sysfs identity is unavailable")
+	}
+	sysname := filepath.Base(device)
+	number := strings.TrimPrefix(sysname, "input")
+	id, err := strconv.ParseUint(number, 10, 32)
+	if err != nil || sysname != "input"+strconv.FormatUint(id, 10) {
+		return "", errors.New("Steam output sysfs name is invalid")
+	}
+	identity, err := os.ReadFile(filepath.Join(device, "name"))
+	if err != nil || strings.TrimSuffix(string(identity), "\n") != name {
+		return "", errors.New("Steam output sysfs identity differs")
+	}
+	if err := s.Verify(); err != nil {
+		return "", err
+	}
+	return sysname, nil
+}
+
+// SteamOutputWriter retains the same device as SteamOutput for the broker.
+// It cannot open an arbitrary path, and rechecks the complete allocation around
+// reopening the sole output with write access.
+func (s *Set) SteamOutputWriter() (*os.File, error) {
+	if err := s.Verify(); err != nil {
+		return nil, err
+	}
+	for _, device := range s.devices {
+		if !device.role.steamOutput {
+			continue
+		}
+		fd, err := syscall.Openat(int(s.directory.Fd()), device.role.name,
+			syscall.O_RDWR|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return nil, err
+		}
+		file := os.NewFile(uintptr(fd), "steam-output")
+		var status syscall.Stat_t
+		if err := syscall.Fstat(fd, &status); err != nil || !sameNode(status, device.status) {
+			_ = file.Close()
+			return nil, errors.New("Steam output changed during admission")
+		}
+		if err := s.Verify(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		return file, nil
+	}
+	return nil, errors.New("Steam output was not allocated")
 }

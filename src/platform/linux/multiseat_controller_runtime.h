@@ -5,11 +5,13 @@
 #pragma once
 
 #ifdef __linux__
+#include "spaces_library.h"
 
   #include "multiseat_moonlight_worker_adapter.h"
   #include "multiseat_worker_coordinator.h"
 
   #include <cstddef>
+  #include <chrono>
   #include <functional>
   #include <memory>
   #include <optional>
@@ -18,18 +20,52 @@
 
 namespace multiseat {
 
+  struct profile_summary_t {
+    std::string id;
+    std::string name;
+    std::vector<std::string> clients;
+    bool steam = false;
+    bool archived = false;
+    std::vector<std::string> access_clients;
+    bool library_enabled = false;
+  };
+
+  struct profile_activity_t {
+    std::string profile, client, state;
+  };
+
+  /** Immutable operator routing for one persistent profile in this epoch. */
+  struct controller_profile_route_t {
+    std::string profile_key;
+    std::vector<std::string> client_keys;
+    runtime_profile_e runtime_profile = runtime_profile_e::unknown;
+    workload_plan_t workload;
+    std::vector<std::string> logical_gpu_ids;
+    std::vector<std::string> access_clients;
+    bool library_enabled = false;
+  };
+
   struct controller_runtime_options_t {
     bool enabled = false;
+    /** Selected launches require their exact worker's authenticated media lease. */
+    bool worker_media_enabled = false;
+    std::vector<controller_profile_route_t> profile_routes;
+    std::vector<profile_summary_t> profile_catalog;
+    /** Deadline from profile reservation through successful RTSP setup. */
+    std::chrono::milliseconds profile_launch_timeout {30000};
+    spaces::library_reader_t library_reader;
+    std::vector<std::string> desktop_clients;
   };
 
   /**
    * Move-only dependencies produced only after the controller is enabled.
    *
    * Every backend must be inert at construction. The optional opaque owner
-   * outlives the worker backend, allowing a later Podman adapter to retain its
+   * outlives the worker backend, allowing the container adapter to retain its
    * input-manifest and kernel-probe dependencies without exposing them here.
    */
   struct controller_runtime_dependencies_t {
+    std::shared_ptr<void> profile_catalog_lease;
     std::unique_ptr<registry_t> registry;
     std::unique_ptr<worker_ipc::authority_store_t> worker_authority_store;
     std::unique_ptr<input::moonlight_session_runtime_t> moonlight_runtime;
@@ -85,6 +121,30 @@ namespace multiseat {
     worker_rejected,
     worker_indeterminate,
     input_cleanup_incomplete,
+    launch_cancelled,
+  };
+
+  enum class controller_profile_admission_status_e {
+    unselected,
+    invalid_launch,
+    controller_not_ready,
+    admitted,
+    rejected,
+  };
+
+  struct controller_profile_admission_result_t {
+    controller_profile_admission_status_e status =
+      controller_profile_admission_status_e::invalid_launch;
+    admission_result_t admission;
+
+    /** Only unselected permits the caller to continue ordinary host launch. */
+    [[nodiscard]] bool use_host_launch() const {
+      return status == controller_profile_admission_status_e::unselected;
+    }
+    [[nodiscard]] bool admitted() const {
+      return status == controller_profile_admission_status_e::admitted &&
+             admission.accepted();
+    }
   };
 
   struct controller_start_result_t {
@@ -109,6 +169,7 @@ namespace multiseat {
     cleanup_pending,
     invalid_request,
     controller_shutting_down,
+    streams_pending,
   };
 
   struct controller_stop_result_t {
@@ -183,6 +244,18 @@ namespace multiseat {
 
     [[nodiscard]] controller_reconcile_result_t reconcile();
     [[nodiscard]] admission_result_t admit(const seat_request_t &request);
+    /**
+     * Resolve only the paired UUID retained by an authenticated pending launch.
+     * Profile, workload, image family and GPU order come from immutable trusted
+     * routing. The controller retains ownership until reconciliation proves
+     * cleanup. Cancellation, abandonment and setup timeout queue automatic
+     * teardown; callers must keep polling reconcile(). No worker starts here.
+     */
+    [[nodiscard]] controller_profile_admission_result_t
+    admit_authenticated_profile_launch(
+      const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
+      seat_display_mode_t display_mode
+    );
     [[nodiscard]] mutation_result_e bind_runtime(
       const seat_handle_t &handle,
       compositor_e selected,
@@ -203,17 +276,28 @@ namespace multiseat {
     [[nodiscard]] controller_shutdown_report_t shutdown() noexcept;
 
     [[nodiscard]] bool admission_ready() const;
+    [[nodiscard]] bool routes_client(std::string_view client_key) const;
+    [[nodiscard]] std::optional<std::string> profile_for_client(std::string_view client_key) const;
+    [[nodiscard]] std::vector<profile_summary_t> profile_catalog() const;
+    [[nodiscard]] spaces::library_reader_t library_reader() const;
+    [[nodiscard]] std::vector<std::string> desktop_clients() const;
+    [[nodiscard]] std::vector<profile_activity_t> profile_activity() const;
+    [[nodiscard]] std::optional<seat_state_e> seat_state(const seat_handle_t &handle) const;
     [[nodiscard]] bool shutting_down() const;
     [[nodiscard]] bool closed() const;
     [[nodiscard]] std::size_t seats() const;
     [[nodiscard]] std::size_t managed_workers() const;
     [[nodiscard]] std::size_t input_allocations() const;
     [[nodiscard]] std::size_t tracked_launches() const;
+    [[nodiscard]] std::size_t owned_profile_launches() const;
 
   private:
     struct impl_t;
 
     explicit controller_runtime_t(std::unique_ptr<impl_t> impl);
+    [[nodiscard]] controller_start_result_t start_seat_locked(
+      const seat_handle_t &handle, input::plan_t input_plan
+    );
 
     std::unique_ptr<impl_t> impl_;
   };

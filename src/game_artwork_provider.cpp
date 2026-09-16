@@ -23,6 +23,11 @@ namespace game_artwork::providers {
     constexpr std::size_t maximum_match_candidate_count = 10;
     constexpr std::size_t maximum_match_title_bytes = 160;
 
+    bool canonical_library_appid(std::string_view appid) {
+      return is_valid_steam_appid(appid) && appid.size() <= 10 && appid.front() != '0' &&
+             std::stoull(std::string(appid)) <= 4294967295ULL;
+    }
+
     std::string_view trim_ascii_whitespace(std::string_view value) {
       while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
         value.remove_prefix(1);
@@ -329,6 +334,68 @@ namespace game_artwork::providers {
       {provider_e::steam, operation_e::download, kind_e::hero, root + "library_hero.jpg", false},
       {provider_e::steam, operation_e::download, kind_e::logo, root + "logo.png", false},
     };
+  }
+
+  std::vector<request_t> parse_steam_library_assets(std::string_view appid, std::string_view response_body) {
+    if (!canonical_library_appid(appid) || response_body.size() > 1024U * 1024U) return {};
+    const auto response = parse_response(response_body);
+    if (!response.is_object() || !response.contains("response") || !response["response"].is_object()) return {};
+    const auto &body = response["response"];
+    if (!body.contains("store_items") || !body["store_items"].is_array() || body["store_items"].size() != 1) return {};
+    const auto &item = body["store_items"][0];
+    if (!item.is_object() || !item.contains("appid") ||
+        positive_json_integer(item["appid"]) != std::stoull(std::string(appid)) ||
+        !item.contains("assets") || !item["assets"].is_object()) return {};
+    const auto &assets = item["assets"];
+    std::vector<request_t> plan;
+    auto hash = [](std::string_view value) {
+      return value.size() == 40 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+      });
+    };
+    auto add = [&](const char *field, kind_e kind, std::initializer_list<std::string_view> filenames) {
+      if (!assets.contains(field) || !assets[field].is_string()) return;
+      const auto path = assets[field].get<std::string>();
+      const auto split = path.find('/');
+      const auto filename = split == std::string::npos ? std::string_view(path) : std::string_view(path).substr(split + 1);
+      if ((split != std::string::npos && !hash(std::string_view(path).substr(0, split))) ||
+          std::find(filenames.begin(), filenames.end(), filename) == filenames.end()) return;
+      // Ignore upstream URL templates: only a bounded asset filename can enter this fixed host/app path.
+      plan.push_back({provider_e::steam, operation_e::download, kind,
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/" + std::string(appid) + '/' + path, false});
+    };
+    add("library_capsule", kind_e::poster, {"library_600x900.jpg", "library_capsule.jpg"});
+    add("library_hero", kind_e::hero, {"library_hero.jpg"});
+    add("library_logo", kind_e::logo, {"logo.png", "library_logo.png"});
+    if (assets.contains("community_icon") && assets["community_icon"].is_string()) {
+      const auto icon = assets["community_icon"].get<std::string>();
+      if (hash(icon)) plan.push_back({provider_e::steam, operation_e::download, kind_e::icon,
+        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/" + std::string(appid) + '/' + icon + ".jpg", false});
+    }
+    // A malformed/incomplete poster entry must not turn a broken lookup into a healthy no-op.
+    if (std::none_of(plan.begin(), plan.end(), [](const auto &request) { return request.kind == kind_e::poster; })) return {};
+    return plan;
+  }
+
+  std::vector<request_t> plan_steam_library_assets(std::string_view appid, const transport_t &transport) {
+    if (!canonical_library_appid(appid)) return {};
+    const json query{{"ids", {{{"appid", std::stoull(std::string(appid))}}}},
+      {"context", {{"language", "english"}, {"country_code", "US"}}},
+      {"data_request", {{"include_assets", true}}}};
+    const request_t request{provider_e::steam, operation_e::list, std::nullopt,
+      "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json=" + percent_encode_path_segment(query.dump()), false};
+    try {
+      if (transport) {
+        const auto response = transport(request, 1024U * 1024U);
+        if (response && response->status_code == 200 &&
+            (response->final_url.empty() || response->final_url == request.url)) {
+          const auto plan = parse_steam_library_assets(appid, std::string_view(
+            reinterpret_cast<const char *>(response->body.data()), response->body.size()));
+          if (!plan.empty()) return plan;
+        }
+      }
+    } catch (...) { /* Preserve the legacy provider when metadata is unavailable. */ }
+    return plan_steam_assets(appid);
   }
 
   std::optional<request_t> plan_steamgriddb_search(const std::string_view title) {

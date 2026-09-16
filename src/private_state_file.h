@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +45,17 @@ namespace private_state_file {
 
   read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes,
                             bool permit_public_read = false, bool wait_for_lock = true);
+
+  struct leased_read_result_t {
+    read_result_t read;
+    std::shared_ptr<void> lease;
+  };
+
+  // Nonblocking exclusive read. Keep the lease while the snapshot authorizes
+  // live resources. Cooperating writers cannot change it until the last owner
+  // releases the lease. Failed reads never retain the lock.
+  leased_read_result_t read_with_lease(const std::filesystem::path &target,
+                                     std::size_t max_bytes);
   // One cross-process transaction. Contention fails immediately so callers can
   // retain session authority without waiting on an unrelated file-lock holder.
   // The callback must not call another persistence operation on this path.

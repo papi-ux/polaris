@@ -40,6 +40,7 @@ const routes = [
   { path: '/webrtc', redirect: '/browser-stream' },
   { path: '/config', component: () => import(/* webpackChunkName: "config" */ './views/ConfigView.vue') },
   { path: '/pin', component: () => import(/* webpackChunkName: "pin" */ './views/PinView.vue') },
+  { path: '/spaces', component: () => import(/* webpackChunkName: "spaces" */ './views/SpacesView.vue') },
   { path: '/password', component: () => import(/* webpackChunkName: "password" */ './views/PasswordView.vue') },
   { path: '/troubleshooting', component: () => import(/* webpackChunkName: "troubleshooting" */ './views/TroubleshootingView.vue') },
   { path: '/welcome', component: () => import(/* webpackChunkName: "welcome" */ './views/WelcomeView.vue') },

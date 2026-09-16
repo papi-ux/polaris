@@ -99,6 +99,7 @@ BuildRequires: gcc-c++
 
 %global cuda_dir %{_builddir}/cuda
 
+Requires: python3
 Requires: labwc
 Requires: grim
 Requires: libayatana-appindicator3 >= 0.5.3
@@ -265,6 +266,7 @@ xvfb-run ./tests/test_polaris
 
 %install
 DESTDIR=%{buildroot} cmake --install %{_builddir}/Polaris/build
+python3 %{_builddir}/Polaris/scripts/spaces/verify_package.py %{buildroot}
 
 %post
 echo "Polaris host integration is now explicit instead of automatic."

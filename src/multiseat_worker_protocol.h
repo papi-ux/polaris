@@ -60,6 +60,7 @@ namespace multiseat::worker_ipc {
     invalidate_ref_frames = 28,
     /** Worker to controller; the one acknowledgement for the three above. */
     media_control_ack = 29,
+    select_media_bitrate = 30,
 
     video = 32,
     audio = 33,

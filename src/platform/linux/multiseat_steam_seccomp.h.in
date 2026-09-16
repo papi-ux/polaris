@@ -1,0 +1,6 @@
+#pragma once
+#include <string_view>
+namespace multiseat::container {
+inline constexpr std::string_view steam_seccomp_path = "@POLARIS_STEAM_SECCOMP_PATH@";
+inline constexpr std::string_view steam_seccomp_data = R"POLARIS_SECCOMP(@POLARIS_STEAM_SECCOMP_JSON@)POLARIS_SECCOMP";
+}

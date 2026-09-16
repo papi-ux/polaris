@@ -20,6 +20,7 @@
 
 // local includes
 #include "src/file_handler.h"
+#include "src/confighttp_validation.h"
 
 class ConfigConsistencyTest: public ::testing::Test {
 protected:
@@ -486,7 +487,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
 
   // Check that all config.cpp options exist in other files (except internal ones)
   for (const auto &option : cppOptions) {
-    if (internalOptions.contains(option)) {
+    if (internalOptions.contains(option) || confighttp::validation::is_local_config_key(option)) {
       continue;  // Skip internal options
     }
 
@@ -514,7 +515,11 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsAreAcceptedByTheConfigApi) {
   // options the user did mean to change.
   std::vector<std::string> rejected;
   for (const auto &option : cppOptions) {
-    if (!allowedKeys.contains(option)) {
+    if (confighttp::validation::is_local_config_key(option)) {
+      // A dedicated setup transaction owns controller activation and paths.
+      // These cannot be changed or cleared through a generic settings save.
+      EXPECT_FALSE(allowedKeys.contains(option)) << option;
+    } else if (!allowedKeys.contains(option)) {
       rejected.push_back(option);
     }
   }
@@ -674,7 +679,7 @@ TEST_F(ConfigConsistencyTest, TestFrameworkDetectsMissingOptions) {
 
   // Check that the fake option is detected as missing from other files
   for (const auto &option : modifiedCppOptions) {
-    if (internalOptions.contains(option)) {
+    if (internalOptions.contains(option) || confighttp::validation::is_local_config_key(option)) {
       continue;  // Skip internal options
     }
 

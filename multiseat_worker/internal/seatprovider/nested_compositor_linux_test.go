@@ -240,6 +240,9 @@ func fakeGamescopeProducer(arguments []string, environment []string, mode string
 	signal.Notify(terminated, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(terminated)
 	<-terminated
+	if mode == "shutdown-failure" {
+		return 124
+	}
 	return 0
 }
 
@@ -1015,4 +1018,42 @@ func TestChildExitDescriptionNamesHowAHelperFinished(t *testing.T) {
 		}
 		_ = child.stop(time.Second)
 	}
+}
+
+func TestNestedCompositorReportsFailureDuringRequestedShutdown(t *testing.T) {
+	runtimePath := privateDisplayRuntimeDirectoryForTest(t)
+	display := displayRequest("nested-shutdown-failure", "polaris-capture-shutdown-failure")
+	outer, _ := startNestedOuterDisplay(t, runtimePath, display)
+	before := snapshotDirectoryIdentities(t, runtimePath)
+	request := nestedRequestFromDisplay(display, "polaris-wayland-shutdown-failure")
+	options := fakeNestedOptions(t, runtimePath, "shutdown-failure")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runNestedCompositor(ctx, request, writer, options) }()
+	record, readyError := readBoundedLine(reader, 3*time.Second, 64)
+	cancel()
+	select {
+	case err = <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("nested shutdown hung")
+	}
+	if readyError != nil || record != seatruntime.ReadyRecord {
+		t.Fatalf("nested readiness failed: %q, %v, %v", record, readyError, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "runtime Gamescope failed during shutdown (exit status 124)") {
+		t.Errorf("abnormal requested shutdown was hidden: %v", err)
+	}
+	if after := snapshotDirectoryIdentities(t, runtimePath); !reflect.DeepEqual(after, before) {
+		t.Errorf("shutdown failure changed the outer display: before=%v after=%v", before, after)
+	}
+	requireDirectoryEmpty(t, options.x11SocketDirectory)
+	requireDirectoryEmpty(t, options.x11LockDirectory)
+	stopRealProvider(t, outer)
+	requireEmptyRuntime(t, runtimePath)
 }

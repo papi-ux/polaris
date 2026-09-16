@@ -122,6 +122,81 @@ namespace {
   }
 }  // namespace
 
+TEST(MultiseatRuntime, AutomaticPlacementSkipsFullSeatsAndExhaustedEncoders) {
+  auto first = shared_gpu(2, 1);
+  auto second = shared_gpu(1, 2);
+  second.logical_gpu_id = "gpu-secondary";
+  second.render_node = "/dev/dri/renderD129";
+  registry_t registry {controller_epoch, {first, second}};
+  auto request = request_for("client-a", "profile-a", "steam-game");
+  request.logical_gpu_id.clear();
+  const std::vector<std::string> candidates {gpu_id, "gpu-secondary"};
+  auto a = registry.admit_first_available(request, candidates);
+  ASSERT_TRUE(a.accepted());
+  EXPECT_EQ(a.seat->handle.logical_gpu_id, gpu_id);
+  request.client_key = "client-b";
+  request.profile_key = "profile-b";
+  auto b = registry.admit_first_available(request, candidates);
+  ASSERT_TRUE(b.accepted());
+  EXPECT_EQ(b.seat->handle.logical_gpu_id, "gpu-secondary");
+  request.client_key = "client-c";
+  request.profile_key = "profile-c";
+  EXPECT_EQ(registry.admit_first_available(request, candidates).rejection,
+    admission_rejection_e::encoder_capacity_reached);
+  EXPECT_EQ(registry.admit_first_available(request, {"gpu-secondary", gpu_id}).rejection,
+    admission_rejection_e::encoder_capacity_reached);
+  EXPECT_EQ(registry.admit_first_available(request, {"gpu-secondary"}).rejection,
+    admission_rejection_e::seat_capacity_reached);
+  ASSERT_EQ(registry.begin_stop(a.seat->handle), mutation_result_e::applied);
+  ASSERT_EQ(registry.release(a.seat->handle), mutation_result_e::applied);
+  EXPECT_TRUE(registry.admit_first_available(request, candidates).accepted());
+}
+
+TEST(MultiseatRuntime, AutomaticPlacementValidatesEntireAllowlistBeforeReservation) {
+  registry_t registry {controller_epoch, {shared_gpu()}};
+  auto request = request_for("client-a", "profile-a", "steam-game");
+  EXPECT_EQ(registry.admit_first_available(request, {gpu_id}).rejection,
+    admission_rejection_e::invalid_request);
+  request.logical_gpu_id.clear();
+  EXPECT_EQ(registry.admit_first_available(request, {gpu_id, "missing"}).rejection,
+    admission_rejection_e::unknown_gpu);
+  EXPECT_EQ(registry.admit_first_available(request, {gpu_id, gpu_id}).rejection,
+    admission_rejection_e::invalid_request);
+  EXPECT_EQ(registry.admit_first_available(request, {}).rejection,
+    admission_rejection_e::invalid_request);
+  request.encoder_sessions = 0;
+  EXPECT_EQ(registry.admit_first_available(request, {gpu_id}).rejection,
+    admission_rejection_e::invalid_request);
+  EXPECT_TRUE(registry.seats().empty());
+}
+
+TEST(MultiseatRuntime, AutomaticPlacementSerializesSharedProfileAcrossGpus) {
+  auto second = shared_gpu();
+  second.logical_gpu_id = "gpu-secondary";
+  second.render_node = "/dev/dri/renderD129";
+  registry_t registry {controller_epoch, {shared_gpu(), second}};
+  std::promise<void> start;
+  auto ready = start.get_future().share();
+  std::vector<std::future<multiseat::admission_result_t>> attempts;
+  for (int index = 0; index < 16; ++index) {
+    attempts.push_back(std::async(std::launch::async, [&, index] {
+      auto request = request_for("client-" + std::to_string(index), "shared-profile", "steam-game");
+      request.logical_gpu_id.clear();
+      ready.wait();
+      return registry.admit_first_available(request, {gpu_id, "gpu-secondary"});
+    }));
+  }
+  start.set_value();
+  unsigned admitted = 0;
+  for (auto &attempt : attempts) {
+    auto result = attempt.get();
+    if (result.accepted()) ++admitted;
+    else EXPECT_EQ(result.rejection, admission_rejection_e::profile_already_active);
+  }
+  EXPECT_EQ(admitted, 1U);
+  EXPECT_EQ(registry.seats().size(), 1U);
+}
+
 TEST(MultiseatRuntime, TwoIndependentSeatsShareOneGpuWithDistinctResources) {
   registry_t registry {controller_epoch, {shared_gpu()}};
   const auto first = admit_or_fail(

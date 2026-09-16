@@ -17,22 +17,51 @@ import (
 
 const launcherHome = "/var/lib/polaris-seat"
 
+type launcherCommand struct {
+	executable        string
+	arguments         []string
+	packageScript     string
+	retainDescendants bool
+}
+
 // Workloads are image-owned executable policy. Controller input selects only
 // this bounded key; paths, argv, shell text and ambient environment never cross.
-func launcherExecutable(request seatruntime.Request) (string, error) {
+func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 	if _, err := seatruntime.Arguments(request); err != nil {
-		return "", err
+		return launcherCommand{}, err
 	}
-	if request.Stage == seatruntime.StageLauncher && request.WorkloadKind == seatruntime.WorkloadGamescope && request.WorkloadID == "input-pong-v1" {
-		return "/usr/libexec/polaris-seat/workloads/input-pong-v1", nil
+	if request.Stage != seatruntime.StageLauncher || !seatruntime.StreamingWorkloadSupported(request.RuntimeProfile, request.WorkloadKind, request.WorkloadID) {
+		return launcherCommand{}, errors.New("workload is not implemented in this image")
 	}
-	return "", errors.New("workload is not implemented in this image")
+	if request.WorkloadKind == seatruntime.WorkloadGamescope {
+		return launcherCommand{executable: "/usr/libexec/polaris-seat/workloads/input-pong-v1"}, nil
+	}
+	// The immutable package script sets STEAMSCRIPT from $0. Interpreting it
+	// through its canonical path keeps Steam updates/restarts from inheriting
+	// /proc/self/fd/3 as the launcher path. Both files are checked as trusted
+	// image executables; no shell text or caller-supplied option is admitted.
+	command := launcherCommand{
+		executable: "/usr/bin/bash", packageScript: "/usr/games/steam",
+		arguments: []string{"/usr/games/steam", "-gamepadui"}, retainDescendants: true,
+	}
+	if request.WorkloadID != seatruntime.SteamBigPicture {
+		command.arguments = append(command.arguments, "-applaunch", request.WorkloadID)
+	}
+	return command, nil
 }
 
 func launcherEnvironment(request seatruntime.Request, session launcherSession) ([]string, error) {
 	environment, err := seatruntime.Environment(request)
 	if err != nil {
 		return nil, err
+	}
+	if request.WorkloadKind == seatruntime.WorkloadSteam {
+		// Profile streams currently allocate at most one gamepad. SDL's Linux
+		// discovery skips our reserved alias because it is not an eventN name
+		// and this namespace has no host udev database. Select only that exact
+		// host-admitted node. It stays absent when controller input is denied;
+		// this hint neither creates a device nor grants access to another seat.
+		environment = append(environment, "SDL_JOYSTICK_DEVICE=/dev/input/polaris-gamepad-0")
 	}
 	return append(environment,
 		"PATH=/usr/bin", "LC_ALL=C",
@@ -67,7 +96,7 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 		return errors.New("launcher invocation is invalid")
 	}
 	defer ready.Close()
-	executable, err := launcherExecutable(request)
+	command, err := planLauncher(request)
 	if err != nil {
 		return err
 	}
@@ -101,6 +130,51 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	if err != nil {
 		return err
 	}
+	var steamBroker *steamInputBroker
+	var steamDone <-chan struct{}
+	if request.WorkloadKind == seatruntime.WorkloadSteam {
+		path, name, err := inputs.SteamOutput()
+		if err != nil {
+			return err
+		}
+		if path != "" {
+			for _, library := range []string{
+				"/usr/lib/x86_64-linux-gnu/libpolaris-steam-input.so",
+				"/usr/lib/i386-linux-gnu/libpolaris-steam-input.so",
+			} {
+				file, err := openTrustedExecutable(library, options.executableOwnerUID)
+				if err != nil {
+					return err
+				}
+				_ = file.Close()
+			}
+			sysname, err := inputs.SteamOutputSysname()
+			if err != nil {
+				return err
+			}
+			output, err := inputs.SteamOutputWriter()
+			if err != nil {
+				return err
+			}
+			defer output.Close()
+			socket := filepath.Join(runtime.path, "polaris-steam-input.sock")
+			steamBroker, err = startSteamInputBroker(parent, socket, options.runtimeOwnerUID, func(state steamInputState) error {
+				events := steamInputEvents(state)
+				n, err := output.Write(events)
+				if err != nil || n != len(events) {
+					return errors.New("Steam output device write failed")
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			defer func() { result = errors.Join(result, steamBroker.close()) }()
+			steamDone = steamBroker.done
+			environment = append(environment, "LD_PRELOAD=libpolaris-steam-input.so",
+				"POLARIS_STEAM_INPUT_SOCKET="+socket, "POLARIS_STEAM_INPUT_SYSNAME="+sysname, "POLARIS_STEAM_INPUT_NAME="+name)
+		}
+	}
 	if err := parent.Err(); err != nil {
 		return err
 	}
@@ -115,7 +189,14 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	if err := session.lifetime.verify(); err != nil {
 		return err
 	}
-	child, err := startManagedChildWithUmask(executable, options.executableOwnerUID, nil, environment, nil, 0o077)
+	if command.packageScript != "" {
+		script, err := openTrustedExecutable(command.packageScript, options.executableOwnerUID)
+		if err != nil {
+			return err
+		}
+		defer script.Close()
+	}
+	child, err := startManagedChildWithUmask(command.executable, options.executableOwnerUID, command.arguments, environment, nil, 0o077)
 	if err != nil {
 		return err
 	}
@@ -124,7 +205,9 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 		return err
 	}
 	if child.exited() {
-		return errors.New("workload exited during startup")
+		if alive, err := launcherDescendantsAlive(command.retainDescendants); err != nil || !alive {
+			return errors.Join(errors.New("workload exited during startup"), err)
+		}
 	}
 	if err := publishReadiness(ready); err != nil {
 		return err
@@ -133,13 +216,32 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 	// successful client presentation are separate media/acceptance evidence.
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	primaryDone := child.done
 	for {
 		select {
 		case <-parent.Done():
 			return nil
-		case <-child.done:
-			return nil
+		case <-steamDone:
+			if parent.Err() != nil {
+				return nil
+			}
+			return errors.Join(errors.New("Steam input broker stopped"), steamBroker.verify())
+		case <-primaryDone:
+			primaryDone = nil
+			if alive, err := launcherDescendantsAlive(command.retainDescendants); err != nil || !alive {
+				return err
+			}
 		case <-ticker.C:
+			if steamBroker != nil {
+				if err := steamBroker.verify(); err != nil {
+					return err
+				}
+			}
+			if primaryDone == nil {
+				if alive, err := launcherDescendantsAlive(command.retainDescendants); err != nil || !alive {
+					return err
+				}
+			}
 			if err := session.lifetime.verify(); err != nil {
 				return err
 			}

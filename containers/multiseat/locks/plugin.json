@@ -2,9 +2,16 @@
   "schema": 1,
   "url": "https://github.com/games-on-whales/gst-wayland-display",
   "revision": "081feb5ab8057937b78104668bb1f507ce42e18d",
-  "cargo_lock_sha256": "90b40461f6b9943c0af26262d711852c0ba7c693c4ad9e187a8adfe1760a227d",
-  "sha256": "96da8c6b366147351f86547ddb40b559cf70402535c9797ca17024f6af5b8ffc",
+  "cargo_lock_sha256": "0894a9bf33bf74ad3e32d50fa266fc62303278beca52c57681167652fe20d9e3",
+  "sha256": "ba60ab5672e5c0a53b2cdaf4a8fd5a469463824857836492165b999fdc13ae9d",
   "archive_epoch": 1754524800,
   "rust_version": "1.89.0",
-  "vendor_mode": "cargo vendor --locked --versioned-dirs vendor"
+  "vendor_mode": "cargo vendor --locked --versioned-dirs vendor",
+  "patches": [
+    "patches/display-polaris-model.patch"
+  ],
+  "upstream_cargo_lock_sha256": "90b40461f6b9943c0af26262d711852c0ba7c693c4ad9e187a8adfe1760a227d",
+  "dependency_patches": [
+    "patches/plugin-security-dependencies.patch"
+  ]
 }

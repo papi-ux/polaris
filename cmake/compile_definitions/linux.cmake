@@ -2,6 +2,48 @@
 
 add_compile_definitions(POLARIS_PLATFORM="linux")
 
+# Bind the installed policy and recovery checks to the exact compiled bytes.
+set(POLARIS_STEAM_SECCOMP_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/seccomp/steam.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_STEAM_SECCOMP_SOURCE}")
+file(READ "${POLARIS_STEAM_SECCOMP_SOURCE}" POLARIS_STEAM_SECCOMP_JSON)
+file(SHA256 "${POLARIS_STEAM_SECCOMP_SOURCE}" POLARIS_STEAM_SECCOMP_SHA256)
+set(POLARIS_STEAM_SECCOMP_NAME "steam-seccomp-${POLARIS_STEAM_SECCOMP_SHA256}.json")
+set(POLARIS_STEAM_SECCOMP_PATH "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polaris/multiseat/${POLARIS_STEAM_SECCOMP_NAME}")
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_steam_seccomp.h.in"
+               "${CMAKE_BINARY_DIR}/generated/multiseat_steam_seccomp.h" @ONLY)
+# Optional SELinux support is shipped inert, then installed by an explicit
+# administrator command against the host's own reference-policy interfaces.
+set(POLARIS_SPACES_SECURITY_DIR "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polaris/multiseat/security")
+set(POLARIS_SPACES_SECURITY_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/selinux")
+set(POLARIS_SPACES_INPUT "${POLARIS_SPACES_SECURITY_SOURCE}/polaris_multiseat_input.cil")
+set(POLARIS_SPACES_WORKER "${POLARIS_SPACES_SECURITY_SOURCE}/polaris_nvidia_worker.te")
+set(POLARIS_SPACES_RULE "${POLARIS_SPACES_SECURITY_SOURCE}/97-polaris-multiseat-input.rules")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${POLARIS_SPACES_INPUT}" "${POLARIS_SPACES_WORKER}" "${POLARIS_SPACES_RULE}")
+file(SHA256 "${POLARIS_SPACES_INPUT}" POLARIS_SPACES_INPUT_SHA)
+file(SHA256 "${POLARIS_SPACES_WORKER}" POLARIS_SPACES_WORKER_SHA)
+file(SHA256 "${POLARIS_SPACES_RULE}" POLARIS_SPACES_RULE_SHA)
+string(SHA256 POLARIS_SPACES_SECURITY_RELEASE "1:${POLARIS_SPACES_INPUT_SHA}:${POLARIS_SPACES_WORKER_SHA}:${POLARIS_SPACES_RULE_SHA}")
+string(SUBSTRING "${POLARIS_SPACES_SECURITY_RELEASE}" 0 32 POLARIS_SPACES_SECURITY_SHORT)
+set(POLARIS_SPACES_SECURITY_MARKER "polaris_spaces_${POLARIS_SPACES_SECURITY_SHORT}_t")
+set(POLARIS_SPACES_VERSION_DATA "(type ${POLARIS_SPACES_SECURITY_MARKER})\n(roletype object_r ${POLARIS_SPACES_SECURITY_MARKER})\n")
+string(SHA256 POLARIS_SPACES_VERSION_SHA "${POLARIS_SPACES_VERSION_DATA}")
+file(WRITE "${CMAKE_BINARY_DIR}/generated/polaris_spaces_version.cil" "${POLARIS_SPACES_VERSION_DATA}")
+file(READ "${POLARIS_SPACES_RULE}" POLARIS_SPACES_RULE_DATA)
+set(POLARIS_SPACES_READY_DATA "{\"schema\":1,\"release\":\"${POLARIS_SPACES_SECURITY_RELEASE}\"}\n")
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security_data.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_security_data.h" @ONLY)
+configure_file("${CMAKE_SOURCE_DIR}/scripts/spaces/security_setup.py.in"
+               "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup" @ONLY)
+# Only a catalog reviewed into the host build may authorize runtime downloads.
+set(POLARIS_SPACES_RUNTIME_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_RUNTIME_SOURCE}")
+file(READ "${POLARIS_SPACES_RUNTIME_SOURCE}" POLARIS_SPACES_RUNTIME_CATALOG)
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_catalog.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_runtime_catalog.h" @ONLY)
+include_directories("${CMAKE_BINARY_DIR}/generated")
+
+
 if(POLARIS_ENABLE_BROWSER_STREAM)
     list(APPEND POLARIS_DEFINITIONS POLARIS_ENABLE_BROWSER_STREAM=1)
 endif()
@@ -513,10 +555,10 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_gamescope.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.cpp"
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.h"
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_backend.cpp"
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_host.h"
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_podman_host.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_backend.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_backend.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_host.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_host.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_authority.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_worker_client.h"
@@ -550,6 +592,24 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_production.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_controller_production.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_library.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_library.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_catalog.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_catalog.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_network.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_profile_network.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_launch_service.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_launch_service.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"

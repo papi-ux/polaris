@@ -6,9 +6,12 @@
 
 #ifdef __linux__
 
-  #include "multiseat_podman_host.h"
+  #include "multiseat_container_host.h"
+  #include "multiseat_profile_catalog.h"
+  #include "multiseat_profile_network.h"
   #include "src/uuid.h"
 
+  #include <algorithm>
   #include <set>
   #include <unordered_set>
   #include <utility>
@@ -33,7 +36,7 @@ namespace multiseat {
     };
 
     class runtime_input_manifest_source_t final :
-        public podman::input_manifest_source_t {
+        public container::input_manifest_source_t {
     public:
       runtime_input_manifest_source_t(
         input::moonlight_session_runtime_t &runtime,
@@ -62,7 +65,7 @@ namespace multiseat {
 
     struct production_worker_backend_dependencies_t {
       production_worker_backend_dependencies_t(
-        std::unique_ptr<podman::host_t> host_value,
+        std::unique_ptr<container::host_t> host_value,
         std::unique_ptr<input::kernel_node_probe_t> probe_value,
         input::moonlight_session_runtime_t &runtime
       ) :
@@ -72,7 +75,7 @@ namespace multiseat {
       }
 
       // Reverse destruction keeps the manifest ahead of its referenced probe.
-      std::unique_ptr<podman::host_t> host;
+      std::unique_ptr<container::host_t> host;
       std::unique_ptr<input::kernel_node_probe_t> probe;
       runtime_input_manifest_source_t input_manifests;
     };
@@ -93,7 +96,7 @@ namespace multiseat {
     bool valid_catalog_boundary(
       const production_controller_options_t &options
     ) {
-      if (options.gpus.empty() || !options.podman.gpus.empty()) {
+      if (options.gpus.empty() || !options.container.gpus.empty()) {
         return false;
       }
       std::unordered_set<std::string> logical_ids;
@@ -125,19 +128,19 @@ namespace multiseat {
       return true;
     }
 
-    std::optional<std::vector<podman::gpu_t>> admitted_podman_gpus(
+    std::optional<std::vector<container::gpu_t>> admitted_container_gpus(
       const std::vector<production_controller_gpu_t> &gpus,
-      podman::host_t &host
+      container::host_t &host
     ) {
       using character_device_key_t =
         std::pair<std::uint32_t, std::uint32_t>;
       std::set<character_device_key_t> exclusive_devices;
       std::set<std::pair<std::uint64_t, std::uint64_t>> exclusive_inodes;
-      std::vector<podman::gpu_t> result;
+      std::vector<container::gpu_t> result;
       result.reserve(gpus.size());
       for (const auto &gpu : gpus) {
         std::set<character_device_key_t> local_devices;
-        podman::gpu_t admitted {
+        container::gpu_t admitted {
           .logical_gpu_id = gpu.logical_gpu_id,
           .render_node = gpu.render_node,
           .max_encoder_sessions = gpu.max_encoder_sessions,
@@ -202,15 +205,87 @@ namespace multiseat {
     if (!options.enabled) {
       return controller_runtime_t::create({}, {});
     }
+    std::shared_ptr<void> catalog_lease;
+    std::vector<profile_summary_t> catalog_summary;
+    std::vector<std::string> desktop_clients;
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> catalog_owner;
+    if (!options.profile_catalog.empty()) {
+      if (!options.container.profiles.empty() || !options.container.workloads.empty() ||
+          !options.profile_routes.empty() || options.container.engine != container::engine_e::docker ||
+          options.container.executable != "/usr/bin/docker" || options.container.runtime_executable != "/usr/bin/runc" ||
+          options.container.daemon_socket != "/var/run/docker.sock") {
+        return {.status = controller_runtime_create_status_e::invalid_dependencies};
+      }
+      auto loaded = profiles::load(options.profile_catalog);
+      if (!loaded) return {.status = controller_runtime_create_status_e::invalid_dependencies};
+      catalog_lease = std::move(loaded->lease);
+      desktop_clients = loaded->catalog.desktop_clients;
+      catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
+      for (auto &entry : loaded->catalog.profiles) {
+        entry.storage.steam_library_enabled = !entry.archived && entry.storage.runtime_profile == runtime_profile_e::steam;
+        catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
+          entry.storage.runtime_profile == runtime_profile_e::steam &&
+            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients, entry.storage.steam_library_enabled});
+        if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
+              entry.workload) == options.container.workloads.end()) {
+          options.container.workloads.push_back(entry.workload);
+        }
+        if (!entry.client_keys.empty() || !entry.access_clients.empty()) {
+          options.profile_routes.push_back({entry.storage.profile_key, std::move(entry.client_keys), entry.workload, std::move(entry.access_clients)});
+        }
+        options.container.profiles.push_back(std::move(entry.storage));
+      }
+    }
+    if (options.container.profiles.empty() && options.profile_routes.empty()) {
+      return controller_runtime_t::create({}, {});
+    }
     if (!valid_catalog_boundary(options)) {
       return {
         .status = controller_runtime_create_status_e::invalid_dependencies,
       };
     }
 
+    controller_runtime_options_t runtime_options {
+      .enabled = true, .worker_media_enabled = options.container.media_enabled,
+      .profile_catalog = std::move(catalog_summary),
+      .desktop_clients = std::move(desktop_clients),
+    };
+    // Resolve profile storage/image and workload from the same trusted catalog
+    // the backend will enforce. No second GPU or image allowlist is accepted.
+    for (const auto &route : options.profile_routes) {
+      const auto &profiles = options.container.profiles;
+      const auto profile = std::find_if(profiles.begin(), profiles.end(), [&](const auto &entry) {
+        return entry.profile_key == route.profile_key;
+      });
+      if (profile == profiles.end() ||
+          std::count_if(profiles.begin(), profiles.end(), [&](const auto &entry) {
+            return entry.profile_key == route.profile_key;
+          }) != 1 ||
+          std::find(options.container.workloads.begin(), options.container.workloads.end(),
+            route.workload) == options.container.workloads.end()) {
+        return {.status = controller_runtime_create_status_e::invalid_dependencies};
+      }
+      controller_profile_route_t resolved {
+        .profile_key = route.profile_key,
+        .client_keys = route.client_keys,
+        .runtime_profile = profile->runtime_profile,
+        .workload = route.workload,
+        .access_clients = route.access_clients,
+        .library_enabled = profile->steam_library_enabled,
+      };
+      for (const auto &gpu : options.gpus) {
+        resolved.logical_gpu_ids.push_back(gpu.logical_gpu_id);
+      }
+      runtime_options.profile_routes.push_back(std::move(resolved));
+    }
+    if (!options.profile_catalog.empty()) {
+      runtime_options.library_reader = spaces::make_library_reader(options.container.profiles,
+        factories.container_host ? factories.container_host : [] { return std::make_unique<container::local_host_t>(); });
+    }
     return controller_runtime_t::create(
-      {.enabled = true},
-      [options = std::move(options), factories = std::move(factories)]()
+      std::move(runtime_options),
+      [options = std::move(options), factories = std::move(factories),
+       catalog_lease = std::move(catalog_lease), catalog_owner]()
         mutable -> std::optional<controller_runtime_dependencies_t> {
         const auto epoch = factories.controller_epoch ?
                              factories.controller_epoch() :
@@ -219,11 +294,13 @@ namespace multiseat {
           return std::nullopt;
         }
 
-        auto host = factories.podman_host ?
-                      factories.podman_host() :
-                      std::make_unique<podman::local_host_t>();
+        auto host = factories.container_host ?
+                      factories.container_host() :
+                      std::make_unique<container::local_host_t>();
+        if (catalog_owner && (!host || host->effective_uid() != catalog_owner->first ||
+                              host->effective_gid() != catalog_owner->second)) return std::nullopt;
         auto admitted_gpus = host ?
-                               admitted_podman_gpus(options.gpus, *host) :
+                               admitted_container_gpus(options.gpus, *host) :
                                std::nullopt;
         if (!host || !admitted_gpus) {
           return std::nullopt;
@@ -252,7 +329,7 @@ namespace multiseat {
         );
         auto authority =
           std::make_unique<worker_ipc::authority_store_t>(
-            options.podman.ipc_root
+            options.container.ipc_root
           );
         if (authority->status() != worker_ipc::authority_status_e::applied) {
           return std::nullopt;
@@ -264,15 +341,16 @@ namespace multiseat {
             std::move(probe),
             *moonlight.runtime
         );
-        auto podman_options = std::move(options.podman);
-        podman_options.gpus = std::move(*admitted_gpus);
-        auto worker_backend = std::make_unique<podman::backend_t>(
+        auto container_options = std::move(options.container);
+        container_options.gpus = std::move(*admitted_gpus);
+        auto worker_backend = std::make_unique<container::backend_t>(
           *backend_dependencies->host,
           backend_dependencies->input_manifests,
-          std::move(podman_options)
+          std::move(container_options)
         );
 
         return controller_runtime_dependencies_t {
+          .profile_catalog_lease = std::move(catalog_lease),
           .registry = std::move(registry),
           .worker_authority_store = std::move(authority),
           .moonlight_runtime = std::move(moonlight.runtime),

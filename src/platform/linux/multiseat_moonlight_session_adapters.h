@@ -111,6 +111,7 @@ namespace multiseat::input {
     void close() noexcept;
     [[nodiscard]] std::size_t registered_sessions() const;
     [[nodiscard]] std::size_t claimed_sessions() const;
+    [[nodiscard]] std::size_t claimed_sessions(const seat_handle_t &handle) const;
     [[nodiscard]] bool closed() const;
 
   private:

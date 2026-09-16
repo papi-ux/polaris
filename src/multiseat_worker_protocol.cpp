@@ -77,6 +77,8 @@ namespace multiseat::worker_ipc {
         case message_e::request_idr:
         case message_e::media_control_ack:
           return channel == channel_e::control && payload_size == 0;
+        case message_e::select_media_bitrate:
+          return channel == channel_e::control && payload_size == 4;
         case message_e::invalidate_ref_frames:
           return channel == channel_e::control && payload_size == frame_range_size;
         case message_e::input:

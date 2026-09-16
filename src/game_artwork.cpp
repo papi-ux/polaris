@@ -472,6 +472,7 @@ namespace game_artwork {
       "shared.akamai.steamstatic.com",
       "steamcdn-a.akamaihd.net",
       "store.steampowered.com",
+      "api.steampowered.com",
     };
     static const std::set<std::string> steamgriddb_hosts {
       "cdn.steamgriddb.com",

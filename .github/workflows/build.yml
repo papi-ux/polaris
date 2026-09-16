@@ -147,6 +147,12 @@ jobs:
           ref: ${{ needs.resolve-source.outputs.commit }}
           submodules: recursive
 
+      - name: Verify Spaces runtime catalog and artifact checks
+        run: |
+          python3 containers/multiseat/runtime_catalog.py validate containers/multiseat/runtime-catalog.json
+          python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
+          python3 -m unittest discover -s scripts/spaces -p 'test_*.py'
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
@@ -459,8 +465,10 @@ jobs:
           pkgbuild.write_text(text)
           PY
 
+      # Manual validation must produce the same installable package as a PR,
+      # without requiring a release tag or enabling release publication.
       - name: Validate Arch package
-        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           useradd -m builder
           # The base system was synchronized before the exact Boost overlay.
@@ -504,7 +512,7 @@ jobs:
           su builder -c "cd '$GITHUB_WORKSPACE/arch-pkgbuild' && ${arch_makepkg_env} makepkg --nodeps --noconfirm --nocheck"
 
       - name: Smoke test Arch package
-        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           set -euo pipefail
 
@@ -654,7 +662,7 @@ jobs:
   arch-current-compatibility:
     name: Arch rolling compatibility
     needs: [resolve-source, cpp-sanitizer-tests, arch-build]
-    if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
     runs-on: ubuntu-24.04
     container:
       # The container identity is immutable; its mirror is deliberately live.
@@ -847,10 +855,14 @@ jobs:
           ref: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Resolve exact SteamOS source commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
         run: |
-          git fetch --no-tags --force origin "$POLARIS_CHECKOUT_REF"
-          POLARIS_BUILD_COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
-          test "$(git rev-parse HEAD)" = "$POLARIS_BUILD_COMMIT"
+          # The branch may advance while prerequisite jobs run. Build the same
+          # resolved source as every other package; release publication still
+          # revalidates the release tag against that exact source.
+          POLARIS_BUILD_COMMIT="$(git rev-parse 'HEAD^{commit}')"
+          test "$POLARIS_BUILD_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
           printf 'POLARIS_BUILD_COMMIT=%s\n' "$POLARIS_BUILD_COMMIT" >> "$GITHUB_ENV"
 
       - name: Initialize submodules
@@ -1133,6 +1145,9 @@ jobs:
           dpkg-deb --info "$deb_path" | tee build/cpack_artifacts/package-info.txt
           dpkg-deb --field "$deb_path" Depends | tee build/cpack_artifacts/package-depends.txt
           dpkg-deb --contents "$deb_path" | tee build/cpack_artifacts/package-files.txt
+          spaces_package_root="$(mktemp -d "$RUNNER_TEMP/spaces-deb.XXXXXX")"
+          dpkg-deb --extract "$deb_path" "$spaces_package_root"
+          python3 scripts/spaces/verify_package.py "$spaces_package_root"
 
           snapshot_sources="$RUNNER_TEMP/polaris-ubuntu-snapshot.sources"
           snapshot_source_parts="$RUNNER_TEMP/polaris-ubuntu-source-parts"
@@ -1491,6 +1506,7 @@ jobs:
 
           dnf install -y "$rpm_path"
           rpm -ql polaris | tee build/cpack_artifacts/package-files.txt
+          python3 scripts/spaces/verify_package.py /
           binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
           if [ -z "$binary" ]; then
             echo "Installed Polaris binary was not found" >&2

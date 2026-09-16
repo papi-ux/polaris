@@ -4,6 +4,10 @@ The **Devices** page is where clients get paired and where each paired device ke
 level, display profile, and per-device automation. This page explains the three pairing routes,
 what the access presets allow, and what the device editor changes.
 
+Separate Steam sign-ins and saves are managed in [Spaces](spaces.md). On a
+configured host, each device shows a compact link to its current space assignment.
+Pairing and permissions stay on this page.
+
 ## Pairing routes
 
 | Route | For | How it works |

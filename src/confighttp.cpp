@@ -89,6 +89,9 @@
   #include <Windows.h>
 #elif __linux__
   #include "platform/linux/session_media.h"
+  #include "platform/linux/multiseat_launch_service.h"
+#include "platform/linux/spaces_setup.h"
+#include "platform/linux/spaces_setup_service.h"
   #include <pwd.h>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -4163,6 +4166,211 @@ namespace confighttp {
 
   // ---- Client Profile CRUD API ----
 
+  void getSpacesSetup(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    multiseat::container::local_host_t host;
+    const auto service = multiseat::installed_profile_service();
+    const bool available = service && service->admin_snapshot().available;
+    send_response(response, multiseat::spaces::inspect_setup(host, config::multiseat.enabled, available));
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void getSpacesSetupJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    if (const auto service = multiseat::spaces::installed_setup_service()) {
+      send_response(response, service->snapshot());
+      return;
+    }
+#endif
+    not_found(response, request);
+  }
+
+  void updateSpacesSetupJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::spaces::installed_setup_service();
+    if (!service) { not_found(response, request); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Setup request is too large"); return; }
+    const auto action = multiseat::spaces::decode_setup_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!action) { bad_request(response, request, "Invalid Spaces setup request"); return; }
+    const auto status = service->submit(*action);
+    auto output = service->snapshot();
+    output["accepted"] = status == 200 || status == 202;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void registerSpacesSetupRoutes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
+    server.resource["^/api/spaces/setup$"]["GET"] = getSpacesSetup;
+    server.resource["^/api/spaces/setup/job$"]["GET"] = getSpacesSetupJob;
+    server.resource["^/api/spaces/setup/job$"]["POST"] = withCsrf(updateSpacesSetupJob);
+  }
+
+  void getMultiseatProfiles(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    nlohmann::json output {{"enabled", false}, {"available", false}, {"changing", false},
+      {"failed", false}, {"profiles", nlohmann::json::array()}, {"activity", nlohmann::json::array()}, {"creation_available", false}, {"management_available", false}, {"access_available", false}};
+#ifdef __linux__
+    if (const auto service = multiseat::installed_profile_service()) {
+      const auto state = service->admin_snapshot();
+      output["enabled"] = true; output["available"] = state.available;
+      output["changing"] = state.changing; output["failed"] = state.failed;
+      output["creation_available"] = state.creation_available;
+      output["management_available"] = state.management_available;
+      output["access_available"] = state.management_available;
+      output["desktop_clients"] = state.desktop_clients;
+      for (const auto &activity : state.activity)
+        output["activity"].push_back({{"profile_id", activity.profile}, {"client_id", activity.client}, {"state", activity.state}});
+      for (const auto &profile : state.profiles)
+        output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
+          {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}});
+    }
+#endif
+    send_response(response, output);
+  }
+
+  void createMultiseatProfile(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Creation request is too large"); return; }
+    const auto creation = multiseat::profiles::decode_steam_create_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!creation) { bad_request(response, request, "Invalid profile creation request"); return; }
+    const auto result = service->create_steam_profile(*creation);
+    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
+      {"profile_id", creation->request_id}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void editMultiseatProfile(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Space change is too large"); return; }
+    const auto edit = multiseat::profiles::decode_edit_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!edit) { bad_request(response, request, "Invalid space change"); return; }
+    const auto result = service->edit_profile(*edit);
+    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message}, {"profile_id", edit->profile_id}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void setMultiseatAssignment(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    try {
+      std::array<char, 4097> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 4096) { bad_request(response, request, "Assignment request is too large"); return; }
+      std::set<std::string> keys;
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count,
+        [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &value) {
+          if (depth > 2) throw std::invalid_argument("assignment nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+      if (!body.is_object() || body.size() != 2 || !body.contains("profile_id") || !body.contains("client_id"))
+        throw std::invalid_argument("assignment fields");
+      const auto profile = body.at("profile_id").get<std::string>();
+      const auto client = body.at("client_id").get<std::string>();
+      const auto devices = nvhttp::get_all_clients();
+      const auto device = std::find_if(devices.begin(), devices.end(),
+        [&](const auto &item) { return item.at("uuid").template get<std::string>() == client; });
+      if ((!profile.empty() && (device == devices.end() || device->at("temporary_authorization").get<bool>() ||
+           !(device->at("perm").get<std::uint32_t>() & static_cast<std::uint32_t>(crypto::PERM::launch)))) ||
+          (profile.empty() && device == devices.end() && !service->routes_client(client))) {
+        bad_request(response, request, "Select a permanently paired device with launch permission");
+        return;
+      }
+      const auto result = service->set_assignment(profile, client);
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid assignment request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void setMultiseatAccess(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Multiseat is not configured"); return; }
+    try {
+      std::array<char, 4097> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 4096) { bad_request(response, request, "Assignment request is too large"); return; }
+      std::set<std::string> keys;
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count,
+        [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &value) {
+          if (depth > 2) throw std::invalid_argument("assignment nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+      if (!body.is_object() || body.size() != 3 || !body.contains("profile_id") || !body.contains("client_id") || !body.contains("allowed") || !body.at("allowed").is_boolean())
+        throw std::invalid_argument("assignment fields");
+      const auto profile = body.at("profile_id").get<std::string>();
+      const auto client = body.at("client_id").get<std::string>();
+      const auto devices = nvhttp::get_all_clients();
+      const auto device = std::find_if(devices.begin(), devices.end(),
+        [&](const auto &item) { return item.at("uuid").template get<std::string>() == client; });
+      if ((!profile.empty() && (device == devices.end() || device->at("temporary_authorization").get<bool>() ||
+           !(device->at("perm").get<std::uint32_t>() & static_cast<std::uint32_t>(crypto::PERM::launch)))) ||
+          (profile.empty() && device == devices.end() && !service->routes_client(client))) {
+        bad_request(response, request, "Select a permanently paired device with launch permission");
+        return;
+      }
+      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>());
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid assignment request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
   // ---- Device Database API ----
 
   void getDevices(resp_https_t response, req_https_t request) {
@@ -4814,6 +5022,7 @@ namespace confighttp {
     }
     auto vars = config::parse_config(observed->contents);
     for (auto &[name, value] : vars) {
+      if (validation::is_local_config_key(name)) continue;
       if (is_write_only_secret_config_key(name)) {
         if (name == "ai_api_key") {
           output_tree["has_ai_api_key"] = !value.empty();
@@ -5033,8 +5242,10 @@ namespace confighttp {
       observed_revision.value_or(configuration_store::revision(config::sunshine.config_file, true)));
     std::stringstream config_stream;
     const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    auto persisted = tree;
+    validation::preserve_local_config(existing_vars, persisted);
     std::vector<std::string> written_keys;
-    for (const auto &[k, v] : tree.items()) {
+    for (const auto &[k, v] : persisted.items()) {
       if (v.is_null()) {
         continue;
       }
@@ -5044,7 +5255,7 @@ namespace confighttp {
       // v.dump() will dump valid json, which we do not want for strings in the config right now
       // we should migrate the config file to straight json and get rid of all this nonsense
       config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
-      written_keys.push_back(k);
+      if (!validation::is_local_config_key(k)) written_keys.push_back(k);
     }
     if (!tree.contains("adaptive_bitrate_enabled")) {
       config_stream << "adaptive_bitrate_enabled = "
@@ -5052,7 +5263,7 @@ namespace confighttp {
     }
     std::size_t dropped = 0;
     for (const auto &[key, value] : existing_vars) {
-      if (tree.contains(key) || value.empty()) {
+      if (persisted.contains(key) || value.empty()) {
         continue;
       }
       if (is_write_only_secret_config_key(key)) {
@@ -8146,6 +8357,12 @@ namespace confighttp {
     server.resource["^/api/devices$"]["GET"] = getDevices;
     server.resource["^/api/devices/suggest$"]["GET"] = getDeviceSuggestion;
     server.resource["^/api/clients/profiles$"]["GET"] = getClientProfiles;
+    registerSpacesSetupRoutes(server);
+    server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
+    server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
+    server.resource["^/api/multiseat/profiles/manage$"]["POST"] = withCsrf(editMultiseatProfile);
+    server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
+    server.resource["^/api/multiseat/access$"]["POST"] = withCsrf(setMultiseatAccess);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);

@@ -707,12 +707,12 @@ if boost_install_tokens.count("sha256sum") != 2 or boost_install_tokens.count("-
     raise AssertionError("both pinned Arch Boost packages must pass SHA-256 verification")
 
 arch_package_condition = (
-    "if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}"
+    "if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}"
 )
 for step_name in ("Validate Arch package", "Smoke test Arch package"):
     step = workflow_step(arch_job, step_name)
     if step.count(arch_package_condition) != 1:
-        raise AssertionError(f"{step_name} must run for pull requests and exact releases")
+        raise AssertionError(f"{step_name} must run for pull requests, manual validation and exact releases")
 
 arch_smoke = workflow_step(arch_job, "Smoke test Arch package")
 for metadata_contract in (
@@ -750,7 +750,7 @@ for job_name, expected_needs in optional_native_job_needs.items():
 
 arch_current_job = optional_native_jobs["arch-current-compatibility"]
 if arch_current_job.count(arch_package_condition) != 1:
-    raise AssertionError("current Arch compatibility must run for pull requests and exact releases")
+    raise AssertionError("current Arch compatibility must run for pull requests, manual validation and exact releases")
 for current_step in (
     "Synchronize current Arch repositories",
     "Download exact Arch package",

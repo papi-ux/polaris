@@ -86,8 +86,13 @@ def prepare_plugin(lock, rust):
              '--components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu', '--disable-ldconfig'])
         source = temporary / 'source'
         checkout(lock['url'], lock['revision'], source)
+        if digest(source / 'Cargo.lock') != lock['upstream_cargo_lock_sha256']:
+            raise ValueError('upstream plugin Cargo.lock changed')
+        for patch in lock['dependency_patches']:
+            with (HERE / patch).open('rb') as stream:
+                run(['patch', '-d', str(source), '-p1', '--batch', '--forward', '--fuzz=0'], stdin=stream)
         if digest(source / 'Cargo.lock') != lock['cargo_lock_sha256']:
-            raise ValueError('plugin Cargo.lock changed')
+            raise ValueError('patched plugin Cargo.lock differs from its reviewed lock')
         environment = dict(os.environ, PATH=str(prefix / 'bin') + ':' + os.environ['PATH'],
                            CARGO_HOME=str(temporary / 'cargo-home'), CARGO_NET_OFFLINE='false',
                            CARGO_NET_GIT_FETCH_WITH_CLI='true')
@@ -124,6 +129,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('profile', choices=['gamescope', 'steam', 'heroic', 'lutris'])
     parser.add_argument('--nvidia', action='store_true')
+    parser.add_argument('--engine', choices=['docker', 'podman'], default='docker')
     args = parser.parse_args()
     if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'amd64'):
         parser.error('prepare inputs on Linux/amd64 with Python 3.11+, GNU tar and git')
@@ -139,8 +145,9 @@ def main():
     rust = json.loads((HERE / 'locks/rust.json').read_text())
     downloads.append((rust, INPUTS / 'toolchains' / pathlib.PurePosixPath(rust['url']).name))
     if args.nvidia:
-        nvidia = json.loads((HERE / 'locks/nvidia.json').read_text())
-        downloads.append((nvidia, INPUTS / pathlib.PurePosixPath(nvidia['url']).name))
+        for name in ['nvidia', 'nvcodec']:
+            entry = json.loads((HERE / 'locks' / (name + '.json')).read_text())
+            downloads.append((entry, INPUTS / pathlib.PurePosixPath(entry['url']).name))
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda item: fetch(*item), downloads))
     prepare_plugin(json.loads((HERE / 'locks/plugin.json').read_text()), rust)
@@ -150,7 +157,7 @@ def main():
     if images['schema'] != 2 or profile['reference'] != package_lock['source_root']:
         raise ValueError('package lock does not match the selected source root')
     for reference in [images['builder']['reference'], profile['reference']]:
-        run(['podman', 'pull', '--platform=linux/amd64', reference])
+        run([args.engine, 'pull', '--platform=linux/amd64', reference])
     print('Verified all offline inputs for ' + args.profile)
 
 
