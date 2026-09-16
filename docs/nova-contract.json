@@ -232,6 +232,7 @@
         "runtime_label",
         "source",
         "steam_appid",
+        "steam_big_picture",
         "steam_launch"
       ],
       "optional": [
@@ -241,7 +242,8 @@
         "platform_label",
         "play_time",
         "runtime",
-        "runtime_label"
+        "runtime_label",
+        "steam_big_picture"
       ],
       "nova_reader": {
         "$comment": [
@@ -900,10 +902,14 @@
         "per-game readiness cue; Nova reads platform_label and runtime_label for the badge",
         "instead. display_planner sat here for the day it was served ahead of its consumer;",
         "papi-ux/nova#197 wired the adapter and the records moved back out, with the",
-        "nova_reader entries above repointed at the functions that now read it."
+        "nova_reader entries above repointed at the functions that now read it.",
+        "steam_big_picture marks Steam Big Picture on the desktop so Play Setup can pair it",
+        "with a Space's Big Picture; it sits here until the Nova change that reads it ships,",
+        "then moves back out."
       ],
       "game": [
-        "emulator"
+        "emulator",
+        "steam_big_picture"
       ],
       "spaces_snapshot": [
         "available",

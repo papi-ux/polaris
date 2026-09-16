@@ -1141,6 +1141,36 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureNeverAllowsCageMangoHud) {
   EXPECT_FALSE(proc::cage_mangohud_allowed_for_session_for_tests(app, true, true));
 }
 
+TEST(ProcessRuntimeConfigTests, SteamBigPictureLauncherIsTheEntryThatOpensBigPictureNotAGame) {
+  proc::ctx_t bundled {};
+  bundled.name = "Steam Big Picture";
+  bundled.detached = {"setsid steam -gamepadui"};
+  EXPECT_TRUE(proc::is_steam_big_picture_launcher(bundled));
+
+  proc::ctx_t uri {};
+  uri.name = "Couch";
+  uri.cmd = "steam steam://open/bigpicture";
+  EXPECT_TRUE(proc::is_steam_big_picture_launcher(uri));
+
+  // A renamed entry is still recognised by the command it runs.
+  proc::ctx_t renamed {};
+  renamed.name = "Living Room Steam";
+  renamed.detached = {"setsid steam -gamepadui"};
+  EXPECT_TRUE(proc::is_steam_big_picture_launcher(renamed));
+
+  // A Steam game is one game, even when it opens through Big Picture.
+  proc::ctx_t game {};
+  game.name = "Control Ultimate Edition";
+  game.source = "steam";
+  game.steam_appid = "870780";
+  game.detached = {"setsid steam -gamepadui", "setsid steam steam://rungameid/870780"};
+  EXPECT_FALSE(proc::is_steam_big_picture_launcher(game));
+
+  proc::ctx_t desktop {};
+  desktop.name = "Desktop";
+  EXPECT_FALSE(proc::is_steam_big_picture_launcher(desktop));
+}
+
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompatibilitySessions) {
   proc::ctx_t big_picture {};
   big_picture.name = "Steam Big Picture";

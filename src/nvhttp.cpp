@@ -8678,6 +8678,8 @@ namespace nvhttp {
         game["steam_appid"] = app.steam_appid;
         game["category"] = app.game_category;
         game["source"] = app.source;
+        // Steam Big Picture on the desktop, so Nova can pair it with a Space's Big Picture.
+        if (proc::is_steam_big_picture_launcher(app)) game["steam_big_picture"] = true;
         game["installed"] = true;
         game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
         game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";

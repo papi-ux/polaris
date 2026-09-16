@@ -4460,6 +4460,10 @@ namespace proc {
     }
   }  // namespace
 
+  bool is_steam_big_picture_launcher(const ctx_t &app) {
+    return is_steam_big_picture_app(app);
+  }
+
 #ifdef __linux__
   struct steam_big_picture_guard_runtime_t {
     std::atomic<bool> stop_requested {false};

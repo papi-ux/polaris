@@ -76,6 +76,7 @@ describe('v1.4.9 release contract', () => {
       'Quick setup has eight steps',
       'has a Gaming runtime check',
       'Spaces turned on from the Spaces page can start and change',
+      'marks Steam Big Picture on the desktop',
     ]) {
       expect(section, `v1.4.9 changelog must include: ${fact}`).toContain(fact)
     }

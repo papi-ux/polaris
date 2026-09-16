@@ -633,6 +633,16 @@ namespace proc {
 
   emulator_identity_t launcher_identity_from_emulator(const std::string &emulator);
 
+  /**
+   * @brief Whether an app opens Steam Big Picture itself rather than one game.
+   *
+   * The rule Polaris already applies to its Big Picture launch and cleanup handling: the
+   * bundled "Steam Big Picture" name, or a command that targets Big Picture (steam
+   * -gamepadui, steam://open/bigpicture) on an entry that is not a Steam game. Nova pairs
+   * such an entry with a Space's Big Picture.
+   */
+  bool is_steam_big_picture_launcher(const ctx_t &app);
+
   enum class session_stop_outcome_t {
     allowed,
     no_active_session,
