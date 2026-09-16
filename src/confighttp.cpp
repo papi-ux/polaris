@@ -54,6 +54,7 @@
 #include "file_handler.h"
 #include "game_artwork.h"
 #include "game_artwork_manual.h"
+#include "game_artwork_override.h"
 #include "globals.h"
 #include "host_setup_facts.h"
 #include "httpcommon.h"
@@ -2322,6 +2323,7 @@ namespace confighttp {
       file_tree["current_app"] = proc::proc.get_running_app_uuid();
       file_tree["host_uuid"] = http::unique_id;
       file_tree["host_name"] = config::nvhttp.sunshine_name;
+      file_tree["artwork_lookup_off"] = apps_with_artwork_lookup_off(platf::appdata(), file_tree);
 
       send_response(response, file_tree);
     } catch (std::exception &e) {
@@ -2423,6 +2425,112 @@ namespace confighttp {
     nlohmann::json output_tree;
     output_tree["status"] = true;
     send_response(response, output_tree);
+  }
+
+  std::optional<std::string> decode_app_artwork_request(std::string_view body) {
+    if (body.empty() || body.size() > 1024) return std::nullopt;
+    const auto tree = nlohmann::json::parse(body, nullptr, false);
+    if (!tree.is_object() || tree.size() != 1 || !tree.contains("uuid") || !tree["uuid"].is_string()) {
+      return std::nullopt;
+    }
+    auto uuid = tree["uuid"].get<std::string>();
+    if (!game_artwork::is_valid_uuid(uuid)) return std::nullopt;
+    return uuid;
+  }
+
+  nlohmann::json apps_with_artwork_lookup_off(const std::filesystem::path &appdata, const nlohmann::json &apps_tree) {
+    auto off = nlohmann::json::array();
+    if (!apps_tree.is_object() || !apps_tree.contains("apps") || !apps_tree["apps"].is_array()) return off;
+    for (const auto &app : apps_tree["apps"]) {
+      if (!app.is_object() || !app.contains("uuid") || !app["uuid"].is_string()) continue;
+      const auto uuid = app["uuid"].get<std::string>();
+      if (game_artwork::is_valid_uuid(uuid) && !game_artwork::automatic_artwork_lookup_enabled(appdata, uuid)) {
+        off.push_back(uuid);
+      }
+    }
+    return off;
+  }
+
+  namespace {
+    // Remove artwork and Find artwork again take the same body, {"uuid": "<app uuid>"}, and act on
+    // the uuid exactly as the app list stores it, which names its artwork directory.
+    std::optional<std::string> read_app_artwork_uuid(resp_https_t response, req_https_t request) {
+      std::array<char, 1025> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 1024) {
+        bad_request(response, request, "Artwork request is too large");
+        return std::nullopt;
+      }
+      const auto uuid = decode_app_artwork_request({bytes.data(), static_cast<std::size_t>(count)});
+      if (!uuid) {
+        bad_request(response, request, "Invalid artwork request");
+        return std::nullopt;
+      }
+      const auto apps = proc::proc.get_apps();
+      const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+        return boost::iequals(candidate.uuid, *uuid);
+      });
+      if (app == apps.end()) {
+        not_found(response, request);
+        return std::nullopt;
+      }
+      return app->uuid;
+    }
+  }  // namespace
+
+  /**
+   * @brief Remove artwork: delete every image downloaded or picked for an app, and stop Polaris
+   *        looking artwork up for it. The app's own image stays.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/apps/artwork/remove| POST| {"uuid":"aaaa-bbbb"}}
+   */
+  void removeAppArtwork(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+    const auto uuid = read_app_artwork_uuid(response, request);
+    if (!uuid) return;
+    const auto appdata = platf::appdata();
+    const bool removed = game_artwork::remove_downloaded_artwork(appdata, *uuid);
+    const bool lookup = game_artwork::automatic_artwork_lookup_enabled(appdata, *uuid);
+    nlohmann::json output;
+    output["status"] = removed;
+    output["uuid"] = *uuid;
+    output["automatic_lookup"] = lookup;
+    if (!removed) {
+      output["error"] = lookup ? "Polaris could not remove the artwork for this entry." :
+                                 "Polaris stopped looking up artwork for this entry, but some pictures could not be deleted.";
+      BOOST_LOG(warning) << "Remove artwork was incomplete for " << *uuid;
+    }
+    send_response(response, output);
+  }
+
+  /**
+   * @brief Find artwork again: let Polaris look up artwork for an app after Remove artwork.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/apps/artwork/find| POST| {"uuid":"aaaa-bbbb"}}
+   */
+  void findAppArtwork(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+    const auto uuid = read_app_artwork_uuid(response, request);
+    if (!uuid) return;
+    const auto appdata = platf::appdata();
+    const bool enabled = game_artwork::enable_automatic_artwork_lookup(appdata, *uuid);
+    nlohmann::json output;
+    output["status"] = enabled;
+    output["uuid"] = *uuid;
+    output["automatic_lookup"] = game_artwork::automatic_artwork_lookup_enabled(appdata, *uuid);
+    if (!enabled) output["error"] = "Polaris could not turn artwork lookup back on for this entry.";
+    send_response(response, output);
   }
 
   /**
@@ -8718,6 +8826,8 @@ namespace confighttp {
     server.resource["^/polaris/v1/session/timing/runs/([^/]+)$"]["GET"] = getBenchmarkRun;
     server.resource["^/polaris/v1/session/timing/runs/([^/]+)$"]["DELETE"] = deleteBenchmarkRun;
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
+    server.resource["^/api/apps/artwork/remove$"]["POST"] = withCsrf(removeAppArtwork);
+    server.resource["^/api/apps/artwork/find$"]["POST"] = withCsrf(findAppArtwork);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
     server.resource["^/api/library/sources$"]["GET"] = getLibrarySources;

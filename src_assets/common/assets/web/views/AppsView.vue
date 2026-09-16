@@ -762,6 +762,14 @@
               <input type="text" class="app-editor-input app-editor-input-mono" id="appImagePath" v-model="editForm['image-path']" />
             </div>
 
+            <AppArtworkControls
+              v-if="editForm.uuid"
+              :app="editForm"
+              :lookup-off="artworkLookupOff.has(editForm.uuid)"
+              :disabled="actionDisabled"
+              @changed="onArtworkChanged"
+            />
+
             <div class="app-editor-field">
               <div class="settings-field-head">
                 <label for="gameCategory" class="settings-field-label">Game Category</label>
@@ -1141,6 +1149,8 @@
 import { computed, ref, inject, watch } from 'vue'
 import Checkbox from '../Checkbox.vue'
 import Button from '../components/Button.vue'
+import AppArtworkControls from '../components/AppArtworkControls.vue'
+import { artworkLookupOffSet } from '../app-artwork.js'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
@@ -1253,6 +1263,8 @@ const editMangoHud = ref(false)
 
 // Reactive state
 const apps = ref([])
+// Entries whose automatic artwork lookup is off, from GET /api/apps.
+const artworkLookupOff = ref(new Set())
 const showEditForm = ref(false)
 const actionDisabled = ref(false)
 const pendingStopAppUuid = ref("")
@@ -1580,12 +1592,20 @@ function loadApps() {
   .then(r => r.json())
   .then(r => {
     apps.value = r.apps.filter(i => i.uuid).map(i => ({ ...i, launching: false, dragover: false }))
+    artworkLookupOff.value = artworkLookupOffSet(r)
     pendingStopAppUuid.value = ""
     currentApp.value = r.current_app
     hostName.value = r.host_name
     hostUUID.value = r.host_uuid
     listReordered.value = false
   })
+}
+
+function onArtworkChanged({ uuid, lookupOff }) {
+  const next = new Set(artworkLookupOff.value)
+  if (lookupOff) next.add(uuid)
+  else next.delete(uuid)
+  artworkLookupOff.value = next
 }
 
 function newApp() {

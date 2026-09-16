@@ -260,6 +260,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_stop_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_projection_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_setup_reports.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_app_artwork_routes.cpp
 )
 
 set(TEST_NETWORK_SOURCES
