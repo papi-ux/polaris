@@ -7,6 +7,11 @@ set(POLARIS_PUBLISHER_ISSUE_URL "https://github.com/papi-ux/polaris/issues"
         CACHE STRING "The URL of the publisher's support site or issue tracker.
         If you provide a modified version of Polaris, we kindly request that you use your own url.")
 
+# Linux desktop entries
+set(POLARIS_DESKTOP_ICON "polaris"
+        CACHE STRING "Icon name the Linux desktop entries use. The Linux package installs it as the
+        hicolor application icon polaris.svg; change it only together with that install rule.")
+
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_TESTS "Build tests" OFF)
 option(BUILD_TEST_COVERAGE "Enable gcov coverage instrumentation for tests." OFF)

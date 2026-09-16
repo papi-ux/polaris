@@ -56,9 +56,6 @@ jobs:
           #   * BOOST_USE_STATIC=OFF        - matches Arch; required on openSUSE (shared-only Boost)
           #   * CUDA=OFF, FAIL_ON_MISSING=OFF - matches Arch on a host without the CUDA toolkit
           #                                    (NVENC is NVIDIA-only; harmless on AMD/Intel)
-          #   * POLARIS_DESKTOP_ICON=polaris - upstream bug: the .desktop template references
-          #                                    @POLARIS_DESKTOP_ICON@ but never set()s it, so the
-          #                                    Icon= line ships empty and no launcher icon shows.
           cmake -B build -G Ninja \
             -DBUILD_DOCS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
@@ -66,7 +63,6 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DPOLARIS_ASSETS_DIR=/usr/share/polaris \
             -DPOLARIS_EXECUTABLE_PATH=/usr/bin/polaris \
-            -DPOLARIS_DESKTOP_ICON=polaris \
             -DPOLARIS_ENABLE_WAYLAND=ON \
             -DPOLARIS_ENABLE_X11=ON \
             -DPOLARIS_ENABLE_DRM=ON \
