@@ -48,11 +48,16 @@ describe('v1.4.8 release contract', () => {
       'handheld audio remains under investigation',
       'removing a Space retains its games and saves',
       'Ordinary streaming keeps its familiar setup',
+      'One set of words everywhere',
+      'The host says why',
+      'speaks the console',
     ]) {
       expect(notes, `v1.4.8 preview limits must include: ${fact}`).toContain(fact)
     }
     expect(currentRelease()).toContain('Spaces preview')
     expect(currentRelease()).toContain('First runtime download remains unavailable')
+    expect(currentRelease()).toContain('A refused Space launch now says why')
+    expect(currentRelease()).toContain("The Spaces console speaks the console's grammar")
   })
 
   it('says what the emulator library does, in the words a player would use', () => {
@@ -81,7 +86,6 @@ describe('v1.4.8 release contract', () => {
       'at least two seconds and at most thirty',
       'built with CUDA',
       'targets, not performance guarantees',
-      'stand-in emulator',
       'experimental Desktop Mode support',
       'Steam Input stays manual and read-only',
       'system extension stays withdrawn',
