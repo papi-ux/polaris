@@ -204,3 +204,16 @@ TEST(LifetimeTests, RestartInPlaceIsOffUntilRequestedAndAnExternalStopClearsIt) 
   EXPECT_FALSE(lifetime::restart_in_place_pending());
   lifetime::reset_for_tests();
 }
+
+TEST(SetupHostAssets, EveryShippedVersionIncludingTheCurrentOneIsRecognised) {
+  for (const auto *name : {"60-polaris.rules", "60-polaris.conf"}) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src_assets/linux/misc" / name, std::ios::binary);
+    ASSERT_TRUE(in) << name;
+    const std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_TRUE(is_shipped_host_asset_version(name, contents))
+      << name << " changed: add its sha256 to the shipped versions in is_shipped_host_asset_version";
+    EXPECT_FALSE(is_shipped_host_asset_version(name, contents + "# local edit\n")) << name;
+  }
+  EXPECT_FALSE(is_shipped_host_asset_version("60-polaris.rules", ""));
+  EXPECT_FALSE(is_shipped_host_asset_version("99-other.rules", "KERNEL==\"uinput\"\n"));
+}
