@@ -9,6 +9,9 @@
 #include <src/private_state_file.h>
 #include <src/utility.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 
@@ -253,4 +256,26 @@ TEST(ConfigLiveApplyTests, SteamGridDbKeyAccessorRoundTrips) {
   EXPECT_EQ(config::steamgriddb_api_key(), "round-trip-key");
   config::set_steamgriddb_api_key(previous);
   EXPECT_EQ(config::steamgriddb_api_key(), previous);
+}
+
+TEST(ConfigNewInstallTests, ANewInstallStartsInPrivateStreamWhenItCanRun) {
+  EXPECT_EQ(config::new_install_config(true), "linux_stream_mode = headless_stream\n");
+  EXPECT_EQ(config::new_install_config(false), "");
+  const auto vars = config::parse_config(config::new_install_config(true));
+  ASSERT_EQ(vars.count("linux_stream_mode"), 1u);
+  EXPECT_EQ(vars.at("linux_stream_mode"), "headless_stream");
+}
+
+TEST(ConfigNewInstallTests, OnlyTheFileCreationWritesTheNewInstallDefault) {
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto create = source.find("if (!fs::exists(sunshine.config_file)) {\n        auto cfg_file = std::ofstream {sunshine.config_file};");
+  ASSERT_NE(create, std::string::npos);
+  const auto use = source.find("cfg_file << new_install_config(");
+  ASSERT_NE(use, std::string::npos);
+  EXPECT_GT(use, create);
+  EXPECT_LT(use - create, 900u);
+  const std::string_view call = "cfg_file << new_install_config(";
+  EXPECT_EQ(source.find("new_install_config(", use + call.size()), std::string::npos);
 }

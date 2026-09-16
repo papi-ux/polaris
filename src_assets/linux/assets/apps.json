@@ -11,6 +11,7 @@
     },
     {
       "name": "Low Res Desktop",
+      "desktop-mirror": true,
       "image-path": "desktop.png",
       "allow-client-commands": false,
       "prep-cmd": [

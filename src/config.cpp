@@ -35,6 +35,7 @@
 #include "utility.h"
 
 #ifdef __linux__
+  #include "platform/linux/executable_path.h"
   #include "platform/linux/stream_display_policy.h"
 #endif
 
@@ -1324,6 +1325,10 @@ namespace config {
     return settings;
   }
 
+  std::string new_install_config(bool private_stream_available) {
+    return private_stream_available ? "linux_stream_mode = headless_stream\n" : std::string {};
+  }
+
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
@@ -1827,11 +1832,24 @@ namespace config {
         }
       }
 
-      // Create empty config file if it does not exist
+      // Create the config file if it does not exist, which only happens on a new
+      // install: an existing host has a file, even an empty one, and keeps its mode.
       if (!fs::exists(sunshine.config_file)) {
         auto cfg_file = std::ofstream {sunshine.config_file};
       #ifdef _WIN32
         cfg_file << "server_cmd = [{\"name\":\"Bubbles\",\"cmd\":\"bubbles.scr\",\"elevated\":false}]\n";
+      #endif
+      #ifdef __linux__
+        // Private Stream is the recommended mode, and the Fedora, Ubuntu and Arch
+        // packages bring labwc and wlr-randr for it. SteamOS cannot install labwc,
+        // so a host without them keeps the derived Mirror Desktop.
+        const bool private_stream_available =
+          !platf::linux_util::find_executable_in_path("labwc").empty() &&
+          !platf::linux_util::find_executable_in_path("wlr-randr").empty();
+        cfg_file << new_install_config(private_stream_available);
+        BOOST_LOG(info) << (private_stream_available ?
+                              "New install: streams start in Private Stream"sv :
+                              "New install: labwc or wlr-randr is not on the PATH, so streams start in Mirror Desktop"sv);
       #endif
       }
 

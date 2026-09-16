@@ -462,4 +462,11 @@ namespace config {
    * @param vars Parsed variables; the AI keys are consumed, as apply_config consumes them.
    */
   video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars);
+
+  /**
+   * @brief The contents a new install's configuration file starts with.
+   * @param private_stream_available Whether labwc and wlr-randr are on the PATH.
+   * @return Private Stream as the stream mode when it can run, otherwise nothing, which leaves Mirror Desktop.
+   */
+  std::string new_install_config(bool private_stream_available);
 }  // namespace config
