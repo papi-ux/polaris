@@ -30,14 +30,14 @@
         <summary class="settings-disclosure-summary focus-ring cursor-pointer rounded py-2 text-sm text-ice">
           <span>{{ $t('spaces.setup_checks') }}</span>
           <span class="flex items-center gap-2">
-            <span class="control-chip">{{ readyCount }}/{{ countedChecks.length }}</span>
+            <span class="control-chip" data-setup-count>{{ readyCount }}/{{ countedChecks.length }}</span>
             <svg class="settings-disclosure-chevron h-4 w-4 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
             </svg>
           </span>
         </summary>
         <ol class="mt-3 grid gap-3 md:grid-cols-2">
-          <li v-for="check in setup.checks" :key="check.id" class="min-w-0 rounded-xl border bg-deep/40 p-4"
+          <li v-for="check in visibleChecks" :key="check.id" class="min-w-0 rounded-xl border bg-deep/40 p-4"
               :class="waitingCheck(check) ? 'border-storm/20' : statusTone(checkStatus(check)).card" :data-setup-check="check.id">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <h3 class="text-sm font-semibold text-silver">{{ check.title }}</h3>
@@ -46,7 +46,23 @@
               </span>
               <StatusBadge v-else :status="checkStatus(check)" :label="checkLabel(check)" />
             </div>
-            <p class="mt-2 text-sm text-storm">{{ waitingCheck(check) ? $t('spaces.check_waiting_runtime_detail') : check.detail }}</p>
+            <p class="mt-2 text-sm text-storm">{{ waitingCheck(check) && check.id === 'spaces' ? $t('spaces.check_waiting_runtime_detail') : check.detail }}</p>
+            <div v-if="check.id === 'runtime' && runtimeActive(check)" class="mt-3 space-y-2" data-runtime-action>
+              <p v-if="runtimeDownloading" class="text-sm text-silver" role="status" aria-live="polite">{{ $t('spaces.runtime_downloading') }}</p>
+              <p v-else-if="downloadOutcome" class="text-sm text-silver" role="status" data-runtime-outcome>{{ downloadOutcome }}</p>
+              <p v-if="runtimeError" class="text-sm text-warning-bright" role="alert">{{ runtimeError }}</p>
+              <div v-if="canDownload(check) || runtime?.download?.can_cancel" class="flex flex-wrap items-center gap-3">
+                <Button v-if="canDownload(check)" variant="outline" size="sm" :loading="runtimeSending" :disabled="downloadBlocked"
+                        :aria-label="downloadLabel(check) + ': ' + check.title" data-runtime-download @click="startDownload(check)">
+                  {{ downloadLabel(check) }}
+                </Button>
+                <Button v-if="runtime?.download?.can_cancel" variant="ghost" size="sm" class="text-warning-bright"
+                        :disabled="runtimeSending" data-runtime-stop @click="stopDownload">
+                  {{ $t('spaces.runtime_stop') }}
+                </Button>
+              </div>
+              <p v-if="canDownload(check) && !setup.host_prerequisites_ready" class="text-xs text-storm">{{ $t('spaces.runtime_host_first') }}</p>
+            </div>
             <div v-if="check.state !== 'ready' && !waitingCheck(check)" class="mt-3 flex flex-wrap gap-3">
               <a :href="guideHref(check)" target="_blank" rel="noopener noreferrer" class="focus-ring inline-block rounded py-2 text-sm text-ice hover:underline">
                 {{ guideLabel(check) }}
@@ -69,13 +85,13 @@
               </div>
             </div>
             <p v-if="check.id === 'spaces' && !setup.configured && !waitingCheck(check)" class="mt-3 text-sm text-storm">
-              {{ $t('spaces.spaces_hint') }} {{ $t('spaces.spaces_hint_runtime') }}
+              {{ $t('spaces.spaces_hint') }}<template v-if="!runtimeCheck"> {{ $t('spaces.spaces_hint_runtime') }}</template>
             </p>
           </li>
         </ol>
       </details>
       <p v-if="!setup.available" class="mt-4 text-xs text-storm">{{ $t('spaces.no_mutation') }}</p>
-      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" :host-ready="setup.host_prerequisites_ready" @runtime="runtime = $event" />
+      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" ref="firstSetup" :host-ready="setup.host_prerequisites_ready" @runtime="runtime = $event" />
     </template>
   </details>
 </template>
@@ -98,30 +114,82 @@ const open = ref(true), checksOpen = ref(true)
 let request, seen = false, copyTimer
 onUnmounted(() => { request?.abort(); clearTimeout(copyTimer) })
 
-// What the first-Space setup last heard from the host about the runtime download.
+// What the first-Space setup last heard from the host about its jobs, including
+// a download started from the gaming runtime check.
 const runtime = ref(null)
+const firstSetup = ref(null)
+const runtimeCheck = computed(() => setup.value?.checks.find(check => check.id === 'runtime') || null)
 // A build with no verified gaming runtime cannot create a Space, and nothing on
-// this PC can change that. The Spaces configuration check then waits instead of
-// asking for attention, and the count covers only the checks a person can act on.
-const runtimeWaiting = computed(() => !!setup.value && !setup.value.configured &&
-  runtime.value?.available === false && runtime.value?.reason === 'runtime_not_published')
+// this PC can change that. Its runtime check then waits instead of asking for
+// attention, and the count covers only the checks a person can act on. Hosts
+// from before that check report the same through first-Space setup.
+const runtimeWaiting = computed(() => !!setup.value && !setup.value.configured && (runtimeCheck.value
+  ? runtimeCheck.value.runtime.status === 'not_published'
+  : runtime.value?.available === false && runtime.value?.reason === 'runtime_not_published'))
 watch(runtimeWaiting, waiting => emit('runtime-waiting', waiting))
-const waitingCheck = check => runtimeWaiting.value && check.id === 'spaces' && check.state === 'not_configured'
-const countedChecks = computed(() => (setup.value?.checks || []).filter(check => !waitingCheck(check)))
+const waitingCheck = check => check.id === 'runtime' ? check.runtime?.status === 'not_published'
+  : !runtimeCheck.value && runtimeWaiting.value && check.id === 'spaces' && check.state === 'not_configured'
+// One waiting row: the runtime check says why no Space can be configured yet.
+const visibleChecks = computed(() => (setup.value?.checks || []).filter(check =>
+  !(runtimeCheck.value && runtimeWaiting.value && check.id === 'spaces' && check.state === 'not_configured')))
+const countedChecks = computed(() => visibleChecks.value.filter(check => !waitingCheck(check)))
 const readyCount = computed(() => countedChecks.value.filter(check => check.state === 'ready').length)
+
+// The runtime download runs as a host job, through first-Space setup's
+// connection. The check turns ready once a recheck finds the verified image.
+const runtimeSending = ref(false), runtimeError = ref('')
+const runtimeDownloading = computed(() => runtime.value?.download?.state === 'downloading' || runtime.value?.job === 'downloading')
+const runtimeNamed = check => ['available', 'ready', 'failed'].includes(check.runtime?.status)
+const canDownload = check => ['available', 'failed'].includes(check.runtime?.status) && !setup.value.configured &&
+  runtime.value?.available === true && !runtimeDownloading.value
+const downloadBlocked = computed(() => runtimeSending.value || loading.value || !setup.value?.host_prerequisites_ready)
+const downloadLabel = check => t(check.runtime.status === 'failed' ? 'spaces.runtime_retry' : 'spaces.runtime_download')
+const downloadOutcome = computed(() => ['failed', 'cancelled'].includes(runtime.value?.download?.state) &&
+  runtimeCheck.value?.runtime.status !== 'ready' ? runtime.value.download.message : '')
+// Progress, an outcome or a button to show; a verified runtime needs none.
+const runtimeActive = check => ['available', 'failed'].includes(check.runtime?.status) && (runtimeDownloading.value ||
+  !!downloadOutcome.value || !!runtimeError.value || canDownload(check) || !!runtime.value?.download?.can_cancel)
+async function startDownload(check) {
+  if (downloadBlocked.value || !firstSetup.value) return
+  runtimeSending.value = true; runtimeError.value = ''
+  try { runtimeError.value = await firstSetup.value.download(check.runtime.id) || '' }
+  finally { runtimeSending.value = false }
+}
+async function stopDownload() {
+  if (runtimeSending.value || !firstSetup.value) return
+  runtimeSending.value = true; runtimeError.value = ''
+  try { runtimeError.value = await firstSetup.value.stopDownload() || '' }
+  finally { runtimeSending.value = false }
+}
+// A download that ends, from here or from first-Space setup, changes what the
+// runtime check finds.
+let recheckAfterLoad = false
+watch(runtimeDownloading, (downloading, was) => {
+  if (!was || downloading) return
+  if (loading.value) recheckAfterLoad = true
+  else refresh()
+})
 const hostReadyAndWaiting = computed(() => runtimeWaiting.value && setup.value?.host_prerequisites_ready)
 const summaryTone = computed(() => error.value ? 'fail' : setup.value?.available && setup.value?.host_prerequisites_ready ? 'pass' : setup.value?.configured ? 'fail' : hostReadyAndWaiting.value ? 'pass' : 'warning')
 const summaryLabel = computed(() => error.value ? t('spaces.host_attention') :
   setup.value?.available && setup.value?.host_prerequisites_ready ? t('spaces.host_configured') :
   setup.value?.configured ? t('spaces.host_attention') : hostReadyAndWaiting.value ? t('spaces.host_ready_badge') : t('spaces.host_set_up'))
-const checkStatus = check => check.state === 'ready' ? 'pass' : check.state === 'not_configured' ? 'warning' : 'fail'
-const checkLabel = check => t(check.state === 'ready' ? 'spaces.check_ready' : check.state === 'not_configured' ? 'spaces.check_not_configured' : 'spaces.check_required')
+// A runtime that is only waiting to be downloaded is a step, not a fault.
+const runtimeStep = check => check.id === 'runtime' && (check.runtime?.status === 'available' ||
+  (runtimeDownloading.value && runtimeNamed(check) && check.runtime.status !== 'ready'))
+const checkStatus = check => runtimeStep(check) ? 'warning' :
+  check.state === 'ready' ? 'pass' : check.state === 'not_configured' ? 'warning' : 'fail'
+const checkLabel = check => runtimeStep(check)
+  ? t(runtimeDownloading.value ? 'spaces.job_downloading' : 'spaces.runtime_not_downloaded')
+  : t(check.state === 'ready' ? 'spaces.check_ready' : check.state === 'not_configured' ? 'spaces.check_not_configured' : 'spaces.check_required')
 const guideLabel = check => t(check.id === 'security' ? 'spaces.guide_security' : ['docker', 'docker_access'].includes(check.id) ? 'spaces.guide_docker' : 'spaces.guide_section')
 const stepsFor = check => setupSteps(setup.value, check)
 
 function settle(next) {
   const needsAttention = !next.available || !next.host_prerequisites_ready
-  const checksNeedAttention = !next.host_prerequisites_ready || (next.configured && !next.available)
+  const runtimeStatus = next.checks.find(check => check.id === 'runtime')?.runtime.status
+  const checksNeedAttention = !next.host_prerequisites_ready || (next.configured && !next.available) ||
+    (!next.configured && ['unsupported', 'available', 'failed'].includes(runtimeStatus))
   if (!seen) { open.value = needsAttention; checksOpen.value = checksNeedAttention; seen = true }
   else { if (needsAttention) open.value = true; if (checksNeedAttention) checksOpen.value = true }
   emit('state', { available: next.available, configured: next.configured, hostReady: next.host_prerequisites_ready })
@@ -153,7 +221,10 @@ async function refresh() {
     open.value = true
     error.value = cause.name === 'AbortError' ? t('spaces.setup_timeout') : cause.message || t('spaces.setup_failed')
     emit('state', null)
-  } finally { clearTimeout(timeout); loading.value = false }
+  } finally {
+    clearTimeout(timeout); loading.value = false
+    if (recheckAfterLoad) { recheckAfterLoad = false; refresh() }
+  }
 }
 onMounted(refresh)
 </script>

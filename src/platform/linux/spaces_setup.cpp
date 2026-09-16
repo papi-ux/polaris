@@ -1,9 +1,157 @@
 #include "spaces_setup.h"
 #ifdef __linux__
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
 namespace multiseat::spaces {
+  namespace {
+    using json = nlohmann::json;
+    bool driver_version(std::string_view value) {
+      return value.size() >= 3 && value.size() <= 32 && value.front() != '.' && value.back() != '.' &&
+        value.find_first_not_of("0123456789.") == std::string_view::npos &&
+        value.find("..") == std::string_view::npos && value.find('.') != std::string_view::npos;
+    }
+    // The loaded NVIDIA kernel module names its version. Only a plain dotted
+    // version is ever repeated to the reader.
+    std::optional<std::string> loaded_nvidia_driver() {
+      std::ifstream file("/sys/module/nvidia/version");
+      if (!file) return std::nullopt;
+      std::string version(33, '\0');
+      file.read(version.data(), static_cast<std::streamsize>(version.size()));
+      version.resize(static_cast<std::size_t>(file.gcount()));
+      while (!version.empty() && (version.back() == '\n' || version.back() == ' ')) version.pop_back();
+      return driver_version(version) ? version : std::string {};
+    }
+    std::string either(const std::vector<std::string> &drivers) {
+      std::string text;
+      for (std::size_t i = 0; i < drivers.size(); ++i)
+        text += (i == 0 ? "" : i + 1 == drivers.size() ? " or " : ", ") + drivers[i];
+      return text;
+    }
+    json describe_runtime(const runtime_facts_t &r) {
+      const auto name = !r.runtime ? std::string {} : r.runtime->variant == "nvidia" ?
+        "gaming runtime for NVIDIA driver " + r.runtime->nvidia_driver : std::string {"gaming runtime for AMD and Intel graphics"};
+      std::string detail;
+      if (r.status == "not_published") detail = "This Polaris build has no approved gaming runtime yet.";
+      else if (r.code == "driver_mismatch")
+        detail = "The gaming runtime in this Polaris build needs NVIDIA driver " + either(r.nvidia_drivers) + ". " +
+          (r.host_nvidia_driver && !r.host_nvidia_driver->empty() ?
+            "This PC runs " + *r.host_nvidia_driver + ". Install the matching driver, restart the PC, then recheck." :
+            std::string {"Polaris could not read the NVIDIA driver version on this PC."});
+      else if (r.code == "graphics_unsupported")
+        detail = r.host_nvidia_driver ?
+          std::string {"The gaming runtime in this Polaris build is for AMD and Intel graphics. This PC uses the NVIDIA driver, and no NVIDIA runtime is approved yet."} :
+          "The gaming runtime in this Polaris build needs NVIDIA graphics with driver " + either(r.nvidia_drivers) +
+            ". No NVIDIA driver is loaded on this PC.";
+      else if (r.status == "ready") detail = "The " + name + " is downloaded and verified.";
+      else if (r.code == "docker_unavailable") detail = "This PC needs the " + name + ". Polaris checks whether it is downloaded once Docker Engine is ready.";
+      else if (r.status == "available") detail = "This PC needs the " + name + ". It is not downloaded yet, and the download is several gigabytes.";
+      else if (r.code == "runtime_identity_mismatch")
+        detail = "The gaming runtime on this PC does not match this Polaris build, so Spaces will not use it. Retry, and open Doctor & Support if it persists.";
+      else detail = "Polaris could not verify the gaming runtime on this PC. Retry, and check Docker if it keeps failing.";
+      json runtime {{"status", r.status}, {"code", r.code}};
+      if (r.runtime) {
+        runtime["id"] = r.runtime->id; runtime["variant"] = r.runtime->variant;
+        runtime["nvidia_driver"] = r.runtime->nvidia_driver;
+      }
+      // A build without a runtime is nothing this PC can fix, so that row is
+      // neutral. Downloading is the step while one fits and is not verified.
+      return {{"id", "runtime"}, {"title", "Gaming runtime"},
+        {"state", r.status == "ready" ? "ready" : r.status == "not_published" ? "not_configured" : "required"},
+        {"detail", std::move(detail)},
+        {"action", r.status == "available" ? "download_runtime" : r.status == "failed" ? "retry_runtime" : ""},
+        {"doc_anchor", "#download-the-gaming-runtime"}, {"runtime", std::move(runtime)}};
+    }
+  }
+
+  runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog, const std::optional<std::string> &nvidia_driver) {
+    if (catalog.empty()) return {std::nullopt, "runtime_not_published"};
+    const std::string_view variant = nvidia_driver ? "nvidia" : "default";
+    for (const auto &runtime : catalog) {
+      if (runtime.variant == variant && (!nvidia_driver || runtime.nvidia_driver == *nvidia_driver)) return {runtime, {}};
+    }
+    const bool other_driver = nvidia_driver &&
+      std::any_of(catalog.begin(), catalog.end(), [](const auto &runtime) { return runtime.variant == "nvidia"; });
+    return {std::nullopt, other_driver ? "driver_mismatch" : "graphics_unsupported"};
+  }
+
+  runtime_inspection_cache_t::runtime_inspection_cache_t(std::chrono::steady_clock::duration lifetime, now_t now) :
+    lifetime_(lifetime), now_(now ? std::move(now) : now_t([] { return std::chrono::steady_clock::now(); })) {}
+
+  runtime_image_e runtime_inspection_cache_t::remember(const std::string &reference, const std::function<runtime_image_e()> &inspect) {
+    std::uint64_t generation;
+    {
+      std::lock_guard lock(mutex_);
+      if (entry_ && entry_->reference == reference && now_() - entry_->checked < lifetime_) return entry_->image;
+      generation = generation_;
+    }
+    const auto image = inspect();
+    // Timeouts and unreadable replies are asked again next time. An answer
+    // that raced a download is dropped too: the download may have changed it.
+    if (image != runtime_image_e::unverifiable) {
+      std::lock_guard lock(mutex_);
+      if (generation == generation_) entry_ = entry_t {reference, image, now_()};
+    }
+    return image;
+  }
+
+  void runtime_inspection_cache_t::forget() {
+    std::lock_guard lock(mutex_);
+    entry_.reset();
+    ++generation_;
+  }
+
+  runtime_inspection_cache_t &runtime_inspection_cache() {
+    static runtime_inspection_cache_t cache;
+    return cache;
+  }
+
+  runtime_facts_t inspect_runtime(container::host_t &host, const std::vector<runtime_t> &catalog,
+    const std::optional<std::string> &nvidia_driver, bool engine_ready, runtime_inspection_cache_t *cache) {
+    runtime_facts_t facts;
+    facts.host_nvidia_driver = nvidia_driver;
+    for (const auto &runtime : catalog) {
+      if (runtime.variant == "nvidia" &&
+          std::find(facts.nvidia_drivers.begin(), facts.nvidia_drivers.end(), runtime.nvidia_driver) == facts.nvidia_drivers.end())
+        facts.nvidia_drivers.push_back(runtime.nvidia_driver);
+    }
+    auto choice = choose_runtime(catalog, nvidia_driver);
+    if (!choice.runtime) {
+      facts.status = choice.code == "runtime_not_published" ? "not_published" : "unsupported";
+      facts.code = std::move(choice.code);
+      return facts;
+    }
+    facts.runtime = std::move(choice.runtime);
+    if (!engine_ready) {
+      facts.status = "available"; facts.code = "docker_unavailable";
+      return facts;
+    }
+    const auto &runtime = *facts.runtime;
+    const auto inspect = [&] {
+      auto argv = container::command_prefix({});
+      argv.insert(argv.end(), {"image", "inspect", runtime.reference()});
+      const auto result = host.run(argv, std::chrono::seconds(5), 65536);
+      if (result.timed_out || result.output_truncated) return runtime_image_e::unverifiable;
+      if (result.exit_status == 0) {
+        if (verified_runtime_image(runtime, result.output)) return runtime_image_e::verified;
+        // Docker described one image under the pinned reference, and it differs.
+        const auto images = json::parse(result.output, nullptr, false);
+        return images.is_array() && images.size() == 1 ? runtime_image_e::mismatch : runtime_image_e::unverifiable;
+      }
+      // Docker lists what it found, an empty list, and exits 1 when nothing
+      // has this reference. The engine answered moments ago.
+      std::string_view found = result.output;
+      while (!found.empty() && (found.back() == '\n' || found.back() == ' ')) found.remove_suffix(1);
+      return result.exit_status == 1 && found == "[]" ? runtime_image_e::absent : runtime_image_e::unverifiable;
+    };
+    const auto image = cache ? cache->remember(runtime.reference(), inspect) : inspect();
+    facts.status = image == runtime_image_e::verified ? "ready" : image == runtime_image_e::absent ? "available" : "failed";
+    facts.code = image == runtime_image_e::verified ? "runtime_ready" : image == runtime_image_e::absent ? "not_downloaded" :
+      image == runtime_image_e::mismatch ? "runtime_identity_mismatch" : "inspection_failed";
+    return facts;
+  }
+
   nlohmann::json describe_setup(const setup_facts_t &f) {
     using json = nlohmann::json;
     json checks = json::array();
@@ -35,6 +183,8 @@ namespace multiseat::spaces {
       "Polaris cannot access a graphics device. Check the driver and host permissions.", "host_setup", "#graphics-access");
     add("security", "Spaces security support", f.security.ready, f.security.detail.c_str(), f.security.code.c_str(),
       "#prepare-spaces-security-support");
+    // Not a host prerequisite: first-Space setup downloads the runtime too.
+    checks.push_back(describe_runtime(f.runtime));
     checks.push_back({{"id", "spaces"}, {"title", "Spaces configuration"},
       {"state", f.controller_available ? "ready" : f.controller_enabled ? "required" : "not_configured"},
       {"detail", f.controller_available ? "The configured Spaces controller is available." :
@@ -98,6 +248,11 @@ namespace multiseat::spaces {
         f.gpu_access = true; break;
       }
     }
+    static const std::vector<runtime_t> unpublished;
+    const auto &catalog = trusted_runtimes();
+    f.runtime = inspect_runtime(host, catalog ? *catalog : unpublished, loaded_nvidia_driver(),
+      f.docker_cli && f.runc && f.daemon_replied && f.daemon_linux && !f.daemon_rootless && f.daemon_runc,
+      &runtime_inspection_cache());
     return describe_setup(f);
   }
 }

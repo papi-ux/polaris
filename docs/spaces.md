@@ -40,7 +40,7 @@ the whole Polaris host inside Docker, and no Unraid template.
 ## Host Setup
 
 Open **Spaces** in the Polaris console, beside **Devices**, and expand **Host
-Setup**. It runs seven checks on the PC hosting Polaris, whichever device you
+Setup**. It runs eight checks on the PC hosting Polaris, whichever device you
 opened the page from, and each failing check links the section of this guide
 that fixes it. Select **Recheck Setup** after every terminal step. A configured
 host keeps the section collapsed.
@@ -212,6 +212,39 @@ change live SELinux policy. Other SELinux distributions need the compatible
 development interfaces and the container reference policy; system images are
 not supported by the helper in the preview.
 
+## Download the gaming runtime
+
+The **Gaming runtime** check picks the runtime this PC needs from the ones this
+Polaris build approves: the NVIDIA runtime built for the NVIDIA driver loaded on
+this PC, otherwise the runtime for AMD and Intel graphics. It asks Docker for
+that exact image and verifies it against the build. Downloading it here is
+optional; preparing your first Space downloads it too.
+
+- **Waiting for runtime** means this build has no approved gaming runtime yet.
+  Nothing on this PC can change that, so the check stays out of the count.
+- **Not downloaded** means the runtime this PC needs is not on it yet. Once the
+  host checks above pass, select **Download**. The download is several
+  gigabytes and shows no percentage. You can leave Spaces and come back; the
+  host keeps the download running. **Stop download** ends it, and Docker keeps
+  verified layers for the next attempt.
+- **Checked** means the runtime is downloaded and verified. Preparing your
+  first Space then starts without downloading it again.
+- **Needs attention** without a button means no runtime in this build fits
+  this PC. When the check names an NVIDIA driver version, install that version,
+  restart the PC, then recheck. When the build's runtime is for other graphics
+  than this PC has, wait for a build that includes one for yours.
+- **Needs attention** with **Retry download** means Docker did not finish
+  answering, or holds an image under the approved reference that does not
+  match this build. Retry. If it keeps failing, check that Docker is running
+  and open **Doctor & Support**.
+
+A download runs on the host like first-Space setup, one job at a time. It never
+prepares a Steam home or changes Spaces configuration, and Polaris never
+removes or replaces an image. If Polaris restarts during a download, select
+**Download** again; Docker reuses the layers it kept. On a host whose Spaces
+are already configured, the check still reports the runtime but offers no
+download.
+
 ## Prepare your first Space
 
 Once the host checks pass and a runtime is offered:
@@ -219,9 +252,10 @@ Once the host checks pass and a runtime is offered:
 1. Under **Set up your first space**, enter a name such as **Living room**.
    If more than one runtime is offered, choose the variant for your graphics
    hardware; an NVIDIA variant names the host driver it needs.
-2. Select **Download and prepare**. The download is several gigabytes. You can
-   leave Spaces and come back; the host keeps the job. Polaris cannot show a
-   percentage for it.
+2. Select **Download and prepare**. If the **Gaming runtime** check shows
+   **Checked**, preparation starts without a download. Otherwise the download
+   is several gigabytes. You can leave Spaces and come back; the host keeps the
+   job. Polaris cannot show a percentage for it.
 3. **Stop setup** is available while the runtime downloads; Docker keeps
    verified layers for the next attempt. Once Steam home preparation begins,
    wait for it to finish.

@@ -63,7 +63,7 @@
     </div>
     <div v-else-if="pending" class="mt-4 text-sm text-storm">
       <p>{{ $t('spaces.saved_request', { name: pending.name }) }}</p>
-      <Button variant="outline" size="sm" class="mt-3" :disabled="busy || !connected || !snapshot?.available || !hostReady"
+      <Button variant="outline" size="sm" class="mt-3" :disabled="busy || !connected || !snapshot?.available || !hostReady || runtimeDownloading"
               @click="send(pending)">{{ $t('spaces.retry_saved_request') }}</Button>
     </div>
     <form v-else-if="snapshot?.available" class="mt-4 max-w-xl space-y-3" @submit.prevent="start">
@@ -81,7 +81,8 @@
       <p v-else class="text-sm text-storm">{{ runtimeLabel(snapshot.runtimes[0]) }}</p>
       <p class="text-xs text-storm">{{ $t('spaces.download_note') }}</p>
       <p v-if="!hostReady" class="text-sm text-storm">{{ $t('spaces.host_first') }}</p>
-      <Button type="submit" variant="outline" size="sm" :disabled="busy || !connected || !hostReady || !name.trim()">{{ $t('spaces.download') }}</Button>
+      <p v-else-if="runtimeDownloading" class="text-sm text-storm" data-runtime-downloading>{{ $t('spaces.runtime_downloading_wait') }}</p>
+      <Button type="submit" variant="outline" size="sm" :disabled="busy || !connected || !hostReady || !name.trim() || runtimeDownloading">{{ $t('spaces.download') }}</Button>
     </form>
     <Button variant="ghost" size="sm" class="mt-3 text-ice" :loading="busy" :disabled="busy" data-setup-reconnect @click="refresh">
       {{ busy ? $t('spaces.checking_setup') : $t('spaces.reconnect') }}
@@ -105,7 +106,8 @@ import { requestHostRestart } from '../restart-host.js'
 
 defineProps({ hostReady: { type: Boolean, default: false } })
 // Host Setup reads the runtime state from here, so a build without a runtime is
-// not shown as a check the person has to fix.
+// not shown as a check the person has to fix. Its gaming runtime check also
+// downloads through this connection, so the page keeps a single poll.
 const emit = defineEmits(['runtime'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
@@ -142,9 +144,12 @@ const jobTone = computed(() => {
   return 'fail'
 })
 
+// A download-only job holds the host's setup worker until it ends.
+const runtimeDownloading = computed(() => snapshot.value?.download?.state === 'downloading')
 function adopt(next) {
   snapshot.value = next; connected.value = true
-  emit('runtime', { available: next.available, reason: next.unavailable_reason || '' })
+  emit('runtime', { available: next.available, reason: next.unavailable_reason || '',
+    download: next.download || null, job: next.job?.state || '' })
   if (next.job?.gpu_id) gpuId.value = next.job.gpu_id
   else if (!next.graphics?.some(g => g.id === gpuId.value)) gpuId.value = next.graphics?.[0]?.id || ''
   if (!next.runtimes.some(runtime => runtime.id === runtimeId.value)) runtimeId.value = next.runtimes[0]?.id || ''
@@ -154,7 +159,7 @@ function adopt(next) {
   }
 }
 function working() {
-  return ['downloading', 'preparing', 'configuring'].includes(snapshot.value?.job?.state)
+  return ['downloading', 'preparing', 'configuring'].includes(snapshot.value?.job?.state) || runtimeDownloading.value
 }
 // The job is polled only while it is doing something, only while the tab is
 // visible, and less often while the host is not answering.
@@ -167,32 +172,39 @@ function handleVisibility() {
   if (document.hidden) { clearTimeout(poll); poll = null }
   else if (working() && !busy.value) refresh()
 }
-async function exchange(action) {
-  if (busy.value || disposed) return
+// Resolves to what went wrong, or ''. A runtime action reports on its own
+// check, so its failure does not also appear on this form.
+async function exchange(action, { runtimeAction = false } = {}) {
+  if (disposed) return ''
+  if (busy.value) return t('spaces.runtime_busy')
   clearTimeout(poll); poll = null
-  busy.value = true; connected.value = false; error.value = ''
+  busy.value = true; connected.value = false
+  if (!runtimeAction) error.value = ''
   request = new AbortController()
   const timeout = setTimeout(() => request.abort(), 12000)
+  let failure = ''
   try {
     const response = await fetch('./api/spaces/setup/job', {
       credentials: 'include', cache: 'no-store', signal: request.signal,
       ...(action ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action) } : {}),
     })
-    if (disposed) return
+    if (disposed) return ''
     if (![200, 202, 409, 503].includes(response.status)) throw new Error(t(response.status === 404 ? 'spaces.job_404' : 'spaces.job_failed'))
     const next = await response.json()
-    if (disposed) return
+    if (disposed) return ''
     if (!validJobSnapshot(next)) throw new Error(t('spaces.job_unverified'))
     adopt(next)
     failures = 0
-    if (action && (!response.ok || next.accepted !== true)) error.value = t('spaces.job_rejected')
+    if (action && (!response.ok || next.accepted !== true)) failure = t('spaces.job_rejected')
   } catch (cause) {
     failures += 1
-    if (!disposed) error.value = cause.name === 'AbortError' ? t('spaces.job_timeout') : cause.message || t('spaces.job_error')
+    if (!disposed) failure = cause.name === 'AbortError' ? t('spaces.job_timeout') : cause.message || t('spaces.job_error')
   } finally {
     clearTimeout(timeout); busy.value = false
     schedule()
   }
+  if (!runtimeAction) error.value = failure
+  return failure
 }
 async function confirmRestart() {
   if (restarting.value || busy.value || !connected.value || restartRequested.value || snapshot.value?.job?.state !== 'restart_required') return
@@ -211,6 +223,18 @@ async function confirmRestart() {
 }
 const refresh = () => exchange()
 const send = action => exchange(action)
+function download(runtimeId) {
+  let action
+  try { action = { operation: 'download', request_id: crypto.randomUUID(), runtime_id: runtimeId } }
+  catch { return Promise.resolve(t('spaces.secure_needed')) }
+  return exchange(action, { runtimeAction: true })
+}
+function stopDownload() {
+  const current = snapshot.value?.download
+  if (!current?.can_cancel) return Promise.resolve('')
+  return exchange({ operation: 'cancel', request_id: current.request_id }, { runtimeAction: true })
+}
+defineExpose({ download, stopDownload })
 function start() {
   let action
   try { action = { operation: 'start', request_id: crypto.randomUUID(), runtime_id: runtimeId.value, name: name.value.trim() } }
