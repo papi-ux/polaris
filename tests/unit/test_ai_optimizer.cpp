@@ -8,11 +8,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <string>
+#include <vector>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
 
@@ -1027,4 +1030,103 @@ TEST(AiOptimizerModeAwareCache, RecommendedModeValidationKeepsRegistryIdsOnly) {
   EXPECT_EQ("headless_stream", ai_optimizer::normalize_stream_mode("headless_stream"));
   EXPECT_EQ("", ai_optimizer::normalize_stream_mode("not_a_mode"));
   EXPECT_EQ("", ai_optimizer::normalize_stream_mode(""));
+}
+
+namespace {
+  std::filesystem::path scratch_codex_home(const char *suffix) {
+    const auto home = std::filesystem::temp_directory_path() /
+      ("polaris-codex-home-" + std::to_string(::getpid()) + "-" + suffix);
+    std::filesystem::remove_all(home);
+    std::filesystem::create_directories(home);
+    return home;
+  }
+
+  void write_text(const std::filesystem::path &path, const std::string &contents) {
+    std::ofstream out(path, std::ios::binary);
+    out << contents;
+  }
+
+  constexpr const char *CODEX_MODELS_CACHE = R"({"fetched_at":"2026-09-16T12:34:00Z","etag":"x","client_version":"0.154.0","models":[
+    {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","priority":12,"supported_in_api":true},
+    {"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide","priority":3,"supported_in_api":true},
+    {"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","priority":1,"supported_in_api":true},
+    {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":4,"supported_in_api":true},
+    {"slug":"bad slug","display_name":"Rejected","visibility":"list","priority":0}
+  ]})";
+}  // namespace
+
+TEST(AiOptimizerCodexCli, ConfiguredModelComesFromTheTopLevelOfConfigToml) {
+  const auto home = scratch_codex_home("configured");
+  write_text(home / "config.toml",
+    "personality = \"pragmatic\"\nmodel_reasoning_effort = \"xhigh\"\nmodel = \"gpt-5.6-sol\"\n"
+    "[projects.\"/srv/games\"]\nmodel = \"other\"\n");
+  EXPECT_EQ(ai_optimizer::codex_cli_configured_model(home), std::optional<std::string> {"gpt-5.6-sol"});
+  EXPECT_FALSE(ai_optimizer::codex_cli_configured_model(home / "missing").has_value());
+  write_text(home / "config.toml", "[projects.\"/srv/games\"]\nmodel = \"other\"\n");
+  EXPECT_FALSE(ai_optimizer::codex_cli_configured_model(home).has_value());
+  std::filesystem::remove_all(home);
+}
+
+TEST(AiOptimizerCodexCli, ModelCatalogListsVisibleModelsInTheCliOrder) {
+  const auto home = scratch_codex_home("catalog");
+  write_text(home / "models_cache.json", CODEX_MODELS_CACHE);
+  const auto catalog = ai_optimizer::codex_cli_model_catalog(home);
+  ASSERT_EQ(catalog.size(), 3u);
+  EXPECT_EQ(catalog[0].slug, "gpt-6-astra");
+  EXPECT_EQ(catalog[0].display_name, "GPT-6-Astra");
+  EXPECT_EQ(catalog[1].slug, "gpt-5.6-sol");
+  EXPECT_EQ(catalog[2].slug, "gpt-5.5");
+  write_text(home / "models_cache.json", "{not json");
+  EXPECT_TRUE(ai_optimizer::codex_cli_model_catalog(home).empty());
+  EXPECT_TRUE(ai_optimizer::codex_cli_model_catalog(home / "missing").empty());
+  std::filesystem::remove_all(home);
+}
+
+TEST(AiOptimizerCodexCli, ErrorMessageComesFromTheProviderErrorLine) {
+  const std::string output =
+    "hook: SessionStart\n"
+    "ERROR: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\","
+    "\"message\":\"The 'gpt-5.4-mini' model is not supported\\n  when using Codex with a ChatGPT account.\"}}\n"
+    "ERROR: {\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"second\"}}\n";
+  EXPECT_EQ(ai_optimizer::codex_cli_error_message(output),
+    std::optional<std::string> {"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account."});
+  EXPECT_FALSE(ai_optimizer::codex_cli_error_message("hook: Stop\ntokens used\n7,643\n").has_value());
+  EXPECT_FALSE(ai_optimizer::codex_cli_error_message("{\"type\":\"item\",\"text\":\"{not an error}\"}\n").has_value());
+}
+
+TEST(AiOptimizerCodexCli, SubscriptionModelListAndDefaultFollowTheCli) {
+  const auto home = scratch_codex_home("listing");
+  write_text(home / "models_cache.json", CODEX_MODELS_CACHE);
+  write_text(home / "config.toml", "model = \"gpt-5.6-sol\"\n");
+
+  ai_optimizer::config_t cfg;
+  cfg.enabled = true;
+  cfg.provider = "openai";
+  cfg.auth_mode = "subscription";
+  cfg.codex_home = home.string();
+  cfg.model.clear();
+
+  const auto listing = nlohmann::json::parse(ai_optimizer::get_models_json_with_config(cfg));
+  EXPECT_TRUE(listing.value("discovered", false));
+  EXPECT_EQ(listing.value("source", std::string {}), "codex_cli");
+  EXPECT_EQ(listing.value("cli_default_model", std::string {}), "gpt-5.6-sol");
+  EXPECT_EQ(listing.value("model", std::string {}), "gpt-5.6-sol");
+  ASSERT_EQ(listing.at("models").size(), 3u);
+  EXPECT_EQ(listing.at("models").at(0).value("id", std::string {}), "gpt-6-astra");
+  std::vector<std::string> fallback_ids;
+  for (const auto &entry : listing.at("fallback_models")) {
+    fallback_ids.push_back(entry.value("id", std::string {}));
+  }
+  EXPECT_NE(std::find(fallback_ids.begin(), fallback_ids.end(), "gpt-6-astra"), fallback_ids.end());
+  EXPECT_EQ(std::find(fallback_ids.begin(), fallback_ids.end(), "gpt-5.4-mini"), fallback_ids.end());
+
+  // Without a configured model the catalog's first entry is the default; without a catalog the CLI has nothing to say.
+  std::filesystem::remove(home / "config.toml");
+  const auto catalog_only = nlohmann::json::parse(ai_optimizer::get_models_json_with_config(cfg));
+  EXPECT_EQ(catalog_only.value("model", std::string {}), "gpt-6-astra");
+  std::filesystem::remove(home / "models_cache.json");
+  const auto nothing = nlohmann::json::parse(ai_optimizer::get_models_json_with_config(cfg));
+  EXPECT_FALSE(nothing.value("discovered", true));
+  EXPECT_NE(nothing.value("error", std::string {}).find("Run codex once"), std::string::npos);
+  std::filesystem::remove_all(home);
 }

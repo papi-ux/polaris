@@ -291,6 +291,84 @@ describe('AI optimizer guided setup', () => {
     wrapper.unmount()
   })
 
+  it('adopts the Codex CLI model when the tab pre-filled the hosted default', async () => {
+    const config = defaultConfig({
+      ai_provider: 'openai',
+      ai_model: 'gpt-5.4-mini',
+      ai_base_url: 'https://api.openai.com/v1',
+      ai_auth_mode: 'subscription',
+      ai_use_subscription: 'enabled',
+    })
+    const catalog = {
+      status: true,
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+      auth_mode: 'subscription',
+      base_url: 'https://api.openai.com/v1',
+      discovered: true,
+      source: 'codex_cli',
+      cli_default_model: 'gpt-5.6-sol',
+      model_count: 2,
+      models: [{ id: 'gpt-6-astra', label: 'GPT-6-Astra' }, { id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' }],
+      fallback_models: [],
+    }
+    mockState.modelCatalog.value = catalog
+    mockAiOptimizer.fetchModels.mockResolvedValue(catalog)
+    try {
+      const wrapper = mountOptimizer(config)
+      await flushMounted()
+
+      const refreshButton = wrapper.findAll('button').find(button => button.text().includes('Refresh list'))
+      expect(refreshButton).toBeTruthy()
+      expect(refreshButton.attributes('disabled')).toBeUndefined()
+
+      await refreshButton.trigger('click')
+      await flushMounted()
+
+      expect(config.ai_model).toBe('gpt-5.6-sol')
+      expect(wrapper.text()).toContain('Models your Codex CLI can use')
+    } finally {
+      mockState.modelCatalog.value = null
+      mockAiOptimizer.fetchModels.mockImplementation(() => Promise.resolve(mockState.modelCatalog.value))
+    }
+  })
+
+  it('keeps a model the user chose when the Codex CLI list arrives', async () => {
+    const config = defaultConfig({
+      ai_provider: 'openai',
+      ai_model: 'gpt-5.6-luna',
+      ai_base_url: 'https://api.openai.com/v1',
+      ai_auth_mode: 'subscription',
+      ai_use_subscription: 'enabled',
+    })
+    const catalog = {
+      status: true,
+      provider: 'openai',
+      model: 'gpt-5.6-luna',
+      auth_mode: 'subscription',
+      base_url: 'https://api.openai.com/v1',
+      discovered: true,
+      source: 'codex_cli',
+      cli_default_model: 'gpt-5.6-sol',
+      model_count: 1,
+      models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' }],
+      fallback_models: [],
+    }
+    mockState.modelCatalog.value = catalog
+    mockAiOptimizer.fetchModels.mockResolvedValue(catalog)
+    try {
+      const wrapper = mountOptimizer(config)
+      await flushMounted()
+      const refreshButton = wrapper.findAll('button').find(button => button.text().includes('Refresh list'))
+      await refreshButton.trigger('click')
+      await flushMounted()
+      expect(config.ai_model).toBe('gpt-5.6-luna')
+    } finally {
+      mockState.modelCatalog.value = null
+      mockAiOptimizer.fetchModels.mockImplementation(() => Promise.resolve(mockState.modelCatalog.value))
+    }
+  })
+
   it('renders failed draft tests as structured actionable feedback', async () => {
     const config = defaultConfig({
       ai_provider: 'openai',
