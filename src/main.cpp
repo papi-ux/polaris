@@ -461,7 +461,7 @@ int main(int argc, char *argv[]) {
     // A SIGINT that did not come from exit_sunshine() has no recorded reason
     // yet; first reason wins, so this only fills in the external case.
     lifetime::note_shutdown_reason("SIGINT received");
-    BOOST_LOG(info) << "Interrupt handler called: "sv << lifetime::shutdown_reason();
+    BOOST_LOG(info) << "Shutdown handler called: "sv << lifetime::shutdown_reason();
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
@@ -480,6 +480,9 @@ int main(int argc, char *argv[]) {
   on_signal(SIGTERM, [&force_shutdown, &display_device_deinit_guard, shutdown_event]() {
     lifetime::note_shutdown_reason("SIGTERM received");
     BOOST_LOG(info) << "Terminate handler called: "sv << lifetime::shutdown_reason();
+    // Whoever sent SIGTERM (systemctl stop or restart, a session ending) wants
+    // this process gone. A restart requested earlier must not re-exec in its place.
+    lifetime::set_restart_in_place_pending(false);
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
@@ -490,6 +493,13 @@ int main(int argc, char *argv[]) {
 
     shutdown_event->raise(true);
     display_device_deinit_guard = nullptr;
+  });
+
+  // Restart and quit requests from the console and the tray begin the same
+  // shutdown as SIGINT, on the requesting thread and without a signal that a
+  // concurrent std::system() call could swallow.
+  lifetime::set_shutdown_request_handler([]() {
+    signal_handlers.at(SIGINT)();
   });
 
 #ifdef _WIN32

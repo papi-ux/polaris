@@ -77,6 +77,9 @@ trap - EXIT
 
 Package removal does not automatically delete user configuration under `~/.config/polaris`. Keep that directory if you plan to reinstall, or remove it separately only after backing up any settings you need.
 
+For a clean slate, or to remove what the package leaves behind, see
+[Uninstall Polaris, or start over](uninstall.md).
+
 ## Troubleshooting
 
 ### `keyring is not writable` or `required key missing from keyring`

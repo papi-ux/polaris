@@ -305,6 +305,9 @@ Reboot after the transaction succeeds. If you used the optional KMS copy, remove
 that copy and its dedicated drop-in. Keep `~/.config/polaris` to preserve your
 account, paired devices, and settings for reinstalling.
 
+For a clean slate, or to remove what the package leaves behind, see
+[Uninstall Polaris, or start over](uninstall.md).
+
 You can then re-enable the Sunshine service you used previously. Run one host
 at a time because their default ports overlap.
 

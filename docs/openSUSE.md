@@ -100,3 +100,16 @@ zypper --non-interactive install --force-resolution gawk
 ```
 
 This is unnecessary on a normal Tumbleweed desktop (gawk is already present).
+
+## 5. Uninstall
+
+```bash
+systemctl --user disable --now polaris
+sudo zypper remove polaris
+```
+
+Package-owned udev rules and modules-load configuration are removed with the package. Host
+configuration in `~/.config/polaris` is left in place.
+
+For a clean slate, or to remove what the package leaves behind, see
+[Uninstall Polaris, or start over](uninstall.md).
