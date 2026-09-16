@@ -4251,6 +4251,7 @@ namespace confighttp {
       output["creation_available"] = state.creation_available;
       output["management_available"] = state.management_available;
       output["access_available"] = state.management_available;
+      output["removal_available"] = state.removal_available;
       output["desktop_clients"] = state.desktop_clients;
       if (state.capacity)
         output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
@@ -4297,10 +4298,23 @@ namespace confighttp {
     if (count > 4096) { bad_request(response, request, "Space change is too large"); return; }
     const auto edit = multiseat::profiles::decode_edit_request({bytes.data(), static_cast<std::size_t>(count)});
     if (!edit) { bad_request(response, request, "Invalid space change"); return; }
-    const auto result = service->edit_profile(*edit);
-    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message}, {"profile_id", edit->profile_id}};
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
+    if (edit->operation == multiseat::profiles::edit_operation_e::remove_for_good) {
+      // Removing for good answers with its reason, its fix, and any Docker
+      // resource it could not delete, so the page can say what is still here.
+      const auto removal = service->remove_space_for_good(*edit);
+      nlohmann::json output {{"status", removal.result.prepared()}, {"message", removal.result.message},
+        {"profile_id", edit->profile_id}};
+      if (!removal.result.code.empty()) output["code"] = removal.result.code;
+      if (!removal.result.action.empty()) output["action"] = removal.result.action;
+      if (!removal.kept_volume.empty()) output["kept_volume"] = removal.kept_volume;
+      if (!removal.kept_network.empty()) output["kept_network"] = removal.kept_network;
+      response->write(static_cast<SimpleWeb::StatusCode>(removal.result.status), output.dump(), headers);
+      return;
+    }
+    const auto result = service->edit_profile(*edit);
+    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message}, {"profile_id", edit->profile_id}};
     response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
 #else
     not_found(response, request);

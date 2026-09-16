@@ -88,17 +88,55 @@ namespace multiseat::profiles {
   // not select a GPU, assign a device, configure or activate the controller.
   [[nodiscard]] change_result_t create_first_steam(const std::filesystem::path &path,
     const first_steam_request_t &request, std::string_view image, container::host_t &host);
-  enum class edit_operation_e { rename, remove, restore };
+  // remove archives a Space and keeps its home; remove_for_good deletes both.
+  enum class edit_operation_e { rename, remove, restore, remove_for_good };
   struct edit_request_t {
     edit_operation_e operation = edit_operation_e::rename;
     std::string profile_id, name;
+    // Removing for good only: the Space's current name exactly as the person
+    // typed it, and the request's own identity so a retry can be confirmed.
+    std::string confirm_name, request_id;
     bool operator==(const edit_request_t &) const = default;
   };
   [[nodiscard]] bool valid_edit_request(const edit_request_t &request);
   [[nodiscard]] std::optional<edit_request_t> decode_edit_request(std::string_view payload);
   // Catalog-only edits. Removal also unassigns devices; homes and networks are
   // retained in a restorable catalog entry. The controller owner must quiesce launches and release its lease.
+  // Removing for good is not a catalog-only edit and is refused here.
   [[nodiscard]] change_result_t edit(const std::filesystem::path &path, const edit_request_t &request);
+
+  enum class removal_outcome_e {
+    removed,              ///< home, Steam network and record are gone
+    invalid,              ///< not a valid removal for good
+    not_found,            ///< no such Space in the catalog
+    name_mismatch,        ///< the typed name is not the Space's current name
+    last_space,           ///< the only Steam Space; new Spaces are made from an existing one
+    not_saved,            ///< the catalog was busy, unsafe or could not be written
+    docker_unavailable,   ///< Docker did not answer before anything changed
+    storage_unverified,   ///< the home is not the storage Polaris made for this Space; nothing changed
+    storage_in_use,       ///< a container still uses the home; nothing changed
+    storage_not_removed,  ///< Docker did not confirm the home is gone; the Space stays archived
+    record_not_removed,   ///< the home is gone but the record could not be removed; the Space stays archived
+  };
+  struct removal_result_t {
+    removal_outcome_e outcome = removal_outcome_e::invalid;
+    /// durability_uncertain when any catalog write was uncertain; callers fail closed.
+    private_state_file::write_status_e status = private_state_file::write_status_e::not_committed;
+    bool archived = false;      ///< the Space was archived before Docker deleted anything
+    std::string kept_volume;    ///< the Docker volume still holding its games and saves, when it was kept
+    std::string kept_network;   ///< its Docker network, when Docker did not remove it
+    explicit operator bool() const { return outcome == removal_outcome_e::removed; }
+  };
+  // Removes one Space for good. Every refusal that needs no change comes first:
+  // the typed name, the last Steam Space, Docker answering, the home being exactly
+  // the volume Polaris created for this Space (local driver, no driver options,
+  // its label, its own mountpoint) and no container using it. Then the Space is
+  // archived, Docker deletes the home and the Steam network, and the record goes.
+  // A failure after the archive leaves an archived Space that a retry can finish.
+  // Nothing is deleted outside Docker, and nothing Polaris did not create.
+  [[nodiscard]] removal_result_t remove_for_good(const std::filesystem::path &path,
+    const edit_request_t &request, container::host_t &host,
+    std::chrono::milliseconds wait_for_users = std::chrono::seconds(20));
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif

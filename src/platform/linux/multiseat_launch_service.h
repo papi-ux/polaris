@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <memory>
+#include <stop_token>
 #include <string_view>
 
 namespace multiseat {
@@ -67,6 +68,8 @@ namespace multiseat {
     std::function<profiles::change_result_t(const profiles::steam_create_request_t &)> create;
     std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
     std::function<profiles::change_result_t(std::string_view, std::string_view, bool)> access;
+    // Deletes a Space's home through Docker; the stop token ends a long removal at shutdown.
+    std::function<profiles::removal_result_t(const profiles::edit_request_t &, std::stop_token)> remove_for_good;
   };
   struct profile_admin_snapshot_t {
     bool available = false, changing = false, failed = false;
@@ -75,6 +78,7 @@ namespace multiseat {
     std::vector<std::string> desktop_clients;
     std::vector<profile_activity_t> activity;
     std::optional<gpu_usage_t> capacity;
+    bool removal_available = false;  ///< a Space can be removed for good, not only archived
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -107,6 +111,11 @@ namespace multiseat {
     std::string id, name;
     spaces::library_t library;
   };
+  // A removal for good says what it could not delete and where it still is.
+  struct profile_removal_result_t {
+    profile_launch_result_t result;
+    std::string kept_volume, kept_network;
+  };
   class profile_launch_service_t final {
   public:
     explicit profile_launch_service_t(std::unique_ptr<profile_controller_t> controller,
@@ -131,6 +140,10 @@ namespace multiseat {
       std::string_view previous);
     [[nodiscard]] profile_launch_result_t create_steam_profile(profiles::steam_create_request_t request);
     [[nodiscard]] profile_launch_result_t edit_profile(profiles::edit_request_t request);
+    // Deletes a Space's games and saves and its record. Refused while that Space
+    // or any Space stream is active, when the typed name is not the Space's name,
+    // and for the last Steam Space. A finished request answers its own retry.
+    [[nodiscard]] profile_removal_result_t remove_space_for_good(profiles::edit_request_t request);
     // Cancellation only marks launches. Docker and input teardown remain on the
     // owner thread. Empty tokens allow an authenticated owner to cancel itself.
     [[nodiscard]] bool cancel_client(std::string_view client, std::string_view token = {});

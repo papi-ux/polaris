@@ -1,6 +1,9 @@
 #include "src/platform/linux/multiseat_profile_catalog.h"
 #include "src/platform/linux/spaces_library.h"
+#include "src/platform/linux/multiseat_container_host.h"
 #include "src/platform/linux/multiseat_profile_network.h"
+#include "src/utility.h"
+#include "src/uuid.h"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +11,8 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <set>
+#include <sstream>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -229,6 +234,29 @@ namespace {
       R"({"operation":"remove","profile_id":"../space-a"})",
       R"({"operation":"remove","profile_id":[]})"}) EXPECT_FALSE(profiles::decode_edit_request(body));
     EXPECT_FALSE(profiles::decode_edit_request(std::string(4097, ' ')));
+  }
+
+  TEST(MultiseatProfileEditRequest, RemovingForGoodIsItsOwnOperationWithTheTypedNameAndARequestIdentity) {
+    const auto removal = profiles::decode_edit_request(
+      R"({"operation":"delete","profile_id":"space-a","confirm_name":"Living room","request_id":"12345678-1234-4234-8234-123456789abc"})");
+    ASSERT_TRUE(removal);
+    EXPECT_EQ(removal->operation, profiles::edit_operation_e::remove_for_good);
+    EXPECT_EQ(removal->confirm_name, "Living room");
+    EXPECT_EQ(removal->request_id, "12345678-1234-4234-8234-123456789abc");
+    EXPECT_TRUE(removal->name.empty());
+    for (const auto *body : {
+      R"({"operation":"delete","profile_id":"space-a","request_id":"12345678-1234-4234-8234-123456789abc"})",
+      R"({"operation":"delete","profile_id":"space-a","confirm_name":"Living room"})",
+      R"({"operation":"delete","profile_id":"space-a","confirm_name":"","request_id":"12345678-1234-4234-8234-123456789abc"})",
+      R"({"operation":"delete","profile_id":"space-a","confirm_name":"Living room","request_id":"12345678-1234-4234-8234-123456789ABC"})",
+      R"({"operation":"delete","profile_id":"space-a","confirm_name":"Living\u0007room","request_id":"12345678-1234-4234-8234-123456789abc"})",
+      R"({"operation":"delete","profile_id":"space-a","confirm_name":"Living room","request_id":"12345678-1234-4234-8234-123456789abc","name":"x"})",
+      R"({"operation":"delete","profile_id":"../space-a","confirm_name":"Living room","request_id":"12345678-1234-4234-8234-123456789abc"})",
+      R"({"operation":"remove","profile_id":"space-a","confirm_name":"Living room"})",
+      R"({"operation":"remove","profile_id":"space-a","request_id":"12345678-1234-4234-8234-123456789abc"})",
+      R"({"operation":"restore","profile_id":"space-a","confirm_name":"Living room","request_id":"12345678-1234-4234-8234-123456789abc"})"})
+      EXPECT_FALSE(profiles::decode_edit_request(body)) << body;
+    EXPECT_FALSE(profiles::valid_edit_request({profiles::edit_operation_e::rename, "space-a", "Player 2", "Player 2"}));
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceCreatesAPrivateCatalogAndFreshHomeWithoutASource) {
@@ -756,6 +784,336 @@ namespace {
     const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
     EXPECT_TRUE(loaded->catalog.desktop_clients.empty());
     EXPECT_EQ(json::parse(profiles::encode(loaded->catalog))["schema"], 1);
+  }
+
+  // A Docker that answers removal questions from a small in-memory state.
+  class removal_host_t : public container::host_t {
+  public:
+    std::vector<std::vector<std::string>> calls;
+    std::set<std::string> volumes {"pv-space-a", "pv-space-b", "unrelated"};
+    std::set<std::string> networks {"bridge", "pn-space-a", "pn-space-b"};
+    json home = json::array({{{"Name", "pv-space-b"}, {"Driver", "local"}, {"Scope", "local"}, {"Options", nullptr},
+      {"Labels", {{"io.polaris.multiseat.profile", "space-b"}}}, {"Mountpoint", "/var/lib/docker/volumes/pv-space-b/_data"}}});
+    bool docker_down = false, rootless = false, keep_after_rm = false, network_occupied = false;
+    std::size_t busy_listings = 0;  // `ps` reports a container using the home this many times
+    std::uint64_t effective_uid() const override { return 1000; }
+    bool executable_file(const std::filesystem::path &) const override { return true; }
+    bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return std::vector<std::uint64_t> {}; }
+    bool readable_directory(const std::filesystem::path &) const override { return true; }
+    bool private_read_write_directory(const std::filesystem::path &) const override { return true; }
+    bool private_readable_file(const std::filesystem::path &) const override { return true; }
+    std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &) const override { return std::nullopt; }
+    std::optional<std::string> read_owned_regular_file(const std::filesystem::path &, std::size_t) const override { return std::nullopt; }
+    static std::string lines(const std::set<std::string> &names) {
+      std::string output;
+      for (const auto &name : names) output += json(name).dump() + "\n";
+      return output;
+    }
+    std::size_t count(std::string_view verb, std::string_view object) const {
+      return std::count_if(calls.begin(), calls.end(), [&](const auto &args) {
+        return args.size() > 1 && args[0] == object && args[1] == verb;
+      });
+    }
+    container::command_result_t run(const std::vector<std::string> &argv,
+                                    std::chrono::milliseconds duration, std::size_t bound) override {
+      const auto prefix = container::command_prefix({});
+      EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), argv.begin()));
+      EXPECT_EQ(bound, profiles::maximum_catalog_bytes);
+      const std::vector<std::string> args(argv.begin() + prefix.size(), argv.end());
+      calls.push_back(args);
+      if (docker_down) return {.exit_status = 1};
+      const auto answer = [](std::string output) { return container::command_result_t {.exit_status = 0, .output = std::move(output)}; };
+      if (args[0] == "info") {
+        return answer(json {{"OSType", "linux"}, {"SecurityOptions", rootless ? json::array({"name=rootless"}) : json::array({"name=selinux"})}}.dump());
+      }
+      if (args[0] == "volume" && args[1] == "ls") return answer(lines(volumes));
+      if (args[0] == "volume" && args[1] == "inspect") { EXPECT_EQ(args[2], "pv-space-b"); return answer(home.dump()); }
+      if (args[0] == "ps") {
+        EXPECT_EQ(args, (std::vector<std::string> {"ps", "--all", "--filter=volume=pv-space-b", "--format={{json .ID}}"}));
+        if (busy_listings == 0) return answer("");
+        --busy_listings;
+        return answer("\"4f1c\"\n");
+      }
+      if (args[0] == "volume" && args[1] == "rm") {
+        EXPECT_EQ(duration, std::chrono::minutes(10));
+        EXPECT_EQ(args.size(), 3U);
+        if (!keep_after_rm) volumes.erase(args[2]);
+        return answer("");
+      }
+      EXPECT_EQ(duration, std::chrono::seconds(30));
+      if (args[0] == "network" && args[1] == "ls") return answer(lines(networks));
+      if (args[0] == "network" && args[1] == "inspect") {
+        return answer(json::array({{{"Id", std::string(64, 'e')}, {"Name", "pn-space-b"},
+          {"Driver", "bridge"}, {"Scope", "local"}, {"Internal", false}, {"Ingress", false}, {"Attachable", false},
+          {"EnableIPv6", false}, {"Labels", {{"io.polaris.multiseat.profile", "space-b"}}},
+          {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
+          {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}},
+          {"Containers", network_occupied ? json {{"4f1c", json::object()}} : json::object()}}}).dump());
+      }
+      if (args[0] == "network" && args[1] == "rm") { networks.erase(args[2]); return answer(""); }
+      ADD_FAILURE() << "Unexpected Docker operation " << args[0];
+      return {};
+    }
+  };
+
+  class MultiseatSpaceRemoval : public MultiseatProfileCatalog {
+  protected:
+    static profiles::entry_t steam(std::string id, std::string name, std::vector<std::string> clients) {
+      return {.storage = {id, "pv-" + id, runtime_profile_e::steam, "sha256:" + std::string(64, 'a')},
+        .name = std::move(name), .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = std::move(clients)};
+    }
+    profiles::catalog_t two_spaces() {
+      auto catalog = profiles::catalog_t {1000, 1000, {steam("space-a", "Alex", {"client-a"}), steam("space-b", "Sam", {"client-b"})}};
+      catalog.profiles[1].access_clients = {"client-a"};
+      return catalog;
+    }
+    static profiles::edit_request_t removal(std::string name = "Sam", std::string id = "space-b") {
+      return {profiles::edit_operation_e::remove_for_good, std::move(id), "", std::move(name), "12345678-1234-4234-8234-123456789abc"};
+    }
+    removal_host_t host;
+    const profiles::entry_t *find(const profiles::catalog_t &catalog, std::string_view id) {
+      const auto entry = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+        [&](const auto &value) { return value.storage.profile_key == id; });
+      return entry == catalog.profiles.end() ? nullptr : &*entry;
+    }
+    // The Space is still exactly as it was: listed, not archived, with its devices.
+    void expect_untouched() {
+      const auto loaded = profiles::load(path);
+      ASSERT_TRUE(loaded);
+      const auto *entry = find(loaded->catalog, "space-b");
+      ASSERT_NE(entry, nullptr);
+      EXPECT_FALSE(entry->archived);
+      EXPECT_EQ(entry->client_keys, std::vector<std::string> {"client-b"});
+      EXPECT_EQ(entry->access_clients, std::vector<std::string> {"client-a"});
+      EXPECT_TRUE(host.volumes.contains("pv-space-b"));
+      EXPECT_EQ(host.count("rm", "volume"), 0U);
+      EXPECT_EQ(host.count("rm", "network"), 0U);
+    }
+  };
+
+  TEST_F(MultiseatSpaceRemoval, DeletesTheHomeTheNetworkAndTheRecordThroughDockerOnly) {
+    save(two_spaces());
+    const auto result = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    ASSERT_TRUE(result);
+    EXPECT_TRUE(result.archived);
+    EXPECT_TRUE(result.kept_volume.empty());
+    EXPECT_TRUE(result.kept_network.empty());
+    EXPECT_EQ(host.volumes, (std::set<std::string> {"pv-space-a", "unrelated"}));
+    EXPECT_EQ(host.networks, (std::set<std::string> {"bridge", "pn-space-a"}));
+    EXPECT_EQ(host.count("rm", "volume"), 1U);
+    EXPECT_EQ(host.count("rm", "network"), 1U);
+    for (const auto &args : host.calls) {
+      EXPECT_NE(args[0], "run") << "removal never starts a container";
+      EXPECT_TRUE(std::none_of(args.begin(), args.end(), [](const auto &arg) { return arg == "--force" || arg == "-f"; }));
+    }
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 1U);
+    EXPECT_EQ(loaded->catalog.profiles[0].storage.profile_key, "space-a");
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string> {"client-a"});
+  }
+
+  TEST_F(MultiseatSpaceRemoval, RefusesAWrongNameAnUnknownSpaceAndTheLastSteamSpaceWithoutAskingDocker) {
+    save(two_spaces());
+    for (const auto *typed : {"sam", "Sam ", " Sam", "Alex"}) {
+      EXPECT_EQ(profiles::remove_for_good(path, removal(typed), host, std::chrono::milliseconds(0)).outcome,
+        profiles::removal_outcome_e::name_mismatch) << typed;
+    }
+    EXPECT_EQ(profiles::remove_for_good(path, removal("Sam", "space-z"), host, std::chrono::milliseconds(0)).outcome,
+      profiles::removal_outcome_e::not_found);
+    auto invalid = removal();
+    invalid.request_id.clear();
+    EXPECT_EQ(profiles::remove_for_good(path, invalid, host, std::chrono::milliseconds(0)).outcome, profiles::removal_outcome_e::invalid);
+    EXPECT_TRUE(host.calls.empty());
+    expect_untouched();
+    // An ordinary catalog edit can never carry a removal for good.
+    EXPECT_FALSE(profiles::edit(path, removal()));
+    expect_untouched();
+
+    auto only = two_spaces();
+    only.profiles.erase(only.profiles.begin());
+    save(only);
+    const auto last = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    EXPECT_EQ(last.outcome, profiles::removal_outcome_e::last_space);
+    EXPECT_FALSE(last.archived);
+    EXPECT_TRUE(host.calls.empty());
+    expect_untouched();
+  }
+
+  TEST_F(MultiseatSpaceRemoval, NeverDeletesStorageItCannotProveIsTheHomePolarisMadeForThisSpace) {
+    save(two_spaces());
+    const auto original = host.home;
+    std::vector<std::function<void(json &)>> impostors {
+      [](json &home) { home[0]["Labels"]["io.polaris.multiseat.profile"] = "space-a"; },
+      [](json &home) { home[0]["Labels"] = json::object(); },
+      // A local volume bound to a host directory would reach outside Docker's store.
+      [](json &home) { home[0]["Options"] = {{"type", "none"}, {"o", "bind"}, {"device", "/srv/player"}}; },
+      [](json &home) { home[0]["Mountpoint"] = "/var/lib/docker/volumes/pv-space-b/_data/../../../../../srv/player"; },
+      [](json &home) { home[0]["Mountpoint"] = "/var/lib/docker/volumes/pv-space-b/./_data"; },
+      [](json &home) { home[0]["Mountpoint"] = "volumes/pv-space-b/_data"; },
+      [](json &home) { home[0]["Mountpoint"] = "/var/lib/docker/volumes/pv-space-a/_data"; },
+      [](json &home) { home[0]["Driver"] = "nfs"; },
+      [](json &home) { home[0]["Name"] = "pv-space-a"; },
+      [](json &home) { home.push_back(home[0]); },
+      [](json &home) { home = json::object(); },
+    };
+    for (std::size_t i = 0; i < impostors.size(); ++i) {
+      host.home = original;
+      impostors[i](host.home);
+      host.calls.clear();
+      const auto result = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+      EXPECT_EQ(result.outcome, profiles::removal_outcome_e::storage_unverified) << i;
+      EXPECT_EQ(result.kept_volume, "pv-space-b") << i;
+      EXPECT_FALSE(result.archived) << i;
+      expect_untouched();
+    }
+    // Docker may keep its store anywhere; the volume's own directory layout is what counts.
+    host.home = original;
+    host.home[0]["Mountpoint"] = "/srv/docker-data/volumes/pv-space-b/_data";
+    EXPECT_TRUE(profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0)));
+  }
+
+  TEST_F(MultiseatSpaceRemoval, ChangesNothingWhileDockerIsDownRootlessOrStillUsingTheHome) {
+    save(two_spaces());
+    host.docker_down = true;
+    EXPECT_EQ(profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0)).outcome, profiles::removal_outcome_e::docker_unavailable);
+    expect_untouched();
+    host.docker_down = false; host.rootless = true;
+    EXPECT_EQ(profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0)).outcome, profiles::removal_outcome_e::docker_unavailable);
+    expect_untouched();
+    host.rootless = false; host.busy_listings = 1000;
+    const auto busy = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    EXPECT_EQ(busy.outcome, profiles::removal_outcome_e::storage_in_use);
+    EXPECT_EQ(busy.kept_volume, "pv-space-b");
+    expect_untouched();
+    // A short library read that finishes is waited out instead of refused.
+    host.busy_listings = 1;
+    EXPECT_TRUE(profiles::remove_for_good(path, removal(), host, std::chrono::seconds(5)));
+    EXPECT_FALSE(host.volumes.contains("pv-space-b"));
+  }
+
+  TEST_F(MultiseatSpaceRemoval, AnUnfinishedDockerRemovalLeavesAnArchivedSpaceThatARetryFinishes) {
+    save(two_spaces());
+    host.keep_after_rm = true;
+    const auto first = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    EXPECT_EQ(first.outcome, profiles::removal_outcome_e::storage_not_removed);
+    EXPECT_TRUE(first.archived);
+    EXPECT_EQ(first.kept_volume, "pv-space-b");
+    EXPECT_EQ(host.count("rm", "network"), 0U) << "the network waits for the home";
+    {
+      const auto loaded = profiles::load(path);
+      ASSERT_TRUE(loaded);
+      const auto *entry = find(loaded->catalog, "space-b");
+      ASSERT_NE(entry, nullptr);
+      EXPECT_TRUE(entry->archived);
+      EXPECT_TRUE(entry->client_keys.empty());
+      EXPECT_TRUE(entry->access_clients.empty());
+    }
+    host.keep_after_rm = false;
+    const auto retry = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    ASSERT_TRUE(retry);
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(find(loaded->catalog, "space-b"), nullptr);
+    EXPECT_FALSE(host.volumes.contains("pv-space-b"));
+    EXPECT_FALSE(host.networks.contains("pn-space-b"));
+  }
+
+  TEST_F(MultiseatSpaceRemoval, FinishesWhenTheHomeIsAlreadyGoneAndNamesANetworkDockerKept) {
+    save(two_spaces());
+    host.volumes.erase("pv-space-b");
+    host.network_occupied = true;
+    const auto result = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    ASSERT_TRUE(result);
+    EXPECT_EQ(host.count("inspect", "volume"), 0U);
+    EXPECT_EQ(host.count("rm", "volume"), 0U);
+    EXPECT_EQ(host.count("rm", "network"), 0U) << "an occupied or unfamiliar network is left alone";
+    EXPECT_EQ(result.kept_network, "pn-space-b");
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(find(loaded->catalog, "space-b"), nullptr);
+  }
+
+  TEST_F(MultiseatSpaceRemoval, AnArchiveThatWasNotSavedDeletesNothing) {
+    save(two_spaces());
+    psf::set_write_fault_for_tests(psf::write_fault_e::rename);
+    const auto unsaved = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    psf::set_write_fault_for_tests(psf::write_fault_e::none);
+    EXPECT_EQ(unsaved.outcome, profiles::removal_outcome_e::not_saved);
+    EXPECT_EQ(unsaved.status, psf::write_status_e::not_committed);
+    EXPECT_FALSE(unsaved.archived);
+    expect_untouched();
+    psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+    const auto uncertain = profiles::remove_for_good(path, removal(), host, std::chrono::milliseconds(0));
+    psf::set_write_fault_for_tests(psf::write_fault_e::none);
+    EXPECT_EQ(uncertain.status, psf::write_status_e::durability_uncertain);
+    EXPECT_FALSE(uncertain);
+    EXPECT_EQ(host.count("rm", "volume"), 0U);
+    EXPECT_TRUE(host.volumes.contains("pv-space-b"));
+  }
+
+  // Opt-in, against the local Docker Engine. The test makes its own scratch
+  // homes and network, removes only those, and proves every other volume and
+  // network is still there afterwards.
+  TEST_F(MultiseatSpaceRemoval, PhysicalDockerRemovesOnlyTheScratchSpaceItMade) {
+    if (!std::getenv("POLARIS_TEST_SPACE_REMOVAL_DOCKER")) GTEST_SKIP() << "Opt-in removal against the local Docker Engine";
+    container::local_host_t docker;
+    const auto run = [&](std::vector<std::string> args) {
+      auto argv = container::command_prefix({});
+      argv.insert(argv.end(), args.begin(), args.end());
+      return docker.run(argv, std::chrono::seconds(60), profiles::maximum_catalog_bytes);
+    };
+    const auto names = [&](std::vector<std::string> args) {
+      const auto result = run(std::move(args));
+      EXPECT_EQ(result.exit_status, 0);
+      std::set<std::string> listed;
+      std::istringstream lines(result.output);
+      for (std::string line; std::getline(lines, line);) if (!line.empty()) listed.insert(json::parse(line).get<std::string>());
+      return listed;
+    };
+    const auto suffix = uuid_util::uuid_t::generate().string();
+    const auto key = "removal-test-" + suffix, keeper = "removal-keeper-" + suffix, impostor = "removal-impostor-" + suffix;
+    const std::vector<std::string> scratch_volumes {"pv-" + key, "pv-" + impostor};
+    const auto network = container::profile_network_name(key);
+    // Only this test's own names are ever cleaned up, whatever happens above.
+    struct cleanup_t {
+      std::function<void()> run;
+      ~cleanup_t() { run(); }
+    } cleanup {[&] {
+      for (const auto &volume : scratch_volumes) (void) run({"volume", "rm", volume});
+      (void) run({"network", "rm", network});
+    }};
+    const auto volumes_before = names({"volume", "ls", "--format={{json .Name}}"});
+    const auto networks_before = names({"network", "ls", "--format={{json .Name}}"});
+    ASSERT_EQ(run({"volume", "create", "--driver=local", "--label=io.polaris.multiseat.profile=" + key, "pv-" + key}).exit_status, 0);
+    ASSERT_TRUE(container::create_profile_network(docker, key));
+    // A home labelled for another Space must be refused and kept.
+    ASSERT_EQ(run({"volume", "create", "--driver=local", "--label=io.polaris.multiseat.profile=" + key, "pv-" + impostor}).exit_status, 0);
+
+    profiles::catalog_t catalog {1000, 1000, {steam(key, "Scratch", {}), steam(keeper, "Keeper", {}), steam(impostor, "Impostor", {})}};
+    save(catalog);
+    const auto refused = profiles::remove_for_good(path,
+      {profiles::edit_operation_e::remove_for_good, impostor, "", "Impostor", "12345678-1234-4234-8234-123456789abc"}, docker, std::chrono::seconds(0));
+    EXPECT_EQ(refused.outcome, profiles::removal_outcome_e::storage_unverified);
+    EXPECT_TRUE(names({"volume", "ls", "--format={{json .Name}}"}).contains("pv-" + impostor));
+
+    const auto removed = profiles::remove_for_good(path,
+      {profiles::edit_operation_e::remove_for_good, key, "", "Scratch", "22345678-1234-4234-8234-123456789abc"}, docker, std::chrono::seconds(5));
+    ASSERT_TRUE(removed) << static_cast<int>(removed.outcome) << " kept " << removed.kept_volume << " " << removed.kept_network;
+    EXPECT_TRUE(removed.kept_volume.empty());
+    EXPECT_TRUE(removed.kept_network.empty());
+    const auto volumes_after = names({"volume", "ls", "--format={{json .Name}}"});
+    const auto networks_after = names({"network", "ls", "--format={{json .Name}}"});
+    EXPECT_FALSE(volumes_after.contains("pv-" + key));
+    EXPECT_FALSE(networks_after.contains(network));
+    for (const auto &volume : volumes_before) EXPECT_TRUE(volumes_after.contains(volume)) << volume << " must survive";
+    for (const auto &name : networks_before) EXPECT_TRUE(networks_after.contains(name)) << name << " must survive";
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(find(loaded->catalog, key), nullptr);
+    EXPECT_NE(find(loaded->catalog, keeper), nullptr);
+    EXPECT_NE(find(loaded->catalog, impostor), nullptr);
   }
 
   TEST(SpacesLibraryHost, UsesOnlyItsOwnedVolumeWithAnIsolatedReadOnlyHelper) {
