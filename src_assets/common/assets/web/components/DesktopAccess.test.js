@@ -2,31 +2,42 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, expect, it, vi } from 'vitest'
 import DesktopAccess from './DesktopAccess.vue'
 import { validSnapshot } from '../spaces-access.js'
+import { spacesGlobal } from './spaces-test-i18n.js'
 let wrapper
 const clients = [{ uuid: 'rp6', friendly_name: 'Retroid', perm: 0x04000000 },
   { uuid: 'guest', name: 'Guest', perm: 0x04000000, temporary_authorization: true }]
-function start(refresh = async () => true) { wrapper = mount(DesktopAccess, { props: { clients, allowed: [], refresh } }) }
+function start(refresh = async () => true, props = {}) { wrapper = mount(DesktopAccess, { global: spacesGlobal, props: { clients, allowed: [], refresh, ...props } }) }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 it('never grants desktop access implicitly and excludes guests', () => {
   start(); expect(wrapper.findAll('input')).toHaveLength(1)
   expect(wrapper.find('input').element.checked).toBe(false)
   expect(wrapper.text()).not.toContain('Guest')
 })
+it('says when no device can be granted Desktop', () => {
+  start(async () => true, { clients: [clients[1]] })
+  expect(wrapper.findAll('input')).toHaveLength(0)
+  expect(wrapper.text()).toContain('Pair a device with permission to launch apps first.')
+})
 it('confirms only the requested device grant after server readback', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ status: true }) })))
   start(async () => { await wrapper.setProps({ allowed: ['rp6'] }); return true })
   await wrapper.find('input').setValue(true); await flushPromises()
   expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: 'desktop', client_id: 'rp6', allowed: true })
-  expect(wrapper.text()).toContain('Desktop Access Saved.')
+  expect(wrapper.text()).toContain('Desktop Access saved.')
 })
 it('does not announce success for a refused or unconfirmed grant', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ status: false, message: 'End the stream first' }) })))
   start(); await wrapper.find('input').setValue(true); await flushPromises()
   expect(wrapper.find('input').element.checked).toBe(false)
-  expect(wrapper.text()).toContain('End the stream first'); expect(wrapper.text()).not.toContain('Access Saved')
+  expect(wrapper.text()).toContain('End the stream first'); expect(wrapper.text()).not.toContain('Access saved')
   fetch.mockResolvedValue({ ok: false, status: 202, json: async () => ({ status: false }) })
   await wrapper.find('input').setValue(true); await flushPromises()
-  expect(wrapper.text()).toContain('has not been confirmed'); expect(wrapper.text()).not.toContain('Access Saved')
+  expect(wrapper.text()).toContain('has not been confirmed'); expect(wrapper.text()).not.toContain('Access saved')
+})
+it('shows the host reason when a bad request carries only an error field', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 400, json: async () => ({ status: false, error: 'Unknown Space.' }) })))
+  start(); await wrapper.find('input').setValue(true); await flushPromises()
+  expect(wrapper.get('[role=alert]').text()).toContain('Unknown Space.')
 })
 it('rejects ambiguous desktop grants in the refreshed snapshot', () => {
   const base = { enabled: true, available: true, changing: false, failed: false, profiles: [] }

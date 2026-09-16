@@ -244,6 +244,8 @@ namespace multiseat {
     [[nodiscard]] std::optional<seat_snapshot_t> snapshot(const seat_handle_t &handle) const;
     [[nodiscard]] std::vector<seat_snapshot_t> seats() const;
     [[nodiscard]] std::optional<gpu_usage_t> gpu_usage(const std::string &logical_gpu_id) const;
+    /// Usage summed over every trusted GPU: the budget a client can be shown before it presses Open.
+    [[nodiscard]] gpu_usage_t usage() const;
 
   private:
     admission_result_t admit_locked(const seat_request_t &request);

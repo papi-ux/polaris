@@ -25,6 +25,7 @@ const routes = [
   { name: 'library', path: '/#/apps', heading: /Library/i },
   { name: 'settings', path: '/#/config', heading: /Settings/i },
   { name: 'pairing', path: '/#/pin', heading: /Pair/i },
+  { name: 'spaces', path: '/#/spaces', heading: /^Spaces$/i },
   { name: 'browser-stream', path: '/#/browser-stream', heading: /Browser Stream/i },
   { name: 'troubleshooting', path: '/#/troubleshooting', heading: /Doctor & Support/i },
 ]

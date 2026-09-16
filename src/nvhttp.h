@@ -140,6 +140,8 @@ namespace nvhttp {
     int status;
     std::string message;
     std::shared_ptr<rtsp_stream::launch_session_t> launch;
+    std::string code;  ///< stable snake_case reason Nova reads as error_code; empty when the refusal has none
+    std::string action;  ///< the one change that fixes it, when there is one
   };
   // Empty only for an authenticated client with no assigned profile. Publication
   // is reauthorized after bounded worker startup and never calls the host proc.
@@ -596,6 +598,9 @@ namespace nvhttp {
   int advertised_max_launch_refresh_rate_for_tests();
   /// Put a recorded launch refusal (or the fallback text) on a response tree; see launch_failure.h.
   void put_launch_refusal_for_tests(boost::property_tree::ptree &tree, int status, const std::string &fallback_message);
+#ifdef __linux__
+  void put_profile_launch_response_for_tests(boost::property_tree::ptree &tree, const profile_launch_response_t &response, bool resume);
+#endif
 
   void ensure_response_status_code_for_tests(
     boost::property_tree::ptree &tree,

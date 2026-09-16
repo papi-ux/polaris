@@ -2,53 +2,55 @@
   <div class="mt-5 border-t border-storm/20 pt-4">
     <p v-if="message" class="mb-3 break-words text-sm text-silver" role="status">{{ message }}</p>
     <p v-if="error" class="mb-3 break-words text-sm text-warning-bright" role="alert">{{ error }}</p>
-    <button v-if="!showForm" ref="openButton" type="button"
-            class="focus-ring rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
-            :disabled="locked || !sources.length" @click="openForm">Create a space</button>
-    <p v-if="!sources.length" class="mt-2 text-xs text-storm">
-      The first Steam space still needs host configuration in this preview. Once configured, you can create additional spaces here.
-    </p>
+    <Button v-if="!showForm" ref="openButton" variant="outline" size="sm" :disabled="locked || !sources.length" @click="openForm">
+      {{ $t('spaces.create') }}
+    </Button>
+    <p v-if="!sources.length" class="mt-2 text-xs text-storm">{{ $t('spaces.create_first_hint') }}</p>
     <form v-if="showForm" class="rounded-xl border border-storm/20 bg-deep/40 p-4" @submit.prevent="submit">
-      <h3 class="text-sm font-semibold text-silver">New space</h3>
-      <p class="mt-1 text-sm text-storm">
-        Starts with its own Steam sign-in, saves, and settings. After creating it, assign a device and open Big Picture to sign in.
-      </p>
-      <label for="new-steam-profile-name" class="mt-4 block text-sm text-silver">Who Is This Space For?</label>
+      <h3 class="text-sm font-semibold text-silver">{{ $t('spaces.new_space') }}</h3>
+      <p class="mt-1 text-sm text-storm">{{ $t('spaces.new_space_copy') }}</p>
+      <label for="new-steam-profile-name" class="mt-4 block text-sm text-silver">{{ $t('spaces.who_for') }}</label>
       <input id="new-steam-profile-name" ref="nameInput" v-model="name" type="text" autocomplete="off" maxlength="128"
-             class="focus-ring mt-2 w-full rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver"
-             placeholder="e.g. Alex’s Space" :disabled="locked || !!pending" aria-describedby="new-steam-name-help">
+             class="settings-input mt-2 text-sm" :placeholder="$t('spaces.name_placeholder')"
+             :disabled="locked || !!pending" aria-describedby="new-steam-name-help">
       <p id="new-steam-name-help" class="mt-1 text-xs text-storm">
-        {{ name.trim() && !validName ? 'Use a shorter name without control characters.' : 'This name appears in Nova’s player selection. Use a name such as Alex’s Space or Family Space.' }}
+        {{ name.trim() && !validName ? $t('spaces.name_invalid') : $t('spaces.name_help') }}
       </p>
-      <details v-if="sources.length > 1" class="mt-4">
-        <summary class="focus-ring cursor-pointer rounded text-sm text-storm">Advanced setup</summary>
-        <label for="new-steam-profile-source" class="mt-4 block text-sm text-silver">Gaming runtime</label>
-        <select id="new-steam-profile-source" v-model="source" :disabled="locked || !!pending"
-                class="focus-ring mt-2 w-full min-w-0 rounded-lg border border-storm/30 bg-deep px-3 py-2.5 text-sm text-silver">
+      <details v-if="sources.length > 1" class="settings-disclosure mt-4">
+        <summary class="settings-disclosure-summary focus-ring cursor-pointer rounded text-sm text-storm">
+          <span>{{ $t('spaces.advanced') }}</span>
+          <svg class="settings-disclosure-chevron h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+          </svg>
+        </summary>
+        <label for="new-steam-profile-source" class="mt-4 block text-sm text-silver">{{ $t('spaces.based_on') }}</label>
+        <select id="new-steam-profile-source" v-model="source" :disabled="locked || !!pending" class="settings-input mt-2 min-w-0 text-sm">
           <option v-for="profile in sources" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
         </select>
       </details>
-      <p class="mt-3 text-xs text-storm">Stop space streams before creating a space. Creation can take a little while.</p>
-      <div class="mt-4 flex flex-wrap gap-3">
-        <button type="submit" class="focus-ring rounded-lg border border-ice/30 px-3 py-2.5 text-sm text-ice disabled:opacity-40"
+      <p class="mt-3 text-xs text-storm">{{ $t('spaces.create_note') }}</p>
+      <div class="mt-4 flex flex-wrap gap-2">
+        <Button type="submit" variant="outline" size="sm" :loading="working"
                 :disabled="locked || working || (!pending && (!validName || !validSource))">
-          {{ working ? 'Creating…' : pending ? 'Retry creation' : 'Create space' }}
-        </button>
-        <button v-if="pending" type="button" class="focus-ring rounded-lg px-3 py-2.5 text-sm text-ice disabled:opacity-40"
-                :disabled="working || refreshing" @click="checkStatus">Check creation status</button>
-        <button v-else type="button" class="focus-ring rounded-lg px-3 py-2.5 text-sm text-storm"
-                :disabled="working" @click="closeForm">Cancel</button>
+          {{ working ? $t('spaces.creating') : pending ? $t('spaces.retry_creation') : $t('spaces.create_submit') }}
+        </Button>
+        <Button v-if="pending" type="button" variant="ghost" size="sm" class="text-ice" :disabled="working || refreshing" @click="checkStatus">
+          {{ $t('spaces.check_creation') }}
+        </Button>
+        <Button v-else type="button" variant="ghost" size="sm" :disabled="working" @click="closeForm">{{ $t('spaces.cancel') }}</Button>
       </div>
       <p v-if="pending" class="mt-3 text-xs text-storm">
-        Retrying checks the same space request.
-        {{ requestSaved ? 'You can return to Spaces in this browser tab to check its result.' : 'Keep this form open until its result is confirmed.' }}
+        {{ $t('spaces.retry_note') }}
+        {{ requestSaved ? $t('spaces.retry_saved') : $t('spaces.retry_unsaved') }}
       </p>
     </form>
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
+import Button from './Button.vue'
+import { useToast } from '../composables/useToast.js'
 
 const props = defineProps({
   profiles: { type: Array, default: () => [] },
@@ -56,7 +58,12 @@ const props = defineProps({
   refresh: { type: Function, required: true },
 })
 const emit = defineEmits(['busy'])
-const sources = computed(() => props.profiles.filter(profile => profile.steam === true))
+const i18n = inject('i18n')
+const t = (key, params) => i18n.t(key, params)
+const { toast } = useToast()
+// A new Space copies the runtime setup of a live Steam Space; archived ones are
+// not offered, since their catalog row carries no devices to inherit from.
+const sources = computed(() => props.profiles.filter(profile => profile.steam === true && !profile.archived))
 const name = ref(''), source = ref(''), showForm = ref(false), working = ref(false)
 const message = ref(''), error = ref(''), pending = ref(null)
 const requestSaved = ref(false)
@@ -93,7 +100,7 @@ function restorePending() {
     pending.value = { request_id: saved.request_id, source_profile_id: saved.source_profile_id, name: saved.name }
     name.value = saved.name; source.value = saved.source_profile_id
     showForm.value = true; requestSaved.value = true
-    message.value = 'A space creation request is waiting for confirmation. Check its status before retrying.'
+    message.value = t('spaces.creation_waiting')
     confirmCreation()
   } catch { /* Storage may be disabled. Never submit an unverified saved request. */ }
 }
@@ -107,14 +114,15 @@ async function openForm() {
 }
 async function closeForm() {
   showForm.value = false
-  await nextTick(); openButton.value?.focus()
+  await nextTick(); openButton.value?.$el?.focus?.()
 }
 function confirmCreation() {
   if (!pending.value || !props.ready) return false
   const found = props.profiles.find(profile => profile.id === pending.value.request_id &&
     profile.name === pending.value.name && profile.steam === true && !profile.archived)
   if (!found) return false
-  message.value = found.name + ' was created. Assign it to a device below, then open Big Picture to sign in.'
+  message.value = t('spaces.created', { name: found.name })
+  toast(message.value, 'success')
   error.value = ''; clearPending(); name.value = ''
   closeForm()
   return true
@@ -127,7 +135,7 @@ watch(sources, () => {
 async function refreshProfiles() {
   try { return await props.refresh() }
   catch {
-    error.value = 'Could not refresh spaces. Check creation status before retrying.'
+    error.value = t('spaces.creation_refresh_failed')
     return false
   }
 }
@@ -137,7 +145,7 @@ async function checkStatus() {
   const verified = await refreshProfiles()
   await nextTick()
   if (verified && !confirmCreation() && pending.value && props.ready) {
-    message.value = 'The space has not been confirmed yet. Retry creation to check the same request.'
+    message.value = t('spaces.creation_unconfirmed')
   }
 }
 
@@ -155,25 +163,24 @@ async function submit() {
       body: JSON.stringify(pending.value),
     })
     const result = await response.json()
-    if (!result || typeof result !== 'object') throw new Error('The creation response could not be verified. Check its status before retrying.')
+    if (!result || typeof result !== 'object') throw new Error(t('spaces.creation_unverified'))
     if (response.status !== 202 && (!response.ok || result.status !== true)) {
       // These refusals happen before provisioning; the form can be corrected.
       if (response.status === 400 || response.status === 404) clearPending()
-      throw new Error(result.message || result.error || 'The space could not be created. Check its status before retrying.')
+      throw new Error(result.message || result.error || t('spaces.creation_failed'))
     }
     if (result.profile_id !== pending.value.request_id ||
         (response.status === 202 ? result.status !== false : result.status !== true)) {
-      throw new Error('The creation response could not be verified. Check its status before retrying.')
+      throw new Error(t('spaces.creation_unverified'))
     }
-    message.value = response.status === 202 ?
-      'Polaris is still creating the space. Check creation status in a moment.' : 'Checking the saved space…'
+    message.value = response.status === 202 ? t('spaces.creation_pending') : t('spaces.creation_checking')
   } catch (cause) {
-    error.value = cause.message || 'Creation could not be confirmed. Check its status before retrying.'
+    error.value = cause.message || t('spaces.creation_error')
   } finally {
     const verified = await refreshProfiles()
     await nextTick()
     if (verified && !confirmCreation() && pending.value && props.ready && !error.value) {
-      message.value = 'The space has not been confirmed yet. Retry creation to check the same request.'
+      message.value = t('spaces.creation_unconfirmed')
     }
     working.value = false; emit('busy', false)
   }

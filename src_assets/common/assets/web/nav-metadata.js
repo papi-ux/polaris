@@ -19,7 +19,7 @@ export const NAV_SECTION_DEFINITIONS = [
       { commandId: 'dashboard', to: '/', icon: ICONS.dashboard, labelKey: 'navbar.dashboard', fallbackLabel: 'Mission Control', aliases: ['dashboard', 'home', 'overview', 'session', 'stream status'], description: 'Open the live control surface and active session overview.' },
       { commandId: 'apps', to: '/apps', icon: ICONS.apps, labelKey: 'navbar.library', fallbackLabel: 'Library', aliases: ['apps', 'applications', 'games', 'game library', 'streamable apps'], description: 'Browse, edit, and import games or streamable applications.' },
       { commandId: 'pairing', to: '/pin', icon: ICONS.pairing, labelKey: 'navbar.pairing', fallbackLabel: 'Devices', aliases: ['pairing', 'pin', 'devices', 'clients', 'moonlight pairing'], description: 'Pair clients and review devices trusted to use this host.' },
-      { commandId: 'spaces', to: '/spaces', icon: ICONS.spaces, labelKey: 'navbar.spaces', fallbackLabel: 'Spaces', aliases: ['space', 'gaming spaces', 'multiseat', 'multi session', 'multiple players', 'headless', 'docker'], description: 'Set up separate gaming spaces, Steam sign-ins, and device access.' },
+      { commandId: 'spaces', to: '/spaces', icon: ICONS.spaces, labelKey: 'navbar.spaces', fallbackLabel: 'Spaces', badge: 'Preview', platforms: ['linux'], aliases: ['space', 'gaming spaces', 'multiseat', 'multi session', 'multiple players', 'headless', 'docker'], description: 'Set up separate gaming Spaces, Steam sign-ins, and device access.' },
     ],
   },
   {
@@ -56,18 +56,23 @@ function translate(t, key, fallback) {
   return translated && translated !== key ? translated : fallback
 }
 
-export function createNavSections(t) {
+// An item that names platforms is listed only on those hosts; an unknown
+// platform (before /api/config answers) keeps every item, so nothing flickers
+// out of the sidebar after the fact.
+export function createNavSections(t, platform = '') {
   return NAV_SECTION_DEFINITIONS.map((section) => {
     const sectionLabel = translate(t, section.labelKey, section.fallbackLabel)
     return {
       key: section.key,
       label: sectionLabel,
-      items: section.items.map((item) => ({
-        ...item,
-        id: item.commandId,
-        label: translate(t, item.labelKey, item.fallbackLabel),
-        sectionLabel,
-      })),
+      items: section.items
+        .filter((item) => !item.platforms || !platform || item.platforms.includes(platform))
+        .map((item) => ({
+          ...item,
+          id: item.commandId,
+          label: translate(t, item.labelKey, item.fallbackLabel),
+          sectionLabel,
+        })),
     }
   })
 }

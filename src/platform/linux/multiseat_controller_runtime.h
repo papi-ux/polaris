@@ -286,6 +286,7 @@ namespace multiseat {
     [[nodiscard]] bool shutting_down() const;
     [[nodiscard]] bool closed() const;
     [[nodiscard]] std::size_t seats() const;
+    [[nodiscard]] gpu_usage_t capacity() const;
     [[nodiscard]] std::size_t managed_workers() const;
     [[nodiscard]] std::size_t input_allocations() const;
     [[nodiscard]] std::size_t tracked_launches() const;

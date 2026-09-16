@@ -16,6 +16,197 @@
   ],
   "version": 1,
   "objects": {
+    "spaces_snapshot": {
+      "$comment": [
+        "GET /polaris/v1/spaces, and the body of POST /polaris/v1/spaces/select. What one",
+        "paired device may see, and why what it cannot do is off. schema stays 1: every key",
+        "added after nova#308 is optional, and the six state words on each space never grow,",
+        "because PolarisSpaces.parse nulls the whole payload on a value it does not know."
+      ],
+      "fields": [
+        "available",
+        "can_switch",
+        "capacity",
+        "default_space_id",
+        "desktop_allowed",
+        "enabled",
+        "schema",
+        "selected_space_id",
+        "spaces",
+        "status",
+        "switch_blocked_reason",
+        "unavailable_reason"
+      ],
+      "optional": [
+        "capacity",
+        "default_space_id",
+        "desktop_allowed",
+        "switch_blocked_reason",
+        "unavailable_reason"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisSpaces.kt",
+        "function": "parse",
+        "receiver": "json"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "spaces_snapshot_json",
+        "declaration": "nlohmann::json body {",
+        "style": "initializer_list"
+      }
+    },
+    "spaces_capacity": {
+      "$comment": "The capacity object of spaces_snapshot and of the console's /api/multiseat/profiles: the trusted seat budget summed over every GPU, so a client can say \"one Space at a time\" before a launch is refused.",
+      "fields": [
+        "concurrent_active",
+        "concurrent_limit"
+      ],
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "spaces_capacity_json",
+        "declaration": "return {",
+        "style": "initializer_list"
+      }
+    },
+    "space": {
+      "$comment": "One entry of spaces_snapshot.spaces. state is one of ready, starting, running, stopping, in_use, unavailable and must stay so; can_open and blocked_reason carry what state cannot (a full budget).",
+      "fields": [
+        "blocked_reason",
+        "can_open",
+        "id",
+        "library_enabled",
+        "name",
+        "selected",
+        "state"
+      ],
+      "optional": [
+        "blocked_reason"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisSpaces.kt",
+        "function": "parse",
+        "receiver": "entry"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "space_json",
+        "declaration": "nlohmann::json entry {",
+        "style": "initializer_list"
+      }
+    },
+    "space_library": {
+      "$comment": "GET /polaris/v1/spaces/library?space_id=. The games are space_library_game objects.",
+      "fields": [
+        "games",
+        "library_available",
+        "schema",
+        "space_id",
+        "space_name",
+        "status",
+        "total"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "getSpaceLibrary",
+        "receiver": "json"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "space_library_json",
+        "declaration": "return {",
+        "style": "initializer_list"
+      }
+    },
+    "space_library_game": {
+      "$comment": [
+        "One game of a Space library, id space.<profile>.<target>. Nova reads it through the",
+        "same PolarisGameJsonAdapter.fromJson as game, which reads every field the host game",
+        "object serves, so a reader entry here would report those as drift; the adapter is",
+        "audited under game and space_ref."
+      ],
+      "fields": [
+        "app_id",
+        "artwork",
+        "cover_url",
+        "hdr_supported",
+        "id",
+        "installed",
+        "launch_mode",
+        "name",
+        "source",
+        "space",
+        "steam_appid"
+      ],
+      "optional": [
+        "artwork"
+      ],
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "space_library_game_json",
+        "declaration": "nlohmann::json entry {",
+        "style": "initializer_list"
+      }
+    },
+    "space_ref": {
+      "$comment": "The space object of space_library_game. Nova requires it on every space.* id and checks id and target against the id it parsed.",
+      "fields": [
+        "id",
+        "name",
+        "target"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "context"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "space_ref_json",
+        "declaration": "return {",
+        "style": "initializer_list"
+      }
+    },
+    "space_launch_mode": {
+      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader.",
+      "fields": [
+        "allowed_modes",
+        "mode_reason",
+        "preferred_mode",
+        "recommended_mode"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+        "function": "fromJson",
+        "receiver": "modeJson"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "space_launch_mode_json",
+        "declaration": "return {",
+        "style": "initializer_list"
+      }
+    },
+    "space_legacy_game": {
+      "$comment": "The one entry GET /polaris/v1/games serves to a device routed to a Space on a host without the Space library: the fixed profile app identity that NovaSpaceUiState.singleSpace opens.",
+      "fields": [
+        "app_id",
+        "cover_url",
+        "hdr_supported",
+        "id",
+        "installed",
+        "launch_mode",
+        "name",
+        "source",
+        "worker_profile"
+      ],
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "space_legacy_game_json",
+        "declaration": "return {",
+        "style": "initializer_list"
+      }
+    },
     "game": {
       "$comment": "Emitted per app by the game library endpoint.",
       "fields": [
@@ -643,7 +834,8 @@
       "$comment": "Nova defaults each of these, so platform and runtime resolve to \"unknown\" and the labels to empty strings rather than failing.",
       "game": [
         "launcher_source",
-        "launcher_detail"
+        "launcher_detail",
+        "space"
       ],
       "optimization": [
         "ai_recommended_mode",
@@ -666,6 +858,31 @@
       "game": [
         "emulator"
       ],
+      "spaces_snapshot": [
+        "available",
+        "can_switch",
+        "capacity",
+        "default_space_id",
+        "enabled",
+        "switch_blocked_reason",
+        "unavailable_reason"
+      ],
+      "space": [
+        "blocked_reason",
+        "can_open",
+        "id",
+        "name",
+        "state"
+      ],
+      "space_library": [
+        "library_available",
+        "schema",
+        "space_name",
+        "total"
+      ],
+      "space_legacy_game": [
+        "worker_profile"
+      ],
       "session_capture": [],
       "client_settings_mode_option": [
         "badge",
@@ -681,6 +898,20 @@
       ]
     },
     "$detail": {
+      "spaces_snapshot": [
+        "enabled, available and can_switch are read, through PolarisSpaces.parse's flag()",
+        "helper that takes the key as a variable, which the accessor scan cannot see; the same",
+        "goes for id, name and state on space, read through listOf(...).all { entry.opt(it) }.",
+        "capacity, default_space_id, unavailable_reason, switch_blocked_reason, can_open and",
+        "blocked_reason are served ahead of their Nova consumer (the reasons Nova shows in",
+        "place of a bare disabled control) and are optional on schema 1. library_available,",
+        "space_name and total on space_library are informational; Nova checks status and",
+        "space_id and reads the games. worker_profile on the legacy entry is never read:",
+        "NovaSpaceUiState.singleSpace keys on the fixed id. serverinfo's PolarisSpacesAvailable",
+        "is XML written through the property tree, outside what this manifest can extract.",
+        "game.space is read by the shared adapter and served only on space_library_game, where",
+        "it is declared; the ordinary library never carries it."
+      ],
       "session_capture": [
         "Corrected. Nova reads gpu_native_succeeded and cross_gpu_dmabuf_risk from the",
         "linux_gpu_profile object instead, so the same fields on capture are redundant rather",

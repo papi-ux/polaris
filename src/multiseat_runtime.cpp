@@ -458,6 +458,19 @@ namespace multiseat {
     };
   }
 
+  gpu_usage_t registry_t::usage() const {
+    std::scoped_lock lock {mutex_};
+    gpu_usage_t total;
+    for (const auto &[id, gpu] : gpus_) {
+      total.active_seats += static_cast<std::uint32_t>(std::count_if(
+        gpu.slots.begin(), gpu.slots.end(), [](const auto &slot) { return slot.has_value(); }));
+      total.encoder_sessions += gpu.encoder_sessions;
+      total.max_seats += gpu.capacity.max_seats;
+      total.max_encoder_sessions += gpu.capacity.max_encoder_sessions;
+    }
+    return total;
+  }
+
   registry_t::seat_record_t *registry_t::find_exact_locked(
     const seat_handle_t &handle,
     mutation_result_e &result

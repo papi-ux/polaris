@@ -362,6 +362,17 @@ TEST(MultiseatRuntime, SeatAndEncoderBudgetsFailClosedIndependently) {
   );
 }
 
+TEST(MultiseatRuntime, UsageSumsTheBudgetAcrossEveryTrustedGpu) {
+  registry_t registry {controller_epoch, {shared_gpu(2, 4)}};
+  EXPECT_EQ(registry.usage(), (multiseat::gpu_usage_t {0, 0, 2, 4}));
+  ASSERT_TRUE(registry.admit(request_for("client-a", "profile-a", "game-a")).accepted());
+  const auto used = registry.usage();
+  EXPECT_EQ(used.active_seats, 1U);
+  EXPECT_GE(used.encoder_sessions, 1U);
+  EXPECT_EQ(used.max_seats, 2U);
+  EXPECT_EQ(used.max_encoder_sessions, 4U);
+}
+
 TEST(MultiseatRuntime, RuntimeProfileAndDisplayModeAreRequiredAtAdmission) {
   registry_t registry {controller_epoch, {shared_gpu()}};
 

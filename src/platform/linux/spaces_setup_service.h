@@ -47,6 +47,7 @@ namespace multiseat::spaces {
     std::condition_variable changed_;
     std::optional<record_t> record_;
     bool enabled_ = false, fault_ = false, active_ = false, closing_ = false;
+    bool locked_ = false;  ///< another Polaris process holds the setup journal
     std::stop_source cancellation_;
     std::thread worker_;
   };

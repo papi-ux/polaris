@@ -61,6 +61,17 @@ TEST(SpacesSetup, DockerAloneDoesNotClaimReadyToPlay) {
   EXPECT_EQ(check(spaces::describe_setup(f), "spaces")["state"], "ready");
 }
 
+TEST(SpacesSetup, EveryCheckLinksTheGuideSectionThatFixesIt) {
+  spaces::setup_facts_t f;
+  const auto value = spaces::describe_setup(f);
+  for (const auto &[id, anchor] : std::vector<std::pair<std::string, std::string>> {
+         {"docker", "#prepare-docker-from-spaces"}, {"docker_access", "#prepare-docker-from-spaces"},
+         {"identity", "#gaming-runtime-account"}, {"input", "#controller-access"}, {"gpu", "#graphics-access"},
+         {"security", "#prepare-spaces-security-support"}, {"spaces", "#prepare-your-first-space"}}) {
+    EXPECT_EQ(check(value, id.c_str())["doc_anchor"], anchor) << id;
+  }
+}
+
 TEST(SpacesSetup, EveryHostPrerequisiteMustPass) {
   for (auto member : {&spaces::setup_facts_t::docker_cli, &spaces::setup_facts_t::runc,
       &spaces::setup_facts_t::daemon_replied, &spaces::setup_facts_t::daemon_linux,
