@@ -110,8 +110,9 @@ sudo rpm-ostree uninstall polaris
 Then reboot into the new deployment.
 
 The package takes its binaries with it, including `polaris-spaces-setup`, plus the user service
-unit, the udev rules and modules-load configuration under `/usr/lib`, the desktop entries and
-`/usr/share/polaris`. The `uinput` and `uhid` kernel modules stay loaded until the next reboot,
+unit, the udev rules and modules-load configuration under `/usr/lib`, the desktop entries, the
+polkit policy the Spaces page asks for administrator approval with
+(`/usr/share/polkit-1/actions/dev.polaris-stream.app.Polaris.policy`) and `/usr/share/polaris`. The `uinput` and `uhid` kernel modules stay loaded until the next reboot,
 which is harmless. The KMS capture capability lives on the binary and leaves with it.
 
 ## 4. What the package does not take with it
@@ -134,6 +135,12 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
   it after step 1:
   ```bash
   sudo rm -rf /var/lib/polaris
+  ```
+- **Docker group membership.** **Give Polaris access to Docker**, or the same terminal step, added
+  the account Polaris runs as to the `docker` group, and the package does not take it back. If that
+  account no longer needs Docker without sudo:
+  ```bash
+  sudo gpasswd -d "$USER" docker
   ```
 - **KWin screencast permissions, on KDE hosts.** Polaris registers itself for KWin's screencast
   permission by writing `~/.local/share/applications/dev.polaris-stream.app.Polaris.kwin.<id>.desktop`,

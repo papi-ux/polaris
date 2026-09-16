@@ -45,15 +45,39 @@ opened the page from, and each failing check links the section of this guide
 that fixes it. Select **Recheck Setup** after every terminal step. A configured
 host keeps the section collapsed.
 
+Two checks can be fixed from the page itself. **Polaris access to Docker**
+offers **Give Polaris access to Docker**, and **Spaces security support** offers
+**Install security support**. Either button opens a password prompt on the
+screen of the PC that runs Polaris, so someone signed in at that PC's desktop
+approves the change. From another device you can start the request, but only
+someone at the PC can approve it. The terminal steps under each check do the
+same thing.
+
+Polaris asks for one change at a time and closes the prompt if nobody approves
+it within five minutes. While a change runs, Space launches and changes to
+Spaces wait. Polaris does not ask, and says why, on an image based system, when
+the native package's helper or its polkit policy is missing, when nobody is
+signed in at the PC's desktop, or while a Space, a stream or the first Space
+setup is still active.
+
 ## Prepare Docker from Spaces
 
+If **Docker Engine** passes and **Polaris access to Docker** needs attention,
+select **Give Polaris access to Docker** and approve the password prompt on the
+Polaris host's screen. Polaris starts the system Docker service and adds the
+account Polaris runs as to the `docker` group. A Polaris that is already running
+keeps the groups it started with, so the check then asks you to restart the PC.
+After the restart, select **Recheck Setup**.
+
+From a terminal on the Polaris host instead:
+
 1. If **Docker Engine** needs attention, install it with your distribution's
-   steps below, in a terminal on the Polaris host.
+   steps below.
 2. Start the system Docker service, then grant Docker access to the Linux
    account running Polaris. For a service installation that account may differ
    from your terminal account; grant it to the service account.
-3. Save your work and stop streams before signing out and back in. If Polaris
-   runs as a system service, restart that service so it picks up the new group.
+3. Save your work, stop streams and restart the PC, so Polaris starts with the
+   new group.
 4. Select **Recheck Setup**.
 
 Docker group access gives that account administrator-level control over the
@@ -149,17 +173,24 @@ seccomp file, which the native package includes.
 
 On a mutable Fedora installation:
 
-1. Install the tools that compile against your host policy:
+1. Install the tools that compile against your host policy, in a terminal on
+   the Polaris host:
    ```sh
    sudo dnf install selinux-policy-devel container-selinux make
    ```
-2. Finish your games, stop Space streams and quit Polaris. If it runs as a
-   service, stop the service first.
-3. Run the helper from the native package:
+2. Finish your games and stop Space streams.
+3. Select **Install security support** on the check and approve the password
+   prompt on the Polaris host's screen. Polaris stays open, and the check is
+   read again when the helper finishes.
+
+Without anyone at the host's desktop, run the helper from a terminal instead:
+
+1. Quit Polaris. If it runs as a service, stop the service first.
+2. Run the helper from the native package:
    ```sh
    sudo -H /usr/bin/polaris-spaces-setup install
    ```
-4. Start Polaris, return to **Spaces** and select **Recheck Setup**.
+3. Start Polaris, return to **Spaces** and select **Recheck Setup**.
 
 The helper installs the worker policy, the reserved controller policy, a
 version marker and the reserved input rule. It reloads policy and udev rules
@@ -187,9 +218,11 @@ that clears it:
   the printed command and run the install again.
 - **"Quit Polaris and stop Spaces streams before changing security setup."**
   names each Polaris process still running as `name (pid N)`, a second
-  instance included, and counts the Spaces input devices still present.
-  `systemctl status PID` shows which service started a process. Stop it and
-  retry.
+  instance included, a Space that is still running with its process count,
+  and the Spaces input devices still present. `systemctl status PID` shows
+  which service started a process. Stop it and retry. From the button the
+  message starts **"Stop Spaces streams and quit any other Polaris"**: the
+  Polaris that asked stays open, and everything else still counts.
 - **"is not owned by this setup and differs from the rule this package ships"**
   means `/etc/udev/rules.d/97-polaris-multiseat-input.rules` was placed there by
   hand or by an older build. Move it aside as the message shows and run the
