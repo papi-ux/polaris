@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentRelease = () => {
+const historicalRelease = () => {
   const changelog = read('docs/changelog.md')
   const start = changelog.indexOf('## v1.4.7 - 2026-09-12')
   const end = changelog.indexOf('## v1.4.6 - 2026-09-11')
@@ -13,7 +13,7 @@ const currentRelease = () => {
   return changelog.slice(start, end)
 }
 
-const currentNotes = () => read('docs/release-notes/v1.4.7.md')
+const historicalNotes = () => read('docs/release-notes/v1.4.7.md')
 
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
@@ -23,18 +23,9 @@ const expectedAssets = [
 ].sort()
 const withdrawnSysextAsset = 'Polaris-sysext-x86_64.raw'
 
-describe('v1.4.7 release contract', () => {
-  it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.7')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.7"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.7',
-    )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.7-1|x86_64'")
-  })
-
+describe('historical v1.4.7 release contract', () => {
   it('says what the controller fix was, in the words the person who hit it would use', () => {
-    const evidence = `${currentRelease()}\n${currentNotes()}`
+    const evidence = `${historicalRelease()}\n${historicalNotes()}`
     for (const fact of [
       'virtual DualSense',
       'Bluetooth bus',
@@ -47,14 +38,14 @@ describe('v1.4.7 release contract', () => {
   })
 
   it('says what the configuration directory fixes were', () => {
-    const evidence = `${currentRelease()}\n${currentNotes()}`
+    const evidence = `${historicalRelease()}\n${historicalNotes()}`
     for (const fact of ['owned by root', 'umask', 'setup-host', 'pair again']) {
       expect(evidence, `v1.4.7 must include: ${fact}`).toContain(fact)
     }
   })
 
   it('keeps the heads up honest about what is still open and what was not validated', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     expect(notes).toContain('that is a separate thing and is still open')
     expect(notes).toContain('No new hardware validation run for this release')
     expect(notes).toContain('system extension stays withdrawn')
@@ -62,7 +53,7 @@ describe('v1.4.7 release contract', () => {
   })
 
   it('ships exactly the four supported packages and installs them from this tag', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const blocks = [...notes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
       .map((match) => match[1])
       .filter((block) => block.includes('wget --output-document='))
@@ -81,7 +72,7 @@ describe('v1.4.7 release contract', () => {
   })
 
   it('closes the changelog section with the exact four-asset sentence', () => {
-    const bullets = currentRelease()
+    const bullets = historicalRelease()
       .split('\n')
       .filter((line) => line.startsWith('- '))
     expect(bullets.at(-1)).toContain(

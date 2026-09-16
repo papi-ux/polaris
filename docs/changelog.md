@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+## v1.4.8 - 2026-09-16
+
+A library and streaming update matched with Nova v1.4.8. Import emulator games and existing artwork, choose higher frame rates, and get clearer help when a launch fails. Spaces arrives as an optional preview for configured hosts.
+
 - Spaces preview: an optional Spaces tab manages separate Steam sign-ins, games, and saves. Assign paired devices, allow access to additional Spaces, rename player environments, or remove and restore them while retaining their data. Ordinary streaming keeps its existing setup.
 - Spaces guides Docker and security setup on the host, with persistent preparation progress and retry controls. First runtime download remains unavailable until an approved image is published; initial setup permits one active Space. See the [setup guide](spaces.md) and [current acceptance results](research/container-multiseat-acceptance-20260915.md) for supported paths and remaining audio limits.
 - Import games can bring emulator games in from a ROM folder. Add the folder and the emulator in the import console (Eden, Dolphin, Cemu, DuckStation, PCSX2, PPSSPP, mGBA, or your own command with `{rom}` in it); every file the emulator can load becomes a candidate named from its filename with the region and version tags removed, update and DLC dumps are skipped, the entry launches the emulator straight into the game with the pad the platform expects, and the emulator itself is published once next to its games. The folder is remembered, so a rescan finds games added later, and covers come from SteamGridDB when a key is set. (#699)
@@ -26,6 +30,8 @@ starts at `v1.0.0`.
 - The Doctor now says when KMS capture was refused because the binary lacks `CAP_SYS_ADMIN`, and names the one command that grants it, instead of blaming compositor protocols and steering you off the only capture path that carries HDR. The HDR finding names the working recipe: `capture = kms` with a stream mode that shows the real HDR output.
 - Docs: the configuration that carries true HDR on Linux today, all five gates with the journal line that names each one, in `runtime.md`, `configuration.md` and `troubleshooting.md`; and how to point MoonDeck Buddy at Polaris' `apps.json` in `moonlight.md`.
 - Launches where Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope) were capped at 120 FPS by three separate literals, and `/serverinfo` advertised a different number again, so a 144 or 165 Hz client was either refused before connecting or quietly served 120. One ceiling now, 240 by default and settable with `headless_max_refresh_rate`, advertised and enforced from the same value (#686)
+
+- Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
 
 ## v1.4.7 - 2026-09-12
 
