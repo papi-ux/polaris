@@ -98,6 +98,9 @@ sudo dnf remove polaris
 Package-owned udev rules and modules-load configuration are removed with the package. Your host
 configuration in `~/.config/polaris` is left alone; delete it yourself if you want a clean slate.
 
+For a clean slate, or to remove what the package leaves behind, see
+[Uninstall Polaris, or start over](uninstall.md).
+
 ## GPU notes
 
 NVIDIA with NVENC is the most validated path. AMD and Intel Mesa VAAPI are supported and use the same

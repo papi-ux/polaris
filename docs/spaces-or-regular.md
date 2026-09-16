@@ -10,7 +10,7 @@ library and set of saves on the same PC, kept in its own container, chosen per
 device. Spaces are a preview; the limits in the table are the ones that shape
 the choice today.
 
-| | Regular streaming | Spaces (preview) |
+| Area | Regular streaming | Spaces (preview) |
 | --- | --- | --- |
 | Who it is for | One player, or one shared Steam account | Each player, or each device, with their own sign-in and saves |
 | Sign-ins and saves | Your PC's Steam and its saves | One Steam per Space; installed games, saves and the sign-in stay in the Space |
