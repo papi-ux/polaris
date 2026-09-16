@@ -58,3 +58,38 @@ export function installGuide(setup) {
 
 export const installSpacesSecurity = 'sudo -H /usr/bin/polaris-spaces-setup install'
 export const fedoraSecurityPackages = 'sudo dnf install selinux-policy-devel container-selinux make'
+
+// The guide on papi-ux.com. A check names its own section (doc_anchor) since
+// Polaris 1.4.9; older hosts get the section the console has always linked.
+export const docsUrl = 'https://papi-ux.com/docs/spaces/'
+const legacyAnchors = {
+  docker: '#prepare-docker-from-spaces', docker_access: '#prepare-docker-from-spaces', identity: '#gaming-runtime-account',
+  input: '#controller-access', gpu: '#graphics-access', security: '#prepare-spaces-security-support', spaces: '#prepare-your-first-space',
+}
+export function guideHref(check) {
+  const anchor = typeof check?.doc_anchor === 'string' && /^#[a-z0-9-]{1,64}$/.test(check.doc_anchor)
+    ? check.doc_anchor : legacyAnchors[check?.id] || ''
+  return docsUrl + anchor
+}
+
+// The terminal steps a failing check needs, in order, from this file's fixed
+// text only. Package installs are withheld on an immutable host; starting the
+// daemon and granting the service account access apply everywhere.
+export function setupSteps(setup, check) {
+  if (!setup || !check || check.state === 'ready') return []
+  const guide = installGuide(setup)
+  if (check.id === 'docker') {
+    return [...(guide?.steps || []), { title: 'Start Docker', command: startDocker }]
+  }
+  if (check.id === 'docker_access') {
+    const access = dockerAccessCommand(setup.service_uid)
+    return [{ title: 'Start Docker', command: startDocker },
+      ...(access ? [{ title: 'Let the Polaris service account use Docker', command: access }] : [])]
+  }
+  if (check.id === 'security') {
+    if (setup.immutable_host) return []
+    return [...(setup.distribution === 'fedora' ? [{ title: 'Install the policy tools', command: fedoraSecurityPackages }] : []),
+      { title: 'Run the helper from the native package, with Polaris stopped', command: installSpacesSecurity }]
+  }
+  return []
+}

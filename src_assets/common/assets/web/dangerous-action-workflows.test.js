@@ -8,7 +8,7 @@ function webSource(relativePath) {
 
 describe('dangerous host action workflows', () => {
   it('uses the reusable confirmation dialog instead of native confirms for host-affecting views', () => {
-    for (const relativePath of ['views/DashboardView.vue', 'views/TroubleshootingView.vue', 'components/QuickControls.vue', 'CommandPalette.vue']) {
+    for (const relativePath of ['views/DashboardView.vue', 'views/TroubleshootingView.vue', 'components/QuickControls.vue', 'CommandPalette.vue', 'components/SpacesList.vue', 'components/SpacesFirstSetup.vue']) {
       const source = webSource(relativePath)
       expect(source).toContain("ConfirmActionDialog")
       expect(source).not.toMatch(/window\.confirm\(|(?<!\.)\bconfirm\(/)
@@ -38,5 +38,16 @@ describe('dangerous host action workflows', () => {
     expect(commandPalette).toContain('pendingDangerousAction')
     expect(commandPalette).toContain('Command palette confirmation')
     expect(commandPalette).toContain('executeCommandAction')
+
+    const spacesList = webSource('components/SpacesList.vue')
+    expect(spacesList).toContain('confirmDialog')
+    expect(spacesList).toContain('spaces.remove_impact_disk')
+    expect(spacesList).toContain('spaces.removed')
+
+    const firstSetup = webSource('components/SpacesFirstSetup.vue')
+    expect(firstSetup).toContain('confirmRestart')
+    expect(firstSetup).toContain('requestHostRestart')
+    expect(firstSetup).toContain('spaces.restart_impact_streams')
+    expect(firstSetup).toContain('spaces.restart_ready')
   })
 })

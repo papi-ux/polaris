@@ -1,6 +1,7 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
+import { spacesGlobal } from './spaces-test-i18n.js'
 
 const id = '12345678-1234-4234-8234-123456789abc'
 const source = { id: 'profile-a', name: 'Alex', steam: true, clients: ['device-a'] }
@@ -17,8 +18,8 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 
 async function open(props = {}) {
-  wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source], ready: true, refresh, ...props } })
-  await button('Create a space').trigger('click')
+  wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source], ready: true, refresh, ...props } })
+  await button('Create a Space').trigger('click')
   await wrapper.get('input').setValue('Player 2')
 }
 
@@ -126,9 +127,10 @@ describe('Steam profile creation', () => {
     expect(button('Retry creation').element.disabled).toBe(true)
   })
 
-  it('offers only configured Steam sources and preserves an explicit selection', async () => {
+  it('offers only live Steam sources and preserves an explicit selection', async () => {
     const second = { ...source, id: 'profile-b', name: 'Sam' }
-    await open({ profiles: [source, { id: 'fixture', name: 'Comparison', steam: false }, second] })
+    await open({ profiles: [source, { id: 'fixture', name: 'Comparison', steam: false }, second,
+      { id: 'gone', name: 'Archived', steam: true, archived: true, clients: [] }] })
     expect(wrapper.findAll('option').map(item => item.text())).toEqual(['Alex', 'Sam'])
     await wrapper.get('select').setValue('profile-b')
     await wrapper.get('form').trigger('submit')
@@ -136,24 +138,24 @@ describe('Steam profile creation', () => {
     expect(JSON.parse(fetch.mock.calls[0][1].body).source_profile_id).toBe('profile-b')
   })
 
-  it('explains first profile setup when no Steam source exists', async () => {
-    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [{ ...source, steam: false }], refresh } })
-    expect(button('Create a space').element.disabled).toBe(true)
-    expect(wrapper.text()).toContain('The first Steam space still needs host configuration')
+  it('points at Host Setup when no Steam source exists', async () => {
+    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [{ ...source, steam: false }], refresh } })
+    expect(button('Create a Space').element.disabled).toBe(true)
+    expect(wrapper.text()).toContain('prepared under Host Setup')
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it.each(['   ', '😀'.repeat(40), 'name\u0001control'])('rejects a blank or oversized UTF-8 name before submitting', async value => {
+  it.each(['   ', '😀'.repeat(40), 'namecontrol'])('rejects a blank or oversized UTF-8 name before submitting', async value => {
     await open()
     await wrapper.get('input').setValue(value)
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(button('Create space').element.disabled).toBe(true)
+    expect(button('Create Space').element.disabled).toBe(true)
     expect(fetch).not.toHaveBeenCalled()
   })
 
   it('allows correction after the server rejects a source before provisioning', async () => {
-    fetch.mockResolvedValueOnce(reply({ message: 'Select an existing configured Steam profile' }, 404))
+    fetch.mockResolvedValueOnce(reply({ message: 'Select an existing Steam Space to base the new one on.' }, 404))
     await open()
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -177,7 +179,7 @@ describe('Steam profile creation', () => {
     await open()
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(wrapper.get('[role=alert]').text()).toContain('Could not refresh spaces')
+    expect(wrapper.get('[role=alert]').text()).toContain('Could not refresh Spaces')
     expect(wrapper.emitted('busy')).toEqual([[true], [false]])
     expect(wrapper.text()).not.toContain('was created')
   })
@@ -189,7 +191,7 @@ describe('Steam profile creation', () => {
     await flushPromises()
     const body = fetch.mock.calls[0][1].body
     wrapper.unmount()
-    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source], ready: true, refresh } })
+    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source], ready: true, refresh } })
     await flushPromises()
     expect(wrapper.get('input').element.value).toBe('Player 2')
     expect(wrapper.get('input').element.disabled).toBe(true)
@@ -202,7 +204,7 @@ describe('Steam profile creation', () => {
 
   it('clears a restored request only after finding its exact saved space', async () => {
     sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: id, source_profile_id: source.id, name: created.name }))
-    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source, created], ready: true, refresh } })
+    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source, created], ready: true, refresh } })
     await flushPromises()
     expect(wrapper.text()).toContain('Player 2 was created')
     expect(sessionStorage.getItem('polaris:spaces:create-request:v1')).toBeNull()
@@ -211,7 +213,7 @@ describe('Steam profile creation', () => {
 
   it('ignores invalid saved requests and never submits them', async () => {
     sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: 'invalid', source_profile_id: source.id, name: created.name }))
-    wrapper = mount(MultiseatProfileCreate, { props: { profiles: [source], ready: true, refresh } })
+    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source], ready: true, refresh } })
     await flushPromises()
     expect(wrapper.find('form').exists()).toBe(false)
     expect(fetch).not.toHaveBeenCalled()
