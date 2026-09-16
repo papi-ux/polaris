@@ -25,6 +25,8 @@ A setup update shaped by a fresh install: first-time setup covers artwork and AI
 - Docs: the README catches up with 1.4.8 (the Spaces preview and its limits, the ROM folder library, 240 FPS on created displays, refusals that say why, the capture forecast), and a [Spaces or regular streaming](spaces-or-regular.md) page puts the two side by side in one table, linked from the Spaces guide.
 - Docs: an [uninstall page](uninstall.md) in the order that works: the Spaces policies first while the helper still exists, then the package, then what the package leaves behind (rule copies under `/etc`, a `/usr/share/polaris` that other files kept alive, the Spaces security record, your own additions) and `~/.config/polaris` with a keep-or-wipe table. Every distribution page links it.
 - Docs: the Spaces guide explains the security helper's three refusals (a policy at another priority, a Polaris process still running, an input rule it did not install) and the fix for each.
+- New installs start in Private Stream: the first start writes `linux_stream_mode = headless_stream` when labwc and wlr-randr are on the PATH, and a host without them, such as SteamOS, keeps Mirror Desktop. Existing configurations keep their mode, and the bundled Low Res Desktop entry mirrors the desktop like Desktop does.
+- On a build without a published gaming runtime, the Spaces page says plainly that a Space cannot be created yet, points at regular streaming meanwhile, and leaves out the setup steps that cannot run.
 - Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and `Polaris-ubuntu24.04-x86_64.deb` as the official package assets
 
 ## v1.4.8 - 2026-09-16

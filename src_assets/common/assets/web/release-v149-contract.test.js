@@ -48,7 +48,8 @@ describe('v1.4.9 release contract', () => {
       'Restart from the console or the tray works again',
       'show the Polaris icon',
       'left in /etc',
-      'waiting for a runtime',
+      'cannot be created on this version yet',
+      'New installs start in Private Stream',
     ]) {
       expect(notes, `v1.4.9 notes must include: ${fact}`).toContain(fact)
     }
