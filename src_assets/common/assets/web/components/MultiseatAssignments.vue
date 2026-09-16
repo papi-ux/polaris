@@ -23,6 +23,7 @@
     <p v-if="streamLock" :id="lockReasonId" class="mt-4 text-sm text-warning-bright" role="status" data-stream-lock>{{ streamLock }}</p>
     <SpacesList v-if="state.enabled" :profiles="state.profiles" :clients="clients" :manageable="state.management_available"
                 :access-available="state.access_available" :creation-available="state.creation_available"
+                :removal-available="state.removal_available"
                 :activity="loadError ? null : state.activity" :refreshing="loading"
                 :locked="locked" :lock-reason-id="streamLock ? lockReasonId : ''" :ready="ready" :refresh="loadProfiles"
                 @busy="managing = $event" @open-default="openDefault" />

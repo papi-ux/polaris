@@ -55,14 +55,51 @@
       <p class="mt-2">{{ $t('spaces.archived_copy') }}</p>
       <div v-for="space in removed" :key="space.id" class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-storm/20 p-3">
         <span class="min-w-0 break-words">{{ space.name }}</span>
-        <Button v-if="manageable" variant="ghost" size="sm" class="text-ice" :disabled="locked"
-                :aria-label="$t('spaces.restore_aria', { name: space.name })" @click="openDialog(space, 'restore')">{{ $t('spaces.restore') }}</Button>
+        <div v-if="manageable" class="flex flex-wrap gap-2">
+          <Button variant="ghost" size="sm" class="text-ice" :disabled="locked"
+                  :aria-label="$t('spaces.restore_aria', { name: space.name })" @click="openDialog(space, 'restore')">{{ $t('spaces.restore') }}</Button>
+          <Button v-if="removalAvailable" variant="ghost" size="sm" class="text-warning-bright hover:text-warning-bright" :disabled="locked"
+                  :aria-label="$t('spaces.delete_aria', { name: space.name })" :aria-describedby="lockReasonId || undefined"
+                  @click="openDialog(space, 'delete')">{{ $t('spaces.delete_confirm') }}</Button>
+        </div>
       </div>
     </details>
     <ConfirmActionDialog v-model="dialogOpen" :title="dialogTitle" :message="dialogMessage" :impact-items="dialogImpact"
-                         :confirm-label="dialogConfirmLabel" :cancel-label="$t('spaces.cancel')" :pending-label="$t('spaces.saving')"
-                         :pending="working" :error="dialogError" :eyebrow="$t('spaces.kicker')" :impact-label="$t('spaces.dialog_impact')"
-                         @confirm="confirmDialog" @cancel="cancelDialog" />
+                         :confirm-label="dialogConfirmLabel" :cancel-label="$t('spaces.cancel')"
+                         :pending-label="removingForGood ? $t('spaces.deleting') : $t('spaces.saving')"
+                         :pending="working" :confirm-disabled="removingForGood && !removalReady" :error="dialogError"
+                         :eyebrow="$t('spaces.kicker')" :impact-label="$t('spaces.dialog_impact')"
+                         @confirm="confirmDialog" @cancel="cancelDialog">
+      <fieldset v-if="offersChoice" class="mt-4 space-y-2" data-remove-choice>
+        <legend class="text-sm font-semibold text-silver">{{ $t('spaces.remove_choice') }}</legend>
+        <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-storm/20 p-3 text-sm">
+          <input v-model="removeMode" type="radio" name="space-remove-mode" value="archive" :disabled="working"
+                 class="mt-0.5 h-4 w-4 shrink-0 border-storm bg-void text-ice accent-ice" data-remove-archive>
+          <span class="min-w-0">
+            <span class="block font-medium text-silver">{{ $t('spaces.remove_archive') }}</span>
+            <span class="block text-storm">{{ $t('spaces.remove_archive_help') }}</span>
+          </span>
+        </label>
+        <label class="flex items-start gap-3 rounded-xl border border-storm/20 p-3 text-sm" :class="lastSpace ? 'cursor-not-allowed' : 'cursor-pointer'">
+          <input v-model="removeMode" type="radio" name="space-remove-mode" value="delete" :disabled="working || lastSpace"
+                 :aria-describedby="lastSpace ? 'space-remove-last' : undefined"
+                 class="mt-0.5 h-4 w-4 shrink-0 border-storm bg-void text-ice accent-ice" data-remove-delete>
+          <span class="min-w-0">
+            <span class="block font-medium text-warning-bright">{{ $t('spaces.remove_delete') }}</span>
+            <span class="block text-storm">{{ $t('spaces.remove_delete_help') }}</span>
+          </span>
+        </label>
+      </fieldset>
+      <p v-if="lastSpace && (offersChoice || removingForGood)" id="space-remove-last" class="mt-3 text-sm text-warning-bright" data-remove-last>
+        {{ $t('spaces.delete_last_space') }}
+      </p>
+      <div v-if="removingForGood && !lastSpace" class="mt-4">
+        <label for="space-remove-name" class="block text-sm text-silver">{{ $t('spaces.delete_type_label', { name: dialogSpace?.name }) }}</label>
+        <input id="space-remove-name" v-model="typedName" type="text" autocomplete="off" spellcheck="false" maxlength="128"
+               :disabled="working" aria-describedby="space-remove-name-help" class="settings-input mt-2 text-sm" data-remove-name>
+        <p id="space-remove-name-help" class="mt-1 text-xs text-storm">{{ $t('spaces.delete_type_help') }}</p>
+      </div>
+    </ConfirmActionDialog>
   </div>
 </template>
 
@@ -77,7 +114,7 @@ import { useToast } from '../composables/useToast.js'
 
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
   activity: { type: Array, default: null }, refreshing: Boolean,
-  accessAvailable: Boolean, creationAvailable: Boolean, manageable: Boolean, locked: Boolean, ready: Boolean,
+  accessAvailable: Boolean, creationAvailable: Boolean, manageable: Boolean, removalAvailable: Boolean, locked: Boolean, ready: Boolean,
   lockReasonId: { type: String, default: '' }, refresh: { type: Function, required: true } })
 const emit = defineEmits(['busy', 'open-default'])
 const i18n = inject('i18n')
@@ -87,11 +124,22 @@ const active = computed(() => props.profiles.filter(space => !space.archived))
 const removed = computed(() => props.profiles.filter(space => space.archived))
 const renaming = ref(null), name = ref(''), working = ref(false), message = ref(''), error = ref(''), renamePanel = ref(null)
 const dialogOpen = ref(false), dialogSpace = ref(null), dialogOperation = ref(''), dialogError = ref('')
+const removeMode = ref('archive'), typedName = ref(''), requestId = ref('')
 let opener = null
 const pending = ref(null), submitted = ref(false)
-const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 && !/[\u0000-\u001f\u007f]/u.test(name.value))
+const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 && !/[ -]/u.test(name.value))
 const canLaunch = client => client && !client.temporary_authorization && (Number(client.perm) & permissionMapping.launch) !== 0
 const deviceName = device => device?.friendly_name || device?.name || t('spaces.paired_device')
+
+// Remove on a card offers a choice only when the host can remove for good.
+// Archive stays selected: deleting games and saves is never the default.
+const offersChoice = computed(() => dialogOperation.value === 'remove' && props.removalAvailable)
+const removingForGood = computed(() => dialogOperation.value === 'delete' || (offersChoice.value && removeMode.value === 'delete'))
+// New Spaces are made from an existing Steam Space, so the host keeps the last one.
+const lastSpace = computed(() => !!dialogSpace.value?.steam &&
+  !props.profiles.some(space => space.id !== dialogSpace.value.id && space.steam))
+// The typed name has to be the Space's name exactly, as the host checks it.
+const removalReady = computed(() => !!dialogSpace.value && !lastSpace.value && typedName.value === dialogSpace.value.name)
 
 // The same filter Device Access uses: a device that lost launch permission
 // is not listed as able to open the Space.
@@ -120,12 +168,45 @@ function statusTone(space) {
   return activity.every(item => item.state === 'running') ? 'pass' : 'warning'
 }
 
-const dialogTitle = computed(() => dialogSpace.value ? t(dialogOperation.value === 'restore' ? 'spaces.restore_title' : 'spaces.remove_title', { name: dialogSpace.value.name }) : '')
-const dialogMessage = computed(() => dialogSpace.value ? t(dialogOperation.value === 'restore' ? 'spaces.restore_message' : 'spaces.remove_message', { name: dialogSpace.value.name }) : '')
-const dialogImpact = computed(() => dialogOperation.value === 'restore'
-  ? [t('spaces.restore_impact_devices'), t('spaces.restore_impact_streams')]
-  : [t('spaces.remove_impact_kept'), t('spaces.remove_impact_restore'), t('spaces.remove_impact_disk'), t('spaces.remove_impact_streams')])
-const dialogConfirmLabel = computed(() => t(dialogOperation.value === 'restore' ? 'spaces.restore' : 'spaces.remove'))
+const dialogTitle = computed(() => {
+  const space = dialogSpace.value
+  if (!space) return ''
+  if (removingForGood.value) return t('spaces.delete_title', { name: space.name })
+  return t(dialogOperation.value === 'restore' ? 'spaces.restore_title' : 'spaces.remove_title', { name: space.name })
+})
+const dialogMessage = computed(() => {
+  const space = dialogSpace.value
+  if (!space) return ''
+  if (removingForGood.value) return t('spaces.delete_message', { name: space.name })
+  return t(dialogOperation.value === 'restore' ? 'spaces.restore_message' : 'spaces.remove_message', { name: space.name })
+})
+const dialogImpact = computed(() => {
+  if (dialogOperation.value === 'restore') return [t('spaces.restore_impact_devices'), t('spaces.restore_impact_streams')]
+  if (removingForGood.value) {
+    return [t('spaces.delete_impact_data'), t('spaces.delete_impact_undo'),
+      ...(dialogSpace.value?.archived ? [] : [t('spaces.delete_impact_devices')]), t('spaces.remove_impact_streams')]
+  }
+  return [t('spaces.remove_impact_kept'), t('spaces.remove_impact_restore'), t('spaces.remove_impact_disk'), t('spaces.remove_impact_streams')]
+})
+const dialogConfirmLabel = computed(() => dialogOperation.value === 'restore' ? t('spaces.restore') :
+  removingForGood.value ? t('spaces.delete_confirm') : offersChoice.value ? t('spaces.archive_confirm') : t('spaces.remove'))
+
+// The host takes a request identity so a retry of the same removal is confirmed.
+function newRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+// The host's reason and its fix, and any Docker resource a removal could not delete.
+function hostSentence(result) {
+  const parts = [result?.message || result?.error, result?.action]
+  if (result?.kept_volume) parts.push(t('spaces.delete_kept_volume', { volume: result.kept_volume }))
+  if (result?.kept_network) parts.push(t('spaces.delete_kept_network', { network: result.kept_network }))
+  return parts.filter(part => typeof part === 'string' && part).join(' ')
+}
 
 async function openRename(space) {
   if (props.locked || !props.manageable) return
@@ -135,22 +216,30 @@ async function openRename(space) {
   await nextTick(); renamePanel.value?.focus?.()
 }
 async function closeRename() { renaming.value = null; await nextTick(); if (opener?.isConnected) opener.focus() }
+function resetDialog() { dialogSpace.value = null; dialogOperation.value = ''; removeMode.value = 'archive'; typedName.value = '' }
 function openDialog(space, operation) {
   if (props.locked || !props.manageable) return
+  resetDialog()
   dialogSpace.value = { ...space }; dialogOperation.value = operation; dialogError.value = ''
+  requestId.value = operation === 'restore' ? '' : newRequestId()
   error.value = ''; message.value = ''; pending.value = null
   dialogOpen.value = true
 }
-function cancelDialog() { if (!working.value) { dialogSpace.value = null; dialogOperation.value = '' } }
+function cancelDialog() { if (!working.value) resetDialog() }
 
 function confirmChange() {
   const request = pending.value
   if (!request || !props.ready) return false
   const current = props.profiles.find(space => space.id === request.profile_id)
-  if (!current || !(request.operation === 'rename' ? current.name === request.name : current.archived === (request.operation === 'remove'))) return false
+  const confirmed = request.operation === 'delete' ? !current :
+    !!current && (request.operation === 'rename' ? current.name === request.name : current.archived === (request.operation === 'remove'))
+  if (!confirmed) return false
   error.value = ''
   message.value = request.operation === 'rename' ? t('spaces.renamed', { name: request.name }) :
-    request.operation === 'remove' ? t('spaces.removed', { name: request.previousName }) : t('spaces.restored', { name: request.previousName })
+    request.operation === 'remove' ? t('spaces.removed', { name: request.previousName }) :
+    request.operation === 'delete' ? [t('spaces.deleted', { name: request.previousName }),
+      request.keptNetwork ? t('spaces.delete_kept_network', { network: request.keptNetwork }) : ''].filter(Boolean).join(' ') :
+    t('spaces.restored', { name: request.previousName })
   toast(message.value, 'success')
   pending.value = null
   if (request.operation === 'rename') closeRename()
@@ -166,7 +255,8 @@ async function submit(request, previousName) {
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
     const result = await response.json()
     if (result?.profile_id !== request.profile_id || (response.status === 202 ? result.status !== false : !response.ok || result.status !== true))
-      throw new Error(result?.message || result?.error || t('spaces.change_unverified'))
+      throw new Error(hostSentence(result) || t('spaces.change_unverified'))
+    if (result.kept_network && pending.value) pending.value.keptNetwork = result.kept_network
     message.value = t('spaces.confirming')
   } catch (cause) { error.value = cause.message || t('spaces.change_failed') }
   try {
@@ -184,9 +274,13 @@ async function submitRename() {
 async function confirmDialog() {
   if (props.locked || working.value || !dialogSpace.value) return
   const space = dialogSpace.value
-  const operation = dialogOperation.value
-  await submit({ operation, profile_id: space.id }, space.name)
+  const forGood = removingForGood.value
+  if (forGood && !removalReady.value) return
+  const request = forGood ?
+    { operation: 'delete', profile_id: space.id, confirm_name: typedName.value, request_id: requestId.value } :
+    { operation: dialogOperation.value, profile_id: space.id }
+  await submit(request, space.name)
   dialogOpen.value = false
-  dialogSpace.value = null; dialogOperation.value = ''
+  resetDialog()
 }
 </script>

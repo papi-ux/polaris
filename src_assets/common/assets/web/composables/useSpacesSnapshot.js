@@ -33,7 +33,7 @@ export function useSpacesSnapshot(options = {}) {
   function emptyState() {
     return {
       enabled: false, available: false, changing: false, failed: false, profiles: [], activity: null,
-      creation_available: false, management_available: false, access_available: false,
+      creation_available: false, management_available: false, access_available: false, removal_available: false,
       desktop_clients: undefined, capacity: null,
     }
   }

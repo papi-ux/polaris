@@ -67,6 +67,28 @@ describe('ConfirmActionDialog', () => {
     expect(wrapper.emitted('update:modelValue')).toBeUndefined()
   })
 
+  it('holds confirm off while the action still needs input from its slot', async () => {
+    const wrapper = mount(ConfirmActionDialog, {
+      attachTo: document.body,
+      props: { ...baseProps, confirmDisabled: true },
+      slots: { default: '<input data-typed aria-label="Type the name">' },
+    })
+    await wrapper.vm.$nextTick()
+
+    const confirm = bodyGet('[data-confirm-confirm]')
+    expect(bodyGet('[role="dialog"] [data-typed]')).toBeTruthy()
+    expect(confirm.hasAttribute('disabled')).toBe(true)
+    expect(confirm.className).toContain('disabled:cursor-not-allowed')
+    confirm.click()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('confirm')).toBeUndefined()
+
+    await wrapper.setProps({ confirmDisabled: false })
+    bodyGet('[data-confirm-confirm]').click()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('confirm')).toHaveLength(1)
+  })
+
   it('supports Escape cancellation unless an async action is pending', async () => {
     const wrapper = mountDialog()
     await wrapper.vm.$nextTick()

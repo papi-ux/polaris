@@ -274,6 +274,21 @@ describe('profile assignments', () => {
     expect(wrapper.get('select').element.disabled).toBe(false)
   })
 
+  it('offers Remove for good only when the host says it can', async () => {
+    const archived = { id: 'profile-b', name: 'Sam', clients: [], steam: true, archived: true }
+    const current = { ...snapshot(), management_available: true, removal_available: true,
+      profiles: [{ ...snapshot().profiles[0], steam: true }, archived] }
+    vi.stubGlobal('fetch', vi.fn(async () => reply(current)))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.find('button[aria-label="Remove Sam for good"]').exists()).toBe(true)
+    delete current.removal_available
+    await wrapper.get('[data-spaces-refresh]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('button[aria-label="Remove Sam for good"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Restore Sam"]').exists()).toBe(true)
+  })
+
   it('shows the host budget when the snapshot carries it', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply({ ...snapshot(), capacity: { concurrent_limit: 1, concurrent_active: 1 } })))
     wrapper = start({ clients: [client] })
