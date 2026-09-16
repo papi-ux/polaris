@@ -47,6 +47,26 @@
               <StatusBadge v-else :status="checkStatus(check)" :label="checkLabel(check)" />
             </div>
             <p class="mt-2 text-sm text-storm">{{ waitingCheck(check) && check.id === 'spaces' ? $t('spaces.check_waiting_runtime_detail') : check.detail }}</p>
+            <div v-if="showsHostAction(check)" class="mt-3 space-y-2" data-host-action>
+              <p v-if="hostJobFor(check) && hostWorking" class="text-sm text-silver" role="status" aria-live="polite" data-host-action-state>
+                {{ hostJobCopy(hostJobFor(check)) }}
+              </p>
+              <p v-else-if="hostJobFor(check)" class="text-sm text-silver" role="status" data-host-action-outcome>{{ hostJobCopy(hostJobFor(check)) }}</p>
+              <p v-if="hostJobFor(check) && hostJobDetail(hostJobFor(check))" class="text-xs text-storm" data-host-action-detail>
+                {{ hostJobDetail(hostJobFor(check)) }}
+              </p>
+              <p v-if="hostError && hostErrorFor === check.host_action" class="text-sm text-warning-bright" role="alert">{{ hostError }}</p>
+              <template v-if="offersHostAction(check) && !(hostWorking && hostJobFor(check))">
+                <div class="flex flex-wrap items-center gap-3">
+                  <Button variant="outline" size="sm" :loading="hostSending === check.host_action" :disabled="hostBlocked"
+                          :aria-label="hostActionLabel(check) + ': ' + check.title" data-host-action-start @click="startHostAction(check)">
+                    {{ hostActionLabel(check) }}
+                  </Button>
+                </div>
+                <p v-if="hostUnavailable" class="text-xs text-warning-bright" data-host-action-unavailable>{{ hostUnavailable }}</p>
+                <p v-else class="text-xs text-storm">{{ hostPromptWhere }}</p>
+              </template>
+            </div>
             <div v-if="check.id === 'runtime' && runtimeActive(check)" class="mt-3 space-y-2" data-runtime-action>
               <p v-if="runtimeDownloading" class="text-sm text-silver" role="status" aria-live="polite">{{ $t('spaces.runtime_downloading') }}</p>
               <p v-else-if="downloadOutcome" class="text-sm text-silver" role="status" data-runtime-outcome>{{ downloadOutcome }}</p>
@@ -103,6 +123,7 @@ import StatusBadge from './StatusBadge.vue'
 import SpacesFirstSetup from './SpacesFirstSetup.vue'
 import { statusTone } from '../status-tones.js'
 import { guideHref, setupSteps, validSetup } from '../spaces-setup.js'
+import { hostActions, hostActionWorking, validHostActionSnapshot } from '../spaces-job.js'
 
 const emit = defineEmits(['state', 'runtime-waiting'])
 const i18n = inject('i18n')
@@ -185,6 +206,104 @@ const checkLabel = check => runtimeStep(check)
 const guideLabel = check => t(check.id === 'security' ? 'spaces.guide_security' : ['docker', 'docker_access'].includes(check.id) ? 'spaces.guide_docker' : 'spaces.guide_section')
 const stepsFor = check => setupSteps(setup.value, check)
 
+// Host setup an administrator approves at the PC that runs Polaris. The host runs one change at a
+// time; this page asks about it only while it waits for approval or runs, and only in a visible tab.
+const hostChecks = { security_install: 'security', docker_access: 'docker_access' }
+const hostReasons = ['closing', 'helper_missing', 'host_setup_running', 'host_unknown', 'image_based_host', 'no_local_desktop',
+  'pkexec_missing', 'policy_missing', 'setup_active', 'spaces_active', 'stream_active']
+const hostAction = ref(null), hostSending = ref(''), hostError = ref(''), hostErrorFor = ref('')
+// Jobs this page started or saw in progress. An old outcome from before the page opened stays quiet.
+const hostSeen = ref([])
+let hostPoll, hostRequest, hostFailures = 0, hostDisposed = false
+const hostWorking = computed(() => hostActionWorking.includes(hostAction.value?.job?.state))
+const offersHostAction = check => !!hostAction.value && check.state !== 'ready' && hostActions.includes(check.host_action)
+const hostJobFor = check => {
+  const job = hostAction.value?.job
+  return job && hostChecks[job.action] === check.id && hostSeen.value.includes(job.request_id) ? job : null
+}
+const showsHostAction = check => offersHostAction(check) || !!hostJobFor(check)
+const hostActionLabel = check => t('spaces.host_action_' + check.host_action)
+const hostJobCopy = job => t(job.state === 'done' ? 'spaces.host_action_done_' + job.action : 'spaces.host_action_' + job.state)
+// The helper's own sentence says what stopped it; after a success the recheck speaks instead.
+const hostJobDetail = job => ['refused', 'failed'].includes(job.state) ? job.detail : ''
+const hostReason = (code, message) => hostReasons.includes(code) ? t('spaces.host_action_unavailable_' + code) : message
+const hostUnavailable = computed(() => hostAction.value && !hostAction.value.available ?
+  hostReason(hostAction.value.reason, hostAction.value.message) : '')
+const hostBlocked = computed(() => !!hostSending.value || hostWorking.value || loading.value || !hostAction.value?.available)
+// A browser on this PC shows the prompt on its own screen; anywhere else, the prompt is not where the reader is.
+const promptLocal = typeof window !== 'undefined' && ['localhost', '127.0.0.1', '[::1]', '::1'].includes(window.location.hostname)
+const hostPromptWhere = computed(() => t(promptLocal ? 'spaces.host_action_prompt_local' : 'spaces.host_action_prompt_remote'))
+
+function adoptHostAction(next) {
+  const was = hostAction.value?.job
+  hostAction.value = next
+  const job = next.job
+  if (job && hostActionWorking.includes(job.state) && !hostSeen.value.includes(job.request_id)) hostSeen.value = [...hostSeen.value, job.request_id]
+  // A change that just finished is checked again at once.
+  if (was && hostActionWorking.includes(was.state) && job?.request_id === was.request_id && !hostActionWorking.includes(job.state)) {
+    if (loading.value) recheckAfterLoad = true
+    else refresh()
+  }
+}
+function scheduleHostAction() {
+  clearTimeout(hostPoll); hostPoll = null
+  if (hostDisposed || !hostWorking.value || (typeof document !== 'undefined' && document.hidden)) return
+  hostPoll = setTimeout(() => { hostExchange().catch(() => {}) }, Math.min(30000, 2000 * (2 ** hostFailures)))
+}
+async function hostExchange(body) {
+  clearTimeout(hostPoll); hostPoll = null
+  if (hostDisposed) return null
+  hostRequest?.abort()
+  const controller = new AbortController()
+  hostRequest = controller
+  const timeout = setTimeout(() => controller.abort(), 12000)
+  try {
+    const response = await fetch('./api/spaces/setup/host-action', {
+      credentials: 'include', cache: 'no-store', signal: controller.signal,
+      ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
+    })
+    if (hostDisposed) return null
+    // A host without in-app setup offers no button; its terminal steps stay.
+    if (response.status === 404) { hostAction.value = null; return null }
+    if (![200, 202, 409, 503].includes(response.status)) throw new Error(t('spaces.host_action_rejected'))
+    const next = await response.json()
+    if (hostDisposed) return null
+    if (!validHostActionSnapshot(next)) throw new Error(t('spaces.host_action_unreachable'))
+    hostFailures = 0
+    adoptHostAction(next)
+    return { status: response.status, snapshot: next }
+  } catch (cause) {
+    hostFailures += 1
+    throw cause
+  } finally {
+    clearTimeout(timeout)
+    scheduleHostAction()
+  }
+}
+async function startHostAction(check) {
+  if (hostBlocked.value || !offersHostAction(check)) return
+  let requestId
+  try { requestId = crypto.randomUUID() } catch { hostErrorFor.value = check.host_action; hostError.value = t('spaces.secure_needed'); return }
+  hostSending.value = check.host_action; hostErrorFor.value = check.host_action; hostError.value = ''
+  hostSeen.value = [...hostSeen.value, requestId]
+  try {
+    const result = await hostExchange({ action: check.host_action, request_id: requestId })
+    if (result && (result.status === 409 || result.status === 503 || result.snapshot.accepted === false))
+      hostError.value = hostReason(result.snapshot.refusal?.code, result.snapshot.refusal?.message || t('spaces.host_action_rejected'))
+  } catch (cause) {
+    hostError.value = cause.name === 'AbortError' ? t('spaces.host_action_unreachable') : cause.message || t('spaces.host_action_unreachable')
+  } finally { hostSending.value = '' }
+}
+function handleHostVisibility() {
+  if (document.hidden) { clearTimeout(hostPoll); hostPoll = null }
+  else if (hostWorking.value) hostExchange().catch(() => {})
+}
+if (typeof document !== 'undefined') document.addEventListener('visibilitychange', handleHostVisibility)
+onUnmounted(() => {
+  hostDisposed = true; clearTimeout(hostPoll); hostRequest?.abort()
+  if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', handleHostVisibility)
+})
+
 function settle(next) {
   const needsAttention = !next.available || !next.host_prerequisites_ready
   const runtimeStatus = next.checks.find(check => check.id === 'runtime')?.runtime.status
@@ -216,6 +335,9 @@ async function refresh() {
     if (!validSetup(next)) throw new Error(t('spaces.setup_unverified'))
     setup.value = next
     settle(next)
+    // Whether an administrator can fix a check from here is asked of the host, not assumed.
+    if (next.checks.some(check => check.state !== 'ready' && hostActions.includes(check.host_action)) || hostWorking.value)
+      hostExchange().catch(() => {})
   } catch (cause) {
     setup.value = null
     open.value = true

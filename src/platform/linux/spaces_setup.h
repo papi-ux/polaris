@@ -71,13 +71,19 @@ namespace multiseat::spaces {
     std::uint64_t uid = 0, gid = 0;
     bool docker_cli = false, runc = false, daemon_replied = false;
     bool daemon_linux = false, daemon_rootless = false, daemon_runc = false;
+    bool docker_access_pending = false;  ///< the account is in the docker group, but this Polaris started before it was
     bool input_access = false, gpu_access = false;
     security_status_t security;
     runtime_facts_t runtime;
     bool controller_enabled = false, controller_available = false;
   };
+  /// The account database lists this account in the docker group, but this process does not carry the
+  /// group, because it started before the change. Only starting again picks the group up.
+  [[nodiscard]] bool docker_access_pending(const std::optional<container::group_membership_t> &docker,
+    std::uint64_t effective_gid, const std::optional<std::vector<std::uint64_t>> &groups);
   // Pure presentation contract. Availability means a particular prerequisite
-  // passed, never proof of game streaming or an audible assessment.
+  // passed, never proof of game streaming or an audible assessment. A check an
+  // administrator can fix from Polaris names that fix as host_action.
   [[nodiscard]] nlohmann::json describe_setup(const setup_facts_t &facts);
   [[nodiscard]] nlohmann::json inspect_setup(container::host_t &host,
     bool enabled, bool available,

@@ -152,6 +152,12 @@ namespace multiseat::spaces {
     return facts;
   }
 
+  bool docker_access_pending(const std::optional<container::group_membership_t> &docker, std::uint64_t effective_gid,
+    const std::optional<std::vector<std::uint64_t>> &groups) {
+    return docker && docker->member && groups && effective_gid != docker->gid &&
+      std::find(groups->begin(), groups->end(), docker->gid) == groups->end();
+  }
+
   nlohmann::json describe_setup(const setup_facts_t &f) {
     using json = nlohmann::json;
     json checks = json::array();
@@ -166,11 +172,17 @@ namespace multiseat::spaces {
       f.docker_cli && f.runc ? "Docker and its container runtime are installed." :
       "Install Docker Engine on this PC to run separate gaming spaces.", "install_docker", "#prepare-docker-from-spaces");
     const bool engine = f.daemon_replied && f.daemon_linux && !f.daemon_rootless && f.daemon_runc;
+    const bool pending = !engine && !f.daemon_replied && f.docker_access_pending;
     add("docker_access", "Polaris access to Docker", engine,
       engine ? "This Polaris service can reach the local Docker Engine." :
-      !f.daemon_replied ? "Start Docker and allow the Polaris service account to use it. Recheck after signing out and back in." :
+      pending ? "Polaris was given access to Docker after it started, and a running Polaris keeps the access it started with. Restart this PC, then recheck." :
+      !f.daemon_replied ? "Start Docker and allow the Polaris service account to use it." :
       f.daemon_rootless ? "This version requires the system Docker Engine. Rootless Docker is not supported for Spaces yet." :
       "Spaces needs a local Linux Docker Engine with runc.", "docker_access", "#prepare-docker-from-spaces");
+    // Starting Docker and joining its group is what an administrator can approve from Polaris.
+    // A daemon that answers but is rootless or not runc, or access that only needs a restart, is not.
+    if (!engine && !pending && !f.daemon_replied && f.docker_cli && f.runc && !f.immutable_host)
+      checks.back()["host_action"] = "docker_access";
     add("identity", "Gaming runtime account", f.uid == 1000 && f.gid == 1000,
       f.uid == 1000 && f.gid == 1000 ? "The current runtime supports this service account." :
       "The current preview runtime does not yet support this service account. Do not change your Linux user ID.",
@@ -183,6 +195,10 @@ namespace multiseat::spaces {
       "Polaris cannot access a graphics device. Check the driver and host permissions.", "host_setup", "#graphics-access");
     add("security", "Spaces security support", f.security.ready, f.security.detail.c_str(), f.security.code.c_str(),
       "#prepare-spaces-security-support");
+    // The packaged helper installs or updates the policies; a host that is not enforcing, or whose
+    // package is incomplete, needs something an administrator prompt cannot give.
+    if (!f.security.ready && f.security.code == "install_selinux" && !f.immutable_host)
+      checks.back()["host_action"] = "security_install";
     // Not a host prerequisite: first-Space setup downloads the runtime too.
     checks.push_back(describe_runtime(f.runtime));
     checks.push_back({{"id", "spaces"}, {"title", "Spaces configuration"},
@@ -238,6 +254,9 @@ namespace multiseat::spaces {
           }
         } catch (...) { f.daemon_replied = false; }
       }
+      // Docker refused this process. If the account already joined the group, only a restart helps.
+      if (!f.daemon_replied)
+        f.docker_access_pending = docker_access_pending(host.group_membership("docker"), host.effective_gid(), host.supplementary_groups());
     }
     f.input_access = host.read_write_character_device("/dev/uinput").has_value() &&
       host.read_write_character_device("/dev/uhid").has_value();

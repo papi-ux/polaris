@@ -39,6 +39,12 @@ namespace multiseat::container {
     bool operator==(const character_device_identity_t &) const = default;
   };
 
+  /** A group from the account database, and whether the effective user belongs to it there. */
+  struct group_membership_t {
+    std::uint64_t gid = 0;
+    bool member = false;  ///< listed as a member, or the group is the account's primary group
+  };
+
   /**
    * Injectable host boundary. The production implementation uses an explicit
    * argv vector and the existing bounded Linux process runner; tests never
@@ -59,6 +65,14 @@ namespace multiseat::container {
     ) const { return false; }
     /** Actual calling process groups; absence means the snapshot failed. */
     [[nodiscard]] virtual std::optional<std::vector<std::uint64_t>> supplementary_groups() const = 0;
+    /**
+     * The named group as the account database lists it now, which a running
+     * process does not pick up until it starts again. Empty when the group
+     * does not exist or cannot be read.
+     */
+    [[nodiscard]] virtual std::optional<group_membership_t> group_membership(std::string_view group) const {
+      return std::nullopt;
+    }
     [[nodiscard]] virtual bool readable_directory(const std::filesystem::path &path) const = 0;
     [[nodiscard]] virtual bool private_read_write_directory(
       const std::filesystem::path &path

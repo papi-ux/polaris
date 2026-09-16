@@ -1,9 +1,10 @@
 import { mount, flushPromises } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SpacesSetup from './SpacesSetup.vue'
 import SpacesFirstSetup from './SpacesFirstSetup.vue'
 import { dockerAccessCommand, fedoraSecurityPackages, installGuide, installSpacesSecurity, setupSteps, startDocker, validSetup } from '../spaces-setup.js'
 import { spacesGlobal } from './spaces-test-i18n.js'
+import { validHostActionSnapshot } from '../spaces-job.js'
 
 const runtimeCodes = { not_published: 'runtime_not_published', unsupported: 'driver_mismatch', available: 'not_downloaded', ready: 'runtime_ready', failed: 'inspection_failed' }
 const runtimeDetails = {
@@ -400,5 +401,156 @@ describe('Spaces setup', () => {
   it('uses service account identity, never a browser user or shell payload', () => {
     expect(dockerAccessCommand(1027)).toContain('id -nu -- 1027')
     for (const bad of [0, -1, 3.5, '1000', '$(touch /tmp/unsafe)', 2147483648]) expect(dockerAccessCommand(bad)).toBe('')
+  })
+})
+
+describe('Spaces host setup approved at the PC', () => {
+  const requestId = '32345678-1234-4234-8234-123456789abc'
+  const working = ['waiting_for_approval', 'running']
+  const hostReply = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
+  const idle = (extra = {}) => ({ version: 1, available: true, job: null, ...extra })
+  const job = (state, action = 'security_install', extra = {}, id = requestId) => ({
+    version: 1, available: !working.includes(state),
+    ...(working.includes(state) ? { reason: 'host_setup_running', message: "Polaris is already waiting on a change to this PC's setup. Wait for it to finish." } : {}),
+    job: { request_id: id, action, state, message: 'Words from the host', detail: '', ...extra },
+  })
+  const failing = (id, hostAction) => {
+    const result = snapshot(false)
+    result.checks.find(item => item.id === id).host_action = hostAction
+    return result
+  }
+  // Each endpoint answers from its own queue; the last answer repeats.
+  function host({ setup, action }) {
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      if (url === './api/spaces/setup') return reply(setup.length > 1 ? setup.shift() : setup[0])
+      if (url === './api/spaces/setup/host-action') return action.length > 1 ? action.shift() : action[0]
+      throw new Error('unexpected ' + url)
+    }))
+  }
+  const calls = url => fetch.mock.calls.filter(([called]) => called === url)
+  beforeEach(() => { vi.stubGlobal('crypto', { randomUUID: () => requestId }) })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('offers the fix on the check it fixes, follows the prompt and rechecks when the change ends', async () => {
+    vi.useFakeTimers()
+    const fixed = snapshot(false)
+    host({
+      setup: [failing('security', 'security_install'), fixed],
+      action: [hostReply(idle()), hostReply({ ...job('waiting_for_approval'), accepted: true }, 202), hostReply(job('running')),
+        hostReply(job('done', 'security_install', { check: { id: 'security', state: 'ready' } }))],
+    })
+    fixed.checks.find(item => item.id === 'security').state = 'ready'
+    wrapper = start()
+    await vi.advanceTimersByTimeAsync(0)
+    const button = row('security').get('[data-host-action-start]')
+    expect(button.text()).toBe('Install security support')
+    expect(button.attributes('aria-label')).toBe('Install security support: security')
+    expect(row('security').text()).toContain("A password prompt opens on this PC's screen, and someone at this PC has to approve it.")
+    expect(row('docker_access').find('[data-host-action]').exists()).toBe(false)
+    // The terminal steps stay beside the button.
+    expect(row('security').find('[data-setup-steps]').exists()).toBe(true)
+
+    await button.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    const post = calls('./api/spaces/setup/host-action').find(([, options]) => options.method === 'POST')
+    expect(JSON.parse(post[1].body)).toEqual({ action: 'security_install', request_id: requestId })
+    expect(row('security').get('[data-host-action-state]').text()).toBe("Waiting for approval on the PC's screen.")
+    expect(row('security').get('[data-host-action-state]').attributes('role')).toBe('status')
+    expect(row('security').find('[data-host-action-start]').exists()).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(row('security').get('[data-host-action-state]').text()).toBe("Approved. Polaris is changing this PC's setup.")
+    expect(calls('./api/spaces/setup')).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(calls('./api/spaces/setup')).toHaveLength(2)
+    expect(row('security').get('[data-host-action-outcome]').text()).toBe('Spaces security support is installed.')
+    expect(row('security').find('[data-host-action-start]').exists()).toBe(false)
+    const asked = calls('./api/spaces/setup/host-action').length
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(calls('./api/spaces/setup/host-action')).toHaveLength(asked)
+  })
+
+  it('says why the fix cannot start, in the console words or the host sentence', async () => {
+    host({ setup: [failing('docker_access', 'docker_access')],
+      action: [hostReply(idle({ available: false, reason: 'no_local_desktop', message: 'Host sentence.' }))] })
+    wrapper = start()
+    await flushPromises()
+    expect(row('docker_access').get('[data-host-action-start]').text()).toBe('Give Polaris access to Docker')
+    expect(row('docker_access').get('[data-host-action-start]').attributes('disabled')).toBeDefined()
+    expect(row('docker_access').get('[data-host-action-unavailable]').text())
+      .toBe("Someone must be signed in at this PC's desktop to approve the password prompt. Otherwise, use the terminal steps below.")
+    expect(row('docker_access').text()).not.toContain('A password prompt opens')
+    wrapper.unmount()
+    host({ setup: [failing('docker_access', 'docker_access')],
+      action: [hostReply(idle({ available: false, reason: 'a_later_reason', message: 'A sentence from a newer host.' }))] })
+    wrapper = start()
+    await flushPromises()
+    expect(row('docker_access').get('[data-host-action-unavailable]').text()).toBe('A sentence from a newer host.')
+  })
+
+  it('shows a refusal at the moment of asking and keeps the button', async () => {
+    const refusal = { code: 'stream_active', message: 'End every stream on this PC, then try again.' }
+    host({ setup: [failing('security', 'security_install')],
+      action: [hostReply(idle()), hostReply({ ...idle({ available: false, reason: 'stream_active', message: refusal.message }), accepted: false, refusal }, 409)] })
+    wrapper = start()
+    await flushPromises()
+    await row('security').get('[data-host-action-start]').trigger('click')
+    await flushPromises()
+    expect(row('security').get('[role=alert]').text()).toBe('End every stream on this PC first.')
+    expect(row('security').find('[data-host-action-state]').exists()).toBe(false)
+    expect(row('security').find('[data-host-action-start]').exists()).toBe(true)
+  })
+
+  it('keeps the helper words when it refuses, and offers the button again', async () => {
+    vi.useFakeTimers()
+    const words = 'Stop Spaces streams and quit any other Polaris before changing security setup. Still active: polaris-spaces-ux (pid 42).'
+    host({ setup: [failing('security', 'security_install')],
+      action: [hostReply(idle()), hostReply({ ...job('waiting_for_approval'), accepted: true }, 202), hostReply(job('refused', 'security_install', { detail: words }))] })
+    wrapper = start()
+    await vi.advanceTimersByTimeAsync(0)
+    await row('security').get('[data-host-action-start]').trigger('click')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(row('security').get('[data-host-action-outcome]').text()).toBe('The Spaces setup helper did not make the change.')
+    expect(row('security').get('[data-host-action-detail]').text()).toBe(words)
+    expect(row('security').get('[data-host-action-start]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('stays quiet about an outcome from before the page opened, and shows a prompt already open', async () => {
+    host({ setup: [failing('security', 'security_install')], action: [hostReply(job('cancelled'))] })
+    wrapper = start()
+    await flushPromises()
+    expect(row('security').find('[data-host-action-outcome]').exists()).toBe(false)
+    expect(row('security').find('[data-host-action-start]').exists()).toBe(true)
+    wrapper.unmount()
+    host({ setup: [failing('security', 'security_install')], action: [hostReply(job('waiting_for_approval'))] })
+    wrapper = start()
+    await flushPromises()
+    expect(row('security').get('[data-host-action-state]').text()).toBe("Waiting for approval on the PC's screen.")
+  })
+
+  it('offers no button on a host without in-app setup', async () => {
+    host({ setup: [failing('security', 'security_install')], action: [hostReply({}, 404)] })
+    wrapper = start()
+    await flushPromises()
+    expect(wrapper.find('[data-host-action]').exists()).toBe(false)
+    expect(row('security').find('[data-setup-steps]').exists()).toBe(true)
+  })
+
+  it('reads only host action snapshots it understands', () => {
+    expect(validHostActionSnapshot(idle())).toBe(true)
+    expect(validHostActionSnapshot(job('waiting_for_approval'))).toBe(true)
+    expect(validHostActionSnapshot(job('done', 'docker_access', { check: { id: 'docker_access', state: 'ready' } }))).toBe(true)
+    const done = job('done').job
+    for (const bad of [
+      { ...idle(), version: 2 },
+      idle({ reason: 'stream_active' }),
+      { version: 1, available: false, job: null },
+      idle({ job: { ...done, action: 'docker_install' } }),
+      idle({ job: { ...done, state: 'approved' } }),
+      idle({ job: { ...done, request_id: 'not-a-uuid' } }),
+      idle({ job: { ...done, detail: 'x'.repeat(4097) } }),
+      idle({ refusal: { code: 'Bad Code', message: 'x' } }),
+    ]) expect(validHostActionSnapshot(bad)).toBe(false)
   })
 })

@@ -184,6 +184,78 @@ TEST(SpacesSetup, RefusesUnverifiedDaemonRepliesWithoutReturningTheirContents) {
   }
 }
 
+TEST(SpacesSetup, AdministratorFixesAreOfferedOnlyWhereAnApprovedPromptFixesTheCheck) {
+  auto f = prepared();
+  f.daemon_replied = f.daemon_linux = f.daemon_runc = false;
+  auto value = spaces::describe_setup(f);
+  EXPECT_EQ(check(value, "docker_access")["host_action"], "docker_access");
+  EXPECT_EQ(check(value, "docker_access")["detail"], "Start Docker and allow the Polaris service account to use it.");
+  for (const auto id : {"docker", "identity", "input", "gpu", "security", "runtime", "spaces"})
+    EXPECT_FALSE(check(value, id).contains("host_action")) << id;
+  auto image = f;
+  image.immutable_host = true;
+  EXPECT_FALSE(check(spaces::describe_setup(image), "docker_access").contains("host_action"));
+  auto missing = f;
+  missing.docker_cli = false;
+  EXPECT_FALSE(check(spaces::describe_setup(missing), "docker_access").contains("host_action"));
+  auto pending = f;
+  pending.docker_access_pending = true;
+  value = spaces::describe_setup(pending);
+  EXPECT_FALSE(check(value, "docker_access").contains("host_action"));
+  EXPECT_EQ(check(value, "docker_access")["detail"],
+    "Polaris was given access to Docker after it started, and a running Polaris keeps the access it started with. Restart this PC, then recheck.");
+  auto rootless = prepared();
+  rootless.daemon_rootless = true;
+  EXPECT_FALSE(check(spaces::describe_setup(rootless), "docker_access").contains("host_action"));
+
+  auto security = prepared();
+  security.security = spaces::describe_security({.seccomp = true, .selinux = true, .kernel_probe = true, .enforcing = true});
+  ASSERT_EQ(security.security.code, "install_selinux");
+  EXPECT_EQ(check(spaces::describe_setup(security), "security")["host_action"], "security_install");
+  security.immutable_host = true;
+  EXPECT_FALSE(check(spaces::describe_setup(security), "security").contains("host_action"));
+  for (const auto &facts : {spaces::security_facts_t {.seccomp = true, .selinux = true, .kernel_probe = true},
+         spaces::security_facts_t {.seccomp = false},
+         spaces::security_facts_t {.seccomp = true, .selinux = true},
+         spaces::security_facts_t {.seccomp = true, .selinux = true, .kernel_probe = true, .enforcing = true, .contexts = true, .rule = true, .receipt = true}}) {
+    auto other = prepared();
+    other.security = spaces::describe_security(facts);
+    EXPECT_FALSE(check(spaces::describe_setup(other), "security").contains("host_action")) << other.security.code;
+  }
+}
+
+TEST(SpacesSetup, DockerAccessGrantedAfterPolarisStartedWaitsForARestart) {
+  using container::group_membership_t;
+  const std::vector<std::uint64_t> without {10, 39}, with {10, 39, 966};
+  EXPECT_TRUE(spaces::docker_access_pending(group_membership_t {966, true}, 1000, without));
+  EXPECT_FALSE(spaces::docker_access_pending(group_membership_t {966, true}, 1000, with));
+  EXPECT_FALSE(spaces::docker_access_pending(group_membership_t {966, true}, 966, without));
+  EXPECT_FALSE(spaces::docker_access_pending(group_membership_t {966, false}, 1000, without));
+  EXPECT_FALSE(spaces::docker_access_pending(std::nullopt, 1000, without));
+  EXPECT_FALSE(spaces::docker_access_pending(group_membership_t {966, true}, 1000, std::nullopt));
+
+  class grouped_host_t : public setup_host_t {
+  public:
+    std::optional<container::group_membership_t> docker {container::group_membership_t {966, true}};
+    std::optional<container::group_membership_t> group_membership(std::string_view group) const override {
+      EXPECT_EQ(group, "docker");
+      return docker;
+    }
+  } host;
+  host.result = {.exit_status = 1, .output = "permission denied while trying to connect to the Docker daemon socket"};
+  auto value = spaces::inspect_setup(host, false, false, spaces::security_facts_t {.seccomp = true});
+  EXPECT_NE(check(value, "docker_access")["detail"].get<std::string>().find("Restart this PC, then recheck."), std::string::npos);
+  EXPECT_FALSE(check(value, "docker_access").contains("host_action"));
+  host.docker->member = false;
+  value = spaces::inspect_setup(host, false, false, spaces::security_facts_t {.seccomp = true});
+  EXPECT_EQ(check(value, "docker_access")["detail"], "Start Docker and allow the Polaris service account to use it.");
+  // A host with a working engine never reads the group: access is already there.
+  host.docker->member = true;
+  host.result = setup_host_t {}.result;
+  value = spaces::inspect_setup(host, false, false, spaces::security_facts_t {.seccomp = true});
+  EXPECT_EQ(check(value, "docker_access")["state"], "ready");
+}
+
 TEST(SpacesSetup, RefusesFailedTimedOutAndTruncatedProbes) {
   for (int failure = 0; failure < 3; ++failure) {
     setup_host_t host;

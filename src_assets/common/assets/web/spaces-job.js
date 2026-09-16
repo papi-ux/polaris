@@ -58,4 +58,21 @@ export function requestForJob(job) {
   return { operation: 'start', request_id: job.request_id, runtime_id: job.runtime_id, name: job.name }
 }
 
+// Host setup an administrator approves at the PC that runs Polaris, since 1.4.9.
+// The host names the action on the check it fixes; this list is what the console knows how to ask for.
+export const hostActions = ['security_install', 'docker_access']
+export const hostActionWorking = ['waiting_for_approval', 'running']
+const hostActionStates = [...hostActionWorking, 'done', 'refused', 'cancelled', 'not_authorized', 'no_agent', 'timed_out', 'failed']
+const detail = value => typeof value === 'string' && value.length <= 4096
+export function validHostActionSnapshot(value) {
+  if (!value || value.version !== 1 || typeof value.available !== 'boolean') return false
+  if (value.available ? value.reason !== undefined : !word(value.reason) || !text(value.message)) return false
+  if (value.refusal !== undefined && (!value.refusal || !word(value.refusal.code) || !text(value.refusal.message))) return false
+  if (value.job === null) return true
+  const job = value.job
+  return !!job && typeof job === 'object' && uuid.test(job.request_id) && hostActions.includes(job.action) &&
+    hostActionStates.includes(job.state) && text(job.message) && detail(job.detail) &&
+    (job.check === undefined || (!!job.check && typeof job.check === 'object'))
+}
+
 function validGpuId(value) { return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value) }
