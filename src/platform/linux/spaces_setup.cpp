@@ -7,36 +7,40 @@ namespace multiseat::spaces {
   nlohmann::json describe_setup(const setup_facts_t &f) {
     using json = nlohmann::json;
     json checks = json::array();
+    // Every check names the guide section that fixes it, so a failing row is
+    // never a dead end whatever the console decides to render.
     auto add = [&](const char *id, const char *title, bool ready, const char *detail,
-                   const char *action = "") {
+                   const char *action, const char *anchor) {
       checks.push_back({{"id", id}, {"title", title}, {"state", ready ? "ready" : "required"},
-        {"detail", detail}, {"action", action}});
+        {"detail", detail}, {"action", action}, {"doc_anchor", anchor}});
     };
     add("docker", "Docker Engine", f.docker_cli && f.runc,
       f.docker_cli && f.runc ? "Docker and its container runtime are installed." :
-      "Install Docker Engine on this PC to run separate gaming spaces.", "install_docker");
+      "Install Docker Engine on this PC to run separate gaming spaces.", "install_docker", "#prepare-docker-from-spaces");
     const bool engine = f.daemon_replied && f.daemon_linux && !f.daemon_rootless && f.daemon_runc;
     add("docker_access", "Polaris access to Docker", engine,
       engine ? "This Polaris service can reach the local Docker Engine." :
       !f.daemon_replied ? "Start Docker and allow the Polaris service account to use it. Recheck after signing out and back in." :
       f.daemon_rootless ? "This version requires the system Docker Engine. Rootless Docker is not supported for Spaces yet." :
-      "Spaces needs a local Linux Docker Engine with runc.", "docker_access");
+      "Spaces needs a local Linux Docker Engine with runc.", "docker_access", "#prepare-docker-from-spaces");
     add("identity", "Gaming runtime account", f.uid == 1000 && f.gid == 1000,
       f.uid == 1000 && f.gid == 1000 ? "The current runtime supports this service account." :
-      "The current preview runtime does not yet support this service account. Do not change your Linux user ID.");
+      "The current preview runtime does not yet support this service account. Do not change your Linux user ID.",
+      "", "#gaming-runtime-account");
     add("input", "Controller and input access", f.input_access,
       f.input_access ? "Polaris can create virtual input devices. Controls are checked again when a space starts." :
-      "Complete Polaris host setup so streamed controls can reach a space.", "host_setup");
+      "Complete Polaris host setup so streamed controls can reach a space.", "host_setup", "#controller-access");
     add("gpu", "Graphics device access", f.gpu_access,
       f.gpu_access ? "A graphics device is accessible. Hardware encoding is checked when the space starts." :
-      "Polaris cannot access a graphics device. Check the driver and host permissions.", "host_setup");
-    add("security", "Spaces security support", f.security.ready, f.security.detail.c_str(), f.security.code.c_str());
+      "Polaris cannot access a graphics device. Check the driver and host permissions.", "host_setup", "#graphics-access");
+    add("security", "Spaces security support", f.security.ready, f.security.detail.c_str(), f.security.code.c_str(),
+      "#prepare-spaces-security-support");
     checks.push_back({{"id", "spaces"}, {"title", "Spaces configuration"},
       {"state", f.controller_available ? "ready" : f.controller_enabled ? "required" : "not_configured"},
       {"detail", f.controller_available ? "The configured Spaces controller is available." :
         f.controller_enabled ? "The configured Spaces controller is unavailable. Review the setup diagnostics." :
         "Host preparation comes first. No spaces have been configured on this host."},
-      {"action", "configure_spaces"}});
+      {"action", "configure_spaces"}, {"doc_anchor", "#prepare-your-first-space"}});
     return {{"version", 2}, {"distribution", f.distribution},
       {"immutable_host", f.immutable_host}, {"service_uid", f.uid},
       {"host_prerequisites_ready", f.docker_cli && f.runc && engine && f.uid == 1000 && f.gid == 1000 && f.input_access && f.gpu_access && f.security.ready},

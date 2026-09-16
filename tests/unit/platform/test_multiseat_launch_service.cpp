@@ -1,5 +1,6 @@
 #include "src/platform/linux/multiseat_launch_service.h"
 #include "src/config.h"
+#include "src/launch_failure.h"
 #include "src/nvhttp.h"
 #include "src/platform/common.h"
 #include "src/private_state_file.h"
@@ -47,6 +48,7 @@ namespace {
     spaces::library_reader_t library;
     std::vector<std::string> desktops;
     std::vector<profile_activity_t> activity;
+    std::optional<gpu_usage_t> capacity;
     void called() { std::lock_guard lock(mutex); owners.push_back(std::this_thread::get_id()); }
     bool await_begin() {
       std::unique_lock lock(mutex);
@@ -71,12 +73,13 @@ namespace {
     std::vector<std::string> desktop_clients() const override { return state_->desktops; }
     std::vector<profile_activity_t> profile_activity() const override { std::lock_guard lock(state_->mutex); return state_->activity; }
     bool idle() const override { return state_->idle; }
+    std::optional<gpu_usage_t> capacity() const override { std::lock_guard lock(state_->mutex); return state_->capacity; }
     void reconcile() override { state_->called(); ++state_->reconciles; }
     profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
       state_->called();
       { std::lock_guard lock(state_->mutex); ++state_->begins; }
       state_->changed.notify_all();
-      if (state_->fail) return {{409, "No capacity"}, {}};
+      if (state_->fail) return {{409, "No capacity.", "space_capacity", "Wait for a Space to finish."}, {}};
       return {{200, "Starting"}, seat_handle_t {"test-epoch", "gpu-a", 0, *launch->lifecycle_generation}};
     }
     profile_poll_e poll(const std::shared_ptr<rtsp_stream::launch_session_t> &, const seat_handle_t &) override {
@@ -1045,12 +1048,90 @@ namespace {
     EXPECT_EQ(state->begins.load(), 0U);
   }
 
+  // The words the controller refuses with travel unchanged to the launch
+  // response, with the code and the action as the attributes Nova reads.
+  TEST_F(MultiseatProfileHttp, ARefusalCarriesItsCodeAndActionToTheLaunchResponse) {
+    state->fail = true;
+    const auto result = nvhttp::launch_profile_request(client, args(), false, [](const auto &) { return true; });
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 409);
+    EXPECT_EQ(result->code, "space_capacity");
+    EXPECT_EQ(result->action, "Wait for a Space to finish.");
+    boost::property_tree::ptree tree;
+    nvhttp::put_profile_launch_response_for_tests(tree, *result, false);
+    EXPECT_EQ(tree.get<int>("root.<xmlattr>.status_code"), 409);
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"), "No capacity. Wait for a Space to finish.");
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "space_capacity");
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"), "Wait for a Space to finish.");
+    EXPECT_EQ(tree.get<int>("root.gamesession"), 0);
+  }
+
+  TEST_F(MultiseatProfileHttp, ARefusalWithoutACodeKeepsItsPlainMessageAndDropsStaleRecords) {
+    launch_failure::refuse(503, "stale", "A record left by an earlier attempt on this thread.", "Ignore it.");
+    boost::property_tree::ptree tree;
+    nvhttp::put_profile_launch_response_for_tests(tree, {409, "The Space launch identity was sent twice.", {}}, true);
+    EXPECT_EQ(tree.get<int>("root.<xmlattr>.status_code"), 409);
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"), "The Space launch identity was sent twice.");
+    EXPECT_FALSE(tree.get_optional<std::string>("root.<xmlattr>.error_code"));
+    EXPECT_EQ(tree.get<int>("root.resume"), 0);
+    boost::property_tree::ptree accepted;
+    nvhttp::put_profile_launch_response_for_tests(accepted, {200, "Space launch accepted", {}}, false);
+    EXPECT_EQ(accepted.get<int>("root.<xmlattr>.status_code"), 200);
+    EXPECT_EQ(accepted.get<std::string>("root.<xmlattr>.status_message"), "Space launch accepted");
+    EXPECT_EQ(accepted.get<int>("root.gamesession"), 1);
+  }
+
+  TEST_F(MultiseatProfileHttp, PreparationRefusalsNameTheSpaceAndTheFix) {
+    const auto unrouted = service->prepare(launch("client-z"));
+    EXPECT_EQ(unrouted.status, 404);
+    EXPECT_EQ(unrouted.code, "no_space_assigned");
+    EXPECT_EQ(unrouted.action, "Open Spaces in Polaris and set this device's Default Space.");
+    auto hdr = launch();
+    hdr->enable_hdr = true;
+    const auto refused = service->prepare(hdr);
+    EXPECT_EQ(refused.status, 400);
+    EXPECT_EQ(refused.code, "space_stream_options");
+    EXPECT_EQ(std::string(refused.message), "A Space stream needs a new SDR session at a whole frame rate.");
+  }
+
   TEST_F(MultiseatProfileHttp, UnmappedDeviceUsesOrdinaryRequestPath) {
     uninstall_profile_launch_service(service);
     const auto result = nvhttp::launch_profile_request(client, args(), false, [](const auto &) { return true; });
     EXPECT_FALSE(result);
     EXPECT_EQ(state->begins.load(), 0U);
   }
+  // The snapshot says why, not just whether, so a client can name the reason
+  // instead of guessing from a bare false.
+  TEST_F(MultiseatLaunchService, ClientSpacesSayWhyAndCountCapacity) {
+    const auto unassigned = service->client_spaces("client-c");
+    EXPECT_FALSE(unassigned.available);
+    EXPECT_EQ(unassigned.unavailable_reason, "no_space_assigned");
+    EXPECT_TRUE(unassigned.spaces.empty());
+    auto own = service->client_spaces("client-a");
+    ASSERT_TRUE(own.available);
+    EXPECT_EQ(own.default_space, "12345678-1234-4234-8234-123456789abc");
+    ASSERT_EQ(own.spaces.size(), 1U);
+    EXPECT_TRUE(own.spaces[0].can_open);
+    EXPECT_FALSE(own.capacity);
+    { std::lock_guard lock(state->mutex); state->capacity = gpu_usage_t {1, 1, 1, 1}; }
+    own = service->client_spaces("client-a");
+    ASSERT_TRUE(own.capacity);
+    EXPECT_EQ(own.capacity->max_seats, 1U);
+    EXPECT_EQ(own.spaces[0].state, "ready");
+    EXPECT_FALSE(own.spaces[0].can_open);
+    EXPECT_EQ(own.spaces[0].blocked_reason, "at_capacity");
+    { std::lock_guard lock(state->mutex); state->capacity.reset(); }
+    auto owned = launch();
+    ASSERT_EQ(service->prepare(owned).status, 200);
+    own = service->client_spaces("client-a");
+    EXPECT_FALSE(own.can_switch);
+    EXPECT_EQ(own.switch_blocked_reason, "your_stream");
+    EXPECT_EQ(own.spaces[0].blocked_reason, "starting");
+    EXPECT_TRUE(service->session_starting("client-a"));
+    EXPECT_FALSE(service->session_starting("client-b"));
+    owned->cancel();
+  }
+
   TEST_F(MultiseatLaunchService, ClientSelectionOnlyUsesGrantedSpacesAndRejectsStaleChoices) {
     ASSERT_TRUE(service->shutdown(2s));
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
@@ -1081,6 +1162,8 @@ namespace {
     EXPECT_FALSE(other->is_cancelled()); EXPECT_EQ(state->shutdowns.load(), shutdowns);
     const auto visible = service->client_spaces("client-a");
     ASSERT_EQ(visible.spaces.size(), 2U); EXPECT_EQ(visible.spaces[1].state, "in_use");
+    EXPECT_FALSE(visible.spaces[1].can_open); EXPECT_EQ(visible.spaces[1].blocked_reason, "in_use");
+    EXPECT_TRUE(visible.spaces[0].can_open); EXPECT_TRUE(visible.spaces[0].blocked_reason.empty());
     other->cancel();
   }
 
@@ -1090,6 +1173,9 @@ namespace {
     ASSERT_EQ(response.status, 200);
     ASSERT_EQ(response.body.at("spaces").size(), 1U);
     EXPECT_EQ(response.body.at("spaces")[0].at("name"), "Primary");
+    EXPECT_EQ(response.body.at("default_space_id"), "12345678-1234-4234-8234-123456789abc");
+    EXPECT_TRUE(response.body.at("spaces")[0].at("can_open").is_boolean());
+    EXPECT_FALSE(response.body.contains("unavailable_reason"));
     EXPECT_EQ(response.body.dump().find("client-b"), std::string::npos);
     EXPECT_EQ(response.body.dump().find("clients"), std::string::npos);
     EXPECT_EQ(nvhttp::profile_spaces_request(nullptr).status, 401);
@@ -1172,6 +1258,7 @@ namespace {
     auto host = launch();
     ASSERT_TRUE(service->track_host_launch(host));
     EXPECT_FALSE(service->client_spaces("client-a").can_switch);
+    EXPECT_EQ(service->client_spaces("client-a").switch_blocked_reason, "desktop_stream");
     EXPECT_EQ(service->select_space("client-a", "12345678-1234-4234-8234-123456789abc", "desktop").status, 409);
     host->cancel();
     EXPECT_EQ(service->select_space("client-a", "12345678-1234-4234-8234-123456789abc", "desktop").status, 200);

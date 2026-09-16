@@ -209,9 +209,13 @@ TEST_F(SpacesSetupService, RefusesASecondOwnerAndUnpublishedOrAlreadyConfiguredS
   auto first = service(operations());
   auto second = service(operations());
   EXPECT_FALSE(second->snapshot()["available"]);
+  EXPECT_EQ(second->snapshot()["unavailable_reason"], "journal_locked");
+  EXPECT_FALSE(first->snapshot().contains("unavailable_reason"));
   EXPECT_EQ(second->submit(request), 503);
   spaces::setup_service_t unpublished(root / "unpublished.json", {}, true, operations());
   spaces::setup_service_t configured(root / "configured.json", {runtime()}, false, operations());
+  EXPECT_EQ(unpublished.snapshot()["unavailable_reason"], "runtime_not_published");
+  EXPECT_EQ(configured.snapshot()["unavailable_reason"], "already_configured");
   EXPECT_EQ(unpublished.submit(request), 503);
   EXPECT_EQ(configured.submit(request), 503);
   EXPECT_FALSE(std::filesystem::exists(root / "unpublished.json.owner"));
@@ -227,9 +231,15 @@ TEST_F(SpacesSetupService, FailedDurabilityCannotAdmitEffectsOrOverwriteUncertai
   EXPECT_EQ(job->submit(request), 503);
   EXPECT_EQ(installs, 0U); EXPECT_EQ(homes, 0U);
   EXPECT_EQ(job->snapshot()["job"]["state"], "recovery_required");
+  EXPECT_EQ(job->snapshot()["unavailable_reason"], "journal_fault");
+  EXPECT_EQ(job->snapshot()["job"]["blocked_by"], json::array({"journal_fault"}));
+  EXPECT_EQ(job->snapshot()["job"]["recovery"]["doc_anchor"], "#recover-an-interrupted-setup");
+  EXPECT_EQ(job->snapshot()["job"]["recovery"]["image"], runtime().config_digest);
   job.reset();
   auto resumed = service(operations());
   EXPECT_EQ(resumed->snapshot()["job"]["state"], "interrupted");
+  EXPECT_TRUE(resumed->snapshot()["job"]["blocked_by"].empty());
+  EXPECT_FALSE(resumed->snapshot()["job"].contains("recovery"));
   EXPECT_EQ(installs, 0U);
   ASSERT_EQ(resumed->submit(request), 202);
   ASSERT_TRUE(wait_state(*resumed, "prepared"));
@@ -253,6 +263,7 @@ TEST_F(SpacesSetupService, InvalidJournalAndChangedRuntimeCannotBeSilentlyReplac
   spaces::setup_service_t upgraded(journal, {changed}, true, operations());
   EXPECT_EQ(upgraded.submit(request), 409);
   EXPECT_FALSE(upgraded.snapshot()["job"]["can_retry"]);
+  EXPECT_EQ(upgraded.snapshot()["job"]["blocked_by"], json::array({"runtime_withdrawn"}));
   EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 0U);
 }
 

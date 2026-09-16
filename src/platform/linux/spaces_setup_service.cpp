@@ -99,12 +99,24 @@ namespace multiseat::spaces {
     try {
       const auto owner_path = std::filesystem::path(journal_.string() + ".owner");
       constexpr std::string_view owner = R"({"schema":1})";
-      if (!psf::update_atomic(owner_path, 64, [&](const psf::read_result_t &existing) -> std::optional<std::string> {
-            if (existing.status != psf::read_status_e::missing && (!existing || existing.payload != owner)) return {};
-            return std::string(owner);
-          })) { fault_ = true; return; }
+      const auto claimed = psf::update_atomic(owner_path, 64, [&](const psf::read_result_t &existing) -> std::optional<std::string> {
+        if (existing.status != psf::read_status_e::missing && (!existing || existing.payload != owner)) return {};
+        return std::string(owner);
+      });
+      if (!claimed) {
+        // Contention fails immediately: an owner file that exists but could not
+        // be re-claimed is another Polaris process holding setup, not a fault.
+        std::error_code error;
+        locked_ = claimed.status == psf::write_status_e::not_committed && std::filesystem::exists(owner_path, error);
+        fault_ = true;
+        return;
+      }
       auto owned = psf::read_with_lease(owner_path, 64);
-      if (!owned.read || owned.read.payload != owner || !owned.lease) { fault_ = true; return; }
+      if (!owned.read || owned.read.payload != owner || !owned.lease) {
+        locked_ = bool(owned.read) && owned.read.payload == owner && !owned.lease;
+        fault_ = true;
+        return;
+      }
       lease_ = std::move(owned.lease);
       const auto saved = psf::read_secure(journal_, 4096, false, false);
       if (saved) {
@@ -157,8 +169,14 @@ namespace multiseat::spaces {
     json result {{"version", 1}, {"available", enabled_ && !fault_ && !closing_ && bool(lease_)},
       {"runtimes", runtimes}, {"graphics", json::array()}, {"job", nullptr},
       {"message", !enabled_ ? "Spaces already have local configuration. Manage your existing spaces below." :
+        locked_ ? "Another Polaris process is using Spaces setup. Close it, then refresh." :
         fault_ ? "Saved setup state could not be secured. Restart Polaris after saving your work. If this persists, open Doctor & Support." :
         catalog_.empty() ? "The verified gaming runtime is not published for this preview yet." : ""}};
+    // Why the job cannot be offered, as a word the console keys copy on; the
+    // message above stays the sentence a person reads.
+    const std::string unavailable = !enabled_ ? "already_configured" : locked_ ? "journal_locked" : fault_ ? "journal_fault" :
+      closing_ ? "closing" : catalog_.empty() ? "runtime_not_published" : "";
+    if (!unavailable.empty()) result["unavailable_reason"] = unavailable;
     if (record_) {
       const auto &r = *record_;
       const bool approved = std::any_of(catalog_.begin(), catalog_.end(), [&](const auto &runtime) {
@@ -178,6 +196,17 @@ namespace multiseat::spaces {
           "This build no longer offers the runtime saved for this setup. Existing player data is preserved." : messages.at(r.code)},
         {"can_retry", approved && !fault_ && !closing_ && !active_ && retryable(r.state)},
         {"can_cancel", !fault_ && !closing_ && active_ && r.state == "downloading" && !cancellation_.stop_requested()}};
+      // What stands between this job and its next step. Empty while it is
+      // working or waiting on the person; never a dead button without a word.
+      json blocked = json::array();
+      if (fault_) blocked.push_back("journal_fault");
+      if (closing_) blocked.push_back("closing");
+      if (!approved) blocked.push_back("runtime_withdrawn");
+      if (approved && !fault_ && (r.state == "prepared" || r.state == "activation_failed") && result["graphics"].empty())
+        blocked.push_back("no_eligible_gpu");
+      result["job"]["blocked_by"] = std::move(blocked);
+      if (fault_) result["job"]["recovery"] = {{"reference", r.reference}, {"image", r.image}, {"code", r.code},
+        {"doc_anchor", "#recover-an-interrupted-setup"}};
     }
     return result;
   }

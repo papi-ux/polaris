@@ -11,7 +11,8 @@ export function validSetup(value) {
   for (const item of value.checks) {
     if (!item || !checkIds.includes(item.id) || seen.has(item.id) ||
         !['ready', 'required', 'not_configured'].includes(item.state) ||
-        typeof item.title !== 'string' || typeof item.detail !== 'string' || typeof item.action !== 'string') return false
+        typeof item.title !== 'string' || typeof item.detail !== 'string' || typeof item.action !== 'string' ||
+        (item.doc_anchor !== undefined && !/^#[a-z0-9-]{1,64}$/.test(item.doc_anchor))) return false
     if (item.id !== 'spaces' && item.state === 'not_configured') return false
     seen.add(item.id)
   }

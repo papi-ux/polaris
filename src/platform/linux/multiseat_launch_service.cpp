@@ -45,6 +45,7 @@ namespace multiseat {
         return runtime_->seats() == 0 && runtime_->managed_workers() == 0 &&
           runtime_->input_allocations() == 0 && runtime_->tracked_launches() == 0;
       }
+      std::optional<gpu_usage_t> capacity() const override { return runtime_->capacity(); }
       void reconcile() override { (void) runtime_->reconcile(); }
       profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
         auto admitted = runtime_->admit_authenticated_profile_launch(launch, {
@@ -53,13 +54,26 @@ namespace multiseat {
         });
         if (!admitted.admitted()) {
           if (admitted.status == controller_profile_admission_status_e::rejected) {
-            if (admitted.admission.rejection == admission_rejection_e::profile_already_active)
-              return {{409, "This profile already has an active seat"}, {}};
-            if (admitted.admission.rejection == admission_rejection_e::client_already_active)
-              return {{409, "This device already has an active seat"}, {}};
-            return {{409, "No seat or encoder capacity is available for this profile"}, {}};
+            switch (admitted.admission.rejection) {
+              case admission_rejection_e::profile_already_active:
+                return {{409, "This Space is already being played on another device.", "space_in_use",
+                  "Wait for that stream to end, or choose another Space."}, {}};
+              case admission_rejection_e::client_already_active:
+                return {{409, "This device already has a Space running.", "device_busy",
+                  "End that stream before starting another."}, {}};
+              case admission_rejection_e::seat_capacity_reached:
+                return {{409, "Every Space slot on this host is in use.", "space_capacity",
+                  "Wait for a Space to finish, or end its stream from Spaces in Polaris."}, {}};
+              case admission_rejection_e::encoder_capacity_reached:
+                return {{409, "The host's video encoder is fully used by other streams.", "encoder_capacity",
+                  "Wait for a stream to end before opening this Space."}, {}};
+              default:
+                return {{409, "The host could not admit this Space launch.", "space_not_admitted",
+                  "Open Spaces in Polaris and recheck Host Setup."}, {}};
+            }
           }
-          return {{503, "Profile reconciliation has not completed"}, {}};
+          return {{503, "Polaris is still reconciling its Spaces after a change.", "spaces_reconciling",
+            "Try again in a moment."}, {}};
         }
         const auto handle = admitted.admission.seat->handle;
         const input::plan_t plan {
@@ -74,7 +88,7 @@ namespace multiseat {
         };
         if (runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch") != mutation_result_e::applied ||
             !runtime_->start_seat(handle, plan).started()) return {};
-        return {{200, "Profile worker is starting"}, handle};
+        return {{200, "Space worker is starting"}, handle};
       }
       profile_poll_e poll(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
                           const seat_handle_t &seat) override {
@@ -195,6 +209,15 @@ namespace multiseat {
         (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end() ||
          std::find(profile.access_clients.begin(), profile.access_clients.end(), client) != profile.access_clients.end());
     }
+    // Why selected_for() has nothing for this device, in the words a client keys on.
+    std::string unavailable_reason() const {
+      if (!controller) return "controller_missing";
+      if (stopping) return "stopping";
+      if (reconfiguring) return "reconfiguring";
+      if (admin_failed) return "admin_failed";
+      if (selection_failed) return "selection_failed";
+      return "no_space_assigned";
+    }
     std::optional<std::string> selected_for(std::string_view client) const {
       if (!controller || stopping || reconfiguring || admin_failed || selection_failed) return std::nullopt;
       const auto desktops = controller->desktop_clients();
@@ -283,15 +306,15 @@ namespace multiseat {
     }
 
     void change_profiles(const std::shared_ptr<admin_request_t> &request, bool pending) noexcept {
-      profile_launch_result_t result {503, "Profile configuration could not be restored. Restart Polaris after reviewing the catalog."};
+      profile_launch_result_t result {503, "Space settings could not be restored. Restart Polaris after reviewing the Spaces catalog.",
+        "spaces_admin_failed", "Restart Polaris."};
       try {
         bool host_active;
         { std::lock_guard lock(mutex); host_active = std::any_of(host_launches.begin(), host_launches.end(),
             [](const auto &weak) { const auto p = weak.lock(); return p && !p->is_cancelled(); }); }
         if (pending || host_active || !controller || !controller->idle()) {
           { std::lock_guard lock(mutex); blocked_clients.clear(); }
-          result = {409, request->edit ? "Stop space streams and wait for cleanup before renaming or removing a space" : request->creation ? "Stop profile sessions and wait for cleanup before creating a profile" :
-            "Stop profile sessions and wait for cleanup before changing assignments"};
+          result = {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
         } else {
           {
             std::lock_guard lock(mutex);
@@ -319,10 +342,10 @@ namespace multiseat {
                 controller = std::move(replacement);
                 admin_failed = false;
                 fallback_catalog.clear(); blocked_clients.clear();
-                result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Steam profile created" : "Profile assignment saved"} :
-                  profile_launch_result_t {409, request->edit ? "Space change was not saved; refresh before retrying" : request->creation ?
-                    "Profile was not created. Refresh before retrying; retained provisioning resources may need administrator review." :
-                    "Assignment was not saved; refresh before retrying"};
+                result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : "Default Space saved"} :
+                  profile_launch_result_t {409, request->edit ? "The Space change was not saved. Refresh before retrying." : request->creation ?
+                    "The Space was not created. Refresh before retrying; retained resources may need administrator review." :
+                    "The Default Space was not saved. Refresh before retrying.", "spaces_change_not_saved", "Refresh Spaces and try again."};
               }
             }
           }
@@ -352,8 +375,8 @@ namespace multiseat {
           std::erase_if(tracked, [](const auto &weak) { const auto launch = weak.lock(); return !launch || launch->is_cancelled(); });
         }
         if (drain) {
-          if (change) change->promise.set_value({503, "The profile controller is stopping"});
-          for (const auto &request : pending) finish(request, {503, "The profile controller is stopping"});
+          if (change) change->promise.set_value({503, "Spaces are shutting down.", "spaces_stopping"});
+          for (const auto &request : pending) finish(request, {503, "Spaces are shutting down.", "spaces_stopping"});
           pending.clear();
           bool complete = false;
           try { complete = !controller || controller->shutdown(); } catch (...) {}
@@ -374,8 +397,8 @@ namespace multiseat {
             const auto &request = *it;
             const auto launch = request->launch.lock();
             std::optional<profile_launch_result_t> done;
-            if (!launch || launch->is_cancelled()) done = profile_launch_result_t {409, "Profile launch was cancelled"};
-            else if (std::chrono::steady_clock::now() >= request->deadline) done = profile_launch_result_t {504, "Profile startup timed out"};
+            if (!launch || launch->is_cancelled()) done = profile_launch_result_t {409, "The Space launch was cancelled.", "space_launch_cancelled"};
+            else if (std::chrono::steady_clock::now() >= request->deadline) done = space_start_timeout_result;
             else if (reconciled) {
               try {
                 if (!request->seat) {
@@ -384,10 +407,10 @@ namespace multiseat {
                   if (!request->seat) done = started.result;
                 } else {
                   const auto state = controller->poll(launch, *request->seat);
-                  if (state == profile_poll_e::selected) done = profile_launch_result_t {200, "Profile ready"};
-                  else if (state == profile_poll_e::failed) done = profile_launch_result_t {};
+                  if (state == profile_poll_e::selected) done = profile_launch_result_t {200, "Space ready"};
+                  else if (state == profile_poll_e::failed) done = space_runtime_unavailable_result;
                 }
-              } catch (...) { done = profile_launch_result_t {}; }
+              } catch (...) { done = space_runtime_unavailable_result; }
             }
             if (done) { finish(request, *done); it = pending.erase(it); }
             else ++it;
@@ -453,23 +476,26 @@ namespace multiseat {
 
   profile_launch_result_t profile_launch_service_t::prepare(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
                                                          std::string_view expected_profile, std::string_view target) {
-    if (!launch || !routes_client(launch->unique_id)) return {404, "No profile is assigned to this device"};
+    if (!launch || !routes_client(launch->unique_id))
+      return {404, "No Space is assigned to this device.", "no_space_assigned", "Open Spaces in Polaris and set this device's Default Space."};
     launch->require_worker_connection();
     if (launch->is_cancelled() || launch->lifecycle_generation || launch->watch_only || launch->input_only ||
         launch->temporary_authorization || !(launch->perm & crypto::PERM::launch) ||
         launch->width <= 0 || launch->height <= 0 || launch->fps <= 0 || launch->fps % 1000 != 0 || launch->enable_hdr) {
-      return {400, "Profile launch requires a new authorized SDR session with a whole frame rate"};
+      return {400, "A Space stream needs a new SDR session at a whole frame rate.", "space_stream_options",
+        "Set Play Setup to Auto frame rate with HDR off."};
     }
     std::string target_name;
     if (!target.empty()) {
       const auto snapshot = library_for_client(launch->unique_id, expected_profile);
-      if (!snapshot) return {409, "This Space library is no longer available. Refresh the library."};
+      if (!snapshot) return {409, "This Space's library is no longer available.", "space_library_unavailable", "Refresh the library."};
       if (target == "big-picture-v1") target_name = "Steam Big Picture";
       else {
         const auto game = std::find_if(snapshot->library.games.begin(), snapshot->library.games.end(),
           [&](const auto &item) { return item.target == target; });
         if (!snapshot->library.available || game == snapshot->library.games.end())
-          return {409, "This game is no longer installed in the selected Space. Open Steam Big Picture or refresh the library."};
+          return {409, "This game is no longer installed in the selected Space.", "space_game_missing",
+            "Open Steam Big Picture in that Space, or refresh the library."};
         target_name = game->name;
       }
     }
@@ -481,18 +507,19 @@ namespace multiseat {
       std::lock_guard lock(impl_->mutex);
       if (impl_->stopping || impl_->reconfiguring || impl_->admin_failed || impl_->selection_failed || !impl_->controller ||
           impl_->tracked.size() >= 64 || launch->lifecycle_generation)
-        return {503, "Profile launch admission is unavailable"};
+        return {503, "Spaces are temporarily unavailable on the host.", "spaces_unavailable",
+          "Refresh the library. If this continues, restart Polaris."};
       if (!impl_->controller->routes_client(launch->unique_id) ||
           (!expected_profile.empty() && impl_->selected_for(launch->unique_id) !=
             std::optional<std::string>{expected_profile}))
-        return {409, "The profile assignment changed; refresh the library"};
+        return {409, "The Space assignment changed.", "space_assignment_changed", "Refresh the library."};
       const auto selected = impl_->selected_for(launch->unique_id);
-      if (!selected) return {409, "Choose an available space before launching"};
+      if (!selected) return {409, "No Space is selected for this device.", "no_space_selected", "Choose a Space in the library."};
       launch->worker_profile_key = *selected;
       launch->worker_library_target = std::string(target);
       launch->worker_library_name = std::move(target_name);
       const auto generation = next_generation.fetch_add(1);
-      if (generation < (1ULL << 63) || generation == std::numeric_limits<std::uint64_t>::max()) return {};
+      if (generation < (1ULL << 63) || generation == std::numeric_limits<std::uint64_t>::max()) return space_runtime_unavailable_result;
       launch->lifecycle_generation = generation;
       launch->session_token = uuid_util::uuid_t::generate().string();
       launch->client_do_cmds.clear();
@@ -504,7 +531,7 @@ namespace multiseat {
     if (future.wait_until(request->deadline) != std::future_status::ready) {
       launch->cancel();
       impl_->wake.notify_all();
-      return {504, "Profile startup timed out"};
+      return space_start_timeout_result;
     }
     return future.get();
   }
@@ -552,7 +579,8 @@ namespace multiseat {
       impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog,
       static_cast<bool>(impl_->admin.reload && impl_->admin.create),
       static_cast<bool>(impl_->admin.reload && impl_->admin.edit),
-      impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}, std::move(activity)};
+      impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}, std::move(activity),
+      impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{}};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
@@ -562,14 +590,14 @@ namespace multiseat {
     {
       std::lock_guard lock(impl_->mutex);
       if (!impl_->admin.reload || !impl_->admin.persist || !impl_->controller || impl_->admin_failed || impl_->stopping)
-        return {503, "Profile administration is unavailable"};
-      if (request->client.empty() || request->client.size() > 256) return {400, "Invalid paired device"};
+        return {503, "Space administration is unavailable.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
+      if (request->client.empty() || request->client.size() > 256) return {400, "Invalid paired device.", "invalid_request"};
       const auto catalog = impl_->controller->profile_catalog();
       if (!request->profile.empty() && std::none_of(catalog.begin(), catalog.end(),
-          [&](const auto &entry) { return entry.id == request->profile && !entry.archived; })) return {404, "Unknown profile"};
+          [&](const auto &entry) { return entry.id == request->profile && !entry.archived; })) return {404, "Unknown Space.", "space_unknown", "Refresh Spaces."};
       if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
           [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
-        return {409, "Stop profile sessions and wait for cleanup before changing assignments"};
+        return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
       impl_->reconfiguring = true;
       // Fence even a previously unassigned device before the owner thread
       // starts the catalog transaction. It must not fall through to host apps.
@@ -579,7 +607,7 @@ namespace multiseat {
     }
     impl_->wake.notify_all();
     if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
-      return {202, "The assignment change is still running; refresh before retrying"};
+      return {202, "The Default Space is still being saved. Refresh before retrying.", "spaces_change_pending"};
     return future.get();
   }
 
@@ -588,18 +616,29 @@ namespace multiseat {
     profile_client_spaces_t result;
     const auto selected = impl_->selected_for(client);
     result.available = selected.has_value(); result.selected = selected.value_or("");
+    if (!result.available) result.unavailable_reason = impl_->unavailable_reason();
     result.can_switch = result.available;
     const auto desktops = impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{};
     result.desktop_allowed = std::find(desktops.begin(), desktops.end(), client) != desktops.end();
+    result.default_space = impl_->controller ? impl_->controller->profile_for_client(client).value_or("") : "";
+    result.capacity = impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{};
     auto activity = impl_->controller ? impl_->controller->profile_activity() : std::vector<profile_activity_t>{};
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock(); launch && !launch->is_cancelled()) {
       if (std::none_of(activity.begin(), activity.end(), [&](const auto &item) { return item.client == launch->unique_id; }))
         activity.push_back({launch->worker_profile_key, launch->unique_id,
           launch->setup_state.load() == rtsp_stream::launch_session_t::setup_state_e::started ? "running" : "starting"});
     }
-    for (const auto &item : activity) if (item.client == client) result.can_switch = false;
+    for (const auto &item : activity) if (item.client == client && result.can_switch) {
+      result.can_switch = false; result.switch_blocked_reason = "your_stream";
+    }
     for (const auto &weak : impl_->host_launches) if (const auto launch = weak.lock();
-        launch && launch->unique_id == client && !launch->is_cancelled()) result.can_switch = false;
+        launch && launch->unique_id == client && !launch->is_cancelled() && result.can_switch) {
+      result.can_switch = false; result.switch_blocked_reason = "desktop_stream";
+    }
+    // A full budget blocks every Space this device is not already playing in.
+    const bool at_capacity = result.capacity &&
+      (result.capacity->active_seats >= result.capacity->max_seats ||
+       result.capacity->encoder_sessions >= result.capacity->max_encoder_sessions);
     const auto catalog = impl_->controller ? impl_->controller->profile_catalog() : impl_->fallback_catalog;
     for (const auto &profile : catalog) {
       if (!impl_t::permitted(profile, client)) continue;
@@ -607,7 +646,11 @@ namespace multiseat {
       for (const auto &item : activity) if (item.profile == profile.id) {
         state = item.client == client ? item.state : "in_use"; break;
       }
-      result.spaces.push_back({profile.id, profile.name, state, selected == profile.id, profile.library_enabled});
+      profile_client_space_t space {profile.id, profile.name, state, selected == profile.id, profile.library_enabled};
+      if (state != "ready") space.blocked_reason = state;
+      else if (at_capacity) space.blocked_reason = "at_capacity";
+      else space.can_open = true;
+      result.spaces.push_back(std::move(space));
     }
     return result;
   }
@@ -616,29 +659,30 @@ namespace multiseat {
                                                                 std::string_view previous) {
     std::lock_guard lock(impl_->mutex);
     const auto selected = impl_->selected_for(client);
-    if (!selected) return {503, "Spaces are unavailable. Refresh and try again."};
+    if (!selected) return {503, "Spaces are unavailable. Refresh and try again.", "spaces_unavailable"};
     if (client.empty() || client.size() > 128 || profile.empty() || profile.size() > 128 || previous.size() > 128)
-      return {400, "Invalid space selection"};
+      return {400, "Invalid Space selection.", "invalid_request"};
     const auto catalog = impl_->controller->profile_catalog();
     const auto desktops = impl_->controller->desktop_clients();
     const bool desktop = profile == "desktop" && std::find(desktops.begin(), desktops.end(), client) != desktops.end();
     if (!desktop && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
           return entry.id == profile && impl_t::permitted(entry, client);
-        })) return {404, "This environment is not available to this device"};
-    if (*selected != previous) return {409, "Your selected space changed. Refresh before choosing again."};
+        })) return {404, "This Space is not available to this device.", "space_not_permitted",
+          "Ask the host owner to allow it under Device Access in Polaris."};
+    if (*selected != previous) return {409, "Your selected Space changed.", "selection_changed", "Refresh before choosing again."};
     for (const auto &weak : impl_->host_launches) if (const auto launch = weak.lock();
         launch && launch->unique_id == client && !launch->is_cancelled() && *selected != profile)
-      return {409, "End your desktop stream before switching environments"};
+      return {409, "End your desktop stream before changing Space.", "desktop_stream_active"};
     // Re-selecting the same Space is harmless while it is active.
     if (*selected == profile) return {200, "Space selected"};
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock();
       launch && launch->unique_id == client && !launch->is_cancelled())
-      return {409, "End your stream before switching spaces"};
+      return {409, "End your stream before changing Space.", "your_stream_active"};
     for (const auto &activity : impl_->controller->profile_activity()) if (activity.client == client)
-      return {409, "Wait for your space to finish closing before switching"};
+      return {409, "Wait for your Space to finish closing before changing Space.", "space_closing"};
     try {
-      if (!impl_->save_selection(client, profile)) return {503, "Space selection was not saved. Refresh before retrying."};
-    } catch (...) { return {503, "Space selection was not saved. Refresh before retrying."}; }
+      if (!impl_->save_selection(client, profile)) return {503, "The Space selection was not saved.", "selection_not_saved", "Refresh before retrying."};
+    } catch (...) { return {503, "The Space selection was not saved.", "selection_not_saved", "Refresh before retrying."}; }
     return {200, "Space selected"};
   }
 
@@ -649,44 +693,44 @@ namespace multiseat {
     {
       std::lock_guard lock(impl_->mutex);
       if (!impl_->admin.reload || !impl_->admin.access || !impl_->controller || impl_->admin_failed || impl_->stopping)
-        return {503, "Space access administration is unavailable"};
+        return {503, "Space access changes are unavailable right now.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
       if (request->client.empty() || request->client.size() > 128 || request->profile.empty() || request->profile.size() > 128)
-        return {400, "Invalid space or paired device"};
+        return {400, "Invalid Space or paired device.", "invalid_request"};
       const auto catalog = impl_->controller->profile_catalog();
       if (request->profile != "desktop" && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == request->profile && !entry.archived; }))
-        return {404, "Unknown space"};
+        return {404, "Unknown Space.", "space_unknown", "Refresh Spaces."};
       if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
         [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
-        return {409, "Stop space streams and wait for cleanup before changing access"};
+        return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
       impl_->reconfiguring = true; impl_->blocked_clients.insert(request->client);
       impl_->queued_admin = request; impl_->active_admin = request;
     }
     impl_->wake.notify_all();
     if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
-      return {202, "Space access is still being saved. Refresh before retrying."};
+      return {202, "Space access is still being saved. Refresh before retrying.", "spaces_change_pending"};
     return future.get();
   }
 
   profile_launch_result_t profile_launch_service_t::create_steam_profile(profiles::steam_create_request_t creation) {
-    if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid profile name and Steam setup"};
+    if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);
-      if (impl_->stopping) return {503, "The profile controller is stopping"};
+      if (impl_->stopping) return {503, "Spaces are shutting down.", "spaces_stopping"};
       if (impl_->active_admin && impl_->active_admin->creation &&
           impl_->active_admin->creation->request_id == creation.request_id) {
-        if (*impl_->active_admin->creation != creation) return {409, "This creation request is already in use"};
+        if (*impl_->active_admin->creation != creation) return {409, "This creation request is already in use.", "creation_request_in_use"};
         request = impl_->active_admin;
       } else {
         if (!impl_->admin.reload || !impl_->admin.create || !impl_->controller || impl_->admin_failed)
-          return {503, "Profile creation is unavailable"};
+          return {503, "Space creation is unavailable.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
         if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
             [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
-          return {409, "Stop profile sessions and wait for cleanup before creating a profile"};
+          return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
         const auto catalog = impl_->controller->profile_catalog();
         if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
               return entry.id == creation.source_profile_id && entry.steam;
-            })) return {404, "Select an existing configured Steam profile"};
+            })) return {404, "Select an existing Steam Space to base the new one on.", "space_source_unknown"};
         request = std::make_shared<impl_t::admin_request_t>();
         request->creation = std::move(creation);
         impl_->reconfiguring = true;
@@ -695,27 +739,27 @@ namespace multiseat {
     }
     impl_->wake.notify_all();
     if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
-      return {202, "The profile is still being created; refresh before retrying"};
+      return {202, "The Space is still being created. Refresh before retrying.", "spaces_change_pending"};
     return request->future.get();
   }
 
   profile_launch_result_t profile_launch_service_t::edit_profile(profiles::edit_request_t edit) {
-    if (!profiles::valid_edit_request(edit)) return {400, "Enter a valid space name and operation"};
+    if (!profiles::valid_edit_request(edit)) return {400, "Enter a valid Space name and operation.", "invalid_request"};
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);
-      if (impl_->stopping) return {503, "The space controller is stopping"};
+      if (impl_->stopping) return {503, "Spaces are shutting down.", "spaces_stopping"};
       if (impl_->active_admin && impl_->active_admin->edit && *impl_->active_admin->edit == edit) {
         request = impl_->active_admin;
       } else {
         if (!impl_->admin.reload || !impl_->admin.edit || !impl_->controller || impl_->admin_failed)
-          return {503, "Space management is unavailable"};
+          return {503, "Space management is unavailable.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
         if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
             [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
-          return {409, "Stop space streams and wait for cleanup before renaming or removing a space"};
+          return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
         const auto catalog = impl_->controller->profile_catalog();
         if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == edit.profile_id; }))
-          return {404, "Space not found. Refresh spaces"};
+          return {404, "Space not found.", "space_unknown", "Refresh Spaces."};
         request = std::make_shared<impl_t::admin_request_t>();
         request->edit = std::move(edit);
         impl_->reconfiguring = true;
@@ -724,7 +768,7 @@ namespace multiseat {
     }
     impl_->wake.notify_all();
     if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
-      return {202, "The space change is still running; refresh before retrying"};
+      return {202, "The Space change is still being saved. Refresh before retrying.", "spaces_change_pending"};
     return request->future.get();
   }
 
@@ -746,6 +790,16 @@ namespace multiseat {
     impl_->stopping = true;
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock()) launch->cancel();
     impl_->wake.notify_all();
+  }
+  bool profile_launch_service_t::session_starting(std::string_view client) const {
+    std::lock_guard lock(impl_->mutex);
+    for (const auto &weak : impl_->tracked) {
+      const auto launch = weak.lock();
+      if (launch && !launch->is_cancelled() && launch->unique_id == client &&
+          launch->setup_state.load() != rtsp_stream::launch_session_t::setup_state_e::started)
+        return true;
+    }
+    return false;
   }
   std::optional<std::string> profile_launch_service_t::session_token(std::string_view client) const {
     std::lock_guard lock(impl_->mutex);
