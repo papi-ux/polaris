@@ -4,6 +4,38 @@ import hashlib
 from pathlib import Path
 import stat
 import sys
+import xml.etree.ElementTree as ElementTree
+
+POLICY = 'dev.polaris-stream.app.Polaris.policy'
+# The only operations Polaris asks polkit for, each bound to one helper operation.
+POLICY_ACTIONS = {
+    'dev.polaris-stream.app.polaris.spaces-security-install': 'install',
+    'dev.polaris-stream.app.polaris.spaces-docker-access': 'docker-access',
+}
+
+
+def verify_policy(base, prefix):
+    """Every action runs only the packaged helper, and every use asks an administrator in a local session."""
+    path = base / 'share/polkit-1/actions' / POLICY
+    assert path.is_file() and not path.is_symlink(), 'Package must ship ' + str(path)
+    assert not path.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    source = path.read_text()
+    assert '<!ENTITY' not in source
+    root = ElementTree.fromstring(source)
+    assert root.tag == 'policyconfig'
+    actions = {}
+    for action in root.findall('action'):
+        identity = action.get('id')
+        assert identity not in actions, identity
+        defaults = action.find('defaults')
+        assert defaults is not None and [(item.tag, item.text) for item in defaults] == [
+            ('allow_any', 'no'), ('allow_inactive', 'no'), ('allow_active', 'auth_admin')], identity
+        annotations = {item.get('key'): item.text for item in action.findall('annotate')}
+        assert set(annotations) == {'org.freedesktop.policykit.exec.path', 'org.freedesktop.policykit.exec.argv1'}, identity
+        assert annotations['org.freedesktop.policykit.exec.path'] == prefix + '/bin/polaris-spaces-setup', identity
+        assert (action.findtext('message') or '').strip() and (action.findtext('description') or '').strip(), identity
+        actions[identity] = annotations['org.freedesktop.policykit.exec.argv1']
+    assert actions == POLICY_ACTIONS, actions
 
 
 def verify(root, prefix='/usr'):
@@ -50,6 +82,7 @@ def verify(root, prefix='/usr'):
                  'usr/lib/udev/rules.d/97-polaris-multiseat-input.rules',
                  'var/lib/polaris/spaces-security/ready.json'):
         assert not (root / path).exists(), 'Package must not activate ' + path
+    verify_policy(base, prefix)
     return values['RELEASE']
 
 

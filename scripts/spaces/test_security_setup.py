@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import copy
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,7 @@ class Host(s.System):
         self.fail = ''
         self.calls = []
         self.compiles = 0
+        self.exempt = 'never asked'
 
     def read(self, path, optional=False, **kwargs):
         if path not in self.files and not optional:
@@ -48,8 +50,12 @@ class Host(s.System):
     def modules(self):
         return copy.deepcopy(self.installed)
 
-    def activity(self):
+    def activity(self, exempt=None):
+        self.exempt = exempt
         return ['polaris (pid 4242)'] if self.active else []
+
+    def tool(self, name):
+        return '/usr/bin/' + name
 
     def compile(self):
         self.compiles += 1
@@ -182,6 +188,23 @@ class Transaction(unittest.TestCase):
         self.assertTrue(message.startswith('Quit Polaris and stop Spaces streams before changing security setup.'))
         self.assertIn('Still active: polaris (pid 4242).', message)
         self.assertIn('systemctl status PID', message)
+        self.assertIsNone(self.host.exempt)
+
+    def test_install_asked_from_polaris_keeps_that_polaris_open_and_names_what_else_must_stop(self):
+        h = self.host
+        h.active = True
+        with self.assertRaises(s.SetupError) as raised:
+            h.change('install', invoker=3100)
+        self.assertEqual(h.exempt, 3100)
+        self.assertEqual((h.calls, h.compiles), ([], 0))
+        message = str(raised.exception)
+        self.assertTrue(message.startswith('Stop Spaces streams and quit any other Polaris before changing security setup.'))
+        self.assertIn('Still active: polaris (pid 4242).', message)
+        self.assertIn('systemctl status PID', message)
+        self.assertNotIn('Reopen Polaris', message)
+        h.active = False
+        self.assertIn('Spaces security files are installed.', h.change('install', invoker=3100))
+        self.assertEqual(h.state_value()['phase'], 'installed')
 
     def test_identical_unowned_rule_is_adopted_and_removed_with_the_setup(self):
         h = self.host
@@ -434,6 +457,122 @@ class Boundaries(unittest.TestCase):
             (proc / '50' / 'comm').unlink()
             (proc / '50' / 'comm').mkdir()
             self.assertIn('1 process or input entry that could not be read', host.activity(proc, inputs))
+
+    def test_activity_leaves_out_only_the_asking_polaris_and_sees_a_running_space_by_its_domain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc, inputs = root / 'proc', root / 'input'
+            inputs.mkdir()
+            processes = [(310, 'polaris', 'unconfined_u:unconfined_r:unconfined_t:s0'),
+                         (311, 'polaris', 'unconfined_u:unconfined_r:unconfined_t:s0'),
+                         (400, 'steam', 'system_u:system_r:' + s.WORKER_TYPE + ':s0:c12,c34\x00'),
+                         (401, 'gamescope', 'system_u:system_r:' + s.WORKER_TYPE + ':s0:c12,c34\n'),
+                         (402, 'bash', 'unconfined_u:unconfined_r:unconfined_t:s0'),
+                         (403, 'worker', 'system_u:system_r:' + s.WORKER_TYPE + 'ish:s0')]
+            for pid, command, context in processes:
+                (proc / str(pid) / 'attr').mkdir(parents=True)
+                (proc / str(pid) / 'comm').write_text(command + '\n')
+                (proc / str(pid) / 'attr' / 'current').write_text(context)
+            host = s.System()
+            self.assertEqual(host.activity(proc, inputs, exempt=310), ['polaris (pid 311)', 'a running Space (2 processes)'])
+            self.assertEqual(host.activity(proc, inputs), ['polaris (pid 310)', 'polaris (pid 311)', 'a running Space (2 processes)'])
+            (proc / '311' / 'comm').write_text('bash\n')
+            (proc / '401' / 'attr' / 'current').unlink()
+            self.assertEqual(host.activity(proc, inputs, exempt=310), ['a running Space (1 process)'])
+            # Without a Polaris process in the way, the exemption changes nothing about what still counts.
+            (proc / '400' / 'attr' / 'current').unlink()
+            (proc / '400' / 'attr' / 'current').mkdir()
+            self.assertEqual(host.activity(proc, inputs, exempt=310), ['1 process or input entry that could not be read'])
+            (proc / '400' / 'attr' / 'current').rmdir()
+            self.assertEqual(host.activity(proc, inputs, exempt=310), [])
+
+    def test_only_a_polaris_parent_running_as_the_pkexec_account_is_the_invoker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            def process(pid, command, uid):
+                (proc / str(pid)).mkdir(exist_ok=True)
+                (proc / str(pid) / 'comm').write_text(command + '\n')
+                (proc / str(pid) / 'status').write_text('Name:\t' + command + '\nUid:\t' + str(uid) + '\t0\t0\t0\nGid:\t1000\t1000\t1000\t1000\n')
+            process(3100, 'polaris', 1000)
+            asked = {'PKEXEC_UID': '1000'}
+            self.assertEqual(s.invoking_polaris(asked, proc, parent=3100), 3100)
+            process(3101, 'polaris-1.4.9.ab', 1000)
+            self.assertEqual(s.invoking_polaris(asked, proc, parent=3101), 3101)
+            # Real uid is the first Uid field; the effective uid of a setuid parent does not count.
+            process(3102, 'polaris', 0)
+            self.assertIsNone(s.invoking_polaris(asked, proc, parent=3102))
+            self.assertIsNone(s.invoking_polaris({'PKEXEC_UID': '1001'}, proc, parent=3100))
+            process(3103, 'bash', 1000)
+            self.assertIsNone(s.invoking_polaris(asked, proc, parent=3103))
+            process(3104, 'polarisish', 1000)
+            self.assertIsNone(s.invoking_polaris(asked, proc, parent=3104))
+            self.assertIsNone(s.invoking_polaris({}, proc, parent=3100))
+            self.assertIsNone(s.invoking_polaris({'SUDO_UID': '1000'}, proc, parent=3100))
+            self.assertIsNone(s.invoking_polaris(asked, proc, parent=1))
+            self.assertIsNone(s.invoking_polaris(asked, proc, parent=4040))
+            (proc / '3100' / 'status').unlink()
+            self.assertIsNone(s.invoking_polaris(asked, proc, parent=3100))
+            with self.assertRaises(s.SetupError):
+                s.invoking_polaris({'PKEXEC_UID': '1000 '}, proc, parent=3101)
+
+    def test_the_requesting_account_comes_from_pkexec_or_sudo_and_never_from_a_malformed_value(self):
+        self.assertEqual(s.requesting_uid({'PKEXEC_UID': '1000', 'SUDO_UID': '1001'}), 1000)
+        self.assertEqual(s.requesting_uid({'SUDO_UID': '1001'}), 1001)
+        self.assertIsNone(s.requesting_uid({}))
+        for value in ('', '-1', '1000x', '99999999999', '2147483648', ' 1000'):
+            with self.assertRaises(s.SetupError):
+                s.requesting_uid({'PKEXEC_UID': value})
+
+    def test_docker_access_starts_docker_and_adds_only_the_account_that_asked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / 'docker'
+            docker.write_text('')
+            accounts = {1000: types.SimpleNamespace(pw_name='papi', pw_gid=1000), 1002: types.SimpleNamespace(pw_name='guest', pw_gid=966)}
+            group = types.SimpleNamespace(gr_gid=966, gr_mem=['friend'])
+            def account(uid):
+                return accounts[uid]
+            def groups(name):
+                self.assertEqual(name, 'docker')
+                return group
+            h = Host()
+            message = h.docker_access(1000, account, groups, docker)
+            self.assertEqual(h.calls, [['/usr/bin/systemctl', 'enable', '--now', 'docker.service'],
+                                       ['/usr/bin/usermod', '-aG', 'docker', '--', 'papi']])
+            self.assertIn('restart this PC, then recheck', message)
+            group.gr_mem.append('papi')
+            h.calls = []
+            self.assertEqual(h.docker_access(1000, account, groups, docker), 'Docker is running, and papi already has access to it.')
+            self.assertEqual(h.calls, [['/usr/bin/systemctl', 'enable', '--now', 'docker.service']])
+            h.calls = []
+            self.assertIn('already has access', h.docker_access(1002, account, groups, docker))
+            self.assertEqual(len(h.calls), 1)
+            refusals = [(None, account, groups, docker, 'account Polaris runs as'), (0, account, groups, docker, 'account Polaris runs as'),
+                        (1001, account, groups, docker, 'does not exist'),
+                        (1000, account, groups, Path(directory) / 'missing', 'not installed'),
+                        (1000, account, lambda name: {}[name], docker, 'no docker group')]
+            for uid, accounts_lookup, groups_lookup, path, words in refusals:
+                h.calls = []
+                with self.assertRaises(s.SetupError) as raised:
+                    h.docker_access(uid, accounts_lookup, groups_lookup, path)
+                self.assertIn(words, str(raised.exception))
+                self.assertEqual(h.calls, [])
+
+    def test_main_prints_the_started_line_first_and_only_when_pkexec_ran_it(self):
+        with ExitStack() as contexts:
+            contexts.enter_context(patch.object(s.os, 'geteuid', return_value=0))
+            contexts.enter_context(patch.object(s, 'trusted'))
+            contexts.enter_context(patch.object(s, 'invoking_polaris', return_value=None))
+            access = contexts.enter_context(patch.object(s.System, 'docker_access', return_value='Docker is running.'))
+            output = contexts.enter_context(patch('sys.stdout', new_callable=io.StringIO))
+            self.assertEqual(s.main(['docker-access'], {'PKEXEC_UID': '1000'}), 0)
+            self.assertEqual(output.getvalue(), s.STARTED + '\nDocker is running.\n')
+            access.assert_called_once_with(1000)
+            output.seek(0); output.truncate()
+            self.assertEqual(s.main(['docker-access'], {'SUDO_UID': '1000'}), 0)
+            self.assertEqual(output.getvalue(), 'Docker is running.\n')
+            with self.assertRaises(s.SetupError) as raised:
+                s.main(['docker-install'], {'PKEXEC_UID': '1000'})
+            self.assertIn('{status|install|remove|docker-access}', str(raised.exception))
 
     def test_trusted_files_reject_mutable_parents_symlinks_links_and_owners(self):
         file_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_nlink=1)

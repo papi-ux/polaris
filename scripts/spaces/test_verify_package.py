@@ -37,9 +37,47 @@ class Package(unittest.TestCase):
         self.helper.write_text(template); self.helper.chmod(0o755)
         seccomp = (source / 'containers/multiseat/seccomp/steam.json').read_bytes()
         (self.data.parent / ('steam-seccomp-' + hashlib.sha256(seccomp).hexdigest() + '.json')).write_bytes(seccomp)
+        policy = (source / 'packaging/linux/dev.polaris-stream.app.Polaris.policy.in').read_text()
+        for key, value in {'POLARIS_PUBLISHER_WEBSITE': 'https://papi-ux.com/polaris/', 'POLARIS_DESKTOP_ICON': 'polaris',
+                           'POLARIS_POLKIT_ACTION_PREFIX': 'dev.polaris-stream.app.polaris',
+                           'CMAKE_INSTALL_FULL_BINDIR': '/usr/bin'}.items():
+            policy = policy.replace('@' + key + '@', value)
+        self.assertNotIn('@', policy)
+        self.policy = self.root / 'usr/share/polkit-1/actions/dev.polaris-stream.app.Polaris.policy'
+        self.policy.parent.mkdir(parents=True)
+        self.policy.write_text(policy)
 
     def test_matching_inert_payload(self):
         self.assertEqual(verify(self.root), self.release)
+
+    def test_polkit_actions_only_run_the_packaged_helper_and_always_ask(self):
+        original = self.policy.read_text()
+        changes = [
+            ('<allow_active>auth_admin</allow_active>', '<allow_active>auth_admin_keep</allow_active>'),
+            ('<allow_active>auth_admin</allow_active>', '<allow_active>yes</allow_active>'),
+            ('<allow_any>no</allow_any>', '<allow_any>auth_admin</allow_any>'),
+            ('<allow_inactive>no</allow_inactive>', '<allow_inactive>auth_admin</allow_inactive>'),
+            ('>/usr/bin/polaris-spaces-setup<', '>/usr/bin/bash<'),
+            ('>docker-access<', '>remove<'),
+            ('.spaces-docker-access"', '.spaces-anything"'),
+            ('<annotate key="org.freedesktop.policykit.exec.argv1">install</annotate>', ''),
+            ('</policyconfig>', '<action id="dev.polaris-stream.app.polaris.extra"><description>x</description><message>x</message>'
+             '<defaults><allow_any>no</allow_any><allow_inactive>no</allow_inactive><allow_active>auth_admin</allow_active></defaults>'
+             '<annotate key="org.freedesktop.policykit.exec.path">/usr/bin/polaris-spaces-setup</annotate>'
+             '<annotate key="org.freedesktop.policykit.exec.argv1">remove</annotate></action></policyconfig>'),
+        ]
+        for old, new in changes:
+            self.assertEqual(original.count(old), 1 if old != '<allow_active>auth_admin</allow_active>' and
+                             old != '<allow_any>no</allow_any>' and old != '<allow_inactive>no</allow_inactive>' and
+                             old != '>/usr/bin/polaris-spaces-setup<' else 2, old)
+            self.policy.write_text(original.replace(old, new, 1))
+            with self.assertRaises(AssertionError, msg=new):
+                verify(self.root)
+        self.policy.write_text(original)
+        self.assertEqual(verify(self.root), self.release)
+        self.policy.unlink()
+        with self.assertRaises(AssertionError):
+            verify(self.root)
 
     def test_changed_payload_or_helper_cannot_pass(self):
         for path in self.data.iterdir():

@@ -35,6 +35,19 @@ configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security_data.h.in
                "${CMAKE_BINARY_DIR}/generated/spaces_security_data.h" @ONLY)
 configure_file("${CMAKE_SOURCE_DIR}/scripts/spaces/security_setup.py.in"
                "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup" @ONLY)
+# Polaris can run that helper through pkexec from its Spaces page. The polkit policy names the
+# installed helper, so the password prompt says what Polaris is about to change, and Polaris checks
+# the exact installed bytes before it offers the button. polkit action ids are lower case.
+string(TOLOWER "${PROJECT_FQDN}" POLARIS_POLKIT_ACTION_PREFIX)
+set(POLARIS_POLKIT_POLICY_NAME "${PROJECT_FQDN}.policy")
+set(POLARIS_POLKIT_POLICY_PATH "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polkit-1/actions/${POLARIS_POLKIT_POLICY_NAME}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_SOURCE_DIR}/packaging/linux/${POLARIS_POLKIT_POLICY_NAME}.in")
+configure_file("${CMAKE_SOURCE_DIR}/packaging/linux/${POLARIS_POLKIT_POLICY_NAME}.in"
+               "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}" @ONLY)
+file(READ "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}" POLARIS_POLKIT_POLICY_DATA)
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin_data.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_host_admin_data.h" @ONLY)
 # Only a catalog reviewed into the host build may authorize runtime downloads. A lab build may
 # compile another catalog and pull from another repository to test Spaces end to end without
 # publishing; release workflows never set either, and a unit test fails if one does.
