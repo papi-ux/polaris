@@ -2958,9 +2958,18 @@ namespace confighttp {
       std::string label;
       std::string platform;
       std::string warning;
+      std::vector<emulator_library::prerequisite_t> prerequisites;
       bool folder_exists = false;
       bool scannable = false;
     };
+
+    nlohmann::json prerequisites_json(const std::vector<emulator_library::prerequisite_t> &checks) {
+      auto list = nlohmann::json::array();
+      for (const auto &check : checks) {
+        list.push_back({{"id", check.id}, {"severity", check.severity}, {"message", check.message}, {"action", check.action}});
+      }
+      return list;
+    }
 
     rom_folder_plan_t plan_rom_folder(const emulator_library::source_t &source) {
       rom_folder_plan_t plan;
@@ -2971,7 +2980,9 @@ namespace confighttp {
       plan.label = emulator_library::source_label(source, plan.preset);
       if (plan.preset != nullptr) {
         plan.platform = std::string(plan.preset->platform);
-        plan.install = emulator_library::detect_install(*plan.preset, source.launcher, game_library::library_home_roots(), service_path_env());
+        const auto home_roots = game_library::library_home_roots();
+        plan.install = emulator_library::detect_install(*plan.preset, source.launcher, home_roots, service_path_env());
+        plan.prerequisites = emulator_library::prerequisites(*plan.preset, plan.install, source.path, home_roots);
         if (plan.install.kind == emulator_library::install_e::missing) {
           plan.warning = plan.install.location.empty() ?
             plan.label + " is not installed on this host; imported entries launch once it is." :
@@ -3019,6 +3030,7 @@ namespace confighttp {
         {"folder_exists", plan.folder_exists},
         {"install", {{"kind", std::string(emulator_library::install_name(plan.install.kind))}, {"location", plan.install.location}}},
         {"warning", plan.warning},
+        {"prerequisites", prerequisites_json(plan.prerequisites)},
       };
     }
 
@@ -3048,6 +3060,7 @@ namespace confighttp {
           {"arguments", std::string(preset.arguments)},
           {"gamepad", std::string(preset.gamepad)},
           {"install", {{"kind", std::string(emulator_library::install_name(install.kind))}, {"location", install.location}}},
+          {"prerequisites", prerequisites_json(emulator_library::prerequisites(preset, install, {}, home_roots))},
         });
       }
       return list;
