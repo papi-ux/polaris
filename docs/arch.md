@@ -111,6 +111,9 @@ sudo pacman -R polaris
 Package-owned udev rules and modules-load configuration are removed with the package. Host
 configuration in `~/.config/polaris` is left in place.
 
+For a clean slate, or to remove what the package leaves behind, see
+[Uninstall Polaris, or start over](uninstall.md).
+
 ## Debug package
 
 Arch and SteamOS also publish a `polaris-debug` package. Install it when you need
