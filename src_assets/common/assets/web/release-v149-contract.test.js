@@ -51,6 +51,9 @@ describe('v1.4.9 release contract', () => {
       'cannot be created on this version yet',
       'New installs start in Private Stream',
       'can be removed for good',
+      'can trust your home network',
+      'Artwork alternatives in Nova work',
+      'checks the gaming runtime this PC needs',
     ]) {
       expect(notes, `v1.4.9 notes must include: ${fact}`).toContain(fact)
     }
@@ -69,6 +72,10 @@ describe('v1.4.9 release contract', () => {
       'reads as ready and waiting',
       'uninstall page',
       'Removing a Space can now delete it for good',
+      "Nova's artwork alternatives work",
+      'Quick setup has eight steps',
+      'has a Gaming runtime check',
+      'Spaces turned on from the Spaces page can start and change',
     ]) {
       expect(section, `v1.4.9 changelog must include: ${fact}`).toContain(fact)
     }
