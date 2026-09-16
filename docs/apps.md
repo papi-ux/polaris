@@ -80,10 +80,26 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 | --- | --- |
 | **Application Name** | The name shown on Moonlight and Nova. |
 | **Image** | The icon, picture, or box image sent to clients. PNG only; when unset, Polaris sends its default box image. |
+| **Artwork in Nova** | How Nova gets posters, backgrounds, logos and icons for a saved entry, with **Remove artwork** and **Find artwork again**. See [Artwork in Nova](#artwork-in-nova). |
 | **Game Category** | A classification hint for Auto Quality, detected from Steam genres on import. |
 | **Platform and runtime** | Filled in for titles imported from Heroic. Says what the title installs as and what will execute it, such as Windows through Proton-GE. Left blank when Heroic did not record it. |
 | **Emulated Gamepad Type** | Which gamepad to emulate for this app, overriding the Input tab's default. |
 | **MangoHud Overlay** | Shows GPU, CPU, temperature, and frametime in the stream from the host side. |
+
+### Artwork in Nova
+
+When Nova shows an entry without artwork of its own, Polaris looks it up. A Steam title gets
+Steam's images, and with a SteamGridDB key set in Settings the rest comes from its SteamGridDB game,
+found by app id. Any other entry gets SteamGridDB artwork only when a search finds a game with
+exactly the entry's name, ignoring case, punctuation and trademark signs. A similar name is never
+used, so an entry SteamGridDB does not know keeps its own image. Desktop, Low Res Desktop and any
+other entry that streams the desktop never look anything up, and artwork an earlier version
+downloaded for them is removed.
+
+**Remove artwork** deletes every picture Polaris downloaded for a saved entry, and any you picked
+in Nova, and stops Polaris looking up new ones. The entry's own image stays, and Nova shows it the
+next time its library loads. **Find artwork again** turns the lookup back on; it does not bring the
+deleted pictures back. Picking artwork in Nova still works after a removal.
 
 ### Command path
 

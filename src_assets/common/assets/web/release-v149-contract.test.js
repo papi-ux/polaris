@@ -54,6 +54,7 @@ describe('v1.4.9 release contract', () => {
       'can trust your home network',
       'Artwork alternatives in Nova work',
       'checks the gaming runtime this PC needs',
+      "no longer borrows another game's pictures",
     ]) {
       expect(notes, `v1.4.9 notes must include: ${fact}`).toContain(fact)
     }
@@ -77,6 +78,7 @@ describe('v1.4.9 release contract', () => {
       'has a Gaming runtime check',
       'Spaces turned on from the Spaces page can start and change',
       'marks Steam Big Picture on the desktop',
+      'Automatic artwork only takes a match that is the entry',
     ]) {
       expect(section, `v1.4.9 changelog must include: ${fact}`).toContain(fact)
     }
