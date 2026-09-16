@@ -170,7 +170,19 @@ const streamDisplayModeDefinitions = [
   },
 ]
 
-const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode) => {
+// kscreen-doctor is the fallback when neither EVDI nor a Hyprland session can
+// add an output. It borrows an existing connector instead, so the default
+// "adds a display" copy would promise something this host cannot do.
+const hostVirtualDisplayKscreenCopy = {
+  badge: $t('config.av_mode_host_virtual_display_kscreen_badge'),
+  copy: $t('config.av_mode_host_virtual_display_kscreen_copy'),
+  impact: $t('config.av_mode_host_virtual_display_kscreen_impact'),
+  technical: $t('config.av_mode_host_virtual_display_kscreen_technical'),
+}
+
+const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((baseMode) => {
+  const kscreenFallback = baseMode.id === 'host_virtual_display' && config.value.vdisplayBackend === 'kscreen-doctor'
+  const mode = kscreenFallback ? { ...baseMode, ...hostVirtualDisplayKscreenCopy } : baseMode
   const hostMode = projectionModes.value?.find((candidate) => candidate?.value === mode.id)
   const availability = hostMode
     ? {
@@ -180,7 +192,9 @@ const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((mode
           : String(hostMode.unavailable_reason || $t('config.av_mode_unavailable_default')),
       }
     : resolveStreamDisplayModeAvailability(mode.id, config.value.stream_display_mode_options)
-  const hostBadge = hostMode && typeof hostMode.badge === 'string' ? hostMode.badge.trim() : ''
+  // The host's generic badge for this mode cannot tell the fallback apart, so
+  // the backend-specific badge wins there.
+  const hostBadge = !kscreenFallback && hostMode && typeof hostMode.badge === 'string' ? hostMode.badge.trim() : ''
   return {
     ...mode,
     ...availability,
