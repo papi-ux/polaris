@@ -5335,3 +5335,68 @@ TEST(GamescopeNestedSessionContract, TeardownGetsTheSameBudgetAndVisibilityAsSta
   EXPECT_NE(source.find("undo_output = stderr;"), std::string::npos);
   EXPECT_NE(source.find("nested gamescope teardown timed out after "), std::string::npos);
 }
+
+TEST(ProcessRuntimeConfigTests, ExactGenerationTerminationHonoursTheAppExitTimeout) {
+#ifdef __linux__
+  // An emulator writes its save when it gets SIGTERM; the grace decides whether the write
+  // finishes or SIGKILL lands first. The shell below takes 1.5 s to leave after SIGTERM.
+  const auto spawn_saver = [](const std::string &token) {
+    const auto child = fork();
+    if (child == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      execl("/bin/sh", "sh", "-c", "trap 'sleep 1.5; exit 0' TERM; sleep 60 & wait $!; exit 0", static_cast<char *>(nullptr));
+      _exit(127);
+    }
+    return child;
+  };
+  const auto wait_for_token = [](pid_t pid, const std::string &token) {
+    const auto environ_path = "/proc/" + std::to_string(pid) + "/environ";
+    for (int i = 0; i < 80; ++i) {
+      std::ifstream in(environ_path, std::ios::binary);
+      const std::string environ((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      if (environ.find("POLARIS_SESSION_INSTANCE_ID=" + token) != std::string::npos) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+  };
+
+  {
+    const std::string token = "exit-timeout-generous-4243";
+    const auto child = spawn_saver(token);
+    linux_child_guard_t guard {child};
+    ASSERT_GT(child, 0);
+    ASSERT_TRUE(wait_for_token(child, token));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the trap is armed by now
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token, std::chrono::milliseconds(3000)));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    int status = 0;
+    EXPECT_EQ(guard.wait(&status, 0), child);
+    EXPECT_TRUE(WIFEXITED(status)) << "a grace longer than the save should let the process leave on its own";
+    if (WIFEXITED(status)) {
+      EXPECT_EQ(WEXITSTATUS(status), 0);
+    }
+    EXPECT_GE(elapsed, std::chrono::milliseconds(1400));
+  }
+
+  {
+    const std::string token = "exit-timeout-stingy-4244";
+    const auto child = spawn_saver(token);
+    linux_child_guard_t guard {child};
+    ASSERT_GT(child, 0);
+    ASSERT_TRUE(wait_for_token(child, token));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token, std::chrono::milliseconds(500)));
+    int status = 0;
+    EXPECT_EQ(guard.wait(&status, 0), child);
+    EXPECT_TRUE(WIFSIGNALED(status)) << "a grace shorter than the save ends in SIGKILL";
+    if (WIFSIGNALED(status)) {
+      EXPECT_EQ(WTERMSIG(status), SIGKILL);
+    }
+  }
+#else
+  GTEST_SKIP() << "Linux-only exact-generation termination";
+#endif
+}
