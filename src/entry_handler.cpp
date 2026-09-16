@@ -6,6 +6,8 @@
 #include <array>
 #include <csignal>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <format>
 #include <iostream>
 #include <string>
@@ -761,7 +763,99 @@ namespace lifetime {
     // than a copy: taking a lock or allocating there is not async-signal-safe.
     // Every reason is a literal, which is why the parameter is a const char *.
     std::atomic<const char *> recorded_shutdown_reason {nullptr};
+
+    std::mutex shutdown_request_handler_mutex;
+    shutdown_request_handler_t shutdown_request_handler;
+    std::atomic<bool> restart_in_place {false};
+
+    shutdown_request_handler_t shutdown_request_handler_snapshot() {
+      std::lock_guard<std::mutex> lock(shutdown_request_handler_mutex);
+      return shutdown_request_handler;
+    }
   }  // namespace
+
+  void set_shutdown_request_handler(shutdown_request_handler_t handler) {
+    std::lock_guard<std::mutex> lock(shutdown_request_handler_mutex);
+    shutdown_request_handler = std::move(handler);
+  }
+
+  bool restart_in_place_pending() {
+    return restart_in_place.load();
+  }
+
+  void set_restart_in_place_pending(bool pending) {
+    restart_in_place.store(pending);
+  }
+
+  std::string systemd_service_unit_from_cgroup(std::string_view cgroup_contents) {
+    // Prefer the unified hierarchy line; a hybrid host lists the v1 controllers first.
+    std::string_view chosen;
+    size_t start = 0;
+    while (start < cgroup_contents.size()) {
+      auto end = cgroup_contents.find('\n', start);
+      if (end == std::string_view::npos) {
+        end = cgroup_contents.size();
+      }
+      const auto line = cgroup_contents.substr(start, end - start);
+      start = end + 1;
+      if (line.empty()) {
+        continue;
+      }
+      if (line.rfind("0::", 0) == 0) {
+        chosen = line;
+        break;
+      }
+      if (chosen.empty()) {
+        chosen = line;
+      }
+    }
+    const auto path_at = chosen.rfind(':');
+    if (path_at == std::string_view::npos) {
+      return {};
+    }
+    auto path = chosen.substr(path_at + 1);
+    while (!path.empty() && (path.back() == '\r' || path.back() == ' ' || path.back() == '/')) {
+      path.remove_suffix(1);
+    }
+    const auto leaf_at = path.rfind('/');
+    const auto leaf = leaf_at == std::string_view::npos ? path : path.substr(leaf_at + 1);
+    constexpr std::string_view suffix = ".service";
+    if (leaf.size() <= suffix.size() || leaf.compare(leaf.size() - suffix.size(), suffix.size(), suffix) != 0) {
+      return {};
+    }
+    return std::string {leaf};
+  }
+
+  bool restart_via_service_manager(std::string_view unit, std::string_view environment_override) {
+    if (environment_override == "1" || environment_override == "true") {
+      return true;
+    }
+    if (environment_override == "0" || environment_override == "false") {
+      return false;
+    }
+    return unit == "polaris.service";
+  }
+
+  bool restart_via_service_manager() {
+    const char *override_value = std::getenv("POLARIS_SERVICE_RESTART");
+    std::string unit;
+#ifdef __linux__
+    if (std::ifstream cgroup("/proc/self/cgroup"); cgroup) {
+      std::string contents((std::istreambuf_iterator<char>(cgroup)), std::istreambuf_iterator<char>());
+      unit = systemd_service_unit_from_cgroup(contents);
+    }
+#endif
+    return restart_via_service_manager(unit, override_value ? override_value : "");
+  }
+
+#ifdef POLARIS_TESTS
+  void reset_for_tests() {
+    set_shutdown_request_handler({});
+    recorded_shutdown_reason.store(nullptr);
+    restart_in_place.store(false);
+    desired_exit_code.store(0);
+  }
+#endif
 
   void note_shutdown_reason(const char *reason) {
     if (reason == nullptr || *reason == '\0') {
@@ -789,8 +883,15 @@ namespace lifetime {
     int zero = 0;
     desired_exit_code.compare_exchange_strong(zero, exit_code);
 
-    // Raise SIGINT to start termination
-    std::raise(SIGINT);
+    // A registered handler begins the shutdown on this thread. Raising SIGINT
+    // instead is unreliable: glibc's system() ignores SIGINT process-wide while
+    // a command runs, and a thread-directed signal generated in that window is
+    // discarded, which is how a restart from the console could simply vanish.
+    if (const auto handler = shutdown_request_handler_snapshot()) {
+      handler();
+    } else {
+      std::raise(SIGINT);
+    }
 
     // Termination will happen asynchronously, but the caller may
     // have wanted synchronous behavior.
