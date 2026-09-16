@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
@@ -225,6 +226,38 @@ namespace ai_optimizer {
     return default_base_url_for_provider(provider);
   }
 
+  static std::optional<std::string> active_codex_home(const config_t &active_cfg);
+
+  /**
+   * The model an empty selection resolves to. In Codex subscription mode the
+   * CLI knows which models the signed-in account can use, so its configured
+   * model comes first and its cached catalog second; the hosted default only
+   * applies to API keys, where the same names are served by the API.
+   */
+  static std::string effective_default_model(const config_t &config) {
+    if (config.provider == PROVIDER_OPENAI && config.auth_mode == AUTH_SUBSCRIPTION) {
+      if (const auto home = active_codex_home(config)) {
+        if (const auto configured = codex_cli_configured_model(*home)) {
+          return *configured;
+        }
+        const auto catalog = codex_cli_model_catalog(*home);
+        if (!catalog.empty()) {
+          return catalog.front().slug;
+        }
+      }
+    }
+    return default_model_for_provider(config.provider);
+  }
+
+  static std::string normalize_model(const config_t &config) {
+    if (!config.model.empty()) {
+      return config.model;
+    }
+    return effective_default_model(config);
+  }
+
+  // Cache and history entries carry only a provider, so their empty model
+  // falls back to the provider default without consulting the CLI.
   static std::string normalize_model(const std::string &provider, std::string model) {
     if (!model.empty()) {
       return model;
@@ -332,6 +365,140 @@ namespace ai_optimizer {
     }
     if (!runtime_home.empty()) {
       return (std::filesystem::path(runtime_home) / ".codex").string();
+    }
+    return std::nullopt;
+  }
+
+  static bool plain_model_slug(const std::string &value) {
+    return !value.empty() && value.size() <= 64 &&
+      value.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") == std::string::npos;
+  }
+
+  std::optional<std::string> codex_cli_configured_model(const std::filesystem::path &codex_home) {
+    std::ifstream in(codex_home / "config.toml");
+    if (!in) {
+      return std::nullopt;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+      const auto first = line.find_first_not_of(" \t");
+      if (first == std::string::npos) {
+        continue;
+      }
+      if (line[first] == '[') {
+        // A project table may carry its own model; only the top-level key is the CLI default.
+        break;
+      }
+      if (line.compare(first, 5, "model") != 0) {
+        continue;
+      }
+      const auto rest = line.substr(first + 5);
+      const auto eq = rest.find_first_not_of(" \t");
+      if (eq == std::string::npos || rest[eq] != '=') {
+        continue;
+      }
+      const auto open = rest.find('"', eq + 1);
+      if (open == std::string::npos) {
+        continue;
+      }
+      const auto close = rest.find('"', open + 1);
+      if (close == std::string::npos) {
+        continue;
+      }
+      const auto value = rest.substr(open + 1, close - open - 1);
+      return plain_model_slug(value) ? std::optional<std::string> {value} : std::nullopt;
+    }
+    return std::nullopt;
+  }
+
+  std::vector<codex_cli_model_t> codex_cli_model_catalog(const std::filesystem::path &codex_home) {
+    std::vector<codex_cli_model_t> listed;
+    std::ifstream in(codex_home / "models_cache.json", std::ios::binary);
+    if (!in) {
+      return listed;
+    }
+    try {
+      const auto parsed = nlohmann::json::parse(in);
+      if (!parsed.is_object() || !parsed.contains("models") || !parsed.at("models").is_array()) {
+        return listed;
+      }
+      std::vector<std::pair<long long, codex_cli_model_t>> ordered;
+      for (const auto &entry : parsed.at("models")) {
+        if (!entry.is_object() || !entry.contains("slug") || !entry.at("slug").is_string()) {
+          continue;
+        }
+        const auto slug = entry.at("slug").get<std::string>();
+        if (!plain_model_slug(slug)) {
+          continue;
+        }
+        if (entry.contains("visibility") && entry.at("visibility").is_string() && entry.at("visibility").get<std::string>() != "list") {
+          continue;
+        }
+        const long long priority = entry.contains("priority") && entry.at("priority").is_number() ? entry.at("priority").get<long long>() : (1LL << 30);
+        const auto display_name = entry.contains("display_name") && entry.at("display_name").is_string() ? entry.at("display_name").get<std::string>() : slug;
+        ordered.push_back({priority, {slug, display_name.substr(0, 96)}});
+      }
+      std::stable_sort(ordered.begin(), ordered.end(), [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+      for (auto &item : ordered) {
+        listed.push_back(std::move(item.second));
+        if (listed.size() == 32) {
+          break;
+        }
+      }
+    } catch (...) {
+      listed.clear();
+    }
+    return listed;
+  }
+
+  std::optional<std::string> codex_cli_error_message(std::string_view cli_output) {
+    size_t start = 0;
+    while (start < cli_output.size()) {
+      auto end = cli_output.find('\n', start);
+      if (end == std::string_view::npos) {
+        end = cli_output.size();
+      }
+      const auto line = cli_output.substr(start, end - start);
+      start = end + 1;
+      const auto brace = line.find('{');
+      if (brace == std::string_view::npos || line.size() > 8192) {
+        continue;
+      }
+      try {
+        const auto parsed = nlohmann::json::parse(line.substr(brace));
+        if (!parsed.is_object() || parsed.value("type", std::string {}) != "error") {
+          continue;
+        }
+        std::string message;
+        if (parsed.contains("error") && parsed.at("error").is_object() &&
+            parsed.at("error").contains("message") && parsed.at("error").at("message").is_string()) {
+          message = parsed.at("error").at("message").get<std::string>();
+        } else if (parsed.contains("message") && parsed.at("message").is_string()) {
+          message = parsed.at("message").get<std::string>();
+        }
+        std::string collapsed;
+        bool pending_space = false;
+        for (const unsigned char ch : message) {
+          if (std::isspace(ch)) {
+            pending_space = !collapsed.empty();
+            continue;
+          }
+          if (pending_space) {
+            collapsed += ' ';
+            pending_space = false;
+          }
+          collapsed += static_cast<char>(ch);
+        }
+        if (collapsed.empty()) {
+          continue;
+        }
+        if (collapsed.size() > 240) {
+          collapsed = collapsed.substr(0, 237) + "...";
+        }
+        return collapsed;
+      } catch (...) {
+        continue;
+      }
     }
     return std::nullopt;
   }
@@ -1120,9 +1287,9 @@ namespace ai_optimizer {
 
   static config_t resolved_config(config_t config) {
     config.provider = normalize_provider(config.provider);
-    config.model = normalize_model(config.provider, config.model);
     config.base_url = normalize_base_url(config.provider, config.base_url);
     config.auth_mode = normalize_auth_mode(config.auth_mode, config.provider, config.use_subscription, config.api_key);
+    config.model = normalize_model(config);
     if (!provider_supports_subscription(config.provider)) {
       config.use_subscription = false;
     }
@@ -2062,12 +2229,23 @@ namespace ai_optimizer {
     std::unordered_set<std::string> seen_ids;
 
     append_unique_model(models, seen_ids, active_cfg.model, "Current selection");
-    append_unique_model(models, seen_ids, default_model_for_provider(active_cfg.provider), "Provider default");
+    append_unique_model(models, seen_ids, effective_default_model(active_cfg), "Provider default");
 
     if (active_cfg.provider == PROVIDER_ANTHROPIC) {
       append_unique_model(models, seen_ids, "claude-haiku-4-5-20251001");
-      append_unique_model(models, seen_ids, "claude-sonnet-4-20250514");
-      append_unique_model(models, seen_ids, "claude-opus-4-20250514");
+      append_unique_model(models, seen_ids, "claude-sonnet-5");
+      append_unique_model(models, seen_ids, "claude-opus-5");
+    } else if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      // Codex with a ChatGPT account accepts a different set of models than the
+      // hosted API, and only the CLI knows which. Offer what it caches, nothing static.
+      if (const auto home = active_codex_home(active_cfg)) {
+        if (const auto configured = codex_cli_configured_model(*home)) {
+          append_unique_model(models, seen_ids, *configured, "Codex CLI default");
+        }
+        for (const auto &entry : codex_cli_model_catalog(*home)) {
+          append_unique_model(models, seen_ids, entry.slug, entry.display_name);
+        }
+      }
     } else if (active_cfg.provider == PROVIDER_OPENAI) {
       append_unique_model(models, seen_ids, "gpt-5.4-mini");
       append_unique_model(models, seen_ids, "gpt-5.4");
@@ -2694,7 +2872,8 @@ namespace ai_optimizer {
 
     std::optional<std::string> call_openai_codex_doctor_cli(
       const config_t &active_cfg,
-      const std::string &redacted_evidence_json) {
+      const std::string &redacted_evidence_json,
+      provider_test_result_t *test_result = nullptr) {
       const std::string home = getenv("HOME") ? getenv("HOME") : "/home";
       const auto codex_bin = resolve_existing_binary(
         {
@@ -2754,10 +2933,21 @@ namespace ai_optimizer {
       BOOST_LOG(debug) << "ai_optimizer: Running bounded Codex CLI Doctor explanation"sv;
       const auto result = run_command_capture(cmd);
       if (result.exit_code != 0) {
-        BOOST_LOG(error) << "ai_optimizer: Codex Doctor CLI exited with code "sv << result.exit_code;
-        // CLI diagnostics can echo portions of the supplied support evidence.
-        // Keep the exit code for operators without copying that content into
-        // the long-lived Polaris log.
+        // CLI diagnostics can echo portions of the supplied support evidence,
+        // so only the provider's own error sentence (a JSON error line such as
+        // "model not supported with a ChatGPT account") is kept for the log
+        // and the test result; the rest of the output stays out of both.
+        const auto message = codex_cli_error_message(result.output);
+        BOOST_LOG(error) << "ai_optimizer: Codex Doctor CLI exited with code "sv << result.exit_code
+                         << (message ? ": " + *message : std::string {});
+        if (message) {
+          set_provider_test_failure(
+            test_result,
+            "codex_cli_rejected",
+            "Codex refused the request",
+            *message,
+            "Pick a model from the list, which comes from your Codex CLI, or run codex login, then retry.");
+        }
         return std::nullopt;
       }
 
@@ -2812,7 +3002,7 @@ namespace ai_optimizer {
       provider_test_result_t *test_result = nullptr,
       const std::string &claude_executable = {}) {
     if (active_cfg.provider == PROVIDER_OPENAI && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
-      return call_openai_codex_doctor_cli(active_cfg, redacted_evidence_json);
+      return call_openai_codex_doctor_cli(active_cfg, redacted_evidence_json, test_result);
     }
     if (active_cfg.provider == PROVIDER_ANTHROPIC && active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
       const auto result = claude_cli::explain(active_cfg.model, doctor_explanation_system_prompt(),
@@ -3551,6 +3741,31 @@ namespace ai_optimizer {
     }
 
     if (active_cfg.auth_mode == AUTH_SUBSCRIPTION) {
+      if (active_cfg.provider == PROVIDER_OPENAI) {
+        // The Codex CLI caches the account's model catalog itself; read that
+        // instead of asking the hosted API, which lists a different set.
+        const auto home = active_codex_home(active_cfg);
+        if (home) {
+          if (const auto configured = codex_cli_configured_model(*home)) {
+            output["cli_default_model"] = *configured;
+          }
+          const auto catalog = codex_cli_model_catalog(*home);
+          if (!catalog.empty()) {
+            nlohmann::json discovered_models = nlohmann::json::array();
+            std::unordered_set<std::string> seen_ids;
+            for (const auto &entry : catalog) {
+              append_unique_model(discovered_models, seen_ids, entry.slug, entry.display_name);
+            }
+            output["discovered"] = true;
+            output["source"] = "codex_cli";
+            output["models"] = discovered_models;
+            output["model_count"] = discovered_models.size();
+            return output.dump(2);
+          }
+        }
+        output["error"] = "Codex has not cached a model list on this host yet. Run codex once in a terminal as the Polaris user, then refresh.";
+        return output.dump(2);
+      }
       output["error"] = "Live model discovery is unavailable for " + subscription_cli_label(active_cfg.provider) + " subscription mode.";
       return output.dump(2);
     }

@@ -485,6 +485,8 @@ and [DeepSeek's API setup](https://api-docs.deepseek.com/).
 
 ### OpenAI
 
+With an API key, the hosted model names apply:
+
 ```ini
 ai_enabled = enabled
 ai_provider = openai
@@ -492,6 +494,22 @@ ai_model = gpt-5.4-mini
 ai_auth_mode = api_key
 ai_api_key = sk-proj-...
 ```
+
+With the signed-in Codex CLI, the models are the ones Codex offers the signed-in account, which
+is a different set from the hosted API (a ChatGPT account cannot use `gpt-5.4-mini` through
+Codex, for example). The console's model list reads the catalog the CLI caches on this host, and
+its default is the model the CLI is configured with. Leave `ai_model` empty to follow that
+default, or pick one of the listed models:
+
+```ini
+ai_enabled = enabled
+ai_provider = openai
+ai_auth_mode = subscription
+ai_model =
+```
+
+If the list is empty, run `codex` once in a terminal as the user Polaris runs as, then refresh.
+When Codex refuses a request, the test result shows its reason.
 
 ### Gemini
 
