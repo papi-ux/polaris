@@ -265,6 +265,12 @@ list in CIDR form). Keys: `enable_discovery`, `enable_pairing`, `upnp`, `address
 `origin_web_ui_allowed`, `external_ip`, `lan_encryption_mode`, `wan_encryption_mode`,
 `trusted_subnets`.
 
+The first-run wizard's Network step can trust a detected home network with one click, or a
+network typed in CIDR form. It adds the network to `trusted_subnets`, keeping the entries already
+there, and turns on Trusted Subnet Auto-Pairing (`trusted_subnet_auto_pairing`). A saved trusted
+network applies to the next pairing request, with no restart. Any device on a trusted network can
+pair without a PIN, so only trust networks you control.
+
 | Field | What it does |
 | --- | --- |
 | **Enable Auto Discovery** (`enable_discovery`) | When disabled, you'll need to manually enter host IP on the client to pair. |
@@ -310,7 +316,7 @@ overrides that force a specific path when automatic selection is wrong. Keys: `l
 | **HEVC Support** (`hevc_mode`) | Allows the client to request HEVC Main or HEVC Main10 video streams. HEVC is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding. |
 | **AV1 Support** (`av1_mode`) | Allows the client to request AV1 Main 8-bit or 10-bit video streams. AV1 is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding. |
 | **Force a Specific Capture Method** (`capture`) | On automatic mode Polaris will use the first one that works. NvFBC requires patched nvidia drivers. |
-| **Force a Specific Encoder** (`encoder`) | Force a specific encoder, otherwise Polaris will select the best available option. Note: If you specify a hardware encoder on Windows, it must match the GPU where the display is connected. |
+| **Force a Specific Encoder** (`encoder`) | Force a specific encoder, otherwise Polaris will select the best available option. Note: If you specify a hardware encoder on Windows, it must match the GPU where the display is connected. The first-run wizard's GPU and Encoder step shows what Automatic picks on this host and what hardware encoding still needs, and saves this key when you choose an encoder there. A changed encoder takes effect after a restart. |
 
 ### Files tab
 

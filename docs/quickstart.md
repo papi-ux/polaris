@@ -44,10 +44,15 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 ## 2. Open the right web console path
 
 **Fresh install:** if this host has never had a Polaris web account, open
-**https://localhost:47990/#/welcome**, create the account, and pair a client. The same wizard
-offers two optional steps on the way: a SteamGridDB key for covers on non-Steam games, and an AI
-provider for Doctor explanations. Both can be skipped and set later under Settings; both take
-effect after a restart, which the last step offers.
+**https://localhost:47990/#/welcome** and create the account. The wizard then walks the rest of
+the setup. GPU and Encoder shows each GPU, the encoder Polaris will use and why, and anything
+hardware encoding still needs, such as the RPM Fusion driver an AMD card needs on Fedora. Launch
+Mode picks where games run, with Private Stream recommended. Network lists the ports and can
+trust your home network with one click, so Nova pairs without a PIN. Two optional steps add a
+SteamGridDB key for covers on non-Steam games and an AI provider for Doctor explanations; both
+can be skipped and set later under Settings. Pair Client comes next, and First App finishes on
+the Applications page. The SteamGridDB key, the AI provider and a trusted network take effect
+right away; an encoder or launch mode change waits for a restart, which the last step offers.
 
 **Upgrade or reinstall:** open **https://localhost:47990/#/login** and sign in with the existing
 account. Package upgrades and removals intentionally preserve credentials, pairing keys, settings,
@@ -63,8 +68,8 @@ first-run installation. If the credentials are no longer known, use the bounded 
 
 ## 3. Confirm the recommended Linux path
 
-In the first-run setup, put games in a private runtime instead of on your desktop: under
-**Settings → Audio/Video → Where games run**, pick **Private Stream**. On an
+Put games in a private runtime instead of on your desktop: in the first-run wizard's Launch Mode
+step, or later under **Settings → Audio/Video → Where games run**, pick **Private Stream**. On an
 NVIDIA card, pick **Private Stream (GPU-native)** instead; it is the best-tested path and keeps
 capture on the GPU. In the config file, those two cards correspond to:
 

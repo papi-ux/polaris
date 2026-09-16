@@ -22,8 +22,9 @@ npx playwright install chromium
 ## Fixtures
 
 The onboarding layout suite runs against locally built assets with mocked APIs;
-it does not need a running Polaris host or credentials. It checks all five steps
-at mobile, tablet, and desktop widths, and saves a First App screenshot per width.
+it does not need a running Polaris host or credentials. It checks all eight steps
+at mobile, tablet, and desktop widths, and saves screenshots of the GPU and Encoder,
+Launch Mode, Network and First App steps at each width.
 
 ```
 npm run build
