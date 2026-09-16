@@ -214,7 +214,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **PreRelease Notifications** (`notify_pre_releases`) | Whether to be notified of new pre-release versions of Polaris |
 | **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray |
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
-| **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. |
+| **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. Polaris reads the key when it starts, so restart after saving before the cover search and Nova can use it. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
 
 ### Input tab
@@ -441,7 +441,9 @@ and the driver decide, `1` selects constant-QP mode, and `4` selects variable bi
 ## AI provider settings
 
 The AI optimizer is optional. Configure it in the web UI if you want connection testing before
-saving, or set it directly in `polaris.conf`.
+saving, or set it directly in `polaris.conf`. The first-run wizard offers the same provider
+choice, sign-in, model list, test and enable step; timeouts, the explanation cache and history
+stay in the AI tab. Provider settings take effect after a restart.
 
 ### Anthropic
 

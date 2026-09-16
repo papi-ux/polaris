@@ -20,12 +20,12 @@
             <div class="flex flex-wrap gap-2">
               <div
                 v-for="(stepDef, idx) in steps"
-                :key="stepDef.title"
+                :key="stepDef.titleKey || stepDef.title"
                 class="rounded-full border px-3 py-1.5 text-sm transition-[background-color,border-color,color] duration-200"
                 :class="idx === currentStep ? 'border-ice/40 bg-ice/10 text-ice' : idx < currentStep ? 'border-storm/30 bg-deep/45 text-silver' : 'border-storm/20 bg-deep/25 text-storm'"
               >
                 <span class="font-medium">{{ idx + 1 }}.</span>
-                <span class="ml-2">{{ stepDef.title }}</span>
+                <span class="ml-2">{{ stepTitle(stepDef) }}</span>
               </div>
             </div>
           </div>
@@ -33,7 +33,7 @@
           <div class="mt-6 rounded-[24px] border border-storm/20 bg-deep/35 p-5 sm:p-6">
             <div class="mb-5">
               <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Step {{ currentStep + 1 }} of {{ steps.length }}</div>
-              <h2 class="mt-2 text-2xl font-semibold text-silver">{{ steps[currentStep].title }}</h2>
+              <h2 class="mt-2 text-2xl font-semibold text-silver">{{ stepTitle(steps[currentStep]) }}</h2>
             </div>
 
             <div v-if="currentStep === 0">
@@ -126,6 +126,26 @@
             </div>
 
             <div v-if="currentStep === 4">
+              <WelcomeArtworkStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="noteRestartNeeded('artwork')" />
+            </div>
+
+            <div v-if="currentStep === 5">
+              <WelcomeAiStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="noteRestartNeeded('ai')" />
+            </div>
+
+            <div v-if="currentStep === 6">
+              <div v-if="restartNeeded.size" class="mb-4 rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright" role="status">
+                <div>{{ restartState === 'done' ? $t('welcome.restart_done') : restartState === 'timeout' ? $t('welcome.restart_timeout') : restartNeeded.size > 1 ? $t('welcome.restart_needed') : $t('welcome.restart_needed_one') }}</div>
+                <button
+                  v-if="restartState !== 'done'"
+                  type="button"
+                  class="mt-3 inline-flex h-9 items-center justify-center rounded-xl border border-warning/40 px-3 text-xs font-semibold text-warning-bright transition-colors hover:bg-warning/15 disabled:opacity-60"
+                  :disabled="restartState === 'restarting'"
+                  @click="restartHost"
+                >
+                  {{ restartState === 'restarting' ? $t('welcome.restarting') : $t('welcome.restart_now') }}
+                </button>
+              </div>
               <p class="mb-4 text-sm leading-relaxed text-storm">Once the host is secured and the library exists, pair a client and start streaming. Nova and Moonlight both work, but Nova exposes more Polaris-specific controls.</p>
               <div class="space-y-3">
                 <div class="surface-subtle p-4">
@@ -184,12 +204,12 @@
             <div class="mt-5 space-y-2">
               <div
                 v-for="(stepDef, idx) in steps"
-                :key="stepDef.title"
+                :key="stepDef.titleKey || stepDef.title"
                 class="rounded-2xl border px-4 py-3 text-sm transition-[background-color,border-color,color] duration-200"
                 :class="idx === currentStep ? 'border-ice/35 bg-ice/10 text-ice' : idx < currentStep ? 'border-storm/25 bg-deep/40 text-silver' : 'border-storm/15 bg-deep/25 text-storm'"
               >
                 <span class="font-medium">{{ idx + 1 }}.</span>
-                <span class="ml-2">{{ stepDef.title }}</span>
+                <span class="ml-2">{{ stepTitle(stepDef) }}</span>
               </div>
             </div>
           </section>
@@ -213,10 +233,15 @@
 
 <script setup>
 
-
-import { ref, reactive } from 'vue'
+import { getCurrentInstance, ref, reactive } from 'vue'
 import ResourceCard from '../ResourceCard.vue'
+import WelcomeArtworkStep from '../components/WelcomeArtworkStep.vue'
+import WelcomeAiStep from '../components/WelcomeAiStep.vue'
+import { requestHostRestart } from '../restart-host.js'
 
+// The wizard keeps its own $t so the step list can translate titles from script code.
+const instance = getCurrentInstance()
+const $t = (key, params) => instance?.proxy?.$t?.(key, params) ?? key
 const currentStep = ref(0)
 const error = ref(null)
 const success = ref(false)
@@ -235,8 +260,70 @@ const steps = [
   { title: 'GPU Detection' },
   { title: 'Network' },
   { title: 'First App' },
+  { titleKey: 'welcome.step_artwork' },
+  { titleKey: 'welcome.step_ai' },
   { title: 'Pair Client' },
 ]
+
+const restartNeeded = ref(new Set())
+const restartState = ref('')
+
+function stepTitle(stepDef) {
+  return stepDef.titleKey ? $t(stepDef.titleKey) : stepDef.title
+}
+
+function noteRestartNeeded(what) {
+  const next = new Set(restartNeeded.value)
+  next.add(what)
+  restartNeeded.value = next
+  restartState.value = ''
+}
+
+// PATCH merges into the saved file and leaves every other key alone; the
+// revision header keeps a concurrent Settings save from being overwritten.
+async function patchConfig(body) {
+  try {
+    const response = await fetch('./api/config', {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(configData.value?.configuration_revision ? { 'If-Match': `"${configData.value.configuration_revision}"` } : {}),
+      },
+      body: JSON.stringify(body),
+    })
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+    if (!response.ok || payload?.status === false) {
+      return { ok: false, error: payload?.error || `HTTP ${response.status}` }
+    }
+    configData.value = {
+      ...(configData.value || {}),
+      ...(payload?.configuration_revision ? { configuration_revision: payload.configuration_revision } : {}),
+      ...(body.steamgriddb_api_key ? { has_steamgriddb_api_key: true } : {}),
+      ...(body.ai_api_key ? { has_ai_api_key: true } : {}),
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'Could not reach Polaris.' }
+  }
+}
+
+async function restartHost() {
+  restartState.value = 'restarting'
+  try {
+    await requestHostRestart({
+      onReady: () => { restartState.value = 'done' },
+      onTimeout: () => { restartState.value = 'timeout' },
+    })
+  } catch {
+    restartState.value = 'timeout'
+  }
+}
 
 function nextStep() {
   if (currentStep.value === 0 && !success.value) return

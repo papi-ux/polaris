@@ -44,7 +44,10 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 ## 2. Open the right web console path
 
 **Fresh install:** if this host has never had a Polaris web account, open
-**https://localhost:47990/#/welcome**, create the account, and pair a client.
+**https://localhost:47990/#/welcome**, create the account, and pair a client. The same wizard
+offers two optional steps on the way: a SteamGridDB key for covers on non-Steam games, and an AI
+provider for Doctor explanations. Both can be skipped and set later under Settings; both take
+effect after a restart, which the last step offers.
 
 **Upgrade or reinstall:** open **https://localhost:47990/#/login** and sign in with the existing
 account. Package upgrades and removals intentionally preserve credentials, pairing keys, settings,
