@@ -39,7 +39,7 @@ namespace multiseat::spaces {
       {"state", f.controller_available ? "ready" : f.controller_enabled ? "required" : "not_configured"},
       {"detail", f.controller_available ? "The configured Spaces controller is available." :
         f.controller_enabled ? "The configured Spaces controller is unavailable. Review the setup diagnostics." :
-        "Host preparation comes first. No spaces have been configured on this host."},
+        "No Space has been configured on this host yet."},
       {"action", "configure_spaces"}, {"doc_anchor", "#prepare-your-first-space"}});
     return {{"version", 2}, {"distribution", f.distribution},
       {"immutable_host", f.immutable_host}, {"service_uid", f.uid},
