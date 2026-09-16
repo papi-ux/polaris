@@ -8,6 +8,8 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Docs: the README catches up with 1.4.8 (the Spaces preview and its limits, the ROM folder library, 240 FPS on created displays, refusals that say why, the capture forecast), and a [Spaces or regular streaming](spaces-or-regular.md) page puts the two side by side in one table, linked from the Spaces guide.
+- Docs: an [uninstall page](uninstall.md) in the order that works: the Spaces policies first while the helper still exists, then the package, then what the package leaves behind (rule copies under `/etc`, a `/usr/share/polaris` that other files kept alive, the Spaces security record, your own additions) and `~/.config/polaris` with a keep-or-wipe table. Every distribution page links it.
+- Docs: the Spaces guide explains the security helper's three refusals (a policy at another priority, a Polaris process still running, an input rule it did not install) and the fix for each.
 ## v1.4.8 - 2026-09-16
 
 A Spaces preview matched with Nova v1.4.8, with a library that fills from a folder of emulator games, higher frame rates on the displays Polaris creates, and launch refusals that say why. Spaces is for configured hosts only and has no public runtime download yet. Existing configurations and paired devices remain valid.
