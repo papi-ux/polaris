@@ -21,6 +21,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -30,6 +31,71 @@ namespace multiseat {
     std::shared_ptr<profile_launch_service_t> installed;
     // Worker lifecycle generations cannot be confused with host proc generations.
     std::atomic<std::uint64_t> next_generation {1ULL << 63};
+
+    // The controller repeats the same report every 50 ms while nothing changes, so each distinct
+    // summary is logged once, without the per-pass counters. Without these lines a Space change
+    // that cannot close or rebuild the controller fails with nothing in the log.
+    const char *shutdown_status_name(controller_shutdown_status_e status) {
+      switch (status) {
+        case controller_shutdown_status_e::closed: return "closed";
+        case controller_shutdown_status_e::already_closed: return "already_closed";
+        case controller_shutdown_status_e::workers_pending: return "workers_pending";
+        case controller_shutdown_status_e::streams_pending: return "streams_pending";
+        case controller_shutdown_status_e::input_cleanup_incomplete: return "input_cleanup_incomplete";
+      }
+      return "unknown";
+    }
+    void describe_worker(std::ostream &out, const coordinator_reconciliation_report_t &worker) {
+      const auto &broker = worker.broker;
+      out << "worker{admission_ready=" << worker.admission_ready
+          << " startup_recovery_complete=" << worker.startup_recovery_complete
+          << " authority_blocked=" << worker.authority_blocked
+          << " authority_status=" << static_cast<int>(worker.authority_status)
+          << " authority_entries=" << worker.authority_entries
+          << " active_orphan_authorities=" << worker.active_orphan_authorities
+          << " authority_failures=" << worker.authority_failures
+          << " endpoint_failures=" << worker.endpoint_failures
+          << " endpoint_shutdown_failures=" << worker.endpoint_shutdown_failures
+          << " broker{admission_ready=" << broker.admission_ready
+          << " inventory_authoritative=" << broker.inventory_authoritative
+          << " backend_observation_failed=" << broker.backend_observation_failed
+          << " current=" << broker.current_workers << " orphans=" << broker.orphan_workers
+          << " missing=" << broker.missing_workers << " stuck=" << broker.stuck_workers
+          << " protocol_errors=" << broker.protocol_errors
+          << " readiness_rejections=" << broker.readiness_rejections << "}}";
+    }
+    std::string describe_reconcile(const controller_reconcile_result_t &result) {
+      std::ostringstream out;
+      out << "ready=" << result.ready() << " status=" << static_cast<int>(result.status) << ' ';
+      describe_worker(out, result.worker);
+      if (!result.input) {
+        out << " input=none";
+        return out.str();
+      }
+      const auto &input = result.input->report;
+      out << " input{status=" << static_cast<int>(result.input->status)
+          << " admission_ready=" << input.admission_ready
+          << " inventory_authoritative=" << input.inventory_authoritative
+          << " expected=" << input.expected << " current=" << input.current
+          << " orphans=" << input.orphans << " missing=" << input.missing
+          << " protocol_errors=" << input.protocol_errors
+          << " backend_failures=" << input.backend_failures << '}';
+      return out.str();
+    }
+    std::string describe_shutdown(const controller_shutdown_report_t &report) {
+      std::ostringstream out;
+      out << "status=" << shutdown_status_name(report.status) << " stop_requests=" << report.stop_requests;
+      if (report.worker) {
+        out << ' ';
+        describe_worker(out, *report.worker);
+      }
+      if (report.input) {
+        out << " input{status=" << static_cast<int>(report.input->status)
+            << " released=" << report.input->released_allocations
+            << " cleanup_failures=" << report.input->cleanup_failures << '}';
+      }
+      return out.str();
+    }
 
     class production_profile_controller_t final : public profile_controller_t {
     public:
@@ -47,7 +113,12 @@ namespace multiseat {
           runtime_->input_allocations() == 0 && runtime_->tracked_launches() == 0;
       }
       std::optional<gpu_usage_t> capacity() const override { return runtime_->capacity(); }
-      void reconcile() override { (void) runtime_->reconcile(); }
+      void reconcile() override {
+        auto summary = describe_reconcile(runtime_->reconcile());
+        if (summary == last_reconcile_) return;
+        BOOST_LOG(info) << "Spaces controller reconcile: " << summary;
+        last_reconcile_ = std::move(summary);
+      }
       profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
         auto admitted = runtime_->admit_authenticated_profile_launch(launch, {
           static_cast<std::uint32_t>(launch->width), static_cast<std::uint32_t>(launch->height),
@@ -99,9 +170,19 @@ namespace multiseat {
         return runtime_->select_authenticated_launch(launch, seat).selected() ?
           profile_poll_e::selected : profile_poll_e::failed;
       }
-      bool shutdown() override { return runtime_->shutdown().closed(); }
+      bool shutdown() override {
+        const auto report = runtime_->shutdown();
+        if (report.closed()) return true;
+        auto summary = describe_shutdown(report);
+        if (summary != last_shutdown_) {
+          BOOST_LOG(warning) << "Spaces controller did not close: " << summary;
+          last_shutdown_ = std::move(summary);
+        }
+        return false;
+      }
     private:
       std::unique_ptr<controller_runtime_t> runtime_;
+      std::string last_reconcile_, last_shutdown_;
     };
 
     bool path_value(const std::filesystem::path &path) {
@@ -366,6 +447,7 @@ namespace multiseat {
             if (!request->client.empty()) blocked_clients.insert(request->client);
           }
           if (!controller->shutdown()) {
+            BOOST_LOG(error) << "A Space change could not close the Spaces controller, so Space changes stay unavailable until Polaris restarts";
             std::lock_guard lock(mutex);
             admin_failed = true;
           } else {
@@ -393,8 +475,11 @@ namespace multiseat {
               BOOST_LOG(error) << "Profile creation retained resources for inspection: volume=" << persisted.volume_name
                 << " initializer=" << persisted.initializer_name << " network=" << persisted.network_name;
             }
-            if ((removal ? removed.status : persisted.status) != private_state_file::write_status_e::durability_uncertain) {
+            const bool save_confirmed = (removal ? removed.status : persisted.status) != private_state_file::write_status_e::durability_uncertain;
+            if (!save_confirmed) BOOST_LOG(error) << "A Space change could not confirm its save, so Spaces stay closed until Polaris restarts";
+            if (save_confirmed) {
               auto replacement = admin.reload();
+              if (!replacement) BOOST_LOG(error) << "Spaces could not be reloaded after a change, so Spaces stay closed until Polaris restarts";
               if (replacement) {
                 std::lock_guard lock(mutex);
                 controller = std::move(replacement);
@@ -415,6 +500,7 @@ namespace multiseat {
           }
         }
       } catch (...) {
+        BOOST_LOG(error) << "A Space change failed unexpectedly, so Spaces stay closed until Polaris restarts";
         std::lock_guard lock(mutex);
         admin_failed = true;
       }

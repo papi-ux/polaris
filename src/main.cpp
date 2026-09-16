@@ -597,8 +597,12 @@ int main(int argc, char *argv[]) {
             .catalog = options->profile_catalog,
             .reload = [settings = *options]() -> std::unique_ptr<multiseat::profile_controller_t> {
               auto replacement = multiseat::create_production_controller_runtime(settings);
-              return replacement.status == multiseat::controller_runtime_create_status_e::ready_enabled ?
-                multiseat::make_profile_controller(std::move(replacement.runtime)) : nullptr;
+              if (replacement.status != multiseat::controller_runtime_create_status_e::ready_enabled) {
+                BOOST_LOG(error) << "Spaces controller could not be rebuilt after a change (status "sv
+                                 << static_cast<int>(replacement.status) << ')';
+                return nullptr;
+              }
+              return multiseat::make_profile_controller(std::move(replacement.runtime));
             }
           });
         if (!multiseat::install_profile_launch_service(profile_service)) return 1;
