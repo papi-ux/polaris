@@ -20,6 +20,10 @@
     <section v-if="firstSpaceMissing" class="section-card" aria-labelledby="spaces-intro-title">
       <h2 id="spaces-intro-title" class="section-title">{{ runtimeWaiting ? $t('spaces.intro_waiting_title') : $t('spaces.intro_title') }}</h2>
       <p class="mt-2 text-sm text-storm">{{ runtimeWaiting ? $t('spaces.intro_waiting_copy') : $t('spaces.intro_copy') }}</p>
+      <a v-if="runtimeWaiting" href="https://papi-ux.com/docs/spaces-or-regular/" target="_blank" rel="noopener noreferrer"
+         data-spaces-or-regular class="mt-3 inline-flex text-sm font-medium text-ice underline-offset-4 hover:underline">
+        {{ $t('spaces.intro_waiting_link') }}
+      </a>
     </section>
 
     <p v-if="clientLoading" class="text-sm text-storm" role="status">{{ $t('spaces.devices_loading') }}</p>

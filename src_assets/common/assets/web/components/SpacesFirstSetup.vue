@@ -2,8 +2,10 @@
   <div class="mt-5 border-t border-storm/20 pt-5" role="group" aria-labelledby="spaces-first-title">
     <p class="section-kicker">{{ $t('spaces.kicker') }}</p>
     <h3 id="spaces-first-title" class="text-base font-semibold text-silver">{{ $t('spaces.first_title') }}</h3>
-    <p class="mt-2 max-w-2xl text-sm text-storm">{{ $t('spaces.first_copy') }}</p>
-    <p class="mt-2 text-sm text-storm">{{ $t('spaces.first_steps') }}</p>
+    <template v-if="!runtimeNotPublished">
+      <p class="mt-2 max-w-2xl text-sm text-storm">{{ $t('spaces.first_copy') }}</p>
+      <p class="mt-2 text-sm text-storm">{{ $t('spaces.first_steps') }}</p>
+    </template>
     <p v-if="error" class="mt-3 text-sm text-warning-bright" role="alert">{{ error }}</p>
     <p v-if="notice" class="mt-3 text-sm text-silver" role="status">{{ notice }}</p>
     <div v-if="snapshot && !snapshot.available && !snapshot.job" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-setup-unavailable>
@@ -124,6 +126,8 @@ const unavailableCopy = computed(() => {
   const reason = snapshot.value?.unavailable_reason
   return unavailableReasons.includes(reason) ? t('spaces.unavailable_' + reason) : (snapshot.value?.message || t('spaces.unavailable_title'))
 })
+// Without a published runtime the create steps cannot run, so they are not described.
+const runtimeNotPublished = computed(() => snapshot.value?.available === false && snapshot.value?.unavailable_reason === 'runtime_not_published')
 const unavailableAnchor = computed(() => ({ runtime_not_published: '#preview-limits', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
 const unavailableLinkLabel = computed(() => t(snapshot.value?.unavailable_reason === 'runtime_not_published' ? 'spaces.preview_limits_link' : 'spaces.guide_section'))
 const blockedReasons = ['journal_fault', 'runtime_withdrawn', 'no_eligible_gpu', 'closing']
