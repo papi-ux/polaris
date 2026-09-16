@@ -24,7 +24,8 @@ Importing a Lutris or Heroic title also publishes an entry for the launcher itse
 
 ### ROM folders
 
-Emulator games come in the same way. In the import console, add a folder and pick the emulator
+Emulator games come in the same way; [Emulators and ROM folders](emulators.md) walks the whole
+path, from keys and BIOS files to what happens on End Session. In the import console, add a folder and pick the emulator
 that loads it. Polaris lists every file with a matching extension as a candidate, named from its
 filename with the region and version tags removed and `Legend of Zelda, The` read as `The Legend
 of Zelda`, and skips update and DLC dumps (`[v65536]`, `[UPD]`, `(DLC)`, or a folder called
