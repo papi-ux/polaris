@@ -111,7 +111,7 @@
         </ol>
       </details>
       <p v-if="!setup.available" class="mt-4 text-xs text-storm">{{ $t('spaces.no_mutation') }}</p>
-      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" ref="firstSetup" :host-ready="setup.host_prerequisites_ready" @runtime="runtime = $event" />
+      <SpacesFirstSetup v-if="!setup.configured" id="spaces-prepare" ref="firstSetup" :host-ready="setup.host_prerequisites_ready" :ready-runtime-id="readyRuntimeId" @runtime="runtime = $event" />
     </template>
   </details>
 </template>
@@ -140,6 +140,7 @@ onUnmounted(() => { request?.abort(); clearTimeout(copyTimer) })
 const runtime = ref(null)
 const firstSetup = ref(null)
 const runtimeCheck = computed(() => setup.value?.checks.find(check => check.id === 'runtime') || null)
+const readyRuntimeId = computed(() => runtimeCheck.value?.runtime?.status === 'ready' ? runtimeCheck.value.runtime.id || '' : '')
 // A build with no verified gaming runtime cannot create a Space, and nothing on
 // this PC can change that. Its runtime check then waits instead of asking for
 // attention, and the count covers only the checks a person can act on. Hosts

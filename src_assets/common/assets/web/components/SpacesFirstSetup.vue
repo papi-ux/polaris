@@ -3,7 +3,7 @@
     <p class="section-kicker">{{ $t('spaces.kicker') }}</p>
     <h3 id="spaces-first-title" class="text-base font-semibold text-silver">{{ $t('spaces.first_title') }}</h3>
     <template v-if="!runtimeNotPublished">
-      <p class="mt-2 max-w-2xl text-sm text-storm">{{ $t('spaces.first_copy') }}</p>
+      <p class="mt-2 max-w-2xl text-sm text-storm">{{ $t(runtimeOnHost ? 'spaces.first_copy_ready' : 'spaces.first_copy') }}</p>
       <p class="mt-2 text-sm text-storm">{{ $t('spaces.first_steps') }}</p>
     </template>
     <p v-if="error" class="mt-3 text-sm text-warning-bright" role="alert">{{ error }}</p>
@@ -79,10 +79,10 @@
         </select>
       </div>
       <p v-else class="text-sm text-storm">{{ runtimeLabel(snapshot.runtimes[0]) }}</p>
-      <p class="text-xs text-storm">{{ $t('spaces.download_note') }}</p>
+      <p v-if="!runtimeOnHost" class="text-xs text-storm">{{ $t('spaces.download_note') }}</p>
       <p v-if="!hostReady" class="text-sm text-storm">{{ $t('spaces.host_first') }}</p>
       <p v-else-if="runtimeDownloading" class="text-sm text-storm" data-runtime-downloading>{{ $t('spaces.runtime_downloading_wait') }}</p>
-      <Button type="submit" variant="outline" size="sm" :disabled="busy || !connected || !hostReady || !name.trim() || runtimeDownloading">{{ $t('spaces.download') }}</Button>
+      <Button type="submit" variant="outline" size="sm" :disabled="busy || !connected || !hostReady || !name.trim() || runtimeDownloading">{{ $t(runtimeOnHost ? 'spaces.prepare' : 'spaces.download') }}</Button>
     </form>
     <Button variant="ghost" size="sm" class="mt-3 text-ice" :loading="busy" :disabled="busy" data-setup-reconnect @click="refresh">
       {{ busy ? $t('spaces.checking_setup') : $t('spaces.reconnect') }}
@@ -104,7 +104,7 @@ import { requestForJob, validJobSnapshot, validSetupStart } from '../spaces-job.
 import { docsUrl } from '../spaces-setup.js'
 import { requestHostRestart } from '../restart-host.js'
 
-defineProps({ hostReady: { type: Boolean, default: false } })
+const props = defineProps({ hostReady: { type: Boolean, default: false }, readyRuntimeId: { type: String, default: '' } })
 // Host Setup reads the runtime state from here, so a build without a runtime is
 // not shown as a check the person has to fix. Its gaming runtime check also
 // downloads through this connection, so the page keeps a single poll.
@@ -146,6 +146,8 @@ const jobTone = computed(() => {
 
 // A download-only job holds the host's setup worker until it ends.
 const runtimeDownloading = computed(() => snapshot.value?.download?.state === 'downloading')
+// Host Setup already verified the chosen runtime on this PC, so starting only prepares the Steam home.
+const runtimeOnHost = computed(() => !!props.readyRuntimeId && props.readyRuntimeId === runtimeId.value)
 function adopt(next) {
   snapshot.value = next; connected.value = true
   emit('runtime', { available: next.available, reason: next.unavailable_reason || '',

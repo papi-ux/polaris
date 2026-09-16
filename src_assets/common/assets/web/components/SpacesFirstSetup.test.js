@@ -239,6 +239,22 @@ describe('first-space preparation', () => {
 })
 
 
+describe('first-space button', () => {
+  it('offers Prepare without the download note once Host Setup verified the chosen runtime', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(state())))
+    wrapper = start({ hostReady: true, readyRuntimeId: runtime.id })
+    await flushPromises()
+    expect(button('Prepare')).toBeTruthy()
+    expect(button('Download and prepare')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('several gigabytes')
+    expect(wrapper.text()).toContain('The gaming runtime is already on this PC')
+    // A different runtime than the verified one still downloads.
+    await wrapper.setProps({ readyRuntimeId: 'steam-other' })
+    expect(button('Download and prepare')).toBeTruthy()
+    expect(wrapper.text()).toContain('several gigabytes')
+  })
+})
+
 describe('first-space activation', () => {
   const prepared = () => ({ ...state({ ...job('prepared'), can_activate: true, gpu_id: '' }),
     graphics: [{ id: 'pci-0000_01_00.0', label: 'NVIDIA graphics' }] })

@@ -64,8 +64,8 @@ setup is still active.
 
 If **Docker Engine** passes and **Polaris access to Docker** needs attention,
 select **Give Polaris access to Docker** and approve the password prompt on the
-Polaris host's screen. Polaris starts the system Docker service and adds the
-account Polaris runs as to the `docker` group. A Polaris that is already running
+Polaris host's screen. Polaris starts the system Docker service, sets it to
+start with the PC, and adds the account Polaris runs as to the `docker` group. A Polaris that is already running
 keeps the groups it started with, so the check then asks you to restart the PC.
 After the restart, select **Recheck Setup**.
 

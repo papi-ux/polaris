@@ -25,7 +25,7 @@
 
   <action id="@POLARIS_POLKIT_ACTION_PREFIX@.spaces-docker-access">
     <description>Give Polaris access to Docker</description>
-    <message>Polaris wants to start Docker and add your account to the docker group so Spaces can use it. Anyone in that group can control Docker, which is as powerful as an administrator account.</message>
+    <message>Polaris wants to start Docker, have it start with this PC, and add your account to the docker group so Spaces can use it. Anyone in that group can control Docker, which is as powerful as an administrator account.</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

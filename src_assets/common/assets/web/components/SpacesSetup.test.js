@@ -43,7 +43,7 @@ const running = (phase = 'downloading') => ({
 const reply = body => ({ ok: true, json: async () => body })
 const start = () => mount(SpacesSetup, { global: { ...spacesGlobal, stubs: ['router-link', 'SpacesFirstSetup'] } })
 // First-Space setup carries the download; this stands in for its connection.
-const firstSetup = { name: 'SpacesFirstSetup', props: ['hostReady'], emits: ['runtime'], template: '<div data-first-setup />',
+const firstSetup = { name: 'SpacesFirstSetup', props: ['hostReady', 'readyRuntimeId'], emits: ['runtime'], template: '<div data-first-setup />',
   methods: { download: vi.fn(async () => ''), stopDownload: vi.fn(async () => '') } }
 const startWithJob = () => mount(SpacesSetup, { global: { ...spacesGlobal, stubs: { 'router-link': true, SpacesFirstSetup: firstSetup } } })
 const report = extra => wrapper.findComponent(firstSetup).vm.$emit('runtime', connection(extra))
@@ -170,6 +170,8 @@ describe('Spaces setup', () => {
     // A runtime to download opens the checks even though the host is ready.
     expect(wrapper.findAll('details').at(1).element.open).toBe(true)
     expect(wrapper.get('[data-setup-count]').text()).toBe('6/8')
+    // Nothing is verified yet, so first Space setup still downloads.
+    expect(wrapper.findComponent(firstSetup).props('readyRuntimeId')).toBe('')
     const available = row('runtime')
     expect(available.text()).toContain('Not downloaded')
     expect(available.text()).not.toContain('Needs attention')
@@ -209,6 +211,7 @@ describe('Spaces setup', () => {
     expect(ready.find('[data-runtime-action]').exists()).toBe(false)
     expect(ready.find('a').exists()).toBe(false)
     expect(wrapper.get('[data-setup-count]').text()).toBe('7/8')
+    expect(wrapper.findComponent(firstSetup).props('readyRuntimeId')).toBe('steam-nvidia-610')
   })
 
   it('also shows progress while first-Space setup downloads the runtime, without a second download', async () => {
