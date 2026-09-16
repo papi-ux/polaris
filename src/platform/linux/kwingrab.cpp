@@ -7,6 +7,7 @@
  */
 
 #include "kwingrab.h"
+#include "kwin_permission_entries.h"
 
 #include "src/logging.h"
 
@@ -17,9 +18,11 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <pwd.h>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -59,15 +62,20 @@ namespace kwingrab {
       return {};
     }
 
-    std::string desktop_exec_line(const std::string &path) {
+    std::string desktop_value(const std::string &path, std::string_view key) {
       std::ifstream in(path);
       std::string line;
+      const auto prefix = std::string {key} + "=";
       while (std::getline(in, line)) {
-        if (line.rfind("Exec=", 0) == 0 && line.size() > 5) {
-          return line.substr(5);
+        if (line.rfind(prefix, 0) == 0 && line.size() > prefix.size()) {
+          return line.substr(prefix.size());
         }
       }
       return {};
+    }
+
+    std::string desktop_exec_line(const std::string &path) {
+      return desktop_value(path, "Exec");
     }
 
     bool system_permission_present(const std::string &exe) {
@@ -113,32 +121,55 @@ namespace kwingrab {
       if (exe.empty()) {
         return;
       }
+      const auto data = xdg_data_home();
+      const auto apps = data.empty() ? std::filesystem::path {} : std::filesystem::path(data) / "applications";
+      std::optional<std::filesystem::path> reusable;
+      if (!apps.empty()) {
+        // One entry per binary. An update installs a new versioned binary, so
+        // the entries for binaries that are gone are deleted here instead of
+        // piling up, one per update.
+        std::vector<permission::entry_t> entries;
+        std::error_code list_ec;
+        for (const auto &entry : std::filesystem::directory_iterator(apps, list_ec)) {
+          if (list_ec) {
+            break;
+          }
+          const auto name = entry.path().filename().string();
+          if (name.rfind(k_desktop_prefix, 0) != 0 || !name.ends_with(".desktop")) {
+            continue;
+          }
+          const auto file = entry.path().string();
+          entries.push_back({entry.path(), desktop_exec_line(file), desktop_value(file, "Name") == permission::entry_name});
+        }
+        const auto plan = permission::plan_entries(entries, exe, [](const std::string &binary) {
+          std::error_code exists_ec;
+          return std::filesystem::exists(binary, exists_ec);
+        });
+        std::size_t removed = 0;
+        for (const auto &stale : plan.remove) {
+          std::error_code remove_ec;
+          if (std::filesystem::remove(stale, remove_ec)) {
+            ++removed;
+          }
+        }
+        if (removed > 0) {
+          BOOST_LOG(info) << "kwingrab: removed permission desktop entries for Polaris binaries that no longer exist: "sv << removed;
+        }
+        reusable = plan.keep;
+      }
       if (system_permission_present(exe)) {
         return;
       }
-      const auto data = xdg_data_home();
-      if (data.empty()) {
+      if (reusable) {
+        BOOST_LOG(debug) << "kwingrab: reuse user permission desktop "sv << reusable->string();
         return;
       }
-      const auto apps = std::filesystem::path(data) / "applications";
+      if (apps.empty()) {
+        return;
+      }
       std::error_code ec;
       std::filesystem::create_directories(apps, ec);
-      // Reuse an existing matching user desktop if present.
-      for (const auto &entry : std::filesystem::directory_iterator(apps, ec)) {
-        if (ec) {
-          break;
-        }
-        const auto name = entry.path().filename().string();
-        if (name.rfind(k_desktop_prefix, 0) != 0 || !name.ends_with(".desktop")) {
-          continue;
-        }
-        if (desktop_exec_line(entry.path().string()) == exe) {
-          BOOST_LOG(debug) << "kwingrab: reuse user permission desktop "sv << entry.path().string();
-          return;
-        }
-      }
-      const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
-      const auto path = apps / (std::string(k_desktop_prefix) + "." + std::to_string(stamp) + ".desktop");
+      const auto path = apps / permission::desktop_file_name(exe);
       std::ofstream out(path);
       if (!out) {
         BOOST_LOG(warning) << "kwingrab: failed to write permission desktop "sv << path.string();
@@ -148,7 +179,7 @@ namespace kwingrab {
           << "Exec=" << exe << '\n'
           << "X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1\n"
           << "Type=Application\n"
-          << "Name=Polaris KWin screencast permission\n"
+          << "Name=" << permission::entry_name << '\n'
           << "Comment=Polaris host capture without xdg-desktop-portal picker\n"
           << "NoDisplay=true\n";
       out.close();
