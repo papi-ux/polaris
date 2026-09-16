@@ -53,6 +53,30 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(config).toContain('role="status"')
   })
 
+  it('gives the Spaces console named regions, live status and reachable targets', () => {
+    const view = webSource('views/SpacesView.vue')
+    const assignments = webSource('components/MultiseatAssignments.vue')
+    const list = webSource('components/SpacesList.vue')
+    const setup = webSource('components/SpacesSetup.vue')
+    const firstSetup = webSource('components/SpacesFirstSetup.vue')
+    const access = webSource('components/SpaceAccess.vue')
+
+    expect(view).toContain('aria-labelledby="spaces-intro-title"')
+    expect(assignments).toContain('aria-labelledby="profile-assignment-title"')
+    expect(assignments).toContain('role="status" data-stream-lock')
+    expect(assignments).toContain('aria-describedby')
+    expect(list).toContain('<ConfirmActionDialog')
+    expect(list).not.toContain('<form v-if="selected"')
+    expect(setup).toContain('role="status" aria-live="polite"')
+    expect(setup).toContain('md:grid-cols-2')
+    expect(firstSetup).toContain('role="group" aria-labelledby="spaces-first-title"')
+    expect(firstSetup).not.toContain('.job-button')
+    expect(access).toContain('class="h-4 w-4 shrink-0 rounded border-storm bg-void text-ice accent-ice"')
+    for (const source of [view, assignments, list, setup, firstSetup, access]) {
+      expect(source).not.toMatch(/rgb\(136 192 208/)
+    }
+  })
+
   it('keeps sticky review bars from covering content on handheld widths', () => {
     const css = webSource('app.css')
 

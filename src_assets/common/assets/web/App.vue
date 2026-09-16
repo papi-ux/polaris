@@ -201,7 +201,7 @@ try {
   // i18n not yet ready
 }
 
-const navSections = computed(() => createNavSections(t))
+const navSections = computed(() => createNavSections(t, sidebarUpdateHost.value?.platform || ''))
 const currentNavItem = computed(() => getNavItemByPath(navSections.value, route.path))
 const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
 const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')

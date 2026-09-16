@@ -2,6 +2,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SpacesFirstSetup from './SpacesFirstSetup.vue'
 import { validJobSnapshot } from '../spaces-job.js'
+import { spacesGlobal } from './spaces-test-i18n.js'
 
 const id = '12345678-1234-1234-1234-123456789abc'
 const runtime = { id: 'steam-test', variant: 'default', nvidia_driver: '' }
@@ -16,28 +17,64 @@ let wrapper
 beforeEach(() => { sessionStorage.clear(); vi.stubGlobal('crypto', { randomUUID: () => id }) })
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.useRealTimers() })
 const button = label => wrapper.findAll('button').find(item => item.text() === label)
+const start = (props = { hostReady: true }) => mount(SpacesFirstSetup, { attachTo: document.body, props, global: spacesGlobal })
 
 describe('first-space preparation', () => {
   it('shows unpublished runtimes honestly without offering a fake download', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply({ ...state(), available: false, runtimes: [], message: 'The runtime is not published yet.' })))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
-    expect(wrapper.text()).toContain('not published')
+    expect(wrapper.get('[data-setup-unavailable]').text()).toContain('not published')
     expect(wrapper.find('form').exists()).toBe(false)
     expect(fetch.mock.calls[0][1].method).toBeUndefined()
   })
 
+  it('names the reason the host gives for an unavailable setup and links its section', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply({ ...state(), available: false, runtimes: [],
+      message: 'The verified gaming runtime is not published for this preview yet.', unavailable_reason: 'runtime_not_published' })))
+    wrapper = start()
+    await flushPromises()
+    const card = wrapper.get('[data-setup-unavailable]')
+    expect(card.text()).toContain('Not available yet')
+    expect(card.text()).toContain('nothing to download until it is')
+    expect(card.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#prepare-your-first-space')
+  })
+
   it('reconnects to the host job after navigation and sends no duplicate request', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(state(job()))))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     expect(wrapper.text()).toContain('Living room')
+    expect(wrapper.text()).toContain('Downloading')
     expect(wrapper.find('form').exists()).toBe(false)
     wrapper.unmount()
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(fetch.mock.calls.every(([, options]) => options.method === undefined)).toBe(true)
+  })
+
+  it('polls a working job only while the tab is visible and backs off when the host fails', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(state(job()))))
+    wrapper = start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+    fetch.mockRejectedValueOnce(new Error('Offline'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetch).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetch).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetch).toHaveBeenCalledTimes(4)
   })
 
   it('retains the same request after an uncertain response and reload', async () => {
@@ -46,7 +83,7 @@ describe('first-space preparation', () => {
       .mockRejectedValueOnce(new Error('Offline'))
       .mockResolvedValueOnce(reply(state()))
       .mockResolvedValueOnce(reply({ ...state(job()), accepted: true }, 202)))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     await wrapper.get('input').setValue('Living room')
     await wrapper.get('form').trigger('submit')
@@ -54,7 +91,7 @@ describe('first-space preparation', () => {
     const original = JSON.parse(fetch.mock.calls[1][1].body)
     expect(original).toEqual({ operation: 'start', request_id: id, runtime_id: runtime.id, name: 'Living room' })
     wrapper.unmount()
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     await button('Retry saved request').trigger('click')
     await flushPromises()
@@ -65,7 +102,7 @@ describe('first-space preparation', () => {
   it('fences cancellation by request identity and offers no cancel during the home commit', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(state(job())))
       .mockResolvedValueOnce(reply({ ...state(job('preparing')), accepted: false }, 409)))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     await button('Stop setup').trigger('click')
     await flushPromises()
@@ -77,7 +114,7 @@ describe('first-space preparation', () => {
   it('disables mutation on a malformed refresh rather than trusting stale progress', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(state(job())))
       .mockResolvedValueOnce(reply({ ...state(job()), version: 2 })))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     await button('Reconnect to setup').trigger('click')
     await flushPromises()
@@ -88,12 +125,28 @@ describe('first-space preparation', () => {
   it('requires host prerequisites and does not present prepared storage as playable', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(state()))
       .mockResolvedValueOnce(reply(state(job('prepared')))))
-    wrapper = mount(SpacesFirstSetup)
+    wrapper = start({})
     await flushPromises()
     expect(button('Download and prepare').attributes('disabled')).toBeDefined()
     await button('Reconnect to setup').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('has not started a game or enabled streaming')
+    expect(button('Stop setup')).toBeUndefined()
+  })
+
+  it('names what blocks a job and what was kept for recovery', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply({ ...state({ ...job('recovery_required'), can_cancel: false, can_retry: false,
+      blocked_by: ['journal_fault'], recovery: { reference: 'ghcr.io/papi-ux/polaris-worker-steam@sha256:' + 'a'.repeat(64),
+        image: 'sha256:' + 'b'.repeat(64), code: 'preparing', doc_anchor: '#recover-an-interrupted-setup' } }), available: false,
+      message: 'Saved setup state could not be secured.', unavailable_reason: 'journal_fault' })))
+    wrapper = start()
+    await flushPromises()
+    expect(wrapper.text()).toContain('Recovery required')
+    expect(wrapper.get('[data-setup-blocked]').text()).toContain('setup journal could not be secured')
+    const recovery = wrapper.get('[data-setup-recovery]')
+    expect(recovery.text()).toContain('sha256:' + 'b'.repeat(64))
+    expect(recovery.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#recover-an-interrupted-setup')
+    expect(button('Retry setup')).toBeUndefined()
     expect(button('Stop setup')).toBeUndefined()
   })
 
@@ -106,6 +159,9 @@ describe('first-space preparation', () => {
       state({ ...job(), can_retry: true }),
       state({ ...job(), request_id: 'other' }),
       { ...state(), runtimes: [{ ...runtime, id: '../image' }] },
+      { ...state(), unavailable_reason: 'not a word' },
+      state({ ...job(), blocked_by: 'journal_fault' }),
+      state({ ...job(), recovery: { doc_anchor: 'javascript:1' } }),
     ]) expect(validJobSnapshot(bad)).toBe(false)
   })
 })
@@ -114,12 +170,14 @@ describe('first-space preparation', () => {
 describe('first-space activation', () => {
   const prepared = () => ({ ...state({ ...job('prepared'), can_activate: true, gpu_id: '' }),
     graphics: [{ id: 'pci-0000_01_00.0', label: 'NVIDIA graphics' }] })
-  it('sends only the saved request and discovered graphics selection, then requires an explicit restart', async () => {
+  it('sends only the saved request and discovered graphics selection, then confirms the restart and waits for the host', async () => {
     const configured = { ...prepared(), job: { ...job('restart_required'), can_activate: false, gpu_id: 'pci-0000_01_00.0' } }
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(prepared()))
-      .mockResolvedValueOnce(reply({ ...configured, accepted: true }, 202))
-      .mockResolvedValueOnce(reply({ restarting: true })))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      if (url === './api/restart') return reply({ restarting: true })
+      if (url === './api/config') return reply({ status: true })
+      return options?.method === 'POST' ? reply({ ...configured, accepted: true }, 202) : reply(prepared())
+    }))
+    wrapper = start()
     await flushPromises()
     await button('Enable Spaces').trigger('click')
     await flushPromises()
@@ -128,16 +186,27 @@ describe('first-space activation', () => {
     expect(wrapper.text()).toContain('disconnects active streams')
     await button('Restart Polaris and finish setup').trigger('click')
     await flushPromises()
-    expect(fetch.mock.calls[2][0]).toBe('./api/restart')
-    expect(wrapper.text()).toContain('assign your device')
+    const dialog = document.body.querySelector('[role="dialog"]')
+    expect(dialog.textContent).toContain('Every stream disconnects')
+    expect(fetch.mock.calls.filter(([url]) => url === './api/restart')).toHaveLength(0)
+    vi.useFakeTimers()
+    dialog.querySelector('[data-confirm-confirm]').click()
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(fetch.mock.calls.filter(([url]) => url === './api/restart')).toHaveLength(1)
+    expect(fetch.mock.calls.find(([url]) => url === './api/restart')[1].body).toBeUndefined()
+    expect(wrapper.get('[role=status]').text()).toContain('Polaris is back')
+    expect(wrapper.find('[role=alert]').exists()).toBe(false)
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+    expect(button('Restart Polaris and finish setup').attributes('disabled')).toBeDefined()
   })
   it('cannot enable without a matching GPU or after an unverified response', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply({ ...prepared(), graphics: [] }))
       .mockResolvedValueOnce(reply(prepared()))
       .mockRejectedValueOnce(new Error('Offline')))
-    wrapper = mount(SpacesFirstSetup, { props: { hostReady: true } })
+    wrapper = start()
     await flushPromises()
     expect(button('Enable Spaces').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('No accessible graphics card')
     await button('Reconnect to setup').trigger('click'); await flushPromises()
     await button('Enable Spaces').trigger('click'); await flushPromises()
     expect(button('Enable Spaces').attributes('disabled')).toBeDefined()
