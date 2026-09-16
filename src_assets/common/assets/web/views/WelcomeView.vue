@@ -126,11 +126,11 @@
             </div>
 
             <div v-if="currentStep === 4">
-              <WelcomeArtworkStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="noteRestartNeeded('artwork')" />
+              <WelcomeArtworkStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="(result) => noteRestartNeeded('artwork', result)" />
             </div>
 
             <div v-if="currentStep === 5">
-              <WelcomeAiStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="noteRestartNeeded('ai')" />
+              <WelcomeAiStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="(result) => noteRestartNeeded('ai', result)" />
             </div>
 
             <div v-if="currentStep === 6">
@@ -238,6 +238,7 @@ import ResourceCard from '../ResourceCard.vue'
 import WelcomeArtworkStep from '../components/WelcomeArtworkStep.vue'
 import WelcomeAiStep from '../components/WelcomeAiStep.vue'
 import { requestHostRestart } from '../restart-host.js'
+import { saveNeedsRestart } from '../config-save-outcome.js'
 
 // The wizard keeps its own $t so the step list can translate titles from script code.
 const instance = getCurrentInstance()
@@ -272,7 +273,10 @@ function stepTitle(stepDef) {
   return stepDef.titleKey ? $t(stepDef.titleKey) : stepDef.title
 }
 
-function noteRestartNeeded(what) {
+function noteRestartNeeded(what, result) {
+  // The host applies both settings while it runs; the offer stays for a host
+  // that says otherwise.
+  if (result && result.restartRequired === false) return
   const next = new Set(restartNeeded.value)
   next.add(what)
   restartNeeded.value = next
@@ -307,7 +311,7 @@ async function patchConfig(body) {
       ...(body.steamgriddb_api_key ? { has_steamgriddb_api_key: true } : {}),
       ...(body.ai_api_key ? { has_ai_api_key: true } : {}),
     }
-    return { ok: true }
+    return { ok: true, restartRequired: saveNeedsRestart(payload) }
   } catch {
     return { ok: false, error: 'Could not reach Polaris.' }
   }

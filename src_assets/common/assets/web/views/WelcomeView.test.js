@@ -176,10 +176,10 @@ describe('WelcomeView optional setup steps', () => {
     wrapper.unmount()
   })
 
-  it('checks a SteamGridDB key before saving it and says the host reads it after a restart', async () => {
+  it('checks a SteamGridDB key before saving it and uses it without a restart', async () => {
     const routes = baseRoutes()
     routes['POST ./api/covers/key/check'] = () => response(200, { status: true, code: 'steamgriddb_ok', matches: 3 })
-    routes['PATCH ./api/config'] = () => response(200, { status: true, configuration_revision: 'r2' })
+    routes['PATCH ./api/config'] = () => response(200, { status: true, configuration_revision: 'r2', restart_required: false })
     routeFetch(routes)
     const wrapper = mountWelcome()
     await settle()
@@ -204,6 +204,30 @@ describe('WelcomeView optional setup steps', () => {
     expect(text).toContain('welcome.artwork_saved')
     expect(wrapper.get('#welcomeSteamGridDbKey').element.value).toBe('')
     expect(wrapper.html()).not.toContain('sgdb-test-key')
+
+    await button(wrapper, 'Next').trigger('click')
+    await settle()
+    await button(wrapper, 'Next').trigger('click')
+    await settle()
+    expect(wrapper.text()).toContain('Step 7 of 7')
+    expect(wrapper.text()).not.toContain('welcome.restart_needed_one')
+    expect(button(wrapper, 'welcome.restart_now')).toBeFalsy()
+    wrapper.unmount()
+  })
+
+  it('still offers the restart when the host says a saved key waits for one', async () => {
+    const routes = baseRoutes()
+    routes['POST ./api/covers/key/check'] = () => response(200, { status: true, code: 'steamgriddb_ok', matches: 1 })
+    routes['PATCH ./api/config'] = () => response(200, { status: true, configuration_revision: 'r2' })
+    routeFetch(routes)
+    const wrapper = mountWelcome()
+    await settle()
+    await reachStep(wrapper, 4)
+
+    await wrapper.get('#welcomeSteamGridDbKey').setValue('sgdb-test-key')
+    await button(wrapper, 'welcome.artwork_check_and_save').trigger('click')
+    await settle()
+    expect(wrapper.text()).toContain('welcome.artwork_saved_restart')
 
     await button(wrapper, 'Next').trigger('click')
     await settle()

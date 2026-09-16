@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
@@ -512,6 +513,25 @@ namespace config {
     }
   }  // namespace dd
 
+  namespace {
+    // Shared by startup parsing and the reload after a console save, so both
+    // start from the same values.
+    const video_t::ai_optimizer_t ai_optimizer_defaults {
+      false,  // enabled
+      "anthropic",  // provider
+      {},  // model
+      {},  // auth_mode
+      {},  // api_key
+      {},  // base_url
+      false,  // use_subscription
+      {},  // codex_home
+      5000,  // timeout_ms
+      168,  // cache_ttl_hours (1 week)
+    };
+
+    std::mutex steamgriddb_api_key_mutex;
+  }  // namespace
+
   video_t video {
     true, // limit_framerate
     false, // double_refreshrate
@@ -623,18 +643,7 @@ namespace config {
     false, // ignore_encoder_probe_failure
     false, // browser_streaming
 
-    {     // ai_optimizer
-      false,  // enabled
-      "anthropic",  // provider
-      {},     // model
-      {},     // auth_mode
-      {},     // api_key
-      {},     // base_url
-      false,  // use_subscription
-      {},     // codex_home
-      5000,   // timeout_ms
-      168,    // cache_ttl_hours (1 week)
-    },
+    ai_optimizer_defaults,  // ai_optimizer
   };
 
   audio_t audio {
@@ -1290,6 +1299,31 @@ namespace config {
     return initial;
   }
 
+  std::string steamgriddb_api_key() {
+    std::lock_guard<std::mutex> lock(steamgriddb_api_key_mutex);
+    return sunshine.steamgriddb_api_key;
+  }
+
+  void set_steamgriddb_api_key(std::string key) {
+    std::lock_guard<std::mutex> lock(steamgriddb_api_key_mutex);
+    sunshine.steamgriddb_api_key = std::move(key);
+  }
+
+  video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars) {
+    auto settings = ai_optimizer_defaults;
+    bool_f(vars, "ai_enabled", settings.enabled);
+    string_f(vars, "ai_provider", settings.provider);
+    string_f(vars, "ai_model", settings.model);
+    string_f(vars, "ai_auth_mode", settings.auth_mode);
+    string_f(vars, "ai_api_key", settings.api_key);
+    string_f(vars, "ai_base_url", settings.base_url);
+    bool_f(vars, "ai_use_subscription", settings.use_subscription);
+    string_f(vars, "ai_codex_home", settings.codex_home);
+    int_f(vars, "ai_timeout_ms", settings.timeout_ms);
+    int_f(vars, "ai_cache_ttl_hours", settings.cache_ttl_hours);
+    return settings;
+  }
+
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
@@ -1460,16 +1494,7 @@ namespace config {
     bool_f(vars, "browser_streaming", video.browser_streaming);
 
     // AI Optimizer
-    bool_f(vars, "ai_enabled", video.ai_optimizer.enabled);
-    string_f(vars, "ai_provider", video.ai_optimizer.provider);
-    string_f(vars, "ai_model", video.ai_optimizer.model);
-    string_f(vars, "ai_auth_mode", video.ai_optimizer.auth_mode);
-    string_f(vars, "ai_api_key", video.ai_optimizer.api_key);
-    string_f(vars, "ai_base_url", video.ai_optimizer.base_url);
-    bool_f(vars, "ai_use_subscription", video.ai_optimizer.use_subscription);
-    string_f(vars, "ai_codex_home", video.ai_optimizer.codex_home);
-    int_f(vars, "ai_timeout_ms", video.ai_optimizer.timeout_ms);
-    int_f(vars, "ai_cache_ttl_hours", video.ai_optimizer.cache_ttl_hours);
+    video.ai_optimizer = ai_optimizer_settings(vars);
 
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);

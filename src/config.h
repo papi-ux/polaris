@@ -446,4 +446,20 @@ namespace config {
   int parse(int argc, char *argv[]);
   bool is_valid_command_prefix(std::string_view argument);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
+
+  /**
+   * @brief The SteamGridDB API key the running host uses. Safe to call from any thread.
+   */
+  std::string steamgriddb_api_key();
+
+  /**
+   * @brief Replace the SteamGridDB API key the running host uses, after a configuration save.
+   */
+  void set_steamgriddb_api_key(std::string key);
+
+  /**
+   * @brief The AI explanation settings in parsed configuration variables, starting from the built-in defaults.
+   * @param vars Parsed variables; the AI keys are consumed, as apply_config consumes them.
+   */
+  video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars);
 }  // namespace config

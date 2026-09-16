@@ -309,8 +309,8 @@ async function saveAndEnable() {
       saveOutcome.value = { ok: false, textKey: 'welcome.ai_save_failed', params: { error: saved.error || '' } }
       return
     }
-    saveOutcome.value = { ok: true, textKey: 'welcome.ai_saved' }
-    emit('saved')
+    saveOutcome.value = { ok: true, textKey: saved.restartRequired === false ? 'welcome.ai_saved' : 'welcome.ai_saved_restart' }
+    emit('saved', saved)
   } finally {
     busy.value = ''
   }

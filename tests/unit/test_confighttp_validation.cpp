@@ -6,6 +6,12 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include <src/confighttp_validation.h>
 
@@ -381,4 +387,37 @@ TEST(AppValidationTests, AcceptsAnEmulatorSourceWithItsRomKeys) {
   payload["source"] = "retroarch";
   EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
   EXPECT_NE(error.find("emulator"), std::string::npos) << error;
+}
+
+TEST(ConfigLiveApplyTests, ChangedKeysTreatAMissingKeyAsEmpty) {
+  const std::unordered_map<std::string, std::string> before {
+    {"port", "47989"}, {"steamgriddb_api_key", "old"}, {"ai_model", "gpt-5.6-luna"}, {"capture", "kms"}, {"ai_codex_home", ""}};
+  const std::unordered_map<std::string, std::string> after {
+    {"port", "47989"}, {"steamgriddb_api_key", "new"}, {"capture", "kms"}, {"ai_enabled", "enabled"}};
+  EXPECT_EQ(confighttp::validation::changed_config_keys(before, after),
+    (std::vector<std::string> {"ai_enabled", "ai_model", "steamgriddb_api_key"}));
+  EXPECT_TRUE(confighttp::validation::changed_config_keys(before, before).empty());
+}
+
+TEST(ConfigLiveApplyTests, OnlyKeysTheHostAppliesLiveSkipTheRestart) {
+  using confighttp::validation::config_change_requires_restart;
+  EXPECT_FALSE(config_change_requires_restart({}));
+  EXPECT_FALSE(config_change_requires_restart({"steamgriddb_api_key"}));
+  EXPECT_FALSE(config_change_requires_restart({"adaptive_bitrate_enabled", "ai_api_key", "ai_auth_mode", "ai_base_url",
+    "ai_cache_ttl_hours", "ai_codex_home", "ai_enabled", "ai_model", "ai_provider", "ai_timeout_ms", "ai_use_subscription"}));
+  EXPECT_TRUE(config_change_requires_restart({"capture", "steamgriddb_api_key"}));
+  EXPECT_TRUE(config_change_requires_restart({"port"}));
+  EXPECT_FALSE(confighttp::validation::is_live_applied_config_key("ai_future_setting"));
+}
+
+TEST(ConfigLiveApplyTests, SteamGridDbKeyIsReadThroughTheLockedAccessor) {
+  // A saved key is applied while the streaming server's threads read it, so the
+  // readers go through config::steamgriddb_api_key() instead of the field.
+  for (const auto *file : {"src/confighttp.cpp", "src/nvhttp.cpp"}) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / file);
+    ASSERT_TRUE(in) << file;
+    const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(source.find("config::sunshine.steamgriddb_api_key"), std::string::npos) << file;
+    EXPECT_NE(source.find("config::steamgriddb_api_key()"), std::string::npos) << file;
+  }
 }

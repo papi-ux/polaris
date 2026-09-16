@@ -79,9 +79,9 @@ const savedThisSession = ref(false)
 
 const hasStoredKey = computed(() => savedThisSession.value || !!props.configData?.has_steamgriddb_api_key)
 
-// The host checks the key against SteamGridDB without storing it, so the
-// answer is real even though the running host only reads a saved key after
-// a restart.
+// The host checks the key against SteamGridDB without storing it, then the
+// save hands it to the running host, so the cover search and Nova use it at
+// once.
 async function checkKey(body) {
   const response = await fetch('./api/covers/key/check', {
     method: 'POST',
@@ -146,8 +146,13 @@ async function checkAndSave() {
     }
     typedKey.value = ''
     savedThisSession.value = true
-    outcome.value = { ok: true, textKey: 'welcome.artwork_ok', params: { matches: result.matches ?? 0 }, hintKey: 'welcome.artwork_saved' }
-    emit('saved')
+    outcome.value = {
+      ok: true,
+      textKey: 'welcome.artwork_ok',
+      params: { matches: result.matches ?? 0 },
+      hintKey: saved.restartRequired === false ? 'welcome.artwork_saved' : 'welcome.artwork_saved_restart',
+    }
+    emit('saved', saved)
   } catch {
     outcome.value = failure(null)
   } finally {

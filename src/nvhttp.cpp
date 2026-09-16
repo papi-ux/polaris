@@ -7604,7 +7604,7 @@ namespace nvhttp {
       features["display_planner_v1"] = true;
       features["artwork_manifest_v1"] = true;
       features["artwork_manual_match_v1"] = nonblank_artwork_api_key(
-        config::sunshine.steamgriddb_api_key);
+        config::steamgriddb_api_key());
       features["support_client_report_v1"] = true;
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
@@ -8925,7 +8925,7 @@ namespace nvhttp {
       }
 
       const auto appdata = platf::appdata();
-      const auto api_key = config::sunshine.steamgriddb_api_key;
+      const auto api_key = config::steamgriddb_api_key();
       const auto transport = make_artwork_transport(api_key);
       // Promote existing host artwork before attempting either remote provider.
       promote_local_artwork_poster(*app);
@@ -9065,7 +9065,7 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_not_found);
         return;
       }
-      const auto api_key = config::sunshine.steamgriddb_api_key;
+      const auto api_key = config::steamgriddb_api_key();
       if (!nonblank_artwork_api_key(api_key)) {
         write_artwork_search_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt));
         return;
@@ -9217,7 +9217,7 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_not_found);
         return;
       }
-      const auto api_key = config::sunshine.steamgriddb_api_key;
+      const auto api_key = config::steamgriddb_api_key();
       if (!nonblank_artwork_api_key(api_key)) {
         fail(SimpleWeb::StatusCode::server_error_service_unavailable, "configuration");
         return;

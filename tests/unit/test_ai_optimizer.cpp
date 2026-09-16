@@ -1130,3 +1130,27 @@ TEST(AiOptimizerCodexCli, SubscriptionModelListAndDefaultFollowTheCli) {
   EXPECT_NE(nothing.value("error", std::string {}).find("Run codex once"), std::string::npos);
   std::filesystem::remove_all(home);
 }
+
+TEST(AiOptimizerReconfigure, StatusAndEnabledFollowSavedSettingsWithoutARestart) {
+  ai_optimizer::config_t local;
+  local.enabled = true;
+  local.provider = "local";
+  local.auth_mode = "none";
+  local.model = "gpt-oss";
+  local.base_url = "http://127.0.0.1:11434/v1";
+  ai_optimizer::reconfigure(local);
+  auto status = nlohmann::json::parse(ai_optimizer::get_status_json());
+  EXPECT_EQ(status.value("provider", std::string {}), "local");
+  EXPECT_EQ(status.value("model", std::string {}), "gpt-oss");
+  EXPECT_TRUE(ai_optimizer::is_enabled());
+
+  local.model = "qwen3-8b";
+  ai_optimizer::reconfigure(local);
+  status = nlohmann::json::parse(ai_optimizer::get_status_json());
+  EXPECT_EQ(status.value("model", std::string {}), "qwen3-8b");
+
+  local.enabled = false;
+  ai_optimizer::reconfigure(local);
+  EXPECT_FALSE(ai_optimizer::is_enabled());
+  EXPECT_FALSE(nlohmann::json::parse(ai_optimizer::get_status_json()).value("enabled", true));
+}

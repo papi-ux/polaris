@@ -9,6 +9,9 @@
 #include <src/private_state_file.h>
 #include <src/utility.h>
 
+#include <string>
+#include <unordered_map>
+
 TEST(ConfigParserTests, ProtocolDecimalsUseDotAndRequireTheWholeValue) {
   const auto fps = util::parse_decimal<double>("60.0");
   ASSERT_TRUE(fps.has_value());
@@ -230,4 +233,24 @@ TEST(ConfigParserTests, SuccessfulConfigWritePublishesCompleteVaapiSettingsAndCl
   EXPECT_EQ(cleared.rc, config::vaapi::rc_e::automatic);
   EXPECT_FALSE(cleared.blbrc.has_value());
   EXPECT_FALSE(cleared.strict_rc_buffer);
+}
+
+TEST(ConfigLiveApplyTests, AiSettingsFromSavedVariablesStartFromTheBuiltInDefaults) {
+  std::unordered_map<std::string, std::string> vars {{"ai_enabled", "enabled"}, {"ai_model", "gpt-5.6-luna"}, {"port", "47989"}};
+  const auto settings = config::ai_optimizer_settings(vars);
+  EXPECT_TRUE(settings.enabled);
+  EXPECT_EQ(settings.provider, "anthropic");
+  EXPECT_EQ(settings.model, "gpt-5.6-luna");
+  EXPECT_EQ(settings.timeout_ms, 5000);
+  EXPECT_EQ(settings.cache_ttl_hours, 168);
+  EXPECT_EQ(vars.size(), 1u);
+  EXPECT_EQ(vars.count("port"), 1u);
+}
+
+TEST(ConfigLiveApplyTests, SteamGridDbKeyAccessorRoundTrips) {
+  const auto previous = config::steamgriddb_api_key();
+  config::set_steamgriddb_api_key("round-trip-key");
+  EXPECT_EQ(config::steamgriddb_api_key(), "round-trip-key");
+  config::set_steamgriddb_api_key(previous);
+  EXPECT_EQ(config::steamgriddb_api_key(), previous);
 }

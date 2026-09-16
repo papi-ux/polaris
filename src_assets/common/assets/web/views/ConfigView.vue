@@ -273,6 +273,7 @@ import {
   stripConfigResponseOnly,
 } from '../client-settings-sync'
 import { requestHostRestart } from '../restart-host.js'
+import { saveNeedsRestart } from '../config-save-outcome.js'
 import { rankSettingsSearchTabs } from '../settings-search.js'
 
 const { toast } = useToast()
@@ -282,6 +283,7 @@ let fallbackDisplayModeCache = ""
 
 const platform = ref("")
 const saved = ref(false)
+const savedNeedsRestart = ref(true)
 const restarted = ref(false)
 const saving = ref(false)
 const restarting = ref(false)
@@ -726,7 +728,7 @@ const commandCenterNote = computed(() => {
     return i18n.t('config.command_unsaved_note')
   }
   if (saved.value) {
-    return i18n.t('config.apply_note')
+    return savedNeedsRestart.value ? i18n.t('config.apply_note') : i18n.t('config.saved_live_note')
   }
   return i18n.t('config.command_saved_note')
 })
@@ -959,16 +961,21 @@ function save() {
       const result = await r.json()
       config.value.configuration_revision = result.configuration_revision
       saved.value = true
+      savedNeedsRestart.value = saveNeedsRestart(result)
       initialSerialized.value = JSON.stringify(serialize())
-      toast(
-        i18n.t('config.apply_note') || 'Configuration saved. Restart Polaris for changes to take effect.',
-        'success',
-        8000,
-        {
-          label: 'Restart Now',
-          handler: () => apply()
-        }
-      )
+      if (savedNeedsRestart.value) {
+        toast(
+          i18n.t('config.apply_note') || 'Configuration saved. Restart Polaris for changes to take effect.',
+          'success',
+          8000,
+          {
+            label: 'Restart Now',
+            handler: () => apply()
+          }
+        )
+      } else {
+        toast(i18n.t('config.saved_live_note') || 'Saved. Polaris is already using these settings.', 'success', 5000)
+      }
       return saved.value
     }
     else {

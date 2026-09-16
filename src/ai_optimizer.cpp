@@ -44,6 +44,10 @@ using namespace std::literals;
 namespace ai_optimizer {
 
   static config_t cfg;
+  // Written on the console thread by init and reconfigure, read from stream and
+  // HTTP threads. Every read copies the settings under this lock; it is a leaf
+  // lock, never held while taking another.
+  static std::mutex cfg_mutex;
   static std::mutex cache_mutex;
   static std::mutex history_mutex;
   static std::mutex inflight_mutex;
@@ -285,8 +289,14 @@ namespace ai_optimizer {
       provider + "\t" + model + "\t" + base_url + "\t" + canonical_device_name(device) + "\t" + app + "\t" + mode;
   }
 
+  static config_t config_snapshot() {
+    std::lock_guard<std::mutex> lock(cfg_mutex);
+    return cfg;
+  }
+
   static std::string current_cache_key(const std::string &device, const std::string &app, const std::string &mode = "") {
-    return cache_key(cfg.provider, cfg.model, cfg.base_url, device, app, mode);
+    const auto active = config_snapshot();
+    return cache_key(active.provider, active.model, active.base_url, device, app, mode);
   }
 
   std::string normalize_stream_mode(const std::string &mode) {
@@ -569,7 +579,7 @@ namespace ai_optimizer {
   }
 
   static int effective_ttl_hours(const cache_entry_t &entry, int base_ttl_hours = 0) {
-    auto ttl_hours = base_ttl_hours > 0 ? base_ttl_hours : cfg.cache_ttl_hours;
+    auto ttl_hours = base_ttl_hours > 0 ? base_ttl_hours : config_snapshot().cache_ttl_hours;
     const auto confidence = to_lower_copy(entry.optimization.confidence);
     if (confidence == "low") {
       ttl_hours = std::min(ttl_hours, LOW_CONFIDENCE_TTL_HOURS);
@@ -3212,37 +3222,57 @@ namespace ai_optimizer {
   }
 
   std::string explain_doctor_json(const std::string &redacted_evidence_json) {
-    return explain_doctor_json_with_config(cfg, redacted_evidence_json);
+    return explain_doctor_json_with_config(config_snapshot(), redacted_evidence_json);
   }
 
   void init(const config_t &config) {
-    cfg = resolved_config(config);
+    const auto resolved = resolved_config(config);
+    {
+      std::lock_guard<std::mutex> lock(cfg_mutex);
+      cfg = resolved;
+    }
     load_cache();
     const bool history_repaired = load_history();
     if (history_repaired) {
       save_history();
       BOOST_LOG(info) << "ai_optimizer: Repaired invalid session history values during load"sv;
     }
-    if (cfg.enabled) {
-      BOOST_LOG(info) << "ai_optimizer: Enabled provider="sv << cfg.provider
-                      << ", model="sv << cfg.model
-                      << ", auth="sv << cfg.auth_mode
-                      << ", cache TTL "sv << cfg.cache_ttl_hours << "h"sv;
+    if (resolved.enabled) {
+      BOOST_LOG(info) << "ai_optimizer: Enabled provider="sv << resolved.provider
+                      << ", model="sv << resolved.model
+                      << ", auth="sv << resolved.auth_mode
+                      << ", cache TTL "sv << resolved.cache_ttl_hours << "h"sv;
     }
   }
 
   bool is_enabled() {
-    return is_config_enabled(cfg);
+    return is_config_enabled(config_snapshot());
   }
 
   bool should_sync_on_cache_miss() {
-    return is_config_enabled(cfg) && cfg.auth_mode == AUTH_SUBSCRIPTION;
+    const auto active = config_snapshot();
+    return is_config_enabled(active) && active.auth_mode == AUTH_SUBSCRIPTION;
   }
 
   void set_enabled(bool enabled) {
-    cfg.enabled = enabled;
+    {
+      std::lock_guard<std::mutex> lock(cfg_mutex);
+      cfg.enabled = enabled;
+    }
     config::video.ai_optimizer.enabled = enabled;
     BOOST_LOG(info) << "ai_optimizer: "sv << (enabled ? "enabled" : "disabled") << " at runtime"sv;
+  }
+
+  void reconfigure(const config_t &config) {
+    const auto resolved = resolved_config(config);
+    {
+      std::lock_guard<std::mutex> lock(cfg_mutex);
+      cfg = resolved;
+    }
+    config::video.ai_optimizer.enabled = resolved.enabled;
+    BOOST_LOG(info) << "ai_optimizer: settings applied at runtime ("sv << (resolved.enabled ? "enabled"sv : "disabled"sv)
+                    << ", provider="sv << resolved.provider << ", model="sv << resolved.model
+                    << ", auth="sv << resolved.auth_mode << ')';
   }
 
   std::optional<device_db::optimization_t> get_cached(
@@ -3421,7 +3451,7 @@ namespace ai_optimizer {
     optimization.reasoning = reasoning.str();
 
     optimization = normalize_optimization(
-      cfg,
+      config_snapshot(),
       device_name,
       app_name,
       "",
@@ -3606,7 +3636,7 @@ namespace ai_optimizer {
                      const std::optional<session_history_t> &history,
                      const std::string &mode) {
     if (!is_enabled()) return;
-    auto active_cfg = cfg;
+    auto active_cfg = config_snapshot();
     (void)get_or_start_request(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
   }
 
@@ -3618,7 +3648,7 @@ namespace ai_optimizer {
       const std::optional<session_history_t> &history,
       const std::string &mode) {
     if (!is_enabled()) return std::nullopt;
-    auto active_cfg = cfg;
+    auto active_cfg = config_snapshot();
     auto future = get_or_start_request(active_cfg, device_name, app_name, gpu_info, game_category, history, mode);
     return future.get();
   }
@@ -3857,16 +3887,17 @@ namespace ai_optimizer {
       std::lock_guard<std::mutex> lock(inflight_mutex);
       runtime_status_snapshot = provider_runtime_status;
     }
-    status["enabled"] = cfg.enabled;
-    status["provider"] = cfg.provider;
-    status["model"] = cfg.model;
-    status["auth_mode"] = cfg.auth_mode;
-    status["base_url"] = cfg.base_url;
-    status["has_api_key"] = !cfg.api_key.empty();
-    status["use_subscription"] = cfg.auth_mode == AUTH_SUBSCRIPTION;
-    status["timeout_ms"] = cfg.timeout_ms;
-    status["cache_ttl_hours"] = cfg.cache_ttl_hours;
-    status["codex_home"] = cfg.codex_home;
+    const auto cfg_now = config_snapshot();
+    status["enabled"] = cfg_now.enabled;
+    status["provider"] = cfg_now.provider;
+    status["model"] = cfg_now.model;
+    status["auth_mode"] = cfg_now.auth_mode;
+    status["base_url"] = cfg_now.base_url;
+    status["has_api_key"] = !cfg_now.api_key.empty();
+    status["use_subscription"] = cfg_now.auth_mode == AUTH_SUBSCRIPTION;
+    status["timeout_ms"] = cfg_now.timeout_ms;
+    status["cache_ttl_hours"] = cfg_now.cache_ttl_hours;
+    status["codex_home"] = cfg_now.codex_home;
     status["cache_count"] = cache_count;
     status["recommendation_version"] = OPTIMIZATION_SCHEMA_VERSION;
     status["in_flight_requests"] = in_flight_requests.load();
@@ -3875,10 +3906,10 @@ namespace ai_optimizer {
     status["last_latency_ms"] = runtime_status_snapshot.last_latency_ms;
     status["last_error"] = runtime_status_snapshot.last_error;
 
-    if (cfg.auth_mode == AUTH_SUBSCRIPTION) {
-      const auto cli_binary = subscription_cli_binary(cfg.provider);
-      const auto cli_label = subscription_cli_label(cfg.provider);
-      const auto login_command = subscription_login_command(cfg.provider);
+    if (cfg_now.auth_mode == AUTH_SUBSCRIPTION) {
+      const auto cli_binary = subscription_cli_binary(cfg_now.provider);
+      const auto cli_label = subscription_cli_label(cfg_now.provider);
+      const auto login_command = subscription_login_command(cfg_now.provider);
       int rc = system(("command -v " + cli_binary + " >/dev/null 2>&1").c_str());
       status["subscription_cli"] = cli_label;
       status["cli_binary"] = cli_binary;
@@ -3886,19 +3917,19 @@ namespace ai_optimizer {
       if (!login_command.empty()) {
         status["cli_login_command"] = login_command;
       }
-      if (cfg.provider == PROVIDER_OPENAI) {
-        const auto codex_home = active_codex_home(cfg);
+      if (cfg_now.provider == PROVIDER_OPENAI) {
+        const auto codex_home = active_codex_home(cfg_now);
         if (codex_home.has_value()) {
           status["codex_home_effective"] = *codex_home;
         }
       }
-      if (cfg.provider == PROVIDER_OPENAI && status["cli_available"].get<bool>()) {
-        auto authenticated = codex_login_ready(cfg);
+      if (cfg_now.provider == PROVIDER_OPENAI && status["cli_available"].get<bool>()) {
+        auto authenticated = codex_login_ready(cfg_now);
         if (authenticated.has_value()) {
           status["cli_authenticated"] = *authenticated;
         }
       }
-      if (cfg.provider == PROVIDER_ANTHROPIC) {
+      if (cfg_now.provider == PROVIDER_ANTHROPIC) {
         const auto claude = claude_cli::status();
         status["cli_available"] = claude.available;
         status["cli_authenticated"] = claude.authenticated.value_or(false);
@@ -3910,10 +3941,11 @@ namespace ai_optimizer {
   }
 
   std::string get_cache_json() {
+    const auto cfg_now = config_snapshot();
     std::lock_guard<std::mutex> lock(cache_mutex);
     nlohmann::json root = nlohmann::json::object();
     for (const auto &[key, entry] : cache) {
-      if (entry.provider != cfg.provider || entry.model != cfg.model || entry.base_url != cfg.base_url) {
+      if (entry.provider != cfg_now.provider || entry.model != cfg_now.model || entry.base_url != cfg_now.base_url) {
         continue;
       }
       nlohmann::json val;
@@ -4468,9 +4500,10 @@ namespace ai_optimizer {
     }
 
     {
+      const auto cfg_now = config_snapshot();
       std::lock_guard<std::mutex> lock(cache_mutex);
       for (const auto &[key, entry] : cache) {
-        if (entry.provider != cfg.provider || entry.model != cfg.model || entry.base_url != cfg.base_url) {
+        if (entry.provider != cfg_now.provider || entry.model != cfg_now.model || entry.base_url != cfg_now.base_url) {
           continue;
         }
         const auto canonical_device = canonical_device_name(entry.device_name);

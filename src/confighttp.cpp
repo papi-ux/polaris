@@ -5250,9 +5250,25 @@ namespace confighttp {
     }
   }
 
+  ai_optimizer::config_t ai_config_from_settings(const config::video_t::ai_optimizer_t &settings) {
+    ai_optimizer::config_t ai_cfg;
+    ai_cfg.enabled = settings.enabled;
+    ai_cfg.provider = settings.provider;
+    ai_cfg.model = settings.model;
+    ai_cfg.auth_mode = settings.auth_mode;
+    ai_cfg.api_key = settings.api_key;
+    ai_cfg.base_url = settings.base_url;
+    ai_cfg.use_subscription = settings.use_subscription;
+    ai_cfg.codex_home = settings.codex_home;
+    ai_cfg.timeout_ms = settings.timeout_ms;
+    ai_cfg.cache_ttl_hours = settings.cache_ttl_hours;
+    return ai_cfg;
+  }
+
   bool write_config_tree(resp_https_t response, req_https_t request, const nlohmann::json &tree, const std::string &writer,
                          doctor_actions::paired_global_control_guard_t &authority,
-                         const std::optional<std::string> &observed_revision = std::nullopt) {
+                         const std::optional<std::string> &observed_revision = std::nullopt,
+                         bool *restart_required = nullptr) {
     const auto before = expected_configuration_revision(request).value_or(
       observed_revision.value_or(configuration_store::revision(config::sunshine.config_file, true)));
     std::stringstream config_stream;
@@ -5301,8 +5317,27 @@ namespace confighttp {
       const bool enabled = json_config_enabled(tree["adaptive_bitrate_enabled"]);
       if (enabled != adaptive_bitrate::get_state().configured_enabled) authority.set_adaptive_enabled(enabled);
     }
-    if (tree.contains("ai_enabled")) {
-      ai_optimizer::set_enabled(json_config_enabled(tree["ai_enabled"]));
+    // Apply what the running host can take without a restart, from what is now
+    // on disk, and tell the caller whether anything else changed.
+    auto written_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    const auto changed = validation::changed_config_keys(existing_vars, written_vars);
+    if (restart_required) {
+      *restart_required = validation::config_change_requires_restart(changed);
+    }
+    if (std::find(changed.begin(), changed.end(), "steamgriddb_api_key") != changed.end()) {
+      const auto it = written_vars.find("steamgriddb_api_key");
+      config::set_steamgriddb_api_key(it == written_vars.end() ? std::string {} : it->second);
+      BOOST_LOG(info) << "SaveConfig: SteamGridDB key applied at runtime"sv;
+    }
+    // Only a changed AI key reapplies: a PATCH merges into the whole file, so the
+    // tree carries every AI key on every save.
+    if (std::any_of(changed.begin(), changed.end(), [](const std::string &key) {
+          return validation::is_ai_config_key(key);
+        })) {
+      // The console server runs on one thread and is the only reader of these
+      // strings; the explanation provider takes its own locked copy.
+      config::video.ai_optimizer = config::ai_optimizer_settings(written_vars);
+      ai_optimizer::reconfigure(ai_config_from_settings(config::video.ai_optimizer));
     }
     return true;
   }
@@ -5345,13 +5380,15 @@ namespace confighttp {
       const bool changes_tuning = input_tree.contains("adaptive_bitrate_enabled") &&
         json_config_enabled(input_tree["adaptive_bitrate_enabled"]) != adaptive_bitrate::get_state().configured_enabled;
       if (!configuration_current(response, request, changes_tuning)) return;
-      if (!write_config_tree(response, request, input_tree, "web_ui", authority)) {
+      bool restart_required = true;
+      if (!write_config_tree(response, request, input_tree, "web_ui", authority, std::nullopt, &restart_required)) {
         return;
       }
       nlohmann::json output_tree;
       output_tree["status"] = true;
       output_tree["configuration_revision"] = configuration_store::revision(config::sunshine.config_file);
       output_tree["live_tuning"] = live_tuning::snapshot(stream_stats::get_current());
+      output_tree["restart_required"] = restart_required;
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SaveConfig: "sv << e.what();
@@ -5388,13 +5425,15 @@ namespace confighttp {
       const auto observed_revision = configuration_store::revision(config::sunshine.config_file, true);
       const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       const auto merged = validation::merge_config_patch(existing_vars, input_tree);
-      if (!write_config_tree(response, request, merged, "api_patch", authority, observed_revision)) {
+      bool restart_required = true;
+      if (!write_config_tree(response, request, merged, "api_patch", authority, observed_revision, &restart_required)) {
         return;
       }
       nlohmann::json output_tree;
       output_tree["status"] = true;
       output_tree["configuration_revision"] = configuration_store::revision(config::sunshine.config_file);
       output_tree["live_tuning"] = live_tuning::snapshot(stream_stats::get_current());
+      output_tree["restart_required"] = restart_required;
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "PatchConfig: "sv << e.what();
@@ -5577,7 +5616,7 @@ namespace confighttp {
       if (body.value("use_stored", false)) {
         const auto saved = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
         const auto it = saved.find("steamgriddb_api_key");
-        api_key = it == saved.end() ? config::sunshine.steamgriddb_api_key : it->second;
+        api_key = it == saved.end() ? config::steamgriddb_api_key() : it->second;
       } else {
         api_key = body.value("steamgriddb_api_key", std::string {});
       }
@@ -5643,7 +5682,7 @@ namespace confighttp {
       output["covers"] = nlohmann::json::array();
       send_response(response, output);
     };
-    const auto &configured_key = config::sunshine.steamgriddb_api_key;
+    const auto configured_key = config::steamgriddb_api_key();
     const bool key_present = std::any_of(configured_key.begin(), configured_key.end(), [](unsigned char ch) {
       return !std::isspace(ch);
     });
@@ -5662,7 +5701,7 @@ namespace confighttp {
     }
 
     std::string game_name = name_it->second;
-    std::string api_key = config::sunshine.steamgriddb_api_key;
+    std::string api_key = configured_key;
 
     // Step 1: Search for the game by name
     std::string search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" +
@@ -8217,18 +8256,7 @@ namespace confighttp {
 
     // Initialize AI optimizer with config
     {
-      ai_optimizer::config_t ai_cfg;
-      ai_cfg.enabled = config::video.ai_optimizer.enabled;
-      ai_cfg.provider = config::video.ai_optimizer.provider;
-      ai_cfg.model = config::video.ai_optimizer.model;
-      ai_cfg.auth_mode = config::video.ai_optimizer.auth_mode;
-      ai_cfg.api_key = config::video.ai_optimizer.api_key;
-      ai_cfg.base_url = config::video.ai_optimizer.base_url;
-      ai_cfg.use_subscription = config::video.ai_optimizer.use_subscription;
-      ai_cfg.codex_home = config::video.ai_optimizer.codex_home;
-      ai_cfg.timeout_ms = config::video.ai_optimizer.timeout_ms;
-      ai_cfg.cache_ttl_hours = config::video.ai_optimizer.cache_ttl_hours;
-      ai_optimizer::init(ai_cfg);
+      ai_optimizer::init(ai_config_from_settings(config::video.ai_optimizer));
     }
 
     // Initialize device database
