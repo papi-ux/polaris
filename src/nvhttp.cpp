@@ -3384,11 +3384,13 @@ namespace nvhttp {
   }  // namespace
 
   bool is_in_trusted_subnet(const boost::asio::ip::address &addr) {
-    if (config::nvhttp.trusted_subnets.empty()) {
+    // A settings save replaces the list while pairing requests run, so read a locked copy.
+    const auto trusted_subnets = config::trusted_subnets();
+    if (trusted_subnets.empty()) {
       return false;
     }
 
-    for (const auto &configured_subnet : config::nvhttp.trusted_subnets) {
+    for (const auto &configured_subnet : trusted_subnets) {
       const std::string subnet_str {normalize_trusted_subnet(configured_subnet)};
       auto slash = subnet_str.find('/');
       if (slash == std::string::npos) {
@@ -5839,6 +5841,7 @@ namespace nvhttp {
         const auto remote_addr = request->remote_endpoint().address();
         const auto remote_addr_str = net::addr_to_normalized_string(remote_addr);
         const bool remote_in_trusted_subnet = is_in_trusted_subnet(remote_addr);
+        const bool trusted_auto_pairing = config::trusted_subnet_auto_pairing();
 
         if (deviceName == "roth"sv) {
           deviceName = "Legacy Moonlight Client";
@@ -5912,7 +5915,7 @@ namespace nvhttp {
             ptr->second.client.family_hint = "nova";
           }
           if (trusted_pair_requested &&
-              config::nvhttp.trusted_subnet_auto_pairing &&
+              trusted_auto_pairing &&
               remote_in_trusted_subnet)
           {
             // TOFU: Auto-approve pairing from trusted subnet with well-known PIN,
@@ -5923,7 +5926,7 @@ namespace nvhttp {
             return;
           }
 
-          if (trusted_pair_requested && !config::nvhttp.trusted_subnet_auto_pairing) {
+          if (trusted_pair_requested && !trusted_auto_pairing) {
             BOOST_LOG(info) << "TOFU: Trusted Pair requested but disabled in host config"sv;
           } else if (trusted_pair_requested && !remote_in_trusted_subnet) {
             BOOST_LOG(info) << "TOFU: Trusted Pair requested from untrusted subnet: "sv
@@ -6087,7 +6090,7 @@ namespace nvhttp {
     }
 
     // Only advertise trusted-subnet pairing when the host actually allows it.
-    if (config::nvhttp.trusted_subnet_auto_pairing && is_in_trusted_subnet(request->remote_endpoint().address())) {
+    if (config::trusted_subnet_auto_pairing() && is_in_trusted_subnet(request->remote_endpoint().address())) {
       tree.put("root.TofuEnabled", 1);
     }
 

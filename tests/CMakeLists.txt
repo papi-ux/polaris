@@ -125,6 +125,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_client_support_report.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_host_setup_facts.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_profile.cpp
@@ -258,6 +259,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_otp_claim.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_stop_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_projection_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_setup_reports.cpp
 )
 
 set(TEST_NETWORK_SOURCES

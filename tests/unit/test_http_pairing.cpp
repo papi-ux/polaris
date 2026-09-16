@@ -40,19 +40,21 @@ using namespace std::literals;
 
 struct TrustedSubnetTest: testing::Test {
   void SetUp() override {
-    previous_trusted_subnets = config::nvhttp.trusted_subnets;
+    previous_trusted_subnets = config::trusted_subnets();
+    previous_auto_pairing = config::trusted_subnet_auto_pairing();
   }
 
   void TearDown() override {
-    config::nvhttp.trusted_subnets = std::move(previous_trusted_subnets);
+    config::set_trusted_network(std::move(previous_trusted_subnets), previous_auto_pairing);
   }
 
   bool matches(std::initializer_list<std::string> subnets) {
-    config::nvhttp.trusted_subnets = subnets;
+    config::set_trusted_network(subnets, previous_auto_pairing);
     return is_in_trusted_subnet_for_tests(boost::asio::ip::make_address("192.168.18.248"));
   }
 
   std::vector<std::string> previous_trusted_subnets;
+  bool previous_auto_pairing = false;
 };
 
 TEST_F(TrustedSubnetTest, AcceptsQuotedIpv4CidrsFromListStyleConfig) {
@@ -2225,14 +2227,12 @@ TEST_F(PairingHttpHandlerTest, OtpHandlerPreservesAccessAndGuestOptions) {
 }
 
 TEST_F(PairingHttpHandlerTest, TrustedNetworkHandlerStillRequiresClientOptIn) {
-  const auto old_enabled = config::nvhttp.trusted_subnet_auto_pairing;
-  auto old_subnets = config::nvhttp.trusted_subnets;
+  const auto old_enabled = config::trusted_subnet_auto_pairing();
+  auto old_subnets = config::trusted_subnets();
   auto restore = util::fail_guard([&] {
-    config::nvhttp.trusted_subnet_auto_pairing = old_enabled;
-    config::nvhttp.trusted_subnets = std::move(old_subnets);
+    config::set_trusted_network(std::move(old_subnets), old_enabled);
   });
-  config::nvhttp.trusted_subnet_auto_pairing = true;
-  config::nvhttp.trusted_subnets = {"127.0.0.0/8"};
+  config::set_trusted_network({"127.0.0.0/8"}, true);
   EXPECT_NE(request(server_certificate_target("trusted-options") + "&trustedpair=1").find("status_code=\"200\""), std::string::npos);
   EXPECT_TRUE(get_pending_pairings().empty());
   EXPECT_EQ(pairing_options_for_tests("trusted-options").at("family"), "nova");
@@ -2244,6 +2244,32 @@ TEST_F(PairingHttpHandlerTest, TrustedNetworkHandlerStillRequiresClientOptIn) {
   ASSERT_FALSE(id.empty());
   EXPECT_TRUE(cancel_pairing(id));
   EXPECT_NE(response.get().find("cancelled by operator"), std::string::npos);
+}
+
+TEST_F(PairingHttpHandlerTest, ASavedTrustedNetworkAppliesToTheNextPairingRequest) {
+  const auto old_enabled = config::trusted_subnet_auto_pairing();
+  auto old_subnets = config::trusted_subnets();
+  auto restore = util::fail_guard([&] {
+    config::set_trusted_network(std::move(old_subnets), old_enabled);
+  });
+  config::set_trusted_network({}, false);
+
+  // Before the save, a trusted pair request from this network waits for a PIN.
+  std::packaged_task<std::string()> request_task {[this] {
+    return request(server_certificate_target("before-save") + "&trustedpair=1");
+  }};
+  auto response = request_task.get_future();
+  std::jthread worker {std::move(request_task)};
+  const auto id = wait_for_pending_pairing();
+  ASSERT_FALSE(id.empty());
+  EXPECT_TRUE(cancel_pairing(id));
+  EXPECT_NE(response.get().find("cancelled by operator"), std::string::npos);
+
+  // A settings save hands the running host what it wrote, as write_config_tree does, and the
+  // next request pairs without a PIN and without a restart.
+  config::apply_trusted_network({{"trusted_subnets", "127.0.0.0/8"}, {"trusted_subnet_auto_pairing", "enabled"}});
+  EXPECT_NE(request(server_certificate_target("after-save") + "&trustedpair=1").find("status_code=\"200\""), std::string::npos);
+  EXPECT_TRUE(get_pending_pairings().empty());
 }
 
 // Reads back what an operator would see, because the whole point of these

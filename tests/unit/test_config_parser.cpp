@@ -258,6 +258,28 @@ TEST(ConfigLiveApplyTests, SteamGridDbKeyAccessorRoundTrips) {
   EXPECT_EQ(config::steamgriddb_api_key(), previous);
 }
 
+TEST(ConfigLiveApplyTests, TrustedNetworkAppliesFromSavedVariables) {
+  const auto previous_subnets = config::trusted_subnets();
+  const auto previous_auto_pairing = config::trusted_subnet_auto_pairing();
+  auto restore = util::fail_guard([&] {
+    config::set_trusted_network(previous_subnets, previous_auto_pairing);
+  });
+
+  config::apply_trusted_network({{"trusted_subnets", "10.0.0.0/24,192.168.1.0/24"}, {"trusted_subnet_auto_pairing", "enabled"}});
+  EXPECT_EQ(config::trusted_subnets(), (std::vector<std::string> {"10.0.0.0/24", "192.168.1.0/24"}));
+  EXPECT_TRUE(config::trusted_subnet_auto_pairing());
+
+  // Hand-written files use the bracketed list form; startup's parser reads both.
+  config::apply_trusted_network({{"trusted_subnets", "[10.0.0.0/24, fd00::/64]"}, {"trusted_subnet_auto_pairing", "disabled"}});
+  EXPECT_EQ(config::trusted_subnets(), (std::vector<std::string> {"10.0.0.0/24", "fd00::/64"}));
+  EXPECT_FALSE(config::trusted_subnet_auto_pairing());
+
+  // A key removed from the file turns its setting off.
+  config::apply_trusted_network({});
+  EXPECT_TRUE(config::trusted_subnets().empty());
+  EXPECT_FALSE(config::trusted_subnet_auto_pairing());
+}
+
 TEST(ConfigNewInstallTests, ANewInstallStartsInPrivateStreamWhenItCanRun) {
   EXPECT_EQ(config::new_install_config(true), "linux_stream_mode = headless_stream\n");
   EXPECT_EQ(config::new_install_config(false), "");

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 // local includes
 #include "misc.h"
@@ -105,4 +106,22 @@ namespace va {
 
   // Ensure the render device pointed to by fd is capable of encoding h264 with the hevc_mode configured
   bool validate(int fd);
+
+  /**
+   * @brief What a render node's VA-API driver can encode, for the first-run setup.
+   */
+  struct encode_support_t {
+    bool driver_loaded = false;  ///< A VA driver loaded and initialized for the node
+    std::string driver_vendor;  ///< vaQueryVendorString, which names the driver and its version
+    bool h264 = false;  ///< H.264 Main encode, which validate() requires
+    bool hevc = false;  ///< HEVC Main encode
+    bool av1 = false;  ///< AV1 Profile 0 encode
+  };
+
+  /**
+   * @brief Open a render node's VA-API driver and list the encode profiles setup cares about.
+   * @details Quiet on purpose: libva's per-driver info lines and a profile the driver lacks are
+   *          the answer here, not errors.
+   */
+  encode_support_t encode_support(const std::string &render_node);
 }  // namespace va

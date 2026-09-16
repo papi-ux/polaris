@@ -410,6 +410,35 @@ TEST(ConfigLiveApplyTests, OnlyKeysTheHostAppliesLiveSkipTheRestart) {
   EXPECT_FALSE(confighttp::validation::is_live_applied_config_key("ai_future_setting"));
 }
 
+TEST(ConfigLiveApplyTests, TheTrustedNetworkAppliesWithoutARestart) {
+  using confighttp::validation::config_change_requires_restart;
+  EXPECT_TRUE(confighttp::validation::is_live_applied_config_key("trusted_subnets"));
+  EXPECT_TRUE(confighttp::validation::is_live_applied_config_key("trusted_subnet_auto_pairing"));
+  EXPECT_FALSE(config_change_requires_restart({"trusted_subnet_auto_pairing", "trusted_subnets"}));
+  EXPECT_TRUE(config_change_requires_restart({"encoder", "trusted_subnets"}));
+  EXPECT_TRUE(config_change_requires_restart({"linux_stream_mode"}));
+}
+
+TEST(ConfigLiveApplyTests, PairingReadsTheTrustedNetworkThroughTheLockedAccessors) {
+  // A save applies the trusted network while the pairing server's threads read it, so nvhttp
+  // reads locked copies and the save hands the written values to the running host.
+  const auto read = [](const char *file) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / file);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  };
+  const auto nvhttp = read("src/nvhttp.cpp");
+  ASSERT_FALSE(nvhttp.empty());
+  EXPECT_EQ(nvhttp.find("config::nvhttp.trusted_subnets"), std::string::npos);
+  EXPECT_EQ(nvhttp.find("config::nvhttp.trusted_subnet_auto_pairing"), std::string::npos);
+  EXPECT_NE(nvhttp.find("config::trusted_subnets()"), std::string::npos);
+  EXPECT_NE(nvhttp.find("config::trusted_subnet_auto_pairing()"), std::string::npos);
+
+  const auto confighttp = read("src/confighttp.cpp");
+  ASSERT_FALSE(confighttp.empty());
+  EXPECT_EQ(confighttp.find("config::nvhttp.trusted_subnet"), std::string::npos);
+  EXPECT_NE(confighttp.find("config::apply_trusted_network(written_vars);"), std::string::npos);
+}
+
 TEST(ConfigLiveApplyTests, SteamGridDbKeyIsReadThroughTheLockedAccessor) {
   // A saved key is applied while the streaming server's threads read it, so the
   // readers go through config::steamgriddb_api_key() instead of the field.

@@ -723,6 +723,48 @@ namespace va {
     return true;
   }
 
+  encode_support_t encode_support(const std::string &render_node) {
+    encode_support_t support;
+    file_t file = open(render_node.c_str(), O_RDWR | O_CLOEXEC);
+    if (file.el < 0) {
+      return support;
+    }
+
+    va::display_t display {vaGetDisplayDRM(file.el)};
+    if (!display) {
+      return support;
+    }
+    // libva names every driver it tries at info level; a setup check keeps that out of the log.
+    vaSetInfoCallback(display.get(), nullptr, nullptr);
+    vaSetErrorCallback(display.get(), __log, &debug);
+
+    int major = 0;
+    int minor = 0;
+    if (vaInitialize(display.get(), &major, &minor) != VA_STATUS_SUCCESS) {
+      return support;
+    }
+    support.driver_loaded = true;
+    if (const auto *vendor = vaQueryVendorString(display.get())) {
+      support.driver_vendor = vendor;
+    }
+
+    // Only listed profiles are asked for entry points, so a driver built without a codec
+    // answers quietly instead of logging an unsupported profile.
+    std::vector<VAProfile> profiles(static_cast<std::size_t>(std::max(vaMaxNumProfiles(display.get()), 0)));
+    int count = 0;
+    if (profiles.empty() || vaQueryConfigProfiles(display.get(), profiles.data(), &count) != VA_STATUS_SUCCESS) {
+      return support;
+    }
+    profiles.resize(static_cast<std::size_t>(std::clamp(count, 0, static_cast<int>(profiles.size()))));
+    const auto encodes = [&](VAProfile profile) {
+      return std::find(profiles.begin(), profiles.end(), profile) != profiles.end() && query(display.get(), profile);
+    };
+    support.h264 = encodes(VAProfileH264Main);
+    support.hevc = encodes(VAProfileHEVCMain);
+    support.av1 = encodes(VAProfileAV1Profile0);
+    return support;
+  }
+
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(int width, int height, file_t &&card, int offset_x, int offset_y, bool vram) {
     if (vram) {
       auto egl = std::make_unique<va::va_vram_t>();

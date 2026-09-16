@@ -458,6 +458,28 @@ namespace config {
   void set_steamgriddb_api_key(std::string key);
 
   /**
+   * @brief The trusted subnets pairing checks. Safe to call from any thread.
+   */
+  std::vector<std::string> trusted_subnets();
+
+  /**
+   * @brief Whether a client on a trusted subnet may pair without a PIN. Safe to call from any thread.
+   */
+  bool trusted_subnet_auto_pairing();
+
+  /**
+   * @brief Replace the trusted network settings the running host uses.
+   */
+  void set_trusted_network(std::vector<std::string> subnets, bool auto_pairing);
+
+  /**
+   * @brief Apply the trusted network settings in saved configuration variables to the running host.
+   * @details Both keys are parsed the way startup parses them, from their defaults, so a key
+   *          removed from the file turns its setting off.
+   */
+  void apply_trusted_network(std::unordered_map<std::string, std::string> vars);
+
+  /**
    * @brief The AI explanation settings in parsed configuration variables, starting from the built-in defaults.
    * @param vars Parsed variables; the AI keys are consumed, as apply_config consumes them.
    */

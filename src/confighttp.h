@@ -88,6 +88,17 @@ namespace confighttp {
   nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats);
 
   /**
+   * @brief What the first-run GPU step shows: each GPU, the encoder Polaris will use and why,
+   *        the encoders that can start, and what is missing for hardware encoding.
+   */
+  nlohmann::json setup_hardware_report();
+
+  /**
+   * @brief The private LAN networks the first-run network step can trust with one click.
+   */
+  nlohmann::json setup_networks_report();
+
+  /**
    * @brief Session lifecycle states.
    */
   enum class session_state_e {

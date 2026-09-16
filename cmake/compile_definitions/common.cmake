@@ -172,6 +172,7 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/confighttp_benchmark_auth.h"
         "${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp"
         "${CMAKE_SOURCE_DIR}/src/confighttp_validation.h"
+        "${CMAKE_SOURCE_DIR}/src/host_setup_facts.h"
         "${CMAKE_SOURCE_DIR}/src/update_status.h"
         "${CMAKE_SOURCE_DIR}/src/update_status.cpp"
         "${CMAKE_SOURCE_DIR}/src/verified_action.cpp"

@@ -531,6 +531,7 @@ namespace config {
     };
 
     std::mutex steamgriddb_api_key_mutex;
+    std::mutex trusted_network_mutex;
   }  // namespace
 
   video_t video {
@@ -1308,6 +1309,30 @@ namespace config {
   void set_steamgriddb_api_key(std::string key) {
     std::lock_guard<std::mutex> lock(steamgriddb_api_key_mutex);
     sunshine.steamgriddb_api_key = std::move(key);
+  }
+
+  std::vector<std::string> trusted_subnets() {
+    std::lock_guard<std::mutex> lock(trusted_network_mutex);
+    return nvhttp.trusted_subnets;
+  }
+
+  bool trusted_subnet_auto_pairing() {
+    std::lock_guard<std::mutex> lock(trusted_network_mutex);
+    return nvhttp.trusted_subnet_auto_pairing;
+  }
+
+  void set_trusted_network(std::vector<std::string> subnets, bool auto_pairing) {
+    std::lock_guard<std::mutex> lock(trusted_network_mutex);
+    nvhttp.trusted_subnets = std::move(subnets);
+    nvhttp.trusted_subnet_auto_pairing = auto_pairing;
+  }
+
+  void apply_trusted_network(std::unordered_map<std::string, std::string> vars) {
+    std::vector<std::string> subnets;
+    bool auto_pairing = false;
+    list_string_f(vars, "trusted_subnets", subnets);
+    bool_f(vars, "trusted_subnet_auto_pairing", auto_pairing);
+    set_trusted_network(std::move(subnets), auto_pairing);
   }
 
   video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars) {
