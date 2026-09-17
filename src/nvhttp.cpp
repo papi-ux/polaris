@@ -3110,6 +3110,8 @@ namespace nvhttp {
       const auto appdata = platf::appdata();
       const auto candidates = local_artwork_candidates(app);
       const bool bundled_utility = uses_bundled_utility_artwork(app);
+      // An entry whose image was cleared stops showing the copy of the old one.
+      (void) game_artwork::retire_orphaned_local_poster(appdata, app.uuid, candidates);
       bool candidate_already_cached = false;
       if (bundled_utility && !candidates.empty()) {
         const auto cached_before = game_artwork::scan_cached_assets(appdata, app.uuid);
@@ -3119,10 +3121,10 @@ namespace nvhttp {
                    asset.source == candidates.front().source;
           });
       }
+      // A changed image replaces its copy, so a second cover pick reaches Nova.
       if (!candidates.empty() &&
           ((bundled_utility && !candidate_already_cached) ||
-           game_artwork::needs_source_upgrade(
-             appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source))) {
+           game_artwork::local_poster_needs_copy(appdata, app.uuid, candidates.front()))) {
         (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
       }
       if (bundled_utility) {

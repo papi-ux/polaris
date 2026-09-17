@@ -88,6 +88,10 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 
 ### Artwork in Nova
 
+An entry's image is its poster in Nova. A new image, including a second cover picked into the
+same file, replaces the poster the next time Nova loads the library, and clearing the image lets
+the next source show.
+
 When Nova shows an entry without artwork of its own, Polaris looks it up. A Steam title gets
 Steam's images, and with a SteamGridDB key set in Settings the rest comes from its SteamGridDB game,
 found by app id. Any other entry gets SteamGridDB artwork only when a search finds a game with

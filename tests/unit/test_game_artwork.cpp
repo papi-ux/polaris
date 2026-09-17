@@ -5,6 +5,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +46,27 @@ namespace {
 
   void write_jpeg(const fs::path &path, unsigned char marker = 0) {
     write_bytes(path, {0xff, 0xd8, 0xff, 0xe0, marker});
+  }
+
+  std::vector<unsigned char> read_bytes(const fs::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  }
+
+  // A second pick rewrites the file within the same second often enough; move its clock on
+  // so the test does not depend on the filesystem's timestamp resolution.
+  void touch_later(const fs::path &path) {
+    fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+  }
+
+  std::optional<game_artwork::asset_t> cached_poster(const fs::path &appdata) {
+    return game_artwork::find_cached_asset(appdata, GAME_UUID, game_artwork::kind_e::poster);
+  }
+
+  void refresh_from(const fs::path &appdata, const fs::path &image) {
+    game_artwork::resolve_request_t request {.appdata = appdata, .uuid = std::string(GAME_UUID)};
+    request.local_posters.push_back({image, game_artwork::source_e::local});
+    (void) game_artwork::resolve_missing_assets(request);
   }
 }  // namespace
 
@@ -182,6 +205,100 @@ TEST(GameArtworkLocalPoster, PromotesLocalOverCachedSteamGridDb) {
   EXPECT_EQ(selected->source, game_artwork::source_e::local);
   EXPECT_EQ(assets.front().source, game_artwork::source_e::local);
   EXPECT_TRUE(fs::exists(*old));
+}
+
+TEST(GameArtworkLocalPoster, RefreshesTheCopyWhenTheEntrysImageChanges) {
+  // Find Cover saves an entry's pick as covers/<uuid>.<ext>, so a second pick replaces the
+  // same file, and Nova kept the first poster because an equal source never upgraded.
+  temp_dir_t temp("local-refresh");
+  const auto picked = temp.path / "covers" / (std::string(GAME_UUID) + ".png");
+  write_png(picked, 1);
+  refresh_from(temp.path, picked);
+  auto poster = cached_poster(temp.path);
+  ASSERT_TRUE(poster.has_value());
+  EXPECT_EQ(poster->source, game_artwork::source_e::local);
+  EXPECT_EQ(read_bytes(poster->path), read_bytes(picked));
+
+  write_png(picked, 2);
+  touch_later(picked);
+  refresh_from(temp.path, picked);
+  poster = cached_poster(temp.path);
+  ASSERT_TRUE(poster.has_value());
+  EXPECT_EQ(read_bytes(poster->path), read_bytes(picked));
+
+  // Pointing the entry at another image in another format replaces the copy, and the old
+  // format's copy cannot win the manifest by sorting first.
+  const auto other = temp.path / "other.jpg";
+  write_jpeg(other, 3);
+  refresh_from(temp.path, other);
+  poster = cached_poster(temp.path);
+  ASSERT_TRUE(poster.has_value());
+  EXPECT_EQ(poster->mime_type, "image/jpeg");
+  EXPECT_EQ(read_bytes(poster->path), read_bytes(other));
+  const auto stale_png = game_artwork::cache_asset_path(
+    temp.path, GAME_UUID, game_artwork::kind_e::poster, game_artwork::source_e::local, ".png");
+  ASSERT_TRUE(stale_png.has_value());
+  EXPECT_FALSE(fs::exists(*stale_png));
+
+  write_png(picked, 4);
+  touch_later(picked);
+  refresh_from(temp.path, picked);
+  poster = cached_poster(temp.path);
+  ASSERT_TRUE(poster.has_value());
+  EXPECT_EQ(poster->mime_type, "image/png");
+  EXPECT_EQ(read_bytes(poster->path), read_bytes(picked));
+}
+
+TEST(GameArtworkLocalPoster, LeavesAnUnchangedImagesCopyAlone) {
+  // Every library listing checks every entry, so an unchanged image must not be copied again.
+  temp_dir_t temp("local-unchanged");
+  const auto configured = temp.path / "configured.png";
+  write_png(configured, 1);
+  refresh_from(temp.path, configured);
+  const auto poster = cached_poster(temp.path);
+  ASSERT_TRUE(poster.has_value());
+
+  // Mark the copy without changing its size or time: a new copy would erase the mark.
+  const auto stamp = fs::last_write_time(poster->path);
+  write_png(poster->path, 9);
+  fs::last_write_time(poster->path, stamp);
+  refresh_from(temp.path, configured);
+  EXPECT_EQ(read_bytes(poster->path).back(), 9);
+}
+
+TEST(GameArtworkLocalPoster, RetiresTheCopyOnceTheEntryNamesNoImage) {
+  temp_dir_t temp("local-retire");
+  const auto configured = temp.path / "configured.png";
+  write_png(configured, 1);
+  refresh_from(temp.path, configured);
+  const auto copy = cached_poster(temp.path);
+  ASSERT_TRUE(copy.has_value());
+  ASSERT_EQ(copy->source, game_artwork::source_e::local);
+
+  // Still named: kept.
+  EXPECT_FALSE(game_artwork::retire_orphaned_local_poster(
+    temp.path, GAME_UUID, {{configured, game_artwork::source_e::local}}));
+  EXPECT_TRUE(fs::exists(copy->path));
+
+  // Cleared, with a host cover left to fall back to: the host cover becomes the poster.
+  const auto host_cover = temp.path / "covers" / (std::string(GAME_UUID) + ".jpg");
+  write_jpeg(host_cover, 2);
+  const std::vector<game_artwork::local_candidate_t> host_only {{host_cover, game_artwork::source_e::host}};
+  EXPECT_TRUE(game_artwork::retire_orphaned_local_poster(temp.path, GAME_UUID, host_only));
+  EXPECT_FALSE(fs::exists(copy->path));
+  ASSERT_TRUE(game_artwork::local_poster_needs_copy(temp.path, GAME_UUID, host_only.front()));
+  ASSERT_TRUE(game_artwork::cache_local_poster(temp.path, GAME_UUID, host_only.front()).has_value());
+  const auto poster = cached_poster(temp.path);
+  ASSERT_TRUE(poster.has_value());
+  EXPECT_EQ(poster->source, game_artwork::source_e::host);
+
+  // A host poster that differs from the legacy cover may be a provider download: never replaced.
+  write_jpeg(host_cover, 3);
+  touch_later(host_cover);
+  EXPECT_FALSE(game_artwork::local_poster_needs_copy(temp.path, GAME_UUID, host_only.front()));
+
+  EXPECT_FALSE(game_artwork::retire_orphaned_local_poster(temp.path, GAME_UUID, {}));
+  EXPECT_FALSE(game_artwork::retire_orphaned_local_poster(temp.path, "../../not-a-uuid", {}));
 }
 
 TEST(GameArtworkCache, RetiresOneAutomaticSourceWithoutTouchingLocalOrManualAssets) {
