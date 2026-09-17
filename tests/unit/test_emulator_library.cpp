@@ -566,6 +566,40 @@ TEST(EmulatorLibraryResolve, TheFolderListSitsNextToTheAppsFileAndNamesItsLaunch
   EXPECT_EQ(emulator_library::configured_launcher_for(sources, ""), "");
 }
 
+TEST(EmulatorLibraryResolve, OnlyACommandPolarisWroteIsReplaced) {
+  const auto *eden = emulator_library::find_preset("eden");
+  const auto *cemu = emulator_library::find_preset("cemu");
+  ASSERT_NE(eden, nullptr);
+  ASSERT_NE(cemu, nullptr);
+  const std::string rom = "/roms/it's here/Game.nsp";
+  const auto arguments = " -f -g " + emulator_library::shell_quote(rom);
+
+  // Every install import can have written for, and the emulator's own entry without a game.
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, "eden" + arguments));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, "flatpak run dev.eden_emu.eden" + arguments));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, emulator_library::shell_quote("/opt/It's Eden.AppImage") + arguments));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*cemu, "", "cemu"));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*cemu, "", "Cemu"));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, "", "flatpak run dev.eden_emu.eden"));
+
+  // The player's edits, and commands for another game or emulator.
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "gamemoderun eden" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "eden -g " + emulator_library::shell_quote(rom)));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "eden -f -g '/roms/Other.nsp'"));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "flatpak run --command=eden-cli dev.eden_emu.eden" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "dolphin-emu" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "'/opt/Eden.AppImage' --portable" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, "", "eden --help"));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, arguments));
+
+  EXPECT_TRUE(emulator_library::single_quoted_token("'/opt/Eden.AppImage'"));
+  EXPECT_TRUE(emulator_library::single_quoted_token(emulator_library::shell_quote("/opt/it's/Eden")));
+  EXPECT_FALSE(emulator_library::single_quoted_token("'/opt/a' '/opt/b'"));
+  EXPECT_FALSE(emulator_library::single_quoted_token("''\\''"));
+  EXPECT_FALSE(emulator_library::single_quoted_token("'"));
+  EXPECT_FALSE(emulator_library::single_quoted_token("/opt/Eden.AppImage"));
+}
+
 TEST(EmulatorInstall, FlatpakRunsForTheAccountFromFlathubWithoutAShell) {
   EXPECT_EQ(emulator_install::remotes_argv("/usr/bin/flatpak"), (std::vector<std::string> {"/usr/bin/flatpak", "remotes", "--user", "--columns=name"}));
   EXPECT_EQ(emulator_install::remote_add_argv("/usr/bin/flatpak"),

@@ -1118,6 +1118,60 @@ namespace emulator_library {
     return it == sources.end() ? std::string {} : it->launcher;
   }
 
+  /// Whether a token is exactly one path as shell_quote writes it.
+  inline bool single_quoted_token(std::string_view token) {
+    if (token.size() < 2 || token.front() != '\'' || token.back() != '\'') {
+      return false;
+    }
+    std::string inner;
+    std::size_t start = 1;
+    while (true) {
+      const auto close = token.find('\'', start);
+      if (close == std::string_view::npos) {
+        return false;
+      }
+      inner.append(token.substr(start, close - start));
+      if (close == token.size() - 1) {
+        return shell_quote(inner) == token;
+      }
+      if (token.substr(close, 4) != "'\\''") {
+        return false;
+      }
+      inner.push_back('\'');
+      start = close + 4;
+    }
+  }
+
+  /**
+   * @brief Whether a saved entry command is one Polaris wrote at import, under any install.
+   *
+   * Import writes the launch for the install the host had then: an emulator file, a
+   * binary on PATH, the Flatpak, or the bare binary name while the emulator was missing,
+   * followed by the preset's arguments for the game. A command the player edited (other
+   * flags, a wrapper in front) matches none of them and is theirs: launch neither
+   * replaces nor refuses it.
+   */
+  inline bool generated_entry_command(const preset_t &preset, std::string_view rom_path, std::string_view saved_command) {
+    const auto saved = trim_view(saved_command);
+    const auto rom = trim_view(rom_path);
+    std::string_view emulator = saved;
+    if (!rom.empty()) {
+      const auto arguments = " " + substitute_rom(preset.arguments.empty() ? rom_placeholder : preset.arguments, std::filesystem::path(rom));
+      if (saved.size() <= arguments.size() || saved.substr(saved.size() - arguments.size()) != arguments) {
+        return false;
+      }
+      emulator = saved.substr(0, saved.size() - arguments.size());
+    }
+    if (emulator == "flatpak run " + std::string(preset.flatpak_id)) {
+      return !preset.flatpak_id.empty();
+    }
+    if (std::find(preset.binaries.begin(), preset.binaries.end(), emulator) != preset.binaries.end()) {
+      return true;
+    }
+    // An emulator file, wherever it was: the folder may have been added again with a new one.
+    return single_quoted_token(emulator);
+  }
+
   /// What an imported entry runs with its emulator as this host has it right now.
   struct entry_launch_t {
     const preset_t *preset = nullptr;

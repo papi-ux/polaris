@@ -4501,13 +4501,18 @@ namespace proc {
       }
     }
     const char *path_env = std::getenv("PATH");
-    return emulator_library::resolve_entry_launch(
+    auto resolved = emulator_library::resolve_entry_launch(
       app.emulator,
       app.rom_path,
       configured_launcher,
       game_library::library_home_roots(),
       path_env == nullptr ? std::string_view {} : std::string_view {path_env}
     );
+    // A command the player edited runs as they wrote it, installed emulator or not.
+    if (resolved && !emulator_library::generated_entry_command(*resolved->preset, app.rom_path, app.cmd)) {
+      return std::nullopt;
+    }
+    return resolved;
   }
 
   bool launches_nothing(const ctx_t &app) {

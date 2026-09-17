@@ -658,9 +658,10 @@ namespace proc {
   /**
    * @brief What an entry imported from a ROM folder runs with its emulator as installed now.
    *
-   * Nothing for any other entry, a custom command template or an unknown emulator. The
-   * folder's own emulator file comes from library_sources.json next to the apps file.
-   * A missing emulator comes back with an empty command, and launch refuses it.
+   * Nothing for any other entry, a custom command template, an unknown emulator or a
+   * command the player edited after import. The folder's own emulator file comes from
+   * library_sources.json next to the apps file. A missing emulator comes back with an
+   * empty command, and launch refuses it.
    */
   std::optional<emulator_library::entry_launch_t> resolve_emulator_entry_launch(const ctx_t &app);
 

@@ -364,6 +364,7 @@ exit 2
        {{"name", "Game One"}, {"uuid", "11111111-1111-4111-8111-111111111111"}, {"cmd", "eden -f -g " + emulator_library::shell_quote(rom.string())}, {"source", "emulator"}, {"emulator", "eden"}, {"rom-path", rom.string()}},
        {{"name", "Game Three"}, {"uuid", "22222222-2222-4222-8222-222222222222"}, {"cmd", "dolphin-emu -b -e '/roms/Game Three.iso'"}, {"source", "emulator"}, {"emulator", "dolphin"}, {"rom-path", "/roms/Game Three.iso"}},
        {{"name", "Desktop"}, {"uuid", "33333333-3333-4333-8333-333333333333"}, {"cmd", "eden"}},
+       {{"name", "Game Four"}, {"uuid", "44444444-4444-4444-8444-444444444444"}, {"cmd", "gamemoderun eden -f -g '/roms/Game Four.nsp'"}, {"source", "emulator"}, {"emulator", "eden"}, {"rom-path", "/roms/Game Four.nsp"}},
      }},
   };
   ASSERT_TRUE(private_state_file::write_atomic(config::stream.file_apps, apps.dump(2)));
@@ -449,10 +450,11 @@ exit 2
               "remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo\n"
               "install --user --noninteractive -y flathub dev.eden_emu.eden\n");
     const auto saved = nlohmann::json::parse(read_text(config::stream.file_apps))["apps"];
-    ASSERT_EQ(saved.size(), 3u);
+    ASSERT_EQ(saved.size(), 4u);
     EXPECT_EQ(saved[0]["cmd"], "flatpak run dev.eden_emu.eden -f -g " + emulator_library::shell_quote(rom.string()));
     EXPECT_EQ(saved[1]["cmd"], "dolphin-emu -b -e '/roms/Game Three.iso'");
     EXPECT_EQ(saved[2]["cmd"], "eden");
+    EXPECT_EQ(saved[3]["cmd"], "gamemoderun eden -f -g '/roms/Game Four.nsp'");  // the player's edit stays
 
     auto again = install("eden");
     EXPECT_EQ(code(again), 409);

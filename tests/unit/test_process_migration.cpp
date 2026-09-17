@@ -5594,6 +5594,14 @@ TEST(ProcessEmulatorEntries, AnImportedEntryRunsTheFoldersEmulatorFileAndIsRefus
   ASSERT_TRUE(gone.has_value());
   EXPECT_EQ(gone->install.kind, emulator_library::install_e::missing);
 
+  // A command the player edited runs as written, whether or not the emulator is there.
+  proc::ctx_t edited = game;
+  edited.cmd = "gamemoderun eden -f -g '/roms/Game.xci'";
+  EXPECT_FALSE(proc::resolve_emulator_entry_launch(edited).has_value());
+  // One written for an emulator file that has since moved is still Polaris's to update.
+  edited.cmd = "'/opt/Old/Eden.AppImage' -f -g '/roms/Game.xci'";
+  EXPECT_TRUE(proc::resolve_emulator_entry_launch(edited).has_value());
+
   // Other entries are left exactly as saved.
   proc::ctx_t manual;
   manual.source = "manual";

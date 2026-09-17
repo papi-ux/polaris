@@ -3398,9 +3398,14 @@ namespace confighttp {
         if (!app.is_object() || app.value("source", "") != emulator_library::source_name || app.value("emulator", "") != preset.id) {
           continue;
         }
+        const auto rom_path = app.value("rom-path", "");
+        const auto saved_command = app.value("cmd", "");
+        if (!emulator_library::generated_entry_command(preset, rom_path, saved_command)) {
+          continue;  // the player's own command stays theirs
+        }
         const auto launcher = emulator_library::configured_launcher_for(sources, app.value("rom-folder", ""));
-        const auto resolved = emulator_library::resolve_entry_launch(preset.id, app.value("rom-path", ""), launcher, home_roots, path_env);
-        if (!resolved || resolved->command.empty() || app.value("cmd", "") == resolved->command) {
+        const auto resolved = emulator_library::resolve_entry_launch(preset.id, rom_path, launcher, home_roots, path_env);
+        if (!resolved || resolved->command.empty() || saved_command == resolved->command) {
           continue;
         }
         app["cmd"] = resolved->command;
