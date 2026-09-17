@@ -114,6 +114,13 @@
               <option v-for="preset in romPresets" :key="preset.id" :value="preset.id">{{ preset.label }} ({{ preset.platform }})</option>
               <option :value="CUSTOM_EMULATOR">Custom command</option>
             </select>
+            <div v-if="selectedRomPresetInstall" class="mt-2 flex flex-wrap items-center gap-2" data-rom-preset-install>
+              <span class="text-xs" :class="selectedRomPresetInstall === 'installing' ? 'text-storm' : 'text-warning-bright'">
+                {{ selectedRomPresetInstall === 'installing' ? `${selectedRomPreset.install_job.message} ${ROM_INSTALL_WAIT_HINT}` : `${selectedRomPreset.label} is not installed on this host, so its games will not start until it is.` }}
+              </span>
+              <Button v-if="selectedRomPresetInstall === 'offer'" type="button" variant="outline" size="sm" :disabled="!!romInstallRequests[selectedRomPreset.id]" :loading="!!romInstallRequests[selectedRomPreset.id]" data-rom-preset-install-button @click="installRomEmulator(selectedRomPreset)">Install from Flathub</Button>
+            </div>
+            <div v-if="romEmulatorInstallFailure(selectedRomPreset || {})" class="mt-1 text-xs text-warning-bright" data-rom-preset-install-failed>{{ romEmulatorInstallFailure(selectedRomPreset || {}) }}</div>
             <div v-for="check in selectedRomPreset?.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-preset-check>
               {{ check.message }} <span class="font-mono">{{ check.action }}</span>
             </div>
@@ -152,8 +159,21 @@
               <div v-for="check in source.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-folder-check>
                 {{ check.message }} <span class="font-mono break-all">{{ check.action }}</span>
               </div>
+              <div v-if="romEmulatorInstallState(source) === 'installing'" class="mt-1 text-xs text-storm" data-rom-folder-installing>{{ source.install_job.message }} {{ ROM_INSTALL_WAIT_HINT }}</div>
+              <div v-else-if="romEmulatorInstallFailure(source)" class="mt-1 text-xs text-warning-bright" data-rom-folder-install-failed>{{ romEmulatorInstallFailure(source) }}</div>
             </div>
-            <Button variant="ghost" size="sm" :disabled="romSourceSaving" data-rom-folder-remove @click="removeRomSource(source)">Remove</Button>
+            <div class="flex shrink-0 flex-wrap items-start justify-end gap-2">
+              <Button
+                v-if="romEmulatorInstallState(source)"
+                variant="outline"
+                size="sm"
+                :disabled="romEmulatorInstallState(source) === 'installing' || !!romInstallRequests[source.emulator]"
+                :loading="romEmulatorInstallState(source) === 'installing' || !!romInstallRequests[source.emulator]"
+                data-rom-folder-install
+                @click="installRomEmulator(source)"
+              >{{ romEmulatorInstallState(source) === 'installing' ? 'Installing' : 'Install from Flathub' }}</Button>
+              <Button variant="ghost" size="sm" :disabled="romSourceSaving" data-rom-folder-remove @click="removeRomSource(source)">Remove</Button>
+            </div>
           </article>
         </div>
         <div v-else-if="!showRomSourceForm" class="mt-3 text-xs text-storm">No ROM folders yet.</div>
@@ -1169,8 +1189,8 @@ import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchA
 import { filterImportGames, summarizeImportGames } from '../library-imports'
 import { useRomSources } from '../composables/useRomSources'
 import {
-  CUSTOM_EMULATOR, blankRomSourceForm, romSourceCountLabel, romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus,
-  validateRomSourceForm
+  CUSTOM_EMULATOR, blankRomSourceForm, romEmulatorId, romEmulatorInstallFailure, romEmulatorInstallState, romSourceCountLabel,
+  romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus, validateRomSourceForm
 } from '../rom-sources'
 
 const { toast: showToast } = useToast()
@@ -1187,19 +1207,27 @@ const importSearch = ref('')
 const importStatus = ref('new')
 const {
   presets: romPresets, sources: romSources, saving: romSourceSaving,
-  error: romSourceRequestError, load: loadRomSources, add: addRomSource, remove: removeRomSourceById
+  error: romSourceRequestError, load: loadRomSources, add: addRomSource, remove: removeRomSourceById,
+  installRequests: romInstallRequests, install: installRomEmulatorById, onInstallFinished: onRomEmulatorInstallFinished
 } = useRomSources()
+const ROM_INSTALL_WAIT_HINT = 'A download can take a few minutes; this updates when it is done.'
 const showRomSourceForm = ref(false)
 const romSourceFormError = ref('')
 const romSourceForm = ref(blankRomSourceForm())
 const romSourceIsCustom = computed(() => romSourceForm.value.emulator === CUSTOM_EMULATOR)
 const selectedRomPreset = computed(() => romPresets.value.find((preset) => preset.id === romSourceForm.value.emulator) || null)
+// An emulator file typed into the form wins over a Flatpak, so no install is offered then.
+const selectedRomPresetInstall = computed(() => (
+  selectedRomPreset.value ? romEmulatorInstallState({ ...selectedRomPreset.value, launcher: romSourceForm.value.launcher }) : ''
+))
 const romSourceReadyCount = computed(() => romSourceCards.value.filter((source) => romSourceReady(source)).length)
 const romSourceError = computed(() => romSourceFormError.value || romSourceRequestError.value || '')
 // The registered folders, with what the last scan learned about each (games found, warnings).
+// Where the emulator is and its install job come from the folder list, which is read
+// again while an install runs; the scan's copy of them is only as new as the last scan.
 const romSourceCards = computed(() => romSources.value.map((source) => {
   const scanned = librarySources.value.find((entry) => entry.id === source.id)
-  return scanned ? { ...source, ...scanned } : source
+  return scanned ? { ...source, ...scanned, install: source.install, installable: source.installable, install_job: source.install_job } : source
 }))
 
 function openRomSourceForm() {
@@ -1221,6 +1249,23 @@ async function submitRomSource() {
   showToast('ROM folder added', 'success')
   await scanGames()
 }
+
+async function installRomEmulator(entry) {
+  const emulator = romEmulatorId(entry)
+  if (await installRomEmulatorById(emulator)) {
+    showToast(`Installing ${entry.label || emulator} from Flathub`, 'info')
+  }
+}
+
+onRomEmulatorInstallFinished(({ job }) => {
+  if (job?.state === 'installed') {
+    showToast(job.message || 'Emulator installed', 'success')
+    // Rescan so each folder shows what the emulator still needs, such as Eden's keys.
+    scanGames()
+    return
+  }
+  showToast(job?.message || 'The install from Flathub failed', 'error', 8000)
+})
 
 async function removeRomSource(source) {
   if (!(await removeRomSourceById(source.id))) return

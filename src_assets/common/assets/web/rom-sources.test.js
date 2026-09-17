@@ -4,6 +4,9 @@ import {
   blankRomSourceForm,
   customCommandValid,
   parseExtensionList,
+  romEmulatorId,
+  romEmulatorInstallFailure,
+  romEmulatorInstallState,
   romSourceCountLabel,
   romSourceInstallLabel,
   romSourcePayload,
@@ -82,5 +85,40 @@ describe('ROM folder forms', () => {
     expect(romSourceCountLabel({})).toBe('Scan to count')
     expect(romSourceCountLabel({ rom_count: 1 })).toBe('1 game')
     expect(romSourceCountLabel({ rom_count: 12 })).toBe('12 games')
+  })
+})
+
+describe('installing a missing emulator from Flathub', () => {
+  const missing = { kind: 'missing', location: '' }
+
+  it('offers the install only for a missing preset emulator Flathub can provide', () => {
+    expect(romEmulatorInstallState({ emulator: 'eden', install: missing, installable: true })).toBe('offer')
+    expect(romEmulatorInstallState({ id: 'eden', install: missing, installable: true })).toBe('offer')
+    expect(romEmulatorInstallState({ emulator: 'eden', install: missing, installable: false })).toBe('')
+    expect(romEmulatorInstallState({ emulator: 'eden', install: { kind: 'flatpak', location: 'dev.eden_emu.eden' }, installable: true })).toBe('')
+    expect(romEmulatorInstallState({ emulator: CUSTOM_EMULATOR, install: missing, installable: true })).toBe('')
+    expect(romEmulatorInstallState({})).toBe('')
+    // A folder that names its own emulator file keeps running that file.
+    expect(romEmulatorInstallState({ emulator: 'eden', launcher: '/opt/Apps/Eden.AppImage', install: { kind: 'missing', location: '/opt/Apps/Eden.AppImage' }, installable: true })).toBe('')
+  })
+
+  it('shows a running install whatever the emulator looks like meanwhile', () => {
+    const job = { state: 'installing', message: 'Installing Eden from Flathub.' }
+    expect(romEmulatorInstallState({ emulator: 'eden', install: missing, installable: true, install_job: job })).toBe('installing')
+    expect(romEmulatorInstallState({ emulator: 'eden', install: missing, installable: false, install_job: job })).toBe('installing')
+  })
+
+  it('keeps a failure only while the emulator is still missing', () => {
+    const failed = { state: 'failed', message: 'Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub' }
+    expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: missing, install_job: failed })).toBe(failed.message)
+    expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: missing, install_job: { state: 'failed' } })).toBe('The install from Flathub failed.')
+    expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: { kind: 'native', location: '/usr/bin/duckstation-qt' }, install_job: failed })).toBe('')
+    expect(romEmulatorInstallFailure({ emulator: 'eden', install: missing, install_job: { state: 'installed', message: 'Eden is installed.' } })).toBe('')
+  })
+
+  it('names the emulator a folder or a preset installs', () => {
+    expect(romEmulatorId({ id: 'folder-1', emulator: 'eden' })).toBe('eden')
+    expect(romEmulatorId({ id: 'dolphin' })).toBe('dolphin')
+    expect(romEmulatorId({})).toBe('')
   })
 })

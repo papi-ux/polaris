@@ -12,6 +12,8 @@ starts at `v1.0.0`.
 - Nova shows a launcher's bundled poster (`lutris.png`, `heroic.png`). The name was read against the working directory, so only the utility entries resolved theirs.
 - Changing an entry's image reaches Nova. Polaris kept the poster it copied the first time, so a second cover pick or another file left Nova on the old one; a cleared image now also stops showing the copy.
 - The app editor's **Needs command** badge and **Command: Missing** summary count a detached command, so launcher entries such as Heroic and Lutris no longer look broken.
+- A game imported from a ROM folder launches the emulator this host has now. An entry saved while its emulator was missing kept the bare binary name, so installing the Flatpak afterwards still started an empty session with a black screen; launch now resolves the folder's emulator file, `PATH` and the Flatpak each time, and a launch whose emulator is still missing is refused with `emulator_not_installed`, naming the emulator, the game and the fix.
+- A missing preset emulator can be installed from the ROM folders panel with **Install from Flathub**. The host runs Flatpak for its own account without a shell, adds the Flathub remote for that account only when it is missing, shows the install on the folder card while it runs, and points that emulator's imported games at the Flatpak when it finishes. A failure shows Flatpak's own reason (DuckStation is no longer on Flathub). New route: `POST /api/library/emulators/install`; `GET /api/library/sources` gains `installable` and `install_job` on presets and folders.
 
 ## v1.4.9 - 2026-09-16
 
