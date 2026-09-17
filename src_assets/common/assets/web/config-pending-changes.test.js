@@ -180,6 +180,45 @@ describe('ConfigView pending changes review', () => {
     if (reason === 'newer restart') wrapper.unmount()
   })
 
+  it('re-reads host capabilities when the operator returns to the tab after an outside restart (#633)', async () => {
+    const wrapper = mountConfigView({
+      vdisplayBackend: 'None',
+      vdisplayAvailable: false,
+      stream_display_mode_options: [{ value: 'host_virtual_display', available: false }],
+    })
+    await flushConfigLoad()
+    wrapper.vm.config.max_bitrate = 42000
+    const readyOptions = [{ value: 'host_virtual_display', available: true }]
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ stream_display_mode_options: readyOptions, vdisplayBackend: 'kscreen-doctor', vdisplayAvailable: true, max_bitrate: 1 }),
+    })
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(wrapper.vm.hostGeneration).toBe(1)
+    expect(wrapper.vm.config.stream_display_mode_options).toEqual(readyOptions)
+    expect(wrapper.vm.config.vdisplayBackend).toBe('kscreen-doctor')
+    expect(wrapper.vm.config.vdisplayAvailable).toBe(true)
+    expect(wrapper.vm.config.max_bitrate).toBe(42000)
+
+    // A focus right after the tab switch is the same return, not a second one.
+    window.dispatchEvent(new Event('focus'))
+    await flushPromises()
+    expect(wrapper.vm.hostGeneration).toBe(1)
+    now.mockReturnValue(1_010_000)
+    window.dispatchEvent(new Event('focus'))
+    await flushPromises()
+    expect(wrapper.vm.hostGeneration).toBe(2)
+
+    wrapper.unmount()
+    now.mockReturnValue(1_100_000)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(wrapper.vm.hostGeneration).toBe(2)
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
     mockToast.mockClear()
