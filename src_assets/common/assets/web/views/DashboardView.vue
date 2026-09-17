@@ -567,6 +567,7 @@ import { resolveClientSettingsSync } from '../client-settings-sync'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
+import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import {
   buildLiveSummary,
   buildQualityGrade,
@@ -1564,7 +1565,7 @@ async function fetchSystemInfo() {
     if (configRes.ok) {
       const config = await configRes.json()
       refreshClientSettingsSync(config)
-      streamingOutput.value = config.linux_streaming_output || config.output_name || ''
+      streamingOutput.value = previewOutputForConfig(config)
       discoveryEnabled.value = config.enable_discovery !== 'disabled'
       pairingEnabled.value = config.enable_pairing !== 'disabled'
     }

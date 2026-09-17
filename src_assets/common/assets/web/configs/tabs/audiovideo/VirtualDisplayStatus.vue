@@ -23,11 +23,19 @@ const isKscreenBackend = computed(() => (
   vdStatus.value?.backend_detected === true && vdStatus.value?.backend === 'kscreen-doctor'
 ))
 const connectorOptions = computed(() => kscreenConnectorOptions(displayOutputs.value?.outputs))
+
+function loadedHostVirtualConnector(outputs) {
+  if (typeof outputs?.host_virtual_display_output === 'string') return outputs.host_virtual_display_output
+  if (typeof outputs?.streaming_output === 'string') return outputs.streaming_output
+  return null
+}
 const connector = computed(() => presentKscreenConnector({
   selected: props.config?.linux_streaming_output,
-  // display-outputs reports the connector the running host loaded; null when
-  // that answer is missing, so unsaved edits are never shown as in use.
-  loaded: typeof displayOutputs.value?.streaming_output === 'string' ? displayOutputs.value.streaming_output : null,
+  // display-outputs reports the connector the running host would borrow; null
+  // when that answer is missing, so unsaved edits are never shown as in use.
+  // host_virtual_display_output survives a private mode retiring the active
+  // streaming_output on load; older hosts only send streaming_output.
+  loaded: loadedHostVirtualConnector(displayOutputs.value),
   available: vdStatus.value?.available === true,
   primary: props.config?.linux_primary_output,
   outputs: displayOutputs.value?.outputs,

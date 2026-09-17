@@ -640,6 +640,7 @@ namespace config {
       {},     // linux_display.stream_mode (empty = derive from legacy booleans)
       "labwc",  // linux_display.private_runtime
       "privacy",  // linux_display.headless_swap_mode
+      {},  // linux_display.saved_streaming_output (copied from linux_streaming_output on parse)
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode
@@ -1503,6 +1504,7 @@ namespace config {
     int_between_f(vars, "color_range", video.color_range, {0, 2});
 
     string_f(vars, "linux_streaming_output", video.linux_display.streaming_output);
+    video.linux_display.saved_streaming_output = video.linux_display.streaming_output;
     string_f(vars, "linux_primary_output", video.linux_display.primary_output);
     bool_f(vars, "linux_auto_manage_displays", video.linux_display.auto_manage_displays);
     bool_f(vars, "linux_use_cage_compositor", video.linux_display.use_cage_compositor);

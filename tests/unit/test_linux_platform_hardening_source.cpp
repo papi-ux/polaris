@@ -203,6 +203,24 @@ TEST(LinuxPlatformHardeningSource, KscreenConfigurationNeverPassesThroughShell) 
   EXPECT_NE(virtual_display.find("platf::run_process_argv(args)", kscreen), std::string::npos);
 }
 
+TEST(LinuxPlatformHardeningSource, KscreenEnableAttemptsShareOnePriorityRule) {
+  // Both the mode-setting attempt and the enable-only retry once built their
+  // own argv, and both sent the primary output priority 2 even when it was the
+  // streaming output itself. They must come from kscreen_enable_args, which is
+  // unit-tested, so the retry cannot drift from the first attempt.
+  const auto source = read_source("src/platform/linux/virtual_display.cpp");
+  const auto kscreen = source.find("namespace kscreen");
+  const auto kscreen_end = source.find("}  // namespace kscreen", kscreen);
+  ASSERT_NE(kscreen, std::string::npos);
+  ASSERT_NE(kscreen_end, std::string::npos);
+  const auto body = source.substr(kscreen, kscreen_end - kscreen);
+
+  EXPECT_NE(body.find("kscreen_enable_args(output, mode_str, cfg.primary_output)"), std::string::npos);
+  EXPECT_NE(body.find("kscreen_enable_args(output, {}, cfg.primary_output)"), std::string::npos);
+  EXPECT_EQ(body.find(".priority.1\""), std::string::npos);
+  EXPECT_EQ(body.find(".priority.2\""), std::string::npos);
+}
+
 TEST(LinuxPlatformHardeningSource, VaapiValidatesExportedDescriptorBeforeIndexing) {
   const auto source = read_source("src/platform/linux/vaapi.cpp");
   EXPECT_NE(source.find("DRMPRIMESurfaceDescriptor prime {}"), std::string::npos);

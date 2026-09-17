@@ -5084,7 +5084,7 @@ namespace confighttp {
     const auto vd_backend = virtual_display::detect_backend();
     const bool vd_available = virtual_display::backend_has_required_configuration(
       vd_backend,
-      config::video.linux_display.streaming_output
+      virtual_display::host_virtual_display_connector()
     );
     const auto configured_policy = stream_display_policy::resolve(stream_display_policy::input_t {
       vd_available,
@@ -7320,7 +7320,7 @@ namespace confighttp {
     const bool backend_detected = cached_backend != virtual_display::backend_e::NONE;
     const bool available = virtual_display::backend_has_required_configuration(
       cached_backend,
-      config::video.linux_display.streaming_output
+      virtual_display::host_virtual_display_connector()
     );
     output_tree["available"] = available;
     const auto labwc = snapshot_labwc();
@@ -8929,6 +8929,9 @@ namespace confighttp {
       output["outputs"] = std::move(arr);
       output["streaming_output"] = config::video.linux_display.streaming_output;
       output["primary_output"] = config::video.linux_display.primary_output;
+      // What the kscreen-doctor Host Virtual Display fallback would borrow, which
+      // outlives streaming_output being retired by a private or desktop mode.
+      output["host_virtual_display_output"] = virtual_display::host_virtual_display_connector();
       // Suggestions when config empty
       std::string sug_stream;
       std::string sug_primary;

@@ -77,6 +77,38 @@ TEST(VirtualDisplayTests, KscreenJsonSnapshotCarriesExactRestoreFields) {
   EXPECT_FALSE(virtual_display::kscreen_output_state_from_json("not json", "DP-1").has_value());
 }
 
+TEST(VirtualDisplayTests, KscreenEnableDemotesOnlyADistinctPrimaryOutput) {
+  using args_t = std::vector<std::string>;
+
+  // With linux_streaming_output and linux_primary_output both naming DP-1, the
+  // argv once told DP-1 to be priority 1 and then 2. kscreen-doctor applies its
+  // arguments in order, so the trailing 2 won and another monitor went first.
+  EXPECT_EQ(
+    virtual_display::kscreen_enable_args("DP-1", "1920x1080@60", "DP-1"),
+    (args_t {"kscreen-doctor", "output.DP-1.enable", "output.DP-1.mode.1920x1080@60", "output.DP-1.priority.1"})
+  );
+  EXPECT_EQ(
+    virtual_display::kscreen_enable_args("DP-1", "", "DP-1"),
+    (args_t {"kscreen-doctor", "output.DP-1.enable", "output.DP-1.priority.1"})
+  );
+
+  // A dummy plug beside a real panel still hands the panel priority 2.
+  EXPECT_EQ(
+    virtual_display::kscreen_enable_args("HDMI-A-2", "1920x1080@60", "DP-1"),
+    (args_t {"kscreen-doctor", "output.HDMI-A-2.enable", "output.HDMI-A-2.mode.1920x1080@60", "output.HDMI-A-2.priority.1", "output.DP-1.priority.2"})
+  );
+  EXPECT_EQ(
+    virtual_display::kscreen_enable_args("HDMI-A-2", "", "DP-1"),
+    (args_t {"kscreen-doctor", "output.HDMI-A-2.enable", "output.HDMI-A-2.priority.1", "output.DP-1.priority.2"})
+  );
+
+  // No primary configured: nothing else is touched.
+  EXPECT_EQ(
+    virtual_display::kscreen_enable_args("HDMI-A-2", "1280x720@120", ""),
+    (args_t {"kscreen-doctor", "output.HDMI-A-2.enable", "output.HDMI-A-2.mode.1280x720@120", "output.HDMI-A-2.priority.1"})
+  );
+}
+
 TEST(VirtualDisplayTests, FailedOrStillActiveTeardownRetainsRecoveryAuthority) {
   EXPECT_TRUE(virtual_display::teardown_is_verified(true, false));
   EXPECT_FALSE(virtual_display::teardown_is_verified(false, false));

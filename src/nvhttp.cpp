@@ -1366,9 +1366,16 @@ namespace nvhttp {
         {"linux_prefer_gpu_native_capture", bool_config_value(linux_display.prefer_gpu_native_capture)},
         {"linux_auto_manage_displays", bool_config_value(linux_display.auto_manage_displays)},
         {"headless_swap_mode", linux_display.headless_swap_mode},
-        {"linux_streaming_output", linux_display.streaming_output},
         {"linux_primary_output", linux_display.primary_output},
       };
+      // Retiring the live connector must not erase the one in the file: modes
+      // that own no connector retire it again on every load, and the kscreen
+      // Host Virtual Display fallback is offered from the file. With nothing
+      // live the key is left out entirely, so a connector edit saved from the
+      // web console and still waiting for a restart is not overwritten either.
+      if (!linux_display.streaming_output.empty()) {
+        values["linux_streaming_output"] = linux_display.streaming_output;
+      }
       if (cleared_owned_output_name) {
         values["output_name"] = "";
       }
@@ -1376,6 +1383,9 @@ namespace nvhttp {
         restore_live_state();
         error = "failed to persist stream display mode";
         return stream_display_mode_apply_result_e::persistence_failed;
+      }
+      if (const auto written = values.find("linux_streaming_output"); written != values.end()) {
+        config::video.linux_display.saved_streaming_output = written->second;
       }
 
       // Capture backend and output_name are launch-scoped companion settings,
@@ -2501,6 +2511,20 @@ namespace nvhttp {
       error,
       [persistence_succeeds](const auto &) {
         return persistence_succeeds;
+      }
+    ) == stream_display_mode_apply_result_e::success;
+  }
+
+  bool apply_stream_display_mode_selection_for_tests(
+      const std::string &selection,
+      std::unordered_map<std::string, std::string> &persisted,
+      std::string &error) {
+    return apply_stream_display_mode_selection(
+      selection,
+      error,
+      [&persisted](const auto &values) {
+        persisted = values;
+        return true;
       }
     ) == stream_display_mode_apply_result_e::success;
   }
