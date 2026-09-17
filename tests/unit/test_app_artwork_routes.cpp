@@ -10,7 +10,9 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 namespace {
   constexpr const char *APP_UUID = "F727EEEE-A124-040A-6D03-33DF1E45E189";
@@ -91,4 +93,59 @@ TEST(AppArtworkRoutes, RoutesNeedTheConsoleSessionCsrfAndJson) {
   EXPECT_NE(reader.find("return app->uuid;"), std::string::npos);
   EXPECT_NE(source.find(R"(file_tree["artwork_lookup_off"] = apps_with_artwork_lookup_off(platf::appdata(), file_tree);)"),
             std::string::npos);
+}
+
+TEST(AppCoverSearch, StoresAPickedPosterUnderItsUuidInTheFormatItReallyIs) {
+  const auto coverdir = std::filesystem::temp_directory_path() / "polaris-cover-select";
+  std::error_code error;
+  std::filesystem::remove_all(coverdir, error);
+
+  const std::vector<unsigned char> png {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01};
+  const std::vector<unsigned char> jpeg {0xff, 0xd8, 0xff, 0x02};
+
+  const auto first = confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", jpeg);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(std::filesystem::path(*first), coverdir / (std::string(APP_UUID) + ".jpg"));
+
+  // A second pick in another format replaces the first rather than sitting next to it.
+  const auto second = confighttp::store_selected_cover(coverdir, APP_UUID, "image/png", png);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(std::filesystem::path(*second), coverdir / (std::string(APP_UUID) + ".png"));
+  EXPECT_FALSE(std::filesystem::exists(coverdir / (std::string(APP_UUID) + ".jpg")));
+  std::ifstream stored(*second, std::ios::binary);
+  const std::vector<unsigned char> bytes {std::istreambuf_iterator<char>(stored), std::istreambuf_iterator<char>()};
+  EXPECT_EQ(bytes, png);
+
+  // The uuid names the file, so it must be one; the bytes must be the type they claim.
+  EXPECT_FALSE(confighttp::store_selected_cover(coverdir, "../escape", "image/png", png).has_value());
+  EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/gif", png).has_value());
+  EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", png).has_value());
+  EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/png", {}).has_value());
+  EXPECT_FALSE(std::filesystem::exists(coverdir / (std::string(APP_UUID) + ".png.tmp")));
+  EXPECT_FALSE(std::filesystem::exists(coverdir / (std::string(APP_UUID) + ".jpg.tmp")));
+
+  std::filesystem::remove_all(coverdir, error);
+}
+
+TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside) {
+  const auto source = read_source("src/confighttp.cpp");
+  const auto search = handler_body(source, "void searchCovers(");
+  // One search for both surfaces: the old console handler took SteamGridDB's first autocomplete
+  // result only, so "Heroic" found nothing while Nova listed Heroic Games Launcher.
+  EXPECT_NE(search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
+  EXPECT_EQ(search.find(R"(search_data["data"][0])"), std::string::npos);
+  EXPECT_NE(search.find("./api/covers/preview/"), std::string::npos);
+  EXPECT_NE(search.find("classify_search_failure(false, std::nullopt)"), std::string::npos);
+
+  const auto select = handler_body(source, "void selectCover(");
+  EXPECT_NE(select.find("artwork_candidate_previews().lookup("), std::string::npos);
+  EXPECT_NE(select.find("store_selected_cover("), std::string::npos);
+  EXPECT_EQ(select.find("download_file"), std::string::npos);
+
+  EXPECT_NE(source.find(R"(server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;)"), std::string::npos);
+  EXPECT_NE(source.find(R"(server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);)"), std::string::npos);
+
+  const auto nova = read_source("src/nvhttp.cpp");
+  const auto nova_search = handler_body(nova, "auto polarisSearchGameArtworkMatches = ", "\n    };\n");
+  EXPECT_NE(nova_search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
 }

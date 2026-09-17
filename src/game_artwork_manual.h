@@ -176,6 +176,34 @@ namespace game_artwork::manual {
     std::int64_t now_milliseconds
   );
 
+  /** One SteamGridDB game a search found, with the opaque token of its first poster when one could be fetched. */
+  struct match_candidate_preview_t {
+    providers::match_candidate_t candidate;
+    std::optional<std::string> poster_token;  ///< a poster preview in the cache, scoped to the searched uuid
+    std::int64_t preview_expires_at = 0;
+  };
+
+  struct match_candidate_search_t {
+    bool invalid_query = false;  ///< the query cannot become a SteamGridDB search at all
+    std::optional<search_failure_t> failure;  ///< SteamGridDB did not answer the search
+    std::vector<match_candidate_preview_t> candidates;
+  };
+
+  /**
+   * Search SteamGridDB for up to maximum_candidate_count games matching a sanitized query and
+   * publish each one's first poster into the preview cache under uuid. This is the search behind
+   * Nova's Artwork Studio and the console's Find Cover, so both list the same games for a title.
+   * A candidate whose poster cannot be fetched is still listed, without a preview. An exception
+   * from the search request itself propagates, so a route can answer it as an upstream failure.
+   */
+  [[nodiscard]] match_candidate_search_t search_match_candidates(
+    preview_cache_t &cache,
+    std::string_view uuid,
+    std::string_view query,
+    const providers::transport_t &transport,
+    std::int64_t now_milliseconds
+  );
+
   [[nodiscard]] nlohmann::json artwork_choice_json(std::string_view uuid, const choice_t &choice);
   [[nodiscard]] nlohmann::json artwork_choices_json(std::string_view uuid, kind_e kind, const std::vector<choice_t> &choices);
 

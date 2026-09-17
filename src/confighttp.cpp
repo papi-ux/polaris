@@ -2438,6 +2438,54 @@ namespace confighttp {
     return uuid;
   }
 
+  std::optional<std::string> store_selected_cover(
+    const std::filesystem::path &coverdir,
+    std::string_view uuid,
+    std::string_view mime_type,
+    const std::vector<unsigned char> &body
+  ) {
+    const std::string extension = mime_type == "image/png" ? ".png" :
+                                  mime_type == "image/jpeg" ? ".jpg" :
+                                  mime_type == "image/webp" ? ".webp" : "";
+    if (!game_artwork::is_valid_uuid(uuid) || extension.empty() || body.empty() ||
+        body.size() > game_artwork::maximum_asset_bytes) {
+      return std::nullopt;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(coverdir, error);
+    if (error) {
+      return std::nullopt;
+    }
+    const auto final_path = coverdir / (std::string(uuid) + extension);
+    const auto temporary = coverdir / (final_path.filename().string() + ".tmp");
+    {
+      std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+      output.write(reinterpret_cast<const char *>(body.data()), static_cast<std::streamsize>(body.size()));
+      if (!output) {
+        std::filesystem::remove(temporary, error);
+        return std::nullopt;
+      }
+    }
+    if (game_artwork::image_mime_type(temporary) != std::optional<std::string> {std::string(mime_type)}) {
+      std::filesystem::remove(temporary, error);
+      return std::nullopt;
+    }
+    std::filesystem::rename(temporary, final_path, error);
+    if (error) {
+      std::error_code cleanup;
+      std::filesystem::remove(temporary, cleanup);
+      return std::nullopt;
+    }
+    // A pick in another format must not leave the earlier one behind: the artwork resolver looks
+    // for `<uuid>` with any image extension, and the older file could win that lookup.
+    for (const auto other : {".png", ".jpg", ".jpeg", ".webp"}) {
+      if (extension != other) {
+        std::filesystem::remove(coverdir / (std::string(uuid) + other), error);
+      }
+    }
+    return final_path.string();
+  }
+
   nlohmann::json apps_with_artwork_lookup_off(const std::filesystem::path &appdata, const nlohmann::json &apps_tree) {
     auto off = nlohmann::json::array();
     if (!apps_tree.is_object() || !apps_tree.contains("apps") || !apps_tree["apps"].is_array()) return off;
@@ -5855,128 +5903,167 @@ namespace confighttp {
   }
 
   /**
-   * @brief Search SteamGridDB for cover art by game name.
-   * Returns a list of cover art URLs that can be downloaded.
-   * Requires `steamgriddb_api_key` to be set in config.
+   * @brief Search SteamGridDB for covers by name, the same search Nova's Artwork Studio runs.
    *
-   * @api_examples{/api/covers/search| GET| ?name=Elden+Ring}
+   * Takes `name` and `uuid`, the entry's uuid or, for an entry not saved yet, one the console
+   * made up for this search. Each candidate carries an opaque poster token and a preview served
+   * by /api/covers/preview/<token>, so the page never loads an image from outside the host and
+   * its Content-Security-Policy stays as strict as it is. Games SteamGridDB knows but has no
+   * poster for are left out: there is nothing to pick. A failure answers with the status and
+   * code Nova gets (steamgriddb_key_missing, steamgriddb_unauthorized, and so on).
+   *
+   * @api_examples{/api/covers/search| GET| ?name=Heroic&uuid=F727EEEE-A124-040A-6D03-33DF1E45E189}
    */
   void searchCovers(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
 
-    nlohmann::json output;
-
-    const auto answer_search_failure = [&](const game_artwork::manual::search_failure_t &failure) {
-      output["status"] = false;
-      output["code"] = failure.code;
-      output["error"] = failure.message;
-      output["covers"] = nlohmann::json::array();
-      send_response(response, output);
+    const auto answer_failure = [&](const game_artwork::manual::search_failure_t &failure) {
+      nlohmann::json output {
+        {"status", false},
+        {"code", failure.code},
+        {"error", failure.message},
+        {"candidates", nlohmann::json::array()},
+      };
+      send_response(response, static_cast<SimpleWeb::StatusCode>(failure.http_status), output);
     };
-    const auto configured_key = config::steamgriddb_api_key();
-    const bool key_present = std::any_of(configured_key.begin(), configured_key.end(), [](unsigned char ch) {
+    const auto api_key = config::steamgriddb_api_key();
+    const bool key_present = std::any_of(api_key.begin(), api_key.end(), [](unsigned char ch) {
       return !std::isspace(ch);
     });
     if (!key_present) {
-      answer_search_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
+      answer_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
       return;
     }
 
     auto args = request->parse_query_string();
-    auto name_it = args.find("name");
-    if (name_it == args.end() || name_it->second.empty()) {
-      output["status"] = false;
-      output["error"] = "Missing name parameter";
-      send_response(response, output);
+    const auto name_it = args.find("name");
+    const auto uuid_it = args.find("uuid");
+    const auto query = name_it == args.end() ? std::optional<std::string> {} : game_artwork::manual::sanitize_search_query(name_it->second);
+    const std::string uuid = uuid_it == args.end() ? std::string {} : uuid_it->second;
+    if (!query || !game_artwork::is_valid_uuid(uuid)) {
+      bad_request(response, request, "A cover search needs a name and a uuid");
       return;
     }
 
-    std::string game_name = name_it->second;
-    std::string api_key = configured_key;
-
-    // Step 1: Search for the game by name
-    std::string search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" +
-      http::url_escape(game_name);
-
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-      output["status"] = false;
-      output["error"] = "Failed to init HTTP client";
-      send_response(response, output);
-      return;
-    }
-
-    std::string search_response;
-    struct curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, ("Authorization: Bearer " + api_key).c_str());
-
-    curl_easy_setopt(curl, CURLOPT_URL, search_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &search_response);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
-
-    CURLcode res = curl_easy_perform(curl);
-
-    if (res != CURLE_OK) {
-      curl_easy_cleanup(curl);
-      curl_slist_free_all(headers);
-      answer_search_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
-      return;
-    }
-    long search_status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &search_status);
-    if (search_status < 200 || search_status >= 300) {
-      // A rejected key comes back as 401 with no `data`; answering "no covers"
-      // there hid the real cause from the console and from Nova.
-      curl_easy_cleanup(curl);
-      curl_slist_free_all(headers);
-      answer_search_failure(game_artwork::manual::classify_search_failure(true, search_status));
-      return;
-    }
-
-    nlohmann::json covers = nlohmann::json::array();
     try {
-      auto search_data = nlohmann::json::parse(search_response);
-      if (search_data.contains("data") && search_data["data"].is_array() && !search_data["data"].empty()) {
-        int game_id = search_data["data"][0]["id"].get<int>();
-
-        // Step 2: Get grids (cover art) for the game
-        std::string grid_url = "https://www.steamgriddb.com/api/v2/grids/game/" +
-          std::to_string(game_id) + "?dimensions=600x900&limit=5";
-
-        std::string grid_response;
-        curl_easy_setopt(curl, CURLOPT_URL, grid_url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &grid_response);
-
-        res = curl_easy_perform(curl);
-        if (res == CURLE_OK) {
-          auto grid_data = nlohmann::json::parse(grid_response);
-          if (grid_data.contains("data") && grid_data["data"].is_array()) {
-            for (const auto &grid : grid_data["data"]) {
-              nlohmann::json cover;
-              cover["url"] = grid.value("url", "");
-              cover["thumb"] = grid.value("thumb", grid.value("url", ""));
-              cover["width"] = grid.value("width", 600);
-              cover["height"] = grid.value("height", 900);
-              cover["author"] = grid.contains("author") ? grid["author"].value("name", "") : "";
-              covers.push_back(cover);
-            }
-          }
-        }
+      const auto search = game_artwork::manual::search_match_candidates(
+        nvhttp::artwork_candidate_previews(),
+        uuid,
+        *query,
+        nvhttp::artwork_transport(api_key),
+        nvhttp::artwork_clock_milliseconds()
+      );
+      if (search.invalid_query) {
+        bad_request(response, request, "A cover search needs a name and a uuid");
+        return;
       }
+      if (search.failure) {
+        answer_failure(*search.failure);
+        return;
+      }
+      auto candidates = nlohmann::json::array();
+      for (const auto &found : search.candidates) {
+        if (!found.poster_token) {
+          continue;
+        }
+        nlohmann::json candidate {
+          {"title", found.candidate.title},
+          {"confidence", found.candidate.confidence},
+          {"token", *found.poster_token},
+          {"preview", "./api/covers/preview/" + *found.poster_token + "?uuid=" + uuid},
+          {"expires_at", found.preview_expires_at},
+        };
+        if (found.candidate.release_year) {
+          candidate["release_year"] = *found.candidate.release_year;
+        }
+        candidates.push_back(std::move(candidate));
+      }
+      nlohmann::json output {{"status", true}, {"query", *query}, {"candidates", std::move(candidates)}};
+      send_response(response, output);
+    } catch (...) {
+      answer_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
+    }
+  }
+
+  /**
+   * @brief Serve a poster preview a cover search published, for the console's candidate tiles.
+   *
+   * @api_examples{/api/covers/preview/<token>| GET| ?uuid=F727EEEE-A124-040A-6D03-33DF1E45E189}
+   */
+  void previewCover(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+
+    const std::string token = request->path_match.size() > 1 ? request->path_match[1].str() : std::string {};
+    auto args = request->parse_query_string();
+    const auto uuid_it = args.find("uuid");
+    const std::string uuid = uuid_it == args.end() ? std::string {} : uuid_it->second;
+    if (!game_artwork::is_valid_uuid(uuid)) {
+      bad_request(response, request, "A cover preview needs a uuid");
+      return;
+    }
+    const auto preview = nvhttp::artwork_candidate_previews().lookup(
+      uuid, token, game_artwork::kind_e::poster, nvhttp::artwork_clock_milliseconds());
+    if (!preview) {
+      not_found(response, request);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_common_security_headers(headers);
+    headers.emplace("Content-Type", preview->mime_type);
+    headers.emplace("Cache-Control", "private, no-store");
+    const std::string body(preview->body.begin(), preview->body.end());
+    response->write(SimpleWeb::StatusCode::success_ok, body, headers);
+  }
+
+  /**
+   * @brief Store the cover picked from a search as `<uuid>.<ext>` in the covers directory.
+   *
+   * The image is the preview the search already fetched from an allowlisted SteamGridDB address;
+   * nothing is downloaded here, and the file name comes from a validated uuid. The console puts
+   * the returned path in the entry's Image field, and saving the entry keeps it.
+   *
+   * @api_examples{/api/covers/select| POST| {"uuid":"F727EEEE-A124-040A-6D03-33DF1E45E189","token":"0123456789abcdef0123456789abcdef"}}
+   */
+  void selectCover(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    std::string uuid;
+    std::string token;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      uuid = body.value("uuid", std::string {});
+      token = body.value("token", std::string {});
     } catch (const std::exception &e) {
-      BOOST_LOG(warning) << "SteamGridDB search error: " << e.what();
+      bad_request(response, request, e.what());
+      return;
+    }
+    if (!game_artwork::is_valid_uuid(uuid) || token.empty()) {
+      bad_request(response, request, "A cover pick needs the uuid and token from its search");
+      return;
     }
 
-    curl_easy_cleanup(curl);
-    curl_slist_free_all(headers);
-
-    output["status"] = true;
-    output["covers"] = covers;
-    output["game_name"] = game_name;
+    const auto preview = nvhttp::artwork_candidate_previews().lookup(
+      uuid, token, game_artwork::kind_e::poster, nvhttp::artwork_clock_milliseconds());
+    if (!preview) {
+      nlohmann::json output {
+        {"status", false},
+        {"code", "cover_preview_expired"},
+        {"error", "That cover is no longer available. Search again and pick it once more."},
+      };
+      send_response(response, SimpleWeb::StatusCode::client_error_gone, output);
+      return;
+    }
+    const auto path = store_selected_cover(platf::appdata() / "covers", uuid, preview->mime_type, preview->body);
+    if (!path) {
+      nlohmann::json output {{"status", false}, {"code", "cover_not_saved"}, {"error", "The cover could not be saved on the host."}};
+      send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error, output);
+      return;
+    }
+    nlohmann::json output {{"status", true}, {"path", *path}};
     send_response(response, output);
   }
 
@@ -8886,6 +8973,8 @@ namespace confighttp {
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);
     server.resource["^/api/covers/image$"]["GET"] = getCoverImage;
     server.resource["^/api/covers/search$"]["GET"] = searchCovers;
+    server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;
+    server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
     server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
     server.resource["^/api/covers/download$"]["POST"] = withCsrf(downloadCover);
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;

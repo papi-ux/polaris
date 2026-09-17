@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // lib includes
 #include <nlohmann/json.hpp>
@@ -107,6 +108,20 @@ namespace confighttp {
    * including a body over 1024 bytes, is refused.
    */
   std::optional<std::string> decode_app_artwork_request(std::string_view body);
+
+  /**
+   * @brief Store a cover picked from a search's preview as `<uuid>.<ext>` under coverdir.
+   *
+   * Only a PNG, JPEG or WebP whose bytes match the given type is stored, under a validated uuid,
+   * through a temporary file; the same uuid's covers in other formats are removed.
+   * @return The stored path, or nothing when the image or the write is refused.
+   */
+  std::optional<std::string> store_selected_cover(
+    const std::filesystem::path &coverdir,
+    std::string_view uuid,
+    std::string_view mime_type,
+    const std::vector<unsigned char> &body
+  );
 
   /**
    * @brief The uuids of the apps in an apps.json tree whose automatic artwork lookup is off.
