@@ -74,6 +74,20 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     fs::remove_all(directory);
   });
 
+  // HOME is not the only home the route reads: it also looks in the account's own home, on PATH
+  // and at system Flatpaks. An Eden already there, or its keys, changes the answers below.
+  const auto &eden = *emulator_library::find_preset("eden");
+  const auto home_roots = game_library::library_home_roots();
+  const char *path_env = std::getenv("PATH");
+  const auto host_eden = emulator_library::detect_install(eden, "", home_roots, path_env ? path_env : "");
+  if (host_eden.kind != emulator_library::install_e::missing) {
+    GTEST_SKIP() << "eden is installed on this host at " << host_eden.location;
+  }
+  const emulator_library::install_t probe {emulator_library::install_e::launcher, (directory / "probe" / "Eden.AppImage").string()};
+  if (emulator_library::prerequisites(eden, probe, directory, home_roots).empty()) {
+    GTEST_SKIP() << "this host already has Eden's prod.keys in the account's home";
+  }
+
   const auto roms = directory / "roms" / "switch";
   touch(roms / "Game One (USA).nsp");
   touch(roms / "Game One [0100AAAA][v65536].nsp");  // an update dump, never an entry
