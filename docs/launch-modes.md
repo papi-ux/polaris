@@ -30,7 +30,7 @@ Every card under **Settings → Audio/Video → Where games run** starts with wh
 Your game runs in its own invisible session. Your desktop never flickers, resizes, or shows the game, and nothing you do on the desktop leaks into the stream. It even works on a host with no monitor attached and nobody logged in: pair it with `sudo -H polaris --setup-host --enable-headless-boot` for a console-style box that streams straight from power-on ([Bazzite guide](bazzite.md#headless-boot-and-deck-images) has the walkthrough).
 
 - **Best for:** most setups, and the preferred path when you stream to a handheld.
-- **One caveat:** it requires both `labwc` and `wlr-randr` on the host `PATH`; the card is greyed out and names the missing tool until both are ready. Once running, the built-in Desktop entry looks like an empty screen until you launch something into it. That is normal, not broken. Right-click the empty screen to open the session menu, or use Mirror Desktop if you actually wanted your desktop.
+- **One caveat:** it requires both `labwc` and `wlr-randr` on the host `PATH`; the card is greyed out and names the missing tool until both are ready. The built-in Desktop entry still shows your real desktop, because it has **Mirror the host desktop** turned on in the [app editor](apps.md#runtime-behavior). An entry with no command and that setting off opens an empty private session instead. That empty screen is normal, not broken: right-click it to open the session menu.
 
 ### Private Stream (GPU-native)
 

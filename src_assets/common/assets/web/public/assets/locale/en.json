@@ -79,6 +79,8 @@
     "covers_found": "Covers Found",
     "delete": "Delete",
     "delete_failed": "App delete failed: ",
+    "desktop_mirror": "Mirror the host desktop",
+    "desktop_mirror_desc": "Streams the desktop you see on the host in any launch mode; turn it off to open this entry in the host's mode, such as an empty Private Stream.",
     "detached_cmds": "Detached Commands",
     "detached_cmds_add": "Add Detached Command",
     "detached_cmds_desc": "A list of commands to be run in the background.",
