@@ -5915,9 +5915,23 @@ namespace confighttp {
     }
   }
 
+  std::optional<std::string> cover_image_etag(const std::filesystem::path &image) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(image, error);
+    if (error) return std::nullopt;
+    const auto written = std::filesystem::last_write_time(image, error);
+    if (error) return std::nullopt;
+    std::ostringstream tag;
+    tag << '"' << std::hex << std::hash<std::string> {}(image.string()) << '-' << size << '-'
+        << written.time_since_epoch().count() << '"';
+    return tag.str();
+  }
+
   /**
    * @brief Serve a cover art image by app name.
-   * Looks up the app's image-path and serves the PNG file.
+   * Looks up the app's image-path and serves the image file. The URL names the entry, not the
+   * image, so the browser revalidates with the image's entity tag every time: a new cover shows
+   * at once, and an unchanged one answers 304 without its bytes.
    */
   void getCoverImage(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -5968,6 +5982,18 @@ namespace confighttp {
     std::string extension = fs::path(resolved).extension().string();
     boost::to_lower(extension);
 
+    const auto etag = cover_image_etag(resolved);
+    if (etag) {
+      const auto seen = request->header.find("If-None-Match");
+      if (seen != request->header.end() && seen->second == *etag) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("ETag", *etag);
+        headers.emplace("Cache-Control", "no-cache");
+        response->write(SimpleWeb::StatusCode::redirection_not_modified, headers);
+        return;
+      }
+    }
+
     std::ifstream in(resolved, std::ios::binary);
     if (!in) {
       SimpleWeb::CaseInsensitiveMultimap headers;
@@ -5983,7 +6009,8 @@ namespace confighttp {
       extension == ".webp" ? "image/webp" :
       "image/png";
     headers.emplace("Content-Type", content_type);
-    headers.emplace("Cache-Control", "max-age=86400");
+    headers.emplace("Cache-Control", "no-cache");
+    if (etag) headers.emplace("ETag", *etag);
     response->write(content, headers);
   }
 

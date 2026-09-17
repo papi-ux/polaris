@@ -98,6 +98,48 @@ TEST(AppArtworkRoutes, RoutesNeedTheConsoleSessionCsrfAndJson) {
             std::string::npos);
 }
 
+TEST(AppCoverImage, ANewCoverUnderTheSameEntryNameIsFetchedAgain) {
+  const auto directory = std::filesystem::temp_directory_path() / "polaris-cover-etag";
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  std::filesystem::create_directories(directory);
+  const auto write = [](const std::filesystem::path &path, std::string_view bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << bytes;
+  };
+  const auto cover = directory / "cover.jpg";
+  write(cover, "first cover");
+
+  const auto first = confighttp::cover_image_etag(cover);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->front(), '"');
+  EXPECT_EQ(first->back(), '"');
+  EXPECT_EQ(confighttp::cover_image_etag(cover), first);
+
+  // Find Cover rewrites the same file: a new size, or the same size written later, is a new tag.
+  write(cover, "a longer second cover");
+  const auto second = confighttp::cover_image_etag(cover);
+  EXPECT_NE(second, first);
+  write(cover, "a longer third  cover");
+  std::filesystem::last_write_time(cover, std::filesystem::last_write_time(cover) + std::chrono::seconds {5});
+  EXPECT_NE(confighttp::cover_image_etag(cover), second);
+  // Another file with the same bytes and time is another image.
+  const auto other = directory / "other.jpg";
+  std::filesystem::copy_file(cover, other);
+  std::filesystem::last_write_time(other, std::filesystem::last_write_time(cover));
+  EXPECT_NE(confighttp::cover_image_etag(other), confighttp::cover_image_etag(cover));
+  EXPECT_FALSE(confighttp::cover_image_etag(directory / "missing.jpg").has_value());
+
+  // The route revalidates instead of letting the browser keep a cover for a day.
+  const auto source = read_source("src/confighttp.cpp");
+  const auto route = handler_body(source, "void getCoverImage(");
+  EXPECT_EQ(route.find("max-age"), std::string::npos);
+  EXPECT_NE(route.find(R"(request->header.find("If-None-Match"))"), std::string::npos);
+  EXPECT_NE(route.find("SimpleWeb::StatusCode::redirection_not_modified"), std::string::npos);
+  EXPECT_NE(route.find(R"(headers.emplace("ETag", *etag))"), std::string::npos);
+  std::filesystem::remove_all(directory, error);
+}
+
 TEST(AppCoverSearch, StoresAPickedPosterUnderItsUuidInTheFormatItReallyIs) {
   const auto coverdir = std::filesystem::temp_directory_path() / "polaris-cover-select";
   std::error_code error;

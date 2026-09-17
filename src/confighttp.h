@@ -128,6 +128,15 @@ namespace confighttp {
   );
 
   /**
+   * @brief The entity tag a console cover image is served with.
+   *
+   * Built from the image's path, size and modification time, so a new cover for an entry, in a
+   * new file or rewritten in place, is fetched again under the same name-keyed URL.
+   * @return A quoted tag, or nothing when the file cannot be read.
+   */
+  std::optional<std::string> cover_image_etag(const std::filesystem::path &image);
+
+  /**
    * @brief Publish a Heroic launcher entry once a Heroic game has been imported, unless one exists.
    */
   void ensure_heroic_library_app(nlohmann::json &file_tree, game_library::launcher_install_t install);
