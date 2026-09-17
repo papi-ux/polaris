@@ -3082,15 +3082,22 @@ namespace nvhttp {
 
     fs::path configured_artwork_image(const proc::ctx_t &app) {
       const fs::path configured = app.image_path;
-      if (!uses_bundled_utility_artwork(app) || configured.empty() || configured.is_absolute()) {
+      if (configured.empty() || configured.is_absolute()) {
         return configured;
       }
 
-      // Runtime-injected entries carry a bundled filename rather than an
-      // absolute path. Artwork resolution must use the same validated path as
-      // the legacy cover endpoint; otherwise a title such as "Virtual Display"
-      // falls through to a coincidental SteamGridDB game match.
-      return proc::validate_app_image_path(app.image_path);
+      // A relative name is a bundled image: a runtime-injected entry's, or a launcher's such as
+      // lutris.png and heroic.png. Artwork resolution must use the same validated path as the
+      // legacy cover endpoint; read against the working directory the name found nothing, so a
+      // launcher had no poster in Nova and a title such as "Virtual Display" fell through to a
+      // coincidental SteamGridDB game match.
+      const auto validated = proc::validate_app_image_path(app.image_path);
+      if (uses_bundled_utility_artwork(app)) {
+        return validated;
+      }
+      // Validation answers with the generic box art for a name it cannot find. For anything but
+      // a utility entry that is no poster: as a local image it would outrank real artwork.
+      return validated == proc::validate_app_image_path({}) ? configured : fs::path {validated};
     }
 
     std::vector<game_artwork::local_candidate_t> local_artwork_candidates(const proc::ctx_t &app) {

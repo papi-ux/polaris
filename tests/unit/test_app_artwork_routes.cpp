@@ -4,14 +4,17 @@
  */
 #include <src/confighttp.h>
 #include <src/game_artwork_override.h>
+#include <src/game_library_scanner.h>
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -148,4 +151,32 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   const auto nova = read_source("src/nvhttp.cpp");
   const auto nova_search = handler_body(nova, "auto polarisSearchGameArtworkMatches = ", "\n    };\n");
   EXPECT_NE(nova_search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
+}
+
+TEST(HeroicLauncherEntry, ImportPublishesItWithTheBundledHeroicPoster) {
+  nlohmann::json tree {{"apps", nlohmann::json::array()}};
+  confighttp::ensure_heroic_library_app(tree, game_library::launcher_install_t::flatpak);
+  ASSERT_EQ(tree["apps"].size(), 1u);
+  const auto &launcher = tree["apps"][0];
+  EXPECT_EQ(launcher["name"], "Heroic");
+  EXPECT_EQ(launcher["source"], "heroic");
+  EXPECT_EQ(launcher["image-path"], "heroic.png");
+  EXPECT_EQ(launcher["detached"][0], game_library::heroic_launcher_command(game_library::launcher_install_t::flatpak));
+
+  // Installed with every other file in the common assets, at the size of its neighbours.
+  const auto png_size = [](const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    std::vector<unsigned char> header(24);
+    input.read(reinterpret_cast<char *>(header.data()), static_cast<std::streamsize>(header.size()));
+    EXPECT_EQ(input.gcount(), 24) << path;
+    const std::vector<unsigned char> signature {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    EXPECT_TRUE(std::equal(signature.begin(), signature.end(), header.begin())) << path;
+    const auto big_endian = [&header](std::size_t offset) {
+      return (header[offset] << 24) | (header[offset + 1] << 16) | (header[offset + 2] << 8) | header[offset + 3];
+    };
+    return std::pair {big_endian(16), big_endian(20)};
+  };
+  const auto assets = std::filesystem::path {POLARIS_SOURCE_DIR} / "src_assets/common/assets";
+  EXPECT_EQ(png_size(assets / "heroic.png"), png_size(assets / "lutris.png"));
+  EXPECT_EQ(png_size(assets / "heroic.png"), (std::pair {600, 900}));
 }

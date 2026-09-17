@@ -3023,6 +3023,7 @@ namespace confighttp {
       {"uuid", ""},
       {"cmd", ""},
       {"detached", nlohmann::json::array({launcher_command})},
+      {"image-path", "heroic.png"},
       {"source", "heroic"},
       {"auto-detach", true},
       {"wait-all", true},

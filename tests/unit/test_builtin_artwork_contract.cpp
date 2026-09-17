@@ -44,6 +44,10 @@ TEST(BuiltinArtworkContract, ResolvesThePackagedPosterAndRetiresOnlyAutomaticMat
   // An upgraded host's apps.json predates the flag, so an entry that launches nothing counts too.
   EXPECT_NE(policy.find("proc::launches_nothing(app)"), std::string::npos);
   EXPECT_NE(configured.find("proc::validate_app_image_path"), std::string::npos);
+  // Launchers name bundled images too (lutris.png, heroic.png), so a relative name resolves for
+  // every entry, but only a utility entry may take the generic box art validation falls back to.
+  EXPECT_EQ(configured.find("!uses_bundled_utility_artwork(app) ||"), std::string::npos);
+  EXPECT_NE(configured.find("validated == proc::validate_app_image_path({}) ? configured"), std::string::npos);
   // A replaced or retargeted image refreshes its copy; a cleared one retires it.
   EXPECT_NE(promotion.find("game_artwork::local_poster_needs_copy(appdata, app.uuid, candidates.front())"), std::string::npos);
   EXPECT_EQ(promotion.find("needs_source_upgrade"), std::string::npos);

@@ -783,6 +783,31 @@ namespace proc {
       return !json_string_member_or(app, "lutris-slug").empty();
     }
 
+    // The entry that opens Heroic itself, as the import publishes it or as an older build did:
+    // a Heroic source, no game identity, and nothing but the launcher as its command.
+    bool is_heroic_launcher_app(const nlohmann::json &app) {
+      if (!app.is_object() || !boost::iequals(json_string_member_or(app, "source"), "heroic") ||
+          !json_string_member_or(app, "heroic-app-name").empty()) {
+        return false;
+      }
+
+      const auto is_launcher_command = [](const std::string &value) {
+        const auto trimmed = boost::trim_copy(value);
+        return boost::iequals(trimmed, game_library::heroic_launcher_command(game_library::launcher_install_t::native)) ||
+               boost::iequals(trimmed, game_library::heroic_launcher_command(game_library::launcher_install_t::flatpak)) ||
+               boost::iequals(trimmed, "heroic");
+      };
+      if (is_launcher_command(json_string_member_or(app, "cmd"))) {
+        return true;
+      }
+      if (!app.contains("detached") || !app["detached"].is_array()) {
+        return false;
+      }
+      return std::any_of(app["detached"].begin(), app["detached"].end(), [&](const nlohmann::json &detached) {
+        return detached.is_string() && is_launcher_command(detached.get<std::string>());
+      });
+    }
+
     nlohmann::json lutris_library_app() {
       return {
         {"name", "Lutris"},
@@ -11827,8 +11852,35 @@ namespace proc {
     }
   }
 
+  void migration_v10(nlohmann::json &fileTree) {
+    // The Heroic launcher entry was published without an image, so clients showed the generic
+    // box where the Lutris entry has its own poster. Give the launcher entry the bundled Heroic
+    // poster only while it still has no image; imported games and chosen images stay as they are.
+    static const int this_version = 14;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    int migrated = 0;
+    if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+      for (auto &app : fileTree["apps"]) {
+        if (!is_heroic_launcher_app(app) || !boost::trim_copy(json_string_member_or(app, "image-path")).empty()) {
+          continue;
+        }
+        app["image-path"] = "heroic.png";
+        ++migrated;
+      }
+    }
+
+    fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Gave " << migrated << " Heroic launcher app(s) the bundled Heroic image (v14).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 13;
+    int last_version = 14;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -11844,6 +11896,7 @@ namespace proc {
       migration_v7(fileTree);
       migration_v8(fileTree);
       migration_v9(fileTree);
+      migration_v10(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }

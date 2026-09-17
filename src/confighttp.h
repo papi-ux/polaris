@@ -24,6 +24,10 @@ namespace stream_stats {
   struct stats_t;
 }
 
+namespace game_library {
+  enum class launcher_install_t;
+}
+
 #define WEB_DIR POLARIS_ASSETS_DIR "/web/"
 
 using namespace std::chrono_literals;
@@ -122,6 +126,11 @@ namespace confighttp {
     std::string_view mime_type,
     const std::vector<unsigned char> &body
   );
+
+  /**
+   * @brief Publish a Heroic launcher entry once a Heroic game has been imported, unless one exists.
+   */
+  void ensure_heroic_library_app(nlohmann::json &file_tree, game_library::launcher_install_t install);
 
   /**
    * @brief The uuids of the apps in an apps.json tree whose automatic artwork lookup is off.

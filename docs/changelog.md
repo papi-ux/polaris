@@ -8,6 +8,8 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Find Cover in the app editor works again. It looked covers up from the browser, which the console's content security policy blocks, so the panel stayed empty. It now runs Nova's SteamGridDB search on the host: you can change the name it searches for, every matching game shows with its title and year, the previews come from the host, and a missing key, a SteamGridDB failure or a search with no match each say so instead of showing nothing. A missing key links to the field in Settings. The console routes are `GET /api/covers/search?name=&uuid=`, `GET /api/covers/preview/<token>?uuid=` and `POST /api/covers/select` with `{uuid, token}`.
+- The Heroic launcher entry has its own poster, `heroic.png`, drawn like the Steam and Lutris ones around Heroic's icon. New imports publish the entry with it, and an existing launcher entry without an image gets it once when Polaris starts.
+- Nova shows a launcher's bundled poster (`lutris.png`, `heroic.png`). The name was read against the working directory, so only the utility entries resolved theirs.
 - Changing an entry's image reaches Nova. Polaris kept the poster it copied the first time, so a second cover pick or another file left Nova on the old one; a cleared image now also stops showing the copy.
 - The app editor's **Needs command** badge and **Command: Missing** summary count a detached command, so launcher entries such as Heroic and Lutris no longer look broken.
 
