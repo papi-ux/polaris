@@ -37,6 +37,7 @@
 .idea/
 .vscode/
 .codex
+.codegraph/
 .claude/
 .hermes/
 .superpowers/
