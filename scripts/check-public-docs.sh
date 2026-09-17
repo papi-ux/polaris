@@ -1317,6 +1317,7 @@ required_release_facts = (
     "Spaces turned on from the Spaces page can start and change",
     "marks Steam Big Picture on the desktop",
     "Automatic artwork only takes a match that is the entry",
+    "Default Space only sets where a device opens first",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",

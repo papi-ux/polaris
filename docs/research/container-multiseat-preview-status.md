@@ -77,7 +77,9 @@ reliable.
 
 ## Catalogs, selections and networking
 
-Catalogs with explicit Desktop Access use schema 4. Catalogs with extra Space
+Catalogs where a device's Default Space is Desktop use schema 5, which lists
+those devices as `desktop_default_clients`. Catalogs with explicit Desktop
+Access use schema 4. Catalogs with extra Space
 access grants use schema 3. Archived-only catalogs use schema 2; catalogs with
 neither use schema 1. Older builds reject newer schemas instead of guessing
 their permissions. Selections live in a private file beside the catalog with a

@@ -298,7 +298,9 @@ Once the host checks pass and a runtime is offered:
    own budget.
 5. Save any running game, then select **Restart Polaris and finish setup**.
    Restarting disconnects every stream. Reconnect and return to **Spaces**.
-6. Under **Default Space**, assign your paired Nova device to the new Space.
+6. Open the new Space's **Device Access** and tick your paired Nova device.
+   With one Space it opens that Space first; **Default Space** changes where
+   each device opens first.
 
 **Steam home prepared** means storage was saved. **Configuration saved** means
 a restart is still required. Neither is a game or controller test yet; that
@@ -342,19 +344,25 @@ inaccessible GPU needs attention; Polaris does not silently choose another.
 
 ## Give a device access
 
-- **Default Space** on the Spaces page lists the handhelds, TVs and computers
-  paired with Polaris. Choose the Space each device opens first and select
-  **Save assignment**. Devices assigned to the same Space share its sign-in and
-  saves and take turns streaming it; give simultaneous players separate Spaces
-  and separate Steam accounts.
-- **Device Access** on a Space card allows more devices into that Space. A
-  device with more than one permitted Space picks between them in Nova with
-  **Change Space**.
-- **Desktop** is this PC's usual desktop and apps. Under Default Space it
-  clears all of a device's Space access; under **Desktop Access** it becomes
-  one more choice beside the device's Spaces.
+- **Device Access** on a Space card decides which devices may open that
+  Space. Tick a device to allow it. A device with more than one place to play
+  picks between them in Nova with **Change Space**.
+- **Desktop Access** adds **Desktop**, this PC's usual desktop and apps, as one
+  more choice beside a device's Spaces.
+- **Default Space** lists the handhelds, TVs and computers paired with Polaris
+  and sets where each one opens first: one of the Spaces it may open, or
+  Desktop once it has Desktop Access. Select **Save assignment**. Saving never
+  changes which Spaces or Desktop a device may open. Devices that share a
+  Space share its sign-in and saves and take turns streaming it; give
+  simultaneous players separate Spaces and separate Steam accounts.
+- To take a device out of a Space, untick it under that Space's **Device
+  Access**. If the Space was its Default Space, the device opens the next place
+  it may play. A device that can no longer launch games shows **Remove from
+  Spaces** under Default Space instead.
 - A device needs permission to launch apps; temporary guests cannot be
-  assigned a Space. Rename an unfamiliar device in **Devices**.
+  assigned a Space. When two paired devices share a name, for example Nova and
+  Nova Debug on one handheld, the Spaces and Devices pages add when each one
+  paired. Rename one in **Devices** to tell them apart for good.
 
 Spaces do not change
 [Steam's account and library sharing rules](https://help.steampowered.com/en/faqs/view/054C-3167-DD7F-49D4).
