@@ -44,9 +44,25 @@ namespace beat_times {
       return lookups_allowed;
     }
 
+    // Every queued title opens its own session, so an outage would otherwise complain
+    // once per title. Latched on the first failure and cleared by the next success, so
+    // the log carries one line per outage rather than one per game.
+    std::atomic<bool> session_failure_logged {false};
+
+    void log_session_failure(std::string_view detail) {
+      if (session_failure_logged.exchange(true)) {
+        return;
+      }
+      BOOST_LOG(warning) << "Beat times: "sv << detail
+                         << "; completion estimates cannot be looked up"sv;
+    }
+
     constexpr const char *HLTB_ORIGIN = "https://howlongtobeat.com";
-    constexpr const char *HLTB_INIT = "https://howlongtobeat.com/api/bleed/init";
-    constexpr const char *HLTB_SEARCH = "https://howlongtobeat.com/api/bleed";
+    // These route names are theirs to change, and they do: both were /api/bleed until
+    // September 2026. A rename retires the old path outright rather than redirecting,
+    // so the symptom is a 404 on the session, not a redirect worth following.
+    constexpr const char *HLTB_INIT = "https://howlongtobeat.com/api/search/site/init";
+    constexpr const char *HLTB_SEARCH = "https://howlongtobeat.com/api/search/site";
     // The site answers a browser; anything else it does not have to answer at all.
     constexpr const char *HLTB_UA =
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -111,6 +127,10 @@ namespace beat_times {
       curl_easy_cleanup(curl);
 
       if (status != 200) {
+        // Worth saying out loud. Every estimate goes through this call, and when their
+        // route moves it fails here for good: the dataset simply stops growing, and
+        // before this line nothing in the log ever said why.
+        log_session_failure("session returned " + std::to_string(status));
         return std::nullopt;
       }
 
@@ -135,8 +155,16 @@ namespace beat_times {
             session.value = value.get<std::string>();
           }
         }
-        return session.valid() ? std::optional<session_t> {session} : std::nullopt;
+        if (!session.valid()) {
+          // A 200 that carries none of the three fields means the shape changed under
+          // us, which is the same outage wearing a different status code.
+          log_session_failure("session response carried no usable token");
+          return std::nullopt;
+        }
+        session_failure_logged.store(false);
+        return std::optional<session_t> {session};
       } catch (...) {
+        log_session_failure("session response did not parse as JSON");
         return std::nullopt;
       }
     }
@@ -370,7 +398,13 @@ namespace beat_times {
     // Deliberately no rule for the query merely appearing inside the candidate. A search
     // for Control really does return "3-D Ultra Radio Control Racers Deluxe", and
     // containment would accept it as confidently as the right answer.
-    const int threshold = std::max<int>(3, static_cast<int>(query.size()) / 2);
+    //
+    // The allowance is purely proportional, with no floor under it. A floor of three
+    // edits reads as generous until the query is four characters long, at which point it
+    // lets three of the four differ: "Eden" was accepted as "BioEden" on exactly that
+    // arithmetic. Half the query is still loose enough for punctuation and numerals,
+    // which are what these names actually disagree about.
+    const int threshold = static_cast<int>(query.size()) / 2;
     return distance <= threshold;
   }
 
