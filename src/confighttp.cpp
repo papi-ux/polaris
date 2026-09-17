@@ -4410,6 +4410,7 @@ namespace confighttp {
       output["access_available"] = state.management_available;
       output["removal_available"] = state.removal_available;
       output["desktop_clients"] = state.desktop_clients;
+      output["desktop_default_clients"] = state.desktop_default_clients;
       if (state.capacity)
         output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
       for (const auto &activity : state.activity)

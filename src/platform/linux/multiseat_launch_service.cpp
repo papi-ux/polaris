@@ -107,6 +107,7 @@ namespace multiseat {
       std::vector<profile_summary_t> profile_catalog() const override { return runtime_->profile_catalog(); }
       spaces::library_reader_t library_reader() const override { return runtime_->library_reader(); }
       std::vector<std::string> desktop_clients() const override { return runtime_->desktop_clients(); }
+      std::vector<std::string> desktop_default_clients() const override { return runtime_->desktop_default_clients(); }
       std::vector<profile_activity_t> profile_activity() const override { return runtime_->profile_activity(); }
       bool idle() const override {
         return runtime_->seats() == 0 && runtime_->managed_workers() == 0 &&
@@ -312,6 +313,9 @@ namespace multiseat {
       if (saved != selections.end() && saved->second == "desktop" && desktop) return "desktop";
       if (saved != selections.end()) for (const auto &profile : controller->profile_catalog())
         if (profile.id == saved->second && permitted(profile, client)) return profile.id;
+      // A Desktop default comes before the first Space the device may open.
+      const auto desktop_defaults = controller->desktop_default_clients();
+      if (desktop && std::find(desktop_defaults.begin(), desktop_defaults.end(), client) != desktop_defaults.end()) return "desktop";
       const auto assigned = controller->profile_for_client(client);
       return assigned ? assigned : desktop ? std::optional<std::string>{"desktop"} : std::nullopt;
     }
@@ -491,6 +495,8 @@ namespace multiseat {
                     removed_for_good.push_back(*request->edit);
                     while (removed_for_good.size() > 32) removed_for_good.pop_front();
                   }
+                } else if (!persisted && persisted.refusal) {
+                  result = {409, persisted.refusal->message, persisted.refusal->code, persisted.refusal->action};
                 } else result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : "Default Space saved"} :
                   profile_launch_result_t {409, request->edit ? "The Space change was not saved. Refresh before retrying." : request->creation ?
                     "The Space was not created. Refresh before retrying; retained resources may need administrator review." :
@@ -732,7 +738,8 @@ namespace multiseat {
       static_cast<bool>(impl_->admin.reload && impl_->admin.edit),
       impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}, std::move(activity),
       impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{},
-      static_cast<bool>(impl_->admin.reload && impl_->admin.remove_for_good)};
+      static_cast<bool>(impl_->admin.reload && impl_->admin.remove_for_good),
+      impl_->controller ? impl_->controller->desktop_default_clients() : std::vector<std::string>{}};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
@@ -746,7 +753,7 @@ namespace multiseat {
         return {503, "Space administration is unavailable.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
       if (request->client.empty() || request->client.size() > 256) return {400, "Invalid paired device.", "invalid_request"};
       const auto catalog = impl_->controller->profile_catalog();
-      if (!request->profile.empty() && std::none_of(catalog.begin(), catalog.end(),
+      if (!request->profile.empty() && request->profile != profiles::desktop_profile_key && std::none_of(catalog.begin(), catalog.end(),
           [&](const auto &entry) { return entry.id == request->profile && !entry.archived; })) return {404, "Unknown Space.", "space_unknown", "Refresh Spaces."};
       if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
           [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
@@ -773,7 +780,10 @@ namespace multiseat {
     result.can_switch = result.available;
     const auto desktops = impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{};
     result.desktop_allowed = std::find(desktops.begin(), desktops.end(), client) != desktops.end();
-    result.default_space = impl_->controller ? impl_->controller->profile_for_client(client).value_or("") : "";
+    const auto desktop_defaults = impl_->controller ? impl_->controller->desktop_default_clients() : std::vector<std::string>{};
+    if (result.desktop_allowed && std::find(desktop_defaults.begin(), desktop_defaults.end(), client) != desktop_defaults.end())
+      result.default_space = "desktop";
+    else result.default_space = impl_->controller ? impl_->controller->profile_for_client(client).value_or("") : "";
     result.capacity = impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{};
     auto activity = impl_->controller ? impl_->controller->profile_activity() : std::vector<profile_activity_t>{};
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock(); launch && !launch->is_cancelled()) {

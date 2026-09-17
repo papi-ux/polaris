@@ -51,6 +51,8 @@ namespace multiseat {
     virtual std::vector<profile_summary_t> profile_catalog() const { return {}; }
     virtual spaces::library_reader_t library_reader() const { return {}; }
     virtual std::vector<std::string> desktop_clients() const { return {}; }
+    /// Devices whose Default Space is Desktop.
+    virtual std::vector<std::string> desktop_default_clients() const { return {}; }
     virtual std::vector<profile_activity_t> profile_activity() const { return {}; }
     virtual bool idle() const { return false; }
     /// Seat and encoder usage against the trusted budget, when the controller can count it.
@@ -83,6 +85,7 @@ namespace multiseat {
     std::vector<profile_activity_t> activity;
     std::optional<gpu_usage_t> capacity;
     bool removal_available = false;  ///< a Space can be removed for good, not only archived
+    std::vector<std::string> desktop_default_clients;  ///< devices whose Default Space is Desktop
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -107,7 +110,7 @@ namespace multiseat {
     bool desktop_allowed = false;
     std::string unavailable_reason;  ///< controller_missing | stopping | reconfiguring | admin_failed | selection_failed | no_space_assigned
     std::string switch_blocked_reason;  ///< your_stream | desktop_stream
-    std::string default_space;  ///< the Default Space assigned in Polaris, empty when none
+    std::string default_space;  ///< where the device opens first: a Space id, "desktop" for a Desktop default, empty when none
     std::optional<gpu_usage_t> capacity;
   };
 

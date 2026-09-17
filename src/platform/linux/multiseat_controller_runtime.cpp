@@ -131,6 +131,7 @@ namespace multiseat {
         profile_launch_timeout(options.profile_launch_timeout),
          library_reader(std::move(options.library_reader)),
          desktop_clients(std::move(options.desktop_clients)),
+         desktop_default_clients(std::move(options.desktop_default_clients)),
         now(dependencies.now) {
       if (!now) now = [] { return worker_broker_t::monotonic_clock_t::now(); };
       profile_launches.reserve(input::maximum_input_allocations);
@@ -166,6 +167,7 @@ namespace multiseat {
     const std::chrono::milliseconds profile_launch_timeout;
     const spaces::library_reader_t library_reader;
     const std::vector<std::string> desktop_clients;
+    const std::vector<std::string> desktop_default_clients;
     worker_broker_t::now_fn_t now;
     std::vector<owned_profile_launch_t> profile_launches;
     bool admission_ready = false;
@@ -880,6 +882,7 @@ namespace multiseat {
   std::vector<profile_summary_t> controller_runtime_t::profile_catalog() const { return impl_->profile_catalog; }
   spaces::library_reader_t controller_runtime_t::library_reader() const { return impl_->library_reader; }
   std::vector<std::string> controller_runtime_t::desktop_clients() const { return impl_->desktop_clients; }
+  std::vector<std::string> controller_runtime_t::desktop_default_clients() const { return impl_->desktop_default_clients; }
 
   std::vector<profile_activity_t> controller_runtime_t::profile_activity() const {
     std::scoped_lock lock {impl_->state_mutex};

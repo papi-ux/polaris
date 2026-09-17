@@ -47,7 +47,7 @@ namespace {
     std::atomic<bool> select {true}, close {true}, fail {false}, idle {true};
     std::atomic<unsigned> destroyed {0};
     spaces::library_reader_t library;
-    std::vector<std::string> desktops;
+    std::vector<std::string> desktops, desktop_defaults;
     std::vector<profile_activity_t> activity;
     std::optional<gpu_usage_t> capacity;
     void called() { std::lock_guard lock(mutex); owners.push_back(std::this_thread::get_id()); }
@@ -64,14 +64,18 @@ namespace {
       state_(std::move(state)), catalog_(std::move(catalog)) {}
     ~controller_t() override { ++state_->destroyed; }
     bool routes_client(std::string_view client) const override { return profile_for_client(client).has_value(); }
+    // As production resolves it: the Default Space, then the first Space the device may open.
     std::optional<std::string> profile_for_client(std::string_view client) const override {
       for (const auto &profile : catalog_)
         if (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end()) return profile.id;
+      for (const auto &profile : catalog_)
+        if (std::find(profile.access_clients.begin(), profile.access_clients.end(), client) != profile.access_clients.end()) return profile.id;
       return std::nullopt;
     }
     std::vector<profile_summary_t> profile_catalog() const override { return catalog_; }
     spaces::library_reader_t library_reader() const override { return state_->library; }
     std::vector<std::string> desktop_clients() const override { return state_->desktops; }
+    std::vector<std::string> desktop_default_clients() const override { return state_->desktop_defaults; }
     std::vector<profile_activity_t> profile_activity() const override { std::lock_guard lock(state_->mutex); return state_->activity; }
     bool idle() const override { return state_->idle; }
     std::optional<gpu_usage_t> capacity() const override { std::lock_guard lock(state_->mutex); return state_->capacity; }
@@ -124,6 +128,7 @@ namespace {
     std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0}, removals {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
+    std::optional<profiles::refusal_t> persist_refusal;
     bool reload_fails = false;
     std::function<void()> before_write;
     void SetUp() override {
@@ -139,6 +144,7 @@ namespace {
             ++writes;
             EXPECT_GT(state->destroyed.load(), 0U);
             if (before_write) before_write();
+            if (persist_refusal) return profiles::change_result_t {.error = std::string(persist_refusal->message), .refusal = persist_refusal};
             if (write_status != private_state_file::write_status_e::not_committed) {
               for (auto &entry : catalog) std::erase(entry.clients, client);
               for (auto &entry : catalog) if (entry.id == profile) entry.clients.emplace_back(client);
@@ -492,6 +498,19 @@ namespace {
     EXPECT_EQ(service->admin_snapshot().profiles[1].clients, std::vector<std::string> {"client-b"});
     EXPECT_EQ(writes, 2U);
     EXPECT_EQ(reloads, 2U);
+  }
+
+  TEST_F(MultiseatAssignments, ARefusedDefaultSaysWhatToDoAndChangesNothing) {
+    persist_refusal = profiles::desktop_access_required;
+    const auto refused = service->set_assignment("desktop", "client-a");
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "desktop_access_required");
+    EXPECT_EQ(std::string(refused.message), "Give this device Desktop Access before making Desktop its Default Space.");
+    EXPECT_EQ(std::string(refused.action), "Tick it under Desktop Access, then save its Default Space again.");
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    EXPECT_EQ(writes, 1U);
+    EXPECT_EQ(reloads, 1U);
+    EXPECT_EQ(service->set_assignment("unknown", "client-a").status, 404);
   }
 
   TEST_F(MultiseatAssignments, AdminActivityIncludesPendingLaunchAndPreservesCleanup) {
@@ -1366,6 +1385,31 @@ namespace {
     EXPECT_EQ(service->prepare(steam, "profile-a", "big-picture-v1").status, 200);
     EXPECT_EQ(steam->worker_library_target, "big-picture-v1");
     steam->cancel();
+  }
+
+  // Where a device opens first: a choice saved from Nova, then a Desktop default while it has
+  // Desktop Access, then its Default Space, then the first Space it may open, then Desktop.
+  TEST_F(MultiseatLaunchService, ADesktopDefaultOpensDesktopFirstAndKeepsTheSpaceOpen) {
+    ASSERT_TRUE(service->shutdown(2s));
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {}, true, false, {"client-a"}}};
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
+    auto spaces = service->client_spaces("client-a");
+    ASSERT_TRUE(spaces.available);
+    EXPECT_EQ(spaces.selected, "profile-a");
+    EXPECT_EQ(spaces.default_space, "profile-a");
+    state->desktop_defaults = {"client-a"};
+    EXPECT_EQ(service->client_spaces("client-a").selected, "profile-a");  // no Desktop Access yet
+    state->desktops = {"client-a"};
+    spaces = service->client_spaces("client-a");
+    EXPECT_EQ(spaces.selected, "desktop");
+    EXPECT_EQ(spaces.default_space, "desktop");
+    ASSERT_EQ(spaces.spaces.size(), 1U);
+    EXPECT_EQ(spaces.spaces[0].id, "profile-a");
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_FALSE(service->profile_for_client("client-a"));
+    EXPECT_EQ(service->admin_snapshot().desktop_default_clients, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(service->select_space("client-a", "profile-a", "desktop").status, 200);
+    EXPECT_EQ(service->client_spaces("client-a").selected, "profile-a");
   }
 
   TEST_F(MultiseatLaunchService, DesktopRequiresAnExplicitGrantAndCannotSwitchDuringLaunch) {

@@ -177,6 +177,8 @@ namespace {
     ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::remove, "profile-a", ""}));
     const profiles::edit_request_t restore {profiles::edit_operation_e::restore, "profile-a", ""};
     ASSERT_TRUE(profiles::edit(path, restore));
+    // A Default Space is only ever a Space the device may already open.
+    ASSERT_TRUE(profiles::set_access(path, "profile-a", "client-b", true));
     ASSERT_TRUE(profiles::set_assignment(path, "profile-a", "client-b"));
     ASSERT_TRUE(profiles::edit(path, restore));
     auto loaded = profiles::load(path);
@@ -477,6 +479,7 @@ namespace {
     catalog.profiles.push_back(other);
     save(catalog);
     EXPECT_FALSE(profiles::set_assignment(path, "missing", "client-a"));
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", true));
     ASSERT_TRUE(profiles::set_assignment(path, "profile-b", "client-a"));
     auto loaded = profiles::load(path);
     ASSERT_TRUE(loaded);
@@ -766,6 +769,112 @@ namespace {
     auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
     EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
     EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-b"});
+  }
+
+  // A Default Space says where a device opens first and nothing more: saving one never changes
+  // which Spaces or Desktop the device may open. Removal from every Space stays its own request.
+  TEST_F(MultiseatProfileCatalog, DesktopDefaultKeepsSpaceAccessAndNeedsDesktopAccess) {
+    save(sample());  // client-a has Living room as its Default Space
+    const auto refused = profiles::set_assignment(path, "desktop", "client-a");
+    EXPECT_FALSE(refused);
+    ASSERT_TRUE(refused.refusal);
+    EXPECT_EQ(refused.refusal->code, "desktop_access_required");
+    EXPECT_EQ(refused.error, "Give this device Desktop Access before making Desktop its Default Space.");
+    {
+      const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+      EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+    }
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-a", true));
+    ASSERT_TRUE(profiles::set_assignment(path, "desktop", "client-a"));
+    {
+      const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+      EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-a"});
+      EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-a"});
+      EXPECT_EQ(loaded->catalog.desktop_default_clients, std::vector<std::string>{"client-a"});
+      const auto encoded = json::parse(profiles::encode(loaded->catalog));
+      EXPECT_EQ(encoded["schema"], 5);
+      // As strict as every schema: a repeat, a missing key, an older schema number, or a device
+      // with two defaults is refused.
+      auto malformed = encoded; malformed["desktop_default_clients"].push_back("client-a");
+      EXPECT_FALSE(profiles::decode(malformed.dump()));
+      malformed = encoded; malformed.erase("desktop_default_clients");
+      EXPECT_FALSE(profiles::decode(malformed.dump()));
+      malformed = encoded; malformed["schema"] = 4;
+      EXPECT_FALSE(profiles::decode(malformed.dump()));
+      malformed = encoded; malformed["profiles"][0]["clients"].push_back("client-a");
+      EXPECT_FALSE(profiles::decode(malformed.dump()));
+      EXPECT_TRUE(profiles::decode(encoded.dump()));
+    }
+    ASSERT_TRUE(profiles::set_assignment(path, "desktop", "client-a"));  // saving it again changes nothing
+    ASSERT_TRUE(profiles::set_assignment(path, "profile-a", "client-a"));
+    const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-a"});
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+    EXPECT_EQ(json::parse(profiles::encode(loaded->catalog))["schema"], 4);
+  }
+
+  TEST_F(MultiseatProfileCatalog, SpaceDefaultNeedsAccessAndLeavingOneKeepsIt) {
+    auto catalog = sample();
+    auto other = catalog.profiles.front();
+    other.storage.profile_key = "profile-b";
+    other.storage.opaque_volume_name = "pv-profile-b";
+    other.name = "Sam";
+    other.client_keys.clear();
+    catalog.profiles.push_back(other);
+    save(catalog);
+    const auto refused = profiles::set_assignment(path, "profile-b", "client-a");
+    EXPECT_FALSE(refused);
+    ASSERT_TRUE(refused.refusal);
+    EXPECT_EQ(refused.refusal->code, "space_access_required");
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", true));
+    ASSERT_TRUE(profiles::set_assignment(path, "profile-b", "client-a"));
+    {
+      const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      EXPECT_TRUE(loaded->catalog.profiles[0].client_keys.empty());
+      EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-a"});
+      EXPECT_EQ(loaded->catalog.profiles[1].client_keys, std::vector<std::string>{"client-a"});
+    }
+    // Unticking the Default Space takes the device out of it entirely.
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", false));
+    const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[1].client_keys.empty());
+    EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty());
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-a"});
+  }
+
+  TEST_F(MultiseatProfileCatalog, ADesktopDefaultGoesWithDesktopAccessOrAnExplicitRemoval) {
+    auto catalog = sample();
+    catalog.profiles[0].access_clients = {"client-b"};
+    catalog.desktop_clients = {"client-b"};
+    save(catalog);
+    // A device without any Space already opens Desktop, so nothing is recorded for it.
+    ASSERT_TRUE(profiles::set_assignment(path, "desktop", "client-z"));
+    ASSERT_TRUE(profiles::set_assignment(path, "desktop", "client-b"));
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-b", false));
+    {
+      const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+      EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-b"});
+    }
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-b", true));
+    ASSERT_TRUE(profiles::set_assignment(path, "desktop", "client-b"));
+    ASSERT_TRUE(profiles::set_assignment(path, "", "client-b"));
+    {
+      const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+      EXPECT_TRUE(loaded->catalog.profiles[0].access_clients.empty());
+      EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-b"});
+    }
+    ASSERT_TRUE(profiles::set_assignment(path, "desktop", "client-b"));
+    ASSERT_TRUE(profiles::unassign(path, "client-b"));
+    ASSERT_TRUE(profiles::assign(path, "profile-a", "client-b"));
+    const auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, (std::vector<std::string>{"client-a", "client-b"}));
   }
 
   TEST_F(MultiseatProfileCatalog, DesktopAccessIsExplicitAtomicAndBackwardsCompatible) {

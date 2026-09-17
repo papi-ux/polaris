@@ -207,7 +207,7 @@ namespace multiseat {
     }
     std::shared_ptr<void> catalog_lease;
     std::vector<profile_summary_t> catalog_summary;
-    std::vector<std::string> desktop_clients;
+    std::vector<std::string> desktop_clients, desktop_default_clients;
     std::optional<std::pair<std::uint32_t, std::uint32_t>> catalog_owner;
     if (!options.profile_catalog.empty()) {
       if (!options.container.profiles.empty() || !options.container.workloads.empty() ||
@@ -220,6 +220,7 @@ namespace multiseat {
       if (!loaded) return {.status = controller_runtime_create_status_e::invalid_dependencies};
       catalog_lease = std::move(loaded->lease);
       desktop_clients = loaded->catalog.desktop_clients;
+      desktop_default_clients = loaded->catalog.desktop_default_clients;
       catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
       for (auto &entry : loaded->catalog.profiles) {
         entry.storage.steam_library_enabled = !entry.archived && entry.storage.runtime_profile == runtime_profile_e::steam;
@@ -249,6 +250,7 @@ namespace multiseat {
       .enabled = true, .worker_media_enabled = options.container.media_enabled,
       .profile_catalog = std::move(catalog_summary),
       .desktop_clients = std::move(desktop_clients),
+      .desktop_default_clients = std::move(desktop_default_clients),
     };
     // Resolve profile storage/image and workload from the same trusted catalog
     // the backend will enforce. No second GPU or image allowlist is accepted.

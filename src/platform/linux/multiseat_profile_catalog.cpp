@@ -86,6 +86,10 @@ namespace multiseat::profiles {
       std::set<std::string> profiles, volumes, clients, desktops;
       if (catalog.desktop_clients.size() > 4096) return false;
       for (const auto &client : catalog.desktop_clients) if (!token(client) || !desktops.insert(client).second) return false;
+      std::set<std::string> desktop_defaults;
+      if (catalog.desktop_default_clients.size() > 4096) return false;
+      for (const auto &client : catalog.desktop_default_clients)
+        if (!token(client) || !desktop_defaults.insert(client).second) return false;
       std::size_t grants = 0;
       for (const auto &entry : catalog.profiles) {
         const auto &storage = entry.storage;
@@ -105,7 +109,8 @@ namespace multiseat::profiles {
           if (!token(client) || !clients.emplace(client).second || clients.size() > 65536) return false;
         }
       }
-      return true;
+      // One Default Space per device: a Space or Desktop, never both.
+      return std::none_of(desktop_defaults.begin(), desktop_defaults.end(), [&](const auto &client) { return clients.contains(client); });
     }
 
     template<class Edit>
@@ -289,15 +294,17 @@ namespace multiseat::profiles {
         if (event == json::parse_event_t::object_end) object_keys.pop_back();
         return true;
       });
-      if (root.value("schema", 0) == 4) keys(root, {"schema", "owner_uid", "owner_gid", "profiles", "desktop_clients"});
+      if (root.value("schema", 0) == 5) keys(root, {"schema", "owner_uid", "owner_gid", "profiles", "desktop_clients", "desktop_default_clients"});
+      else if (root.value("schema", 0) == 4) keys(root, {"schema", "owner_uid", "owner_gid", "profiles", "desktop_clients"});
       else keys(root, {"schema", "owner_uid", "owner_gid", "profiles"});
-      if (!root.at("schema").is_number_unsigned() || (root.at("schema") != 1 && root.at("schema") != 2 && root.at("schema") != 3 && root.at("schema") != 4) ||
+      if (!root.at("schema").is_number_unsigned() || root.at("schema") < 1 || root.at("schema") > 5 ||
           !root.at("owner_uid").is_number_unsigned() || !root.at("owner_gid").is_number_unsigned() ||
           root.at("owner_uid").get<std::uint64_t>() > 2147483647 ||
           root.at("owner_gid").get<std::uint64_t>() > 2147483647 ||
           !root.at("profiles").is_array() || root.at("profiles").size() > 4096) return std::nullopt;
       catalog_t catalog {root.at("owner_uid").get<std::uint32_t>(), root.at("owner_gid").get<std::uint32_t>(), {}};
-      if (root.at("schema") == 4) catalog.desktop_clients = root.at("desktop_clients").get<std::vector<std::string>>();
+      if (root.at("schema") >= 4) catalog.desktop_clients = root.at("desktop_clients").get<std::vector<std::string>>();
+      if (root.at("schema") == 5) catalog.desktop_default_clients = root.at("desktop_default_clients").get<std::vector<std::string>>();
       for (const auto &value : root.at("profiles")) {
         if (root.at("schema") >= 3) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived", "access_clients"});
         else if (root.at("schema") == 2) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived"});
@@ -325,9 +332,14 @@ namespace multiseat::profiles {
   std::string encode(const catalog_t &catalog) {
     if (!valid(catalog)) throw std::invalid_argument("invalid profile catalog");
     const bool archives = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return entry.archived; });
-    const bool access = !catalog.desktop_clients.empty() || std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return !entry.access_clients.empty(); });
-    json root {{"schema", !catalog.desktop_clients.empty() ? 4 : access ? 3 : archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
-    if (!catalog.desktop_clients.empty()) root["desktop_clients"] = catalog.desktop_clients;
+    // The oldest schema that holds the catalog, so a file without Desktop defaults stays readable by
+    // builds from before schema 5.
+    const bool desktop_defaults = !catalog.desktop_default_clients.empty();
+    const bool desktops = desktop_defaults || !catalog.desktop_clients.empty();
+    const bool access = desktops || std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return !entry.access_clients.empty(); });
+    json root {{"schema", desktop_defaults ? 5 : desktops ? 4 : access ? 3 : archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
+    if (desktops) root["desktop_clients"] = catalog.desktop_clients;
+    if (desktop_defaults) root["desktop_default_clients"] = catalog.desktop_default_clients;
     for (const auto &entry : catalog.profiles) {
       root["profiles"].push_back({{"id", entry.storage.profile_key}, {"name", entry.name},
         {"volume", entry.storage.opaque_volume_name}, {"family", family(entry.storage.runtime_profile)},
@@ -378,6 +390,7 @@ namespace multiseat::profiles {
         }
       }
       target->client_keys.emplace_back(client_key);
+      std::erase(catalog.desktop_default_clients, client_key);
       return encode(catalog);
     });
   }
@@ -389,6 +402,7 @@ namespace multiseat::profiles {
         std::erase(entry.client_keys, client_key);
         std::erase(entry.access_clients, client_key);
       }
+      std::erase(catalog.desktop_default_clients, client_key);
       return encode(catalog);
     });
   }
@@ -398,23 +412,59 @@ namespace multiseat::profiles {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
       std::erase(catalog.desktop_clients, client_key);
       if (allowed) catalog.desktop_clients.emplace_back(client_key);
+      // A Default Space is a place the device may play, so Desktop stops being one with its access.
+      else std::erase(catalog.desktop_default_clients, client_key);
       return encode(catalog);
     });
   }
 
   change_result_t set_assignment(const std::filesystem::path &path,
                                std::string_view profile_key, std::string_view client_key) {
-    return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
+    return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
+      const auto listed = [&](const std::vector<std::string> &list) {
+        return std::find(list.begin(), list.end(), client_key) != list.end();
+      };
+      // Removing a device from every Space stays its own explicit request.
+      if (profile_key.empty()) {
+        for (auto &entry : catalog.profiles) {
+          std::erase(entry.client_keys, client_key);
+          std::erase(entry.access_clients, client_key);
+        }
+        std::erase(catalog.desktop_default_clients, client_key);
+        return encode(catalog);
+      }
+      const bool desktop = profile_key == desktop_profile_key;
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
         return entry.storage.profile_key == profile_key;
       });
-      if (!profile_key.empty() && (target == catalog.profiles.end() || target->archived)) {
+      if (!desktop && (target == catalog.profiles.end() || target->archived)) {
         result.error = "Unknown profile."; return std::nullopt;
       }
-      for (auto &entry : catalog.profiles) std::erase(entry.client_keys, client_key);
-      if (target != catalog.profiles.end()) target->client_keys.emplace_back(client_key);
-      if (profile_key.empty()) for (auto &entry : catalog.profiles) std::erase(entry.access_clients, client_key);
+      const auto refuse = [&](const refusal_t &refusal) -> std::optional<std::string> {
+        result.refusal = refusal;
+        result.error = std::string(refusal.message);
+        return std::nullopt;
+      };
+      if (desktop && !listed(catalog.desktop_clients)) {
+        const bool any_space = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
+          return !entry.archived && (listed(entry.client_keys) || listed(entry.access_clients));
+        });
+        // A device without a Space already opens Desktop, so there is nothing to record.
+        if (!any_space) return encode(catalog);
+        return refuse(desktop_access_required);
+      }
+      if (!desktop && !listed(target->client_keys) && !listed(target->access_clients)) return refuse(space_access_required);
+      // A default only says where the device opens first. Leaving a Space default keeps that
+      // Space open to the device under Device Access.
+      for (auto &entry : catalog.profiles) {
+        if ((!desktop && &entry == &*target) || !listed(entry.client_keys)) continue;
+        std::erase(entry.client_keys, client_key);
+        if (!listed(entry.access_clients)) entry.access_clients.emplace_back(client_key);
+      }
+      std::erase(catalog.desktop_default_clients, client_key);
+      if (desktop) catalog.desktop_default_clients.emplace_back(client_key);
+      else if (!listed(target->client_keys)) target->client_keys.emplace_back(client_key);
       return encode(catalog);
     });
   }
@@ -428,6 +478,8 @@ namespace multiseat::profiles {
       if (target == catalog.profiles.end()) { result.error = "Unknown or removed space."; return std::nullopt; }
       std::erase(target->access_clients, client_key);
       if (allowed) target->access_clients.emplace_back(client_key);
+      // Unticking a Space is how a device leaves it, so it stops being that device's Default Space too.
+      else std::erase(target->client_keys, client_key);
       return encode(catalog);
     });
   }

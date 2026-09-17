@@ -10,6 +10,8 @@
 
 namespace multiseat::profiles {
   inline constexpr std::size_t maximum_catalog_bytes = 4 * 1024 * 1024;
+  /// The Default Space value that means Desktop. No Space can use this id.
+  inline constexpr std::string_view desktop_profile_key = "desktop";
 
   struct entry_t {
     container::profile_t storage;
@@ -25,6 +27,8 @@ namespace multiseat::profiles {
     std::uint32_t owner_gid = 0;
     std::vector<entry_t> profiles;
     std::vector<std::string> desktop_clients;
+    /// Devices whose Default Space is Desktop. Never also a Space's client_keys.
+    std::vector<std::string> desktop_default_clients;
   };
 
   struct loaded_catalog_t {
@@ -37,9 +41,21 @@ namespace multiseat::profiles {
   [[nodiscard]] std::string encode(const catalog_t &catalog);
   [[nodiscard]] std::optional<loaded_catalog_t> load(const std::filesystem::path &path);
 
+  /// A request refused for a reason the person can act on. Static text, so a caller can pass it on.
+  struct refusal_t {
+    std::string_view code, message, action;
+  };
+  inline constexpr refusal_t desktop_access_required {"desktop_access_required",
+    "Give this device Desktop Access before making Desktop its Default Space.",
+    "Tick it under Desktop Access, then save its Default Space again."};
+  inline constexpr refusal_t space_access_required {"space_access_required",
+    "Allow this device under that Space's Device Access before making it the Default Space.",
+    "Tick it under the Space's Device Access, then save its Default Space again."};
+
   struct change_result_t {
     private_state_file::write_status_e status = private_state_file::write_status_e::not_committed;
     std::string error;
+    std::optional<refusal_t> refusal;
     std::string profile_key;
     // Retain these on any failure after provisioning starts. Never silently
     // adopt, reinitialize, or delete a volume after an uncertain transaction.
@@ -55,12 +71,17 @@ namespace multiseat::profiles {
     std::string_view profile_key, std::string_view client_key);
   [[nodiscard]] change_result_t unassign(const std::filesystem::path &path,
     std::string_view client_key);
-  // One atomic move between profiles, or unassignment with an empty profile.
+  // Sets where a device opens first: a Space it may already open, or desktop_profile_key for
+  // Desktop, which needs Desktop Access once the device has any Space. Saving a default never
+  // changes what the device may open: leaving a Space default keeps that Space under Device
+  // Access. An empty profile_key is the explicit removal from every Space and from a Desktop default.
   [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key);
-  // Additional access does not change the default assignment.
+  // Allowing Desktop does not change a Default Space. Removing Desktop Access also ends a Desktop default.
   [[nodiscard]] change_result_t set_desktop_access(const std::filesystem::path &path,
     std::string_view client_key, bool allowed);
+  // Allowing a device does not change its Default Space. Disallowing it removes the Space from the
+  // device entirely, a Default Space included.
   [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key, bool allowed);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
