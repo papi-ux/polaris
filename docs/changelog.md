@@ -7,6 +7,9 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Find Cover in the app editor works again. It looked covers up from the browser, which the console's content security policy blocks, so the panel stayed empty. It now runs Nova's SteamGridDB search on the host: you can change the name it searches for, every matching game shows with its title and year, the previews come from the host, and a missing key, a SteamGridDB failure or a search with no match each say so instead of showing nothing. A missing key links to the field in Settings. The console routes are `GET /api/covers/search?name=&uuid=`, `GET /api/covers/preview/<token>?uuid=` and `POST /api/covers/select` with `{uuid, token}`.
+- The app editor's **Needs command** badge and **Command: Missing** summary count a detached command, so launcher entries such as Heroic and Lutris no longer look broken.
+
 ## v1.4.9 - 2026-09-16
 
 A setup update shaped by a fresh install: quick setup covers the encoder, the launch mode and a trusted network as well as artwork and AI explanations, saved settings apply without a restart, restart from the console and the tray works again, Nova's artwork alternatives work, a Space can be removed for good and its host setup fixed from the Spaces page, and host setup, the KMS guidance, the Spaces helper and the Spaces page say what they found. Nova 1.4.9 comes out alongside it, and Nova 1.4.8 keeps working with this host. Existing configurations and paired devices remain valid.

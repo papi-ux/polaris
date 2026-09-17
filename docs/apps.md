@@ -79,7 +79,7 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 | Field | What it does |
 | --- | --- |
 | **Application Name** | The name shown on Moonlight and Nova. |
-| **Image** | The icon, picture, or box image sent to clients. PNG only; when unset, Polaris sends its default box image. |
+| **Image** | The icon, picture, or box image sent to clients: PNG, JPEG or WebP. When unset, Polaris sends its default box image. **Find Cover** searches SteamGridDB through the host for the name you type and shows every game it matches, with its title and year. Picking one saves that poster in Polaris's covers directory and puts its path here; the entry uses it once you save. The search needs the SteamGridDB API key from Settings, General, and says so, with a link to that field, when the key is missing. |
 | **Artwork in Nova** | How Nova gets posters, backgrounds, logos and icons for a saved entry, with **Remove artwork** and **Find artwork again**. See [Artwork in Nova](#artwork-in-nova). |
 | **Game Category** | A classification hint for Auto Quality, detected from Steam genres on import. |
 | **Platform and runtime** | Filled in for titles imported from Heroic. Says what the title installs as and what will execute it, such as Windows through Proton-GE. Left blank when Heroic did not record it. |

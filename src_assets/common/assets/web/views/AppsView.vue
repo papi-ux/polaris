@@ -723,31 +723,41 @@
               <div class="app-editor-inline-control">
                 <input type="text" class="app-editor-input" id="appName" v-model="editForm.name" />
                 <div class="relative" ref="coverFinderWrapper">
-                  <button class="app-editor-secondary-button" type="button" @click="showCoverFinder">
+                  <button class="app-editor-secondary-button" type="button" aria-controls="coverFinder" :aria-expanded="coverFinderOpen ? 'true' : 'false'" @click="showCoverFinder">
                     {{ $t('apps.find_cover') }}
                   </button>
-                  <div v-if="coverFinderOpen" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
+                  <div v-if="coverFinderOpen" id="coverFinder" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
                     <div class="flex justify-between items-center p-3 border-b border-storm">
                       <h4 class="text-silver font-medium">{{ $t('apps.covers_found') }}</h4>
-                      <button type="button" class="text-storm hover:text-silver" @click="closeCoverFinder">
+                      <button type="button" class="text-storm hover:text-silver" aria-label="Close cover search" @click="closeCoverFinder">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                       </button>
                     </div>
-                    <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }">
-                      <div class="grid grid-cols-3 gap-3">
-                        <div v-if="coverSearching" class="col-span-1">
-                          <div class="cover-container flex items-center justify-center">
-                            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-ice"></div>
-                          </div>
-                        </div>
-                        <div v-for="cover in coverCandidates" :key="cover.key" class="cursor-pointer hover:opacity-80 transition" @click="useCover(cover)">
-                          <div class="cover-container">
-                            <img class="rounded" :src="cover.url" />
-                          </div>
-                          <label class="block text-xs text-center text-storm truncate mt-1">
-                            {{ cover.name }}
-                          </label>
-                        </div>
+                    <form class="flex gap-2 p-3 border-b border-storm" data-cover-search @submit.prevent="searchCovers">
+                      <label for="coverQuery" class="sr-only">Game to search SteamGridDB for</label>
+                      <input id="coverQuery" v-model="coverQuery" type="search" class="app-editor-input" placeholder="Game name" autocomplete="off" />
+                      <button type="submit" class="app-editor-secondary-button" :disabled="coverSearching || !coverQuery.trim()">Search</button>
+                    </form>
+                    <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }" aria-live="polite">
+                      <div v-if="coverSearching" class="flex items-center gap-2 text-sm text-storm" data-cover-state="searching">
+                        <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
+                        <span>Searching SteamGridDB for "{{ coverSearchedQuery }}"</span>
+                      </div>
+                      <div v-if="coverError" class="mb-3 text-sm text-warning-bright" role="alert" data-cover-state="error">
+                        <p>{{ coverError }}</p>
+                        <a v-if="coverNeedsKey" href="#/config#steamgriddb_api_key" target="_blank" rel="noopener" class="mt-1 inline-block text-ice hover:underline" data-cover-key-link>Open the SteamGridDB API key setting</a>
+                      </div>
+                      <p v-if="!coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-storm" data-cover-state="empty">
+                        No covers found for "{{ coverSearchedQuery }}". Try a shorter or different name.
+                      </p>
+                      <div v-if="!coverSearching && coverCandidates.length" class="grid grid-cols-3 gap-3">
+                        <button v-for="cover in coverCandidates" :key="cover.token" type="button" class="min-w-0 text-left cursor-pointer hover:opacity-80 transition" :title="coverLabel(cover)" data-cover-candidate @click="useCover(cover)">
+                          <span class="cover-container block">
+                            <img class="rounded" :src="cover.preview" :alt="coverLabel(cover)" />
+                          </span>
+                          <span class="block text-xs text-center text-silver truncate mt-1">{{ cover.title }}</span>
+                          <span v-if="cover.release_year" class="block text-xs text-center text-storm">{{ cover.release_year }}</span>
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -821,7 +831,7 @@
               <div class="section-kicker">Launch</div>
               <h2 class="section-title">Command path</h2>
             </div>
-            <span class="data-pill">{{ editForm.cmd?.trim() ? 'Command set' : 'Needs command' }}</span>
+            <span class="data-pill">{{ editHasLaunchCommand ? 'Command set' : 'Needs command' }}</span>
           </div>
 
           <div class="app-editor-grid">
@@ -1119,7 +1129,7 @@
             </div>
             <div class="library-health-chip">
               <span>Command</span>
-              <strong>{{ editForm.cmd?.trim() ? 'Ready' : 'Missing' }}</strong>
+              <strong>{{ editHasLaunchCommand ? 'Ready' : 'Missing' }}</strong>
             </div>
             <div class="library-health-chip">
               <span>Tweaks</span>
@@ -1155,7 +1165,7 @@ import { artworkLookupOffSet } from '../app-artwork.js'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
-import { isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
+import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
 import { filterImportGames, summarizeImportGames } from '../library-imports'
 import { useRomSources } from '../composables/useRomSources'
 import {
@@ -1274,10 +1284,21 @@ const showEditForm = ref(false)
 const actionDisabled = ref(false)
 const pendingStopAppUuid = ref("")
 const editForm = ref(null)
+// Find Cover asks the host, which runs Nova's SteamGridDB search and serves the
+// previews itself: the console's CSP loads no images from anywhere else.
 const coverSearching = ref(false)
 const coverFinderBusy = ref(false)
 const coverFinderOpen = ref(false)
 const coverCandidates = ref([])
+const coverQuery = ref("")
+const coverSearchedQuery = ref("")
+const coverError = ref("")
+const coverErrorCode = ref("")
+const coverNeedsKey = computed(() => ['steamgriddb_key_missing', 'steamgriddb_unauthorized'].includes(coverErrorCode.value))
+// Launcher entries such as Heroic and Lutris start through a detached command.
+const editHasLaunchCommand = computed(() => hasLaunchCommand(editForm.value))
+let coverSearchUuid = ""
+let coverSearchSequence = 0
 const platform = ref("")
 const currentApp = ref("")
 const draggingApp = ref(-1)
@@ -1614,6 +1635,7 @@ function onArtworkChanged({ uuid, lookupOff }) {
 }
 
 function newApp() {
+  resetCoverFinder()
   editForm.value = Object.assign({}, newAppTemplate)
   editEnvVars.value = []
   editMangoHud.value = false
@@ -1674,6 +1696,7 @@ function closeApp(options = {}) {
 }
 
 function editApp(app) {
+  resetCoverFinder()
   editForm.value = Object.assign({}, newAppTemplate, JSON.parse(JSON.stringify(app)))
   // Populate env vars editor from the app's env object
   const envObj = app.env || {}
@@ -1725,76 +1748,119 @@ function addCmd(cmdArr, idx) {
   else cmdArr.splice(idx, 0, template)
 }
 
-function showCoverFinder() {
+const COVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function newCoverUuid() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+// Previews and the picked file belong to the entry's uuid. A draft has none yet,
+// so it borrows a temporary one until the editor opens something else.
+function coverScopeUuid() {
+  if (!coverSearchUuid) {
+    const uuid = editForm.value?.uuid
+    coverSearchUuid = typeof uuid === 'string' && COVER_UUID.test(uuid) ? uuid : newCoverUuid()
+  }
+  return coverSearchUuid
+}
+
+function resetCoverFinder() {
+  coverSearchSequence += 1
+  coverFinderOpen.value = false
+  coverSearching.value = false
+  coverFinderBusy.value = false
   coverCandidates.value = []
-  coverSearching.value = true
+  coverQuery.value = ""
+  coverSearchedQuery.value = ""
+  coverError.value = ""
+  coverErrorCode.value = ""
+  coverSearchUuid = ""
+}
+
+function coverLabel(cover) {
+  return cover.release_year ? `${cover.title} (${cover.release_year})` : cover.title
+}
+
+function showCoverFinder() {
   coverFinderOpen.value = true
+  coverQuery.value = (editForm.value?.name || "").toString().trim()
+  if (coverQuery.value) searchCovers()
+}
 
-  function getSearchBucket(name) {
-    let bucket = name.substring(0, Math.min(name.length, 2)).toLowerCase().replaceAll(/[^a-z\d]/g, '')
-    if (!bucket) return '@'
-    return bucket
+function showCoverFailure(response, body, fallback) {
+  coverErrorCode.value = typeof body?.code === 'string' ? body.code : ""
+  coverError.value = typeof body?.error === 'string' && body.error
+    ? body.error
+    : `${fallback} (HTTP ${response.status}).`
+}
+
+async function searchCovers() {
+  const query = coverQuery.value.trim()
+  if (!query) return
+  const sequence = ++coverSearchSequence
+  coverSearching.value = true
+  coverSearchedQuery.value = query
+  coverCandidates.value = []
+  coverError.value = ""
+  coverErrorCode.value = ""
+  try {
+    const params = new URLSearchParams({ name: query, uuid: coverScopeUuid() })
+    const response = await fetch(`./api/covers/search?${params}`, { credentials: 'include' })
+    const body = await response.json().catch(() => null)
+    if (sequence !== coverSearchSequence) return
+    if (!response.ok || body?.status !== true) {
+      showCoverFailure(response, body, 'The cover search failed')
+      return
+    }
+    const candidates = Array.isArray(body.candidates) ? body.candidates : []
+    coverCandidates.value = candidates.filter(cover => cover?.token && cover?.preview && cover?.title)
+  } catch {
+    if (sequence !== coverSearchSequence) return
+    coverErrorCode.value = ""
+    coverError.value = "Polaris could not run the cover search. Check the connection to the host and try again."
+  } finally {
+    if (sequence === coverSearchSequence) coverSearching.value = false
   }
-
-  function searchCovers(name) {
-    if (!name) return Promise.resolve([])
-    let searchName = name.replaceAll(/\s+/g, '.').toLowerCase()
-    let dbUrl = "https://raw.githubusercontent.com/LizardByte/GameDB/gh-pages"
-    let bucket = getSearchBucket(name)
-    return fetch(`${dbUrl}/buckets/${bucket}.json`).then(function (r) {
-      if (!r.ok) throw new Error("Failed to search covers")
-      return r.json()
-    }).then(maps => Promise.all(Object.keys(maps).map(id => {
-      let item = maps[id]
-      if (item.name.replaceAll(/\s+/g, '.').toLowerCase().startsWith(searchName)) {
-        return fetch(`${dbUrl}/games/${id}.json`).then(function (r) {
-          return r.json()
-        }).catch(() => null)
-      }
-      return null
-    }).filter(item => item)))
-      .then(results => results
-        .filter(item => item && item.cover && item.cover.url)
-        .map(game => {
-          const thumb = game.cover.url
-          const dotIndex = thumb.lastIndexOf('.')
-          const slashIndex = thumb.lastIndexOf('/')
-          if (dotIndex < 0 || slashIndex < 0) return null
-          const slug = thumb.substring(slashIndex + 1, dotIndex)
-          return {
-            name: game.name,
-            key: `igdb_${game.id}`,
-            url: `https://images.igdb.com/igdb/image/upload/t_cover_big/${slug}.jpg`,
-            saveUrl: `https://images.igdb.com/igdb/image/upload/t_cover_big_2x/${slug}.png`,
-          }
-        }).filter(item => item))
-  }
-
-  searchCovers(editForm.value["name"].toString().trim())
-    .then(list => coverCandidates.value = list)
-    .finally(() => coverSearching.value = false)
 }
 
 function closeCoverFinder() {
   coverFinderOpen.value = false
 }
 
-function useCover(cover) {
+async function useCover(cover) {
+  if (coverFinderBusy.value) return
+  const uuid = coverScopeUuid()
   coverFinderBusy.value = true
-  fetch("./api/covers/upload", {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    method: 'POST',
-    body: JSON.stringify({
-      key: cover.key,
-      url: cover.saveUrl,
+  coverError.value = ""
+  coverErrorCode.value = ""
+  try {
+    const response = await fetch("./api/covers/select", {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify({ uuid, token: cover.token }),
     })
-  }).then(r => {
-    if (!r.ok) throw new Error("Failed to download covers")
-    return r.json()
-  }).then(body => editForm.value["image-path"] = body.path)
-    .then(() => closeCoverFinder())
-    .finally(() => coverFinderBusy.value = false)
+    const body = await response.json().catch(() => null)
+    // The editor moved on to another entry while the pick was saving.
+    if (uuid !== coverSearchUuid) return
+    if (!response.ok || body?.status !== true || !body.path) {
+      showCoverFailure(response, body, 'Polaris could not use that cover')
+      return
+    }
+    // The pick lands in the form; the entry changes when the player saves it.
+    editForm.value["image-path"] = body.path
+    closeCoverFinder()
+  } catch {
+    if (uuid !== coverSearchUuid) return
+    coverError.value = "Polaris could not use that cover. Check the connection to the host and try again."
+  } finally {
+    coverFinderBusy.value = false
+  }
 }
 
 function save() {
