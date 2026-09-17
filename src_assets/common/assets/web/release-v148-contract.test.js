@@ -28,20 +28,20 @@ describe('historical v1.4.8 release contract', () => {
     const notes = historicalNotes()
     const intro = notes.split('\n')[2]
     expect(intro).toMatch(/^Spaces arrives as an early preview/)
-    expect(intro).toContain('configured hosts only')
-    expect(intro).toContain('without a public runtime download yet')
+    expect(intro).toContain('needs a host set up for it')
+    expect(intro).toContain('no public runtime download yet')
     expect(notes.indexOf('**Spaces, an early preview**')).toBeLessThan(
       notes.indexOf('**More games, less setup**'),
     )
     for (const fact of [
-      'public Docker runtime download is not available yet',
+      'There is no public runtime download',
       'one active Space',
-      'handheld audio remains under investigation',
+      'Handheld audio is still being looked at',
       'removing a Space retains its games and saves',
       'Ordinary streaming keeps its familiar setup',
-      'One set of words everywhere',
+      'The same words everywhere',
       'The host says why',
-      'speaks the console',
+      'looks like the rest of the console',
     ]) {
       expect(notes, `v1.4.8 preview limits must include: ${fact}`).toContain(fact)
     }
