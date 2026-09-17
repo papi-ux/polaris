@@ -322,6 +322,7 @@ const tabs = ref([
       "enable_discovery": "enabled",
       "steamgriddb_api_key": "",
       "beat_times_lookup": "enabled",
+      "host_sleep_enabled": "disabled",
     },
   },
   {

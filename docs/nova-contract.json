@@ -869,6 +869,28 @@
         "style": "initializer_list",
         "declaration": "fields[name] = {"
       }
+    },
+    "host_power": {
+      "$comment": "Served on the capabilities response and on GET /polaris/v1/host/power. Tells a client whether to offer a sleep control at all: sleep_supported is what logind answers, sleep_enabled is the host owner's opt in, and sleep_permitted is whether this client may control the host rather than only watch it. All three have to be true before the control is worth showing.",
+      "fields": [
+        "sleep_blocked_message",
+        "sleep_blocked_reason",
+        "sleep_enabled",
+        "sleep_endpoint",
+        "sleep_permitted",
+        "sleep_supported"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseHostPower",
+        "receiver": "json"
+      },
+      "polaris_emitter": {
+        "file": "src/nvhttp.cpp",
+        "function": "build_host_power_contract",
+        "variable": "host_power",
+        "style": "subscript"
+      }
     }
   },
   "known_drift": {

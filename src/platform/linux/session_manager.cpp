@@ -666,6 +666,108 @@ namespace session_manager {
     return false;
   }
 
+  // ---------------------------------------------------------------------
+  // Host sleep
+  //
+  // logind owns suspend and answers the two questions separately: CanSuspend
+  // says whether a request would be accepted, which is what decides if a
+  // client is offered the control at all, and Suspend(false) makes the request
+  // without an interactive polkit prompt. Non-interactive matters, because
+  // nobody is sitting at a streaming host to answer a prompt, and an
+  // interactive call would hang the request rather than fail it.
+  //
+  // Both go through busctl for the same reason the rest of this file shells
+  // out: it keeps Polaris off a libsystemd link it does not otherwise need.
+  // ---------------------------------------------------------------------
+
+  static std::string logind_call(const std::string &method, const std::string &args) {
+    std::string cmd =
+      "busctl --system call org.freedesktop.login1 /org/freedesktop/login1 "
+      "org.freedesktop.login1.Manager ";
+    cmd += method;
+    if (!args.empty()) {
+      cmd += " ";
+      cmd += args;
+    }
+    // stderr carries the polkit refusal, which is the answer we most need.
+    cmd += " 2>&1";
+    return exec(cmd);
+  }
+
+  static bool logind_answered(const std::string &output, std::string_view answer) {
+    // busctl prints a string reply as: s "yes"
+    const std::string quoted = "\"" + std::string {answer} + "\"";
+    return output.find(quoted) != std::string::npos;
+  }
+
+  host_sleep_readiness_t host_sleep_readiness() {
+    host_sleep_readiness_t readiness;
+    const auto answer = logind_call("CanSuspend", "");
+
+    if (answer.empty()) {
+      readiness.reason = "logind_unavailable";
+      readiness.message = "logind did not answer, so Polaris cannot suspend this host.";
+      return readiness;
+    }
+
+    if (logind_answered(answer, "yes")) {
+      readiness.supported = true;
+      return readiness;
+    }
+
+    if (logind_answered(answer, "challenge")) {
+      readiness.reason = "polkit_denied";
+      readiness.message =
+        "polkit wants interactive authentication for org.freedesktop.login1.suspend, "
+        "which a remote request cannot answer. Allow that action for this user to "
+        "enable host sleep.";
+      return readiness;
+    }
+
+    if (logind_answered(answer, "na")) {
+      readiness.reason = "not_available";
+      readiness.message = "This host reports that it cannot suspend.";
+      return readiness;
+    }
+
+    readiness.reason = "logind_unavailable";
+    readiness.message = answer;
+    return readiness;
+  }
+
+  host_sleep_result_t suspend_host() {
+    host_sleep_result_t result;
+
+    const auto readiness = host_sleep_readiness();
+    if (!readiness.supported) {
+      result.reason = readiness.reason;
+      result.message = readiness.message;
+      BOOST_LOG(warning) << "session_manager: refusing host sleep: "sv << result.message;
+      return result;
+    }
+
+    const auto answer = logind_call("Suspend", "b false");
+    if (answer.empty()) {
+      BOOST_LOG(info) << "session_manager: host suspend requested"sv;
+      result.ok = true;
+      return result;
+    }
+
+    if (answer.find("Interactive authentication required") != std::string::npos ||
+        answer.find("Access denied") != std::string::npos) {
+      result.reason = "polkit_denied";
+      result.message =
+        "polkit refused org.freedesktop.login1.suspend for this user. Allow that "
+        "action to enable host sleep.";
+    } else {
+      result.reason = "request_failed";
+      result.message = answer;
+    }
+
+    BOOST_LOG(warning) << "session_manager: host suspend failed: "sv << result.message;
+    return result;
+  }
+
 #ifdef POLARIS_TESTS
   void set_command_hooks_for_tests(
     std::function<std::string(const std::string &)> exec_hook,

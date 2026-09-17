@@ -384,6 +384,11 @@ namespace config {
     // explicit benchmark-mode enable at process start" rather than a
     // dynamically-toggleable runtime setting.
     bool benchmark_mode_enabled;
+
+    // Host sleep is opt in. A paired client asking the host to suspend takes
+    // the machine away from everyone on it with no undo from the couch, so it
+    // stays off until the host owner turns it on.
+    bool host_sleep_enabled;
   };
 
   struct recording_t {

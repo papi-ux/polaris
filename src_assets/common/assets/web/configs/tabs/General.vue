@@ -330,6 +330,21 @@ function handleSteamGridDbKeyInput() {
                 default="true"
       ></Checkbox>
     </section>
+
+    <section class="settings-section settings-section-compact">
+      <div class="settings-section-header">
+        <div class="section-kicker">{{ $t('config.general_kicker_host_power') }}</div>
+        <div class="section-title-row">
+          <h3 class="settings-section-title">{{ $t('config.general_section_host_power') }}</h3>
+        </div>
+      </div>
+      <Checkbox class="mt-1"
+                id="host_sleep_enabled"
+                locale-prefix="config"
+                v-model="config.host_sleep_enabled"
+                default="false"
+      ></Checkbox>
+    </section>
   </div>
 </template>
 
