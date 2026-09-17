@@ -89,13 +89,14 @@ namespace {
         .run = [this](const std::vector<std::string> &argv, std::chrono::milliseconds timeout,
                    const std::function<void()> &approved, std::stop_token stop) {
           std::unique_lock lock(mutex);
-          argvs.push_back(argv);
-          timeouts.push_back(timeout);
           if (approve) {
             lock.unlock();
             approved();
             lock.lock();
           }
+          // Recorded after the approval, so a test waiting for this run never reads the job in between.
+          argvs.push_back(argv);
+          timeouts.push_back(timeout);
           changed.notify_all();
           if (!changed.wait(lock, stop, [&] { return release; })) return spaces::host_action_run_t {};
           return next;
