@@ -783,6 +783,31 @@ namespace proc {
       return !json_string_member_or(app, "lutris-slug").empty();
     }
 
+    // The entry that opens Heroic itself, as the import publishes it or as an older build did:
+    // a Heroic source, no game identity, and nothing but the launcher as its command.
+    bool is_heroic_launcher_app(const nlohmann::json &app) {
+      if (!app.is_object() || !boost::iequals(json_string_member_or(app, "source"), "heroic") ||
+          !json_string_member_or(app, "heroic-app-name").empty()) {
+        return false;
+      }
+
+      const auto is_launcher_command = [](const std::string &value) {
+        const auto trimmed = boost::trim_copy(value);
+        return boost::iequals(trimmed, game_library::heroic_launcher_command(game_library::launcher_install_t::native)) ||
+               boost::iequals(trimmed, game_library::heroic_launcher_command(game_library::launcher_install_t::flatpak)) ||
+               boost::iequals(trimmed, "heroic");
+      };
+      if (is_launcher_command(json_string_member_or(app, "cmd"))) {
+        return true;
+      }
+      if (!app.contains("detached") || !app["detached"].is_array()) {
+        return false;
+      }
+      return std::any_of(app["detached"].begin(), app["detached"].end(), [&](const nlohmann::json &detached) {
+        return detached.is_string() && is_launcher_command(detached.get<std::string>());
+      });
+    }
+
     nlohmann::json lutris_library_app() {
       return {
         {"name", "Lutris"},
@@ -4464,6 +4489,32 @@ namespace proc {
     return is_steam_big_picture_app(app);
   }
 
+  std::optional<emulator_library::entry_launch_t> resolve_emulator_entry_launch(const ctx_t &app) {
+    if (!boost::iequals(boost::trim_copy(app.source), emulator_library::source_name)) {
+      return std::nullopt;
+    }
+    std::string configured_launcher;
+    if (!boost::trim_copy(app.rom_folder).empty()) {
+      const auto sources_path = emulator_library::sources_path_for_apps_file(config::stream.file_apps, platf::appdata());
+      if (const auto text = emulator_library::read_text_file(sources_path)) {
+        configured_launcher = emulator_library::configured_launcher_for(emulator_library::parse_sources(*text), app.rom_folder);
+      }
+    }
+    const char *path_env = std::getenv("PATH");
+    auto resolved = emulator_library::resolve_entry_launch(
+      app.emulator,
+      app.rom_path,
+      configured_launcher,
+      game_library::library_home_roots(),
+      path_env == nullptr ? std::string_view {} : std::string_view {path_env}
+    );
+    // A command the player edited runs as they wrote it, installed emulator or not.
+    if (resolved && !emulator_library::generated_entry_command(*resolved->preset, app.rom_path, app.cmd, configured_launcher)) {
+      return std::nullopt;
+    }
+    return resolved;
+  }
+
   bool launches_nothing(const ctx_t &app) {
     const auto blank = [](const std::string &value) {
       return boost::trim_copy(value).empty();
@@ -7167,6 +7218,24 @@ namespace proc {
     }
 #endif
 
+    // An entry imported from a ROM folder runs the emulator as this host has it now. The
+    // command saved at import names whatever was installed then, and an emulator that was
+    // missing is saved under its bare binary name, which a later Flatpak never provides.
+    // Refuse before any session state changes rather than start an empty private session.
+    std::optional<std::string> resolved_emulator_command;
+    if (const auto emulator_launch = resolve_emulator_entry_launch(app)) {
+      if (emulator_launch->install.kind == emulator_library::install_e::missing) {
+        const auto reason = emulator_library::missing_install_reason(*emulator_launch->preset, emulator_launch->install, app.name);
+        BOOST_LOG(error) << "process: refusing launch of ["sv << app.name << "]: "sv << reason.message;
+        return launch_failure::refuse(503, "emulator_not_installed", reason.message, reason.action);
+      }
+      if (emulator_launch->command != app.cmd) {
+        BOOST_LOG(info) << "process: launching ["sv << app.name << "] with the installed "sv << emulator_launch->preset->label
+                        << " ("sv << emulator_library::install_name(emulator_launch->install.kind) << ") instead of the saved command"sv;
+        resolved_emulator_command = emulator_launch->command;
+      }
+    }
+
     // Resolve hard output capabilities only after the previous generation has
     // been torn down, but before installing any state for the new generation.
     // /resume calls this same helper immediately before admitting its RTSP
@@ -7369,6 +7438,9 @@ namespace proc {
     _detached_child_authority_complete = true;
 #endif
     _app = app;
+    if (resolved_emulator_command) {
+      _app.cmd = *resolved_emulator_command;
+    }
     _app_id = util::from_view(app.id);
     _app_name = app.name;
     _launch_session = launch_session;
@@ -11827,8 +11899,35 @@ namespace proc {
     }
   }
 
+  void migration_v10(nlohmann::json &fileTree) {
+    // The Heroic launcher entry was published without an image, so clients showed the generic
+    // box where the Lutris entry has its own poster. Give the launcher entry the bundled Heroic
+    // poster only while it still has no image; imported games and chosen images stay as they are.
+    static const int this_version = 14;
+    const int file_version = json_int_member_or(fileTree, "version", 0);
+    if (file_version >= this_version) {
+      return;
+    }
+
+    int migrated = 0;
+    if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+      for (auto &app : fileTree["apps"]) {
+        if (!is_heroic_launcher_app(app) || !boost::trim_copy(json_string_member_or(app, "image-path")).empty()) {
+          continue;
+        }
+        app["image-path"] = "heroic.png";
+        ++migrated;
+      }
+    }
+
+    fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Gave " << migrated << " Heroic launcher app(s) the bundled Heroic image (v14).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 13;
+    int last_version = 14;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -11844,6 +11943,7 @@ namespace proc {
       migration_v7(fileTree);
       migration_v8(fileTree);
       migration_v9(fileTree);
+      migration_v10(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -12010,6 +12110,7 @@ namespace proc {
           ctx.lutris_runner = app_node.value("lutris-runner", "");
           ctx.emulator = app_node.value("emulator", "");
           ctx.rom_path = app_node.value("rom-path", "");
+          ctx.rom_folder = app_node.value("rom-folder", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {

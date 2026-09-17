@@ -2388,6 +2388,18 @@ namespace nvhttp {
     }
   }  // namespace
 
+  game_artwork::providers::transport_t artwork_transport(std::string api_key) {
+    return make_artwork_transport(std::move(api_key));
+  }
+
+  game_artwork::manual::preview_cache_t &artwork_candidate_previews() {
+    return artwork_preview_cache();
+  }
+
+  std::int64_t artwork_clock_milliseconds() {
+    return artwork_now_milliseconds();
+  }
+
   std::optional<std::string> normalize_encoder_backend(std::string value) {
     value = lower_copy(std::move(value));
     if (value.empty() || !video::encoder_backend_selectable(value)) {
@@ -3070,15 +3082,22 @@ namespace nvhttp {
 
     fs::path configured_artwork_image(const proc::ctx_t &app) {
       const fs::path configured = app.image_path;
-      if (!uses_bundled_utility_artwork(app) || configured.empty() || configured.is_absolute()) {
+      if (configured.empty() || configured.is_absolute()) {
         return configured;
       }
 
-      // Runtime-injected entries carry a bundled filename rather than an
-      // absolute path. Artwork resolution must use the same validated path as
-      // the legacy cover endpoint; otherwise a title such as "Virtual Display"
-      // falls through to a coincidental SteamGridDB game match.
-      return proc::validate_app_image_path(app.image_path);
+      // A relative name is a bundled image: a runtime-injected entry's, or a launcher's such as
+      // lutris.png and heroic.png. Artwork resolution must use the same validated path as the
+      // legacy cover endpoint; read against the working directory the name found nothing, so a
+      // launcher had no poster in Nova and a title such as "Virtual Display" fell through to a
+      // coincidental SteamGridDB game match.
+      const auto validated = proc::validate_app_image_path(app.image_path);
+      if (uses_bundled_utility_artwork(app)) {
+        return validated;
+      }
+      // Validation answers with the generic box art for a name it cannot find. For anything but
+      // a utility entry that is no poster: as a local image it would outrank real artwork.
+      return validated == proc::validate_app_image_path({}) ? configured : fs::path {validated};
     }
 
     std::vector<game_artwork::local_candidate_t> local_artwork_candidates(const proc::ctx_t &app) {
@@ -3098,6 +3117,8 @@ namespace nvhttp {
       const auto appdata = platf::appdata();
       const auto candidates = local_artwork_candidates(app);
       const bool bundled_utility = uses_bundled_utility_artwork(app);
+      // An entry whose image was cleared stops showing the copy of the old one.
+      (void) game_artwork::retire_orphaned_local_poster(appdata, app.uuid, candidates);
       bool candidate_already_cached = false;
       if (bundled_utility && !candidates.empty()) {
         const auto cached_before = game_artwork::scan_cached_assets(appdata, app.uuid);
@@ -3107,10 +3128,10 @@ namespace nvhttp {
                    asset.source == candidates.front().source;
           });
       }
+      // A changed image replaces its copy, so a second cover pick reaches Nova.
       if (!candidates.empty() &&
           ((bundled_utility && !candidate_already_cached) ||
-           game_artwork::needs_source_upgrade(
-             appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source))) {
+           game_artwork::local_poster_needs_copy(appdata, app.uuid, candidates.front()))) {
         (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
       }
       if (bundled_utility) {
@@ -9131,31 +9152,20 @@ namespace nvhttp {
         return;
       }
       const auto transport = make_artwork_transport(api_key);
-      const auto search_request = game_artwork::providers::plan_steamgriddb_search(*query);
-      if (!search_request) {
-        response->write(SimpleWeb::StatusCode::client_error_bad_request);
-        return;
-      }
       try {
-        const auto search_response = transport(*search_request, artwork_metadata_bytes);
-        if (!search_response || search_response->status_code < 200 || search_response->status_code >= 300 ||
-            !game_artwork::is_allowed_provider_url(
-              game_artwork::provider_e::steamgriddb,
-              search_response->final_url.empty() ? search_request->url : search_response->final_url)) {
-          write_artwork_search_failure(
-            response,
-            game_artwork::manual::classify_search_failure(
-              true,
-              search_response ? std::optional<long>(static_cast<long>(search_response->status_code)) : std::optional<long> {}
-            )
-          );
+        const auto search = game_artwork::manual::search_match_candidates(
+          artwork_preview_cache(), app->uuid, *query, transport, artwork_now_milliseconds());
+        if (search.invalid_query) {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request);
           return;
         }
-        const std::string search_body(search_response->body.begin(), search_response->body.end());
-        const auto candidates = game_artwork::providers::parse_steamgriddb_match_candidates(
-          *query, search_body, game_artwork::manual::maximum_candidate_count);
+        if (search.failure) {
+          write_artwork_search_failure(response, *search.failure);
+          return;
+        }
         nlohmann::json matches = nlohmann::json::array();
-        for (const auto &candidate : candidates) {
+        for (const auto &found : search.candidates) {
+          const auto &candidate = found.candidate;
           nlohmann::json item {
             {"provider", candidate.provider},
             {"provider_game_id", candidate.provider_game_id},
@@ -9164,42 +9174,10 @@ namespace nvhttp {
           };
           if (candidate.steam_appid) item["steam_appid"] = *candidate.steam_appid;
           if (candidate.release_year) item["release_year"] = *candidate.release_year;
-          try {
-            const auto id = std::stoull(candidate.provider_game_id);
-            const auto plans = game_artwork::providers::plan_steamgriddb_assets(id);
-            const auto poster = std::find_if(plans.begin(), plans.end(), [](const auto &plan) {
-              return plan.kind == game_artwork::kind_e::poster;
-            });
-            if (poster != plans.end()) {
-              const auto list_response = transport(*poster, artwork_metadata_bytes);
-              if (list_response && list_response->status_code >= 200 && list_response->status_code < 300) {
-                const std::string list_body(list_response->body.begin(), list_response->body.end());
-                const auto images = game_artwork::providers::parse_steamgriddb_assets(
-                  game_artwork::kind_e::poster, list_body);
-                if (!images.empty()) {
-                  const game_artwork::providers::request_t download {
-                    game_artwork::provider_e::steamgriddb,
-                    game_artwork::providers::operation_e::download,
-                    game_artwork::kind_e::poster,
-                    images.front().url,
-                    false,
-                  };
-                  const auto image = transport(download, game_artwork::manual::maximum_preview_bytes);
-                  const auto effective = image && !image->final_url.empty() ? image->final_url : download.url;
-                  if (image && image->status_code >= 200 && image->status_code < 300 &&
-                      game_artwork::is_allowed_provider_url(download.provider, effective)) {
-                    if (const auto preview = artwork_preview_cache().publish(
-                          app->uuid, game_artwork::kind_e::poster, image->body, artwork_now_milliseconds())) {
-                      item["preview"] = {{"poster", "/polaris/v1/games/" + app->uuid +
-                        "/artwork/candidate/" + preview->token + "/poster"}};
-                      item["preview_expires_at"] = preview->expires_at;
-                    }
-                  }
-                }
-              }
-            }
-          } catch (...) {
-            // A preview failure never removes an otherwise valid sanitized candidate.
+          if (found.poster_token) {
+            item["preview"] = {{"poster", "/polaris/v1/games/" + app->uuid +
+              "/artwork/candidate/" + *found.poster_token + "/poster"}};
+            item["preview_expires_at"] = found.preview_expires_at;
           }
           matches.push_back(std::move(item));
         }

@@ -497,6 +497,126 @@ namespace game_artwork::manual {
     return listing;
   }
 
+  match_candidate_search_t search_match_candidates(
+    preview_cache_t &cache,
+    const std::string_view uuid,
+    const std::string_view query,
+    const providers::transport_t &transport,
+    const std::int64_t now_milliseconds,
+    const candidate_listing_e listing,
+    const search_budget_t &budget
+  ) {
+    match_candidate_search_t result;
+    const auto search_request = providers::plan_steamgriddb_search(query);
+    if (!search_request) {
+      result.invalid_query = true;
+      return result;
+    }
+    const auto search_response = transport(*search_request, maximum_listing_bytes);
+    if (!search_response || !successful_status(search_response->status_code) ||
+        !is_allowed_provider_url(
+          provider_e::steamgriddb,
+          search_response->final_url.empty() ? search_request->url : search_response->final_url)) {
+      result.failure = classify_search_failure(
+        true,
+        search_response ? std::optional<long>(static_cast<long>(search_response->status_code)) : std::optional<long> {}
+      );
+      return result;
+    }
+    const std::string search_body(search_response->body.begin(), search_response->body.end());
+    const bool posters_only = listing == candidate_listing_e::matches_with_posters;
+    const auto searched = posters_only ? maximum_searched_match_count : maximum_candidate_count;
+    bool read_a_match = false;
+    const auto out_of_time = [&] {
+      return read_a_match && budget.clock && budget.milliseconds > 0 &&
+             budget.clock() - now_milliseconds >= budget.milliseconds;
+    };
+    for (auto &candidate : providers::parse_steamgriddb_match_candidates(query, search_body, searched)) {
+      // One match is always read. Past the bound the rest wait for the next search rather than
+      // hold a caller that shares its thread.
+      if (out_of_time()) break;
+      read_a_match = true;
+      match_candidate_preview_t item {std::move(candidate), std::nullopt, 0};
+      try {
+        const auto game_id = provider_game_number(item.candidate.provider_game_id);
+        const auto plans = game_id ? providers::plan_steamgriddb_assets(*game_id) : std::vector<providers::request_t> {};
+        const auto poster = std::find_if(plans.begin(), plans.end(), [](const auto &plan) {
+          return plan.kind == kind_e::poster;
+        });
+        if (poster != plans.end()) {
+          const auto list_response = transport(*poster, maximum_listing_bytes);
+          if (list_response && successful_status(list_response->status_code)) {
+            const std::string list_body(list_response->body.begin(), list_response->body.end());
+            const auto images = providers::parse_steamgriddb_assets(kind_e::poster, list_body);
+            if (!images.empty()) {
+              const providers::request_t download {
+                provider_e::steamgriddb,
+                providers::operation_e::download,
+                kind_e::poster,
+                images.front().url,
+                false,
+              };
+              const auto image = transport(download, maximum_preview_bytes);
+              const auto effective = image && !image->final_url.empty() ? image->final_url : download.url;
+              if (image && successful_status(image->status_code) && is_allowed_provider_url(download.provider, effective)) {
+                if (const auto preview = cache.publish(uuid, kind_e::poster, image->body, now_milliseconds)) {
+                  item.poster_token = preview->token;
+                  item.preview_expires_at = preview->expires_at;
+                }
+              }
+            }
+          }
+        }
+      } catch (...) {
+        // A preview failure never removes an otherwise valid sanitized candidate from Nova's list.
+      }
+      if (posters_only && !item.poster_token) continue;
+      result.candidates.push_back(std::move(item));
+      if (result.candidates.size() == maximum_candidate_count) break;
+    }
+    return result;
+  }
+
+  cover_pick_t cover_image_for_pick(const preview_t &pick, const providers::transport_t &transport) {
+    cover_pick_t result;
+    if (!pick.choice) {
+      result.image = cover_image_t {pick.mime_type, pick.body};
+      return result;
+    }
+    if (!is_allowed_provider_url(provider_e::steamgriddb, pick.choice->asset_url)) {
+      result.failure = choice_expired_failure();
+      return result;
+    }
+    const providers::request_t download {
+      provider_e::steamgriddb,
+      providers::operation_e::download,
+      pick.kind,
+      pick.choice->asset_url,
+      false,
+    };
+    try {
+      const auto image = transport(download, maximum_asset_bytes);
+      if (!image ||
+          !is_allowed_provider_url(download.provider, image->final_url.empty() ? download.url : image->final_url)) {
+        result.failure = classify_search_failure(true, std::nullopt);
+        return result;
+      }
+      if (!successful_status(image->status_code)) {
+        result.failure = classify_search_failure(true, static_cast<long>(image->status_code));
+        return result;
+      }
+      const auto mime_type = mime_from_signature(image->body);
+      if (!mime_type || image->body.size() > maximum_asset_bytes) {
+        result.failure = classify_search_failure(true, std::nullopt);
+        return result;
+      }
+      result.image = cover_image_t {*mime_type, image->body};
+    } catch (...) {
+      result.failure = classify_search_failure(true, std::nullopt);
+    }
+    return result;
+  }
+
   nlohmann::json artwork_choice_json(const std::string_view uuid, const choice_t &choice) {
     nlohmann::json body {
       {"selection_token", choice.token},

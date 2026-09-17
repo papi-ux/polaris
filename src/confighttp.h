@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // lib includes
 #include <nlohmann/json.hpp>
@@ -21,6 +22,10 @@
 
 namespace stream_stats {
   struct stats_t;
+}
+
+namespace game_library {
+  enum class launcher_install_t;
 }
 
 #define WEB_DIR POLARIS_ASSETS_DIR "/web/"
@@ -107,6 +112,36 @@ namespace confighttp {
    * including a body over 1024 bytes, is refused.
    */
   std::optional<std::string> decode_app_artwork_request(std::string_view body);
+
+  /**
+   * @brief Store a cover picked from a search's preview as `<uuid>.<ext>` under coverdir.
+   *
+   * Only a PNG, JPEG or WebP whose bytes match the given type is stored, under a validated uuid,
+   * through a temporary file; the same uuid's covers in other formats are removed, except `keep`,
+   * the image the entry still names, because a pick the player abandons must not delete their cover.
+   * @return The stored path, or nothing when the image or the write is refused.
+   */
+  std::optional<std::string> store_selected_cover(
+    const std::filesystem::path &coverdir,
+    std::string_view uuid,
+    std::string_view mime_type,
+    const std::vector<unsigned char> &body,
+    const std::filesystem::path &keep = {}
+  );
+
+  /**
+   * @brief The entity tag a console cover image is served with.
+   *
+   * Built from the image's path, size and modification time, so a new cover for an entry, in a
+   * new file or rewritten in place, is fetched again under the same name-keyed URL.
+   * @return A quoted tag, or nothing when the file cannot be read.
+   */
+  std::optional<std::string> cover_image_etag(const std::filesystem::path &image);
+
+  /**
+   * @brief Publish a Heroic launcher entry once a Heroic game has been imported, unless one exists.
+   */
+  void ensure_heroic_library_app(nlohmann::json &file_tree, game_library::launcher_install_t install);
 
   /**
    * @brief The uuids of the apps in an apps.json tree whose automatic artwork lookup is off.

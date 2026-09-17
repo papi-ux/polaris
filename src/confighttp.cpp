@@ -81,6 +81,7 @@
 #include "doctor_actions.h"
 #include "ai_optimizer.h"
 #include "game_classifier.h"
+#include "emulator_install.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
 
@@ -2332,6 +2333,41 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    /**
+     * @brief The lock every read, change and write of apps.json takes.
+     *
+     * The console's handlers share one thread, so they never raced each other, but the emulator
+     * install job runs on its own and rewrites the file when it finishes. Without this a finished
+     * install and a save made at the same moment lose one side's change.
+     */
+    std::mutex &apps_file_mutex() {
+      static std::mutex mutex;
+      return mutex;
+    }
+
+    std::string app_string(const nlohmann::json &app, const char *key) {
+      return app.is_object() && app.contains(key) && app[key].is_string() ? app[key].get<std::string>() : std::string {};
+    }
+
+    // The image an entry named before a save; a new entry named none.
+    std::string stored_app_image(const nlohmann::json &file_tree, const std::string &uuid) {
+      if (uuid.empty() || !file_tree.contains("apps") || !file_tree["apps"].is_array()) return {};
+      for (const auto &app : file_tree["apps"]) {
+        if (app_string(app, "uuid") == uuid) return app_string(app, "image-path");
+      }
+      return {};
+    }
+
+    // The file an entry's image names, read as Nova's artwork reads it: a relative name is a
+    // bundled image, and a name that finds no bundled image names no file.
+    std::filesystem::path app_image_file(const std::string &image_path) {
+      if (image_path.empty() || std::filesystem::path(image_path).is_absolute()) return image_path;
+      const auto validated = proc::validate_app_image_path(image_path);
+      return validated == proc::validate_app_image_path({}) ? std::filesystem::path {} : std::filesystem::path {validated};
+    }
+  }  // namespace
+
   /**
    * @brief Save an application. To save a new application the UUID must be empty.
    *        To update an existing application, you must provide the current UUID of the application.
@@ -2385,9 +2421,11 @@ namespace confighttp {
         return;
       }
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
+      const auto previous_image = stored_app_image(fileTree, app_string(inputTree, "uuid"));
 
       // Migrate/merge the new app into the file tree.
       proc::migrate_apps(&fileTree, &inputTree);
@@ -2395,6 +2433,18 @@ namespace confighttp {
       // Write the updated file tree back to disk.
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
       proc::refresh(config::stream.file_apps);
+
+      // A cover chosen here after artwork was picked in Nova takes the poster back.
+      const auto uuid = app_string(inputTree, "uuid");
+      if (game_artwork::yield_picked_poster_to_console_cover(
+            platf::appdata(),
+            uuid,
+            app_image_file(previous_image),
+            app_image_file(app_string(inputTree, "image-path")),
+            platf::appdata() / "covers"
+          )) {
+        BOOST_LOG(info) << "The console cover for " << uuid << " replaces the poster picked in Nova";
+      }
 
       // Prepare and send the output response.
       nlohmann::json outputTree;
@@ -2436,6 +2486,59 @@ namespace confighttp {
     auto uuid = tree["uuid"].get<std::string>();
     if (!game_artwork::is_valid_uuid(uuid)) return std::nullopt;
     return uuid;
+  }
+
+  std::optional<std::string> store_selected_cover(
+    const std::filesystem::path &coverdir,
+    std::string_view uuid,
+    std::string_view mime_type,
+    const std::vector<unsigned char> &body,
+    const std::filesystem::path &keep
+  ) {
+    const std::string extension = mime_type == "image/png" ? ".png" :
+                                  mime_type == "image/jpeg" ? ".jpg" :
+                                  mime_type == "image/webp" ? ".webp" : "";
+    if (!game_artwork::is_valid_uuid(uuid) || extension.empty() || body.empty() ||
+        body.size() > game_artwork::maximum_asset_bytes) {
+      return std::nullopt;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(coverdir, error);
+    if (error) {
+      return std::nullopt;
+    }
+    const auto final_path = coverdir / (std::string(uuid) + extension);
+    const auto temporary = coverdir / (final_path.filename().string() + ".tmp");
+    {
+      std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+      output.write(reinterpret_cast<const char *>(body.data()), static_cast<std::streamsize>(body.size()));
+      if (!output) {
+        std::filesystem::remove(temporary, error);
+        return std::nullopt;
+      }
+    }
+    if (game_artwork::image_mime_type(temporary) != std::optional<std::string> {std::string(mime_type)}) {
+      std::filesystem::remove(temporary, error);
+      return std::nullopt;
+    }
+    std::filesystem::rename(temporary, final_path, error);
+    if (error) {
+      std::error_code cleanup;
+      std::filesystem::remove(temporary, cleanup);
+      return std::nullopt;
+    }
+    // A pick in another format must not leave the earlier one behind: the artwork resolver looks
+    // for `<uuid>` with any image extension, and the older file could win that lookup. The image
+    // the entry still names stays, because a pick the player closes the editor on must not delete
+    // the cover the entry is using.
+    const auto kept = keep.empty() ? std::filesystem::path {} : keep.lexically_normal();
+    for (const auto other : {".png", ".jpg", ".jpeg", ".webp"}) {
+      if (extension == other) continue;
+      const auto stale = coverdir / (std::string(uuid) + other);
+      if (!kept.empty() && stale.lexically_normal() == kept) continue;
+      std::filesystem::remove(stale, error);
+    }
+    return final_path.string();
   }
 
   nlohmann::json apps_with_artwork_lookup_off(const std::filesystem::path &appdata, const nlohmann::json &apps_tree) {
@@ -2554,6 +2657,7 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       nlohmann::json output_tree;
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -2673,6 +2777,7 @@ namespace confighttp {
       }
       auto uuid = input_tree["uuid"].get<std::string>();
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read the apps file into a nlohmann::json object.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -2975,6 +3080,7 @@ namespace confighttp {
       {"uuid", ""},
       {"cmd", ""},
       {"detached", nlohmann::json::array({launcher_command})},
+      {"image-path", "heroic.png"},
       {"source", "heroic"},
       {"auto-detach", true},
       {"wait-all", true},
@@ -3037,9 +3143,7 @@ namespace confighttp {
   namespace {
     // Next to apps.json, wherever that is: the folders belong with the apps they feed.
     std::filesystem::path library_sources_path() {
-      const std::filesystem::path apps_file {config::stream.file_apps};
-      const auto directory = apps_file.has_parent_path() ? apps_file.parent_path() : platf::appdata();
-      return directory / "library_sources.json";
+      return emulator_library::sources_path_for_apps_file(config::stream.file_apps, platf::appdata());
     }
 
     std::vector<emulator_library::source_t> load_library_sources() {
@@ -3103,8 +3207,8 @@ namespace confighttp {
         plan.prerequisites = emulator_library::prerequisites(*plan.preset, plan.install, source.path, home_roots);
         if (plan.install.kind == emulator_library::install_e::missing) {
           plan.warning = plan.install.location.empty() ?
-            plan.label + " is not installed on this host; imported entries launch once it is." :
-            plan.label + " was not found at " + plan.install.location + "; imported entries launch once it is back.";
+            plan.label + " is not installed on this host, so games from this folder will not start until it is." :
+            plan.label + " was not found at " + plan.install.location + ", so games from this folder will not start until it is back.";
         }
         plan.scannable = true;
       } else {
@@ -3135,6 +3239,41 @@ namespace confighttp {
       return (error || canonical.empty() ? rom.lexically_normal() : canonical).string();
     }
 
+    emulator_install::run_result_t run_flatpak_step(const std::vector<std::string> &argv, std::chrono::milliseconds timeout) {
+#ifdef __linux__
+      // Flatpak reports why an install failed on standard error, so both streams are kept.
+      const auto result = platf::run_process_argv_capture(argv, timeout, 4 * 1024 * 1024, {}, true);
+      return {result.exit_status, result.timed_out, result.output};
+#else
+      return {};
+#endif
+    }
+
+    std::optional<std::string> service_flatpak_binary() {
+      if (const auto found = emulator_library::find_on_path("flatpak", service_path_env())) {
+        return found->string();
+      }
+      return std::nullopt;
+    }
+
+    emulator_install::installer_t &emulator_installer() {
+      static emulator_install::installer_t installer {run_flatpak_step, service_flatpak_binary};
+      return installer;
+    }
+
+    nlohmann::json install_job_json(std::string_view emulator_id) {
+      const auto job = emulator_installer().job(emulator_id);
+      if (!job) {
+        return nullptr;
+      }
+      return {
+        {"state", std::string(emulator_install::state_name(job->state))},
+        {"message", job->message},
+        {"started_at", job->started_at},
+        {"finished_at", job->finished_at},
+      };
+    }
+
     nlohmann::json rom_folder_json(const emulator_library::source_t &source, const rom_folder_plan_t &plan) {
       return {
         {"id", source.id},
@@ -3149,6 +3288,8 @@ namespace confighttp {
         {"install", {{"kind", std::string(emulator_library::install_name(plan.install.kind))}, {"location", plan.install.location}}},
         {"warning", plan.warning},
         {"prerequisites", prerequisites_json(plan.prerequisites)},
+        {"installable", plan.preset != nullptr && emulator_installer().installable(*plan.preset)},
+        {"install_job", plan.preset != nullptr ? install_job_json(plan.preset->id) : nlohmann::json(nullptr)},
       };
     }
 
@@ -3179,6 +3320,8 @@ namespace confighttp {
           {"gamepad", std::string(preset.gamepad)},
           {"install", {{"kind", std::string(emulator_library::install_name(install.kind))}, {"location", install.location}}},
           {"prerequisites", prerequisites_json(emulator_library::prerequisites(preset, install, {}, home_roots))},
+          {"installable", emulator_installer().installable(preset)},
+          {"install_job", install_job_json(preset.id)},
         });
       }
       return list;
@@ -3285,6 +3428,55 @@ namespace confighttp {
       return false;
     }
 
+    std::mutex emulator_command_refresh_mutex;
+
+    /**
+     * @brief Point every entry of one emulator at the install this host has now.
+     *
+     * Launch resolves the command anyway; rewriting the saved one keeps what the console
+     * shows equal to what runs. Only entries whose command actually changes are written.
+     */
+    void refresh_emulator_entry_commands(const emulator_library::preset_t &preset) {
+      std::lock_guard lock(emulator_command_refresh_mutex);
+      std::scoped_lock apps_lock(apps_file_mutex());
+      std::error_code error;
+      if (!std::filesystem::is_regular_file(config::stream.file_apps, error)) {
+        return;
+      }
+      auto file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()), nullptr, false);
+      if (file_tree.is_discarded() || !file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+        return;
+      }
+      const auto sources = load_library_sources();
+      const auto home_roots = game_library::library_home_roots();
+      const auto path_env = service_path_env();
+      std::size_t changed = 0;
+      for (auto &app : file_tree["apps"]) {
+        if (!app.is_object() || app.value("source", "") != emulator_library::source_name || app.value("emulator", "") != preset.id) {
+          continue;
+        }
+        const auto rom_path = app.value("rom-path", "");
+        const auto saved_command = app.value("cmd", "");
+        const auto launcher = emulator_library::configured_launcher_for(sources, app.value("rom-folder", ""));
+        if (!emulator_library::generated_entry_command(preset, rom_path, saved_command, launcher)) {
+          continue;  // the player's own command stays theirs
+        }
+        const auto resolved = emulator_library::resolve_entry_launch(preset.id, rom_path, launcher, home_roots, path_env);
+        if (!resolved || resolved->command.empty() || saved_command == resolved->command) {
+          continue;
+        }
+        app["cmd"] = resolved->command;
+        ++changed;
+      }
+      if (changed == 0) {
+        return;
+      }
+      file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+      // An install finishes minutes after the click, maybe mid stream: reload without ending it.
+      proc::refresh(config::stream.file_apps, false);
+      BOOST_LOG(info) << "Pointed " << changed << " " << preset.label << " entr" << (changed == 1 ? "y" : "ies") << " at the installed emulator.";
+    }
+
     // The emulator's own UI, published once next to its games so a stream can reach it.
     void ensure_emulator_launcher_app(nlohmann::json &file_tree, const emulator_library::preset_t &preset, const emulator_library::install_t &install) {
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -3365,6 +3557,16 @@ namespace confighttp {
       return result;
     }
   }  // namespace
+
+  void set_emulator_flatpak_for_tests(std::optional<std::string> flatpak_binary) {
+    emulator_installer().reset_for_tests(run_flatpak_step, [flatpak_binary]() {
+      return flatpak_binary;
+    });
+  }
+
+  bool wait_for_emulator_installs_for_tests(std::chrono::milliseconds timeout) {
+    return emulator_installer().wait_idle_for_tests(timeout);
+  }
 
   nlohmann::json rom_folder_scan_for_tests(const std::set<std::string> &existing_cmds, const std::set<std::string> &existing_rom_paths) {
     const auto scan = scan_rom_folders(existing_cmds, existing_rom_paths);
@@ -3466,6 +3668,58 @@ namespace confighttp {
       output["error"] = e.what();
     }
     send_response(response, output);
+  }
+
+  /**
+   * @brief Install a ROM folder preset's emulator from Flathub, for the account Polaris runs as.
+   *
+   * The body names the preset: `{"emulator": "eden"}`. The install runs in the background
+   * and answers 202 with the job; the folder list carries its progress as `install_job`.
+   * When it finishes, the saved commands of that emulator's entries follow the install.
+   * Only the preset's own Flatpak id is installed; keys, firmware and BIOS images never are.
+   *
+   * @api_examples{/api/library/emulators/install| POST| {"emulator":"eden"}}
+   */
+  void installEmulator(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    const auto body = nlohmann::json::parse(ss.str(), nullptr, false);
+    const auto emulator_it = body.is_object() ? body.find("emulator") : body.end();
+    const auto emulator_id = body.is_object() && emulator_it != body.end() && emulator_it->is_string() ?
+                               boost::trim_copy(emulator_it->get<std::string>()) :
+                               std::string {};
+    const auto *preset = emulator_library::find_preset(emulator_id);
+    if (preset == nullptr) {
+      bad_request(response, request, emulator_id.empty() ? "Name the emulator to install" : "Unknown emulator: " + emulator_id);
+      return;
+    }
+    const std::string label {preset->label};
+    if (!emulator_installer().installable(*preset)) {
+      bad_request(response, request, preset->flatpak_id.empty() ?
+                                       label + " has no Flatpak to install." :
+                                       "Flatpak is not installed on this host, so " + label + " cannot be installed from Flathub. Install Flatpak, or install " + label + " another way.");
+      return;
+    }
+    const auto install = emulator_library::detect_install(*preset, "", game_library::library_home_roots(), service_path_env());
+    if (install.kind != emulator_library::install_e::missing) {
+      send_response(response, SimpleWeb::StatusCode::client_error_conflict, {{"status", false}, {"error", label + " is already installed."}, {"install_job", install_job_json(preset->id)}});
+      return;
+    }
+    switch (emulator_installer().start(*preset, refresh_emulator_entry_commands)) {
+      case emulator_install::start_e::already_running:
+        send_response(response, SimpleWeb::StatusCode::client_error_conflict, {{"status", false}, {"error", label + " is already being installed."}, {"install_job", install_job_json(preset->id)}});
+        return;
+      case emulator_install::start_e::not_installable:
+        bad_request(response, request, label + " cannot be installed from Flathub on this host.");
+        return;
+      case emulator_install::start_e::started:
+        break;
+    }
+    BOOST_LOG(info) << "Installing " << label << " (" << preset->flatpak_id << ") from Flathub for the ROM folders.";
+    send_response(response, SimpleWeb::StatusCode::success_accepted, {{"status", true}, {"install_job", install_job_json(preset->id)}});
   }
 
   /**
@@ -3884,6 +4138,7 @@ namespace confighttp {
         return;
       }
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read existing apps file
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -5682,9 +5937,23 @@ namespace confighttp {
     }
   }
 
+  std::optional<std::string> cover_image_etag(const std::filesystem::path &image) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(image, error);
+    if (error) return std::nullopt;
+    const auto written = std::filesystem::last_write_time(image, error);
+    if (error) return std::nullopt;
+    std::ostringstream tag;
+    tag << '"' << std::hex << std::hash<std::string> {}(image.string()) << '-' << size << '-'
+        << written.time_since_epoch().count() << '"';
+    return tag.str();
+  }
+
   /**
    * @brief Serve a cover art image by app name.
-   * Looks up the app's image-path and serves the PNG file.
+   * Looks up the app's image-path and serves the image file. The URL names the entry, not the
+   * image, so the browser revalidates with the image's entity tag every time: a new cover shows
+   * at once, and an unchanged one answers 304 without its bytes.
    */
   void getCoverImage(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -5735,6 +6004,18 @@ namespace confighttp {
     std::string extension = fs::path(resolved).extension().string();
     boost::to_lower(extension);
 
+    const auto etag = cover_image_etag(resolved);
+    if (etag) {
+      const auto seen = request->header.find("If-None-Match");
+      if (seen != request->header.end() && seen->second == *etag) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("ETag", *etag);
+        headers.emplace("Cache-Control", "no-cache");
+        response->write(SimpleWeb::StatusCode::redirection_not_modified, headers);
+        return;
+      }
+    }
+
     std::ifstream in(resolved, std::ios::binary);
     if (!in) {
       SimpleWeb::CaseInsensitiveMultimap headers;
@@ -5750,7 +6031,8 @@ namespace confighttp {
       extension == ".webp" ? "image/webp" :
       "image/png";
     headers.emplace("Content-Type", content_type);
-    headers.emplace("Cache-Control", "max-age=86400");
+    headers.emplace("Cache-Control", "no-cache");
+    if (etag) headers.emplace("ETag", *etag);
     response->write(content, headers);
   }
 
@@ -5854,129 +6136,277 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  namespace {
+    bool steamgriddb_key_present(std::string_view api_key) {
+      return std::any_of(api_key.begin(), api_key.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+      });
+    }
+
+    // A cover route's failure, with the status and code Nova gets, and an empty list when the route answers with one.
+    void send_cover_failure(resp_https_t response, const game_artwork::manual::search_failure_t &failure, const std::string &list = {}) {
+      nlohmann::json output {
+        {"status", false},
+        {"code", failure.code},
+        {"error", failure.message},
+      };
+      if (!list.empty()) output[list] = nlohmann::json::array();
+      send_response(response, static_cast<SimpleWeb::StatusCode>(failure.http_status), output);
+    }
+  }  // namespace
+
+  /// How long the console's cover search keeps reading matches before answering with what it has.
+  constexpr std::int64_t cover_search_budget_milliseconds = 12'000;
+
   /**
-   * @brief Search SteamGridDB for cover art by game name.
-   * Returns a list of cover art URLs that can be downloaded.
-   * Requires `steamgriddb_api_key` to be set in config.
+   * @brief Search SteamGridDB for covers by name, the same search Nova's Artwork Studio runs.
    *
-   * @api_examples{/api/covers/search| GET| ?name=Elden+Ring}
+   * Takes `name` and `uuid`, the entry's uuid or, for an entry not saved yet, one the console
+   * made up for this search. Each candidate carries an opaque poster token and a preview served
+   * by /api/covers/preview/<token>, so the page never loads an image from outside the host and
+   * its Content-Security-Policy stays as strict as it is. Games SteamGridDB knows but has no
+   * poster for are left out: there is nothing to pick. A failure answers with the status and
+   * code Nova gets (steamgriddb_key_missing, steamgriddb_unauthorized, and so on).
+   *
+   * @api_examples{/api/covers/search| GET| ?name=Heroic&uuid=F727EEEE-A124-040A-6D03-33DF1E45E189}
    */
   void searchCovers(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
 
-    nlohmann::json output;
-
-    const auto answer_search_failure = [&](const game_artwork::manual::search_failure_t &failure) {
-      output["status"] = false;
-      output["code"] = failure.code;
-      output["error"] = failure.message;
-      output["covers"] = nlohmann::json::array();
-      send_response(response, output);
+    const auto answer_failure = [&](const game_artwork::manual::search_failure_t &failure) {
+      send_cover_failure(response, failure, "candidates");
     };
-    const auto configured_key = config::steamgriddb_api_key();
-    const bool key_present = std::any_of(configured_key.begin(), configured_key.end(), [](unsigned char ch) {
-      return !std::isspace(ch);
-    });
-    if (!key_present) {
-      answer_search_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
+    const auto api_key = config::steamgriddb_api_key();
+    if (!steamgriddb_key_present(api_key)) {
+      answer_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
       return;
     }
 
     auto args = request->parse_query_string();
-    auto name_it = args.find("name");
-    if (name_it == args.end() || name_it->second.empty()) {
-      output["status"] = false;
-      output["error"] = "Missing name parameter";
-      send_response(response, output);
+    const auto name_it = args.find("name");
+    const auto uuid_it = args.find("uuid");
+    const auto query = name_it == args.end() ? std::optional<std::string> {} : game_artwork::manual::sanitize_search_query(name_it->second);
+    const std::string uuid = uuid_it == args.end() ? std::string {} : uuid_it->second;
+    if (!query || !game_artwork::is_valid_uuid(uuid)) {
+      bad_request(response, request, "A cover search needs a name and a uuid");
       return;
     }
 
-    std::string game_name = name_it->second;
-    std::string api_key = configured_key;
-
-    // Step 1: Search for the game by name
-    std::string search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" +
-      http::url_escape(game_name);
-
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-      output["status"] = false;
-      output["error"] = "Failed to init HTTP client";
-      send_response(response, output);
-      return;
-    }
-
-    std::string search_response;
-    struct curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, ("Authorization: Bearer " + api_key).c_str());
-
-    curl_easy_setopt(curl, CURLOPT_URL, search_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &search_response);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
-
-    CURLcode res = curl_easy_perform(curl);
-
-    if (res != CURLE_OK) {
-      curl_easy_cleanup(curl);
-      curl_slist_free_all(headers);
-      answer_search_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
-      return;
-    }
-    long search_status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &search_status);
-    if (search_status < 200 || search_status >= 300) {
-      // A rejected key comes back as 401 with no `data`; answering "no covers"
-      // there hid the real cause from the console and from Nova.
-      curl_easy_cleanup(curl);
-      curl_slist_free_all(headers);
-      answer_search_failure(game_artwork::manual::classify_search_failure(true, search_status));
-      return;
-    }
-
-    nlohmann::json covers = nlohmann::json::array();
     try {
-      auto search_data = nlohmann::json::parse(search_response);
-      if (search_data.contains("data") && search_data["data"].is_array() && !search_data["data"].empty()) {
-        int game_id = search_data["data"][0]["id"].get<int>();
-
-        // Step 2: Get grids (cover art) for the game
-        std::string grid_url = "https://www.steamgriddb.com/api/v2/grids/game/" +
-          std::to_string(game_id) + "?dimensions=600x900&limit=5";
-
-        std::string grid_response;
-        curl_easy_setopt(curl, CURLOPT_URL, grid_url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &grid_response);
-
-        res = curl_easy_perform(curl);
-        if (res == CURLE_OK) {
-          auto grid_data = nlohmann::json::parse(grid_response);
-          if (grid_data.contains("data") && grid_data["data"].is_array()) {
-            for (const auto &grid : grid_data["data"]) {
-              nlohmann::json cover;
-              cover["url"] = grid.value("url", "");
-              cover["thumb"] = grid.value("thumb", grid.value("url", ""));
-              cover["width"] = grid.value("width", 600);
-              cover["height"] = grid.value("height", 900);
-              cover["author"] = grid.contains("author") ? grid["author"].value("name", "") : "";
-              covers.push_back(cover);
-            }
-          }
-        }
+      const auto search = game_artwork::manual::search_match_candidates(
+        nvhttp::artwork_candidate_previews(),
+        uuid,
+        *query,
+        nvhttp::artwork_transport(api_key),
+        nvhttp::artwork_clock_milliseconds(),
+        game_artwork::manual::candidate_listing_e::matches_with_posters,
+        // The console's routes share one thread, so a slow SteamGridDB stops the read instead
+        // of holding every page for as long as ten matches can take.
+        game_artwork::manual::search_budget_t {&nvhttp::artwork_clock_milliseconds, cover_search_budget_milliseconds}
+      );
+      if (search.invalid_query) {
+        bad_request(response, request, "A cover search needs a name and a uuid");
+        return;
       }
-    } catch (const std::exception &e) {
-      BOOST_LOG(warning) << "SteamGridDB search error: " << e.what();
+      if (search.failure) {
+        answer_failure(*search.failure);
+        return;
+      }
+      auto candidates = nlohmann::json::array();
+      for (const auto &found : search.candidates) {
+        if (!found.poster_token) {
+          continue;
+        }
+        nlohmann::json candidate {
+          {"title", found.candidate.title},
+          {"provider_game_id", found.candidate.provider_game_id},
+          {"confidence", found.candidate.confidence},
+          {"token", *found.poster_token},
+          {"preview", "./api/covers/preview/" + *found.poster_token + "?uuid=" + uuid},
+          {"expires_at", found.preview_expires_at},
+        };
+        if (found.candidate.release_year) {
+          candidate["release_year"] = *found.candidate.release_year;
+        }
+        if (found.candidate.steam_appid) {
+          candidate["steam_appid"] = *found.candidate.steam_appid;
+        }
+        candidates.push_back(std::move(candidate));
+      }
+      nlohmann::json output {{"status", true}, {"query", *query}, {"candidates", std::move(candidates)}};
+      send_response(response, output);
+    } catch (...) {
+      answer_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
+    }
+  }
+
+  /**
+   * @brief List the posters of a game a cover search found, the alternatives Nova's Artwork Studio offers.
+   *
+   * Takes the uuid the search used and the game a candidate named: its provider_game_id, title
+   * and steam_appid when it had one. Up to five posters come back as opaque tokens with previews
+   * served by /api/covers/preview/<token>. A preview is SteamGridDB's thumbnail; picking it with
+   * /api/covers/select stores the full image. A failure answers the way the search does.
+   *
+   * @api_examples{/api/covers/choices| POST| {"uuid":"F727EEEE-A124-040A-6D03-33DF1E45E189","provider_game_id":"5321091","title":"Heroic Games Launcher"}}
+   */
+  void listCoverChoices(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    const auto api_key = config::steamgriddb_api_key();
+    if (!steamgriddb_key_present(api_key)) {
+      send_cover_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt), "choices");
+      return;
     }
 
-    curl_easy_cleanup(curl);
-    curl_slist_free_all(headers);
+    std::string uuid;
+    std::optional<game_artwork::manual::match_selection_t> game;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      uuid = body.value("uuid", std::string {});
+      // The same identity Nova sends for its alternatives, checked by the same parser.
+      nlohmann::json identity {
+        {"provider", "steamgriddb"},
+        {"provider_game_id", body.value("provider_game_id", std::string {})},
+        {"title", body.value("title", std::string {})},
+      };
+      if (body.contains("steam_appid")) {
+        identity["steam_appid"] = body.value("steam_appid", std::string {});
+      }
+      game = game_artwork::manual::parse_choice_request(identity.dump());
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+      return;
+    }
+    if (!game_artwork::is_valid_uuid(uuid) || !game) {
+      bad_request(response, request, "A poster list needs the uuid and a game from a cover search");
+      return;
+    }
 
-    output["status"] = true;
-    output["covers"] = covers;
-    output["game_name"] = game_name;
+    try {
+      const auto listing = game_artwork::manual::list_artwork_choices(
+        nvhttp::artwork_candidate_previews(),
+        uuid,
+        game_artwork::kind_e::poster,
+        *game,
+        nvhttp::artwork_transport(api_key),
+        nvhttp::artwork_clock_milliseconds()
+      );
+      if (listing.failure) {
+        send_cover_failure(response, *listing.failure, "choices");
+        return;
+      }
+      auto choices = nlohmann::json::array();
+      for (const auto &choice : listing.choices) {
+        choices.push_back({
+          {"token", choice.token},
+          {"preview", "./api/covers/preview/" + choice.token + "?uuid=" + uuid},
+          {"expires_at", choice.expires_at},
+        });
+      }
+      send_response(response, nlohmann::json {{"status", true}, {"choices", std::move(choices)}});
+    } catch (...) {
+      send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), "choices");
+    }
+  }
+
+  /**
+   * @brief Serve a poster preview a cover search published, for the console's candidate tiles.
+   *
+   * @api_examples{/api/covers/preview/<token>| GET| ?uuid=F727EEEE-A124-040A-6D03-33DF1E45E189}
+   */
+  void previewCover(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+
+    const std::string token = request->path_match.size() > 1 ? request->path_match[1].str() : std::string {};
+    auto args = request->parse_query_string();
+    const auto uuid_it = args.find("uuid");
+    const std::string uuid = uuid_it == args.end() ? std::string {} : uuid_it->second;
+    if (!game_artwork::is_valid_uuid(uuid)) {
+      bad_request(response, request, "A cover preview needs a uuid");
+      return;
+    }
+    const auto preview = nvhttp::artwork_candidate_previews().lookup(
+      uuid, token, game_artwork::kind_e::poster, nvhttp::artwork_clock_milliseconds());
+    if (!preview) {
+      not_found(response, request);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_common_security_headers(headers);
+    headers.emplace("Content-Type", preview->mime_type);
+    headers.emplace("Cache-Control", "private, no-store");
+    const std::string body(preview->body.begin(), preview->body.end());
+    response->write(SimpleWeb::StatusCode::success_ok, body, headers);
+  }
+
+  /**
+   * @brief Store the cover picked from a search as `<uuid>.<ext>` in the covers directory.
+   *
+   * The image is the preview the search already fetched from an allowlisted SteamGridDB address;
+   * nothing is downloaded here, and the file name comes from a validated uuid. The console puts
+   * the returned path in the entry's Image field, and saving the entry keeps it.
+   *
+   * @api_examples{/api/covers/select| POST| {"uuid":"F727EEEE-A124-040A-6D03-33DF1E45E189","token":"0123456789abcdef0123456789abcdef"}}
+   */
+  void selectCover(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    std::string uuid;
+    std::string token;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      uuid = body.value("uuid", std::string {});
+      token = body.value("token", std::string {});
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+      return;
+    }
+    if (!game_artwork::is_valid_uuid(uuid) || token.empty()) {
+      bad_request(response, request, "A cover pick needs the uuid and token from its search");
+      return;
+    }
+
+    const auto preview = nvhttp::artwork_candidate_previews().lookup(
+      uuid, token, game_artwork::kind_e::poster, nvhttp::artwork_clock_milliseconds());
+    if (!preview) {
+      nlohmann::json output {
+        {"status", false},
+        {"code", "cover_preview_expired"},
+        {"error", "That cover is no longer available. Search again and pick it once more."},
+      };
+      send_response(response, SimpleWeb::StatusCode::client_error_gone, output);
+      return;
+    }
+    // A poster from a game's list previews as a thumbnail; the cover is the full image behind it.
+    const auto picked = game_artwork::manual::cover_image_for_pick(*preview, nvhttp::artwork_transport(config::steamgriddb_api_key()));
+    if (!picked.image) {
+      send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)));
+      return;
+    }
+    // The cover the entry names today survives a pick the player does not save.
+    std::filesystem::path keep;
+    for (const auto &app : proc::proc.get_apps()) {
+      if (app.uuid == uuid) {
+        keep = app.image_path;
+        break;
+      }
+    }
+    const auto path = store_selected_cover(
+      platf::appdata() / "covers", uuid, picked.image->mime_type, picked.image->body, keep);
+    if (!path) {
+      nlohmann::json output {{"status", false}, {"code", "cover_not_saved"}, {"error", "The cover could not be saved on the host."}};
+      send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error, output);
+      return;
+    }
+    nlohmann::json output {{"status", true}, {"path", *path}};
     send_response(response, output);
   }
 
@@ -8838,6 +9268,7 @@ namespace confighttp {
     server.resource["^/api/library/sources$"]["GET"] = getLibrarySources;
     server.resource["^/api/library/sources$"]["POST"] = withCsrf(addLibrarySource);
     server.resource["^/api/library/sources/([^/]+)$"]["DELETE"] = withCsrf(deleteLibrarySource);
+    server.resource["^/api/library/emulators/install$"]["POST"] = withCsrf(installEmulator);
     server.resource["^/polaris/v1/diagnostics/logs/tail$"]["GET"] = getLogTail;
     server.resource["^/polaris/v1/diagnostics/logs/previous$"]["GET"] = getPreviousLogs;
     server.resource["^/polaris/v1/diagnostics/kernel-gpu$"]["GET"] = getKernelGpuMessages;
@@ -8886,6 +9317,9 @@ namespace confighttp {
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);
     server.resource["^/api/covers/image$"]["GET"] = getCoverImage;
     server.resource["^/api/covers/search$"]["GET"] = searchCovers;
+    server.resource["^/api/covers/choices$"]["POST"] = withCsrf(listCoverChoices);
+    server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;
+    server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
     server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
     server.resource["^/api/covers/download$"]["POST"] = withCsrf(downloadCover);
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;

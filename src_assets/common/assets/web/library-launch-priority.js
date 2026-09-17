@@ -25,10 +25,16 @@ export function appLastLaunched(app = {}) {
   return RECENT_KEYS.reduce((latest, key) => Math.max(latest, numericTimestamp(app?.[key])), 0)
 }
 
+// A command that starts the entry: its own cmd, or a detached one, which is how
+// launcher entries such as Heroic and Lutris start.
+export function hasLaunchCommand(app = {}) {
+  if (normalizeText(app?.cmd)) return true
+  return Array.isArray(app?.detached) && app.detached.some((command) => normalizeText(command))
+}
+
 export function isLaunchReadyApp(app = {}) {
   if (!app?.uuid) return false
-  if (normalizeText(app.cmd)) return true
-  if (Array.isArray(app.detached) && app.detached.some((command) => normalizeText(command))) return true
+  if (hasLaunchCommand(app)) return true
   if (Array.isArray(app['prep-cmd']) && app['prep-cmd'].length > 0) return true
   if (Array.isArray(app['state-cmd']) && app['state-cmd'].length > 0) return true
   return normalizeText(app.name).toLowerCase() === 'desktop'
