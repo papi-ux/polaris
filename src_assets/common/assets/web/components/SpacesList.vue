@@ -110,6 +110,7 @@ import ConfirmActionDialog from './ConfirmActionDialog.vue'
 import SpaceAccess from './SpaceAccess.vue'
 import StatusBadge from './StatusBadge.vue'
 import { permissionMapping } from '../composables/useClients.js'
+import { deviceNameLabels } from '../device-names.js'
 import { useToast } from '../composables/useToast.js'
 
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
@@ -129,7 +130,8 @@ let opener = null
 const pending = ref(null), submitted = ref(false)
 const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 && !/[\u0000-\u001f\u007f]/u.test(name.value))
 const canLaunch = client => client && !client.temporary_authorization && (Number(client.perm) & permissionMapping.launch) !== 0
-const deviceName = device => device?.friendly_name || device?.name || t('spaces.paired_device')
+const nameLabels = computed(() => deviceNameLabels(props.clients, { t, fallback: t('spaces.paired_device') }))
+const deviceName = device => nameLabels.value.get(device?.uuid) || device?.friendly_name || device?.name || t('spaces.paired_device')
 
 // Remove on a card offers a choice only when the host can remove for good.
 // Archive stays selected: deleting games and saves is never the default.

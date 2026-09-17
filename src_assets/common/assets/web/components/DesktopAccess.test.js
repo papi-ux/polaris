@@ -13,6 +13,16 @@ it('never grants desktop access implicitly and excludes guests', () => {
   expect(wrapper.find('input').element.checked).toBe(false)
   expect(wrapper.text()).not.toContain('Guest')
 })
+it('tells same-named devices apart in the list and in each checkbox label', () => {
+  start(async () => true, { clients: [
+    { uuid: 'rp6', name: 'RetroidPocket6', perm: 0x04000000, paired_at: 1789593894 },
+    { uuid: 'rp6-debug', name: 'RetroidPocket6', perm: 0x04000000, paired_at: 1789600000 },
+  ] })
+  const labels = wrapper.findAll('input').map(input => input.attributes('aria-label'))
+  expect(labels).toHaveLength(2)
+  expect(labels.every(label => /^Allow Desktop for RetroidPocket6 \(paired .+\)$/.test(label))).toBe(true)
+  expect(labels[0]).not.toBe(labels[1])
+})
 it('says when no device can be granted Desktop', () => {
   start(async () => true, { clients: [clients[1]] })
   expect(wrapper.findAll('input')).toHaveLength(0)

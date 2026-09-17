@@ -8,6 +8,9 @@ export function validSnapshot(next) {
   if (next.desktop_clients !== undefined && (!Array.isArray(next.desktop_clients) ||
       next.desktop_clients.some(id => typeof id !== 'string' || !id) ||
       new Set(next.desktop_clients).size !== next.desktop_clients.length)) return false
+  if (next.desktop_default_clients !== undefined && (!Array.isArray(next.desktop_default_clients) ||
+      next.desktop_default_clients.some(id => typeof id !== 'string' || !id) ||
+      new Set(next.desktop_default_clients).size !== next.desktop_default_clients.length)) return false
   const profiles = new Set(), clients = new Set()
   for (const profile of next.profiles) {
     if (!profile || typeof profile.id !== 'string' || !profile.id || profiles.has(profile.id) ||
@@ -25,6 +28,8 @@ export function validSnapshot(next) {
       clients.add(id)
     }
   }
+  // One Default Space per device: Desktop or a Space, never both.
+  if ((next.desktop_default_clients || []).some(id => clients.has(id))) return false
   if (next.activity !== undefined && (!Array.isArray(next.activity) || next.activity.length > 4096 ||
       next.activity.some(item => !item || !profiles.has(item.profile_id) ||
         typeof item.client_id !== 'string' || !item.client_id ||
