@@ -59,4 +59,13 @@ namespace confighttp::validation {
    * @brief Whether any changed key still needs a restart before it takes effect.
    */
   bool config_change_requires_restart(const std::vector<std::string> &changed_keys);
+
+  /**
+   * @brief Whether a written configuration file still needs a restart to take effect.
+   * @details Some key the running host does not apply live differs from the file the process loaded
+   *          at start. An earlier unrestarted change keeps counting across saves, and a change reverted
+   *          to its loaded value needs no restart.
+   */
+  bool written_config_requires_restart(const std::unordered_map<std::string, std::string> &loaded,
+                                       const std::unordered_map<std::string, std::string> &written);
 }  // namespace confighttp::validation

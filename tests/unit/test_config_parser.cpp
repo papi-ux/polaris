@@ -288,6 +288,21 @@ TEST(ConfigNewInstallTests, ANewInstallStartsInPrivateStreamWhenItCanRun) {
   EXPECT_EQ(vars.at("linux_stream_mode"), "headless_stream");
 }
 
+TEST(ConfigLoadedFileTests, ParseKeepsTheFileItReadBeforeCommandLineOverrides) {
+  // Settings saves judge restart_required against these variables, so they must be the file
+  // itself: command line overrides are not in the file a save writes.
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto read = source.find("auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));");
+  ASSERT_NE(read, std::string::npos);
+  const auto keep = source.find("loaded_config_file = vars;", read);
+  ASSERT_NE(keep, std::string::npos);
+  const auto overrides = source.find("for (auto &[name, value] : cmd_vars)", read);
+  ASSERT_NE(overrides, std::string::npos);
+  EXPECT_LT(keep, overrides);
+}
+
 TEST(ConfigNewInstallTests, OnlyTheFileCreationWritesTheNewInstallDefault) {
   std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
   ASSERT_TRUE(in);

@@ -419,6 +419,38 @@ TEST(ConfigLiveApplyTests, TheTrustedNetworkAppliesWithoutARestart) {
   EXPECT_TRUE(config_change_requires_restart({"linux_stream_mode"}));
 }
 
+TEST(ConfigLiveApplyTests, RestartIsJudgedAgainstTheFileTheProcessLoaded) {
+  using confighttp::validation::written_config_requires_restart;
+  const std::unordered_map<std::string, std::string> loaded {{"encoder", "nvenc"}, {"port", "47989"}};
+  EXPECT_FALSE(written_config_requires_restart(loaded, loaded));
+  // An encoder change waits for a restart.
+  auto written = loaded;
+  written["encoder"] = "software";
+  EXPECT_TRUE(written_config_requires_restart(loaded, written));
+  // A later save that only adds a live key still says so: the encoder change is not live yet.
+  written["steamgriddb_api_key"] = "key";
+  EXPECT_TRUE(written_config_requires_restart(loaded, written));
+  // Put back to what was loaded, only the live key is left changed, and that needs no restart.
+  written["encoder"] = "nvenc";
+  EXPECT_FALSE(written_config_requires_restart(loaded, written));
+}
+
+TEST(ConfigLiveApplyTests, SettingsSavesJudgeTheRestartAgainstTheLoadedFile) {
+  // A save used to compare the file after it with the file before it, so saving a SteamGridDB key
+  // after an unrestarted encoder change answered restart_required false and hid Restart Now.
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/confighttp.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto start = source.find("bool write_config_tree(");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("\n  }\n", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  EXPECT_NE(body.find("config::loaded_config_file_vars()"), std::string::npos);
+  EXPECT_NE(body.find("validation::written_config_requires_restart("), std::string::npos);
+  EXPECT_EQ(body.find("config_change_requires_restart(changed)"), std::string::npos);
+}
+
 TEST(ConfigLiveApplyTests, PairingReadsTheTrustedNetworkThroughTheLockedAccessors) {
   // A save applies the trusted network while the pairing server's threads read it, so nvhttp
   // reads locked copies and the save hands the written values to the running host.

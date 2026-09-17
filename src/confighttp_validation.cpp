@@ -732,4 +732,9 @@ namespace confighttp::validation {
       return !is_live_applied_config_key(key);
     });
   }
+
+  bool written_config_requires_restart(const std::unordered_map<std::string, std::string> &loaded,
+                                       const std::unordered_map<std::string, std::string> &written) {
+    return config_change_requires_restart(changed_config_keys(loaded, written));
+  }
 }  // namespace confighttp::validation

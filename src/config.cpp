@@ -532,6 +532,9 @@ namespace config {
 
     std::mutex steamgriddb_api_key_mutex;
     std::mutex trusted_network_mutex;
+    // What parse() read from the configuration file, before command line overrides.
+    std::mutex loaded_config_file_mutex;
+    std::optional<std::unordered_map<std::string, std::string>> loaded_config_file;
   }  // namespace
 
   video_t video {
@@ -1354,6 +1357,11 @@ namespace config {
     return private_stream_available ? "linux_stream_mode = headless_stream\n" : std::string {};
   }
 
+  std::optional<std::unordered_map<std::string, std::string>> loaded_config_file_vars() {
+    std::lock_guard<std::mutex> lock(loaded_config_file_mutex);
+    return loaded_config_file;
+  }
+
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
@@ -1880,6 +1888,11 @@ namespace config {
 
       // Read config file
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
+      {
+        // Settings saves judge a restart against this file, not against the file before each save.
+        std::lock_guard<std::mutex> lock(loaded_config_file_mutex);
+        loaded_config_file = vars;
+      }
 
       for (auto &[name, value] : cmd_vars) {
         vars.insert_or_assign(std::move(name), std::move(value));

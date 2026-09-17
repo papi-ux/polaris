@@ -5503,7 +5503,11 @@ namespace confighttp {
     auto written_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     const auto changed = validation::changed_config_keys(existing_vars, written_vars);
     if (restart_required) {
-      *restart_required = validation::config_change_requires_restart(changed);
+      // Against the file this process loaded at start, not the file before this save: an earlier
+      // change that still waits for a restart keeps saying so, and one reverted needs none. A process
+      // that never read a configuration file compares against the file before this save.
+      const auto loaded = config::loaded_config_file_vars();
+      *restart_required = validation::written_config_requires_restart(loaded ? *loaded : existing_vars, written_vars);
     }
     if (std::find(changed.begin(), changed.end(), "steamgriddb_api_key") != changed.end()) {
       const auto it = written_vars.find("steamgriddb_api_key");

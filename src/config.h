@@ -491,4 +491,12 @@ namespace config {
    * @return Private Stream as the stream mode when it can run, otherwise nothing, which leaves Mirror Desktop.
    */
   std::string new_install_config(bool private_stream_available);
+
+  /**
+   * @brief The configuration file's variables as this process read them at startup, before command
+   *        line overrides, or nothing before the file was read. Safe to call from any thread.
+   * @details A settings save compares the file it wrote against these, so an earlier change that still
+   *          waits for a restart keeps saying so, and a change reverted to its loaded value needs none.
+   */
+  std::optional<std::unordered_map<std::string, std::string>> loaded_config_file_vars();
 }  // namespace config
