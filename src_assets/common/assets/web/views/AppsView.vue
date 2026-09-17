@@ -759,7 +759,7 @@
                       <button type="submit" class="app-editor-secondary-button" :disabled="coverSearching || !coverQuery.trim()">Search</button>
                     </form>
                     <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }" aria-live="polite">
-                      <div v-if="coverSearching" class="flex items-center gap-2 text-sm text-storm" data-cover-state="searching">
+                      <div v-if="coverSearching && !coverGame" class="flex items-center gap-2 text-sm text-storm" data-cover-state="searching">
                         <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
                         <span>Searching SteamGridDB for "{{ coverSearchedQuery }}"</span>
                       </div>
@@ -767,17 +767,34 @@
                         <p>{{ coverError }}</p>
                         <a v-if="coverNeedsKey" href="#/config#steamgriddb_api_key" target="_blank" rel="noopener" class="mt-1 inline-block text-ice hover:underline" data-cover-key-link>Open the SteamGridDB API key setting</a>
                       </div>
-                      <p v-if="!coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-storm" data-cover-state="empty">
+                      <p v-if="!coverGame && !coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-storm" data-cover-state="empty">
                         No covers found for "{{ coverSearchedQuery }}". Try a shorter or different name.
                       </p>
-                      <div v-if="!coverSearching && coverCandidates.length" class="grid grid-cols-3 gap-3">
-                        <button v-for="cover in coverCandidates" :key="cover.token" type="button" class="min-w-0 text-left cursor-pointer hover:opacity-80 transition" :title="coverLabel(cover)" data-cover-candidate @click="useCover(cover)">
+                      <div v-if="!coverGame && !coverSearching && coverCandidates.length" class="grid grid-cols-3 gap-3">
+                        <button v-for="cover in coverCandidates" :key="cover.token" type="button" class="min-w-0 text-left cursor-pointer hover:opacity-80 transition" :title="`Posters for ${coverLabel(cover)}`" data-cover-candidate @click="openCoverGame(cover)">
                           <span class="cover-container block">
                             <img class="rounded" :src="cover.preview" :alt="coverLabel(cover)" />
                           </span>
                           <span class="block text-xs text-center text-silver truncate mt-1">{{ cover.title }}</span>
                           <span v-if="cover.release_year" class="block text-xs text-center text-storm">{{ cover.release_year }}</span>
                         </button>
+                      </div>
+                      <div v-if="coverGame" data-cover-game>
+                        <div class="mb-3 flex items-center gap-2">
+                          <button type="button" class="app-editor-secondary-button shrink-0" data-cover-back @click="closeCoverGame">All matches</button>
+                          <p class="min-w-0 truncate text-sm text-silver" :title="coverLabel(coverGame)">{{ coverLabel(coverGame) }}</p>
+                        </div>
+                        <div v-if="coverChoicesLoading" class="flex items-center gap-2 text-sm text-storm" data-cover-state="loading-posters">
+                          <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
+                          <span>Loading posters for "{{ coverGame.title }}"</span>
+                        </div>
+                        <div v-else class="grid grid-cols-3 gap-3">
+                          <button v-for="(poster, index) in coverPosters" :key="poster.token" type="button" class="min-w-0 cursor-pointer hover:opacity-80 transition" :title="posterLabel(index)" data-cover-poster @click="useCover(poster)">
+                            <span class="cover-container block">
+                              <img class="rounded" :src="poster.preview" :alt="posterLabel(index)" />
+                            </span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1340,6 +1357,16 @@ const coverSearchedQuery = ref("")
 const coverError = ref("")
 const coverErrorCode = ref("")
 const coverNeedsKey = computed(() => ['steamgriddb_key_missing', 'steamgriddb_unauthorized'].includes(coverErrorCode.value))
+// A game picked from the matches lists its posters, as Nova's Artwork Studio does. Its search
+// poster stands in when the list comes back empty or fails, so there is always one to pick.
+const coverGame = ref(null)
+const coverChoices = ref([])
+const coverChoicesLoading = ref(false)
+const coverPosters = computed(() => {
+  if (coverChoices.value.length) return coverChoices.value
+  return coverGame.value ? [coverGame.value] : []
+})
+let coverChoicesSequence = 0
 // Launcher entries such as Heroic and Lutris start through a detached command.
 const editHasLaunchCommand = computed(() => hasLaunchCommand(editForm.value))
 let coverSearchUuid = ""
@@ -1816,6 +1843,10 @@ function coverScopeUuid() {
 
 function resetCoverFinder() {
   coverSearchSequence += 1
+  coverChoicesSequence += 1
+  coverGame.value = null
+  coverChoices.value = []
+  coverChoicesLoading.value = false
   coverFinderOpen.value = false
   coverSearching.value = false
   coverFinderBusy.value = false
@@ -1829,6 +1860,10 @@ function resetCoverFinder() {
 
 function coverLabel(cover) {
   return cover.release_year ? `${cover.title} (${cover.release_year})` : cover.title
+}
+
+function posterLabel(index) {
+  return coverGame.value ? `Poster ${index + 1} for ${coverLabel(coverGame.value)}` : `Poster ${index + 1}`
 }
 
 function showCoverFinder() {
@@ -1847,6 +1882,7 @@ function showCoverFailure(response, body, fallback) {
 async function searchCovers() {
   const query = coverQuery.value.trim()
   if (!query) return
+  closeCoverGame()
   const sequence = ++coverSearchSequence
   coverSearching.value = true
   coverSearchedQuery.value = query
@@ -1875,6 +1911,50 @@ async function searchCovers() {
 
 function closeCoverFinder() {
   coverFinderOpen.value = false
+}
+
+function closeCoverGame() {
+  coverChoicesSequence += 1
+  coverGame.value = null
+  coverChoices.value = []
+  coverChoicesLoading.value = false
+  coverError.value = ""
+  coverErrorCode.value = ""
+}
+
+async function openCoverGame(game) {
+  if (coverFinderBusy.value) return
+  const uuid = coverScopeUuid()
+  const sequence = ++coverChoicesSequence
+  coverGame.value = game
+  coverChoices.value = []
+  coverChoicesLoading.value = true
+  coverError.value = ""
+  coverErrorCode.value = ""
+  try {
+    const request = { uuid, provider_game_id: game.provider_game_id, title: game.title }
+    if (game.steam_appid) request.steam_appid = game.steam_appid
+    const response = await fetch("./api/covers/choices", {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+    const body = await response.json().catch(() => null)
+    if (sequence !== coverChoicesSequence) return
+    if (!response.ok || body?.status !== true) {
+      showCoverFailure(response, body, 'Polaris could not list the posters for that game')
+      return
+    }
+    const choices = Array.isArray(body.choices) ? body.choices : []
+    coverChoices.value = choices.filter(choice => choice?.token && choice?.preview)
+  } catch {
+    if (sequence !== coverChoicesSequence) return
+    coverErrorCode.value = ""
+    coverError.value = "Polaris could not list the posters. Check the connection to the host and try again."
+  } finally {
+    if (sequence === coverChoicesSequence) coverChoicesLoading.value = false
+  }
 }
 
 async function useCover(cover) {

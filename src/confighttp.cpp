@@ -6087,6 +6087,25 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  namespace {
+    bool steamgriddb_key_present(std::string_view api_key) {
+      return std::any_of(api_key.begin(), api_key.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+      });
+    }
+
+    // A cover route's failure, with the status and code Nova gets, and an empty list when the route answers with one.
+    void send_cover_failure(resp_https_t response, const game_artwork::manual::search_failure_t &failure, const std::string &list = {}) {
+      nlohmann::json output {
+        {"status", false},
+        {"code", failure.code},
+        {"error", failure.message},
+      };
+      if (!list.empty()) output[list] = nlohmann::json::array();
+      send_response(response, static_cast<SimpleWeb::StatusCode>(failure.http_status), output);
+    }
+  }  // namespace
+
   /**
    * @brief Search SteamGridDB for covers by name, the same search Nova's Artwork Studio runs.
    *
@@ -6104,19 +6123,10 @@ namespace confighttp {
     print_req(request);
 
     const auto answer_failure = [&](const game_artwork::manual::search_failure_t &failure) {
-      nlohmann::json output {
-        {"status", false},
-        {"code", failure.code},
-        {"error", failure.message},
-        {"candidates", nlohmann::json::array()},
-      };
-      send_response(response, static_cast<SimpleWeb::StatusCode>(failure.http_status), output);
+      send_cover_failure(response, failure, "candidates");
     };
     const auto api_key = config::steamgriddb_api_key();
-    const bool key_present = std::any_of(api_key.begin(), api_key.end(), [](unsigned char ch) {
-      return !std::isspace(ch);
-    });
-    if (!key_present) {
+    if (!steamgriddb_key_present(api_key)) {
       answer_failure(game_artwork::manual::classify_search_failure(false, std::nullopt));
       return;
     }
@@ -6155,6 +6165,7 @@ namespace confighttp {
         }
         nlohmann::json candidate {
           {"title", found.candidate.title},
+          {"provider_game_id", found.candidate.provider_game_id},
           {"confidence", found.candidate.confidence},
           {"token", *found.poster_token},
           {"preview", "./api/covers/preview/" + *found.poster_token + "?uuid=" + uuid},
@@ -6163,12 +6174,88 @@ namespace confighttp {
         if (found.candidate.release_year) {
           candidate["release_year"] = *found.candidate.release_year;
         }
+        if (found.candidate.steam_appid) {
+          candidate["steam_appid"] = *found.candidate.steam_appid;
+        }
         candidates.push_back(std::move(candidate));
       }
       nlohmann::json output {{"status", true}, {"query", *query}, {"candidates", std::move(candidates)}};
       send_response(response, output);
     } catch (...) {
       answer_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
+    }
+  }
+
+  /**
+   * @brief List the posters of a game a cover search found, the alternatives Nova's Artwork Studio offers.
+   *
+   * Takes the uuid the search used and the game a candidate named: its provider_game_id, title
+   * and steam_appid when it had one. Up to five posters come back as opaque tokens with previews
+   * served by /api/covers/preview/<token>. A preview is SteamGridDB's thumbnail; picking it with
+   * /api/covers/select stores the full image. A failure answers the way the search does.
+   *
+   * @api_examples{/api/covers/choices| POST| {"uuid":"F727EEEE-A124-040A-6D03-33DF1E45E189","provider_game_id":"5321091","title":"Heroic Games Launcher"}}
+   */
+  void listCoverChoices(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    const auto api_key = config::steamgriddb_api_key();
+    if (!steamgriddb_key_present(api_key)) {
+      send_cover_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt), "choices");
+      return;
+    }
+
+    std::string uuid;
+    std::optional<game_artwork::manual::match_selection_t> game;
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      const auto body = nlohmann::json::parse(ss.str());
+      uuid = body.value("uuid", std::string {});
+      // The same identity Nova sends for its alternatives, checked by the same parser.
+      nlohmann::json identity {
+        {"provider", "steamgriddb"},
+        {"provider_game_id", body.value("provider_game_id", std::string {})},
+        {"title", body.value("title", std::string {})},
+      };
+      if (body.contains("steam_appid")) {
+        identity["steam_appid"] = body.value("steam_appid", std::string {});
+      }
+      game = game_artwork::manual::parse_choice_request(identity.dump());
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+      return;
+    }
+    if (!game_artwork::is_valid_uuid(uuid) || !game) {
+      bad_request(response, request, "A poster list needs the uuid and a game from a cover search");
+      return;
+    }
+
+    try {
+      const auto listing = game_artwork::manual::list_artwork_choices(
+        nvhttp::artwork_candidate_previews(),
+        uuid,
+        game_artwork::kind_e::poster,
+        *game,
+        nvhttp::artwork_transport(api_key),
+        nvhttp::artwork_clock_milliseconds()
+      );
+      if (listing.failure) {
+        send_cover_failure(response, *listing.failure, "choices");
+        return;
+      }
+      auto choices = nlohmann::json::array();
+      for (const auto &choice : listing.choices) {
+        choices.push_back({
+          {"token", choice.token},
+          {"preview", "./api/covers/preview/" + choice.token + "?uuid=" + uuid},
+          {"expires_at", choice.expires_at},
+        });
+      }
+      send_response(response, nlohmann::json {{"status", true}, {"choices", std::move(choices)}});
+    } catch (...) {
+      send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), "choices");
     }
   }
 
@@ -6243,7 +6330,13 @@ namespace confighttp {
       send_response(response, SimpleWeb::StatusCode::client_error_gone, output);
       return;
     }
-    const auto path = store_selected_cover(platf::appdata() / "covers", uuid, preview->mime_type, preview->body);
+    // A poster from a game's list previews as a thumbnail; the cover is the full image behind it.
+    const auto picked = game_artwork::manual::cover_image_for_pick(*preview, nvhttp::artwork_transport(config::steamgriddb_api_key()));
+    if (!picked.image) {
+      send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)));
+      return;
+    }
+    const auto path = store_selected_cover(platf::appdata() / "covers", uuid, picked.image->mime_type, picked.image->body);
     if (!path) {
       nlohmann::json output {{"status", false}, {"code", "cover_not_saved"}, {"error", "The cover could not be saved on the host."}};
       send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error, output);
@@ -9160,6 +9253,7 @@ namespace confighttp {
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);
     server.resource["^/api/covers/image$"]["GET"] = getCoverImage;
     server.resource["^/api/covers/search$"]["GET"] = searchCovers;
+    server.resource["^/api/covers/choices$"]["POST"] = withCsrf(listCoverChoices);
     server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;
     server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
     server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);

@@ -475,6 +475,66 @@ TEST(GameArtworkManualPreviewCache, ChoiceTokensAreOpaqueScopedAndExpire) {
   EXPECT_EQ(cache.size(), 0);
 }
 
+TEST(GameArtworkManualChoices, FindCoverStoresTheFullImageBehindAListedPoster) {
+  const std::string full_url = "https://cdn2.steamgriddb.com/grid/full.png";
+  const std::string thumb_url = "https://cdn2.steamgriddb.com/thumb/full.jpg";
+  fake_steamgriddb_t steamgriddb;
+  steamgriddb.list(POSTER_LIST_URL, {steamgriddb_image(1, full_url, thumb_url)});
+  steamgriddb.serve(thumb_url, jpeg(1));
+  steamgriddb.serve(full_url, png(9));
+
+  auto cache = sequential_cache();
+  const auto listing = game_artwork::manual::list_artwork_choices(
+    cache, GAME_UUID, kind_e::poster, choice_identity(), steamgriddb.transport(), 1'000);
+  ASSERT_FALSE(listing.failure.has_value());
+  ASSERT_EQ(listing.choices.size(), 1);
+  const auto listed = cache.lookup(GAME_UUID, listing.choices[0].token, kind_e::poster, 2'000);
+  ASSERT_TRUE(listed.has_value());
+  // The list previews SteamGridDB's thumbnail.
+  EXPECT_EQ(listed->body, jpeg(1));
+
+  // Picking it downloads the full image once, without the key, within the asset bound.
+  steamgriddb.requests.clear();
+  steamgriddb.limits.clear();
+  const auto picked = game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport());
+  EXPECT_FALSE(picked.failure.has_value());
+  ASSERT_TRUE(picked.image.has_value());
+  EXPECT_EQ(picked.image->body, png(9));
+  EXPECT_EQ(picked.image->mime_type, "image/png");
+  ASSERT_EQ(steamgriddb.requests.size(), 1);
+  EXPECT_EQ(steamgriddb.requests[0].url, full_url);
+  EXPECT_FALSE(steamgriddb.requests[0].requires_authorization);
+  EXPECT_EQ(steamgriddb.limits[0], game_artwork::maximum_asset_bytes);
+
+  // A search's poster preview already is the full image, so nothing is downloaded for it.
+  const auto searched = cache.publish(GAME_UUID, kind_e::poster, png(5), 1'000);
+  ASSERT_TRUE(searched.has_value());
+  const auto searched_preview = cache.lookup(GAME_UUID, searched->token, kind_e::poster, 2'000);
+  ASSERT_TRUE(searched_preview.has_value());
+  steamgriddb.requests.clear();
+  const auto search_pick = game_artwork::manual::cover_image_for_pick(*searched_preview, steamgriddb.transport());
+  ASSERT_TRUE(search_pick.image.has_value());
+  EXPECT_EQ(search_pick.image->body, png(5));
+  EXPECT_TRUE(steamgriddb.requests.empty());
+
+  // A full image that fails, is not an image or arrives from off the allowlist is never kept.
+  steamgriddb.responses[full_url] = {404, {}, {}};
+  const auto missing = game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport());
+  EXPECT_FALSE(missing.image.has_value());
+  EXPECT_TRUE(missing.failure.has_value());
+  const std::string text = "not an image";
+  steamgriddb.responses[full_url] = {200, {text.begin(), text.end()}, {}};
+  EXPECT_FALSE(game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport()).image.has_value());
+  steamgriddb.responses[full_url] = {200, png(9), "https://evil.example/grid/full.png"};
+  EXPECT_FALSE(game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport()).image.has_value());
+  auto tampered = *listed;
+  tampered.choice->asset_url = "https://evil.example/grid/full.png";
+  steamgriddb.requests.clear();
+  const auto refused = game_artwork::manual::cover_image_for_pick(tampered, steamgriddb.transport());
+  EXPECT_EQ(code_of(refused.failure), "artwork_choice_expired");
+  EXPECT_TRUE(steamgriddb.requests.empty());
+}
+
 TEST(GameArtworkManualChoices, ListsBoundedAllowlistedChoicesInTheShapeNovaParses) {
   using game_artwork::manual::route_e;
   fake_steamgriddb_t steamgriddb;

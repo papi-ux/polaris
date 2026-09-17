@@ -146,6 +146,21 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_NE(select.find("artwork_candidate_previews().lookup("), std::string::npos);
   EXPECT_NE(select.find("store_selected_cover("), std::string::npos);
   EXPECT_EQ(select.find("download_file"), std::string::npos);
+  // A listed poster previews as a thumbnail, so the pick stores the full image behind it.
+  EXPECT_LT(select.find("cover_image_for_pick("), select.find("store_selected_cover("));
+  EXPECT_NE(select.find("store_selected_cover(platf::appdata() / \"covers\", uuid, picked.image->mime_type, picked.image->body)"),
+            std::string::npos);
+
+  // A game's posters: Nova's alternatives listing for the poster kind, behind the console session and CSRF.
+  EXPECT_NE(search.find(R"({"provider_game_id", found.candidate.provider_game_id})"), std::string::npos);
+  const auto choices = handler_body(source, "void listCoverChoices(");
+  EXPECT_NE(choices.find("validateContentType(response, request, \"application/json\") || !authenticate(response, request)"),
+            std::string::npos);
+  EXPECT_NE(choices.find("game_artwork::manual::parse_choice_request("), std::string::npos);
+  EXPECT_NE(choices.find("game_artwork::manual::list_artwork_choices("), std::string::npos);
+  EXPECT_NE(choices.find("game_artwork::kind_e::poster"), std::string::npos);
+  EXPECT_NE(choices.find("./api/covers/preview/"), std::string::npos);
+  EXPECT_NE(source.find(R"(server.resource["^/api/covers/choices$"]["POST"] = withCsrf(listCoverChoices);)"), std::string::npos);
 
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;)"), std::string::npos);
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);)"), std::string::npos);

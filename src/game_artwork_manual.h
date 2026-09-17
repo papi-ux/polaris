@@ -219,6 +219,26 @@ namespace game_artwork::manual {
   [[nodiscard]] nlohmann::json artwork_choice_json(std::string_view uuid, const choice_t &choice);
   [[nodiscard]] nlohmann::json artwork_choices_json(std::string_view uuid, kind_e kind, const std::vector<choice_t> &choices);
 
+  /** A cover the console stores: an image's type and bytes. */
+  struct cover_image_t {
+    std::string mime_type;
+    std::vector<unsigned char> body;
+  };
+
+  struct cover_pick_t {
+    std::optional<cover_image_t> image;
+    std::optional<search_failure_t> failure;  ///< the download's upstream failure, or artwork_choice_expired
+  };
+
+  /**
+   * The image Find Cover stores for a picked preview. A search's poster preview already is the
+   * full image. A listed alternative's preview is SteamGridDB's thumbnail, so the full image it
+   * stands for is downloaded from the allowlisted address the listing recorded, within
+   * maximum_asset_bytes, and kept only when it answers from an allowlisted address with a PNG,
+   * JPEG or WebP body. The transport carries the API key; nothing here sees it.
+   */
+  [[nodiscard]] cover_pick_t cover_image_for_pick(const preview_t &pick, const providers::transport_t &transport);
+
   struct selected_download_plan_t {
     std::vector<providers::request_t> downloads;  ///< one download per pick, in the selection's order
     std::optional<search_failure_t> refusal;  ///< artwork_choice_expired or artwork_choice_mismatch, with a 4xx status

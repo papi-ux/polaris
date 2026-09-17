@@ -567,6 +567,46 @@ namespace game_artwork::manual {
     return result;
   }
 
+  cover_pick_t cover_image_for_pick(const preview_t &pick, const providers::transport_t &transport) {
+    cover_pick_t result;
+    if (!pick.choice) {
+      result.image = cover_image_t {pick.mime_type, pick.body};
+      return result;
+    }
+    if (!is_allowed_provider_url(provider_e::steamgriddb, pick.choice->asset_url)) {
+      result.failure = choice_expired_failure();
+      return result;
+    }
+    const providers::request_t download {
+      provider_e::steamgriddb,
+      providers::operation_e::download,
+      pick.kind,
+      pick.choice->asset_url,
+      false,
+    };
+    try {
+      const auto image = transport(download, maximum_asset_bytes);
+      if (!image ||
+          !is_allowed_provider_url(download.provider, image->final_url.empty() ? download.url : image->final_url)) {
+        result.failure = classify_search_failure(true, std::nullopt);
+        return result;
+      }
+      if (!successful_status(image->status_code)) {
+        result.failure = classify_search_failure(true, static_cast<long>(image->status_code));
+        return result;
+      }
+      const auto mime_type = mime_from_signature(image->body);
+      if (!mime_type || image->body.size() > maximum_asset_bytes) {
+        result.failure = classify_search_failure(true, std::nullopt);
+        return result;
+      }
+      result.image = cover_image_t {*mime_type, image->body};
+    } catch (...) {
+      result.failure = classify_search_failure(true, std::nullopt);
+    }
+    return result;
+  }
+
   nlohmann::json artwork_choice_json(const std::string_view uuid, const choice_t &choice) {
     nlohmann::json body {
       {"selection_token", choice.token},
