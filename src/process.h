@@ -44,6 +44,7 @@
 // local includes
 #include "capture_generation.h"
 #include "config.h"
+#include "emulator_library.h"
 #include "audio.h"
 #include "platform/common.h"
 #include "rtsp.h"
@@ -583,6 +584,7 @@ namespace proc {
     std::string lutris_runner;  // Lutris runner id persisted at import ("wine", "linux", ...), or ""
     std::string emulator;       // ROM folder imports: the emulator preset id ("eden") or "custom", or ""
     std::string rom_path;       // ROM folder imports: the game file the entry launches, or ""
+    std::string rom_folder;     // ROM folder imports: the library_sources.json id of the folder it came from, or ""
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
@@ -652,6 +654,15 @@ namespace proc {
    * such an entry without matching its name.
    */
   bool launches_nothing(const ctx_t &app);
+
+  /**
+   * @brief What an entry imported from a ROM folder runs with its emulator as installed now.
+   *
+   * Nothing for any other entry, a custom command template or an unknown emulator. The
+   * folder's own emulator file comes from library_sources.json next to the apps file.
+   * A missing emulator comes back with an empty command, and launch refuses it.
+   */
+  std::optional<emulator_library::entry_launch_t> resolve_emulator_entry_launch(const ctx_t &app);
 
   enum class session_stop_outcome_t {
     allowed,

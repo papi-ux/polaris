@@ -544,6 +544,7 @@ below are stable, so they can be searched for here and in support threads.
 | `virtual_display_failed`, `virtual_display_unavailable` | Host Virtual Display could not be created, or no backend exists | The message carries the reason (usually the `evdi` module); Private Stream needs no virtual display |
 | `desktop_takeover_failed`, `desktop_takeover_recovery_pending` | Desktop Takeover could not start, or the previous one is still restoring the display | Wait for the host display to return; the Doctor's display warning names the reason |
 | `session_stopping`, `session_state_changed`, `launch_cancelled`, `previous_session_cleanup_pending`, `steam_shutdown_pending`, `virtual_display_recovery_pending` | The previous session, Steam, or a display is still being torn down | Wait a few seconds and launch again; restart Polaris if it persists |
+| `emulator_not_installed` | A game imported from a ROM folder names an emulator this host does not have, or the emulator file the folder points at is gone | Install the emulator from **ROM folders** under **Import Games** (Flathub emulators have an install button), or put the folder's emulator file back |
 | `child_tracking_failed`, `no_active_session` | The app started but could not be tracked, or a resume found nothing to resume | Launch again; send a support bundle if it repeats |
 
 Moonlight clients see the same message in their own error dialog; only the code and action

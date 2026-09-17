@@ -4489,6 +4489,27 @@ namespace proc {
     return is_steam_big_picture_app(app);
   }
 
+  std::optional<emulator_library::entry_launch_t> resolve_emulator_entry_launch(const ctx_t &app) {
+    if (!boost::iequals(boost::trim_copy(app.source), emulator_library::source_name)) {
+      return std::nullopt;
+    }
+    std::string configured_launcher;
+    if (!boost::trim_copy(app.rom_folder).empty()) {
+      const auto sources_path = emulator_library::sources_path_for_apps_file(config::stream.file_apps, platf::appdata());
+      if (const auto text = emulator_library::read_text_file(sources_path)) {
+        configured_launcher = emulator_library::configured_launcher_for(emulator_library::parse_sources(*text), app.rom_folder);
+      }
+    }
+    const char *path_env = std::getenv("PATH");
+    return emulator_library::resolve_entry_launch(
+      app.emulator,
+      app.rom_path,
+      configured_launcher,
+      game_library::library_home_roots(),
+      path_env == nullptr ? std::string_view {} : std::string_view {path_env}
+    );
+  }
+
   bool launches_nothing(const ctx_t &app) {
     const auto blank = [](const std::string &value) {
       return boost::trim_copy(value).empty();
@@ -7192,6 +7213,24 @@ namespace proc {
     }
 #endif
 
+    // An entry imported from a ROM folder runs the emulator as this host has it now. The
+    // command saved at import names whatever was installed then, and an emulator that was
+    // missing is saved under its bare binary name, which a later Flatpak never provides.
+    // Refuse before any session state changes rather than start an empty private session.
+    std::optional<std::string> resolved_emulator_command;
+    if (const auto emulator_launch = resolve_emulator_entry_launch(app)) {
+      if (emulator_launch->install.kind == emulator_library::install_e::missing) {
+        const auto reason = emulator_library::missing_install_reason(*emulator_launch->preset, emulator_launch->install, app.name);
+        BOOST_LOG(error) << "process: refusing launch of ["sv << app.name << "]: "sv << reason.message;
+        return launch_failure::refuse(503, "emulator_not_installed", reason.message, reason.action);
+      }
+      if (emulator_launch->command != app.cmd) {
+        BOOST_LOG(info) << "process: launching ["sv << app.name << "] with the installed "sv << emulator_launch->preset->label
+                        << " ("sv << emulator_library::install_name(emulator_launch->install.kind) << ") instead of the saved command"sv;
+        resolved_emulator_command = emulator_launch->command;
+      }
+    }
+
     // Resolve hard output capabilities only after the previous generation has
     // been torn down, but before installing any state for the new generation.
     // /resume calls this same helper immediately before admitting its RTSP
@@ -7394,6 +7433,9 @@ namespace proc {
     _detached_child_authority_complete = true;
 #endif
     _app = app;
+    if (resolved_emulator_command) {
+      _app.cmd = *resolved_emulator_command;
+    }
     _app_id = util::from_view(app.id);
     _app_name = app.name;
     _launch_session = launch_session;
@@ -12063,6 +12105,7 @@ namespace proc {
           ctx.lutris_runner = app_node.value("lutris-runner", "");
           ctx.emulator = app_node.value("emulator", "");
           ctx.rom_path = app_node.value("rom-path", "");
+          ctx.rom_folder = app_node.value("rom-folder", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {

@@ -3086,9 +3086,7 @@ namespace confighttp {
   namespace {
     // Next to apps.json, wherever that is: the folders belong with the apps they feed.
     std::filesystem::path library_sources_path() {
-      const std::filesystem::path apps_file {config::stream.file_apps};
-      const auto directory = apps_file.has_parent_path() ? apps_file.parent_path() : platf::appdata();
-      return directory / "library_sources.json";
+      return emulator_library::sources_path_for_apps_file(config::stream.file_apps, platf::appdata());
     }
 
     std::vector<emulator_library::source_t> load_library_sources() {

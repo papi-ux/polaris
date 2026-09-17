@@ -5550,3 +5550,87 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationTerminationHonoursTheAppExitTimeo
   GTEST_SKIP() << "Linux-only exact-generation termination";
 #endif
 }
+
+TEST(ProcessEmulatorEntries, AnImportedEntryRunsTheFoldersEmulatorFileAndIsRefusedWhenItIsGone) {
+  const auto root = test_paths::root() / "process_emulator_entries";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto appimage = root / "Eden.AppImage";
+  {
+    std::ofstream file(appimage);
+    file << "x";
+  }
+  {
+    std::ofstream sources(root / "library_sources.json");
+    sources << nlohmann::json {
+      {"version", 1},
+      {"sources", nlohmann::json::array({
+        {{"id", "folder-with-file"}, {"path", root.string()}, {"emulator", "eden"}, {"launcher", appimage.string()}, {"command", ""}, {"extensions", nlohmann::json::array()}},
+        {{"id", "folder-file-gone"}, {"path", root.string()}, {"emulator", "eden"}, {"launcher", (root / "Gone.AppImage").string()}, {"command", ""}, {"extensions", nlohmann::json::array()}},
+      })},
+    }.dump();
+  }
+  const auto saved_apps_file = config::stream.file_apps;
+  config::stream.file_apps = (root / "apps.json").string();
+  auto restore = util::fail_guard([&]() {
+    config::stream.file_apps = saved_apps_file;
+  });
+
+  proc::ctx_t game;
+  game.name = "Game";
+  game.source = "emulator";
+  game.emulator = "eden";
+  game.rom_path = "/roms/Game.xci";
+  game.rom_folder = "folder-with-file";
+  game.cmd = "eden -f -g '/roms/Game.xci'";
+
+  const auto resolved = proc::resolve_emulator_entry_launch(game);
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(resolved->install.kind, emulator_library::install_e::launcher);
+  EXPECT_EQ(resolved->command, "'" + appimage.string() + "' -f -g '/roms/Game.xci'");
+
+  game.rom_folder = "folder-file-gone";
+  const auto gone = proc::resolve_emulator_entry_launch(game);
+  ASSERT_TRUE(gone.has_value());
+  EXPECT_EQ(gone->install.kind, emulator_library::install_e::missing);
+
+  // Other entries are left exactly as saved.
+  proc::ctx_t manual;
+  manual.source = "manual";
+  manual.emulator = "eden";
+  manual.cmd = "eden";
+  EXPECT_FALSE(proc::resolve_emulator_entry_launch(manual).has_value());
+  proc::ctx_t custom = game;
+  custom.emulator = "custom";
+  EXPECT_FALSE(proc::resolve_emulator_entry_launch(custom).has_value());
+}
+
+TEST(ProcessEmulatorEntries, LaunchRefusesAMissingEmulatorBeforeSessionStateAndRunsTheResolvedCommand) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  ASSERT_NE(execute_start, std::string::npos);
+  const auto execute = source.substr(execute_start);
+
+  const auto resolve = execute.find("resolve_emulator_entry_launch(app)");
+  const auto refuse = execute.find("return launch_failure::refuse(503, \"emulator_not_installed\"", resolve);
+  const auto validate = execute.find("validate_resolved_launch_profile_for_app(app, launch_session, client_profile)");
+  const auto display_semantics = execute.find("apply_app_display_semantics(app, *launch_session)");
+  const auto install_app = execute.find("    _app = app;\n");
+  const auto apply_command = execute.find("_app.cmd = *resolved_emulator_command;", install_app);
+  const auto effective_command = execute.find("std::string effective_cmd = _app.cmd;");
+  ASSERT_NE(resolve, std::string::npos);
+  ASSERT_NE(refuse, std::string::npos);
+  ASSERT_NE(validate, std::string::npos);
+  ASSERT_NE(display_semantics, std::string::npos);
+  ASSERT_NE(install_app, std::string::npos);
+  ASSERT_NE(apply_command, std::string::npos);
+  ASSERT_NE(effective_command, std::string::npos);
+  // No display, profile or generation state is touched for an emulator that cannot start.
+  EXPECT_LT(refuse, validate);
+  EXPECT_LT(refuse, display_semantics);
+  EXPECT_LT(refuse, install_app);
+  // The command the child actually runs comes from the resolved entry.
+  EXPECT_LT(install_app, apply_command);
+  EXPECT_LT(apply_command, effective_command);
+}

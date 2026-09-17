@@ -486,3 +486,78 @@ TEST(EmulatorLibraryInstall, HomeExpansion) {
   EXPECT_EQ(emulator_library::expand_home("/roms", "/accounts/x"), "/roms");
   EXPECT_EQ(emulator_library::expand_home("~/roms", ""), "~/roms");
 }
+
+TEST(EmulatorLibraryResolve, AnEntryRunsWhatIsInstalledNotWhatWasSavedAtImport) {
+  const auto root = fresh_root("resolve");
+  const auto home = root / "home";
+  const auto system_flatpak = root / "var-lib-flatpak";
+  const auto empty_path = (root / "empty").string();
+  using install_e = emulator_library::install_e;
+
+  // Imported while Eden was missing: the saved command names the bare binary.
+  const auto missing = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", "", {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_EQ(missing->install.kind, install_e::missing);
+  EXPECT_TRUE(missing->command.empty());
+  ASSERT_NE(missing->preset, nullptr);
+  EXPECT_EQ(missing->preset->id, "eden");
+
+  // Installed from Flathub afterwards: the game and the emulator's own entry both follow it.
+  fs::create_directories(home / ".local" / "share" / "flatpak" / "app" / "dev.eden_emu.eden");
+  const auto game = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", "", {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(game.has_value());
+  EXPECT_EQ(game->install.kind, install_e::flatpak);
+  EXPECT_EQ(game->command, "flatpak run dev.eden_emu.eden -f -g '/roms/Game.xci'");
+  const auto launcher_entry = emulator_library::resolve_entry_launch("eden", "", "", {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(launcher_entry.has_value());
+  EXPECT_EQ(launcher_entry->command, "flatpak run dev.eden_emu.eden");
+
+  // The folder's own emulator file wins, and one that went away is missing with its path.
+  touch(root / "Eden.AppImage");
+  const auto appimage = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", (root / "Eden.AppImage").string(), {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(appimage.has_value());
+  EXPECT_EQ(appimage->command, "'" + (root / "Eden.AppImage").string() + "' -f -g '/roms/Game.xci'");
+  const auto gone = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", (root / "Gone.AppImage").string(), {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(gone.has_value());
+  EXPECT_EQ(gone->install.kind, install_e::missing);
+  EXPECT_EQ(gone->install.location, (root / "Gone.AppImage").string());
+
+  // A custom template, an unknown emulator and an ordinary app have nothing to resolve.
+  EXPECT_FALSE(emulator_library::resolve_entry_launch("custom", "/roms/Game.sfc", "", {home}, empty_path, system_flatpak).has_value());
+  EXPECT_FALSE(emulator_library::resolve_entry_launch("retroarch", "/roms/Game.sfc", "", {home}, empty_path, system_flatpak).has_value());
+  EXPECT_FALSE(emulator_library::resolve_entry_launch("", "", "", {home}, empty_path, system_flatpak).has_value());
+}
+
+TEST(EmulatorLibraryResolve, TheRefusalNamesTheEmulatorTheGameAndTheFix) {
+  const auto *eden = emulator_library::find_preset("eden");
+  ASSERT_NE(eden, nullptr);
+
+  const auto not_installed = emulator_library::missing_install_reason(*eden, {}, "The Legend of Zelda - Breath of the Wild");
+  EXPECT_EQ(not_installed.message, "Eden is not installed on this host, so The Legend of Zelda - Breath of the Wild cannot start.");
+  EXPECT_EQ(not_installed.action, "Install Eden from ROM folders under Import Games in the Polaris web UI, then launch again.");
+
+  // The emulator's own entry does not repeat its name.
+  const auto own_entry = emulator_library::missing_install_reason(*eden, {}, "Eden");
+  EXPECT_EQ(own_entry.message, "Eden is not installed on this host.");
+
+  const auto gone = emulator_library::missing_install_reason(
+    *eden, {emulator_library::install_e::missing, "/opt/Eden.AppImage"}, "Game");
+  EXPECT_EQ(gone.message, "Eden was not found at /opt/Eden.AppImage, so Game cannot start.");
+  EXPECT_EQ(gone.action, "Put Eden back at that path, or add the ROM folder again with the file where it is now, then launch again.");
+}
+
+TEST(EmulatorLibraryResolve, TheFolderListSitsNextToTheAppsFileAndNamesItsLauncher) {
+  EXPECT_EQ(emulator_library::sources_path_for_apps_file("/accounts/x/.config/polaris/apps.json", "/fallback"),
+            fs::path("/accounts/x/.config/polaris/library_sources.json"));
+  EXPECT_EQ(emulator_library::sources_path_for_apps_file("apps.json", "/fallback"), fs::path("/fallback/library_sources.json"));
+
+  std::vector<emulator_library::source_t> sources(2);
+  sources[0].id = "folder-a";
+  sources[0].launcher = "/opt/Eden.AppImage";
+  sources[1].id = "folder-b";
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, "folder-a"), "/opt/Eden.AppImage");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, " folder-a "), "/opt/Eden.AppImage");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, "folder-b"), "");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, "unknown"), "");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, ""), "");
+}
