@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { effectScope } from 'vue'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useRomSources } from './composables/useRomSources'
 import {
   CUSTOM_EMULATOR,
   blankRomSourceForm,
@@ -85,6 +87,39 @@ describe('ROM folder forms', () => {
     expect(romSourceCountLabel({})).toBe('Scan to count')
     expect(romSourceCountLabel({ rom_count: 1 })).toBe('1 game')
     expect(romSourceCountLabel({ rom_count: 12 })).toBe('12 games')
+  })
+})
+
+describe('the folder list while an emulator installs', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    delete global.fetch
+  })
+
+  it('stops reading the folder list once the page is gone', async () => {
+    vi.useFakeTimers()
+    const installing = {
+      status: true,
+      presets: [{ id: 'eden', label: 'Eden', install: { kind: 'missing' }, installable: true, install_job: { state: 'installing' } }],
+      folders: [],
+    }
+    global.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(installing) }))
+    const scope = effectScope()
+    let rom
+    scope.run(() => { rom = useRomSources({ pollIntervalMs: 2000 }) })
+
+    await rom.load()
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2100)
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+
+    // A load already out when the page goes away must not start the timer again.
+    const pending = rom.load()
+    scope.stop()
+    await pending
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(global.fetch).toHaveBeenCalledTimes(3)
   })
 })
 

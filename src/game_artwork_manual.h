@@ -191,6 +191,19 @@ namespace game_artwork::manual {
     std::vector<match_candidate_preview_t> candidates;
   };
 
+  /**
+   * How long a search may keep reading matches, for a caller that shares its thread.
+   *
+   * Each match costs up to two requests to SteamGridDB, and the console's routes run on one
+   * thread, so an unbounded read of ten matches can hold every console page while SteamGridDB
+   * is slow or rate limiting. With a clock and a bound, the search stops starting matches once
+   * the bound has passed and answers with what it has.
+   */
+  struct search_budget_t {
+    std::function<std::int64_t()> clock;  ///< epoch milliseconds, or empty to read every match
+    std::int64_t milliseconds = 0;  ///< 0 to read every match
+  };
+
   /** Which of SteamGridDB's matches a search lists. */
   enum class candidate_listing_e {
     first_matches,  ///< the first maximum_candidate_count matches, with or without a poster (Nova)
@@ -213,7 +226,8 @@ namespace game_artwork::manual {
     std::string_view query,
     const providers::transport_t &transport,
     std::int64_t now_milliseconds,
-    candidate_listing_e listing = candidate_listing_e::first_matches
+    candidate_listing_e listing = candidate_listing_e::first_matches,
+    const search_budget_t &budget = {}
   );
 
   [[nodiscard]] nlohmann::json artwork_choice_json(std::string_view uuid, const choice_t &choice);

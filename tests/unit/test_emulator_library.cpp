@@ -592,6 +592,22 @@ TEST(EmulatorLibraryResolve, OnlyACommandPolarisWroteIsReplaced) {
   EXPECT_FALSE(emulator_library::generated_entry_command(*eden, "", "eden --help"));
   EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, arguments));
 
+  // An emulator file that is still there, and not the one the folder names, is the player's.
+  const auto directory = std::filesystem::temp_directory_path() / "polaris-emulator-command";
+  std::error_code cleanup;
+  std::filesystem::remove_all(directory, cleanup);
+  std::filesystem::create_directories(directory);
+  const auto moved = directory / "Eden.AppImage";
+  { std::ofstream(moved, std::ios::binary) << "x"; }
+  const auto moved_command = emulator_library::shell_quote(moved.string()) + arguments;
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, moved_command, "/old/Eden.AppImage"));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, moved_command));
+  // The folder's own launcher stays Polaris's to update, and so does a file that is gone.
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, moved_command, moved.string()));
+  EXPECT_TRUE(emulator_library::generated_entry_command(
+    *eden, rom, emulator_library::shell_quote((directory / "Gone.AppImage").string()) + arguments, moved.string()));
+  std::filesystem::remove_all(directory, cleanup);
+
   EXPECT_TRUE(emulator_library::single_quoted_token("'/opt/Eden.AppImage'"));
   EXPECT_TRUE(emulator_library::single_quoted_token(emulator_library::shell_quote("/opt/it's/Eden")));
   EXPECT_FALSE(emulator_library::single_quoted_token("'/opt/a' '/opt/b'"));

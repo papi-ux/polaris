@@ -503,7 +503,8 @@ namespace game_artwork::manual {
     const std::string_view query,
     const providers::transport_t &transport,
     const std::int64_t now_milliseconds,
-    const candidate_listing_e listing
+    const candidate_listing_e listing,
+    const search_budget_t &budget
   ) {
     match_candidate_search_t result;
     const auto search_request = providers::plan_steamgriddb_search(query);
@@ -525,7 +526,16 @@ namespace game_artwork::manual {
     const std::string search_body(search_response->body.begin(), search_response->body.end());
     const bool posters_only = listing == candidate_listing_e::matches_with_posters;
     const auto searched = posters_only ? maximum_searched_match_count : maximum_candidate_count;
+    bool read_a_match = false;
+    const auto out_of_time = [&] {
+      return read_a_match && budget.clock && budget.milliseconds > 0 &&
+             budget.clock() - now_milliseconds >= budget.milliseconds;
+    };
     for (auto &candidate : providers::parse_steamgriddb_match_candidates(query, search_body, searched)) {
+      // One match is always read. Past the bound the rest wait for the next search rather than
+      // hold a caller that shares its thread.
+      if (out_of_time()) break;
+      read_a_match = true;
       match_candidate_preview_t item {std::move(candidate), std::nullopt, 0};
       try {
         const auto game_id = provider_game_number(item.candidate.provider_game_id);

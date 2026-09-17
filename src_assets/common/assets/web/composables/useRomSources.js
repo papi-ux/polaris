@@ -34,6 +34,9 @@ export function useRomSources({ pollIntervalMs = INSTALL_POLL_INTERVAL_MS } = {}
   let loadSequence = 0
   let appliedSequence = 0
 
+  // A load that was already out when the page went away must not start the timer again.
+  let disposed = false
+
   function stopInstallPolling() {
     if (pollTimer) clearTimeout(pollTimer)
     pollTimer = null
@@ -76,7 +79,7 @@ export function useRomSources({ pollIntervalMs = INSTALL_POLL_INTERVAL_MS } = {}
     } finally {
       if (sequence === loadSequence) loading.value = false
     }
-    if (sequence < appliedSequence) return
+    if (sequence < appliedSequence || disposed) return
     stopInstallPolling()
     if (presets.value.some((preset) => preset?.install_job?.state === 'installing')) {
       pollTimer = setTimeout(load, pollIntervalMs)
@@ -172,7 +175,12 @@ export function useRomSources({ pollIntervalMs = INSTALL_POLL_INTERVAL_MS } = {}
     finishedListeners.push(listener)
   }
 
-  if (getCurrentScope()) onScopeDispose(stopInstallPolling)
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      disposed = true
+      stopInstallPolling()
+    })
+  }
 
   return {
     presets, sources, loading, saving, error, installRequests,

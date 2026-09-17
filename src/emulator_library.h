@@ -1118,28 +1118,33 @@ namespace emulator_library {
     return it == sources.end() ? std::string {} : it->launcher;
   }
 
-  /// Whether a token is exactly one path as shell_quote writes it.
-  inline bool single_quoted_token(std::string_view token) {
+  /// The path a token holds when it is exactly one path as shell_quote writes it.
+  inline std::optional<std::string> single_quoted_path(std::string_view token) {
     if (token.size() < 2 || token.front() != '\'' || token.back() != '\'') {
-      return false;
+      return std::nullopt;
     }
     std::string inner;
     std::size_t start = 1;
     while (true) {
       const auto close = token.find('\'', start);
       if (close == std::string_view::npos) {
-        return false;
+        return std::nullopt;
       }
       inner.append(token.substr(start, close - start));
       if (close == token.size() - 1) {
-        return shell_quote(inner) == token;
+        return shell_quote(inner) == token ? std::optional<std::string>(inner) : std::nullopt;
       }
       if (token.substr(close, 4) != "'\\''") {
-        return false;
+        return std::nullopt;
       }
       inner.push_back('\'');
       start = close + 4;
     }
+  }
+
+  /// Whether a token is exactly one path as shell_quote writes it.
+  inline bool single_quoted_token(std::string_view token) {
+    return single_quoted_path(token).has_value();
   }
 
   /**
@@ -1147,11 +1152,18 @@ namespace emulator_library {
    *
    * Import writes the launch for the install the host had then: an emulator file, a
    * binary on PATH, the Flatpak, or the bare binary name while the emulator was missing,
-   * followed by the preset's arguments for the game. A command the player edited (other
-   * flags, a wrapper in front) matches none of them and is theirs: launch neither
-   * replaces nor refuses it.
+   * followed by the preset's arguments for the game. A quoted emulator file counts when the
+   * folder names that file, or when the file is gone, since the folder may have been added again
+   * with another one. A command the player edited (other flags, a wrapper in front, an emulator
+   * file of their own that is there) matches none of them and is theirs: launch neither replaces
+   * nor refuses it.
    */
-  inline bool generated_entry_command(const preset_t &preset, std::string_view rom_path, std::string_view saved_command) {
+  inline bool generated_entry_command(
+    const preset_t &preset,
+    std::string_view rom_path,
+    std::string_view saved_command,
+    std::string_view configured_launcher = {}
+  ) {
     const auto saved = trim_view(saved_command);
     const auto rom = trim_view(rom_path);
     std::string_view emulator = saved;
@@ -1168,8 +1180,20 @@ namespace emulator_library {
     if (std::find(preset.binaries.begin(), preset.binaries.end(), emulator) != preset.binaries.end()) {
       return true;
     }
-    // An emulator file, wherever it was: the folder may have been added again with a new one.
-    return single_quoted_token(emulator);
+    // An emulator file, quoted the way import writes it. The folder's own launcher is Polaris's
+    // to update. So is a file that is no longer there, because the folder may have been added
+    // again with another emulator and no command can be running from a path that is gone. A
+    // path that does exist and is not the folder's is the player's, edited in deliberately.
+    const auto quoted = single_quoted_path(emulator);
+    if (!quoted) {
+      return false;
+    }
+    const auto launcher = trim_view(configured_launcher);
+    if (!launcher.empty() && *quoted == launcher) {
+      return true;
+    }
+    std::error_code error;
+    return !std::filesystem::is_regular_file(std::filesystem::path(*quoted), error);
   }
 
   /// What an imported entry runs with its emulator as this host has it right now.

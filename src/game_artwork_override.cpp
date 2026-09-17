@@ -687,11 +687,12 @@ namespace game_artwork {
     if (posters.empty()) return false;
 
     const auto image = saved_image.lexically_normal();
+    auto covers = covers_directory.lexically_normal();
+    if (!covers.has_filename()) covers = covers.parent_path();
+    // Only Find Cover's own file for the entry. Importers rewrite theirs in the same directory on
+    // every rescan, and the console hands an entry that stores no image one it synthesised.
+    if (image.parent_path() != covers || image.stem().string() != uuid) return false;
     if (image == previous_image.lexically_normal()) {
-      auto covers = covers_directory.lexically_normal();
-      if (!covers.has_filename()) covers = covers.parent_path();
-      // Only Find Cover's own file for the entry; importers rewrite theirs on every rescan.
-      if (image.parent_path() != covers || image.stem().string() != uuid) return false;
       std::error_code error;
       const auto written = fs::last_write_time(image, error);
       if (error) return false;

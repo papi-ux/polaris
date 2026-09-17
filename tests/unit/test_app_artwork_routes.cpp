@@ -162,6 +162,19 @@ TEST(AppCoverSearch, StoresAPickedPosterUnderItsUuidInTheFormatItReallyIs) {
   EXPECT_EQ(bytes, png);
 
   // The uuid names the file, so it must be one; the bytes must be the type they claim.
+  // A pick in another format keeps the image the entry still names: closing the editor without
+  // saving must not delete the cover the entry is using.
+  const auto kept = coverdir / (std::string(APP_UUID) + ".jpg");
+  ASSERT_TRUE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", jpeg).has_value());
+  ASSERT_TRUE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/png", png, kept).has_value());
+  EXPECT_TRUE(std::filesystem::is_regular_file(kept));
+  EXPECT_TRUE(std::filesystem::is_regular_file(coverdir / (std::string(APP_UUID) + ".png")));
+  // Without that image to keep, the other format goes as before.
+  ASSERT_TRUE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", jpeg).has_value());
+  EXPECT_FALSE(std::filesystem::exists(coverdir / (std::string(APP_UUID) + ".png")));
+  const auto select = handler_body(read_source("src/confighttp.cpp"), "void selectCover(");
+  EXPECT_NE(select.find("keep = app.image_path"), std::string::npos);
+
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, "../escape", "image/png", png).has_value());
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/gif", png).has_value());
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", png).has_value());
@@ -190,8 +203,7 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_EQ(select.find("download_file"), std::string::npos);
   // A listed poster previews as a thumbnail, so the pick stores the full image behind it.
   EXPECT_LT(select.find("cover_image_for_pick("), select.find("store_selected_cover("));
-  EXPECT_NE(select.find("store_selected_cover(platf::appdata() / \"covers\", uuid, picked.image->mime_type, picked.image->body)"),
-            std::string::npos);
+  EXPECT_NE(select.find("picked.image->mime_type, picked.image->body"), std::string::npos);
 
   // A game's posters: Nova's alternatives listing for the poster kind, behind the console session and CSRF.
   EXPECT_NE(search.find(R"({"provider_game_id", found.candidate.provider_game_id})"), std::string::npos);
@@ -211,6 +223,28 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   const auto nova_search = handler_body(nova, "auto polarisSearchGameArtworkMatches = ", "\n    };\n");
   EXPECT_NE(nova_search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
   EXPECT_EQ(nova_search.find("candidate_listing_e::matches_with_posters"), std::string::npos);
+}
+
+TEST(AppsFile, EveryChangeTakesOneLock) {
+  // The console's handlers share a thread, but a finished install rewrites apps.json from its
+  // own, so a save and an install landing together would lose one side's change.
+  const auto source = read_source("src/confighttp.cpp");
+  EXPECT_NE(source.find("std::mutex &apps_file_mutex()"), std::string::npos);
+  constexpr std::string_view taken = "std::scoped_lock apps_lock(apps_file_mutex());";
+  std::size_t locks = 0;
+  for (auto at = source.find(taken); at != std::string::npos; at = source.find(taken, at + 1)) {
+    ++locks;
+  }
+  // saveApp, reorderApps, deleteApp, importGames and the install job's own rewrite.
+  EXPECT_EQ(locks, 5u);
+  for (const auto *signature : {"void saveApp(", "void reorderApps(", "void deleteApp(", "void importGames("}) {
+    const auto body = handler_body(source, signature);
+    const auto lock = body.find("std::scoped_lock apps_lock(apps_file_mutex());");
+    const auto read = body.find("read_file(config::stream.file_apps.c_str())");
+    EXPECT_NE(lock, std::string::npos) << signature;
+    EXPECT_NE(read, std::string::npos) << signature;
+    EXPECT_LT(lock, read) << signature;
+  }
 }
 
 TEST(AppCoverSearch, SavingAChosenCoverTakesThePosterBackFromNova) {

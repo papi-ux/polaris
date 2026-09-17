@@ -2334,6 +2334,18 @@ namespace confighttp {
   }
 
   namespace {
+    /**
+     * @brief The lock every read, change and write of apps.json takes.
+     *
+     * The console's handlers share one thread, so they never raced each other, but the emulator
+     * install job runs on its own and rewrites the file when it finishes. Without this a finished
+     * install and a save made at the same moment lose one side's change.
+     */
+    std::mutex &apps_file_mutex() {
+      static std::mutex mutex;
+      return mutex;
+    }
+
     std::string app_string(const nlohmann::json &app, const char *key) {
       return app.is_object() && app.contains(key) && app[key].is_string() ? app[key].get<std::string>() : std::string {};
     }
@@ -2409,6 +2421,7 @@ namespace confighttp {
         return;
       }
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -2479,7 +2492,8 @@ namespace confighttp {
     const std::filesystem::path &coverdir,
     std::string_view uuid,
     std::string_view mime_type,
-    const std::vector<unsigned char> &body
+    const std::vector<unsigned char> &body,
+    const std::filesystem::path &keep
   ) {
     const std::string extension = mime_type == "image/png" ? ".png" :
                                   mime_type == "image/jpeg" ? ".jpg" :
@@ -2514,11 +2528,15 @@ namespace confighttp {
       return std::nullopt;
     }
     // A pick in another format must not leave the earlier one behind: the artwork resolver looks
-    // for `<uuid>` with any image extension, and the older file could win that lookup.
+    // for `<uuid>` with any image extension, and the older file could win that lookup. The image
+    // the entry still names stays, because a pick the player closes the editor on must not delete
+    // the cover the entry is using.
+    const auto kept = keep.empty() ? std::filesystem::path {} : keep.lexically_normal();
     for (const auto other : {".png", ".jpg", ".jpeg", ".webp"}) {
-      if (extension != other) {
-        std::filesystem::remove(coverdir / (std::string(uuid) + other), error);
-      }
+      if (extension == other) continue;
+      const auto stale = coverdir / (std::string(uuid) + other);
+      if (!kept.empty() && stale.lexically_normal() == kept) continue;
+      std::filesystem::remove(stale, error);
     }
     return final_path.string();
   }
@@ -2639,6 +2657,7 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       nlohmann::json output_tree;
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -2758,6 +2777,7 @@ namespace confighttp {
       }
       auto uuid = input_tree["uuid"].get<std::string>();
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read the apps file into a nlohmann::json object.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -3418,6 +3438,7 @@ namespace confighttp {
      */
     void refresh_emulator_entry_commands(const emulator_library::preset_t &preset) {
       std::lock_guard lock(emulator_command_refresh_mutex);
+      std::scoped_lock apps_lock(apps_file_mutex());
       std::error_code error;
       if (!std::filesystem::is_regular_file(config::stream.file_apps, error)) {
         return;
@@ -3436,10 +3457,10 @@ namespace confighttp {
         }
         const auto rom_path = app.value("rom-path", "");
         const auto saved_command = app.value("cmd", "");
-        if (!emulator_library::generated_entry_command(preset, rom_path, saved_command)) {
+        const auto launcher = emulator_library::configured_launcher_for(sources, app.value("rom-folder", ""));
+        if (!emulator_library::generated_entry_command(preset, rom_path, saved_command, launcher)) {
           continue;  // the player's own command stays theirs
         }
-        const auto launcher = emulator_library::configured_launcher_for(sources, app.value("rom-folder", ""));
         const auto resolved = emulator_library::resolve_entry_launch(preset.id, rom_path, launcher, home_roots, path_env);
         if (!resolved || resolved->command.empty() || saved_command == resolved->command) {
           continue;
@@ -4117,6 +4138,7 @@ namespace confighttp {
         return;
       }
 
+      std::scoped_lock apps_lock(apps_file_mutex());
       // Read existing apps file
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
@@ -6133,6 +6155,9 @@ namespace confighttp {
     }
   }  // namespace
 
+  /// How long the console's cover search keeps reading matches before answering with what it has.
+  constexpr std::int64_t cover_search_budget_milliseconds = 12'000;
+
   /**
    * @brief Search SteamGridDB for covers by name, the same search Nova's Artwork Studio runs.
    *
@@ -6175,7 +6200,10 @@ namespace confighttp {
         *query,
         nvhttp::artwork_transport(api_key),
         nvhttp::artwork_clock_milliseconds(),
-        game_artwork::manual::candidate_listing_e::matches_with_posters
+        game_artwork::manual::candidate_listing_e::matches_with_posters,
+        // The console's routes share one thread, so a slow SteamGridDB stops the read instead
+        // of holding every page for as long as ten matches can take.
+        game_artwork::manual::search_budget_t {&nvhttp::artwork_clock_milliseconds, cover_search_budget_milliseconds}
       );
       if (search.invalid_query) {
         bad_request(response, request, "A cover search needs a name and a uuid");
@@ -6363,7 +6391,16 @@ namespace confighttp {
       send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)));
       return;
     }
-    const auto path = store_selected_cover(platf::appdata() / "covers", uuid, picked.image->mime_type, picked.image->body);
+    // The cover the entry names today survives a pick the player does not save.
+    std::filesystem::path keep;
+    for (const auto &app : proc::proc.get_apps()) {
+      if (app.uuid == uuid) {
+        keep = app.image_path;
+        break;
+      }
+    }
+    const auto path = store_selected_cover(
+      platf::appdata() / "covers", uuid, picked.image->mime_type, picked.image->body, keep);
     if (!path) {
       nlohmann::json output {{"status", false}, {"code", "cover_not_saved"}, {"error", "The cover could not be saved on the host."}};
       send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error, output);

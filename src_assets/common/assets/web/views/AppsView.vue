@@ -1367,6 +1367,7 @@ const coverPosters = computed(() => {
   return coverGame.value ? [coverGame.value] : []
 })
 let coverChoicesSequence = 0
+let coverPickSequence = 0
 // Launcher entries such as Heroic and Lutris start through a detached command.
 const editHasLaunchCommand = computed(() => hasLaunchCommand(editForm.value))
 let coverSearchUuid = ""
@@ -1844,6 +1845,7 @@ function coverScopeUuid() {
 function resetCoverFinder() {
   coverSearchSequence += 1
   coverChoicesSequence += 1
+  coverPickSequence += 1
   coverGame.value = null
   coverChoices.value = []
   coverChoicesLoading.value = false
@@ -1960,6 +1962,7 @@ async function openCoverGame(game) {
 async function useCover(cover) {
   if (coverFinderBusy.value) return
   const uuid = coverScopeUuid()
+  const sequence = ++coverPickSequence
   coverFinderBusy.value = true
   coverError.value = ""
   coverErrorCode.value = ""
@@ -1984,7 +1987,9 @@ async function useCover(cover) {
     if (uuid !== coverSearchUuid) return
     coverError.value = "Polaris could not use that cover. Check the connection to the host and try again."
   } finally {
-    coverFinderBusy.value = false
+    // Only the newest pick clears the panel, so an answer for an entry the editor has left
+    // cannot let a second pick start while this one is still saving.
+    if (sequence === coverPickSequence) coverFinderBusy.value = false
   }
 }
 

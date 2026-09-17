@@ -1028,6 +1028,25 @@ TEST(GameArtworkManualCandidates, FindCoverReadsPastMatchesWithoutAPosterAndStop
   }));
   EXPECT_EQ(steamgriddb.requests_for(list_url(10)), 1);
 
+  // A slow SteamGridDB stops the read: the console's routes share one thread, so the search
+  // answers with the matches it has instead of holding every page for ten of them.
+  fake_steamgriddb_t slow;
+  heroic(slow, 7);
+  std::int64_t clock_milliseconds = 1'000;
+  const game_artwork::manual::search_budget_t budget {
+    [&clock_milliseconds]() {
+      clock_milliseconds += 5'000;  // each match costs five seconds
+      return clock_milliseconds;
+    },
+    12'000,
+  };
+  const auto bounded = game_artwork::manual::search_match_candidates(
+    cache, GAME_UUID, "Heroic", slow.transport(), 1'000, candidate_listing_e::matches_with_posters, budget);
+  ASSERT_FALSE(bounded.failure.has_value());
+  EXPECT_TRUE(bounded.candidates.empty());
+  EXPECT_EQ(slow.requests_for(list_url(1)), 1);
+  EXPECT_EQ(slow.requests_for(list_url(4)), 0);
+
   // Five posters are enough: the rest of the matches are never asked for.
   fake_steamgriddb_t plenty;
   heroic(plenty, 2);

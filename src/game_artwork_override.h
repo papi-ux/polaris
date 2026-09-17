@@ -95,14 +95,14 @@ namespace game_artwork {
 
   /**
    * A cover chosen in the console after artwork was picked for the game in Nova takes the poster
-   * back. A save chose one when the entry now names another image file than before, or still names
-   * the file Find Cover writes for it, `<uuid>.<ext>` in the covers directory, and Find Cover
-   * rewrote that file after the Nova pick. Any other save keeps the pick: other files change under
-   * an entry without anyone choosing them, as a library rescan refreshes an imported game's
-   * `steam_<appid>` cover and Steam its library cache. Only the picked poster goes; the picked
-   * hero, logo and icon stay, and a pick left without an image is cleared with its metadata.
-   * Images are resolved files: an empty saved image, or one that is not a readable image, keeps
-   * the pick.
+   * back. The saved image has to be the file Find Cover writes for the entry, `<uuid>.<ext>` in
+   * the covers directory, and either new to the entry or rewritten after the Nova pick. Every
+   * other save keeps the pick, because other images change under an entry with nobody choosing
+   * one: a library rescan refreshes an imported game's `steam_<appid>` cover in the same
+   * directory, Steam refreshes its library cache, and the console shows a Lutris entry the
+   * cover art path that entry stores none of. Only the picked poster goes; the picked hero, logo
+   * and icon stay, and a pick left without an image is cleared with its metadata. Images are
+   * resolved files: an empty saved image, or one that is not a readable image, keeps the pick.
    * @return true when the picked poster was removed.
    */
   bool yield_picked_poster_to_console_cover(

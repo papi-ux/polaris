@@ -651,10 +651,21 @@ TEST(GameArtworkOverride, AConsoleCoverTakesThePosterBackFromANovaPick) {
   EXPECT_EQ(manifest.at("assets").at("hero").at("source"), "override");
   EXPECT_FALSE(yield(cover, cover, covers));
 
+  // An image that is not Find Cover's file for this entry keeps the pick, however it arrived:
+  // the console hands a Lutris entry a cover art path it stores none of, and a save of some
+  // other change would otherwise read as a cover the player chose here.
+  const auto lutris_cover = appdata / "lutris" / "coverart" / "hollow-knight.jpg";
+  write_text(lutris_cover, jpeg_bytes('L'));
+  pick_in_nova(written_at(cover) - 1000, true);
+  EXPECT_FALSE(yield({}, lutris_cover, covers));
+  EXPECT_FALSE(yield(lutris_cover, lutris_cover, covers));
+  EXPECT_FALSE(yield(cover, imported_cover, covers));
+  EXPECT_TRUE(fs::exists(*picked_poster));
+
   // Another image file takes the poster whenever it was written, and a pick left without an
   // image is cleared with its metadata. An entry that had no image counts as another file.
   pick_in_nova(written_at(steam_image) + 60000, false);
-  EXPECT_TRUE(yield(cover, steam_image, covers));
+  EXPECT_TRUE(yield(steam_image, cover, covers));
   EXPECT_FALSE(fs::exists(*picked_poster));
   EXPECT_FALSE(fs::exists(metadata_path(appdata)));
   EXPECT_FALSE(game_artwork::load_artwork_override(appdata, GAME_UUID).has_value());

@@ -4509,7 +4509,7 @@ namespace proc {
       path_env == nullptr ? std::string_view {} : std::string_view {path_env}
     );
     // A command the player edited runs as they wrote it, installed emulator or not.
-    if (resolved && !emulator_library::generated_entry_command(*resolved->preset, app.rom_path, app.cmd)) {
+    if (resolved && !emulator_library::generated_entry_command(*resolved->preset, app.rom_path, app.cmd, configured_launcher)) {
       return std::nullopt;
     }
     return resolved;

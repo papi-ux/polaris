@@ -117,14 +117,16 @@ namespace confighttp {
    * @brief Store a cover picked from a search's preview as `<uuid>.<ext>` under coverdir.
    *
    * Only a PNG, JPEG or WebP whose bytes match the given type is stored, under a validated uuid,
-   * through a temporary file; the same uuid's covers in other formats are removed.
+   * through a temporary file; the same uuid's covers in other formats are removed, except `keep`,
+   * the image the entry still names, because a pick the player abandons must not delete their cover.
    * @return The stored path, or nothing when the image or the write is refused.
    */
   std::optional<std::string> store_selected_cover(
     const std::filesystem::path &coverdir,
     std::string_view uuid,
     std::string_view mime_type,
-    const std::vector<unsigned char> &body
+    const std::vector<unsigned char> &body,
+    const std::filesystem::path &keep = {}
   );
 
   /**
