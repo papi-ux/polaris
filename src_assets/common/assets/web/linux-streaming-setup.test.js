@@ -146,6 +146,41 @@ describe('Linux Streaming Setup checklist', () => {
     expect(checklist.text()).toContain('Safe default')
   })
 
+  it('stops promising an added display when kscreen-doctor is the only backend (#633)', async () => {
+    // Serve the settings projection so the host's generic badge is in play.
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/settings/metadata')
+        ? {
+            status: true, version: 1, fields: {},
+            modes: [{ value: 'host_virtual_display', available: true, badge: 'Compatibility' }],
+          }
+        : { status: true },
+    })))
+    const cardText = async (config) => {
+      const wrapper = mountAudioVideo(config)
+      await flushPromises()
+      const text = wrapper.find('[data-stream-display-mode-picker]')
+        .findAll('article')
+        .find((card) => card.text().includes('Host Virtual Display'))
+        .find('button')
+        .text()
+      wrapper.unmount()
+      return text
+    }
+
+    const evdi = await cardText(linuxConfig({ vdisplayBackend: 'EVDI' }))
+    expect(evdi).toContain(enMessages.config.av_mode_host_virtual_display_copy)
+    expect(evdi).toContain('Compatibility')
+
+    const kscreen = await cardText(linuxConfig({ vdisplayBackend: 'kscreen-doctor' }))
+    expect(kscreen).toContain(enMessages.config.av_mode_host_virtual_display_kscreen_copy)
+    expect(kscreen).toContain(enMessages.config.av_mode_host_virtual_display_kscreen_impact)
+    expect(kscreen).toContain(enMessages.config.av_mode_host_virtual_display_kscreen_badge)
+    expect(kscreen).not.toContain('Compatibility')
+    expect(kscreen).not.toContain(enMessages.config.av_mode_host_virtual_display_copy)
+  })
+
   it('puts player impact first and keeps backend vocabulary in one selected-path summary', () => {
     const wrapper = mountAudioVideo()
     const picker = wrapper.find('[data-stream-display-mode-picker]')

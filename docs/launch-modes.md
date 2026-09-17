@@ -56,6 +56,7 @@ Adds an extra screen to your real desktop, sized to match the client, and stream
 
 - **Best for:** using the stream like a second monitor for your normal desktop session.
 - **One caveat:** adding and removing a display can make your desktop icons and windows rearrange, exactly as plugging in a real monitor can.
+- **On KDE Plasma without EVDI:** adding a screen needs an EVDI device Polaris can use (load the `evdi` module with `initial_device_count=1`) or a Hyprland session. Without either, Polaris falls back to kscreen-doctor, which cannot add a screen. It borrows the connector saved as `linux_streaming_output`, makes it the primary screen, switches it to the client's resolution when the connector offers that mode, and restores the layout afterward, so point it at a spare connector with a dummy plug. Pointed at a monitor you use, it takes over that monitor, which looks the same as Mirror Desktop; a connector with nothing plugged in has no screen to turn on, so the launch fails. The settings page lists the connectors it finds and says when a new choice still needs a restart.
 
 ### Desktop Takeover
 

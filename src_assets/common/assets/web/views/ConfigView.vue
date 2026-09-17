@@ -987,14 +987,38 @@ async function refreshHostCapabilities(generation) {
     const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
     if (!response.ok) return
     const data = await response.json()
-    if (disposed || generation !== hostGeneration.value) return
+    if (disposed || generation !== hostGeneration.value || !config.value) return
     if (Array.isArray(data.stream_display_mode_options)) {
       config.value.stream_display_mode_options = data.stream_display_mode_options
       responseOnlyConfig.value.stream_display_mode_options = data.stream_display_mode_options
     }
+    // The Host Virtual Display card words itself by backend, and installing
+    // EVDI changes the backend across a restart.
+    for (const key of ['vdisplayAvailable', 'vdisplayBackend']) {
+      if (key in data) {
+        config.value[key] = data[key]
+        responseOnlyConfig.value[key] = data[key]
+      }
+    }
   } catch {
     // Keep the last capability snapshot if the restarted host is unavailable.
   }
+}
+
+// A restart from the tray, systemd, or a reboot never runs apply(), so an open
+// settings tab would keep the capability answers from before it. Re-read them
+// when the operator comes back to the tab; the hostGeneration bump also
+// refreshes the mode cards and the virtual display panel.
+const HOST_RETURN_REFRESH_INTERVAL_MS = 5000
+let lastHostReturnRefresh = 0
+
+function refreshHostOnReturn() {
+  if (disposed || restarting.value || !config.value) return
+  if (document.visibilityState !== 'visible') return
+  const now = Date.now()
+  if (now - lastHostReturnRefresh < HOST_RETURN_REFRESH_INTERVAL_MS) return
+  lastHostReturnRefresh = now
+  refreshHostCapabilities(++hostGeneration.value)
 }
 
 function apply() {
@@ -1208,6 +1232,8 @@ function acceptOwnLiveTuningSave(event) {
 
 onMounted(() => {
   window.addEventListener('polaris:live-tuning-saved', acceptOwnLiveTuningSave)
+  document.addEventListener('visibilitychange', refreshHostOnReturn)
+  window.addEventListener('focus', refreshHostOnReturn)
   handleHash()
   window.addEventListener("hashchange", handleHash)
 })
@@ -1230,6 +1256,8 @@ watch(currentTab, async (value) => {
 onUnmounted(() => {
   disposed = true
   window.removeEventListener('polaris:live-tuning-saved', acceptOwnLiveTuningSave)
+  document.removeEventListener('visibilitychange', refreshHostOnReturn)
+  window.removeEventListener('focus', refreshHostOnReturn)
   clearSearchHighlight()
   window.removeEventListener("hashchange", handleHash)
 })
