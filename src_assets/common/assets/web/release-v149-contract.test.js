@@ -33,11 +33,11 @@ describe('v1.4.9 release contract', () => {
     expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.9-1|x86_64'")
   })
 
-  it('leads with what a fresh install changed and says Nova needs no update', () => {
+  it('leads with what a fresh install changed and says which Nova goes with it', () => {
     const notes = currentNotes()
     const intro = notes.split('\n')[2]
     expect(intro).toMatch(/^A setup update shaped by a fresh install/)
-    expect(intro).toContain('Nova stays at v1.4.8 and needs no update')
+    expect(intro).toContain('Nova 1.4.9 comes out alongside it, and Nova 1.4.8 keeps working')
     expect(notes.indexOf('**New**')).toBeLessThan(notes.indexOf('**Fixed**'))
     expect(notes.indexOf('**Fixed**')).toBeLessThan(notes.indexOf('**Heads up**'))
     for (const fact of [

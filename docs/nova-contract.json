@@ -903,13 +903,10 @@
         "instead. display_planner sat here for the day it was served ahead of its consumer;",
         "papi-ux/nova#197 wired the adapter and the records moved back out, with the",
         "nova_reader entries above repointed at the functions that now read it.",
-        "steam_big_picture marks Steam Big Picture on the desktop so Play Setup can pair it",
-        "with a Space's Big Picture; it sits here until the Nova change that reads it ships,",
-        "then moves back out."
+        "steam_big_picture sat here until Nova 1.4.9's Play Setup read it, and moved back out."
       ],
       "game": [
-        "emulator",
-        "steam_big_picture"
+        "emulator"
       ],
       "spaces_snapshot": [
         "available",

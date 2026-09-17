@@ -9,7 +9,7 @@ starts at `v1.0.0`.
 
 ## v1.4.9 - 2026-09-16
 
-A setup update shaped by a fresh install: quick setup covers the encoder, the launch mode and a trusted network as well as artwork and AI explanations, saved settings apply without a restart, restart from the console and the tray works again, Nova's artwork alternatives work, a Space can be removed for good and its host setup fixed from the Spaces page, and host setup, the KMS guidance, the Spaces helper and the Spaces page say what they found. Polaris only; Nova stays at v1.4.8. Existing configurations and paired devices remain valid.
+A setup update shaped by a fresh install: quick setup covers the encoder, the launch mode and a trusted network as well as artwork and AI explanations, saved settings apply without a restart, restart from the console and the tray works again, Nova's artwork alternatives work, a Space can be removed for good and its host setup fixed from the Spaces page, and host setup, the KMS guidance, the Spaces helper and the Spaces page say what they found. Nova 1.4.9 comes out alongside it, and Nova 1.4.8 keeps working with this host. Existing configurations and paired devices remain valid.
 
 - A saved SteamGridDB key or AI provider setting takes effect while Polaris runs: the cover search, Nova's artwork search and AI explanations use the new value at once. The save response carries `restart_required`, and the settings page and the first-run wizard ask for a restart only when a saved change still needs one.
 - Host setup removes an `/etc` copy of the udev rules or modules-load configuration that an older Polaris installed, recognising every version Polaris shipped, and its closing summary names a copy it keeps because that copy may hold a local edit.

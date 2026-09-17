@@ -1369,7 +1369,7 @@ for label, section, expected_section_assets in (
 # detail. Pin phrases a player would read, never internal identifiers.
 release_notes_facts = (
     "A setup update shaped by a fresh install",
-    "Nova stays at v1.4.8 and needs no update",
+    "Nova 1.4.9 comes out alongside it, and Nova 1.4.8 keeps working",
     "First-time setup has two optional steps",
     "takes effect right away",
     "the model Codex is set to use is the default",
