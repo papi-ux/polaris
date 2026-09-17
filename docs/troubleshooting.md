@@ -154,10 +154,12 @@ performance/capability fallback first, not a startup failure. If enabling GPU-na
 launch on a specific driver/compositor stack, temporarily set it to `disabled` and include the
 capture decision fields in the bug report.
 
-The built-in Desktop entry does not launch your existing KDE, GNOME, or wlroots desktop inside this
-private compositor. If the client connects but shows an empty or black desktop while app entries work,
-that usually means the headless runtime is alive but nothing visible has been launched in it. Use
-Desktop Display mode when you want to stream the already-running host desktop session.
+The built-in Desktop entry streams your existing KDE, GNOME, or wlroots desktop even when the host
+default is a private stream, because it has **Mirror the host desktop** turned on in the
+[app editor](apps.md#runtime-behavior). An entry with no command and that setting off opens this private
+compositor instead. If such an entry connects but shows an empty or black desktop while app entries
+work, the headless runtime is alive and nothing visible has been launched in it yet; right-click the
+empty screen to open the session menu.
 
 Unsure which mode you should be running in the first place? Start with
 [Launch modes and capture paths](launch-modes.md).

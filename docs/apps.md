@@ -112,6 +112,7 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 | **Continue streaming until all app processes exit** | Keeps streaming until every process the app started has ended, instead of stopping when the first one does. |
 | **Continue streaming if the application exits quickly** | Detects launcher-type apps that close right after starting something else and treats them as detached. |
 | **Terminate on Pause** | Ends the app when the last client disconnects instead of keeping it paused for the resume window. |
+| **Mirror the host desktop** | Linux only. Streams the desktop you see on the host whatever launch mode the host uses, and ignores **Always create Virtual Display** for this entry. The bundled Desktop entry has it on, which is why Desktop shows your real desktop on a Private Stream host. Turn it off, or add an entry with no command, to get an empty private session to launch things into. A Desktop Takeover launch ignores it. |
 | **Close desktop Steam for private launches** | When desktop Steam is running as a private stream starts, quits it and waits for it to exit instead of refusing the launch. Unsaved state in that Steam session is lost. |
 | **Per Client App Identity** | Gives the app a separate identity per client, so one app can carry different virtual display configurations for different devices. |
 | **Use App Identity** | Creates virtual displays under the app's own identity instead of the client's, so each app gets its own display configuration. |
