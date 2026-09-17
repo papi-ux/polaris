@@ -398,7 +398,13 @@ namespace beat_times {
     // Deliberately no rule for the query merely appearing inside the candidate. A search
     // for Control really does return "3-D Ultra Radio Control Racers Deluxe", and
     // containment would accept it as confidently as the right answer.
-    const int threshold = std::max<int>(3, static_cast<int>(query.size()) / 2);
+    //
+    // The allowance is purely proportional, with no floor under it. A floor of three
+    // edits reads as generous until the query is four characters long, at which point it
+    // lets three of the four differ: "Eden" was accepted as "BioEden" on exactly that
+    // arithmetic. Half the query is still loose enough for punctuation and numerals,
+    // which are what these names actually disagree about.
+    const int threshold = static_cast<int>(query.size()) / 2;
     return distance <= threshold;
   }
 
