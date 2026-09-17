@@ -103,3 +103,29 @@ export function romSourceCountLabel(source = {}) {
   if (typeof source.rom_count !== 'number') return 'Scan to count'
   return `${source.rom_count} game${source.rom_count === 1 ? '' : 's'}`
 }
+
+/**
+ * What a folder card or the chosen preset can offer for installing its emulator:
+ * 'installing' while the host installs it, 'offer' when it is missing and Flathub has
+ * it, or '' when there is nothing to install. A folder that names its own emulator file
+ * keeps that file, so a Flatpak would not change what runs and none is offered.
+ */
+export function romEmulatorInstallState(entry = {}) {
+  const emulator = entry.emulator ?? entry.id
+  if (!emulator || emulator === CUSTOM_EMULATOR) return ''
+  if (entry.install_job?.state === 'installing') return 'installing'
+  if (entry.install?.kind !== 'missing' || !entry.installable) return ''
+  if (String(entry.launcher || '').trim()) return ''
+  return 'offer'
+}
+
+/** The emulator a card installs: a folder names it, a preset is it. */
+export function romEmulatorId(entry = {}) {
+  return entry.emulator ?? entry.id ?? ''
+}
+
+/** Why the last install failed, while the emulator is still missing; Flatpak's own reason when it gave one. */
+export function romEmulatorInstallFailure(entry = {}) {
+  if (entry.install_job?.state !== 'failed' || entry.install?.kind !== 'missing') return ''
+  return entry.install_job.message || 'The install from Flathub failed.'
+}

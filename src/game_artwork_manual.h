@@ -19,6 +19,8 @@ namespace game_artwork::manual {
   inline constexpr std::size_t maximum_match_body_bytes = 4096;
   inline constexpr std::size_t maximum_search_query_bytes = 160;
   inline constexpr std::size_t maximum_candidate_count = 5;
+  /// SteamGridDB's autocomplete answers with at most ten games; a search for posters reads them all.
+  inline constexpr std::size_t maximum_searched_match_count = 10;
   inline constexpr std::size_t maximum_choice_count = 5;
   inline constexpr std::size_t maximum_choice_url_bytes = 2048;
   inline constexpr std::uintmax_t maximum_listing_bytes = 1024U * 1024U;
@@ -176,8 +178,80 @@ namespace game_artwork::manual {
     std::int64_t now_milliseconds
   );
 
+  /** One SteamGridDB game a search found, with the opaque token of its first poster when one could be fetched. */
+  struct match_candidate_preview_t {
+    providers::match_candidate_t candidate;
+    std::optional<std::string> poster_token;  ///< a poster preview in the cache, scoped to the searched uuid
+    std::int64_t preview_expires_at = 0;
+  };
+
+  struct match_candidate_search_t {
+    bool invalid_query = false;  ///< the query cannot become a SteamGridDB search at all
+    std::optional<search_failure_t> failure;  ///< SteamGridDB did not answer the search
+    std::vector<match_candidate_preview_t> candidates;
+  };
+
+  /**
+   * How long a search may keep reading matches, for a caller that shares its thread.
+   *
+   * Each match costs up to two requests to SteamGridDB, and the console's routes run on one
+   * thread, so an unbounded read of ten matches can hold every console page while SteamGridDB
+   * is slow or rate limiting. With a clock and a bound, the search stops starting matches once
+   * the bound has passed and answers with what it has.
+   */
+  struct search_budget_t {
+    std::function<std::int64_t()> clock;  ///< epoch milliseconds, or empty to read every match
+    std::int64_t milliseconds = 0;  ///< 0 to read every match
+  };
+
+  /** Which of SteamGridDB's matches a search lists. */
+  enum class candidate_listing_e {
+    first_matches,  ///< the first maximum_candidate_count matches, with or without a poster (Nova)
+    matches_with_posters,  ///< the first maximum_candidate_count matches with a poster, from every match (Find Cover)
+  };
+
+  /**
+   * Search SteamGridDB for games matching a sanitized query and publish each listed one's first
+   * poster into the preview cache under uuid. This is the search behind Nova's Artwork Studio and
+   * the console's Find Cover. Nova lists the first maximum_candidate_count matches, and a match
+   * whose poster cannot be fetched is still listed without a preview. Find Cover can only use a
+   * poster, so it lists the first maximum_candidate_count matches that have one and reads on
+   * through every match SteamGridDB returned: for "Heroic" the first five have no 600x900 poster,
+   * and Heroic Games Launcher is seventh. An exception from the search request itself propagates,
+   * so a route can answer it as an upstream failure.
+   */
+  [[nodiscard]] match_candidate_search_t search_match_candidates(
+    preview_cache_t &cache,
+    std::string_view uuid,
+    std::string_view query,
+    const providers::transport_t &transport,
+    std::int64_t now_milliseconds,
+    candidate_listing_e listing = candidate_listing_e::first_matches,
+    const search_budget_t &budget = {}
+  );
+
   [[nodiscard]] nlohmann::json artwork_choice_json(std::string_view uuid, const choice_t &choice);
   [[nodiscard]] nlohmann::json artwork_choices_json(std::string_view uuid, kind_e kind, const std::vector<choice_t> &choices);
+
+  /** A cover the console stores: an image's type and bytes. */
+  struct cover_image_t {
+    std::string mime_type;
+    std::vector<unsigned char> body;
+  };
+
+  struct cover_pick_t {
+    std::optional<cover_image_t> image;
+    std::optional<search_failure_t> failure;  ///< the download's upstream failure, or artwork_choice_expired
+  };
+
+  /**
+   * The image Find Cover stores for a picked preview. A search's poster preview already is the
+   * full image. A listed alternative's preview is SteamGridDB's thumbnail, so the full image it
+   * stands for is downloaded from the allowlisted address the listing recorded, within
+   * maximum_asset_bytes, and kept only when it answers from an allowlisted address with a PNG,
+   * JPEG or WebP body. The transport carries the API key; nothing here sees it.
+   */
+  [[nodiscard]] cover_pick_t cover_image_for_pick(const preview_t &pick, const providers::transport_t &transport);
 
   struct selected_download_plan_t {
     std::vector<providers::request_t> downloads;  ///< one download per pick, in the selection's order

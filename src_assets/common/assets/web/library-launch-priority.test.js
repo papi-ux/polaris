@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   appLastLaunched,
+  hasLaunchCommand,
   isLaunchReadyApp,
   launchPriorityDetails,
   quickLaunchApps,
@@ -23,6 +24,14 @@ describe('Library launch priority', () => {
     expect(isLaunchReadyApp(apps[1])).toBe(true)
     expect(isLaunchReadyApp(apps[4])).toBe(true)
     expect(isLaunchReadyApp(apps[5])).toBe(true)
+  })
+
+  it('counts a detached command as a launch command, the way Heroic and Lutris entries start', () => {
+    expect(hasLaunchCommand({ cmd: 'game' })).toBe(true)
+    expect(hasLaunchCommand({ cmd: '', detached: ['', 'flatpak run com.heroicgameslauncher.hgl'] })).toBe(true)
+    expect(hasLaunchCommand({ cmd: '  ', detached: ['  '] })).toBe(false)
+    expect(hasLaunchCommand({ name: 'Desktop' })).toBe(false)
+    expect(hasLaunchCommand(null)).toBe(false)
   })
 
   it('uses the newest known launch timestamp across legacy field names', () => {
