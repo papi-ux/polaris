@@ -191,6 +191,17 @@ namespace config {
        * primary and disables primary_output; "off" keeps physical primary (extended).
        */
       std::string headless_swap_mode;
+      /**
+       * @brief linux_streaming_output as loaded at startup, or as last written
+       * by a client mode switch.
+       *
+       * Loading a mode that owns no connector retires streaming_output, so a
+       * stale connector cannot pin capture or fullscreen hints. The
+       * kscreen-doctor Host Virtual Display fallback still has to be offered
+       * with the saved connector, so it reads this copy. Not a configuration
+       * key, and not updated by a web save until Polaris restarts.
+       */
+      std::string saved_streaming_output;
     } linux_display;
 
     std::string fallback_mode;

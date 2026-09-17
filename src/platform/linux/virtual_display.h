@@ -181,6 +181,15 @@ namespace virtual_display {
   );
 
   /**
+   * @brief The connector the kscreen-doctor fallback may borrow.
+   *
+   * The active linux_streaming_output while a mode holds one, otherwise the
+   * saved one. Modes that own no connector retire the active one on load, and
+   * Host Virtual Display must still be offered as a mode to switch to.
+   */
+  std::string host_virtual_display_connector();
+
+  /**
    * @brief Build the kscreen-doctor call that makes a borrowed output the stream display.
    *
    * The borrowed output is enabled and made priority 1. The configured primary

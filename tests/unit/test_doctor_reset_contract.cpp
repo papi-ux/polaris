@@ -71,14 +71,40 @@ TEST(DoctorResetContract, WebLaunchModeCatalogUsesLaunchEquivalentVirtualDisplay
     get_config.find("virtual_display::backend_has_required_configuration("),
     std::string::npos
   );
+  // Launch-equivalent: kscreen::create borrows the same connector, including
+  // the saved one a private or desktop mode retired on load (#633).
   EXPECT_NE(
-    get_config.find("config::video.linux_display.streaming_output"),
+    get_config.find("virtual_display::host_virtual_display_connector()"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    source("src/platform/linux/virtual_display.cpp").find(
+      "const std::string output = host_virtual_display_connector();"
+    ),
     std::string::npos
   );
   EXPECT_EQ(
     get_config.find("vd_backend != virtual_display::backend_e::NONE"),
     std::string::npos
   );
+}
+
+TEST(DoctorResetContract, SavedStreamingOutputIsCopiedWheneverTheConnectorIsParsed) {
+  // Mode normalization runs after parsing and may retire streaming_output; the
+  // copy has to be taken first, straight from the parsed value.
+  const auto config = source("src/config.cpp");
+  const auto parsed = config.find(
+    "string_f(vars, \"linux_streaming_output\", video.linux_display.streaming_output);"
+  );
+  const auto copied = config.find(
+    "video.linux_display.saved_streaming_output = video.linux_display.streaming_output;",
+    parsed
+  );
+  const auto normalized = config.find("stream_display_policy::normalize_config_from_load();", parsed);
+  ASSERT_NE(parsed, std::string::npos);
+  ASSERT_NE(copied, std::string::npos);
+  ASSERT_NE(normalized, std::string::npos);
+  EXPECT_LT(copied, normalized);
 }
 
 TEST(DoctorResetContract, RunningSessionCannotRewriteTheConfiguredHostBitrateCap) {

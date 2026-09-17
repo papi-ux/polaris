@@ -564,6 +564,13 @@ namespace virtual_display {
     return std::nullopt;
   }
 
+  std::string host_virtual_display_connector() {
+    const auto &linux_display = config::video.linux_display;
+    return !linux_display.streaming_output.empty() ?
+             linux_display.streaming_output :
+             linux_display.saved_streaming_output;
+  }
+
   std::vector<std::string> kscreen_enable_args(
     std::string_view output,
     std::string_view mode,
@@ -1664,14 +1671,15 @@ namespace virtual_display {
     static std::optional<vdisplay_t> create(int width, int height, int fps) {
       const auto &cfg = config::video.linux_display;
 
-      // We need a configured streaming output for kscreen-doctor to manage
-      if (cfg.streaming_output.empty()) {
+      // We need a configured streaming output for kscreen-doctor to manage. The
+      // saved one still counts after a private or desktop mode retired it.
+      const std::string output = host_virtual_display_connector();
+      if (output.empty()) {
         BOOST_LOG(warning) << "Virtual display: kscreen-doctor fallback requires "
                               "'linux_streaming_output' to be configured"sv;
         return std::nullopt;
       }
 
-      std::string output = cfg.streaming_output;
       const auto output_before = current_output_state(output);
       const auto primary_before =
         !cfg.primary_output.empty() && cfg.primary_output != output ?
@@ -1864,12 +1872,12 @@ namespace virtual_display {
 
   bool is_available() {
     const auto backend = detect_backend();
-    return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
+    return backend_has_required_configuration(backend, host_virtual_display_connector());
   }
 
   bool is_available_fresh() {
     const auto backend = detect_backend_fresh();
-    return backend_has_required_configuration(backend, config::video.linux_display.streaming_output);
+    return backend_has_required_configuration(backend, host_virtual_display_connector());
   }
 
   std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured) {
@@ -1900,7 +1908,7 @@ namespace virtual_display {
     // load_library() owns lazy handle/function-pointer state and must never run
     // outside backend_detection_mutex, including on its broken-library path.
     const auto backend = detect_backend_with_cache_policy(false, &evdi_blocked);
-    return unavailable_reason_for(backend, evdi_blocked, !config::video.linux_display.streaming_output.empty());
+    return unavailable_reason_for(backend, evdi_blocked, !host_virtual_display_connector().empty());
   }
 
   static bool destroy_unlocked(vdisplay_t &display);
