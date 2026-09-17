@@ -94,6 +94,26 @@ namespace game_artwork {
   );
 
   /**
+   * A cover chosen in the console after artwork was picked for the game in Nova takes the poster
+   * back. A save chose one when the entry now names another image file than before, or still names
+   * the file Find Cover writes for it, `<uuid>.<ext>` in the covers directory, and Find Cover
+   * rewrote that file after the Nova pick. Any other save keeps the pick: other files change under
+   * an entry without anyone choosing them, as a library rescan refreshes an imported game's
+   * `steam_<appid>` cover and Steam its library cache. Only the picked poster goes; the picked
+   * hero, logo and icon stay, and a pick left without an image is cleared with its metadata.
+   * Images are resolved files: an empty saved image, or one that is not a readable image, keeps
+   * the pick.
+   * @return true when the picked poster was removed.
+   */
+  bool yield_picked_poster_to_console_cover(
+    const std::filesystem::path &appdata,
+    std::string_view uuid,
+    const std::filesystem::path &previous_image,
+    const std::filesystem::path &saved_image,
+    const std::filesystem::path &covers_directory
+  );
+
+  /**
    * Whether automatic artwork lookup may fetch artwork for a game. Remove artwork turns it off
    * with a marker beside the game's cached artwork, and Find artwork again turns it back on.
    * A game without the marker is looked up; an unsafe artwork directory is not.

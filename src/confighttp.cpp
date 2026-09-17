@@ -2333,6 +2333,29 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    std::string app_string(const nlohmann::json &app, const char *key) {
+      return app.is_object() && app.contains(key) && app[key].is_string() ? app[key].get<std::string>() : std::string {};
+    }
+
+    // The image an entry named before a save; a new entry named none.
+    std::string stored_app_image(const nlohmann::json &file_tree, const std::string &uuid) {
+      if (uuid.empty() || !file_tree.contains("apps") || !file_tree["apps"].is_array()) return {};
+      for (const auto &app : file_tree["apps"]) {
+        if (app_string(app, "uuid") == uuid) return app_string(app, "image-path");
+      }
+      return {};
+    }
+
+    // The file an entry's image names, read as Nova's artwork reads it: a relative name is a
+    // bundled image, and a name that finds no bundled image names no file.
+    std::filesystem::path app_image_file(const std::string &image_path) {
+      if (image_path.empty() || std::filesystem::path(image_path).is_absolute()) return image_path;
+      const auto validated = proc::validate_app_image_path(image_path);
+      return validated == proc::validate_app_image_path({}) ? std::filesystem::path {} : std::filesystem::path {validated};
+    }
+  }  // namespace
+
   /**
    * @brief Save an application. To save a new application the UUID must be empty.
    *        To update an existing application, you must provide the current UUID of the application.
@@ -2389,6 +2412,7 @@ namespace confighttp {
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json fileTree = nlohmann::json::parse(content);
+      const auto previous_image = stored_app_image(fileTree, app_string(inputTree, "uuid"));
 
       // Migrate/merge the new app into the file tree.
       proc::migrate_apps(&fileTree, &inputTree);
@@ -2396,6 +2420,18 @@ namespace confighttp {
       // Write the updated file tree back to disk.
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
       proc::refresh(config::stream.file_apps);
+
+      // A cover chosen here after artwork was picked in Nova takes the poster back.
+      const auto uuid = app_string(inputTree, "uuid");
+      if (game_artwork::yield_picked_poster_to_console_cover(
+            platf::appdata(),
+            uuid,
+            app_image_file(previous_image),
+            app_image_file(app_string(inputTree, "image-path")),
+            platf::appdata() / "covers"
+          )) {
+        BOOST_LOG(info) << "The console cover for " << uuid << " replaces the poster picked in Nova";
+      }
 
       // Prepare and send the output response.
       nlohmann::json outputTree;

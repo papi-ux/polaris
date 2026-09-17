@@ -92,6 +92,11 @@ An entry's image is its poster in Nova. A new image, including a second cover pi
 same file, replaces the poster the next time Nova loads the library, and clearing the image lets
 the next source show.
 
+Artwork picked in Nova comes before the entry's image. A cover you choose here afterwards takes the
+poster back: saving the entry with another image, or with a cover Find Cover picked after the Nova
+pick, drops the poster picked in Nova and keeps its background, logo and icon. Saving any other
+change leaves Nova's pick alone, even when a library rescan refreshed the entry's imported cover.
+
 When Nova shows an entry without artwork of its own, Polaris looks it up. A Steam title gets
 Steam's images, and with a SteamGridDB key set in Settings the rest comes from its SteamGridDB game,
 found by app id. Any other entry gets SteamGridDB artwork only when a search finds a game with

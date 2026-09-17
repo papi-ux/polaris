@@ -581,6 +581,88 @@ TEST(GameArtworkOverride, RemoveArtworkDeletesDownloadsAndPicksKeepsTheOwnImageA
   EXPECT_TRUE(game_artwork::enable_automatic_artwork_lookup(appdata, GAME_UUID));
 }
 
+TEST(GameArtworkOverride, AConsoleCoverTakesThePosterBackFromANovaPick) {
+  using game_artwork::kind_e;
+  using game_artwork::source_e;
+  temp_dir_t temp("console-cover");
+  const auto &appdata = temp.path;
+  const auto covers = appdata / "covers";
+  const auto cover = covers / (std::string(GAME_UUID) + ".png");
+  const auto steam_image = appdata / "steam" / "library_600x900.jpg";
+  const auto imported_cover = covers / "steam_620.jpg";
+  write_text(cover, png_bytes('C'));
+  write_text(steam_image, jpeg_bytes('S'));
+  write_text(imported_cover, jpeg_bytes('I'));
+  const auto picked_poster = game_artwork::cache_asset_path(appdata, GAME_UUID, kind_e::poster, source_e::override, ".png");
+  const auto picked_hero = game_artwork::cache_asset_path(appdata, GAME_UUID, kind_e::hero, source_e::override, ".jpg");
+  ASSERT_TRUE(picked_poster.has_value());
+  ASSERT_TRUE(picked_hero.has_value());
+  const auto written_at = [](const fs::path &path) {
+    const auto written = fs::last_write_time(path);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+             decltype(written)::clock::to_sys(written).time_since_epoch()
+           )
+      .count();
+  };
+  const auto pick_in_nova = [&](std::int64_t updated_at, bool with_hero) {
+    ASSERT_TRUE(game_artwork::clear_artwork_override(appdata, GAME_UUID));
+    write_text(*picked_poster, png_bytes('P'));
+    if (with_hero) write_text(*picked_hero, jpeg_bytes('H'));
+    auto metadata = valid_override();
+    metadata.updated_at = updated_at;
+    ASSERT_TRUE(game_artwork::save_artwork_override(appdata, metadata));
+  };
+  const auto yield = [&](const fs::path &previous, const fs::path &saved, const fs::path &directory) {
+    return game_artwork::yield_picked_poster_to_console_cover(appdata, GAME_UUID, previous, saved, directory);
+  };
+
+  // Saving an entry whose cover is older than the Nova pick, a rename say, keeps the pick.
+  pick_in_nova(written_at(cover) + 1000, true);
+  EXPECT_FALSE(yield(cover, cover, covers));
+  EXPECT_TRUE(fs::exists(*picked_poster));
+
+  // Other files change under an entry without a choice, so a newer one keeps the pick too: a
+  // rescan rewrites an imported game's cover beside Find Cover's, and Steam its library cache.
+  pick_in_nova(written_at(imported_cover) - 1000, true);
+  EXPECT_FALSE(yield(imported_cover, imported_cover, covers));
+  EXPECT_TRUE(fs::exists(*picked_poster));
+  pick_in_nova(written_at(steam_image) - 1000, true);
+  EXPECT_FALSE(yield(steam_image, steam_image, covers));
+  EXPECT_TRUE(fs::exists(*picked_poster));
+
+  // No image, an unreadable one or an invalid uuid never takes anything.
+  EXPECT_FALSE(yield(cover, {}, covers));
+  EXPECT_FALSE(yield(cover, appdata / "missing.png", covers));
+  EXPECT_FALSE(game_artwork::yield_picked_poster_to_console_cover(appdata, "../escape", {}, cover, covers));
+  EXPECT_TRUE(fs::exists(*picked_poster));
+
+  // Find Cover rewrote the entry's cover after the Nova pick: the poster goes, the picked hero and
+  // the pick's metadata stay, and Nova's poster is the entry's own image again.
+  pick_in_nova(written_at(cover) - 1000, true);
+  const auto local_copy = game_artwork::cache_asset_path(appdata, GAME_UUID, kind_e::poster, source_e::local, ".png");
+  ASSERT_TRUE(local_copy.has_value());
+  write_text(*local_copy, png_bytes('C'));
+  EXPECT_TRUE(yield(cover, cover, covers / ""));
+  EXPECT_FALSE(fs::exists(*picked_poster));
+  EXPECT_TRUE(fs::exists(*picked_hero));
+  EXPECT_TRUE(game_artwork::load_artwork_override(appdata, GAME_UUID).has_value());
+  const auto manifest = game_artwork::current_manifest(appdata, GAME_UUID);
+  EXPECT_EQ(manifest.at("assets").at("poster").at("source"), "local");
+  EXPECT_EQ(manifest.at("assets").at("hero").at("source"), "override");
+  EXPECT_FALSE(yield(cover, cover, covers));
+
+  // Another image file takes the poster whenever it was written, and a pick left without an
+  // image is cleared with its metadata. An entry that had no image counts as another file.
+  pick_in_nova(written_at(steam_image) + 60000, false);
+  EXPECT_TRUE(yield(cover, steam_image, covers));
+  EXPECT_FALSE(fs::exists(*picked_poster));
+  EXPECT_FALSE(fs::exists(metadata_path(appdata)));
+  EXPECT_FALSE(game_artwork::load_artwork_override(appdata, GAME_UUID).has_value());
+  pick_in_nova(written_at(cover) + 60000, false);
+  EXPECT_TRUE(yield({}, cover, covers));
+  EXPECT_FALSE(fs::exists(metadata_path(appdata)));
+}
+
 TEST(GameArtworkOverride, AutomaticLookupStateFailsClosed) {
   temp_dir_t temp("lookup-fails-closed");
   const auto &appdata = temp.path;

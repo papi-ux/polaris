@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -657,6 +658,64 @@ namespace game_artwork {
     if (!is_valid_uuid(uuid)) return false;
     std::unique_lock transaction_lock(override_gate());
     return clear_artwork_override_unlocked(appdata, uuid);
+  }
+
+  bool yield_picked_poster_to_console_cover(
+    const fs::path &appdata,
+    std::string_view uuid,
+    const fs::path &previous_image,
+    const fs::path &saved_image,
+    const fs::path &covers_directory
+  ) {
+    if (!is_valid_uuid(uuid) || saved_image.empty() || !image_mime_type(saved_image)) return false;
+    std::unique_lock transaction_lock(override_gate());
+    if (safe_directory_tree_state(appdata, uuid) != directory_tree_state_e::safe) return false;
+    if (!recover_interrupted_artwork_override_unlocked(appdata, uuid)) return false;
+    const auto metadata = load_artwork_override(appdata, uuid);
+    if (!metadata) return false;
+
+    const auto picked = [&](const kind_e kind) {
+      std::vector<fs::path> paths;
+      for (const auto extension : std::array<std::string_view, 4> {".png", ".jpg", ".jpeg", ".webp"}) {
+        const auto path = cache_asset_path(appdata, uuid, kind, source_e::override, extension);
+        std::error_code error;
+        if (path && fs::exists(fs::symlink_status(*path, error))) paths.push_back(*path);
+      }
+      return paths;
+    };
+    const auto posters = picked(kind_e::poster);
+    if (posters.empty()) return false;
+
+    const auto image = saved_image.lexically_normal();
+    if (image == previous_image.lexically_normal()) {
+      auto covers = covers_directory.lexically_normal();
+      if (!covers.has_filename()) covers = covers.parent_path();
+      // Only Find Cover's own file for the entry; importers rewrite theirs on every rescan.
+      if (image.parent_path() != covers || image.stem().string() != uuid) return false;
+      std::error_code error;
+      const auto written = fs::last_write_time(image, error);
+      if (error) return false;
+      const auto written_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                decltype(written)::clock::to_sys(written).time_since_epoch()
+                              )
+                                .count();
+      if (written_at <= metadata->updated_at) return false;
+    }
+
+    bool success = true;
+    for (const auto &poster : posters) {
+      if (!remove_metadata_path(poster)) success = false;
+    }
+    const std::array others {kind_e::hero, kind_e::logo, kind_e::icon};
+    const bool pick_keeps_an_image = std::any_of(others.begin(), others.end(), [&](const kind_e kind) {
+      return !picked(kind).empty();
+    });
+    if (!pick_keeps_an_image) {
+      const auto path = metadata_path(appdata, uuid);
+      if (!remove_metadata_path(path)) success = false;
+      if (!remove_metadata_path(temporary_path(path))) success = false;
+    }
+    return success;
   }
 
   bool automatic_artwork_lookup_enabled(

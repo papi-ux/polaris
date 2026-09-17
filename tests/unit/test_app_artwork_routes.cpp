@@ -153,6 +153,21 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_NE(nova_search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
 }
 
+TEST(AppCoverSearch, SavingAChosenCoverTakesThePosterBackFromNova) {
+  const auto source = read_source("src/confighttp.cpp");
+  const auto save = handler_body(source, "void saveApp(");
+  const auto previous = save.find("stored_app_image(fileTree, ");
+  const auto merge = save.find("proc::migrate_apps(&fileTree, &inputTree);");
+  const auto yield = save.find("game_artwork::yield_picked_poster_to_console_cover(");
+  ASSERT_NE(previous, std::string::npos);
+  ASSERT_NE(merge, std::string::npos);
+  ASSERT_NE(yield, std::string::npos);
+  // The image the entry named is read before the save replaces it, and the pick yields after.
+  EXPECT_LT(previous, merge);
+  EXPECT_LT(merge, yield);
+  EXPECT_NE(save.find(R"(platf::appdata() / "covers")"), std::string::npos);
+}
+
 TEST(HeroicLauncherEntry, ImportPublishesItWithTheBundledHeroicPoster) {
   nlohmann::json tree {{"apps", nlohmann::json::array()}};
   confighttp::ensure_heroic_library_app(tree, game_library::launcher_install_t::flatpak);
