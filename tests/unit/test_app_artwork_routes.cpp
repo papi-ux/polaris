@@ -137,6 +137,8 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   // result only, so "Heroic" found nothing while Nova listed Heroic Games Launcher.
   EXPECT_NE(search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
   EXPECT_EQ(search.find(R"(search_data["data"][0])"), std::string::npos);
+  // A cover needs a poster, so Find Cover reads past matches without one; Nova lists as before.
+  EXPECT_NE(search.find("candidate_listing_e::matches_with_posters"), std::string::npos);
   EXPECT_NE(search.find("./api/covers/preview/"), std::string::npos);
   EXPECT_NE(search.find("classify_search_failure(false, std::nullopt)"), std::string::npos);
 
@@ -151,6 +153,7 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   const auto nova = read_source("src/nvhttp.cpp");
   const auto nova_search = handler_body(nova, "auto polarisSearchGameArtworkMatches = ", "\n    };\n");
   EXPECT_NE(nova_search.find("game_artwork::manual::search_match_candidates("), std::string::npos);
+  EXPECT_EQ(nova_search.find("candidate_listing_e::matches_with_posters"), std::string::npos);
 }
 
 TEST(AppCoverSearch, SavingAChosenCoverTakesThePosterBackFromNova) {

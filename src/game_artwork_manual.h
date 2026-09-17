@@ -19,6 +19,8 @@ namespace game_artwork::manual {
   inline constexpr std::size_t maximum_match_body_bytes = 4096;
   inline constexpr std::size_t maximum_search_query_bytes = 160;
   inline constexpr std::size_t maximum_candidate_count = 5;
+  /// SteamGridDB's autocomplete answers with at most ten games; a search for posters reads them all.
+  inline constexpr std::size_t maximum_searched_match_count = 10;
   inline constexpr std::size_t maximum_choice_count = 5;
   inline constexpr std::size_t maximum_choice_url_bytes = 2048;
   inline constexpr std::uintmax_t maximum_listing_bytes = 1024U * 1024U;
@@ -189,19 +191,29 @@ namespace game_artwork::manual {
     std::vector<match_candidate_preview_t> candidates;
   };
 
+  /** Which of SteamGridDB's matches a search lists. */
+  enum class candidate_listing_e {
+    first_matches,  ///< the first maximum_candidate_count matches, with or without a poster (Nova)
+    matches_with_posters,  ///< the first maximum_candidate_count matches with a poster, from every match (Find Cover)
+  };
+
   /**
-   * Search SteamGridDB for up to maximum_candidate_count games matching a sanitized query and
-   * publish each one's first poster into the preview cache under uuid. This is the search behind
-   * Nova's Artwork Studio and the console's Find Cover, so both list the same games for a title.
-   * A candidate whose poster cannot be fetched is still listed, without a preview. An exception
-   * from the search request itself propagates, so a route can answer it as an upstream failure.
+   * Search SteamGridDB for games matching a sanitized query and publish each listed one's first
+   * poster into the preview cache under uuid. This is the search behind Nova's Artwork Studio and
+   * the console's Find Cover. Nova lists the first maximum_candidate_count matches, and a match
+   * whose poster cannot be fetched is still listed without a preview. Find Cover can only use a
+   * poster, so it lists the first maximum_candidate_count matches that have one and reads on
+   * through every match SteamGridDB returned: for "Heroic" the first five have no 600x900 poster,
+   * and Heroic Games Launcher is seventh. An exception from the search request itself propagates,
+   * so a route can answer it as an upstream failure.
    */
   [[nodiscard]] match_candidate_search_t search_match_candidates(
     preview_cache_t &cache,
     std::string_view uuid,
     std::string_view query,
     const providers::transport_t &transport,
-    std::int64_t now_milliseconds
+    std::int64_t now_milliseconds,
+    candidate_listing_e listing = candidate_listing_e::first_matches
   );
 
   [[nodiscard]] nlohmann::json artwork_choice_json(std::string_view uuid, const choice_t &choice);

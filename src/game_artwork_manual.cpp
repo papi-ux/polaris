@@ -502,7 +502,8 @@ namespace game_artwork::manual {
     const std::string_view uuid,
     const std::string_view query,
     const providers::transport_t &transport,
-    const std::int64_t now_milliseconds
+    const std::int64_t now_milliseconds,
+    const candidate_listing_e listing
   ) {
     match_candidate_search_t result;
     const auto search_request = providers::plan_steamgriddb_search(query);
@@ -522,7 +523,9 @@ namespace game_artwork::manual {
       return result;
     }
     const std::string search_body(search_response->body.begin(), search_response->body.end());
-    for (auto &candidate : providers::parse_steamgriddb_match_candidates(query, search_body, maximum_candidate_count)) {
+    const bool posters_only = listing == candidate_listing_e::matches_with_posters;
+    const auto searched = posters_only ? maximum_searched_match_count : maximum_candidate_count;
+    for (auto &candidate : providers::parse_steamgriddb_match_candidates(query, search_body, searched)) {
       match_candidate_preview_t item {std::move(candidate), std::nullopt, 0};
       try {
         const auto game_id = provider_game_number(item.candidate.provider_game_id);
@@ -555,9 +558,11 @@ namespace game_artwork::manual {
           }
         }
       } catch (...) {
-        // A preview failure never removes an otherwise valid sanitized candidate.
+        // A preview failure never removes an otherwise valid sanitized candidate from Nova's list.
       }
+      if (posters_only && !item.poster_token) continue;
       result.candidates.push_back(std::move(item));
+      if (result.candidates.size() == maximum_candidate_count) break;
     }
     return result;
   }

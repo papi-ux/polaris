@@ -6137,7 +6137,8 @@ namespace confighttp {
         uuid,
         *query,
         nvhttp::artwork_transport(api_key),
-        nvhttp::artwork_clock_milliseconds()
+        nvhttp::artwork_clock_milliseconds(),
+        game_artwork::manual::candidate_listing_e::matches_with_posters
       );
       if (search.invalid_query) {
         bad_request(response, request, "A cover search needs a name and a uuid");
