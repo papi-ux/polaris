@@ -419,6 +419,11 @@ namespace stream_display_policy {
     // profile's separate primary-output authority. EVDI and wlroots create a
     // new output, so their old connector and capture-output pins are retired.
     linux_display.primary_output.clear();
+    // Entering from a private or desktop mode, the active connector was retired
+    // on load; KScreen borrows the saved one.
+    if (!host_virtual_backend_creates_output(backend) && linux_display.streaming_output.empty()) {
+      linux_display.streaming_output = linux_display.saved_streaming_output;
+    }
     const auto previous_capture = config::video.capture;
     config::video.capture = capture_for_host_virtual_display_backend(
       backend,
@@ -768,10 +773,11 @@ namespace stream_display_policy {
         if (path->id != stream_path::k_headless_dongle &&
             path->id != k_host_virtual_display &&
             path->id != k_desktop_takeover) {
-          const bool retiring_connector_state =
-            linux_display.auto_manage_displays ||
-            !linux_display.headless_swap_mode.empty();
-          clear_connector_output_authority(retiring_connector_state);
+          // These modes never own a connector. The previous condition (leftover
+          // auto-management or swap mode) could not be false here, because
+          // headless_swap_mode cannot load empty, so retire unconditionally.
+          // Host Virtual Display reads saved_streaming_output instead.
+          clear_connector_output_authority(true);
         }
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.

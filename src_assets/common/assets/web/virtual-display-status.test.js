@@ -116,6 +116,22 @@ describe('virtual display status presentation', () => {
     wrapper.unmount()
   })
 
+  it('reads the saved connector on a Private Stream host that retired the active one (#633)', async () => {
+    vi.stubGlobal('fetch', kscreenFetch({
+      status: { available: true, policy_mode: 'headless_stream' },
+      outputs: { streaming_output: '', host_virtual_display_output: 'HDMI-A-2', outputs: [
+        { name: 'HDMI-A-2', connected: true, enabled: false },
+      ] },
+    }))
+    const config = reactive({ linux_streaming_output: 'HDMI-A-2' })
+    const wrapper = shallowMount(VirtualDisplayStatus, { props: { platform: 'linux', config } })
+
+    await flushPromises()
+    expect(wrapper.find('[data-kscreen-optional]').exists()).toBe(true)
+    expect(wrapper.find('[data-kscreen-connector-state]').text()).toBe('Host Virtual Display will use HDMI-A-2.')
+    wrapper.unmount()
+  })
+
   it('says a connector chosen before a restart has not taken effect yet (#633)', async () => {
     vi.stubGlobal('fetch', kscreenFetch({
       status: { available: false, policy_mode: 'headless_stream' },

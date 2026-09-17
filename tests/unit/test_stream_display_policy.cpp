@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include <filesystem>
 #include <fstream>
@@ -76,6 +78,7 @@ namespace {
         headless_swap_mode {config::video.linux_display.headless_swap_mode},
         streaming_output {config::video.linux_display.streaming_output},
         primary_output {config::video.linux_display.primary_output},
+        saved_streaming_output {config::video.linux_display.saved_streaming_output},
         capture {config::video.capture},
         output_name {config::video.output_name} {
     }
@@ -90,6 +93,7 @@ namespace {
       config::video.linux_display.headless_swap_mode = headless_swap_mode;
       config::video.linux_display.streaming_output = streaming_output;
       config::video.linux_display.primary_output = primary_output;
+      config::video.linux_display.saved_streaming_output = saved_streaming_output;
       config::video.capture = capture;
       config::video.output_name = output_name;
     }
@@ -103,6 +107,7 @@ namespace {
     std::string headless_swap_mode;
     std::string streaming_output;
     std::string primary_output;
+    std::string saved_streaming_output;
     std::string capture;
     std::string output_name;
   };
@@ -858,6 +863,121 @@ TEST(StreamDisplayPolicyTests, NormalizeConfigClearsStaleGamescopeRuntime) {
     stream_display_policy::normalize_config_from_load();
     EXPECT_TRUE(d.private_runtime.empty()) << mode;
   }
+}
+
+TEST(StreamDisplayPolicyTests, PrivateStreamLoadRetiresTheConnectorButKeepsHostVirtualDisplayOffered) {
+  // #633: a Private Stream host saved linux_streaming_output = DP-1 for the
+  // kscreen-doctor fallback. The default headless_swap_mode ("privacy") made
+  // the load retire it, Host Virtual Display then read as unconfigured, and the
+  // card stayed greyed out asking for the connector the file already had.
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  d.stream_mode = "headless_stream";
+  d.streaming_output = "DP-1";
+  d.saved_streaming_output = "DP-1";
+  d.primary_output = "DP-1";
+  d.auto_manage_displays = false;
+  d.headless_swap_mode = "privacy";
+  config::video.output_name.clear();
+
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_TRUE(d.streaming_output.empty()) << "a private mode must not pin capture to the connector";
+  EXPECT_TRUE(d.primary_output.empty());
+  EXPECT_EQ(d.saved_streaming_output, "DP-1");
+  EXPECT_EQ(virtual_display::host_virtual_display_connector(), "DP-1");
+  EXPECT_TRUE(virtual_display::backend_has_required_configuration(
+    virtual_display::backend_e::KSCREEN_DOCTOR,
+    virtual_display::host_virtual_display_connector()
+  ));
+}
+
+TEST(StreamDisplayPolicyTests, ConnectorlessModesRetireTheConnectorWhateverTheSwapFlagsSay) {
+  // The old condition (leftover auto-management or headless_swap_mode) could
+  // not be false on load, because headless_swap_mode cannot load empty. Pin
+  // that retirement no longer depends on it at all.
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  for (const auto mode : {"headless_stream", "windowed_stream", "desktop_display"}) {
+    d.stream_mode = mode;
+    d.streaming_output = "HDMI-A-2";
+    d.saved_streaming_output = "HDMI-A-2";
+    d.primary_output.clear();
+    d.auto_manage_displays = false;
+    d.headless_swap_mode.clear();
+    config::video.output_name = "HDMI-A-2";
+
+    stream_display_policy::normalize_config_from_load();
+    EXPECT_TRUE(d.streaming_output.empty()) << mode;
+    EXPECT_TRUE(config::video.output_name.empty()) << mode;
+    EXPECT_EQ(d.saved_streaming_output, "HDMI-A-2") << mode;
+  }
+}
+
+TEST(StreamDisplayPolicyTests, EnteringKScreenHostVirtualBorrowsTheSavedConnector) {
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+
+  d.streaming_output.clear();
+  d.saved_streaming_output = "DP-1";
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::KSCREEN_DOCTOR
+  );
+  EXPECT_EQ(d.streaming_output, "DP-1");
+
+  // An active connector wins over the saved one.
+  d.streaming_output = "HDMI-A-2";
+  stream_display_policy::normalize_host_virtual_display_state_for_backend(
+    virtual_display::backend_e::KSCREEN_DOCTOR
+  );
+  EXPECT_EQ(d.streaming_output, "HDMI-A-2");
+
+  // Backends that create their own output never take one.
+  for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::WAYLAND_WLR}) {
+    d.streaming_output.clear();
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(backend);
+    EXPECT_TRUE(d.streaming_output.empty());
+  }
+  EXPECT_EQ(d.saved_streaming_output, "DP-1");
+}
+
+TEST(StreamDisplayPolicyTests, ModeSwitchLeavesTheConnectorInTheFile) {
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  d.stream_mode = "headless_stream";
+  d.headless_mode = true;
+  d.use_cage_compositor = true;
+  d.streaming_output.clear();  // retired on load
+  d.saved_streaming_output = "DP-1";
+  d.primary_output.clear();
+  d.auto_manage_displays = false;
+  d.headless_swap_mode.clear();
+  config::video.output_name.clear();
+
+  std::unordered_map<std::string, std::string> persisted;
+  std::string error;
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("desktop_display", persisted, error)) << error;
+  EXPECT_EQ(persisted.at("linux_stream_mode"), "desktop_display");
+  // Writing "" would delete the key (the #633 erasure); writing the saved copy
+  // would overwrite a web edit still waiting for a restart. Neither is sent.
+  EXPECT_FALSE(persisted.contains("linux_streaming_output"));
+  EXPECT_TRUE(d.streaming_output.empty());
+  EXPECT_EQ(d.saved_streaming_output, "DP-1");
+
+  // Leaving a dongle retires its live connector and leaves the file's alone.
+  d.stream_mode = "headless_dongle";
+  d.auto_manage_displays = true;
+  d.headless_swap_mode = "privacy";
+  d.streaming_output = "HDMI-A-2";
+  d.saved_streaming_output = "HDMI-A-2";
+  d.primary_output = "eDP-1";
+  config::video.output_name = "HDMI-A-2";
+  persisted.clear();
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("desktop_display", persisted, error)) << error;
+  EXPECT_FALSE(persisted.contains("linux_streaming_output"));
+  EXPECT_EQ(persisted.at("output_name"), "");
+  EXPECT_EQ(d.saved_streaming_output, "HDMI-A-2");
+  EXPECT_TRUE(d.streaming_output.empty());
+  EXPECT_TRUE(config::video.output_name.empty());
 }
 
 TEST(StreamDisplayPolicyTests, NormalizeConfigRepairsHostVirtualState) {
