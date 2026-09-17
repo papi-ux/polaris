@@ -1171,6 +1171,53 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureLauncherIsTheEntryThatOpensBigPic
   EXPECT_FALSE(proc::is_steam_big_picture_launcher(desktop));
 }
 
+TEST(ProcessRuntimeConfigTests, AnEntryThatLaunchesNothingStreamsTheDesktop) {
+  // Low Res Desktop as an upgraded host's apps.json still has it: no desktop-mirror flag, a
+  // resolution prep command, nothing to launch.
+  proc::ctx_t upgraded_low_res {};
+  upgraded_low_res.name = "Low Res Desktop";
+  upgraded_low_res.image_path = "desktop.png";
+  upgraded_low_res.prep_cmds = {{"xrandr --output HDMI-1 --mode 1920x1080", "xrandr --output HDMI-1 --mode 1920x1200", false}};
+  EXPECT_FALSE(upgraded_low_res.desktop_mirror);
+  EXPECT_TRUE(proc::launches_nothing(upgraded_low_res));
+
+  proc::ctx_t manual_blank {};
+  manual_blank.name = "Couch Desktop";
+  manual_blank.source = "manual";
+  manual_blank.cmd = "  ";
+  manual_blank.detached = {""};
+  EXPECT_TRUE(proc::launches_nothing(manual_blank));
+
+  proc::ctx_t with_cmd {};
+  with_cmd.name = "A Game";
+  with_cmd.cmd = "/usr/bin/a-game";
+  EXPECT_FALSE(proc::launches_nothing(with_cmd));
+
+  proc::ctx_t with_detached {};
+  with_detached.name = "Lutris";
+  with_detached.detached = {"setsid lutris"};
+  EXPECT_FALSE(proc::launches_nothing(with_detached));
+
+  // An older Steam library entry launches through its app id alone.
+  proc::ctx_t steam_by_appid {};
+  steam_by_appid.name = "Disco Elysium";
+  steam_by_appid.steam_appid = "632470";
+  EXPECT_FALSE(proc::launches_nothing(steam_by_appid));
+
+  proc::ctx_t rom {};
+  rom.name = "Game One";
+  rom.emulator = "eden";
+  rom.rom_path = "/games/switch/one.nsp";
+  EXPECT_FALSE(proc::launches_nothing(rom));
+
+  for (const auto *source : {"steam", "lutris", "heroic"}) {
+    proc::ctx_t imported {};
+    imported.name = "Imported";
+    imported.source = source;
+    EXPECT_FALSE(proc::launches_nothing(imported)) << source;
+  }
+}
+
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompatibilitySessions) {
   proc::ctx_t big_picture {};
   big_picture.name = "Steam Big Picture";

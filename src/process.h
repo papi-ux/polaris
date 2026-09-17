@@ -643,6 +643,16 @@ namespace proc {
    */
   bool is_steam_big_picture_launcher(const ctx_t &app);
 
+  /**
+   * @brief Whether an app launches nothing of its own, which means it streams the desktop.
+   *
+   * No command, no detached command, no Steam app id, no ROM folder emulator or file, and no
+   * library source other than a manual entry. Upgraded hosts keep an apps.json from before the
+   * desktop-mirror flag, so their bundled Low Res Desktop never gained it; this still recognises
+   * such an entry without matching its name.
+   */
+  bool launches_nothing(const ctx_t &app);
+
   enum class session_stop_outcome_t {
     allowed,
     no_active_session,

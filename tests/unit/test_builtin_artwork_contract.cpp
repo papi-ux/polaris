@@ -41,6 +41,8 @@ TEST(BuiltinArtworkContract, ResolvesThePackagedPosterAndRetiresOnlyAutomaticMat
   EXPECT_NE(policy.find("VIRTUAL_DISPLAY_UUID"), std::string::npos);
   // Desktop entries are not games either (Low Res Desktop once took Low Magic Age's artwork).
   EXPECT_NE(policy.find("app.desktop_mirror"), std::string::npos);
+  // An upgraded host's apps.json predates the flag, so an entry that launches nothing counts too.
+  EXPECT_NE(policy.find("proc::launches_nothing(app)"), std::string::npos);
   EXPECT_NE(configured.find("proc::validate_app_image_path"), std::string::npos);
   EXPECT_NE(promotion.find("candidate_already_cached"), std::string::npos);
   EXPECT_NE(promotion.find("bundled_utility && !candidate_already_cached"), std::string::npos);

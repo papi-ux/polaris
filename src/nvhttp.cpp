@@ -3034,11 +3034,14 @@ namespace nvhttp {
     bool uses_bundled_utility_artwork(const proc::ctx_t &app) {
       // An entry that streams the desktop is not a game either. No provider has artwork for it,
       // and a title search only finds a coincidental game (Low Res Desktop -> Low Magic Age).
+      // The flag alone misses upgraded hosts, whose apps.json predates it, so an entry that
+      // launches nothing counts as well.
       return app.uuid == VIRTUAL_DISPLAY_UUID ||
              app.uuid == FALLBACK_DESKTOP_UUID ||
              app.uuid == REMOTE_INPUT_UUID ||
              app.uuid == TERMINATE_APP_UUID ||
-             app.desktop_mirror;
+             app.desktop_mirror ||
+             proc::launches_nothing(app);
     }
 
     fs::path configured_artwork_image(const proc::ctx_t &app) {
