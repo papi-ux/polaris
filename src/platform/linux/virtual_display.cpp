@@ -564,6 +564,23 @@ namespace virtual_display {
     return std::nullopt;
   }
 
+  std::vector<std::string> kscreen_enable_args(
+    std::string_view output,
+    std::string_view mode,
+    std::string_view primary_output
+  ) {
+    const auto prefix = "output."s + std::string {output};
+    std::vector<std::string> args {"kscreen-doctor", prefix + ".enable"};
+    if (!mode.empty()) {
+      args.push_back(prefix + ".mode." + std::string {mode});
+    }
+    args.push_back(prefix + ".priority.1");
+    if (!primary_output.empty() && primary_output != output) {
+      args.push_back("output."s + std::string {primary_output} + ".priority.2");
+    }
+    return args;
+  }
+
   bool evdi_output_name_is_proven(std::string_view output_name) {
     return !output_name.empty();
   }
@@ -1689,19 +1706,15 @@ namespace virtual_display {
         }
       };
 
+      if (cfg.primary_output == output) {
+        BOOST_LOG(info) << "Virtual display: linux_streaming_output and linux_primary_output both name ["sv << output
+                        << "]; that monitor is reconfigured for the stream and made first"sv;
+      }
+
       // Set mode and enable the output
       std::string mode_str = std::to_string(width) + "x" + std::to_string(height) +
                              "@" + std::to_string(fps);
-      std::vector<std::string> args {
-        "kscreen-doctor",
-        "output." + output + ".enable",
-        "output." + output + ".mode." + mode_str,
-        "output." + output + ".priority.1",
-      };
-
-      if (!cfg.primary_output.empty()) {
-        args.push_back("output." + cfg.primary_output + ".priority.2");
-      }
+      auto args = kscreen_enable_args(output, mode_str, cfg.primary_output);
 
       BOOST_LOG(info) << "Virtual display: running kscreen-doctor enable with "sv << args.size() - 1 << " argument(s)"sv;
       int rc = platf::run_process_argv(args);
@@ -1709,14 +1722,7 @@ namespace virtual_display {
         BOOST_LOG(warning) << "Virtual display: kscreen-doctor enable failed (rc="sv << rc << ")"sv;
 
         // Try without explicit mode setting (just enable)
-        args = {
-          "kscreen-doctor",
-          "output." + output + ".enable",
-          "output." + output + ".priority.1",
-        };
-        if (!cfg.primary_output.empty()) {
-          args.push_back("output." + cfg.primary_output + ".priority.2");
-        }
+        args = kscreen_enable_args(output, {}, cfg.primary_output);
 
         rc = platf::run_process_argv(args);
         if (rc != 0) {

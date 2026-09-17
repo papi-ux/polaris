@@ -180,6 +180,26 @@ namespace virtual_display {
     std::string_view output_name
   );
 
+  /**
+   * @brief Build the kscreen-doctor call that makes a borrowed output the stream display.
+   *
+   * The borrowed output is enabled and made priority 1. The configured primary
+   * output is moved to priority 2 only when it is a different output: when
+   * both settings name one connector this same call has just made it first,
+   * and a trailing priority 2 for it would win, because kscreen-doctor applies
+   * its arguments in order.
+   *
+   * @param output The output named by `linux_streaming_output`.
+   * @param mode A kscreen-doctor mode such as `1920x1080@60`, or empty to only enable.
+   * @param primary_output The output named by `linux_primary_output`; may be empty.
+   * @return The full argv, starting with `kscreen-doctor`.
+   */
+  std::vector<std::string> kscreen_enable_args(
+    std::string_view output,
+    std::string_view mode,
+    std::string_view primary_output
+  );
+
   /** @brief EVDI output identity is proven only by non-empty connector discovery. */
   bool evdi_output_name_is_proven(std::string_view output_name);
 
