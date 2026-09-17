@@ -3,6 +3,7 @@
  * @brief Definitions for entry handling functions.
  */
 // standard includes
+#include <algorithm>
 #include <array>
 #include <csignal>
 #include <filesystem>
@@ -17,6 +18,7 @@
 // local includes
 #include "config.h"
 #include "confighttp.h"
+#include "crypto.h"
 #include "entry_handler.h"
 #include "file_handler.h"
 #include "globals.h"
@@ -118,36 +120,40 @@ namespace {
    *
    * /etc wins over the vendor directory, so a copy left by an older install
    * shadows the packaged file — every later fix to the rules would be installed
-   * and then ignored. A copy that still matches what Polaris ships is Polaris'
-   * own leftover and is removed; anything else is a local edit and is kept, with
-   * a warning that it is the file in effect.
+   * and then ignored. A copy that matches any version Polaris shipped is Polaris'
+   * own leftover and is removed; anything else may be a local edit and is kept,
+   * with a warning that it is the file in effect.
+   *
+   * @return Whether the /etc copy is gone afterwards; false means it still overrides the packaged file.
    */
-  void retire_shadowing_etc_asset(const fs::path &etc_target, const fs::path &packaged_source, std::string_view label) {
+  bool retire_shadowing_etc_asset(const fs::path &etc_target, const fs::path &packaged_source, std::string_view label) {
     std::error_code ec;
     if (!fs::exists(etc_target, ec)) {
-      return;
+      return true;
     }
 
-    if (file_handler::read_file(etc_target.c_str()) != file_handler::read_file(packaged_source.c_str())) {
-      // Either a local edit worth keeping or a copy from an older Polaris. The
-      // two are indistinguishable from content alone, and deleting somebody's
-      // edit is worse than leaving a stale file, so this only reports it — with
-      // the command to run, because the shadowed file is the packaged one.
-      BOOST_LOG(warning) << "Linux host setup: ["sv << etc_target << "] differs from the "sv << label
-                         << " this Polaris ships and overrides it. If you did not edit it yourself it is "sv
-                         << "a copy from an older install; remove it with [sudo rm "sv << etc_target
-                         << "] so the packaged file applies."sv;
-      return;
+    const auto existing = file_handler::read_file(etc_target.c_str());
+    const bool identical = existing == file_handler::read_file(packaged_source.c_str());
+    if (!identical && !is_shipped_host_asset_version(etc_target.filename().string(), existing)) {
+      // It matches no version Polaris shipped, so it may hold a local edit, and
+      // deleting somebody's edit is worse than leaving a stale file. This only
+      // reports it, with the command, because the shadowed file is the packaged one.
+      BOOST_LOG(warning) << "Linux host setup: ["sv << etc_target << "] differs from every "sv << label
+                         << " version Polaris shipped and overrides the packaged file. If you did not edit it yourself, "sv
+                         << "remove it with [sudo rm "sv << etc_target << "] so the packaged file applies."sv;
+      return false;
     }
 
     if (fs::remove(etc_target, ec) && !ec) {
-      BOOST_LOG(info) << "Linux host setup: removed the superseded "sv << label << " copy at ["sv << etc_target
-                      << "]; the packaged file applies from now on"sv;
-      return;
+      BOOST_LOG(info) << "Linux host setup: removed the superseded "sv << label << " copy at ["sv << etc_target << ']'
+                      << (identical ? ""sv : " that an older Polaris installed"sv)
+                      << "; the packaged file applies from now on"sv;
+      return true;
     }
 
     BOOST_LOG(warning) << "Linux host setup: could not remove the superseded "sv << label << " copy at ["sv
                        << etc_target << "]: "sv << ec.message();
+    return false;
   }
 
   bool install_host_asset(const fs::path &source, const fs::path &target, std::string_view label) {
@@ -424,6 +430,33 @@ void launch_ui(const std::optional<std::string> &path) {
   platf::open_url(url);
 }
 
+bool is_shipped_host_asset_version(std::string_view file_name, std::string_view contents) {
+  // Every version of the two files Polaris has shipped, by sha256. When either
+  // file changes, add the new digest here; the entry handler test fails until then.
+  static constexpr std::array<std::pair<std::string_view, std::string_view>, 8> shipped {{
+    {"60-polaris.rules", "9c50dce1aaf5d326685fb83bd00880d09d368a1eece1e45de7297f7b7494c4ae"},
+    {"60-polaris.rules", "a48ab8b22bda422bdaec1212eadbf38aa80a384e89f6b8bc7dca060f521e892d"},
+    {"60-polaris.rules", "5e69cee0e39bf85d57c17c273d3ff71a3b5d187f8125e3f396a207dae2651490"},
+    {"60-polaris.rules", "f34cde4f5d6b369ae2bab83c50b8bd0f6b0f783d7d9bbe0f6affd6947a1542b5"},
+    {"60-polaris.rules", "1e1455ef4f19154d83fe5d5da6b9f530daad733d5debda101950bace0863ca33"},
+    {"60-polaris.rules", "0f7e99b4ae07d7379f9416b2417eee6b7744c9bafc0547dfc503cb35b7b0bdf1"},
+    {"60-polaris.conf", "11ed83ac0126b16abab10ae0ca1c8750207f2fcabe5f00fe736a562a2bd45884"},
+    {"60-polaris.conf", "557eb7e447e6e55fd3eefcc392cd1690cfb905936683b3978583a36f91a0ab84"},
+  }};
+  if (contents.empty()) {
+    return false;
+  }
+  const auto digest = crypto::hash(contents);
+  std::string hex;
+  hex.reserve(digest.size() * 2);
+  for (const auto byte : digest) {
+    hex += std::format("{:02x}", byte);
+  }
+  return std::any_of(shipped.begin(), shipped.end(), [&](const auto &version) {
+    return version.first == file_name && version.second == hex;
+  });
+}
+
 config_ownership_action_e config_ownership_action(
   bool exists,
   bool is_directory,
@@ -676,13 +709,18 @@ namespace args {
       }
     }
 
+    std::vector<fs::path> etc_overrides_left;
     if (udev_from_package) {
-      retire_shadowing_etc_asset("/etc/udev/rules.d/60-polaris.rules", udev_source, "udev rules");
+      if (!retire_shadowing_etc_asset("/etc/udev/rules.d/60-polaris.rules", udev_source, "udev rules")) {
+        etc_overrides_left.emplace_back("/etc/udev/rules.d/60-polaris.rules");
+      }
     } else {
       ok &= install_host_asset(udev_source, "/etc/udev/rules.d/60-polaris.rules", "udev rules");
     }
     if (modules_from_package) {
-      retire_shadowing_etc_asset("/etc/modules-load.d/60-polaris.conf", modules_source, "modules-load config");
+      if (!retire_shadowing_etc_asset("/etc/modules-load.d/60-polaris.conf", modules_source, "modules-load config")) {
+        etc_overrides_left.emplace_back("/etc/modules-load.d/60-polaris.conf");
+      }
     } else {
       ok &= install_host_asset(modules_source, "/etc/modules-load.d/60-polaris.conf", "modules-load config");
     }
@@ -720,6 +758,12 @@ namespace args {
       std::cout
         << "The udev rules and modules-load configuration came from the package, so nothing was written to /etc."sv << std::endl
         << "Everything this step applied is also applied automatically at boot; it is only needed to avoid a reboot after install."sv << std::endl;
+    }
+    for (const auto &override_path : etc_overrides_left) {
+      // Repeated here because the warning scrolls away above the summary.
+      std::cout
+        << "Still overriding the packaged file: "sv << override_path.string() << ". See the warning above; unless you edited it yourself,"sv << std::endl
+        << "remove it with: sudo rm "sv << override_path.string() << std::endl;
     }
     std::cout
       << "Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation."sv << std::endl

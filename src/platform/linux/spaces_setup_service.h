@@ -28,6 +28,9 @@ namespace multiseat::spaces {
     ~setup_service_t();
     [[nodiscard]] nlohmann::json snapshot() const;
     // 202 queued/cancelling, 200 idempotent completion, 409 conflict, 503 unavailable.
+    // "download" fetches and verifies the runtime alone. It holds the worker like
+    // any job but writes no journal record and prepares no home: Docker's verified
+    // store is its only result, and the setup check reads that store again.
     int submit(const setup_request_t &request);
     void shutdown();
 
@@ -35,6 +38,9 @@ namespace multiseat::spaces {
     struct record_t {
       setup_request_t request;
       std::string reference, image, state, code, gpu_id;
+    };
+    struct download_t {
+      std::string request_id, runtime_id, state, code;
     };
     bool save_locked();
     void work();
@@ -46,6 +52,7 @@ namespace multiseat::spaces {
     std::mutex shutdown_mutex_;
     std::condition_variable changed_;
     std::optional<record_t> record_;
+    std::optional<download_t> download_;  ///< the last download-only job, kept in memory
     bool enabled_ = false, fault_ = false, active_ = false, closing_ = false;
     bool locked_ = false;  ///< another Polaris process holds the setup journal
     std::stop_source cancellation_;

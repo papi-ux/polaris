@@ -178,6 +178,22 @@ namespace game_artwork::providers {
       return static_cast<unsigned int>(*year);
     }
 
+    std::optional<std::string> allowlisted_steamgriddb_url(const json &asset, const char *field) {
+      if (!asset.contains(field) || !asset[field].is_string()) return std::nullopt;
+      auto url = asset[field].get<std::string>();
+      if (!is_allowed_provider_url(provider_e::steamgriddb, url)) return std::nullopt;
+      return url;
+    }
+
+    // Icons store SteamGridDB's thumbnail, as the match path always has: a full icon can
+    // be an .ico, which the cache does not accept. Every other kind stores the full image.
+    std::optional<std::string> steamgriddb_asset_url(kind_e kind, const json &asset) {
+      if (kind == kind_e::icon) {
+        if (auto thumb = allowlisted_steamgriddb_url(asset, "thumb")) return thumb;
+      }
+      return allowlisted_steamgriddb_url(asset, "url");
+    }
+
     request_t steamgriddb_request(operation_e operation, std::optional<kind_e> kind, std::string url) {
       return {
         provider_e::steamgriddb,
@@ -415,28 +431,79 @@ namespace game_artwork::providers {
     return request;
   }
 
-  std::optional<std::uint64_t> parse_steamgriddb_game_id(const std::string_view response_body) {
+  namespace {
+    // Trademark, registered and copyright signs decorate a title; they never tell two games apart.
+    std::string automatic_title_key(std::string_view value) {
+      std::string plain(value.substr(0, maximum_match_title_bytes));
+      for (const std::string_view sign : {std::string_view {"\xE2\x84\xA2"}, std::string_view {"\xC2\xAE"}, std::string_view {"\xC2\xA9"}}) {
+        for (auto at = plain.find(sign); at != std::string::npos; at = plain.find(sign, at)) {
+          plain.replace(at, sign.size(), " ");
+        }
+      }
+      return normalized_match_title(plain);
+    }
+  }  // namespace
+
+  std::optional<std::uint64_t> select_steamgriddb_title_match(
+    const std::string_view title,
+    const std::string_view response_body
+  ) {
+    const auto wanted = automatic_title_key(title);
+    if (wanted.empty()) return std::nullopt;
     const auto response = parse_response(response_body);
     if (!is_success_response(response) || !response.contains("data") || !response["data"].is_array()) {
       return std::nullopt;
     }
-
     for (const auto &result : response["data"]) {
-      if (!result.is_object() || !result.contains("id")) {
-        continue;
+      if (!result.is_object() || !result.contains("id")) continue;
+      const auto id = positive_json_integer(result["id"]);
+      const auto candidate = sanitized_match_title(result);
+      if (id && candidate && automatic_title_key(*candidate) == wanted) return id;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<request_t> plan_steamgriddb_steam_game(const std::string_view steam_appid) {
+    if (!canonical_library_appid(steam_appid)) return std::nullopt;
+    auto request = steamgriddb_request(
+      operation_e::search,
+      std::nullopt,
+      std::string {steamgriddb_api_root} + "games/steam/" + std::string(steam_appid)
+    );
+    if (!is_allowed_provider_url(provider_e::steamgriddb, request.url)) return std::nullopt;
+    return request;
+  }
+
+  std::optional<std::uint64_t> parse_steamgriddb_steam_game_id(const std::string_view response_body) {
+    const auto response = parse_response(response_body);
+    if (!is_success_response(response) || !response.contains("data") || !response["data"].is_object() ||
+        !response["data"].contains("id")) {
+      return std::nullopt;
+    }
+    return positive_json_integer(response["data"]["id"]);
+  }
+
+  std::optional<std::uint64_t> automatic_steamgriddb_game(
+    const std::string_view title,
+    const std::string_view steam_appid,
+    const transport_t &transport
+  ) {
+    if (!transport) return std::nullopt;
+    const auto ask = [&](const request_t &request) -> std::optional<std::string> {
+      const auto response = transport(request, maximum_asset_bytes);
+      if (!response || response->status_code < 200 || response->status_code >= 300) return std::nullopt;
+      if (!response->final_url.empty() && !is_allowed_provider_url(request.provider, response->final_url)) {
+        return std::nullopt;
       }
-      const auto &id = result["id"];
-      if (id.is_number_unsigned()) {
-        const auto value = id.get<std::uint64_t>();
-        if (value != 0) {
-          return value;
-        }
-      } else if (id.is_number_integer()) {
-        const auto value = id.get<std::int64_t>();
-        if (value > 0) {
-          return static_cast<std::uint64_t>(value);
-        }
+      return std::string(response->body.begin(), response->body.end());
+    };
+    if (const auto request = plan_steamgriddb_steam_game(steam_appid)) {
+      if (const auto body = ask(*request)) {
+        if (const auto id = parse_steamgriddb_steam_game_id(*body)) return id;
       }
+    }
+    if (const auto request = plan_steamgriddb_search(title)) {
+      if (const auto body = ask(*request)) return select_steamgriddb_title_match(title, *body);
     }
     return std::nullopt;
   }
@@ -517,18 +584,37 @@ namespace game_artwork::providers {
     for (const auto &asset : response["data"]) {
       if (!asset.is_object()) continue;
 
-      std::optional<std::string> selected_url;
-      if (kind == kind_e::icon && asset.contains("thumb") && asset["thumb"].is_string()) {
-        const auto thumb = asset["thumb"].get<std::string>();
-        if (is_allowed_provider_url(provider_e::steamgriddb, thumb)) selected_url = thumb;
-      }
-      if (!selected_url && asset.contains("url") && asset["url"].is_string()) {
-        const auto url = asset["url"].get<std::string>();
-        if (is_allowed_provider_url(provider_e::steamgriddb, url)) selected_url = url;
-      }
+      const auto selected_url = steamgriddb_asset_url(kind, asset);
       if (!selected_url || !seen.emplace(*selected_url).second) continue;
       candidates.push_back({kind, source_e::steamgriddb, *selected_url});
     }
     return candidates;
+  }
+
+  std::vector<choice_candidate_t> parse_steamgriddb_choices(
+    const kind_e kind,
+    const std::string_view response_body,
+    const std::size_t maximum_choices
+  ) {
+    if (maximum_choices == 0) return {};
+    const auto response = parse_response(response_body);
+    if (!is_success_response(response) || !response.contains("data") || !response["data"].is_array()) {
+      return {};
+    }
+
+    std::vector<choice_candidate_t> choices;
+    std::unordered_set<std::string> seen;
+    for (const auto &asset : response["data"]) {
+      if (!asset.is_object()) continue;
+
+      const auto asset_url = steamgriddb_asset_url(kind, asset);
+      if (!asset_url || !seen.emplace(*asset_url).second) continue;
+      // The thumbnail is a smaller rendition of the same image, so a preview stays light
+      // and still shows what the apply stores.
+      auto preview_url = allowlisted_steamgriddb_url(asset, "thumb").value_or(*asset_url);
+      choices.push_back({kind, *asset_url, std::move(preview_url)});
+      if (choices.size() == maximum_choices) break;
+    }
+    return choices;
   }
 }

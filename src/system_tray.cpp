@@ -16,7 +16,7 @@
     #define TRAY_ICON_LOCKED WEB_DIR "images/apollo-locked.ico"
   #elif defined(__linux__) || defined(linux) || defined(__linux)
     #include <gtk/gtk.h>
-    #define TRAY_ICON WEB_DIR "images/polaris-playing.svg"
+    #define TRAY_ICON WEB_DIR "images/logo-polaris.svg"
     #define TRAY_ICON_PLAYING WEB_DIR "images/polaris-playing.svg"
     #define TRAY_ICON_PAUSING WEB_DIR "images/polaris-pausing.svg"
     #define TRAY_ICON_LOCKED WEB_DIR "images/polaris-locked.svg"

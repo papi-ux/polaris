@@ -18,8 +18,12 @@
     </section>
 
     <section v-if="firstSpaceMissing" class="section-card" aria-labelledby="spaces-intro-title">
-      <h2 id="spaces-intro-title" class="section-title">{{ $t('spaces.intro_title') }}</h2>
-      <p class="mt-2 text-sm text-storm">{{ $t('spaces.intro_copy') }}</p>
+      <h2 id="spaces-intro-title" class="section-title">{{ runtimeWaiting ? $t('spaces.intro_waiting_title') : $t('spaces.intro_title') }}</h2>
+      <p class="mt-2 text-sm text-storm">{{ runtimeWaiting ? $t('spaces.intro_waiting_copy') : $t('spaces.intro_copy') }}</p>
+      <a v-if="runtimeWaiting" href="https://papi-ux.com/docs/spaces-or-regular/" target="_blank" rel="noopener noreferrer"
+         data-spaces-or-regular class="mt-3 inline-flex text-sm font-medium text-ice underline-offset-4 hover:underline">
+        {{ $t('spaces.intro_waiting_link') }}
+      </a>
     </section>
 
     <p v-if="clientLoading" class="text-sm text-storm" role="status">{{ $t('spaces.devices_loading') }}</p>
@@ -31,7 +35,7 @@
     <div class="flex flex-col gap-6">
       <MultiseatAssignments :class="hostFirst ? 'order-2' : 'order-1'" :clients="clients"
                             :clients-ready="!clientLoading && !clientError" @snapshot="snapshot = $event" />
-      <SpacesSetup :class="hostFirst ? 'order-1' : 'order-2'" @state="setupState = $event" />
+      <SpacesSetup :class="hostFirst ? 'order-1' : 'order-2'" @state="setupState = $event" @runtime-waiting="runtimeWaiting = $event" />
     </div>
 
     <div class="flex flex-wrap items-center justify-between gap-3 text-sm text-storm">
@@ -51,6 +55,9 @@ import { docsUrl } from '../spaces-setup.js'
 const i18n = inject('i18n')
 const clients = ref([]), snapshot = ref(null), setupState = ref(null), clientError = ref('')
 const clientLoading = ref(true)
+// True while this build has no verified gaming runtime: no Space can be created
+// yet, so the intro speaks about getting the PC ready instead.
+const runtimeWaiting = ref(false)
 let request = null
 onUnmounted(() => request?.abort())
 

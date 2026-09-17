@@ -20,7 +20,7 @@
             <div class="flex flex-wrap gap-2">
               <div
                 v-for="(stepDef, idx) in steps"
-                :key="stepDef.titleKey || stepDef.title"
+                :key="stepDef.id"
                 class="rounded-full border px-3 py-1.5 text-sm transition-[background-color,border-color,color] duration-200"
                 :class="idx === currentStep ? 'border-ice/40 bg-ice/10 text-ice' : idx < currentStep ? 'border-storm/30 bg-deep/45 text-silver' : 'border-storm/20 bg-deep/25 text-storm'"
               >
@@ -36,7 +36,7 @@
               <h2 class="mt-2 text-2xl font-semibold text-silver">{{ stepTitle(steps[currentStep]) }}</h2>
             </div>
 
-            <div v-if="currentStep === 0">
+            <div v-if="currentId === 'credentials'">
               <p class="mb-4 text-sm leading-relaxed text-storm">{{ $t('welcome.create_creds') }}</p>
               <div class="mb-4 rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright">
                 {{ $t('welcome.create_creds_alert') }}
@@ -67,28 +67,28 @@
               </form>
             </div>
 
-            <div v-if="currentStep === 1">
-              <p class="mb-4 text-sm leading-relaxed text-storm">Polaris detected the following host runtime defaults. You can fine-tune them later, but this gives you a quick sanity check before streaming.</p>
-              <div v-if="configLoading" class="rounded-2xl border border-storm/20 bg-void/45 px-4 py-8 text-center text-sm text-storm">Loading configuration…</div>
-              <div v-else-if="configData" class="space-y-3">
-                <div class="surface-subtle p-4">
-                  <div class="text-sm text-storm">Video Encoder</div>
-                  <div class="mt-2 text-base font-medium text-silver">{{ configData.video_encoder || configData.encoder || 'Auto-detected' }}</div>
-                </div>
-                <div v-if="configData.adapter_name || configData.output_name" class="surface-subtle p-4">
-                  <div class="text-sm text-storm">GPU / Display Adapter</div>
-                  <div class="mt-2 text-base font-medium text-silver">{{ configData.adapter_name || configData.output_name || 'Default' }}</div>
-                </div>
-                <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
-                  You can fine-tune encoder and display behavior later in Configuration → Audio/Video.
-                </div>
-              </div>
-              <div v-else class="rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright">
-                Could not load the configuration. You can still continue and revisit hardware settings later.
-              </div>
+            <div v-if="currentId === 'gpu'">
+              <WelcomeGpuStep
+                :config-data="configData"
+                :hardware="hardware"
+                :loading="hardwareLoading"
+                :patch-config="patchConfig"
+                @saved="(result) => noteRestartNeeded('encoder', result)"
+              />
             </div>
 
-            <div v-if="currentStep === 2">
+            <div v-if="currentId === 'launch_mode'">
+              <div v-if="configLoading" class="rounded-2xl border border-storm/20 bg-void/45 px-4 py-8 text-center text-sm text-storm">{{ $t('welcome.launch_mode_loading') }}</div>
+              <WelcomeLaunchModeStep
+                v-else
+                :config-data="configData"
+                :hardware="hardware"
+                :patch-config="patchConfig"
+                @saved="(result) => noteRestartNeeded('launch_mode', result)"
+              />
+            </div>
+
+            <div v-if="currentId === 'network'">
               <p class="mb-4 text-sm leading-relaxed text-storm">Confirm the network path before pairing anything. Local-only streaming is usually enough at first; remote access can wait until the host is stable.</p>
               <div class="space-y-3">
                 <div class="surface-subtle p-4">
@@ -106,46 +106,23 @@
                 <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
                   You can change the host port later in Configuration → Network.
                 </div>
+                <WelcomeTrustedNetwork
+                  :config-data="configData"
+                  :patch-config="patchConfig"
+                  @saved="(result) => noteRestartNeeded('trusted_network', result)"
+                />
               </div>
             </div>
 
-            <div v-if="currentStep === 3">
-              <p class="mb-4 text-sm leading-relaxed text-storm">Polaris is most useful when the library is intentional. Publish the apps you actually want to expose instead of dumping every launcher and helper tool into the client view.</p>
-              <div class="space-y-3">
-                <div class="rounded-2xl border border-storm/20 bg-void/45 p-5 text-center">
-                  <div class="mb-3 text-4xl">&#x1F3AE;</div>
-                  <div class="text-base font-medium text-silver">Applications become the client-facing launch surface</div>
-                  <p class="mt-2 text-sm leading-relaxed text-storm">
-                    Add games manually, scan supported launchers, and tune per-app behavior once entries exist.
-                  </p>
-                </div>
-                <a href="#/apps" target="_blank" class="inline-flex min-h-10 max-w-full items-center justify-center rounded-xl border border-storm/25 bg-deep/50 px-4 py-2 text-center text-sm font-medium text-ice transition-[background-color,border-color,color] duration-200 hover:border-ice/30 hover:bg-twilight/35 no-underline">
-                  Open Applications Page
-                </a>
-              </div>
+            <div v-if="currentId === 'artwork'">
+              <WelcomeArtworkStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="(result) => noteRestartNeeded('artwork', result)" />
             </div>
 
-            <div v-if="currentStep === 4">
-              <WelcomeArtworkStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="noteRestartNeeded('artwork')" />
+            <div v-if="currentId === 'ai'">
+              <WelcomeAiStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="(result) => noteRestartNeeded('ai', result)" />
             </div>
 
-            <div v-if="currentStep === 5">
-              <WelcomeAiStep :config-data="configData" :patch-config="patchConfig" @skip="nextStep" @saved="noteRestartNeeded('ai')" />
-            </div>
-
-            <div v-if="currentStep === 6">
-              <div v-if="restartNeeded.size" class="mb-4 rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright" role="status">
-                <div>{{ restartState === 'done' ? $t('welcome.restart_done') : restartState === 'timeout' ? $t('welcome.restart_timeout') : restartNeeded.size > 1 ? $t('welcome.restart_needed') : $t('welcome.restart_needed_one') }}</div>
-                <button
-                  v-if="restartState !== 'done'"
-                  type="button"
-                  class="mt-3 inline-flex h-9 items-center justify-center rounded-xl border border-warning/40 px-3 text-xs font-semibold text-warning-bright transition-colors hover:bg-warning/15 disabled:opacity-60"
-                  :disabled="restartState === 'restarting'"
-                  @click="restartHost"
-                >
-                  {{ restartState === 'restarting' ? $t('welcome.restarting') : $t('welcome.restart_now') }}
-                </button>
-              </div>
+            <div v-if="currentId === 'pair'">
               <p class="mb-4 text-sm leading-relaxed text-storm">Once the host is secured and the library exists, pair a client and start streaming. Nova and Moonlight both work, but Nova exposes more Polaris-specific controls.</p>
               <div class="space-y-3">
                 <div class="surface-subtle p-4">
@@ -162,6 +139,34 @@
                 </a>
                 <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
                   Trusted pair and QR flows can be faster than manual PIN entry when the client supports them.
+                </div>
+              </div>
+            </div>
+
+            <div v-if="currentId === 'first_app'">
+              <div v-if="restartNeeded.size" class="mb-4 rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright" role="status">
+                <div>{{ restartState === 'done' ? $t('welcome.restart_done') : restartState === 'timeout' ? $t('welcome.restart_timeout') : restartNeeded.size > 1 ? $t('welcome.restart_needed', { count: restartNeeded.size }) : $t('welcome.restart_needed_one') }}</div>
+                <button
+                  v-if="restartState !== 'done'"
+                  type="button"
+                  class="mt-3 inline-flex h-9 items-center justify-center rounded-xl border border-warning/40 px-3 text-xs font-semibold text-warning-bright transition-colors hover:bg-warning/15 disabled:opacity-60"
+                  :disabled="restartState === 'restarting'"
+                  @click="restartHost"
+                >
+                  {{ restartState === 'restarting' ? $t('welcome.restarting') : $t('welcome.restart_now') }}
+                </button>
+              </div>
+              <p class="mb-4 text-sm leading-relaxed text-storm">Polaris is most useful when the library is intentional. Publish the apps you actually want to expose instead of dumping every launcher and helper tool into the client view.</p>
+              <div class="space-y-3">
+                <div class="rounded-2xl border border-storm/20 bg-void/45 p-5 text-center">
+                  <div class="mb-3 text-4xl">&#x1F3AE;</div>
+                  <div class="text-base font-medium text-silver">Applications become the client-facing launch surface</div>
+                  <p class="mt-2 text-sm leading-relaxed text-storm">
+                    Add games manually, scan supported launchers, and tune per-app behavior once entries exist.
+                  </p>
+                </div>
+                <div class="rounded-2xl border border-info/20 bg-info/10 px-4 py-3 text-sm text-info-bright">
+                  {{ $t('welcome.first_app_finish') }}
                 </div>
               </div>
             </div>
@@ -204,7 +209,7 @@
             <div class="mt-5 space-y-2">
               <div
                 v-for="(stepDef, idx) in steps"
-                :key="stepDef.titleKey || stepDef.title"
+                :key="stepDef.id"
                 class="rounded-2xl border px-4 py-3 text-sm transition-[background-color,border-color,color] duration-200"
                 :class="idx === currentStep ? 'border-ice/35 bg-ice/10 text-ice' : idx < currentStep ? 'border-storm/25 bg-deep/40 text-silver' : 'border-storm/15 bg-deep/25 text-storm'"
               >
@@ -233,11 +238,15 @@
 
 <script setup>
 
-import { getCurrentInstance, ref, reactive } from 'vue'
+import { computed, getCurrentInstance, ref, reactive } from 'vue'
 import ResourceCard from '../ResourceCard.vue'
 import WelcomeArtworkStep from '../components/WelcomeArtworkStep.vue'
 import WelcomeAiStep from '../components/WelcomeAiStep.vue'
+import WelcomeGpuStep from '../components/WelcomeGpuStep.vue'
+import WelcomeLaunchModeStep from '../components/WelcomeLaunchModeStep.vue'
+import WelcomeTrustedNetwork from '../components/WelcomeTrustedNetwork.vue'
 import { requestHostRestart } from '../restart-host.js'
+import { saveNeedsRestart } from '../config-save-outcome.js'
 
 // The wizard keeps its own $t so the step list can translate titles from script code.
 const instance = getCurrentInstance()
@@ -248,6 +257,8 @@ const success = ref(false)
 const loading = ref(false)
 const configLoading = ref(false)
 const configData = ref(null)
+const hardwareLoading = ref(false)
+const hardware = ref(null)
 
 const passwordData = reactive({
   newUsername: "polaris",
@@ -255,15 +266,23 @@ const passwordData = reactive({
   confirmNewPassword: "",
 })
 
-const steps = [
-  { title: 'Credentials' },
-  { title: 'GPU Detection' },
-  { title: 'Network' },
-  { title: 'First App' },
-  { titleKey: 'welcome.step_artwork' },
-  { titleKey: 'welcome.step_ai' },
-  { title: 'Pair Client' },
+// First App is last because finishing opens Applications. Launch Mode only exists on Linux;
+// until the host says which platform it is, the Linux list is shown.
+const allSteps = [
+  { id: 'credentials', title: 'Credentials' },
+  { id: 'gpu', titleKey: 'welcome.step_gpu' },
+  { id: 'launch_mode', titleKey: 'welcome.step_launch_mode', linuxOnly: true },
+  { id: 'network', title: 'Network' },
+  { id: 'artwork', titleKey: 'welcome.step_artwork' },
+  { id: 'ai', titleKey: 'welcome.step_ai' },
+  { id: 'pair', title: 'Pair Client' },
+  { id: 'first_app', title: 'First App' },
 ]
+
+const steps = computed(() => allSteps.filter((step) => (
+  !step.linuxOnly || !configData.value?.platform || configData.value.platform === 'linux'
+)))
+const currentId = computed(() => steps.value[currentStep.value]?.id)
 
 const restartNeeded = ref(new Set())
 const restartState = ref('')
@@ -272,7 +291,10 @@ function stepTitle(stepDef) {
   return stepDef.titleKey ? $t(stepDef.titleKey) : stepDef.title
 }
 
-function noteRestartNeeded(what) {
+function noteRestartNeeded(what, result) {
+  // The host applies both settings while it runs; the offer stays for a host
+  // that says otherwise.
+  if (result && result.restartRequired === false) return
   const next = new Set(restartNeeded.value)
   next.add(what)
   restartNeeded.value = next
@@ -301,13 +323,17 @@ async function patchConfig(body) {
     if (!response.ok || payload?.status === false) {
       return { ok: false, error: payload?.error || `HTTP ${response.status}` }
     }
+    // What was saved is now the host's value, so a step opened again starts from it. Secrets
+    // are never kept in the page.
+    const saved = Object.fromEntries(Object.entries(body).filter(([key]) => !key.endsWith('_api_key') && !key.startsWith('clear_')))
     configData.value = {
       ...(configData.value || {}),
+      ...saved,
       ...(payload?.configuration_revision ? { configuration_revision: payload.configuration_revision } : {}),
       ...(body.steamgriddb_api_key ? { has_steamgriddb_api_key: true } : {}),
       ...(body.ai_api_key ? { has_ai_api_key: true } : {}),
     }
-    return { ok: true }
+    return { ok: true, restartRequired: saveNeedsRestart(payload) }
   } catch {
     return { ok: false, error: 'Could not reach Polaris.' }
   }
@@ -328,8 +354,9 @@ async function restartHost() {
 function nextStep() {
   if (currentStep.value === 0 && !success.value) return
   currentStep.value++
-  if (currentStep.value === 1 && !configData.value) {
-    loadConfig()
+  if (currentStep.value === 1) {
+    if (!configData.value) loadConfig()
+    if (!hardware.value && !hardwareLoading.value) loadHardware()
   }
 }
 
@@ -347,8 +374,22 @@ async function loadConfig() {
   }
 }
 
+async function loadHardware() {
+  hardwareLoading.value = true
+  try {
+    const res = await fetch('./api/setup/hardware', { credentials: 'include' })
+    const payload = res.ok ? await res.json() : null
+    hardware.value = payload && payload.status !== false ? payload : null
+  } catch (e) {
+    console.error('Failed to load the GPU facts', e)
+  } finally {
+    hardwareLoading.value = false
+  }
+}
+
+// Finishing opens Applications in this tab, where the first game is added.
 function finishWizard() {
-  document.location.href = './#/'
+  document.location.href = './#/apps'
   document.location.reload()
 }
 

@@ -4460,6 +4460,19 @@ namespace proc {
     }
   }  // namespace
 
+  bool is_steam_big_picture_launcher(const ctx_t &app) {
+    return is_steam_big_picture_app(app);
+  }
+
+  bool launches_nothing(const ctx_t &app) {
+    const auto blank = [](const std::string &value) {
+      return boost::trim_copy(value).empty();
+    };
+    return blank(app.cmd) && std::all_of(app.detached.begin(), app.detached.end(), blank) &&
+      blank(app.steam_appid) && blank(app.emulator) && blank(app.rom_path) &&
+      (blank(app.source) || boost::iequals(boost::trim_copy(app.source), "manual"));
+  }
+
 #ifdef __linux__
   struct steam_big_picture_guard_runtime_t {
     std::atomic<bool> stop_requested {false};

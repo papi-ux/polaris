@@ -24,6 +24,7 @@
 <script setup>
 import { computed, inject, nextTick, ref } from 'vue'
 import { permissionMapping } from '../composables/useClients.js'
+import { deviceNameLabels } from '../device-names.js'
 const props = defineProps({ clients: { type: Array, default: () => [] }, allowed: { type: Array, default: () => [] },
   locked: Boolean, refresh: { type: Function, required: true } })
 const emit = defineEmits(['busy'])
@@ -31,7 +32,8 @@ const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const working = ref(false), message = ref(''), error = ref('')
 const eligible = computed(() => props.clients.filter(device => !device.temporary_authorization && (Number(device.perm) & permissionMapping.launch) !== 0))
-const deviceName = device => device.friendly_name || device.name || t('spaces.paired_device')
+const nameLabels = computed(() => deviceNameLabels(props.clients, { t, fallback: t('spaces.paired_device') }))
+const deviceName = device => nameLabels.value.get(device?.uuid) || device?.friendly_name || device?.name || t('spaces.paired_device')
 async function save(client, event) {
   const requested = event.target.checked
   event.target.checked = props.allowed.includes(client)

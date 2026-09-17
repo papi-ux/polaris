@@ -1,0 +1,9 @@
+#pragma once
+#include <string_view>
+namespace multiseat::spaces::host_admin_data {
+inline constexpr std::string_view helper_path = "@CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup";
+inline constexpr std::string_view pkexec_path = "/usr/bin/pkexec";
+inline constexpr std::string_view action_prefix = "@POLARIS_POLKIT_ACTION_PREFIX@";
+inline constexpr std::string_view policy_path = "@POLARIS_POLKIT_POLICY_PATH@";
+inline constexpr std::string_view policy = R"POLARIS_POLKIT(@POLARIS_POLKIT_POLICY_DATA@)POLARIS_POLKIT";
+}

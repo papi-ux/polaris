@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <vector>
 #include <span>
 #include <string>
 #include <string_view>
@@ -36,4 +37,35 @@ namespace confighttp::validation {
   // payloads and config load scrubs any that leaked into the config file.
   std::span<const std::string_view> response_only_config_keys();
   bool is_response_only_config_key(std::string_view key);
+
+  /**
+   * @brief The keys whose value differs between two parsed configuration files, sorted.
+   * A key missing on one side counts as an empty value.
+   */
+  std::vector<std::string> changed_config_keys(const std::unordered_map<std::string, std::string> &before,
+                                               const std::unordered_map<std::string, std::string> &after);
+
+  /**
+   * @brief Whether a configuration key is one of the AI explanation settings.
+   */
+  bool is_ai_config_key(std::string_view key);
+
+  /**
+   * @brief Whether the running host applies a saved change to this key without a restart.
+   */
+  bool is_live_applied_config_key(std::string_view key);
+
+  /**
+   * @brief Whether any changed key still needs a restart before it takes effect.
+   */
+  bool config_change_requires_restart(const std::vector<std::string> &changed_keys);
+
+  /**
+   * @brief Whether a written configuration file still needs a restart to take effect.
+   * @details Some key the running host does not apply live differs from the file the process loaded
+   *          at start. An earlier unrestarted change keeps counting across saves, and a change reverted
+   *          to its loaded value needs no restart.
+   */
+  bool written_config_requires_restart(const std::unordered_map<std::string, std::string> &loaded,
+                                       const std::unordered_map<std::string, std::string> &written);
 }  // namespace confighttp::validation

@@ -983,6 +983,7 @@ import { buildClientHostSyncRows } from '../client-host-sync.js'
 import { useToast } from '../composables/useToast'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { formatClientTimestamp } from '../client-timestamps'
+import { deviceNameLabels } from '../device-names.js'
 import {
   useClients,
   permissionMapping, permissionGroups,
@@ -1131,8 +1132,10 @@ const aiSuggestion = ref(null)
 const aiSuggestionFor = ref(null)
 const recommendationSuggestions = ref({})
 
+// Same-named devices, such as two builds of Nova on one handheld, are told apart by when they paired.
+const clientNameLabels = computed(() => deviceNameLabels(clients.value, { t: (key, params) => i18n.t(key, params) }))
 function clientDisplayName(client) {
-  return client?.friendly_name || client?.name || ''
+  return clientNameLabels.value.get(client?.uuid) || client?.friendly_name || client?.name || ''
 }
 
 function clientAliasName(client) {

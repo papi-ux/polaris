@@ -108,6 +108,12 @@ namespace ai_optimizer {
   void set_enabled(bool enabled);
 
   /**
+   * @brief Replace the provider settings at runtime after the configuration is saved.
+   * Requests already running keep the settings they started with.
+   */
+  void reconfigure(const config_t &config);
+
+  /**
    * @brief Get a cached optimization for a device+game pair.
    * Returns nullopt if no cached result exists.
    */

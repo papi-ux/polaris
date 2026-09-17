@@ -1,4 +1,5 @@
 #include "src/platform/linux/multiseat_launch_service.h"
+#include "src/platform/linux/spaces_host_admin.h"
 #include "src/config.h"
 #include "src/launch_failure.h"
 #include "src/nvhttp.h"
@@ -46,7 +47,7 @@ namespace {
     std::atomic<bool> select {true}, close {true}, fail {false}, idle {true};
     std::atomic<unsigned> destroyed {0};
     spaces::library_reader_t library;
-    std::vector<std::string> desktops;
+    std::vector<std::string> desktops, desktop_defaults;
     std::vector<profile_activity_t> activity;
     std::optional<gpu_usage_t> capacity;
     void called() { std::lock_guard lock(mutex); owners.push_back(std::this_thread::get_id()); }
@@ -63,14 +64,18 @@ namespace {
       state_(std::move(state)), catalog_(std::move(catalog)) {}
     ~controller_t() override { ++state_->destroyed; }
     bool routes_client(std::string_view client) const override { return profile_for_client(client).has_value(); }
+    // As production resolves it: the Default Space, then the first Space the device may open.
     std::optional<std::string> profile_for_client(std::string_view client) const override {
       for (const auto &profile : catalog_)
         if (std::find(profile.clients.begin(), profile.clients.end(), client) != profile.clients.end()) return profile.id;
+      for (const auto &profile : catalog_)
+        if (std::find(profile.access_clients.begin(), profile.access_clients.end(), client) != profile.access_clients.end()) return profile.id;
       return std::nullopt;
     }
     std::vector<profile_summary_t> profile_catalog() const override { return catalog_; }
     spaces::library_reader_t library_reader() const override { return state_->library; }
     std::vector<std::string> desktop_clients() const override { return state_->desktops; }
+    std::vector<std::string> desktop_default_clients() const override { return state_->desktop_defaults; }
     std::vector<profile_activity_t> profile_activity() const override { std::lock_guard lock(state_->mutex); return state_->activity; }
     bool idle() const override { return state_->idle; }
     std::optional<gpu_usage_t> capacity() const override { std::lock_guard lock(state_->mutex); return state_->capacity; }
@@ -120,8 +125,10 @@ namespace {
   class MultiseatAssignments : public MultiseatLaunchService {
   protected:
     std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, true}, {"profile-b", "Sam", {"client-b"}}};
-    std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0};
+    std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0}, removals {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
+    profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
+    std::optional<profiles::refusal_t> persist_refusal;
     bool reload_fails = false;
     std::function<void()> before_write;
     void SetUp() override {
@@ -137,6 +144,7 @@ namespace {
             ++writes;
             EXPECT_GT(state->destroyed.load(), 0U);
             if (before_write) before_write();
+            if (persist_refusal) return profiles::change_result_t {.error = std::string(persist_refusal->message), .refusal = persist_refusal};
             if (write_status != private_state_file::write_status_e::not_committed) {
               for (auto &entry : catalog) std::erase(entry.clients, client);
               for (auto &entry : catalog) if (entry.id == profile) entry.clients.emplace_back(client);
@@ -163,8 +171,24 @@ namespace {
               }
             }
             return profiles::change_result_t {.status = write_status};
+          },
+          .remove_for_good = [&](const profiles::edit_request_t &request, std::stop_token) {
+            state->called(); ++removals;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            if (before_write) before_write();
+            auto answer = removal_answer;
+            answer.status = write_status;
+            if (answer.outcome == profiles::removal_outcome_e::removed && write_status != private_state_file::write_status_e::not_committed)
+              std::erase_if(catalog, [&](const auto &entry) { return entry.id == request.profile_id; });
+            else if (answer.archived)
+              for (auto &entry : catalog) if (entry.id == request.profile_id) { entry.archived = true; entry.clients.clear(); }
+            return answer;
           }
         });
+    }
+    static profiles::edit_request_t removal(std::string name = "Sam", std::string id = "profile-b",
+                                            std::string request_id = "22345678-1234-4234-8234-123456789abc") {
+      return {profiles::edit_operation_e::remove_for_good, std::move(id), "", std::move(name), std::move(request_id)};
     }
   };
 
@@ -244,6 +268,107 @@ namespace {
     EXPECT_TRUE(service->admin_snapshot().failed);
     EXPECT_TRUE(service->routes_client("client-a"));
     EXPECT_EQ(service->edit_profile(remove_request).status, 503);
+  }
+
+  TEST_F(MultiseatAssignments, RemovingForGoodRunsUnderTheOwnerAndAFinishedRequestAnswersItsRetry) {
+    EXPECT_TRUE(service->admin_snapshot().removal_available);
+    const auto removed = service->remove_space_for_good(removal());
+    ASSERT_EQ(removed.result.status, 200);
+    EXPECT_TRUE(removed.kept_volume.empty());
+    EXPECT_FALSE(service->routes_client("client-b"));
+    EXPECT_TRUE(service->routes_client("client-a"));
+    ASSERT_EQ(service->admin_snapshot().profiles.size(), 1U);
+    EXPECT_EQ(removals, 1U);
+    EXPECT_EQ(state->shutdowns, 1U);
+    // The same request after the record is gone is confirmed, not reported unknown.
+    EXPECT_EQ(service->remove_space_for_good(removal()).result.status, 200);
+    EXPECT_EQ(removals, 1U);
+    const auto reused = service->remove_space_for_good(removal("Alex", "profile-a"));
+    EXPECT_EQ(reused.result.status, 409);
+    EXPECT_EQ(reused.result.code, "removal_request_in_use");
+    const auto another = service->remove_space_for_good(removal("Sam", "profile-b", "32345678-1234-4234-8234-123456789abc"));
+    EXPECT_EQ(another.result.status, 404);
+    EXPECT_EQ(removals, 1U);
+    // Removing for good never travels the catalog-only edit path.
+    EXPECT_EQ(service->edit_profile(removal()).status, 400);
+    EXPECT_EQ(edits, 0U);
+    std::lock_guard lock(state->mutex);
+    for (const auto owner : state->owners) EXPECT_EQ(owner, state->owners.front());
+  }
+
+  TEST_F(MultiseatAssignments, RemovingForGoodRefusesTheWrongNameTheLastSteamSpaceAndStreamsBeforeShutdown) {
+    for (const auto *typed : {"sam", "Sam ", "Alex"}) {
+      const auto mismatch = service->remove_space_for_good(removal(typed));
+      EXPECT_EQ(mismatch.result.status, 409) << typed;
+      EXPECT_EQ(mismatch.result.code, "space_name_mismatch") << typed;
+    }
+    const auto last = service->remove_space_for_good(removal("Alex", "profile-a"));
+    EXPECT_EQ(last.result.status, 409);
+    EXPECT_EQ(last.result.code, "space_last");
+    EXPECT_EQ(service->remove_space_for_good(removal("Sam", "profile-z")).result.status, 404);
+    auto invalid = removal();
+    invalid.request_id = "not-a-request";
+    EXPECT_EQ(service->remove_space_for_good(invalid).result.status, 400);
+
+    const auto own = launch("client-b");
+    ASSERT_EQ(service->prepare(own, "profile-b").status, 200);
+    const auto active = service->remove_space_for_good(removal());
+    EXPECT_EQ(active.result.status, 409);
+    EXPECT_EQ(active.result.code, "space_active");
+    EXPECT_FALSE(own->is_cancelled());
+    own->cancel();
+    { std::lock_guard lock(state->mutex); state->activity = {{"profile-b", "client-b", "stopping"}}; }
+    EXPECT_EQ(service->remove_space_for_good(removal()).result.code, "space_active");
+    { std::lock_guard lock(state->mutex); state->activity = {{"profile-a", "client-a", "running"}}; }
+    state->idle = false;
+    const auto streaming = service->remove_space_for_good(removal());
+    EXPECT_EQ(streaming.result.status, 409);
+    EXPECT_EQ(streaming.result.code, "spaces_streaming");
+    EXPECT_EQ(removals, 0U);
+    EXPECT_EQ(state->shutdowns, 0U);
+    EXPECT_TRUE(service->routes_client("client-b"));
+  }
+
+  TEST_F(MultiseatAssignments, RemovingForGoodSaysWhatItKeptAndARetryFinishesTheJob) {
+    removal_answer = {.outcome = profiles::removal_outcome_e::storage_unverified, .kept_volume = "pv-profile-b"};
+    const auto unverified = service->remove_space_for_good(removal());
+    EXPECT_EQ(unverified.result.status, 409);
+    EXPECT_EQ(unverified.result.code, "space_storage_unverified");
+    EXPECT_EQ(unverified.kept_volume, "pv-profile-b");
+    EXPECT_TRUE(service->routes_client("client-b"));
+    ASSERT_EQ(service->admin_snapshot().profiles.size(), 2U);
+    EXPECT_FALSE(service->admin_snapshot().profiles[1].archived);
+
+    removal_answer = {.outcome = profiles::removal_outcome_e::storage_not_removed, .archived = true, .kept_volume = "pv-profile-b"};
+    const auto kept = service->remove_space_for_good(removal());
+    EXPECT_EQ(kept.result.status, 503);
+    EXPECT_EQ(kept.result.code, "space_storage_not_removed");
+    EXPECT_EQ(kept.kept_volume, "pv-profile-b");
+    EXPECT_FALSE(service->admin_snapshot().failed);
+    ASSERT_EQ(service->admin_snapshot().profiles.size(), 2U);
+    EXPECT_TRUE(service->admin_snapshot().profiles[1].archived);
+    EXPECT_FALSE(service->routes_client("client-b"));
+
+    // Not finished, so not remembered: the same request runs again and finishes.
+    removal_answer = {.outcome = profiles::removal_outcome_e::removed, .archived = true, .kept_network = "pn-profile-b"};
+    const auto finished = service->remove_space_for_good(removal());
+    EXPECT_EQ(finished.result.status, 200);
+    EXPECT_EQ(finished.kept_network, "pn-profile-b");
+    EXPECT_TRUE(finished.kept_volume.empty());
+    EXPECT_EQ(removals, 3U);
+    EXPECT_EQ(service->admin_snapshot().profiles.size(), 1U);
+  }
+
+  TEST_F(MultiseatAssignments, RemovingForGoodFailsClosedWhenAWriteIsUncertain) {
+    write_status = private_state_file::write_status_e::durability_uncertain;
+    const auto uncertain = service->remove_space_for_good(removal());
+    EXPECT_EQ(uncertain.result.status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->routes_client("client-b"));
+    EXPECT_EQ(service->prepare(launch("client-b"), "profile-b").status, 503);
+    EXPECT_EQ(reloads, 0U);
+    EXPECT_EQ(service->remove_space_for_good(removal()).result.status, 503);
+    EXPECT_EQ(removals, 1U);
   }
 
   TEST_F(MultiseatAssignments, CreatesAnUnassignedSteamProfileUnderTheControllerOwner) {
@@ -373,6 +498,19 @@ namespace {
     EXPECT_EQ(service->admin_snapshot().profiles[1].clients, std::vector<std::string> {"client-b"});
     EXPECT_EQ(writes, 2U);
     EXPECT_EQ(reloads, 2U);
+  }
+
+  TEST_F(MultiseatAssignments, ARefusedDefaultSaysWhatToDoAndChangesNothing) {
+    persist_refusal = profiles::desktop_access_required;
+    const auto refused = service->set_assignment("desktop", "client-a");
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "desktop_access_required");
+    EXPECT_EQ(std::string(refused.message), "Give this device Desktop Access before making Desktop its Default Space.");
+    EXPECT_EQ(std::string(refused.action), "Tick it under Desktop Access, then save its Default Space again.");
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    EXPECT_EQ(writes, 1U);
+    EXPECT_EQ(reloads, 1U);
+    EXPECT_EQ(service->set_assignment("unknown", "client-a").status, 404);
   }
 
   TEST_F(MultiseatAssignments, AdminActivityIncludesPendingLaunchAndPreservesCleanup) {
@@ -1249,6 +1387,31 @@ namespace {
     steam->cancel();
   }
 
+  // Where a device opens first: a choice saved from Nova, then a Desktop default while it has
+  // Desktop Access, then its Default Space, then the first Space it may open, then Desktop.
+  TEST_F(MultiseatLaunchService, ADesktopDefaultOpensDesktopFirstAndKeepsTheSpaceOpen) {
+    ASSERT_TRUE(service->shutdown(2s));
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {}, true, false, {"client-a"}}};
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
+    auto spaces = service->client_spaces("client-a");
+    ASSERT_TRUE(spaces.available);
+    EXPECT_EQ(spaces.selected, "profile-a");
+    EXPECT_EQ(spaces.default_space, "profile-a");
+    state->desktop_defaults = {"client-a"};
+    EXPECT_EQ(service->client_spaces("client-a").selected, "profile-a");  // no Desktop Access yet
+    state->desktops = {"client-a"};
+    spaces = service->client_spaces("client-a");
+    EXPECT_EQ(spaces.selected, "desktop");
+    EXPECT_EQ(spaces.default_space, "desktop");
+    ASSERT_EQ(spaces.spaces.size(), 1U);
+    EXPECT_EQ(spaces.spaces[0].id, "profile-a");
+    EXPECT_FALSE(service->routes_client("client-a"));
+    EXPECT_FALSE(service->profile_for_client("client-a"));
+    EXPECT_EQ(service->admin_snapshot().desktop_default_clients, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(service->select_space("client-a", "profile-a", "desktop").status, 200);
+    EXPECT_EQ(service->client_spaces("client-a").selected, "profile-a");
+  }
+
   TEST_F(MultiseatLaunchService, DesktopRequiresAnExplicitGrantAndCannotSwitchDuringLaunch) {
     EXPECT_EQ(service->select_space("client-a", "desktop", "12345678-1234-4234-8234-123456789abc").status, 404);
     state->desktops = {"client-a"};
@@ -1384,6 +1547,60 @@ namespace {
     EXPECT_EQ(nvhttp::profile_library_request(client, "profile-a").status, 403);
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.870780"));
     EXPECT_EQ(state->begins.load(), began);
+  }
+
+  // While an administrator approves a change to this PC's setup, nothing starts or changes a Space.
+  TEST_F(MultiseatAssignments, HostSetupInProgressHoldsLaunchesAndSpacesChangesUntilItFinishes) {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool release = false;
+    auto admin = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+      .facts = [] {
+        spaces::host_admin_facts_t facts;
+        facts.helper = facts.pkexec = facts.policy = true;
+        return facts;
+      },
+      .run = [&](const std::vector<std::string> &, std::chrono::milliseconds, const std::function<void()> &, std::stop_token stop) {
+        std::unique_lock lock(mutex);
+        changed.wait(lock, stop, [&] { return release; });
+        return spaces::host_action_run_t {.exit_status = 0, .approved = true};
+      },
+    });
+    ASSERT_TRUE(spaces::install_host_admin_service(admin));
+    auto uninstall = util::fail_guard([&] {
+      {
+        std::lock_guard lock(mutex);
+        release = true;
+      }
+      changed.notify_all();
+      admin->shutdown();
+      spaces::uninstall_host_admin_service(admin);
+    });
+    ASSERT_EQ(admin->submit({spaces::host_action_e::security_install, "12345678-1234-4234-8234-123456789abc"}).status, 202);
+    const auto held = [](const profile_launch_result_t &result) {
+      EXPECT_EQ(result.status, 409);
+      EXPECT_EQ(result.code, "spaces_host_setup_running");
+      EXPECT_EQ(std::string(result.message), "Polaris is changing this PC's Spaces setup.");
+    };
+    held(service->prepare(launch(), "profile-a"));
+    held(service->set_assignment("profile-b", "client-a"));
+    held(service->set_access("profile-a", "client-b", true));
+    held(service->create_steam_profile(create_request));
+    held(service->edit_profile(remove_request));
+    held(service->remove_space_for_good(removal()).result);
+    held(service->select_space("client-a", "profile-b", "profile-a"));
+    EXPECT_EQ(writes + creates + edits + removals, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
+    {
+      std::lock_guard lock(mutex);
+      release = true;
+    }
+    changed.notify_all();
+    for (int attempt = 0; attempt < 300 && admin->running(); ++attempt) std::this_thread::sleep_for(10ms);
+    ASSERT_FALSE(admin->running());
+    const auto active = launch();
+    EXPECT_EQ(service->prepare(active, "profile-a").status, 200);
+    active->cancel();
   }
 
 }  // namespace

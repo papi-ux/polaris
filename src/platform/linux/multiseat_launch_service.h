@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <memory>
+#include <stop_token>
 #include <string_view>
 
 namespace multiseat {
@@ -30,6 +31,10 @@ namespace multiseat {
   inline constexpr profile_launch_result_t space_start_timeout_result {
     504, "The Space did not start in time.", "space_start_timeout",
     "Try again. If it keeps happening, open Spaces in Polaris and check Host Setup."};
+  // While an administrator approves a change to this PC's setup from the Spaces page.
+  inline constexpr profile_launch_result_t spaces_host_setup_running_result {
+    409, "Polaris is changing this PC's Spaces setup.", "spaces_host_setup_running",
+    "Try again when Host Setup in Polaris finishes."};
   struct profile_begin_result_t {
     profile_launch_result_t result;
     std::optional<seat_handle_t> seat;
@@ -46,6 +51,8 @@ namespace multiseat {
     virtual std::vector<profile_summary_t> profile_catalog() const { return {}; }
     virtual spaces::library_reader_t library_reader() const { return {}; }
     virtual std::vector<std::string> desktop_clients() const { return {}; }
+    /// Devices whose Default Space is Desktop.
+    virtual std::vector<std::string> desktop_default_clients() const { return {}; }
     virtual std::vector<profile_activity_t> profile_activity() const { return {}; }
     virtual bool idle() const { return false; }
     /// Seat and encoder usage against the trusted budget, when the controller can count it.
@@ -67,6 +74,8 @@ namespace multiseat {
     std::function<profiles::change_result_t(const profiles::steam_create_request_t &)> create;
     std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
     std::function<profiles::change_result_t(std::string_view, std::string_view, bool)> access;
+    // Deletes a Space's home through Docker; the stop token ends a long removal at shutdown.
+    std::function<profiles::removal_result_t(const profiles::edit_request_t &, std::stop_token)> remove_for_good;
   };
   struct profile_admin_snapshot_t {
     bool available = false, changing = false, failed = false;
@@ -75,6 +84,8 @@ namespace multiseat {
     std::vector<std::string> desktop_clients;
     std::vector<profile_activity_t> activity;
     std::optional<gpu_usage_t> capacity;
+    bool removal_available = false;  ///< a Space can be removed for good, not only archived
+    std::vector<std::string> desktop_default_clients;  ///< devices whose Default Space is Desktop
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -99,13 +110,18 @@ namespace multiseat {
     bool desktop_allowed = false;
     std::string unavailable_reason;  ///< controller_missing | stopping | reconfiguring | admin_failed | selection_failed | no_space_assigned
     std::string switch_blocked_reason;  ///< your_stream | desktop_stream
-    std::string default_space;  ///< the Default Space assigned in Polaris, empty when none
+    std::string default_space;  ///< where the device opens first: a Space id, "desktop" for a Desktop default, empty when none
     std::optional<gpu_usage_t> capacity;
   };
 
   struct profile_library_snapshot_t {
     std::string id, name;
     spaces::library_t library;
+  };
+  // A removal for good says what it could not delete and where it still is.
+  struct profile_removal_result_t {
+    profile_launch_result_t result;
+    std::string kept_volume, kept_network;
   };
   class profile_launch_service_t final {
   public:
@@ -131,6 +147,10 @@ namespace multiseat {
       std::string_view previous);
     [[nodiscard]] profile_launch_result_t create_steam_profile(profiles::steam_create_request_t request);
     [[nodiscard]] profile_launch_result_t edit_profile(profiles::edit_request_t request);
+    // Deletes a Space's games and saves and its record. Refused while that Space
+    // or any Space stream is active, when the typed name is not the Space's name,
+    // and for the last Steam Space. A finished request answers its own retry.
+    [[nodiscard]] profile_removal_result_t remove_space_for_good(profiles::edit_request_t request);
     // Cancellation only marks launches. Docker and input teardown remain on the
     // owner thread. Empty tokens allow an authenticated owner to cancel itself.
     [[nodiscard]] bool cancel_client(std::string_view client, std::string_view token = {});

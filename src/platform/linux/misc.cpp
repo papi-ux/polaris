@@ -2298,6 +2298,10 @@ std::string get_local_ip_for_gateway() {
 
   }  // namespace
 
+  std::vector<render_device_candidate_t> render_devices() {
+    return render_device_candidates();
+  }
+
   bool is_virtual_display_driver(std::string_view driver) {
     for (const auto known : {"evdi"sv, "vkms"sv, "hermes-kms"sv, "hermes_kms"sv, "vibeshine_drm"sv, "vibeshine-drm"sv, "udl"sv}) {
       if (driver == known) {

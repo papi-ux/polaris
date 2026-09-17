@@ -4,4 +4,8 @@
 namespace multiseat::spaces {
   // Reviewed with the host package. Downloaded metadata cannot add trust roots.
   inline constexpr std::string_view runtime_catalog_json = R"catalog(@POLARIS_SPACES_RUNTIME_CATALOG@)catalog";
+  // Where a runtime reference pulls from. Release builds use the Polaris registry; only a lab
+  // build configured with POLARIS_SPACES_RUNTIME_REPOSITORY points somewhere else.
+  inline constexpr std::string_view runtime_repository = "@POLARIS_SPACES_RUNTIME_REPOSITORY@";
+  inline constexpr std::string_view release_runtime_repository = "ghcr.io/papi-ux/polaris-worker-steam";
 }

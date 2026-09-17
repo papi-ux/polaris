@@ -2,9 +2,15 @@
 
 #include <src/game_artwork_provider.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <map>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
   using game_artwork::kind_e;
@@ -20,6 +26,13 @@ namespace {
       return request.kind == kind;
     });
     return found == requests.end() ? nullptr : &*found;
+  }
+
+  // A SteamGridDB search answer with these results, in this order.
+  std::string steamgriddb_search_answer(std::initializer_list<std::pair<int, const char *>> results) {
+    nlohmann::json body {{"success", true}, {"data", nlohmann::json::array()}};
+    for (const auto &[id, name] : results) body["data"].push_back({{"id", id}, {"name", name}});
+    return body.dump();
   }
 }
 
@@ -121,18 +134,113 @@ TEST(GameArtworkProviderSteamGridDb, EscapesSearchTitlesWithoutPuttingSecretsInU
   EXPECT_FALSE(game_artwork::providers::plan_steamgriddb_search(" \t\n ").has_value());
 }
 
-TEST(GameArtworkProviderSteamGridDb, ParsesFirstValidPositiveSearchResultWithoutThrowing) {
-  EXPECT_EQ(
-    game_artwork::providers::parse_steamgriddb_game_id(
-      R"({"success":true,"data":[{"id":null},{"id":12345},{"id":99999}]})"
-    ),
-    12345
-  );
-  EXPECT_FALSE(game_artwork::providers::parse_steamgriddb_game_id("not json").has_value());
-  EXPECT_FALSE(game_artwork::providers::parse_steamgriddb_game_id(
-    R"({"success":false,"data":[{"id":12345}]})").has_value());
-  EXPECT_FALSE(game_artwork::providers::parse_steamgriddb_game_id(
-    R"({"success":true,"data":[{"id":0},{"id":-1},{"id":"12345"}]})").has_value());
+TEST(GameArtworkProviderSteamGridDb, AutomaticLookupTakesOnlyAResultWithTheSameTitle) {
+  using game_artwork::providers::select_steamgriddb_title_match;
+  // SteamGridDB's autocomplete answers for these titles on 2026-09-16, in its order. The first
+  // result is never taken as a guess: none of these is the entry that was searched.
+  EXPECT_FALSE(select_steamgriddb_title_match("Low Res Desktop", steamgriddb_search_answer({
+    {101, "Low Magic Age"}, {102, "Low Desert Punk"}, {103, "Low G Man: The Low Gravity Man"}, {104, "LOW-FI"},
+  })).has_value());
+  EXPECT_FALSE(select_steamgriddb_title_match("Desktop", steamgriddb_search_answer({
+    {201, "Desktop Dungeons"}, {202, "Desktop Dynasties"}, {203, "Desktop Tree"},
+  })).has_value());
+  EXPECT_FALSE(select_steamgriddb_title_match("Steam Big Picture", steamgriddb_search_answer({
+    {301, "Steam"}, {302, "Steam Hardware"}, {303, "Steam Summer Getaway"},
+  })).has_value());
+
+  // Real games still resolve, also when their exact title is not the first result.
+  EXPECT_EQ(select_steamgriddb_title_match("Control Ultimate Edition", steamgriddb_search_answer({
+    {28601, "Control Ultimate Edition"}, {402, "Ultimate Control Machine"}, {403, "Control"},
+  })), 28601U);
+  EXPECT_EQ(select_steamgriddb_title_match("Control", steamgriddb_search_answer({
+    {28601, "Control Ultimate Edition"}, {402, "Ultimate Control Machine"}, {403, "Control"},
+  })), 403U);
+  EXPECT_EQ(select_steamgriddb_title_match("Disco Elysium", steamgriddb_search_answer({
+    {18262, "Disco Elysium"}, {502, "Disco Elysium: Game Boy Edition"},
+  })), 18262U);
+  EXPECT_EQ(select_steamgriddb_title_match("Big Walk", steamgriddb_search_answer({
+    {5438463, "Big Walk"}, {602, "Walking with Dinosaurs: The Ballad of Big Al"},
+  })), 5438463U);
+  EXPECT_EQ(select_steamgriddb_title_match("Lutris", steamgriddb_search_answer({
+    {701, "Lutris"}, {702, "I.C.O. - Machina Lutris"},
+  })), 701U);
+
+  // Case, spacing, punctuation and trademark signs do not tell two titles apart.
+  EXPECT_EQ(select_steamgriddb_title_match("DOOM  Eternal", steamgriddb_search_answer({{801, "Doom: Eternal™"}})), 801U);
+  EXPECT_EQ(select_steamgriddb_title_match("Control®", steamgriddb_search_answer({{901, "CONTROL"}})), 901U);
+
+  // Malformed or empty answers are refused without throwing.
+  EXPECT_FALSE(select_steamgriddb_title_match("Control", "not json").has_value());
+  EXPECT_FALSE(select_steamgriddb_title_match("Control", R"({"success":false,"data":[{"id":1,"name":"Control"}]})").has_value());
+  EXPECT_FALSE(select_steamgriddb_title_match(
+    "Control", R"({"success":true,"data":[{"id":0,"name":"Control"},{"id":"5","name":"Control"},{"id":6}]})").has_value());
+  EXPECT_FALSE(select_steamgriddb_title_match(" - ", steamgriddb_search_answer({{1, " - "}})).has_value());
+}
+
+TEST(GameArtworkProviderSteamGridDb, LooksUpASteamGameByItsAppIdExactly) {
+  using namespace game_artwork::providers;
+  const auto request = plan_steamgriddb_steam_game("870780");
+  ASSERT_TRUE(request.has_value());
+  EXPECT_EQ(request->url, "https://www.steamgriddb.com/api/v2/games/steam/870780");
+  EXPECT_EQ(request->provider, provider_e::steamgriddb);
+  EXPECT_EQ(request->operation, operation_e::search);
+  EXPECT_FALSE(request->kind.has_value());
+  EXPECT_TRUE(request->requires_authorization);
+  EXPECT_TRUE(game_artwork::is_allowed_provider_url(provider_e::steamgriddb, request->url));
+  for (const auto *invalid : {"", "0", "087", "12a", "../1", "99999999999"}) {
+    EXPECT_FALSE(plan_steamgriddb_steam_game(invalid).has_value()) << invalid;
+  }
+
+  // The shape SteamGridDB answered for games/steam/870780 on 2026-09-16.
+  EXPECT_EQ(parse_steamgriddb_steam_game_id(
+    R"({"success":true,"data":{"id":28601,"name":"Control Ultimate Edition","release_date":1566864000,"types":["steam"],"verified":true}})"), 28601U);
+  EXPECT_FALSE(parse_steamgriddb_steam_game_id(R"({"success":false,"errors":["Game not found"]})").has_value());
+  EXPECT_FALSE(parse_steamgriddb_steam_game_id(R"({"success":true,"data":[{"id":28601}]})").has_value());
+  EXPECT_FALSE(parse_steamgriddb_steam_game_id(R"({"success":true,"data":{"id":-4}})").has_value());
+  EXPECT_FALSE(parse_steamgriddb_steam_game_id("not json").has_value());
+}
+
+TEST(GameArtworkProviderSteamGridDb, AutomaticGameUsesTheAppIdThenAnExactTitleAndNeverGuesses) {
+  using namespace game_artwork::providers;
+  const std::string api = "https://www.steamgriddb.com/api/v2/";
+  std::vector<std::string> asked;
+  std::map<std::string, std::pair<unsigned int, std::string>> answers;
+  const transport_t transport = [&](const request_t &request, std::uintmax_t) -> std::optional<transport_response_t> {
+    asked.push_back(request.url);
+    const auto found = answers.find(request.url);
+    if (found == answers.end()) return std::nullopt;
+    const auto &[status, body] = found->second;
+    return transport_response_t {status, std::vector<unsigned char>(body.begin(), body.end()), {}};
+  };
+
+  // A Steam game SteamGridDB knows by app id: its name there may differ, and no title search runs.
+  answers[api + "games/steam/632470"] = {200, R"({"success":true,"data":{"id":18262,"name":"Disco Elysium - The Final Cut"}})"};
+  EXPECT_EQ(automatic_steamgriddb_game("Disco Elysium", "632470", transport), 18262U);
+  EXPECT_EQ(asked, (std::vector<std::string> {api + "games/steam/632470"}));
+
+  // SteamGridDB does not know the app id, so the title search runs and must match exactly.
+  asked.clear();
+  answers[api + "games/steam/1478500"] = {404, R"({"success":false,"errors":["Game not found"]})"};
+  answers[api + "search/autocomplete/Big%20Walk"] = {200, steamgriddb_search_answer({{5438463, "Big Walk"}})};
+  EXPECT_EQ(automatic_steamgriddb_game("Big Walk", "1478500", transport), 5438463U);
+  EXPECT_EQ(asked, (std::vector<std::string> {api + "games/steam/1478500", api + "search/autocomplete/Big%20Walk"}));
+
+  // No app id and no result with the entry's title: nothing, though SteamGridDB returned games.
+  asked.clear();
+  answers[api + "search/autocomplete/Low%20Res%20Desktop"] = {
+    200, steamgriddb_search_answer({{101, "Low Magic Age"}, {102, "Low Desert Punk"}})};
+  EXPECT_FALSE(automatic_steamgriddb_game("Low Res Desktop", "", transport).has_value());
+  EXPECT_EQ(asked, (std::vector<std::string> {api + "search/autocomplete/Low%20Res%20Desktop"}));
+
+  // An unanswered request, a missing transport, or an answer from a redirect off the allowlist
+  // yields nothing too.
+  EXPECT_FALSE(automatic_steamgriddb_game("Control", "", transport).has_value());
+  EXPECT_FALSE(automatic_steamgriddb_game("Control", "870780", {}).has_value());
+  const transport_t redirected = [](const request_t &, std::uintmax_t) -> std::optional<transport_response_t> {
+    const auto body = steamgriddb_search_answer({{1, "Control"}});
+    return transport_response_t {200, std::vector<unsigned char>(body.begin(), body.end()), "https://evil.example/api/v2/"};
+  };
+  EXPECT_FALSE(automatic_steamgriddb_game("Control", "", redirected).has_value());
 }
 
 TEST(GameArtworkProviderSteamGridDb, ParsesSanitizedManualMatchCandidatesInProviderOrder) {
@@ -304,4 +412,49 @@ TEST(GameArtworkProviderSteamGridDb, PrefersIconThumbnailButKeepsPosterUrl) {
   const auto poster = game_artwork::providers::parse_steamgriddb_assets(kind_e::poster, body);
   ASSERT_EQ(poster.size(), 1);
   EXPECT_EQ(poster[0].url, "https://cdn.steamgriddb.com/icon/raw.ico");
+}
+
+TEST(GameArtworkProviderSteamGridDb, ParsesBoundedChoicesThatPreviewThumbnailsAndStoreWhatAMatchStores) {
+  const auto body = R"({"success":true,"data":[
+    {"url":"https://evil.example/grid/a.png","thumb":"https://cdn2.steamgriddb.com/thumb/a.jpg"},
+    {"url":"https://cdn2.steamgriddb.com/grid/b.png","thumb":"https://cdn2.steamgriddb.com/thumb/b.jpg"},
+    {"url":"https://cdn2.steamgriddb.com/grid/b.png","thumb":"https://cdn2.steamgriddb.com/thumb/b2.jpg"},
+    {"url":"https://cdn.steamgriddb.com/grid/c.png"},
+    {"url":"https://cdn2.steamgriddb.com/grid/d.png","thumb":"https://evil.example/thumb/d.jpg"},
+    17,
+    {"url":"https://cdn2.steamgriddb.com/grid/e.png","thumb":"https://cdn2.steamgriddb.com/thumb/e.jpg"}
+  ]})";
+  const auto choices = game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, body, 5);
+  ASSERT_EQ(choices.size(), 4);
+  EXPECT_EQ(choices[0].asset_url, "https://cdn2.steamgriddb.com/grid/b.png");
+  EXPECT_EQ(choices[0].preview_url, "https://cdn2.steamgriddb.com/thumb/b.jpg");
+  EXPECT_EQ(choices[1].asset_url, "https://cdn.steamgriddb.com/grid/c.png");
+  EXPECT_EQ(choices[1].preview_url, "https://cdn.steamgriddb.com/grid/c.png");
+  EXPECT_EQ(choices[2].asset_url, "https://cdn2.steamgriddb.com/grid/d.png");
+  EXPECT_EQ(choices[2].preview_url, "https://cdn2.steamgriddb.com/grid/d.png");
+  EXPECT_EQ(choices[3].asset_url, "https://cdn2.steamgriddb.com/grid/e.png");
+  EXPECT_EQ(choices[3].preview_url, "https://cdn2.steamgriddb.com/thumb/e.jpg");
+
+  // A pick stores exactly the image a match by kinds would have stored from the same entry.
+  const auto assets = game_artwork::providers::parse_steamgriddb_assets(kind_e::poster, body);
+  ASSERT_EQ(assets.size(), choices.size());
+  for (std::size_t index = 0; index < choices.size(); ++index) {
+    EXPECT_EQ(choices[index].kind, kind_e::poster);
+    EXPECT_EQ(choices[index].asset_url, assets[index].url);
+  }
+
+  EXPECT_EQ(game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, body, 2).size(), 2);
+  EXPECT_TRUE(game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, body, 0).empty());
+  EXPECT_TRUE(game_artwork::providers::parse_steamgriddb_choices(kind_e::poster, "not json", 5).empty());
+  EXPECT_TRUE(game_artwork::providers::parse_steamgriddb_choices(
+    kind_e::poster, R"({"success":false,"data":[{"url":"https://cdn.steamgriddb.com/grid/no.jpg"}]})", 5).empty());
+
+  const auto icons = game_artwork::providers::parse_steamgriddb_choices(
+    kind_e::icon,
+    R"({"success":true,"data":[{"url":"https://cdn.steamgriddb.com/icon/raw.ico","thumb":"https://cdn2.steamgriddb.com/icon/thumb.png"}]})",
+    5
+  );
+  ASSERT_EQ(icons.size(), 1);
+  EXPECT_EQ(icons[0].asset_url, "https://cdn2.steamgriddb.com/icon/thumb.png");
+  EXPECT_EQ(icons[0].preview_url, "https://cdn2.steamgriddb.com/icon/thumb.png");
 }

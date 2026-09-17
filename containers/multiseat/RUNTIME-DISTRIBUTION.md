@@ -110,6 +110,17 @@ immutable digest, anonymous read-back and compiled host catalog admission with
 the runtime release procedure below. Do not put Docker archives in the dnf or
 pacman repository or treat a signed host package as proof of image publication.
 
+## Lab builds
+
+To test Spaces end to end before a runtime is published, keep everything on one machine: run a
+registry bound to localhost, copy the exact built OCI archive into it with `skopeo copy` (a
+`docker push` re-encodes layers, which the catalog preparation then rejects), prepare a candidate
+against that registry's manifest bytes, and configure a Polaris build with
+`-DPOLARIS_SPACES_RUNTIME_REPOSITORY=localhost:5000/polaris-worker-steam` and
+`-DPOLARIS_SPACES_RUNTIME_CATALOG_FILE=/path/to/lab-catalog.json`. CMake warns that it is a lab
+build. Never ship one: release workflows do not set either option, and a unit test fails if one
+does.
+
 ## Catalog admission
 
 1. Build committed, reviewed source with `multiseat-images.yml`. Use

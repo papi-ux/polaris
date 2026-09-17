@@ -23,6 +23,7 @@
     <p v-if="streamLock" :id="lockReasonId" class="mt-4 text-sm text-warning-bright" role="status" data-stream-lock>{{ streamLock }}</p>
     <SpacesList v-if="state.enabled" :profiles="state.profiles" :clients="clients" :manageable="state.management_available"
                 :access-available="state.access_available" :creation-available="state.creation_available"
+                :removal-available="state.removal_available"
                 :activity="loadError ? null : state.activity" :refreshing="loading"
                 :locked="locked" :lock-reason-id="streamLock ? lockReasonId : ''" :ready="ready" :refresh="loadProfiles"
                 @busy="managing = $event" @open-default="openDefault" />
@@ -45,22 +46,22 @@
       <div class="mt-4 grid gap-3">
         <div v-for="client in devices" :key="client.uuid" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
           <div class="flex flex-wrap items-start justify-between gap-2">
-            <label :for="'gaming-profile-' + client.uuid" class="min-w-0 break-words text-sm font-semibold text-silver">
+            <label v-if="eligible(client)" :for="'gaming-profile-' + client.uuid" class="min-w-0 break-words text-sm font-semibold text-silver">
               {{ deviceName(client) }}
             </label>
-            <span v-if="dirty(client.uuid)" class="text-xs text-warning-bright">{{ $t('spaces.unsaved') }}</span>
+            <p v-else class="min-w-0 break-words text-sm font-semibold text-silver">{{ deviceName(client) }}</p>
+            <span v-if="eligible(client) && dirty(client.uuid)" class="text-xs text-warning-bright">{{ $t('spaces.unsaved') }}</span>
           </div>
           <p :id="'gaming-profile-current-' + client.uuid" class="mt-1 break-words text-xs text-storm">
-            {{ $t('spaces.default_current', { space: profileName(assigned(client.uuid)) }) }}
+            {{ $t('spaces.default_current', { space: profileName(current(client.uuid)) }) }}
           </p>
-          <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div v-if="eligible(client)" class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
             <select :id="'gaming-profile-' + client.uuid" v-model="choices[client.uuid]"
                     class="settings-input min-w-0 text-sm sm:flex-1"
                     :aria-describedby="describedBy(client.uuid)"
                     :disabled="locked" @change="clearFeedback">
-              <option value="">{{ $t('spaces.desktop_option') }}</option>
-              <option v-for="profile in activeSpaces" :key="profile.id" :value="profile.id"
-                      :disabled="!eligible(client)">{{ profile.name }}</option>
+              <option v-if="offersDesktop(client.uuid)" value="desktop">{{ $t('spaces.desktop_option') }}</option>
+              <option v-for="profile in spacesFor(client.uuid)" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
             </select>
             <Button variant="outline" size="sm" class="shrink-0" :loading="saving === client.uuid"
                     :aria-label="$t('spaces.save_assignment_aria', { device: deviceName(client) })"
@@ -69,8 +70,20 @@
               {{ saving === client.uuid ? $t('spaces.saving') : $t('spaces.save_assignment') }}
             </Button>
           </div>
+          <div v-else class="mt-3">
+            <Button variant="outline" size="sm" :loading="saving === client.uuid"
+                    :aria-label="$t('spaces.remove_from_spaces_aria', { device: deviceName(client) })"
+                    :aria-describedby="describedBy(client.uuid)"
+                    :disabled="locked" data-remove-from-spaces @click="save(client.uuid, '')">
+              {{ saving === client.uuid ? $t('spaces.saving') : $t('spaces.remove_from_spaces') }}
+            </Button>
+          </div>
           <p :id="'gaming-profile-help-' + client.uuid" class="mt-2 break-words text-xs text-storm">
             {{ selectionHelp(client) }}
+          </p>
+          <p v-if="eligible(client) && spacesFor(client.uuid).length && !offersDesktop(client.uuid)"
+             class="mt-1 break-words text-xs text-storm" data-desktop-needs-access>
+            {{ $t('spaces.help_desktop_needs_access') }}
           </p>
         </div>
       </div>
@@ -93,6 +106,7 @@ import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
 import { useToast } from '../composables/useToast.js'
 import { useSpacesSnapshot } from '../composables/useSpacesSnapshot.js'
 import { permissionMapping } from '../composables/useClients.js'
+import { deviceNameLabels } from '../device-names.js'
 
 const emit = defineEmits(['snapshot'])
 const props = defineProps({
@@ -117,12 +131,24 @@ const { state, loading, loadError, load, start } = useSpacesSnapshot({
 const activeSpaces = computed(() => state.profiles.filter(space => !space.archived))
 const countLabel = computed(() => t(activeSpaces.value.length === 1 ? 'spaces.count_one' : 'spaces.count_many', { count: activeSpaces.value.length }))
 const eligible = client => !client.temporary_authorization && (Number(client.perm) & permissionMapping.launch) !== 0
-const assigned = id => state.profiles.find(profile => profile.clients.includes(id))?.id ||
-  state.profiles.find(profile => !profile.archived && (profile.access_clients || []).includes(id))?.id || ''
-const profileName = id => state.profiles.find(profile => profile.id === id)?.name || t('spaces.desktop')
-const deviceName = client => client.friendly_name || client.name || t('spaces.paired_device')
-const devices = computed(() => props.clients.filter(client => eligible(client) || assigned(client.uuid)))
-const dirty = id => choices[id] !== assigned(id)
+const hasDesktopAccess = id => (state.desktop_clients || []).includes(id)
+// The Spaces a device may open: its Default Space and every Space that allows it under Device Access.
+const spacesFor = id => activeSpaces.value.filter(space => space.clients.includes(id) || (space.access_clients || []).includes(id))
+// A default is only ever a place the device may play. Desktop is one with Desktop Access, or when
+// the device has no Space at all.
+const offersDesktop = id => hasDesktopAccess(id) || !spacesFor(id).length
+const choicesFor = id => [...(offersDesktop(id) ? ['desktop'] : []), ...spacesFor(id).map(space => space.id)]
+// Where the device opens first, in the host's order: a Desktop default, its Default Space, then
+// the first Space it may open, then Desktop.
+const current = id => {
+  if ((state.desktop_default_clients || []).includes(id) && hasDesktopAccess(id)) return 'desktop'
+  return activeSpaces.value.find(profile => profile.clients.includes(id))?.id || spacesFor(id)[0]?.id || 'desktop'
+}
+const profileName = id => (id !== 'desktop' && state.profiles.find(profile => profile.id === id)?.name) || t('spaces.desktop')
+const nameLabels = computed(() => deviceNameLabels(props.clients, { t, fallback: t('spaces.paired_device') }))
+const deviceName = client => nameLabels.value.get(client?.uuid) || client?.friendly_name || client?.name || t('spaces.paired_device')
+const devices = computed(() => props.clients.filter(client => eligible(client) || spacesFor(client.uuid).length))
+const dirty = id => choices[id] !== current(id)
 const ready = computed(() => state.available && !state.changing && !state.failed && !loadError.value)
 // A live Space stream holds the catalog: every change waits for it, and the
 // controls say so instead of sending the request to a 409.
@@ -142,7 +168,8 @@ function clearFeedback() { message.value = ''; actionError.value = '' }
 
 function selectionHelp(client) {
   if (!eligible(client)) return t('spaces.help_lost_access')
-  const selected = state.profiles.find(profile => profile.id === choices[client.uuid])
+  if (!spacesFor(client.uuid).length) return t('spaces.help_no_space')
+  const selected = activeSpaces.value.find(profile => profile.id === choices[client.uuid])
   if (!selected) return t('spaces.help_desktop')
   const others = selected.clients.filter(id => id !== client.uuid)
   if (!others.length) return t('spaces.help_keeps')
@@ -159,9 +186,8 @@ function reconcileChoices(resetClient = '') {
   }
   for (const client of props.clients) {
     const choice = choices[client.uuid]
-    if (client.uuid === resetClient || choice === undefined ||
-        (choice !== '' && (!eligible(client) || !activeSpaces.value.some(profile => profile.id === choice)))) {
-      choices[client.uuid] = assigned(client.uuid)
+    if (client.uuid === resetClient || choice === undefined || !choicesFor(client.uuid).includes(choice)) {
+      choices[client.uuid] = current(client.uuid)
     }
   }
 }
@@ -172,7 +198,7 @@ let edited = new Set()
 function afterLoad(next) {
   emit('snapshot', { ...next })
   for (const client of props.clients) {
-    if (!edited.has(client.uuid)) choices[client.uuid] = assigned(client.uuid)
+    if (!edited.has(client.uuid)) choices[client.uuid] = current(client.uuid)
   }
   reconcileChoices(resetAfterLoad)
   resetAfterLoad = ''
@@ -204,9 +230,10 @@ async function openDefault() {
   section.querySelector('select')?.focus()
 }
 
-async function save(client) {
-  if (locked.value || !dirty(client)) return
-  const requested = choices[client]
+// requested is a Space id or 'desktop' for a default, or '' to remove the device from every Space.
+async function save(client, requested = choices[client]) {
+  const removal = requested === ''
+  if (locked.value || (!removal && !dirty(client))) return
   saving.value = client
   clearFeedback()
   try {
@@ -220,9 +247,12 @@ async function save(client) {
     }
     const verified = await loadProfiles(client)
     if (!verified) return
-    if (state.enabled && state.available && !state.changing && !state.failed && assigned(client) === requested) {
+    const confirmed = removal ? !spacesFor(client).length : current(client) === requested
+    if (state.enabled && state.available && !state.changing && !state.failed && confirmed) {
       const name = deviceName(props.clients.find(item => item.uuid === client) || {})
-      message.value = t('spaces.assignment_saved', { device: name, space: profileName(requested) })
+      message.value = removal ? t('spaces.removed_from_spaces', { device: name })
+        : requested === 'desktop' ? t('spaces.assignment_saved_desktop', { device: name })
+        : t('spaces.assignment_saved', { device: name, space: profileName(requested) })
       toast(message.value, 'success')
     } else if (response.status === 202 || state.changing) {
       message.value = t('spaces.assignment_pending')

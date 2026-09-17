@@ -69,7 +69,7 @@ describe('useSpacesSnapshot', () => {
 
   it('resets keys the host may omit before merging a new snapshot', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(snapshot({ desktop_clients: ['a'], capacity: { concurrent_limit: 1, concurrent_active: 0 },
-      activity: [], creation_available: true }))).mockResolvedValueOnce(reply(snapshot())))
+      activity: [], creation_available: true, removal_available: true }))).mockResolvedValueOnce(reply(snapshot())))
     host()
     await vi.waitFor(() => expect(wrapper.vm.state.desktop_clients).toEqual(['a']))
     expect(wrapper.vm.state.capacity).toEqual({ concurrent_limit: 1, concurrent_active: 0 })
@@ -78,6 +78,7 @@ describe('useSpacesSnapshot', () => {
     expect(wrapper.vm.state.capacity).toBeNull()
     expect(wrapper.vm.state.activity).toBeNull()
     expect(wrapper.vm.state.creation_available).toBe(false)
+    expect(wrapper.vm.state.removal_available).toBe(false)
   })
 
   it('reports an invalid snapshot with the verify message and keeps the last good state', async () => {

@@ -125,6 +125,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_client_support_report.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cursor_visibility.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_file_handler.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_host_setup_facts.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_log_tail_api.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_private_state_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_profile.cpp
@@ -207,6 +208,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamepad_isolation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_group_access.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_virtual_input.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kwin_permission_entries.cpp
     )
 endif()
 
@@ -257,6 +259,8 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_otp_claim.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_stop_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_projection_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_setup_reports.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_app_artwork_routes.cpp
 )
 
 set(TEST_NETWORK_SOURCES
@@ -297,6 +301,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_runtime.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup_service.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_host_admin.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_container_host.cpp
         ${CMAKE_SOURCE_DIR}/tests/integration/test_multiseat_physical.cpp
     )

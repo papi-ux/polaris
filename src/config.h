@@ -457,4 +457,57 @@ namespace config {
   int parse(int argc, char *argv[]);
   bool is_valid_command_prefix(std::string_view argument);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
+
+  /**
+   * @brief The SteamGridDB API key the running host uses. Safe to call from any thread.
+   */
+  std::string steamgriddb_api_key();
+
+  /**
+   * @brief Replace the SteamGridDB API key the running host uses, after a configuration save.
+   */
+  void set_steamgriddb_api_key(std::string key);
+
+  /**
+   * @brief The trusted subnets pairing checks. Safe to call from any thread.
+   */
+  std::vector<std::string> trusted_subnets();
+
+  /**
+   * @brief Whether a client on a trusted subnet may pair without a PIN. Safe to call from any thread.
+   */
+  bool trusted_subnet_auto_pairing();
+
+  /**
+   * @brief Replace the trusted network settings the running host uses.
+   */
+  void set_trusted_network(std::vector<std::string> subnets, bool auto_pairing);
+
+  /**
+   * @brief Apply the trusted network settings in saved configuration variables to the running host.
+   * @details Both keys are parsed the way startup parses them, from their defaults, so a key
+   *          removed from the file turns its setting off.
+   */
+  void apply_trusted_network(std::unordered_map<std::string, std::string> vars);
+
+  /**
+   * @brief The AI explanation settings in parsed configuration variables, starting from the built-in defaults.
+   * @param vars Parsed variables; the AI keys are consumed, as apply_config consumes them.
+   */
+  video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars);
+
+  /**
+   * @brief The contents a new install's configuration file starts with.
+   * @param private_stream_available Whether labwc and wlr-randr are on the PATH.
+   * @return Private Stream as the stream mode when it can run, otherwise nothing, which leaves Mirror Desktop.
+   */
+  std::string new_install_config(bool private_stream_available);
+
+  /**
+   * @brief The configuration file's variables as this process read them at startup, before command
+   *        line overrides, or nothing before the file was read. Safe to call from any thread.
+   * @details A settings save compares the file it wrote against these, so an earlier change that still
+   *          waits for a restart keeps saying so, and a change reverted to its loaded value needs none.
+   */
+  std::optional<std::unordered_map<std::string, std::string>> loaded_config_file_vars();
 }  // namespace config

@@ -232,6 +232,7 @@
         "runtime_label",
         "source",
         "steam_appid",
+        "steam_big_picture",
         "steam_launch"
       ],
       "optional": [
@@ -241,7 +242,8 @@
         "platform_label",
         "play_time",
         "runtime",
-        "runtime_label"
+        "runtime_label",
+        "steam_big_picture"
       ],
       "nova_reader": {
         "$comment": [
@@ -304,6 +306,53 @@
         "function": "steam_launch_contract_for_app",
         "variable": "contract",
         "style": "subscript"
+      }
+    },
+    "artwork_choices": {
+      "$comment": [
+        "The response of POST /polaris/v1/games/<uuid>/artwork/choices/<kind>: up to five",
+        "SteamGridDB images of one kind for the match named in the body. Nova drops the whole",
+        "list unless status is true and kind is the kind it asked for, then keeps at most five."
+      ],
+      "fields": [
+        "choices",
+        "kind",
+        "status"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseArtworkChoices",
+        "receiver": "json"
+      },
+      "polaris_emitter": {
+        "file": "src/game_artwork_manual.cpp",
+        "function": "artwork_choices_json",
+        "declaration": "nlohmann::json body {",
+        "style": "initializer_list"
+      }
+    },
+    "artwork_choice": {
+      "$comment": [
+        "One entry of artwork_choices. selection_token is 32 lowercase hex characters and is the",
+        "only thing a pick sends back to POST .../artwork/match under selections. Nova drops an",
+        "entry whose preview is not exactly /polaris/v1/games/<uuid>/artwork/candidate/<token>/<kind>,",
+        "the host path the candidate preview route serves. expires_at is epoch milliseconds."
+      ],
+      "fields": [
+        "expires_at",
+        "preview",
+        "selection_token"
+      ],
+      "nova_reader": {
+        "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+        "function": "parseArtworkChoices",
+        "receiver": "item"
+      },
+      "polaris_emitter": {
+        "file": "src/game_artwork_manual.cpp",
+        "function": "artwork_choice_json",
+        "declaration": "nlohmann::json body {",
+        "style": "initializer_list"
       }
     },
     "display_planner": {
@@ -853,7 +902,8 @@
         "per-game readiness cue; Nova reads platform_label and runtime_label for the badge",
         "instead. display_planner sat here for the day it was served ahead of its consumer;",
         "papi-ux/nova#197 wired the adapter and the records moved back out, with the",
-        "nova_reader entries above repointed at the functions that now read it."
+        "nova_reader entries above repointed at the functions that now read it.",
+        "steam_big_picture sat here until Nova 1.4.9's Play Setup read it, and moved back out."
       ],
       "game": [
         "emulator"

@@ -45,7 +45,11 @@
   #include "platform/linux/spaces_runtime.h"
   #include "platform/linux/spaces_setup_service.h"
   #include "platform/linux/spaces_activation.h"
+  #include "platform/linux/spaces_host_admin.h"
+  #include "platform/linux/spaces_setup.h"
+  #include "platform/linux/multiseat_container_host.h"
   #include "platform/linux/multiseat_launch_service.h"
+  #include "rtsp.h"
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
@@ -541,6 +545,33 @@ int main(int argc, char *argv[]) {
     multiseat::spaces::uninstall_setup_service(spaces_setup);
   });
   if (!multiseat::spaces::install_setup_service(spaces_setup)) return 1;
+  // Host setup from the Spaces page. Every probe reads the installed services, so the order in
+  // which they stop at exit does not matter.
+  auto host_admin = multiseat::spaces::make_host_admin_service({
+    .setup_active = [] {
+      const auto setup = multiseat::spaces::installed_setup_service();
+      const auto job = setup ? setup->snapshot().value("job", nlohmann::json {}) : nlohmann::json {};
+      const auto state = job.is_object() ? job.value("state", std::string {}) : std::string {};
+      return state == "downloading" || state == "preparing" || state == "configuring";
+    },
+    .spaces_active = [] {
+      const auto service = multiseat::installed_profile_service();
+      if (!service) return false;
+      const auto admin = service->admin_snapshot();
+      return admin.changing || !admin.activity.empty();
+    },
+    .stream_active = [] { return rtsp_stream::session_count() != 0; },
+    .setup = []() -> std::optional<nlohmann::json> {
+      multiseat::container::local_host_t host;
+      const auto service = multiseat::installed_profile_service();
+      return multiseat::spaces::inspect_setup(host, config::multiseat.enabled, service && service->admin_snapshot().available);
+    },
+  });
+  auto host_admin_guard = util::fail_guard([&] {
+    host_admin->shutdown();
+    multiseat::spaces::uninstall_host_admin_service(host_admin);
+  });
+  if (!multiseat::spaces::install_host_admin_service(host_admin)) return 1;
   auto profile_service_guard = util::fail_guard([&] {
     if (profile_service) {
       profile_service->stop_admission();
@@ -566,8 +597,12 @@ int main(int argc, char *argv[]) {
             .catalog = options->profile_catalog,
             .reload = [settings = *options]() -> std::unique_ptr<multiseat::profile_controller_t> {
               auto replacement = multiseat::create_production_controller_runtime(settings);
-              return replacement.status == multiseat::controller_runtime_create_status_e::ready_enabled ?
-                multiseat::make_profile_controller(std::move(replacement.runtime)) : nullptr;
+              if (replacement.status != multiseat::controller_runtime_create_status_e::ready_enabled) {
+                BOOST_LOG(error) << "Spaces controller could not be rebuilt after a change (status "sv
+                                 << static_cast<int>(replacement.status) << ')';
+                return nullptr;
+              }
+              return multiseat::make_profile_controller(std::move(replacement.runtime));
             }
           });
         if (!multiseat::install_profile_launch_service(profile_service)) return 1;

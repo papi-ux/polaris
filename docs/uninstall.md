@@ -10,12 +10,16 @@ lists all of it, in the order that works.
 ## Before you start
 
 1. Finish your games and end every stream from the client.
-2. Quit Polaris. If it runs as a service:
+2. If you want a Space's games and saves gone too, remove that Space for good now, while Polaris
+   still runs: **Remove Space**, then **Remove for good**, on the Spaces page, as
+   [Rename, remove and restore](spaces.md#rename-remove-and-restore) describes. The last Space can
+   only be archived there; section 1 below covers removing its home with Docker.
+3. Quit Polaris. If it runs as a service:
    ```bash
    systemctl --user disable --now polaris
    ```
    If you start it from the desktop or the tray, quit it from the tray icon.
-3. Check that nothing is left running:
+4. Check that nothing is left running:
    ```bash
    pgrep -a polaris
    ```
@@ -35,11 +39,12 @@ It removes only the SELinux policies and the input rule it installed, and it nev
 homes. If it refuses, [Prepare Spaces security support](spaces.md#prepare-spaces-security-support)
 explains each message.
 
-Docker keeps the gaming runtime image and each Space's Steam home after the package is gone, and
-Polaris never deletes a home on its own. The homes are Docker volumes with opaque names, listed by
-`docker volume ls` next to your other volumes. Leave them if you might come back; the games and
-saves live there. Remove one with `docker volume rm` only when you are sure which Space it belongs
-to and want its games and saves gone for good. The runtime image is safe to remove at any time:
+Docker keeps the gaming runtime image and each Space's Steam home after the package is gone.
+Polaris deletes a home only when you remove its Space for good. The homes left are Docker volumes
+with opaque names, listed by `docker volume ls` next to your other volumes. Leave them if you might
+come back; the games and saves live there. Remove one with `docker volume rm` only when you are sure
+which Space it belongs to and want its games and saves gone for good. The runtime image is safe to
+remove at any time:
 
 ```bash
 docker image ls 'ghcr.io/papi-ux/polaris-worker-steam'
@@ -105,8 +110,9 @@ sudo rpm-ostree uninstall polaris
 Then reboot into the new deployment.
 
 The package takes its binaries with it, including `polaris-spaces-setup`, plus the user service
-unit, the udev rules and modules-load configuration under `/usr/lib`, the desktop entries and
-`/usr/share/polaris`. The `uinput` and `uhid` kernel modules stay loaded until the next reboot,
+unit, the udev rules and modules-load configuration under `/usr/lib`, the desktop entries, the
+polkit policy the Spaces page asks for administrator approval with
+(`/usr/share/polkit-1/actions/dev.polaris-stream.app.Polaris.policy`) and `/usr/share/polaris`. The `uinput` and `uhid` kernel modules stay loaded until the next reboot,
 which is harmless. The KMS capture capability lives on the binary and leaves with it.
 
 ## 4. What the package does not take with it
@@ -129,6 +135,12 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
   it after step 1:
   ```bash
   sudo rm -rf /var/lib/polaris
+  ```
+- **Docker group membership.** **Give Polaris access to Docker**, or the same terminal step, added
+  the account Polaris runs as to the `docker` group, and the package does not take it back. If that
+  account no longer needs Docker without sudo:
+  ```bash
+  sudo gpasswd -d "$USER" docker
   ```
 - **KWin screencast permissions, on KDE hosts.** Polaris registers itself for KWin's screencast
   permission by writing `~/.local/share/applications/dev.polaris-stream.app.Polaris.kwin.<id>.desktop`,

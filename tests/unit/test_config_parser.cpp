@@ -9,6 +9,12 @@
 #include <src/private_state_file.h>
 #include <src/utility.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <unordered_map>
+
 TEST(ConfigParserTests, ProtocolDecimalsUseDotAndRequireTheWholeValue) {
   const auto fps = util::parse_decimal<double>("60.0");
   ASSERT_TRUE(fps.has_value());
@@ -230,4 +236,83 @@ TEST(ConfigParserTests, SuccessfulConfigWritePublishesCompleteVaapiSettingsAndCl
   EXPECT_EQ(cleared.rc, config::vaapi::rc_e::automatic);
   EXPECT_FALSE(cleared.blbrc.has_value());
   EXPECT_FALSE(cleared.strict_rc_buffer);
+}
+
+TEST(ConfigLiveApplyTests, AiSettingsFromSavedVariablesStartFromTheBuiltInDefaults) {
+  std::unordered_map<std::string, std::string> vars {{"ai_enabled", "enabled"}, {"ai_model", "gpt-5.6-luna"}, {"port", "47989"}};
+  const auto settings = config::ai_optimizer_settings(vars);
+  EXPECT_TRUE(settings.enabled);
+  EXPECT_EQ(settings.provider, "anthropic");
+  EXPECT_EQ(settings.model, "gpt-5.6-luna");
+  EXPECT_EQ(settings.timeout_ms, 5000);
+  EXPECT_EQ(settings.cache_ttl_hours, 168);
+  EXPECT_EQ(vars.size(), 1u);
+  EXPECT_EQ(vars.count("port"), 1u);
+}
+
+TEST(ConfigLiveApplyTests, SteamGridDbKeyAccessorRoundTrips) {
+  const auto previous = config::steamgriddb_api_key();
+  config::set_steamgriddb_api_key("round-trip-key");
+  EXPECT_EQ(config::steamgriddb_api_key(), "round-trip-key");
+  config::set_steamgriddb_api_key(previous);
+  EXPECT_EQ(config::steamgriddb_api_key(), previous);
+}
+
+TEST(ConfigLiveApplyTests, TrustedNetworkAppliesFromSavedVariables) {
+  const auto previous_subnets = config::trusted_subnets();
+  const auto previous_auto_pairing = config::trusted_subnet_auto_pairing();
+  auto restore = util::fail_guard([&] {
+    config::set_trusted_network(previous_subnets, previous_auto_pairing);
+  });
+
+  config::apply_trusted_network({{"trusted_subnets", "10.0.0.0/24,192.168.1.0/24"}, {"trusted_subnet_auto_pairing", "enabled"}});
+  EXPECT_EQ(config::trusted_subnets(), (std::vector<std::string> {"10.0.0.0/24", "192.168.1.0/24"}));
+  EXPECT_TRUE(config::trusted_subnet_auto_pairing());
+
+  // Hand-written files use the bracketed list form; startup's parser reads both.
+  config::apply_trusted_network({{"trusted_subnets", "[10.0.0.0/24, fd00::/64]"}, {"trusted_subnet_auto_pairing", "disabled"}});
+  EXPECT_EQ(config::trusted_subnets(), (std::vector<std::string> {"10.0.0.0/24", "fd00::/64"}));
+  EXPECT_FALSE(config::trusted_subnet_auto_pairing());
+
+  // A key removed from the file turns its setting off.
+  config::apply_trusted_network({});
+  EXPECT_TRUE(config::trusted_subnets().empty());
+  EXPECT_FALSE(config::trusted_subnet_auto_pairing());
+}
+
+TEST(ConfigNewInstallTests, ANewInstallStartsInPrivateStreamWhenItCanRun) {
+  EXPECT_EQ(config::new_install_config(true), "linux_stream_mode = headless_stream\n");
+  EXPECT_EQ(config::new_install_config(false), "");
+  const auto vars = config::parse_config(config::new_install_config(true));
+  ASSERT_EQ(vars.count("linux_stream_mode"), 1u);
+  EXPECT_EQ(vars.at("linux_stream_mode"), "headless_stream");
+}
+
+TEST(ConfigLoadedFileTests, ParseKeepsTheFileItReadBeforeCommandLineOverrides) {
+  // Settings saves judge restart_required against these variables, so they must be the file
+  // itself: command line overrides are not in the file a save writes.
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto read = source.find("auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));");
+  ASSERT_NE(read, std::string::npos);
+  const auto keep = source.find("loaded_config_file = vars;", read);
+  ASSERT_NE(keep, std::string::npos);
+  const auto overrides = source.find("for (auto &[name, value] : cmd_vars)", read);
+  ASSERT_NE(overrides, std::string::npos);
+  EXPECT_LT(keep, overrides);
+}
+
+TEST(ConfigNewInstallTests, OnlyTheFileCreationWritesTheNewInstallDefault) {
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto create = source.find("if (!fs::exists(sunshine.config_file)) {\n        auto cfg_file = std::ofstream {sunshine.config_file};");
+  ASSERT_NE(create, std::string::npos);
+  const auto use = source.find("cfg_file << new_install_config(");
+  ASSERT_NE(use, std::string::npos);
+  EXPECT_GT(use, create);
+  EXPECT_LT(use - create, 900u);
+  const std::string_view call = "cfg_file << new_install_config(";
+  EXPECT_EQ(source.find("new_install_config(", use + call.size()), std::string::npos);
 }

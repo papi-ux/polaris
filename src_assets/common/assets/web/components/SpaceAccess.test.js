@@ -11,13 +11,20 @@ function start(refresh = async () => true, props = {}) {
   wrapper = mount(SpaceAccess, { global: spacesGlobal, props: { space, clients: devices, ready: true, refresh, ...props } })
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
-it('shows eligible devices and keeps default access locked with a way to the Default Space section', async () => {
-  start(); expect(wrapper.findAll('input')).toHaveLength(2)
-  expect(wrapper.findAll('input')[0].element.disabled).toBe(true)
+it('shows eligible devices, marks the Default Space with a way to change it, and lets it be unticked', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ status: true }) })))
+  start(async () => { await wrapper.setProps({ space: { ...space, clients: [] } }); return true })
+  expect(wrapper.findAll('input')).toHaveLength(2)
+  expect(wrapper.findAll('input')[0].element.checked).toBe(true)
+  expect(wrapper.findAll('input')[0].element.disabled).toBe(false)
   expect(wrapper.text()).toContain('Default Space'); expect(wrapper.text()).not.toContain('Guest')
   expect(wrapper.get('.control-chip').text()).toBe('1')
   await wrapper.get('button').trigger('click')
   expect(wrapper.emitted('open-default')).toHaveLength(1)
+  // Unticking is how a device leaves a Space; the host drops it as the Default Space too.
+  await wrapper.findAll('input')[0].setValue(false); await flushPromises()
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: 'a', client_id: 'default', allowed: false })
+  expect(wrapper.text()).toContain('Device Access saved.')
 })
 it('says when no device can be given access', () => {
   start(async () => true, { clients: [devices[2]] })

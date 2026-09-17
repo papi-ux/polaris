@@ -665,7 +665,7 @@ contributing = strip_html_comments(
 readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
 changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
 release_notes = strip_html_comments(
-    Path("docs/release-notes/v1.4.8.md").read_text(encoding="utf-8")
+    Path("docs/release-notes/v1.4.9.md").read_text(encoding="utf-8")
 )
 
 
@@ -1296,22 +1296,28 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
+    "## v1.4.9 - 2026-09-16",
     "## v1.4.8 - 2026-09-16",
-    "## v1.4.7 - 2026-09-12",
 )
 current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
-    "Spaces preview",
-    "First runtime download remains unavailable",
-    "one active Space",
-    "ROM folder",
-    "emulators guide",
-    "Exit Timeout",
-    "240",
-    "Ubuntu 24.04",
-    "A refused launch",
-    "A refused Space launch now says why",
-    "The Spaces console speaks the console's grammar",
+    "The first-run wizard gains two optional steps",
+    "follow the Codex CLI",
+    "Restart from the console and the tray works again",
+    "takes effect while Polaris runs",
+    "every version Polaris shipped",
+    "--setup-host --enable-kms",
+    "one per binary",
+    "reads as ready and waiting",
+    "uninstall page",
+    "Removing a Space can now delete it for good",
+    "Nova's artwork alternatives work",
+    "Quick setup has eight steps",
+    "has a Gaming runtime check",
+    "Spaces turned on from the Spaces page can start and change",
+    "marks Steam Big Picture on the desktop",
+    "Automatic artwork only takes a match that is the entry",
+    "Default Space only sets where a device opens first",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",
@@ -1319,7 +1325,7 @@ required_release_facts = (
 )
 for fact in required_release_facts:
     if fact not in current_release_prose:
-        print(f"v1.4.8 changelog is missing final release fact: {fact}", file=sys.stderr)
+        print(f"v1.4.9 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
 asset_phrase = (
@@ -1328,7 +1334,7 @@ asset_phrase = (
     "`Polaris-steamos3.8-x86_64.pkg.tar.zst`, and "
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
-for label, section in (("v1.4.8 changelog", current_release_prose),):
+for label, section in (("v1.4.9 changelog", current_release_prose),):
     if section.count(asset_phrase) != 1:
         print(f"{label} must contain the exact visible four-asset phrase", file=sys.stderr)
         sys.exit(1)
@@ -1348,7 +1354,7 @@ building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section, expected_section_assets in (
     ("docs/building.md Packaging", building_packaging_prose, expected_assets),
-    ("v1.4.8 changelog", current_release_prose, expected_changelog_assets),
+    ("v1.4.9 changelog", current_release_prose, expected_changelog_assets),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_section_assets:
@@ -1362,32 +1368,33 @@ for label, section, expected_section_assets in (
 # Release notes are the short, user-facing list; the changelog carries the
 # detail. Pin phrases a player would read, never internal identifiers.
 release_notes_facts = (
-    "Spaces arrives as an early preview",
-    "configured hosts only",
-    "without a public runtime download yet",
-    "matched with Nova v1.4.8",
-    "public Docker runtime download is not available yet",
-    "one active Space",
-    "handheld audio remains under investigation",
-    "Import a ROM folder",
-    "emulators guide",
-    "Steam Big Picture",
-    "240 FPS",
-    "Exit Timeout",
-    "One set of words everywhere",
-    "The host says why",
+    "A setup update shaped by a fresh install",
+    "Nova 1.4.9 comes out alongside it, and Nova 1.4.8 keeps working",
+    "First-time setup has two optional steps",
+    "takes effect right away",
+    "the model Codex is set to use is the default",
+    "uninstall guide",
+    "Restart from the console or the tray works again",
+    "show the Polaris icon",
+    "left in /etc",
+    "cannot be created on this version yet",
+    "New installs start in Private Stream",
+    "can be removed for good",
+    "removes the KMS capture permission",
+    "sudo -H polaris --setup-host --enable-kms",
+    "still not available",
     "Bazzite",
     "rpm-ostree",
     "system extension stays withdrawn",
     "SteamOS",
     "Steam Input",
-    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.4.8/Polaris-fedora44-x86_64.rpm &&",
+    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.4.9/Polaris-fedora44-x86_64.rpm &&",
     "sudo dnf install \"./Polaris-fedora44-x86_64.rpm\" &&",
-    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.8/Polaris-arch-x86_64.pkg.tar.zst &&",
+    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.9/Polaris-arch-x86_64.pkg.tar.zst &&",
     "sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&",
-    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.4.8/Polaris-ubuntu24.04-x86_64.deb &&",
+    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.4.9/Polaris-ubuntu24.04-x86_64.deb &&",
     "sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&",
-    "wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.8/Polaris-steamos3.8-x86_64.pkg.tar.zst &&",
+    "wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.9/Polaris-steamos3.8-x86_64.pkg.tar.zst &&",
     "trap 'sudo steamos-readonly enable' EXIT",
     "sudo pacman-key --init || exit $?",
     "sudo pacman-key --populate || exit $?",
@@ -1395,25 +1402,25 @@ release_notes_facts = (
 )
 for fact in release_notes_facts:
     if fact not in release_notes:
-        print(f"v1.4.8 release notes are missing release fact: {fact}", file=sys.stderr)
+        print(f"v1.4.9 release notes are missing release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 release_asset_lines = [
     line for line in release_notes.splitlines() if line.startswith("**Assets:**")
 ]
 if len(release_asset_lines) != 1:
-    print("v1.4.8 release notes must contain exactly one Assets line", file=sys.stderr)
+    print("v1.4.9 release notes must contain exactly one Assets line", file=sys.stderr)
     sys.exit(1)
 release_note_assets = Counter(asset_pattern.findall(release_asset_lines[0]))
 if release_note_assets != expected_assets:
     print(
-        "v1.4.8 release-note Assets line must contain only the four supported packages; "
+        "v1.4.9 release-note Assets line must contain only the four supported packages; "
         f"expected={dict(expected_assets)}, actual={dict(release_note_assets)}",
         file=sys.stderr,
     )
     sys.exit(1)
 if release_notes.count(withdrawn_sysext_asset) != 0:
     print(
-        "v1.4.8 release notes must not name the withdrawn system extension file; that warning lives in v1.4.3",
+        "v1.4.9 release notes must not name the withdrawn system extension file; that warning lives in v1.4.3",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -1424,19 +1431,19 @@ for forbidden in (
     "AI Auto Quality Preference",
 ):
     if forbidden in current_release_prose or forbidden in release_notes:
-        print(f"v1.4.8 public release scope must exclude: {forbidden}", file=sys.stderr)
+        print(f"v1.4.9 public release scope must exclude: {forbidden}", file=sys.stderr)
         sys.exit(1)
 if release_notes.count("sudo -H polaris --setup-host &&") != 3:
-    print("v1.4.8 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
+    print("v1.4.9 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("sudo -H polaris --setup-host || exit $?") != 1:
-    print("v1.4.8 release notes must chain setup-host in the SteamOS command", file=sys.stderr)
+    print("v1.4.9 release notes must chain setup-host in the SteamOS command", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user restart polaris") != 3:
-    print("v1.4.8 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
+    print("v1.4.9 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user enable --now polaris") != 1:
-    print("v1.4.8 release notes must start Polaris once after SteamOS read-only restoration", file=sys.stderr)
+    print("v1.4.9 release notes must start Polaris once after SteamOS read-only restoration", file=sys.stderr)
     sys.exit(1)
 
 release_workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")

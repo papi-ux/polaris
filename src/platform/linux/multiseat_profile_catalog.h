@@ -10,6 +10,8 @@
 
 namespace multiseat::profiles {
   inline constexpr std::size_t maximum_catalog_bytes = 4 * 1024 * 1024;
+  /// The Default Space value that means Desktop. No Space can use this id.
+  inline constexpr std::string_view desktop_profile_key = "desktop";
 
   struct entry_t {
     container::profile_t storage;
@@ -25,6 +27,8 @@ namespace multiseat::profiles {
     std::uint32_t owner_gid = 0;
     std::vector<entry_t> profiles;
     std::vector<std::string> desktop_clients;
+    /// Devices whose Default Space is Desktop. Never also a Space's client_keys.
+    std::vector<std::string> desktop_default_clients;
   };
 
   struct loaded_catalog_t {
@@ -37,9 +41,21 @@ namespace multiseat::profiles {
   [[nodiscard]] std::string encode(const catalog_t &catalog);
   [[nodiscard]] std::optional<loaded_catalog_t> load(const std::filesystem::path &path);
 
+  /// A request refused for a reason the person can act on. Static text, so a caller can pass it on.
+  struct refusal_t {
+    std::string_view code, message, action;
+  };
+  inline constexpr refusal_t desktop_access_required {"desktop_access_required",
+    "Give this device Desktop Access before making Desktop its Default Space.",
+    "Tick it under Desktop Access, then save its Default Space again."};
+  inline constexpr refusal_t space_access_required {"space_access_required",
+    "Allow this device under that Space's Device Access before making it the Default Space.",
+    "Tick it under the Space's Device Access, then save its Default Space again."};
+
   struct change_result_t {
     private_state_file::write_status_e status = private_state_file::write_status_e::not_committed;
     std::string error;
+    std::optional<refusal_t> refusal;
     std::string profile_key;
     // Retain these on any failure after provisioning starts. Never silently
     // adopt, reinitialize, or delete a volume after an uncertain transaction.
@@ -55,12 +71,17 @@ namespace multiseat::profiles {
     std::string_view profile_key, std::string_view client_key);
   [[nodiscard]] change_result_t unassign(const std::filesystem::path &path,
     std::string_view client_key);
-  // One atomic move between profiles, or unassignment with an empty profile.
+  // Sets where a device opens first: a Space it may already open, or desktop_profile_key for
+  // Desktop, which needs Desktop Access once the device has any Space. Saving a default never
+  // changes what the device may open: leaving a Space default keeps that Space under Device
+  // Access. An empty profile_key is the explicit removal from every Space and from a Desktop default.
   [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key);
-  // Additional access does not change the default assignment.
+  // Allowing Desktop does not change a Default Space. Removing Desktop Access also ends a Desktop default.
   [[nodiscard]] change_result_t set_desktop_access(const std::filesystem::path &path,
     std::string_view client_key, bool allowed);
+  // Allowing a device does not change its Default Space. Disallowing it removes the Space from the
+  // device entirely, a Default Space included.
   [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key, bool allowed);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
@@ -88,17 +109,55 @@ namespace multiseat::profiles {
   // not select a GPU, assign a device, configure or activate the controller.
   [[nodiscard]] change_result_t create_first_steam(const std::filesystem::path &path,
     const first_steam_request_t &request, std::string_view image, container::host_t &host);
-  enum class edit_operation_e { rename, remove, restore };
+  // remove archives a Space and keeps its home; remove_for_good deletes both.
+  enum class edit_operation_e { rename, remove, restore, remove_for_good };
   struct edit_request_t {
     edit_operation_e operation = edit_operation_e::rename;
     std::string profile_id, name;
+    // Removing for good only: the Space's current name exactly as the person
+    // typed it, and the request's own identity so a retry can be confirmed.
+    std::string confirm_name, request_id;
     bool operator==(const edit_request_t &) const = default;
   };
   [[nodiscard]] bool valid_edit_request(const edit_request_t &request);
   [[nodiscard]] std::optional<edit_request_t> decode_edit_request(std::string_view payload);
   // Catalog-only edits. Removal also unassigns devices; homes and networks are
   // retained in a restorable catalog entry. The controller owner must quiesce launches and release its lease.
+  // Removing for good is not a catalog-only edit and is refused here.
   [[nodiscard]] change_result_t edit(const std::filesystem::path &path, const edit_request_t &request);
+
+  enum class removal_outcome_e {
+    removed,              ///< home, Steam network and record are gone
+    invalid,              ///< not a valid removal for good
+    not_found,            ///< no such Space in the catalog
+    name_mismatch,        ///< the typed name is not the Space's current name
+    last_space,           ///< the only Steam Space; new Spaces are made from an existing one
+    not_saved,            ///< the catalog was busy, unsafe or could not be written
+    docker_unavailable,   ///< Docker did not answer before anything changed
+    storage_unverified,   ///< the home is not the storage Polaris made for this Space; nothing changed
+    storage_in_use,       ///< a container still uses the home; nothing changed
+    storage_not_removed,  ///< Docker did not confirm the home is gone; the Space stays archived
+    record_not_removed,   ///< the home is gone but the record could not be removed; the Space stays archived
+  };
+  struct removal_result_t {
+    removal_outcome_e outcome = removal_outcome_e::invalid;
+    /// durability_uncertain when any catalog write was uncertain; callers fail closed.
+    private_state_file::write_status_e status = private_state_file::write_status_e::not_committed;
+    bool archived = false;      ///< the Space was archived before Docker deleted anything
+    std::string kept_volume;    ///< the Docker volume still holding its games and saves, when it was kept
+    std::string kept_network;   ///< its Docker network, when Docker did not remove it
+    explicit operator bool() const { return outcome == removal_outcome_e::removed; }
+  };
+  // Removes one Space for good. Every refusal that needs no change comes first:
+  // the typed name, the last Steam Space, Docker answering, the home being exactly
+  // the volume Polaris created for this Space (local driver, no driver options,
+  // its label, its own mountpoint) and no container using it. Then the Space is
+  // archived, Docker deletes the home and the Steam network, and the record goes.
+  // A failure after the archive leaves an archived Space that a retry can finish.
+  // Nothing is deleted outside Docker, and nothing Polaris did not create.
+  [[nodiscard]] removal_result_t remove_for_good(const std::filesystem::path &path,
+    const edit_request_t &request, container::host_t &host,
+    std::chrono::milliseconds wait_for_users = std::chrono::seconds(20));
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif

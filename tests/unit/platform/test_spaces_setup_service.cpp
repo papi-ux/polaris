@@ -14,6 +14,7 @@
 #include <fstream>
 #include <future>
 #include <set>
+#include <stdexcept>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -28,6 +29,7 @@ namespace {
   namespace psf = private_state_file;
   using namespace std::chrono_literals;
   const spaces::setup_request_t request {"start", "12345678-1234-1234-1234-123456789abc", "steam-test", "Living room"};
+  const spaces::setup_request_t download {"download", "22345678-1234-1234-1234-123456789abc", "steam-test", {}};
   spaces::runtime_t runtime() {
     return {"steam-test", "default", std::string(40, 'a'), "sha256:" + std::string(64, 'b'),
       "sha256:" + std::string(64, 'c'), ""};
@@ -72,6 +74,23 @@ namespace {
         std::this_thread::sleep_for(1ms);
       }
       return false;
+    }
+    bool wait_download(spaces::setup_service_t &job, std::string_view state) {
+      const auto deadline = std::chrono::steady_clock::now() + 3s;
+      while (std::chrono::steady_clock::now() < deadline) {
+        if (job.snapshot()["download"]["state"] == state) return true;
+        std::this_thread::sleep_for(1ms);
+      }
+      return false;
+    }
+    // Blocks inside the download until the job is stopped.
+    std::function<spaces::runtime_install_result_t(std::string_view, std::stop_token)> blocking(std::promise<void> &entered) {
+      return [this, &entered](std::string_view, std::stop_token stop) {
+        ++installs; entered.set_value();
+        std::mutex mutex; std::condition_variable_any changed; std::unique_lock lock(mutex);
+        changed.wait(lock, stop, [] { return false; });
+        return spaces::runtime_install_result_t {false, "download_cancelled", {}, {}};
+      };
     }
   };
 }
@@ -442,11 +461,51 @@ TEST_F(SpacesSetupService, ConfigurationCommitsLastPreservesSettingsAndRecreates
   EXPECT_EQ(configuration_store::read(paths.native)->contents, committed->contents);
   worker_ipc::authority_store_t authority(paths.ipc);
   EXPECT_EQ(authority.status(), worker_ipc::authority_status_e::applied);
+  // Worker recovery at controller start inspects every entry inside the directory, so preparation
+  // leaves it empty and binds it with a marker beside it.
+  EXPECT_TRUE(authority.recover_inactive({}).inspected());
+  EXPECT_TRUE(std::filesystem::is_empty(paths.ipc));
+  EXPECT_TRUE(std::filesystem::is_regular_file(root / "ipc.owner"));
   std::filesystem::remove_all(paths.ipc);
   EXPECT_TRUE(spaces::prepare_managed_ipc(paths));
   auto wrong = paths; wrong.ipc = root / "unrelated";
   EXPECT_FALSE(spaces::prepare_managed_ipc(wrong));
   EXPECT_FALSE(std::filesystem::exists(wrong.ipc));
+}
+
+TEST_F(SpacesSetupService, PreparationMovesAnEarlierMarkerOutOfTheWorkerDirectory) {
+  activation_host_t host;
+  const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
+  ASSERT_TRUE(psf::write_atomic(paths.native, "port = 47989\n"));
+  const profiles::catalog_t catalog {static_cast<unsigned>(geteuid()), static_cast<unsigned>(getegid()), {{
+    .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, runtime().config_digest},
+    .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+  }}};
+  ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
+  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
+  ASSERT_TRUE(spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host));
+  // The layout earlier builds left: the marker and its lock inside the worker directory, which
+  // blocked worker recovery, so no Space could start and every Space change failed.
+  const auto marker = json {{"controller", paths.controller.string()}}.dump();
+  std::filesystem::remove(root / "ipc.owner");
+  std::filesystem::remove(root / "ipc.owner.lock");
+  ASSERT_TRUE(psf::write_atomic(paths.ipc / ".owner", marker));
+  {
+    worker_ipc::authority_store_t blocked(paths.ipc);
+    EXPECT_EQ(blocked.recover_inactive({}).status, worker_ipc::authority_status_e::integrity_violation);
+  }
+  EXPECT_TRUE(spaces::prepare_managed_ipc(paths));
+  EXPECT_TRUE(std::filesystem::is_empty(paths.ipc));
+  EXPECT_TRUE(std::filesystem::is_regular_file(root / "ipc.owner"));
+  {
+    worker_ipc::authority_store_t recovered(paths.ipc);
+    EXPECT_TRUE(recovered.recover_inactive({}).inspected());
+  }
+  // A marker inside that names another controller is neither adopted nor removed.
+  const auto foreign = json {{"controller", (root / "other.json").string()}}.dump();
+  ASSERT_TRUE(psf::write_atomic(paths.ipc / ".owner", foreign));
+  EXPECT_FALSE(spaces::prepare_managed_ipc(paths));
+  EXPECT_EQ(psf::read_secure(paths.ipc / ".owner", 4096).payload, foreign);
 }
 
 TEST_F(SpacesSetupService, ConfigurationRefusesExistingAuthoritySymlinksAndUncertainWrites) {
@@ -508,6 +567,156 @@ TEST_F(SpacesSetupService, ManagedSocketPathsLeaveRoomForGenerationGrowth) {
   const auto paths = spaces::activation_paths(root, root / "polaris.conf");
   const auto socket = paths.ipc / ("polaris-runtime-" + request.request_id + "-1000000") / "ipc/control.sock";
   EXPECT_LT(socket.string().size(), 108U);
+}
+
+TEST_F(SpacesSetupService, DownloadOnlyVerifiesTheRuntimeWithoutAJournalRecordOrHome) {
+  const json body {{"operation", "download"}, {"request_id", download.request_id}, {"runtime_id", download.runtime_id}};
+  const auto decoded = spaces::decode_setup_request(body.dump());
+  ASSERT_TRUE(decoded);
+  EXPECT_EQ(decoded->operation, "download");
+  EXPECT_EQ(decoded->runtime_id, download.runtime_id);
+  EXPECT_TRUE(decoded->name.empty());
+  for (const auto &[key, value] : std::vector<std::pair<std::string, json>> {
+      {"runtime_id", "image:latest"}, {"runtime_id", ""}, {"request_id", "../another-home"},
+      {"name", "Living room"}, {"gpu_id", "gpu-0"}, {"catalog", "/tmp/catalog"}}) {
+    auto bad = body; bad[key] = value;
+    EXPECT_FALSE(spaces::decode_setup_request(bad.dump())) << key;
+  }
+  auto missing = body; missing.erase("runtime_id");
+  EXPECT_FALSE(spaces::decode_setup_request(missing.dump()));
+
+  auto job = service(operations());
+  EXPECT_EQ(job->snapshot()["download"], nullptr);
+  ASSERT_EQ(job->submit(download), 202);
+  ASSERT_TRUE(wait_download(*job, "ready"));
+  const auto done = job->snapshot();
+  EXPECT_EQ(done["download"], json({{"request_id", download.request_id}, {"runtime_id", "steam-test"},
+    {"state", "ready"}, {"code", "runtime_ready"}, {"message", "The gaming runtime is downloaded and verified."},
+    {"can_cancel", false}}));
+  EXPECT_EQ(done["job"], nullptr);
+  EXPECT_EQ(job->submit(download), 200);
+  EXPECT_FALSE(std::filesystem::exists(journal));
+  EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 0U);
+  auto unknown = download; unknown.request_id.back() = 'e'; unknown.runtime_id = "steam-other";
+  EXPECT_EQ(job->submit(unknown), 409);
+  // First-Space setup starts from its own request, and checks the runtime again.
+  ASSERT_EQ(job->submit(request), 202);
+  ASSERT_TRUE(wait_state(*job, "prepared"));
+  EXPECT_EQ(installs, 2U); EXPECT_EQ(homes, 1U);
+}
+
+TEST_F(SpacesSetupService, DownloadCancellationIsFencedByItsOwnRequest) {
+  std::promise<void> entered;
+  auto ops = operations();
+  ops.install = blocking(entered);
+  auto job = service(ops);
+  ASSERT_EQ(job->submit(download), 202);
+  ASSERT_EQ(entered.get_future().wait_for(3s), std::future_status::ready);
+  EXPECT_EQ(job->snapshot()["download"]["state"], "downloading");
+  EXPECT_TRUE(job->snapshot()["download"]["can_cancel"]);
+  // The worker is busy: no first-Space job, second download or activation is admitted.
+  EXPECT_EQ(job->submit(request), 409);
+  auto another = download; another.request_id.back() = 'd';
+  EXPECT_EQ(job->submit(another), 409);
+  EXPECT_EQ(job->submit({"activate", request.request_id, {}, {}, "gpu-0"}), 409);
+  EXPECT_EQ(job->submit(download), 202);
+  // Stale or unrelated requests cannot stop it.
+  EXPECT_EQ(job->submit({"cancel", request.request_id, {}, {}}), 409);
+  EXPECT_EQ(job->submit({"cancel", another.request_id, {}, {}}), 409);
+  EXPECT_EQ(job->snapshot()["download"]["state"], "downloading");
+  EXPECT_EQ(job->submit({"cancel", download.request_id, {}, {}}), 202);
+  ASSERT_TRUE(wait_download(*job, "cancelled"));
+  const auto stopped = job->snapshot()["download"];
+  EXPECT_FALSE(stopped["can_cancel"]);
+  EXPECT_EQ(stopped["code"], "cancelled");
+  EXPECT_EQ(stopped["message"], "The download stopped. Docker may keep verified download layers for your next retry.");
+  EXPECT_EQ(job->submit({"cancel", download.request_id, {}, {}}), 200);
+  EXPECT_FALSE(std::filesystem::exists(journal));
+  EXPECT_EQ(installs, 1U); EXPECT_EQ(homes, 0U);
+  // One request identity names one job, in either order.
+  auto reused = request; reused.request_id = download.request_id;
+  EXPECT_EQ(job->submit(reused), 409);
+}
+
+TEST_F(SpacesSetupService, ShutdownStopsADownloadAndRestartKeepsNoDownloadState) {
+  std::promise<void> entered;
+  auto ops = operations();
+  ops.install = blocking(entered);
+  {
+    auto job = service(ops);
+    ASSERT_EQ(job->submit(download), 202);
+    ASSERT_EQ(entered.get_future().wait_for(3s), std::future_status::ready);
+    job->shutdown();
+    EXPECT_EQ(job->snapshot()["download"]["state"], "cancelled");
+    EXPECT_FALSE(job->snapshot()["download"]["can_cancel"]);
+    EXPECT_EQ(job->submit(download), 503);
+  }
+  EXPECT_FALSE(std::filesystem::exists(journal));
+  auto resumed = service(operations());
+  EXPECT_EQ(resumed->snapshot()["download"], nullptr);
+  EXPECT_EQ(resumed->snapshot()["job"], nullptr);
+  ASSERT_EQ(resumed->submit(download), 202);
+  ASSERT_TRUE(wait_download(*resumed, "ready"));
+  EXPECT_EQ(installs, 2U); EXPECT_EQ(homes, 0U);
+}
+
+TEST_F(SpacesSetupService, DownloadLeavesASavedSetupRecordUntouched) {
+  auto job = service(operations());
+  ASSERT_EQ(job->submit(request), 202);
+  ASSERT_TRUE(wait_state(*job, "prepared"));
+  const auto before = psf::read_secure(journal, 4096, false, false).payload;
+  auto reused = download; reused.request_id = request.request_id;
+  EXPECT_EQ(job->submit(reused), 409);
+  ASSERT_EQ(job->submit(download), 202);
+  ASSERT_TRUE(wait_download(*job, "ready"));
+  EXPECT_EQ(psf::read_secure(journal, 4096, false, false).payload, before);
+  EXPECT_EQ(job->snapshot()["job"]["state"], "prepared");
+  EXPECT_TRUE(job->snapshot()["job"]["can_activate"]);
+  EXPECT_EQ(job->submit({"cancel", request.request_id, {}, {}}), 200);
+  EXPECT_EQ(installs, 2U); EXPECT_EQ(homes, 1U);
+}
+
+TEST_F(SpacesSetupService, DownloadNeverAdoptsAnUnapprovedImageAndNeedsAnOfferedRuntime) {
+  auto ops = operations();
+  ops.install = [&](auto, auto) {
+    ++installs;
+    return spaces::runtime_install_result_t {true, "runtime_ready", {}, "sha256:" + std::string(64, 'd')};
+  };
+  {
+    auto job = service(ops);
+    ASSERT_EQ(job->submit(download), 202);
+    ASSERT_TRUE(wait_download(*job, "failed"));
+    EXPECT_EQ(job->snapshot()["download"]["code"], "runtime_verification_failed");
+    // A failed download can be tried again with the same request.
+    ASSERT_EQ(job->submit(download), 202);
+    ASSERT_TRUE(wait_download(*job, "failed"));
+    EXPECT_EQ(installs, 2U);
+  }
+  auto incomplete = operations();
+  incomplete.install = [&](auto, auto) { ++installs; return spaces::runtime_install_result_t {false, "download_incomplete", {}, {}}; };
+  {
+    auto job = service(incomplete);
+    ASSERT_EQ(job->submit(download), 202);
+    ASSERT_TRUE(wait_download(*job, "failed"));
+    EXPECT_EQ(job->snapshot()["download"]["code"], "download_incomplete");
+    EXPECT_EQ(job->snapshot()["download"]["message"], "The download did not finish. Retry to reuse verified layers.");
+  }
+  auto throwing = operations();
+  throwing.install = [&](auto, auto) -> spaces::runtime_install_result_t { ++installs; throw std::runtime_error("private failure"); };
+  {
+    auto job = service(throwing);
+    ASSERT_EQ(job->submit(download), 202);
+    ASSERT_TRUE(wait_download(*job, "failed"));
+    EXPECT_EQ(job->snapshot()["download"]["code"], "setup_failed");
+    EXPECT_EQ(job->snapshot().dump().find("private failure"), std::string::npos);
+  }
+  spaces::setup_service_t unpublished(root / "unpublished.json", {}, true, operations());
+  spaces::setup_service_t configured(root / "configured.json", {runtime()}, false, operations());
+  EXPECT_EQ(unpublished.submit(download), 503);
+  EXPECT_EQ(configured.submit(download), 503);
+  EXPECT_EQ(unpublished.snapshot()["download"], nullptr);
+  EXPECT_EQ(homes, 0U);
+  EXPECT_FALSE(std::filesystem::exists(journal));
 }
 
 TEST_F(SpacesSetupService, NewJournalSchemaRequiresTheExactGraphicsField) {

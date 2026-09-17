@@ -8,6 +8,9 @@
 #include <array>
 #include <cctype>
 #include <string_view>
+#include <vector>
+#include <unordered_map>
+#include <string>
 
 using namespace std::literals;
 
@@ -680,5 +683,58 @@ namespace confighttp::validation {
 
   bool is_response_only_config_key(const std::string_view key) {
     return std::ranges::binary_search(response_only_config_keys_list, key);
+  }
+
+  std::vector<std::string> changed_config_keys(const std::unordered_map<std::string, std::string> &before,
+                                               const std::unordered_map<std::string, std::string> &after) {
+    std::vector<std::string> changed;
+    const auto value_in = [](const std::unordered_map<std::string, std::string> &vars, const std::string &key) {
+      const auto it = vars.find(key);
+      return it == vars.end() ? std::string_view {} : std::string_view {it->second};
+    };
+    for (const auto &[key, value] : before) {
+      if (value_in(after, key) != std::string_view {value}) {
+        changed.push_back(key);
+      }
+    }
+    for (const auto &[key, value] : after) {
+      if (!before.contains(key) && !value.empty()) {
+        changed.push_back(key);
+      }
+    }
+    std::sort(changed.begin(), changed.end());
+    return changed;
+  }
+
+  bool is_ai_config_key(std::string_view key) {
+    static constexpr std::array keys {
+      std::string_view {"ai_enabled"},
+      std::string_view {"ai_provider"},
+      std::string_view {"ai_model"},
+      std::string_view {"ai_auth_mode"},
+      std::string_view {"ai_api_key"},
+      std::string_view {"ai_base_url"},
+      std::string_view {"ai_use_subscription"},
+      std::string_view {"ai_codex_home"},
+      std::string_view {"ai_timeout_ms"},
+      std::string_view {"ai_cache_ttl_hours"},
+    };
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+  }
+
+  bool is_live_applied_config_key(std::string_view key) {
+    return is_ai_config_key(key) || key == "steamgriddb_api_key" || key == "adaptive_bitrate_enabled" ||
+           key == "trusted_subnets" || key == "trusted_subnet_auto_pairing";
+  }
+
+  bool config_change_requires_restart(const std::vector<std::string> &changed_keys) {
+    return std::any_of(changed_keys.begin(), changed_keys.end(), [](const std::string &key) {
+      return !is_live_applied_config_key(key);
+    });
+  }
+
+  bool written_config_requires_restart(const std::unordered_map<std::string, std::string> &loaded,
+                                       const std::unordered_map<std::string, std::string> &written) {
+    return config_change_requires_restart(changed_config_keys(loaded, written));
   }
 }  // namespace confighttp::validation

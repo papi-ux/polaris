@@ -9,6 +9,8 @@
 #include "misc.h"
 
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -117,6 +119,30 @@ namespace multiseat::container {
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
+  }
+
+  std::optional<group_membership_t> local_host_t::group_membership(std::string_view group) const {
+    if (group.empty() || group.size() > 64) return std::nullopt;
+    const std::string name(group);
+    std::vector<char> buffer(16384);
+    struct group entry {};
+    struct group *found = nullptr;
+    int error;
+    while ((error = getgrnam_r(name.c_str(), &entry, buffer.data(), buffer.size(), &found)) == ERANGE && buffer.size() < (1U << 20))
+      buffer.resize(buffer.size() * 2);
+    if (error != 0 || !found) return std::nullopt;
+    group_membership_t membership {.gid = static_cast<std::uint64_t>(found->gr_gid)};
+    std::vector<char> account_buffer(16384);
+    struct passwd account {};
+    struct passwd *owner = nullptr;
+    while ((error = getpwuid_r(geteuid(), &account, account_buffer.data(), account_buffer.size(), &owner)) == ERANGE &&
+           account_buffer.size() < (1U << 20))
+      account_buffer.resize(account_buffer.size() * 2);
+    if (error != 0 || !owner) return membership;
+    membership.member = owner->pw_gid == found->gr_gid;
+    for (auto member = found->gr_mem; member && *member && !membership.member; ++member)
+      membership.member = std::string_view(*member) == owner->pw_name;
+    return membership;
   }
 
   bool local_host_t::readable_directory(const std::filesystem::path &path) const {

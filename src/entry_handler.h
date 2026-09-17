@@ -247,6 +247,13 @@ namespace service_ctrl {
 #endif
 
 /** What host setup may do about the ownership of a per-user directory. */
+/**
+ * @brief Whether contents match a version of a host asset Polaris has shipped, named by file
+ * (60-polaris.rules or 60-polaris.conf). Host setup deletes such a copy from /etc because an older
+ * setup put it there; a copy that matches no shipped version may hold a local edit and stays.
+ */
+bool is_shipped_host_asset_version(std::string_view file_name, std::string_view contents);
+
 enum class config_ownership_action_e {
   nothing,  ///< Absent, or already owned by the account that streams.
   repair,  ///< Owned by root, which only a privileged run can have caused.

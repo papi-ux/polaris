@@ -1,15 +1,20 @@
 #include "game_artwork_manual.h"
 
+#include "game_artwork_override.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <random>
 #include <set>
 #include <sstream>
+#include <system_error>
 
 namespace game_artwork::manual {
   namespace {
@@ -69,6 +74,67 @@ namespace game_artwork::manual {
       if (body.size() >= 12 && body[0] == 'R' && body[1] == 'I' && body[2] == 'F' && body[3] == 'F' &&
           body[8] == 'W' && body[9] == 'E' && body[10] == 'B' && body[11] == 'P') return "image/webp";
       return std::nullopt;
+    }
+
+    std::optional<json> parse_bounded_object(const std::string_view body) {
+      if (body.empty() || body.size() > maximum_match_body_bytes) return std::nullopt;
+      try {
+        auto document = json::parse(body);
+        if (!document.is_object()) return std::nullopt;
+        return document;
+      } catch (const json::exception &) {
+        return std::nullopt;
+      }
+    }
+
+    bool has_only_keys(const json &document, const std::set<std::string> &allowed) {
+      for (const auto &item : document.items()) {
+        if (!allowed.contains(item.key())) return false;
+      }
+      return true;
+    }
+
+    // The match identity every artwork body carries. Callers refuse unknown keys first.
+    std::optional<match_selection_t> parse_match_identity(const json &document) {
+      if (!document.contains("provider") || !document.at("provider").is_string() ||
+          document.at("provider").get<std::string>() != "steamgriddb" ||
+          !document.contains("provider_game_id") || !document.at("provider_game_id").is_string() ||
+          !document.contains("title")) return std::nullopt;
+      const auto provider_game_id = document.at("provider_game_id").get<std::string>();
+      const auto title = sanitized_title(document.at("title"));
+      if (!positive_identifier(provider_game_id) || !title) return std::nullopt;
+      std::optional<std::string> steam_appid;
+      if (document.contains("steam_appid")) {
+        if (!document.at("steam_appid").is_string()) return std::nullopt;
+        const auto value = document.at("steam_appid").get<std::string>();
+        if (!positive_identifier(value) || !is_valid_steam_appid(value)) return std::nullopt;
+        steam_appid = value;
+      }
+      return match_selection_t {"steamgriddb", provider_game_id, *title, steam_appid, {}, {}};
+    }
+
+    std::optional<std::uint64_t> provider_game_number(const std::string_view value) {
+      std::uint64_t number = 0;
+      const auto *const end = value.data() + value.size();
+      const auto [parsed_end, error] = std::from_chars(value.data(), end, number);
+      if (error != std::errc {} || parsed_end != end || number == 0) return std::nullopt;
+      return number;
+    }
+
+    bool successful_status(const unsigned int status) {
+      return status >= 200 && status < 300;
+    }
+
+    search_failure_t invalid_match_failure() {
+      return {"artwork_match_invalid", "That artwork match is not valid. Search for the game again.", 400};
+    }
+
+    search_failure_t choice_expired_failure() {
+      return {"artwork_choice_expired", "That artwork choice expired. Load the alternatives again.", 409};
+    }
+
+    search_failure_t choice_mismatch_failure() {
+      return {"artwork_choice_mismatch", "That artwork choice belongs to a different match. Load the alternatives again.", 409};
     }
   }
 
@@ -131,6 +197,13 @@ namespace game_artwork::manual {
     if (suffix == "match") return route_request_t {route_e::apply, std::string(uuid), {}, {}};
     if (suffix == "override") return route_request_t {route_e::clear, std::string(uuid), {}, {}};
 
+    constexpr std::string_view choices_prefix = "choices/";
+    if (suffix.starts_with(choices_prefix)) {
+      const auto kind = parse_kind(suffix.substr(choices_prefix.size()));
+      if (!kind) return std::nullopt;
+      return route_request_t {route_e::choices, std::string(uuid), {}, *kind};
+    }
+
     constexpr std::string_view candidate_prefix = "candidate/";
     if (!suffix.starts_with(candidate_prefix)) return std::nullopt;
     const auto candidate = suffix.substr(candidate_prefix.size());
@@ -149,43 +222,53 @@ namespace game_artwork::manual {
   }
 
   std::optional<match_selection_t> parse_match_selection(const std::string_view body) {
-    if (body.empty() || body.size() > maximum_match_body_bytes) return std::nullopt;
-    json document;
-    try {
-      document = json::parse(body);
-    } catch (const json::exception &) {
+    const auto document = parse_bounded_object(body);
+    if (!document ||
+        !has_only_keys(*document, {"provider", "provider_game_id", "title", "steam_appid", "kinds", "selections"})) {
       return std::nullopt;
     }
-    if (!document.is_object()) return std::nullopt;
-    const std::set<std::string> allowed {"provider", "provider_game_id", "title", "steam_appid", "kinds"};
-    for (const auto &[key, value] : document.items()) {
-      static_cast<void>(value);
-      if (!allowed.contains(key)) return std::nullopt;
+    auto selection = parse_match_identity(*document);
+    if (!selection || document->contains("kinds") == document->contains("selections")) return std::nullopt;
+
+    if (document->contains("kinds")) {
+      const auto &kinds = document->at("kinds");
+      if (!kinds.is_array() || kinds.empty() || kinds.size() > 4) return std::nullopt;
+      std::set<kind_e> seen_kinds;
+      for (const auto &value : kinds) {
+        if (!value.is_string()) return std::nullopt;
+        const auto kind = parse_kind(value.get<std::string>());
+        if (!kind || !seen_kinds.emplace(*kind).second) return std::nullopt;
+        selection->kinds.push_back(*kind);
+      }
+      return selection;
     }
-    if (!document.contains("provider") || !document["provider"].is_string() ||
-        document["provider"].get<std::string>() != "steamgriddb" ||
-        !document.contains("provider_game_id") || !document["provider_game_id"].is_string() ||
-        !document.contains("title") || !document.contains("kinds") || !document["kinds"].is_array()) return std::nullopt;
-    const auto provider_game_id = document["provider_game_id"].get<std::string>();
-    const auto title = sanitized_title(document["title"]);
-    if (!positive_identifier(provider_game_id) || !title) return std::nullopt;
-    std::optional<std::string> steam_appid;
-    if (document.contains("steam_appid")) {
-      if (!document["steam_appid"].is_string()) return std::nullopt;
-      const auto value = document["steam_appid"].get<std::string>();
-      if (!positive_identifier(value) || !is_valid_steam_appid(value)) return std::nullopt;
-      steam_appid = value;
+
+    // Picks name images only by the opaque tokens a choice list issued. Whatever a
+    // token stands for stays on the host until plan_selected_downloads resolves it.
+    const auto &selections = document->at("selections");
+    if (!selections.is_object() || selections.empty() || selections.size() > 4) return std::nullopt;
+    std::map<kind_e, std::string> picks;
+    std::set<std::string> seen_tokens;
+    for (const auto &item : selections.items()) {
+      const auto kind = parse_kind(item.key());
+      if (!kind || !item.value().is_string()) return std::nullopt;
+      auto token = item.value().get<std::string>();
+      if (!valid_token(token) || !seen_tokens.emplace(token).second) return std::nullopt;
+      picks.emplace(*kind, std::move(token));
     }
-    std::vector<kind_e> kinds;
-    std::set<kind_e> seen_kinds;
-    if (document["kinds"].empty() || document["kinds"].size() > 4) return std::nullopt;
-    for (const auto &value : document["kinds"]) {
-      if (!value.is_string()) return std::nullopt;
-      const auto kind = parse_kind(value.get<std::string>());
-      if (!kind || !seen_kinds.emplace(*kind).second) return std::nullopt;
-      kinds.push_back(*kind);
+    for (auto &[kind, token] : picks) {
+      selection->kinds.push_back(kind);
+      selection->selections.push_back({kind, std::move(token)});
     }
-    return match_selection_t {"steamgriddb", provider_game_id, *title, steam_appid, std::move(kinds)};
+    return selection;
+  }
+
+  std::optional<match_selection_t> parse_choice_request(const std::string_view body) {
+    const auto document = parse_bounded_object(body);
+    if (!document || !has_only_keys(*document, {"provider", "provider_game_id", "title", "steam_appid"})) {
+      return std::nullopt;
+    }
+    return parse_match_identity(*document);
   }
 
   preview_cache_t::preview_cache_t(
@@ -215,12 +298,18 @@ namespace game_artwork::manual {
     const std::string_view uuid,
     const kind_e kind,
     std::vector<unsigned char> body,
-    const std::int64_t now_milliseconds
+    const std::int64_t now_milliseconds,
+    std::optional<choice_source_t> choice
   ) {
     const auto mime_type = mime_from_signature(body);
     if (!is_valid_uuid(uuid) || !mime_type || body.empty() || body.size() > maximum_preview_bytes ||
         maximum_entries_ == 0 || body.size() > maximum_total_bytes_ || ttl_milliseconds_ <= 0 ||
         now_milliseconds < 0 || now_milliseconds > std::numeric_limits<std::int64_t>::max() - ttl_milliseconds_) {
+      return std::nullopt;
+    }
+    if (choice && (!positive_identifier(choice->provider_game_id) ||
+                   choice->asset_url.size() > maximum_choice_url_bytes ||
+                   !is_allowed_provider_url(provider_e::steamgriddb, choice->asset_url))) {
       return std::nullopt;
     }
     std::lock_guard lock(mutex_);
@@ -241,10 +330,30 @@ namespace game_artwork::manual {
       token.clear();
     }
     if (token.empty()) return std::nullopt;
-    preview_t preview {token, std::string(uuid), kind, *mime_type, std::move(body), now_milliseconds + ttl_milliseconds_};
+    preview_t preview {
+      token,
+      std::string(uuid),
+      kind,
+      *mime_type,
+      std::move(body),
+      now_milliseconds + ttl_milliseconds_,
+      std::move(choice),
+    };
     total_bytes_ += preview.body.size();
     entries_.emplace(token, preview);
     return preview;
+  }
+
+  const preview_t *preview_cache_t::find_locked(
+    const std::string_view uuid,
+    const std::string_view token,
+    const kind_e kind,
+    const std::int64_t now_milliseconds
+  ) {
+    prune_locked(now_milliseconds);
+    const auto found = entries_.find(std::string(token));
+    if (found == entries_.end() || found->second.uuid != uuid || found->second.kind != kind) return nullptr;
+    return &found->second;
   }
 
   std::optional<preview_t> preview_cache_t::lookup(
@@ -255,10 +364,22 @@ namespace game_artwork::manual {
   ) {
     if (!is_valid_uuid(uuid) || !valid_token(token) || now_milliseconds < 0) return std::nullopt;
     std::lock_guard lock(mutex_);
-    prune_locked(now_milliseconds);
-    const auto found = entries_.find(std::string(token));
-    if (found == entries_.end() || found->second.uuid != uuid || found->second.kind != kind) return std::nullopt;
-    return found->second;
+    const auto *const entry = find_locked(uuid, token, kind, now_milliseconds);
+    if (entry == nullptr) return std::nullopt;
+    return *entry;
+  }
+
+  std::optional<choice_source_t> preview_cache_t::lookup_choice(
+    const std::string_view uuid,
+    const std::string_view token,
+    const kind_e kind,
+    const std::int64_t now_milliseconds
+  ) {
+    if (!is_valid_uuid(uuid) || !valid_token(token) || now_milliseconds < 0) return std::nullopt;
+    std::lock_guard lock(mutex_);
+    const auto *const entry = find_locked(uuid, token, kind, now_milliseconds);
+    if (entry == nullptr) return std::nullopt;
+    return entry->choice;
   }
 
   void preview_cache_t::clear_game(const std::string_view uuid) {
@@ -293,6 +414,217 @@ namespace game_artwork::manual {
       default:
         return {"steamgriddb_unavailable", "SteamGridDB did not answer (HTTP " + std::to_string(*upstream_status) + ").", 502};
     }
+  }
+
+  choice_listing_t list_artwork_choices(
+    preview_cache_t &cache,
+    const std::string_view uuid,
+    const kind_e kind,
+    const match_selection_t &identity,
+    const providers::transport_t &transport,
+    const std::int64_t now_milliseconds
+  ) {
+    choice_listing_t listing;
+    const auto game_id = provider_game_number(identity.provider_game_id);
+    const auto plans = game_id ? providers::plan_steamgriddb_assets(*game_id) : std::vector<providers::request_t> {};
+    // The match path's own lookup for this kind, so choices carry its style and size filters.
+    const auto plan = std::find_if(plans.begin(), plans.end(), [kind](const auto &request) {
+      return request.kind == kind;
+    });
+    if (!is_valid_uuid(uuid) || plan == plans.end()) {
+      listing.failure = invalid_match_failure();
+      return listing;
+    }
+    if (!transport) {
+      listing.failure = classify_search_failure(true, std::nullopt);
+      return listing;
+    }
+
+    std::vector<providers::choice_candidate_t> candidates;
+    try {
+      const auto response = transport(*plan, maximum_listing_bytes);
+      if (!response ||
+          !is_allowed_provider_url(plan->provider, response->final_url.empty() ? plan->url : response->final_url)) {
+        listing.failure = classify_search_failure(true, std::nullopt);
+        return listing;
+      }
+      if (!successful_status(response->status_code)) {
+        listing.failure = classify_search_failure(true, static_cast<long>(response->status_code));
+        return listing;
+      }
+      const std::string body(response->body.begin(), response->body.end());
+      candidates = providers::parse_steamgriddb_choices(kind, body, maximum_choice_count);
+    } catch (...) {
+      listing.failure = classify_search_failure(true, std::nullopt);
+      return listing;
+    }
+
+    // A preview that cannot be fetched drops only its own choice.
+    std::optional<search_failure_t> preview_failure;
+    for (const auto &candidate : candidates) {
+      const providers::request_t download {
+        provider_e::steamgriddb,
+        providers::operation_e::download,
+        kind,
+        candidate.preview_url,
+        false,
+      };
+      try {
+        const auto image = transport(download, maximum_preview_bytes);
+        if (!image ||
+            !is_allowed_provider_url(download.provider, image->final_url.empty() ? download.url : image->final_url)) {
+          if (!preview_failure) preview_failure = classify_search_failure(true, std::nullopt);
+          continue;
+        }
+        if (!successful_status(image->status_code)) {
+          if (!preview_failure) preview_failure = classify_search_failure(true, static_cast<long>(image->status_code));
+          continue;
+        }
+        const auto published = cache.publish(
+          uuid,
+          kind,
+          image->body,
+          now_milliseconds,
+          choice_source_t {identity.provider_game_id, candidate.asset_url}
+        );
+        if (published) listing.choices.push_back({published->token, published->kind, published->expires_at});
+      } catch (...) {
+        if (!preview_failure) preview_failure = classify_search_failure(true, std::nullopt);
+      }
+    }
+    // Images SteamGridDB listed but the host could not fetch are an upstream failure, not an empty list.
+    if (listing.choices.empty() && preview_failure) listing.failure = preview_failure;
+    return listing;
+  }
+
+  nlohmann::json artwork_choice_json(const std::string_view uuid, const choice_t &choice) {
+    nlohmann::json body {
+      {"selection_token", choice.token},
+      {"preview", "/polaris/v1/games/" + std::string(uuid) + "/artwork/candidate/" + choice.token + "/" + std::string(kind_name(choice.kind))},
+      {"expires_at", choice.expires_at},
+    };
+    return body;
+  }
+
+  nlohmann::json artwork_choices_json(const std::string_view uuid, const kind_e kind, const std::vector<choice_t> &choices) {
+    auto values = nlohmann::json::array();
+    for (const auto &choice : choices) values.push_back(artwork_choice_json(uuid, choice));
+    nlohmann::json body {
+      {"status", true},
+      {"kind", std::string(kind_name(kind))},
+      {"choices", std::move(values)},
+    };
+    return body;
+  }
+
+  selected_download_plan_t plan_selected_downloads(
+    preview_cache_t &cache,
+    const std::string_view uuid,
+    const match_selection_t &selection,
+    const std::int64_t now_milliseconds
+  ) {
+    selected_download_plan_t plan;
+    if (selection.selections.empty()) {
+      plan.refusal = invalid_match_failure();
+      return plan;
+    }
+    for (const auto &pick : selection.selections) {
+      const auto source = cache.lookup_choice(uuid, pick.token, pick.kind, now_milliseconds);
+      if (!source || !is_allowed_provider_url(provider_e::steamgriddb, source->asset_url)) {
+        plan.downloads.clear();
+        plan.refusal = choice_expired_failure();
+        return plan;
+      }
+      if (source->provider_game_id != selection.provider_game_id) {
+        plan.downloads.clear();
+        plan.refusal = choice_mismatch_failure();
+        return plan;
+      }
+      plan.downloads.push_back({
+        provider_e::steamgriddb,
+        providers::operation_e::download,
+        pick.kind,
+        source->asset_url,
+        false,
+      });
+    }
+    return plan;
+  }
+
+  bool stage_unselected_override_assets(
+    const std::filesystem::path &appdata,
+    const std::filesystem::path &staging_appdata,
+    const std::string_view uuid,
+    const std::vector<kind_e> &selected_kinds
+  ) {
+    namespace fs = std::filesystem;
+    if (!is_valid_uuid(uuid) || !recover_interrupted_artwork_override(appdata, uuid)) return false;
+    // Commits wait while this copies, so no live file changes halfway through.
+    const auto lock = acquire_artwork_override_read_lock();
+    for (const auto kind : std::array {kind_e::poster, kind_e::hero, kind_e::logo, kind_e::icon}) {
+      if (std::find(selected_kinds.begin(), selected_kinds.end(), kind) != selected_kinds.end()) continue;
+      for (const auto extension : std::array<std::string_view, 4> {".png", ".jpg", ".jpeg", ".webp"}) {
+        const auto live = cache_asset_path(appdata, uuid, kind, source_e::override, extension);
+        const auto staged = cache_asset_path(staging_appdata, uuid, kind, source_e::override, extension);
+        if (!live || !staged) return false;
+        std::error_code error;
+        const auto status = fs::symlink_status(*live, error);
+        if (error == std::errc::no_such_file_or_directory || (!error && !fs::exists(status))) continue;
+        // The commit refuses these shapes as well. Refusing here fails the apply
+        // instead of quietly dropping the player's image.
+        if (error || fs::is_symlink(status) || !fs::is_regular_file(status) || !image_mime_type(*live)) return false;
+        const auto size = fs::file_size(*live, error);
+        if (error || size == 0 || size > maximum_asset_bytes) return false;
+        fs::create_directories(staged->parent_path(), error);
+        if (error) return false;
+        if (!fs::copy_file(*live, *staged, fs::copy_options::none, error) || error) return false;
+        break;
+      }
+    }
+    return true;
+  }
+
+  apply_stage_e publish_artwork_override(
+    const std::filesystem::path &appdata,
+    const std::filesystem::path &staging_appdata,
+    const std::string_view uuid,
+    const match_selection_t &selection,
+    const std::vector<providers::request_t> &downloads,
+    const providers::transport_t &transport,
+    const std::int64_t now_milliseconds
+  ) {
+    std::set<kind_e> published_kinds;
+    const providers::execution_options_t options {
+      .destination_source = source_e::override,
+      .force_replace = true,
+      .on_published = [&](const asset_t &asset) {
+        published_kinds.insert(asset.kind);
+      },
+    };
+    static_cast<void>(providers::execute_download_plan(staging_appdata, uuid, downloads, transport, options));
+
+    const bool picked = !selection.selections.empty();
+    const bool every_pick_landed = std::all_of(selection.selections.begin(), selection.selections.end(), [&](const auto &pick) {
+      return published_kinds.contains(pick.kind);
+    });
+    // A match by kinds keeps whatever SteamGridDB could supply. A pick names the exact
+    // image the player chose, so a missing one fails the apply rather than half of it.
+    if (published_kinds.empty() || (picked && !every_pick_landed)) return apply_stage_e::asset_download;
+    if (picked && !stage_unselected_override_assets(appdata, staging_appdata, uuid, selection.kinds)) {
+      return apply_stage_e::staging;
+    }
+
+    const artwork_override_t metadata {
+      std::string(uuid),
+      selection.provider,
+      selection.provider_game_id,
+      selection.title,
+      selection.steam_appid,
+      true,
+      now_milliseconds,
+    };
+    if (!commit_staged_artwork_override(appdata, staging_appdata, metadata)) return apply_stage_e::commit;
+    return apply_stage_e::published;
   }
 
 }  // namespace game_artwork::manual

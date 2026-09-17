@@ -5,7 +5,9 @@
 #pragma once
 
 // standard includes
+#include <filesystem>
 #include <functional>
+#include <optional>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -86,6 +88,30 @@ namespace confighttp {
    * the keys are additive so bare stats consumers keep working unchanged.
    */
   nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats);
+
+  /**
+   * @brief What the first-run GPU step shows: each GPU, the encoder Polaris will use and why,
+   *        the encoders that can start, and what is missing for hardware encoding.
+   */
+  nlohmann::json setup_hardware_report();
+
+  /**
+   * @brief The private LAN networks the first-run network step can trust with one click.
+   */
+  nlohmann::json setup_networks_report();
+
+  /**
+   * @brief The app uuid in a Remove artwork or Find artwork again request.
+   *
+   * The body is a JSON object with exactly one key, uuid, holding an app uuid. Anything else,
+   * including a body over 1024 bytes, is refused.
+   */
+  std::optional<std::string> decode_app_artwork_request(std::string_view body);
+
+  /**
+   * @brief The uuids of the apps in an apps.json tree whose automatic artwork lookup is off.
+   */
+  nlohmann::json apps_with_artwork_lookup_off(const std::filesystem::path &appdata, const nlohmann::json &apps_tree);
 
   /**
    * @brief Session lifecycle states.

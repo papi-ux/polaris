@@ -6,6 +6,12 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include <src/confighttp_validation.h>
 
@@ -381,4 +387,98 @@ TEST(AppValidationTests, AcceptsAnEmulatorSourceWithItsRomKeys) {
   payload["source"] = "retroarch";
   EXPECT_FALSE(confighttp::validation::validate_app_payload(payload, error));
   EXPECT_NE(error.find("emulator"), std::string::npos) << error;
+}
+
+TEST(ConfigLiveApplyTests, ChangedKeysTreatAMissingKeyAsEmpty) {
+  const std::unordered_map<std::string, std::string> before {
+    {"port", "47989"}, {"steamgriddb_api_key", "old"}, {"ai_model", "gpt-5.6-luna"}, {"capture", "kms"}, {"ai_codex_home", ""}};
+  const std::unordered_map<std::string, std::string> after {
+    {"port", "47989"}, {"steamgriddb_api_key", "new"}, {"capture", "kms"}, {"ai_enabled", "enabled"}};
+  EXPECT_EQ(confighttp::validation::changed_config_keys(before, after),
+    (std::vector<std::string> {"ai_enabled", "ai_model", "steamgriddb_api_key"}));
+  EXPECT_TRUE(confighttp::validation::changed_config_keys(before, before).empty());
+}
+
+TEST(ConfigLiveApplyTests, OnlyKeysTheHostAppliesLiveSkipTheRestart) {
+  using confighttp::validation::config_change_requires_restart;
+  EXPECT_FALSE(config_change_requires_restart({}));
+  EXPECT_FALSE(config_change_requires_restart({"steamgriddb_api_key"}));
+  EXPECT_FALSE(config_change_requires_restart({"adaptive_bitrate_enabled", "ai_api_key", "ai_auth_mode", "ai_base_url",
+    "ai_cache_ttl_hours", "ai_codex_home", "ai_enabled", "ai_model", "ai_provider", "ai_timeout_ms", "ai_use_subscription"}));
+  EXPECT_TRUE(config_change_requires_restart({"capture", "steamgriddb_api_key"}));
+  EXPECT_TRUE(config_change_requires_restart({"port"}));
+  EXPECT_FALSE(confighttp::validation::is_live_applied_config_key("ai_future_setting"));
+}
+
+TEST(ConfigLiveApplyTests, TheTrustedNetworkAppliesWithoutARestart) {
+  using confighttp::validation::config_change_requires_restart;
+  EXPECT_TRUE(confighttp::validation::is_live_applied_config_key("trusted_subnets"));
+  EXPECT_TRUE(confighttp::validation::is_live_applied_config_key("trusted_subnet_auto_pairing"));
+  EXPECT_FALSE(config_change_requires_restart({"trusted_subnet_auto_pairing", "trusted_subnets"}));
+  EXPECT_TRUE(config_change_requires_restart({"encoder", "trusted_subnets"}));
+  EXPECT_TRUE(config_change_requires_restart({"linux_stream_mode"}));
+}
+
+TEST(ConfigLiveApplyTests, RestartIsJudgedAgainstTheFileTheProcessLoaded) {
+  using confighttp::validation::written_config_requires_restart;
+  const std::unordered_map<std::string, std::string> loaded {{"encoder", "nvenc"}, {"port", "47989"}};
+  EXPECT_FALSE(written_config_requires_restart(loaded, loaded));
+  // An encoder change waits for a restart.
+  auto written = loaded;
+  written["encoder"] = "software";
+  EXPECT_TRUE(written_config_requires_restart(loaded, written));
+  // A later save that only adds a live key still says so: the encoder change is not live yet.
+  written["steamgriddb_api_key"] = "key";
+  EXPECT_TRUE(written_config_requires_restart(loaded, written));
+  // Put back to what was loaded, only the live key is left changed, and that needs no restart.
+  written["encoder"] = "nvenc";
+  EXPECT_FALSE(written_config_requires_restart(loaded, written));
+}
+
+TEST(ConfigLiveApplyTests, SettingsSavesJudgeTheRestartAgainstTheLoadedFile) {
+  // A save used to compare the file after it with the file before it, so saving a SteamGridDB key
+  // after an unrestarted encoder change answered restart_required false and hid Restart Now.
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/confighttp.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto start = source.find("bool write_config_tree(");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("\n  }\n", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  EXPECT_NE(body.find("config::loaded_config_file_vars()"), std::string::npos);
+  EXPECT_NE(body.find("validation::written_config_requires_restart("), std::string::npos);
+  EXPECT_EQ(body.find("config_change_requires_restart(changed)"), std::string::npos);
+}
+
+TEST(ConfigLiveApplyTests, PairingReadsTheTrustedNetworkThroughTheLockedAccessors) {
+  // A save applies the trusted network while the pairing server's threads read it, so nvhttp
+  // reads locked copies and the save hands the written values to the running host.
+  const auto read = [](const char *file) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / file);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  };
+  const auto nvhttp = read("src/nvhttp.cpp");
+  ASSERT_FALSE(nvhttp.empty());
+  EXPECT_EQ(nvhttp.find("config::nvhttp.trusted_subnets"), std::string::npos);
+  EXPECT_EQ(nvhttp.find("config::nvhttp.trusted_subnet_auto_pairing"), std::string::npos);
+  EXPECT_NE(nvhttp.find("config::trusted_subnets()"), std::string::npos);
+  EXPECT_NE(nvhttp.find("config::trusted_subnet_auto_pairing()"), std::string::npos);
+
+  const auto confighttp = read("src/confighttp.cpp");
+  ASSERT_FALSE(confighttp.empty());
+  EXPECT_EQ(confighttp.find("config::nvhttp.trusted_subnet"), std::string::npos);
+  EXPECT_NE(confighttp.find("config::apply_trusted_network(written_vars);"), std::string::npos);
+}
+
+TEST(ConfigLiveApplyTests, SteamGridDbKeyIsReadThroughTheLockedAccessor) {
+  // A saved key is applied while the streaming server's threads read it, so the
+  // readers go through config::steamgriddb_api_key() instead of the field.
+  for (const auto *file : {"src/confighttp.cpp", "src/nvhttp.cpp"}) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / file);
+    ASSERT_TRUE(in) << file;
+    const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(source.find("config::sunshine.steamgriddb_api_key"), std::string::npos) << file;
+    EXPECT_NE(source.find("config::steamgriddb_api_key()"), std::string::npos) << file;
+  }
 }

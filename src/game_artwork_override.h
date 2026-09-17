@@ -94,6 +94,36 @@ namespace game_artwork {
   );
 
   /**
+   * Whether automatic artwork lookup may fetch artwork for a game. Remove artwork turns it off
+   * with a marker beside the game's cached artwork, and Find artwork again turns it back on.
+   * A game without the marker is looked up; an unsafe artwork directory is not.
+   */
+  bool automatic_artwork_lookup_enabled(
+    const std::filesystem::path &appdata,
+    std::string_view uuid
+  );
+
+  /**
+   * Remove artwork: turn automatic lookup off for a game, then delete every image that was
+   * downloaded for it, the automatic Steam and SteamGridDB copies and a picked override with its
+   * metadata. The copy of the entry's own image stays. The marker is written first, so a removal
+   * that fails partway still never fetches again; false means something could not be removed.
+   */
+  bool remove_downloaded_artwork(
+    const std::filesystem::path &appdata,
+    std::string_view uuid
+  );
+
+  /**
+   * Find artwork again: turn automatic lookup back on for a game. A game that never had it off
+   * succeeds without change.
+   */
+  bool enable_automatic_artwork_lookup(
+    const std::filesystem::path &appdata,
+    std::string_view uuid
+  );
+
+  /**
    * Decorate an already-sanitized artwork manifest with the sanitized match
    * and active override state. Invalid metadata leaves the manifest unchanged.
    */

@@ -114,6 +114,12 @@ namespace platf {
   std::string default_render_device();
 
   /**
+   * @brief Every render node that can encode, with the sysfs facts the default choice uses.
+   * @details Virtual display nodes are left out. Enumerated once per process.
+   */
+  std::vector<render_device_candidate_t> render_devices();
+
+  /**
    * @brief Return the kernel driver bound to an enumerated render node.
    * @param render_device Exact /dev/dri/renderD* path, or empty to inspect the
    *        shared default render device.

@@ -13,7 +13,7 @@
     <p v-if="!devices.length" class="mt-2 text-sm text-storm">{{ $t('spaces.device_access_empty') }}</p>
     <label v-for="device in devices" :key="device.uuid" class="mt-3 flex items-center gap-3 text-sm text-silver">
       <input type="checkbox" class="h-4 w-4 shrink-0 rounded border-storm bg-void text-ice accent-ice"
-             :checked="allowed(device.uuid)" :disabled="locked || working || !ready || isDefault(device.uuid)"
+             :checked="allowed(device.uuid)" :disabled="locked || working || !ready"
              :aria-label="$t('spaces.allow_aria', { device: deviceName(device), space: space.name })"
              :aria-describedby="lockReasonId || undefined" @change="save(device.uuid, $event)">
       <span class="min-w-0 break-words">
@@ -31,6 +31,7 @@
 <script setup>
 import { computed, inject, nextTick, ref } from 'vue'
 import { permissionMapping } from '../composables/useClients.js'
+import { deviceNameLabels } from '../device-names.js'
 const props = defineProps({ space: { type: Object, required: true }, clients: { type: Array, default: () => [] },
   locked: Boolean, ready: Boolean, lockReasonId: { type: String, default: '' }, refresh: { type: Function, required: true } })
 const emit = defineEmits(['busy', 'open-default'])
@@ -38,14 +39,15 @@ const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const working = ref(false), error = ref(''), message = ref('')
 const devices = computed(() => props.clients.filter(client => !client.temporary_authorization && (Number(client.perm) & permissionMapping.launch) !== 0))
-const deviceName = device => device.friendly_name || device.name || t('spaces.paired_device')
+const nameLabels = computed(() => deviceNameLabels(props.clients, { t, fallback: t('spaces.paired_device') }))
+const deviceName = device => nameLabels.value.get(device?.uuid) || device?.friendly_name || device?.name || t('spaces.paired_device')
 const isDefault = id => props.space.clients.includes(id)
 const allowed = id => isDefault(id) || (props.space.access_clients || []).includes(id)
 const allowedCount = computed(() => devices.value.filter(device => allowed(device.uuid)).length)
 async function save(client, event) {
   const requested = event.target.checked
   event.target.checked = allowed(client)
-  if (props.locked || working.value || !props.ready || isDefault(client)) return
+  if (props.locked || working.value || !props.ready) return
   working.value = true; emit('busy', true); error.value = ''; message.value = ''
   try {
     const response = await fetch('./api/multiseat/access', { method: 'POST', credentials: 'include',

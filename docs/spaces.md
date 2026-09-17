@@ -40,20 +40,44 @@ the whole Polaris host inside Docker, and no Unraid template.
 ## Host Setup
 
 Open **Spaces** in the Polaris console, beside **Devices**, and expand **Host
-Setup**. It runs seven checks on the PC hosting Polaris, whichever device you
+Setup**. It runs eight checks on the PC hosting Polaris, whichever device you
 opened the page from, and each failing check links the section of this guide
 that fixes it. Select **Recheck Setup** after every terminal step. A configured
 host keeps the section collapsed.
 
+Two checks can be fixed from the page itself. **Polaris access to Docker**
+offers **Give Polaris access to Docker**, and **Spaces security support** offers
+**Install security support**. Either button opens a password prompt on the
+screen of the PC that runs Polaris, so someone signed in at that PC's desktop
+approves the change. From another device you can start the request, but only
+someone at the PC can approve it. The terminal steps under each check do the
+same thing.
+
+Polaris asks for one change at a time and closes the prompt if nobody approves
+it within five minutes. While a change runs, Space launches and changes to
+Spaces wait. Polaris does not ask, and says why, on an image based system, when
+the native package's helper or its polkit policy is missing, when nobody is
+signed in at the PC's desktop, or while a Space, a stream or the first Space
+setup is still active.
+
 ## Prepare Docker from Spaces
 
+If **Docker Engine** passes and **Polaris access to Docker** needs attention,
+select **Give Polaris access to Docker** and approve the password prompt on the
+Polaris host's screen. Polaris starts the system Docker service, sets it to
+start with the PC, and adds the account Polaris runs as to the `docker` group. A Polaris that is already running
+keeps the groups it started with, so the check then asks you to restart the PC.
+After the restart, select **Recheck Setup**.
+
+From a terminal on the Polaris host instead:
+
 1. If **Docker Engine** needs attention, install it with your distribution's
-   steps below, in a terminal on the Polaris host.
+   steps below.
 2. Start the system Docker service, then grant Docker access to the Linux
    account running Polaris. For a service installation that account may differ
    from your terminal account; grant it to the service account.
-3. Save your work and stop streams before signing out and back in. If Polaris
-   runs as a system service, restart that service so it picks up the new group.
+3. Save your work, stop streams and restart the PC, so Polaris starts with the
+   new group.
 4. Select **Recheck Setup**.
 
 Docker group access gives that account administrator-level control over the
@@ -149,42 +173,67 @@ seccomp file, which the native package includes.
 
 On a mutable Fedora installation:
 
-1. Install the tools that compile against your host policy:
+1. Install the tools that compile against your host policy, in a terminal on
+   the Polaris host:
    ```sh
    sudo dnf install selinux-policy-devel container-selinux make
    ```
-2. Finish your games, stop Space streams and quit Polaris. If it runs as a
-   service, stop the service first.
-3. Run the helper from the native package:
+2. Finish your games and stop Space streams.
+3. Select **Install security support** on the check and approve the password
+   prompt on the Polaris host's screen. Polaris stays open, and the check is
+   read again when the helper finishes.
+
+Without anyone at the host's desktop, run the helper from a terminal instead:
+
+1. Quit Polaris. If it runs as a service, stop the service first.
+2. Run the helper from the native package:
    ```sh
    sudo -H /usr/bin/polaris-spaces-setup install
    ```
-4. Start Polaris, return to **Spaces** and select **Recheck Setup**.
+3. Start Polaris, return to **Spaces** and select **Recheck Setup**.
 
 The helper installs the worker policy, the reserved controller policy, a
 version marker and the reserved input rule. It reloads policy and udev rules
 without changing enforcement or relabeling controllers, and it does not
 install Steam, change drivers, start Docker or restart Polaris. If it is
-interrupted, run the same command again. Policies you installed by hand, or an
-input rule with no ownership record, are reported for review rather than
-replaced.
+interrupted, run the same command again. Policies you installed by hand, and an
+input rule that differs from the packaged one, are reported with the command
+that clears them rather than replaced. An input rule identical to the packaged
+one is adopted.
 
-If the helper refuses, its message names the situation:
+If the helper refuses, its message names what it found and prints the command
+that clears it:
 
-- **"An existing Spaces policy is disabled, overridden or locally managed."** A
-  module with one of the helper's names is installed at another priority, for
-  example a copy installed by hand. `sudo semodule -lfull | grep polaris` shows
-  it with its priority. Remove that copy, for example
-  `sudo semodule -X 400 -r polaris_multiseat_input polaris_nvidia_worker`, then
-  run the install again. libsemanage may print "Failed!" while removing; trust
-  the list, not the message.
-- **"Quit Polaris and stop Spaces streams before changing security setup."** A
-  process named `polaris` or `polaris-something` is still running, a second
-  instance included. `pgrep -a polaris` names it; stop it and retry.
-- **"Existing Spaces input rule is not owned by this setup."**
-  `/etc/udev/rules.d/97-polaris-multiseat-input.rules` was placed there by hand,
-  so the helper has no record of it. Move it aside and run the install again;
-  the helper writes and records its own copy.
+- **"Spaces setup found SELinux modules it does not manage"** lists each copy of
+  a module with one of the helper's names that sits at another priority, is
+  disabled or was installed another way, for example a copy installed by hand,
+  and prints the command that removes those copies, such as
+  `sudo semodule -X 400 -r polaris_multiseat_input polaris_nvidia_worker`. Run
+  it, check `sudo semodule -lfull | grep polaris_`, then run the install again.
+  libsemanage may print "Failed!" while removing; trust the list, not the
+  message.
+- **"Spaces setup found SELinux modules at priority 200 that it has no record
+  of installing"** means the policies stayed installed after the helper's
+  records in `/var/lib/polaris/spaces-security` were deleted. Remove them with
+  the printed command and run the install again.
+- **"Quit Polaris and stop Spaces streams before changing security setup."**
+  names each Polaris process still running as `name (pid N)`, a second
+  instance included, a Space that is still running with its process count,
+  and the Spaces input devices still present. `systemctl status PID` shows
+  which service started a process. Stop it and retry. From the button the
+  message starts **"Stop Spaces streams and quit any other Polaris"**: the
+  Polaris that asked stays open, and everything else still counts.
+- **"is not owned by this setup and differs from the rule this package ships"**
+  means `/etc/udev/rules.d/97-polaris-multiseat-input.rules` was placed there by
+  hand or by an older build. Move it aside as the message shows and run the
+  install again. A rule identical to the one the package ships is adopted
+  instead: the install says so, records it as its own, and `remove` deletes it
+  later like any rule the helper installed.
+- **"changed after this setup installed it"** or **"is missing"** means a
+  policy or the input rule the helper installed was changed or deleted since.
+  The message prints the command that restores the installed copy from
+  `/var/lib/polaris/spaces-security`. Run it, then the same helper command
+  again.
 
 `polaris-spaces-setup status` shows readiness. `sudo -H /usr/bin/polaris-spaces-setup remove`
 removes only what the helper owns, after Polaris and every Space have stopped;
@@ -196,6 +245,39 @@ change live SELinux policy. Other SELinux distributions need the compatible
 development interfaces and the container reference policy; system images are
 not supported by the helper in the preview.
 
+## Download the gaming runtime
+
+The **Gaming runtime** check picks the runtime this PC needs from the ones this
+Polaris build approves: the NVIDIA runtime built for the NVIDIA driver loaded on
+this PC, otherwise the runtime for AMD and Intel graphics. It asks Docker for
+that exact image and verifies it against the build. Downloading it here is
+optional; preparing your first Space downloads it too.
+
+- **Waiting for runtime** means this build has no approved gaming runtime yet.
+  Nothing on this PC can change that, so the check stays out of the count.
+- **Not downloaded** means the runtime this PC needs is not on it yet. Once the
+  host checks above pass, select **Download**. The download is several
+  gigabytes and shows no percentage. You can leave Spaces and come back; the
+  host keeps the download running. **Stop download** ends it, and Docker keeps
+  verified layers for the next attempt.
+- **Checked** means the runtime is downloaded and verified. Preparing your
+  first Space then starts without downloading it again.
+- **Needs attention** without a button means no runtime in this build fits
+  this PC. When the check names an NVIDIA driver version, install that version,
+  restart the PC, then recheck. When the build's runtime is for other graphics
+  than this PC has, wait for a build that includes one for yours.
+- **Needs attention** with **Retry download** means Docker did not finish
+  answering, or holds an image under the approved reference that does not
+  match this build. Retry. If it keeps failing, check that Docker is running
+  and open **Doctor & Support**.
+
+A download runs on the host like first-Space setup, one job at a time. It never
+prepares a Steam home or changes Spaces configuration, and Polaris never
+removes or replaces an image. If Polaris restarts during a download, select
+**Download** again; Docker reuses the layers it kept. On a host whose Spaces
+are already configured, the check still reports the runtime but offers no
+download.
+
 ## Prepare your first Space
 
 Once the host checks pass and a runtime is offered:
@@ -203,9 +285,10 @@ Once the host checks pass and a runtime is offered:
 1. Under **Set up your first space**, enter a name such as **Living room**.
    If more than one runtime is offered, choose the variant for your graphics
    hardware; an NVIDIA variant names the host driver it needs.
-2. Select **Download and prepare**. The download is several gigabytes. You can
-   leave Spaces and come back; the host keeps the job. Polaris cannot show a
-   percentage for it.
+2. Select **Download and prepare**. If the **Gaming runtime** check shows
+   **Checked**, preparation starts without a download. Otherwise the download
+   is several gigabytes. You can leave Spaces and come back; the host keeps the
+   job. Polaris cannot show a percentage for it.
 3. **Stop setup** is available while the runtime downloads; Docker keeps
    verified layers for the next attempt. Once Steam home preparation begins,
    wait for it to finish.
@@ -215,7 +298,9 @@ Once the host checks pass and a runtime is offered:
    own budget.
 5. Save any running game, then select **Restart Polaris and finish setup**.
    Restarting disconnects every stream. Reconnect and return to **Spaces**.
-6. Under **Default Space**, assign your paired Nova device to the new Space.
+6. Open the new Space's **Device Access** and tick your paired Nova device.
+   With one Space it opens that Space first; **Default Space** changes where
+   each device opens first.
 
 **Steam home prepared** means storage was saved. **Configuration saved** means
 a restart is still required. Neither is a game or controller test yet; that
@@ -259,19 +344,25 @@ inaccessible GPU needs attention; Polaris does not silently choose another.
 
 ## Give a device access
 
-- **Default Space** on the Spaces page lists the handhelds, TVs and computers
-  paired with Polaris. Choose the Space each device opens first and select
-  **Save assignment**. Devices assigned to the same Space share its sign-in and
-  saves and take turns streaming it; give simultaneous players separate Spaces
-  and separate Steam accounts.
-- **Device Access** on a Space card allows more devices into that Space. A
-  device with more than one permitted Space picks between them in Nova with
-  **Change Space**.
-- **Desktop** is this PC's usual desktop and apps. Under Default Space it
-  clears all of a device's Space access; under **Desktop Access** it becomes
-  one more choice beside the device's Spaces.
+- **Device Access** on a Space card decides which devices may open that
+  Space. Tick a device to allow it. A device with more than one place to play
+  picks between them in Nova with **Change Space**.
+- **Desktop Access** adds **Desktop**, this PC's usual desktop and apps, as one
+  more choice beside a device's Spaces.
+- **Default Space** lists the handhelds, TVs and computers paired with Polaris
+  and sets where each one opens first: one of the Spaces it may open, or
+  Desktop once it has Desktop Access. Select **Save assignment**. Saving never
+  changes which Spaces or Desktop a device may open. Devices that share a
+  Space share its sign-in and saves and take turns streaming it; give
+  simultaneous players separate Spaces and separate Steam accounts.
+- To take a device out of a Space, untick it under that Space's **Device
+  Access**. If the Space was its Default Space, the device opens the next place
+  it may play. A device that can no longer launch games shows **Remove from
+  Spaces** under Default Space instead.
 - A device needs permission to launch apps; temporary guests cannot be
-  assigned a Space. Rename an unfamiliar device in **Devices**.
+  assigned a Space. When two paired devices share a name, for example Nova and
+  Nova Debug on one handheld, the Spaces and Devices pages add when each one
+  paired. Rename one in **Devices** to tell them apart for good.
 
 Spaces do not change
 [Steam's account and library sharing rules](https://help.steampowered.com/en/faqs/view/054C-3167-DD7F-49D4).
@@ -309,11 +400,29 @@ switches accounts or Spaces.
 ## Rename, remove and restore
 
 **Rename** on a Space card changes its name without touching its account or
-files; refresh the library in Nova afterwards. **Remove Space** archives it
-after a confirmation: devices lose access, other Spaces stay available, and
-installed games, saves, settings and the sign-in stay on the host. It frees no
-disk space and deletes no Docker volume. **Restore** under **Archived Spaces**
-brings it back without its device access; assign devices again.
+files; refresh the library in Nova afterwards.
+
+**Remove Space** asks what happens to the Space's games and saves. Other Spaces
+stay available either way.
+
+- **Archive** is already selected. Devices lose access, and installed games,
+  saves, settings and the Steam sign-in stay on the host, so archiving frees no
+  disk space. **Restore** under **Archived Spaces** brings the Space back
+  without its device access; assign devices again.
+- **Remove for good** deletes the Space with its installed games, saves,
+  settings and sign-in, and frees their disk space. Type the Space's name
+  exactly as it is shown to confirm. It cannot be undone or restored. An
+  archived Space offers **Remove for good** beside **Restore**.
+
+Like every change to Spaces, removing for good needs every Space stream to end
+first. Polaris deletes only the storage it made for that Space, and only
+through Docker: if the storage is not the one Polaris created, or Docker does
+not answer, nothing is removed and the page says why. If Docker stops partway,
+the Space stays under **Archived Spaces**, the page names the Docker volume
+that may still hold its games and saves, and **Remove for good** again
+finishes the job. The last Space can be archived but not removed for good,
+because Polaris makes a new Space from an existing one; create another Space
+first.
 
 ## Check sound and stuttering
 

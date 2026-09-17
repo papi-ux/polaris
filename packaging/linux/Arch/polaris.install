@@ -11,7 +11,8 @@ with no further steps.
 To use it without rebooting first, load the modules once:
   sudo modprobe uinput uhid
 
-Only DRM/KMS capture still needs an explicit privileged step:
+Only DRM/KMS capture still needs an explicit privileged step, repeated after every
+update because an update replaces the binary that held the capability:
   sudo -H polaris --setup-host --enable-kms
 
 If Polaris crashes, install polaris-debug and report the backtrace:

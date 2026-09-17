@@ -778,7 +778,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^pkgname = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^pkgver = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
-    expect(buildScript).toContain("'polaris|1.4.8-1|x86_64'")
+    expect(buildScript).toContain("'polaris|1.4.9-1|x86_64'")
     expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain("sed -n 's/^depend = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
@@ -1224,5 +1224,46 @@ printf 'PipeWire detected, will prefer native PipeWire for audio capture\\n'
     } finally {
       rmSync(fixture, { force: true, recursive: true })
     }
+  })
+})
+
+describe('Linux desktop entry and tray icons', () => {
+  const images = 'src_assets/common/assets/web/public/images'
+  const states = ['playing', 'pausing', 'locked']
+
+  it('names the icon the package installs in the desktop entry and its terminal action', () => {
+    // The template's variable was never set, so every package but openSUSE shipped `Icon=`.
+    const entry = readSource('packaging/linux/dev.polaris-stream.app.Polaris.desktop')
+    expect([...entry.matchAll(/^Icon=(.*)$/gm)].map((match) => match[1])).toEqual(['@POLARIS_DESKTOP_ICON@', '@POLARIS_DESKTOP_ICON@'])
+    expect(readSource('cmake/prep/options.cmake')).toMatch(/^set\(POLARIS_DESKTOP_ICON "polaris"\s*\n\s*CACHE STRING /m)
+    expect(readSource('cmake/packaging/linux.cmake')).toMatch(
+      /install\(FILES "\$\{CMAKE_SOURCE_DIR\}\/polaris\.svg"\s*\n\s*DESTINATION "\$\{CMAKE_INSTALL_DATAROOTDIR\}\/icons\/hicolor\/scalable\/apps"\)/
+    )
+    expect(readSource('packaging/linux/AppImage/dev.polaris-stream.app.Polaris.desktop')).toMatch(/^Icon=polaris$/m)
+  })
+
+  it('gives each tray state its own icon over the unchanged logo', () => {
+    const logo = readSource('polaris.svg')
+    const logoPaths = [...logo.matchAll(/\sd="([^"]+)"/g)].map((match) => match[1])
+    expect(logoPaths.length).toBeGreaterThan(5)
+    expect(readSource(`${images}/logo-polaris.svg`), 'the idle tray icon is the plain logo').toBe(logo)
+
+    const icons = Object.fromEntries(states.map((state) => [state, readSource(`${images}/polaris-${state}.svg`)]))
+    expect(new Set([logo, ...Object.values(icons)]).size, 'idle, playing, pausing and locked must look different').toBe(4)
+    for (const [state, svg] of Object.entries(icons)) {
+      expect(svg).toContain('viewBox="0 0 713.3 649.6"')
+      for (const path of logoPaths) {
+        expect(svg.includes(`d="${path}"`), `polaris-${state}.svg no longer carries the logo; rerun scripts/icons/generate-tray-icons.py`).toBe(true)
+      }
+      // Plasma's tray renders icons given by path through Qt SVG: presentation attributes only.
+      expect(svg).not.toMatch(/<mask|<clipPath|<style|class=/)
+    }
+
+    const tray = section(readSource('src/system_tray.cpp'), '#elif defined(__linux__)', '#elif defined(__APPLE__)')
+    expect(tray).toContain('#define TRAY_ICON WEB_DIR "images/logo-polaris.svg"')
+    for (const state of states) expect(tray).toContain(`#define TRAY_ICON_${state.toUpperCase()} WEB_DIR "images/polaris-${state}.svg"`)
+
+    const linux = readSource('cmake/packaging/linux.cmake')
+    for (const state of states) expect(linux).toContain(`common/assets/web/public/images/polaris-${state}.svg"`)
   })
 })

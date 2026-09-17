@@ -4,6 +4,7 @@
 #include "multiseat_launch_service.h"
 #ifdef __linux__
 #include "multiseat_container_host.h"
+#include "spaces_host_admin.h"
 #include "src/logging.h"
 #include "src/private_state_file.h"
 #include "src/rtsp.h"
@@ -20,6 +21,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -29,6 +31,71 @@ namespace multiseat {
     std::shared_ptr<profile_launch_service_t> installed;
     // Worker lifecycle generations cannot be confused with host proc generations.
     std::atomic<std::uint64_t> next_generation {1ULL << 63};
+
+    // The controller repeats the same report every 50 ms while nothing changes, so each distinct
+    // summary is logged once, without the per-pass counters. Without these lines a Space change
+    // that cannot close or rebuild the controller fails with nothing in the log.
+    const char *shutdown_status_name(controller_shutdown_status_e status) {
+      switch (status) {
+        case controller_shutdown_status_e::closed: return "closed";
+        case controller_shutdown_status_e::already_closed: return "already_closed";
+        case controller_shutdown_status_e::workers_pending: return "workers_pending";
+        case controller_shutdown_status_e::streams_pending: return "streams_pending";
+        case controller_shutdown_status_e::input_cleanup_incomplete: return "input_cleanup_incomplete";
+      }
+      return "unknown";
+    }
+    void describe_worker(std::ostream &out, const coordinator_reconciliation_report_t &worker) {
+      const auto &broker = worker.broker;
+      out << "worker{admission_ready=" << worker.admission_ready
+          << " startup_recovery_complete=" << worker.startup_recovery_complete
+          << " authority_blocked=" << worker.authority_blocked
+          << " authority_status=" << static_cast<int>(worker.authority_status)
+          << " authority_entries=" << worker.authority_entries
+          << " active_orphan_authorities=" << worker.active_orphan_authorities
+          << " authority_failures=" << worker.authority_failures
+          << " endpoint_failures=" << worker.endpoint_failures
+          << " endpoint_shutdown_failures=" << worker.endpoint_shutdown_failures
+          << " broker{admission_ready=" << broker.admission_ready
+          << " inventory_authoritative=" << broker.inventory_authoritative
+          << " backend_observation_failed=" << broker.backend_observation_failed
+          << " current=" << broker.current_workers << " orphans=" << broker.orphan_workers
+          << " missing=" << broker.missing_workers << " stuck=" << broker.stuck_workers
+          << " protocol_errors=" << broker.protocol_errors
+          << " readiness_rejections=" << broker.readiness_rejections << "}}";
+    }
+    std::string describe_reconcile(const controller_reconcile_result_t &result) {
+      std::ostringstream out;
+      out << "ready=" << result.ready() << " status=" << static_cast<int>(result.status) << ' ';
+      describe_worker(out, result.worker);
+      if (!result.input) {
+        out << " input=none";
+        return out.str();
+      }
+      const auto &input = result.input->report;
+      out << " input{status=" << static_cast<int>(result.input->status)
+          << " admission_ready=" << input.admission_ready
+          << " inventory_authoritative=" << input.inventory_authoritative
+          << " expected=" << input.expected << " current=" << input.current
+          << " orphans=" << input.orphans << " missing=" << input.missing
+          << " protocol_errors=" << input.protocol_errors
+          << " backend_failures=" << input.backend_failures << '}';
+      return out.str();
+    }
+    std::string describe_shutdown(const controller_shutdown_report_t &report) {
+      std::ostringstream out;
+      out << "status=" << shutdown_status_name(report.status) << " stop_requests=" << report.stop_requests;
+      if (report.worker) {
+        out << ' ';
+        describe_worker(out, *report.worker);
+      }
+      if (report.input) {
+        out << " input{status=" << static_cast<int>(report.input->status)
+            << " released=" << report.input->released_allocations
+            << " cleanup_failures=" << report.input->cleanup_failures << '}';
+      }
+      return out.str();
+    }
 
     class production_profile_controller_t final : public profile_controller_t {
     public:
@@ -40,13 +107,19 @@ namespace multiseat {
       std::vector<profile_summary_t> profile_catalog() const override { return runtime_->profile_catalog(); }
       spaces::library_reader_t library_reader() const override { return runtime_->library_reader(); }
       std::vector<std::string> desktop_clients() const override { return runtime_->desktop_clients(); }
+      std::vector<std::string> desktop_default_clients() const override { return runtime_->desktop_default_clients(); }
       std::vector<profile_activity_t> profile_activity() const override { return runtime_->profile_activity(); }
       bool idle() const override {
         return runtime_->seats() == 0 && runtime_->managed_workers() == 0 &&
           runtime_->input_allocations() == 0 && runtime_->tracked_launches() == 0;
       }
       std::optional<gpu_usage_t> capacity() const override { return runtime_->capacity(); }
-      void reconcile() override { (void) runtime_->reconcile(); }
+      void reconcile() override {
+        auto summary = describe_reconcile(runtime_->reconcile());
+        if (summary == last_reconcile_) return;
+        BOOST_LOG(info) << "Spaces controller reconcile: " << summary;
+        last_reconcile_ = std::move(summary);
+      }
       profile_begin_result_t begin(const std::shared_ptr<rtsp_stream::launch_session_t> &launch) override {
         auto admitted = runtime_->admit_authenticated_profile_launch(launch, {
           static_cast<std::uint32_t>(launch->width), static_cast<std::uint32_t>(launch->height),
@@ -98,9 +171,19 @@ namespace multiseat {
         return runtime_->select_authenticated_launch(launch, seat).selected() ?
           profile_poll_e::selected : profile_poll_e::failed;
       }
-      bool shutdown() override { return runtime_->shutdown().closed(); }
+      bool shutdown() override {
+        const auto report = runtime_->shutdown();
+        if (report.closed()) return true;
+        auto summary = describe_shutdown(report);
+        if (summary != last_shutdown_) {
+          BOOST_LOG(warning) << "Spaces controller did not close: " << summary;
+          last_shutdown_ = std::move(summary);
+        }
+        return false;
+      }
     private:
       std::unique_ptr<controller_runtime_t> runtime_;
+      std::string last_reconcile_, last_shutdown_;
     };
 
     bool path_value(const std::filesystem::path &path) {
@@ -186,6 +269,7 @@ namespace multiseat {
       std::optional<bool> access;
       std::optional<profiles::steam_create_request_t> creation;
       std::optional<profiles::edit_request_t> edit;
+      std::string kept_volume, kept_network;  // set by the owner thread before the promise
       std::promise<profile_launch_result_t> promise;
       std::shared_future<profile_launch_result_t> future = promise.get_future().share();
     };
@@ -201,6 +285,9 @@ namespace multiseat {
     std::shared_ptr<admin_request_t> queued_admin;
     std::shared_ptr<admin_request_t> active_admin;
     bool reconfiguring = false, admin_failed = false, selection_failed = false;
+    // Finished removals for good, newest last, so a retry after the record is
+    // gone is confirmed instead of reported as an unknown Space.
+    std::deque<profiles::edit_request_t> removed_for_good;
     std::map<std::string, std::string> selections;
     std::filesystem::path selection_path;
 
@@ -226,6 +313,9 @@ namespace multiseat {
       if (saved != selections.end() && saved->second == "desktop" && desktop) return "desktop";
       if (saved != selections.end()) for (const auto &profile : controller->profile_catalog())
         if (profile.id == saved->second && permitted(profile, client)) return profile.id;
+      // A Desktop default comes before the first Space the device may open.
+      const auto desktop_defaults = controller->desktop_default_clients();
+      if (desktop && std::find(desktop_defaults.begin(), desktop_defaults.end(), client) != desktop_defaults.end()) return "desktop";
       const auto assigned = controller->profile_for_client(client);
       return assigned ? assigned : desktop ? std::optional<std::string>{"desktop"} : std::nullopt;
     }
@@ -294,6 +384,11 @@ namespace multiseat {
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
       if (!admin.access && !admin.catalog.empty())
         admin.access = [path = admin.catalog](auto profile, auto client, bool allowed) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed) : profiles::set_access(path, profile, client, allowed); };
+      if (!admin.remove_for_good && !admin.catalog.empty())
+        admin.remove_for_good = [path = admin.catalog](const auto &request, std::stop_token stop) {
+          container::local_host_t host(stop);
+          return profiles::remove_for_good(path, request, host);
+        };
       if (!admin.catalog.empty()) {
         selection_path = admin.catalog; selection_path += ".selections";
         if (std::filesystem::exists(selection_path)) {
@@ -305,7 +400,41 @@ namespace multiseat {
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
     }
 
-    void change_profiles(const std::shared_ptr<admin_request_t> &request, bool pending) noexcept {
+    static profile_launch_result_t removal_response(const profiles::removal_result_t &removed) {
+      using outcome_e = profiles::removal_outcome_e;
+      switch (removed.outcome) {
+        case outcome_e::removed:
+          return {200, "Space removed for good"};
+        case outcome_e::not_found:
+          return {404, "Space not found.", "space_unknown", "Refresh Spaces."};
+        case outcome_e::name_mismatch:
+          return {409, "The name you typed is not this Space's name.", "space_name_mismatch",
+            "Type the Space's name exactly as it is shown."};
+        case outcome_e::last_space:
+          return {409, "This is the only Space, so it can be archived but not removed for good.", "space_last",
+            "Create another Space first, or archive this one."};
+        case outcome_e::docker_unavailable:
+          return {503, "Docker did not answer, so nothing was removed.", "docker_unavailable",
+            "Check that Docker is running, then try again."};
+        case outcome_e::storage_unverified:
+          return {409, "This Space's games and saves are not in the storage Polaris made for it, so nothing was removed.",
+            "space_storage_unverified", "Archive the Space instead, or open Doctor & Support."};
+        case outcome_e::storage_in_use:
+          return {409, "A container is still using this Space's games and saves, so nothing was removed.",
+            "space_storage_in_use", "Wait a moment, then try again."};
+        case outcome_e::storage_not_removed:
+          return {503, "Docker did not confirm that this Space's games and saves were deleted. The Space is archived for now.",
+            "space_storage_not_removed", "Remove it for good again from Archived Spaces to finish."};
+        case outcome_e::record_not_removed:
+          return {503, "This Space's games and saves were deleted, but Polaris could not take it off the list. The Space is archived for now.",
+            "space_record_not_removed", "Remove it for good again from Archived Spaces to finish."};
+        default:
+          return {409, "The Space was not removed. Refresh before retrying.", "spaces_change_not_saved",
+            "Refresh Spaces and try again."};
+      }
+    }
+
+    void change_profiles(const std::shared_ptr<admin_request_t> &request, bool pending, std::stop_token stop) noexcept {
       profile_launch_result_t result {503, "Space settings could not be restored. Restart Polaris after reviewing the Spaces catalog.",
         "spaces_admin_failed", "Restart Polaris."};
       try {
@@ -322,27 +451,53 @@ namespace multiseat {
             if (!request->client.empty()) blocked_clients.insert(request->client);
           }
           if (!controller->shutdown()) {
+            BOOST_LOG(error) << "A Space change could not close the Spaces controller, so Space changes stay unavailable until Polaris restarts";
             std::lock_guard lock(mutex);
             admin_failed = true;
           } else {
             // Closing proves that no stream owns this catalog. Destruction
             // releases the old global input owner before the replacement is built.
             { std::lock_guard lock(mutex); ++controller_revision; controller.reset(); admin_failed = true; }
-            const auto persisted = request->access ? admin.access(request->profile, request->client, *request->access) :
-              request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
-              admin.persist(request->profile, request->client);
+            const bool removal = request->edit && request->edit->operation == profiles::edit_operation_e::remove_for_good;
+            profiles::removal_result_t removed;
+            profiles::change_result_t persisted;
+            if (removal) {
+              removed = admin.remove_for_good(*request->edit, stop);
+              request->kept_volume = removed.kept_volume;
+              request->kept_network = removed.kept_network;
+              if (!removed.kept_volume.empty() || !removed.kept_network.empty()) {
+                BOOST_LOG(warning) << "Removing a Space for good kept Docker resources: volume="
+                  << (removed.kept_volume.empty() ? "none" : removed.kept_volume)
+                  << " network=" << (removed.kept_network.empty() ? "none" : removed.kept_network);
+              }
+            } else {
+              persisted = request->access ? admin.access(request->profile, request->client, *request->access) :
+                request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
+                admin.persist(request->profile, request->client);
+            }
             if (request->creation && !persisted && !persisted.volume_name.empty()) {
               BOOST_LOG(error) << "Profile creation retained resources for inspection: volume=" << persisted.volume_name
                 << " initializer=" << persisted.initializer_name << " network=" << persisted.network_name;
             }
-            if (persisted.status != private_state_file::write_status_e::durability_uncertain) {
+            const bool save_confirmed = (removal ? removed.status : persisted.status) != private_state_file::write_status_e::durability_uncertain;
+            if (!save_confirmed) BOOST_LOG(error) << "A Space change could not confirm its save, so Spaces stay closed until Polaris restarts";
+            if (save_confirmed) {
               auto replacement = admin.reload();
+              if (!replacement) BOOST_LOG(error) << "Spaces could not be reloaded after a change, so Spaces stay closed until Polaris restarts";
               if (replacement) {
                 std::lock_guard lock(mutex);
                 controller = std::move(replacement);
                 admin_failed = false;
                 fallback_catalog.clear(); blocked_clients.clear();
-                result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : "Default Space saved"} :
+                if (removal) {
+                  result = removal_response(removed);
+                  if (removed) {
+                    removed_for_good.push_back(*request->edit);
+                    while (removed_for_good.size() > 32) removed_for_good.pop_front();
+                  }
+                } else if (!persisted && persisted.refusal) {
+                  result = {409, persisted.refusal->message, persisted.refusal->code, persisted.refusal->action};
+                } else result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : "Default Space saved"} :
                   profile_launch_result_t {409, request->edit ? "The Space change was not saved. Refresh before retrying." : request->creation ?
                     "The Space was not created. Refresh before retrying; retained resources may need administrator review." :
                     "The Default Space was not saved. Refresh before retrying.", "spaces_change_not_saved", "Refresh Spaces and try again."};
@@ -351,6 +506,7 @@ namespace multiseat {
           }
         }
       } catch (...) {
+        BOOST_LOG(error) << "A Space change failed unexpectedly, so Spaces stay closed until Polaris restarts";
         std::lock_guard lock(mutex);
         admin_failed = true;
       }
@@ -387,7 +543,7 @@ namespace multiseat {
             return;
           }
         } else {
-          if (change) change_profiles(change, !pending.empty());
+          if (change) change_profiles(change, !pending.empty(), stop);
           bool reconciled = true;
           try {
             if (controller && !admin_failed) controller->reconcile();
@@ -485,6 +641,7 @@ namespace multiseat {
       return {400, "A Space stream needs a new SDR session at a whole frame rate.", "space_stream_options",
         "Set Play Setup to Auto frame rate with HDR off."};
     }
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::string target_name;
     if (!target.empty()) {
       const auto snapshot = library_for_client(launch->unique_id, expected_profile);
@@ -580,10 +737,13 @@ namespace multiseat {
       static_cast<bool>(impl_->admin.reload && impl_->admin.create),
       static_cast<bool>(impl_->admin.reload && impl_->admin.edit),
       impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{}, std::move(activity),
-      impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{}};
+      impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{},
+      static_cast<bool>(impl_->admin.reload && impl_->admin.remove_for_good),
+      impl_->controller ? impl_->controller->desktop_default_clients() : std::vector<std::string>{}};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client);
     auto future = request->future;
@@ -593,7 +753,7 @@ namespace multiseat {
         return {503, "Space administration is unavailable.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
       if (request->client.empty() || request->client.size() > 256) return {400, "Invalid paired device.", "invalid_request"};
       const auto catalog = impl_->controller->profile_catalog();
-      if (!request->profile.empty() && std::none_of(catalog.begin(), catalog.end(),
+      if (!request->profile.empty() && request->profile != profiles::desktop_profile_key && std::none_of(catalog.begin(), catalog.end(),
           [&](const auto &entry) { return entry.id == request->profile && !entry.archived; })) return {404, "Unknown Space.", "space_unknown", "Refresh Spaces."};
       if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
           [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
@@ -620,7 +780,10 @@ namespace multiseat {
     result.can_switch = result.available;
     const auto desktops = impl_->controller ? impl_->controller->desktop_clients() : std::vector<std::string>{};
     result.desktop_allowed = std::find(desktops.begin(), desktops.end(), client) != desktops.end();
-    result.default_space = impl_->controller ? impl_->controller->profile_for_client(client).value_or("") : "";
+    const auto desktop_defaults = impl_->controller ? impl_->controller->desktop_default_clients() : std::vector<std::string>{};
+    if (result.desktop_allowed && std::find(desktop_defaults.begin(), desktop_defaults.end(), client) != desktop_defaults.end())
+      result.default_space = "desktop";
+    else result.default_space = impl_->controller ? impl_->controller->profile_for_client(client).value_or("") : "";
     result.capacity = impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{};
     auto activity = impl_->controller ? impl_->controller->profile_activity() : std::vector<profile_activity_t>{};
     for (const auto &weak : impl_->tracked) if (const auto launch = weak.lock(); launch && !launch->is_cancelled()) {
@@ -657,6 +820,7 @@ namespace multiseat {
 
   profile_launch_result_t profile_launch_service_t::select_space(std::string_view client, std::string_view profile,
                                                                 std::string_view previous) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::lock_guard lock(impl_->mutex);
     const auto selected = impl_->selected_for(client);
     if (!selected) return {503, "Spaces are unavailable. Refresh and try again.", "spaces_unavailable"};
@@ -687,6 +851,7 @@ namespace multiseat {
   }
 
   profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client); request->access = allowed;
     const auto future = request->future;
@@ -713,6 +878,7 @@ namespace multiseat {
 
   profile_launch_result_t profile_launch_service_t::create_steam_profile(profiles::steam_create_request_t creation) {
     if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);
@@ -744,7 +910,10 @@ namespace multiseat {
   }
 
   profile_launch_result_t profile_launch_service_t::edit_profile(profiles::edit_request_t edit) {
-    if (!profiles::valid_edit_request(edit)) return {400, "Enter a valid Space name and operation.", "invalid_request"};
+    // Removing for good has its own entry point, its own checks and its own result.
+    if (!profiles::valid_edit_request(edit) || edit.operation == profiles::edit_operation_e::remove_for_good)
+      return {400, "Enter a valid Space name and operation.", "invalid_request"};
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::shared_ptr<impl_t::admin_request_t> request;
     {
       std::lock_guard lock(impl_->mutex);
@@ -770,6 +939,58 @@ namespace multiseat {
     if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
       return {202, "The Space change is still being saved. Refresh before retrying.", "spaces_change_pending"};
     return request->future.get();
+  }
+
+  profile_removal_result_t profile_launch_service_t::remove_space_for_good(profiles::edit_request_t removal) {
+    if (removal.operation != profiles::edit_operation_e::remove_for_good || !profiles::valid_edit_request(removal))
+      return {{400, "Type the Space's name to remove it for good.", "invalid_request"}};
+    if (spaces::host_admin_running()) return {spaces_host_setup_running_result};
+    std::shared_ptr<impl_t::admin_request_t> request;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (impl_->stopping) return {{503, "Spaces are shutting down.", "spaces_stopping"}};
+      if (impl_->active_admin && impl_->active_admin->edit && *impl_->active_admin->edit == removal) {
+        request = impl_->active_admin;
+      } else {
+        for (const auto &done : impl_->removed_for_good) {
+          if (done.request_id != removal.request_id) continue;
+          if (done == removal) return {{200, "Space removed for good"}};
+          return {{409, "This removal request was already used for another change.", "removal_request_in_use",
+            "Close the dialog and try again."}};
+        }
+        if (!impl_->admin.reload || !impl_->admin.remove_for_good || !impl_->controller || impl_->admin_failed)
+          return {{503, "Space management is unavailable.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."}};
+        const auto catalog = impl_->controller->profile_catalog();
+        const auto target = std::find_if(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == removal.profile_id; });
+        if (target == catalog.end()) return {{404, "Space not found.", "space_unknown", "Refresh Spaces."}};
+        // This Space's own stream first, in its own words, then the rule every change follows.
+        const auto activity = impl_->controller->profile_activity();
+        const bool target_active = std::any_of(activity.begin(), activity.end(), [&](const auto &item) { return item.profile == target->id; }) ||
+          std::any_of(impl_->tracked.begin(), impl_->tracked.end(), [&](const auto &weak) {
+            const auto launch = weak.lock();
+            return launch && !launch->is_cancelled() && launch->worker_profile_key == target->id;
+          });
+        if (target_active)
+          return {{409, "This Space is open on a device.", "space_active", "End that stream, then remove the Space for good."}};
+        if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+            [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+          return {{409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."}};
+        if (target->name != removal.confirm_name)
+          return {{409, "The name you typed is not this Space's name.", "space_name_mismatch", "Type the Space's name exactly as it is shown."}};
+        if (target->steam && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.steam && entry.id != target->id; }))
+          return {{409, "This is the only Space, so it can be archived but not removed for good.", "space_last",
+            "Create another Space first, or archive this one."}};
+        request = std::make_shared<impl_t::admin_request_t>();
+        request->edit = std::move(removal);
+        impl_->reconfiguring = true;
+        impl_->active_admin = impl_->queued_admin = request;
+      }
+    }
+    impl_->wake.notify_all();
+    if (request->future.wait_for(impl_->timeout) != std::future_status::ready)
+      return {{202, "The Space is still being removed. Refresh before retrying.", "spaces_change_pending"}};
+    auto result = request->future.get();
+    return {result, request->kept_volume, request->kept_network};
   }
 
   bool profile_launch_service_t::cancel_client(std::string_view client, std::string_view token) {

@@ -14,7 +14,9 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unistd.h>
 
 namespace multiseat::profiles {
@@ -37,17 +39,21 @@ namespace multiseat::profiles {
         });
     }
 
-    bool valid_new_steam(std::string_view request_id, std::string_view name) {
-      if (request_id.size() != 36 ||
-          name.empty() || name.size() > 128 ||
-          name.front() == ' ' || name.back() == ' ' ||
-          std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; })) return false;
+    bool request_uuid(std::string_view request_id) {
+      if (request_id.size() != 36) return false;
       for (std::size_t i = 0; i < request_id.size(); ++i) {
         const char c = request_id[i];
         if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; }
         else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
       }
       return true;
+    }
+
+    bool valid_new_steam(std::string_view request_id, std::string_view name) {
+      if (name.empty() || name.size() > 128 ||
+          name.front() == ' ' || name.back() == ' ' ||
+          std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; })) return false;
+      return request_uuid(request_id);
     }
 
     std::string family(runtime_profile_e value) {
@@ -80,6 +86,10 @@ namespace multiseat::profiles {
       std::set<std::string> profiles, volumes, clients, desktops;
       if (catalog.desktop_clients.size() > 4096) return false;
       for (const auto &client : catalog.desktop_clients) if (!token(client) || !desktops.insert(client).second) return false;
+      std::set<std::string> desktop_defaults;
+      if (catalog.desktop_default_clients.size() > 4096) return false;
+      for (const auto &client : catalog.desktop_default_clients)
+        if (!token(client) || !desktop_defaults.insert(client).second) return false;
       std::size_t grants = 0;
       for (const auto &entry : catalog.profiles) {
         const auto &storage = entry.storage;
@@ -99,7 +109,8 @@ namespace multiseat::profiles {
           if (!token(client) || !clients.emplace(client).second || clients.size() > 65536) return false;
         }
       }
-      return true;
+      // One Default Space per device: a Space or Desktop, never both.
+      return std::none_of(desktop_defaults.begin(), desktop_defaults.end(), [&](const auto &client) { return clients.contains(client); });
     }
 
     template<class Edit>
@@ -208,6 +219,67 @@ namespace multiseat::profiles {
           throw std::runtime_error("Steam profile network could not be provisioned authoritatively");
       }
     }
+
+    // Removal reads Docker's answers without throwing: every unanswered call is
+    // a refusal or a kept resource, never a guess that something is gone.
+    std::optional<std::string> docker_output(container::host_t &host, std::initializer_list<std::string> arguments,
+                                             std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+      auto argv = container::command_prefix({});
+      argv.insert(argv.end(), arguments.begin(), arguments.end());
+      const auto result = host.run(argv, timeout, maximum_catalog_bytes);
+      if (result.exit_status != 0 || result.timed_out || result.output_truncated) return std::nullopt;
+      return result.output;
+    }
+
+    // One JSON string per line, as --format={{json .Name}} prints. Nothing when
+    // the output cannot prove which names exist.
+    std::optional<std::set<std::string>> listed_names(const std::optional<std::string> &output) {
+      if (!output) return std::nullopt;
+      try {
+        std::set<std::string> names;
+        std::istringstream lines(*output);
+        for (std::string line; std::getline(lines, line);) {
+          if (line.empty()) continue;
+          const auto value = json::parse(line);
+          if (!value.is_string()) return std::nullopt;
+          names.insert(value.get<std::string>());
+        }
+        return names;
+      } catch (...) { return std::nullopt; }
+    }
+
+    bool local_docker_engine(container::host_t &host) {
+      if (!host.trusted_runtime_file("/usr/bin/docker")) return false;
+      try {
+        const auto output = docker_output(host, {"info", "--format={{json .}}"});
+        if (!output) return false;
+        const auto info = json::parse(*output);
+        if (info.at("OSType") != "linux" || !info.at("SecurityOptions").is_array()) return false;
+        for (const auto &option : info.at("SecurityOptions"))
+          if (!option.is_string() || option.get<std::string>().starts_with("name=rootless")) return false;
+        return true;
+      } catch (...) { return false; }
+    }
+
+    // Exactly the home provision() made for this Space: a local volume without
+    // driver options (a bind device would point outside Docker's own storage),
+    // labelled for this Space, mounted at its own directory in Docker's store.
+    bool created_home(const json &values, const entry_t &entry) {
+      try {
+        if (!values.is_array() || values.size() != 1) return false;
+        const auto &volume = values[0];
+        const auto &name = entry.storage.opaque_volume_name;
+        const auto &options = volume.at("Options");
+        const auto &labels = volume.at("Labels");
+        const std::filesystem::path mountpoint = volume.at("Mountpoint").get<std::string>();
+        return volume.at("Name") == name && volume.at("Driver") == "local" && volume.at("Scope") == "local" &&
+          (options.is_null() || (options.is_object() && options.empty())) &&
+          labels.is_object() && labels.contains("io.polaris.multiseat.profile") &&
+          labels.at("io.polaris.multiseat.profile") == entry.storage.profile_key &&
+          mountpoint.is_absolute() && mountpoint.lexically_normal() == mountpoint &&
+          mountpoint.native().ends_with("/volumes/" + name + "/_data");
+      } catch (...) { return false; }
+    }
   }  // namespace
 
   std::optional<catalog_t> decode(std::string_view payload) {
@@ -222,15 +294,17 @@ namespace multiseat::profiles {
         if (event == json::parse_event_t::object_end) object_keys.pop_back();
         return true;
       });
-      if (root.value("schema", 0) == 4) keys(root, {"schema", "owner_uid", "owner_gid", "profiles", "desktop_clients"});
+      if (root.value("schema", 0) == 5) keys(root, {"schema", "owner_uid", "owner_gid", "profiles", "desktop_clients", "desktop_default_clients"});
+      else if (root.value("schema", 0) == 4) keys(root, {"schema", "owner_uid", "owner_gid", "profiles", "desktop_clients"});
       else keys(root, {"schema", "owner_uid", "owner_gid", "profiles"});
-      if (!root.at("schema").is_number_unsigned() || (root.at("schema") != 1 && root.at("schema") != 2 && root.at("schema") != 3 && root.at("schema") != 4) ||
+      if (!root.at("schema").is_number_unsigned() || root.at("schema") < 1 || root.at("schema") > 5 ||
           !root.at("owner_uid").is_number_unsigned() || !root.at("owner_gid").is_number_unsigned() ||
           root.at("owner_uid").get<std::uint64_t>() > 2147483647 ||
           root.at("owner_gid").get<std::uint64_t>() > 2147483647 ||
           !root.at("profiles").is_array() || root.at("profiles").size() > 4096) return std::nullopt;
       catalog_t catalog {root.at("owner_uid").get<std::uint32_t>(), root.at("owner_gid").get<std::uint32_t>(), {}};
-      if (root.at("schema") == 4) catalog.desktop_clients = root.at("desktop_clients").get<std::vector<std::string>>();
+      if (root.at("schema") >= 4) catalog.desktop_clients = root.at("desktop_clients").get<std::vector<std::string>>();
+      if (root.at("schema") == 5) catalog.desktop_default_clients = root.at("desktop_default_clients").get<std::vector<std::string>>();
       for (const auto &value : root.at("profiles")) {
         if (root.at("schema") >= 3) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived", "access_clients"});
         else if (root.at("schema") == 2) keys(value, {"id", "name", "volume", "family", "image", "target", "clients", "archived"});
@@ -258,9 +332,14 @@ namespace multiseat::profiles {
   std::string encode(const catalog_t &catalog) {
     if (!valid(catalog)) throw std::invalid_argument("invalid profile catalog");
     const bool archives = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return entry.archived; });
-    const bool access = !catalog.desktop_clients.empty() || std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return !entry.access_clients.empty(); });
-    json root {{"schema", !catalog.desktop_clients.empty() ? 4 : access ? 3 : archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
-    if (!catalog.desktop_clients.empty()) root["desktop_clients"] = catalog.desktop_clients;
+    // The oldest schema that holds the catalog, so a file without Desktop defaults stays readable by
+    // builds from before schema 5.
+    const bool desktop_defaults = !catalog.desktop_default_clients.empty();
+    const bool desktops = desktop_defaults || !catalog.desktop_clients.empty();
+    const bool access = desktops || std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [](const auto &entry) { return !entry.access_clients.empty(); });
+    json root {{"schema", desktop_defaults ? 5 : desktops ? 4 : access ? 3 : archives ? 2 : 1}, {"owner_uid", catalog.owner_uid}, {"owner_gid", catalog.owner_gid}, {"profiles", json::array()}};
+    if (desktops) root["desktop_clients"] = catalog.desktop_clients;
+    if (desktop_defaults) root["desktop_default_clients"] = catalog.desktop_default_clients;
     for (const auto &entry : catalog.profiles) {
       root["profiles"].push_back({{"id", entry.storage.profile_key}, {"name", entry.name},
         {"volume", entry.storage.opaque_volume_name}, {"family", family(entry.storage.runtime_profile)},
@@ -311,6 +390,7 @@ namespace multiseat::profiles {
         }
       }
       target->client_keys.emplace_back(client_key);
+      std::erase(catalog.desktop_default_clients, client_key);
       return encode(catalog);
     });
   }
@@ -322,6 +402,7 @@ namespace multiseat::profiles {
         std::erase(entry.client_keys, client_key);
         std::erase(entry.access_clients, client_key);
       }
+      std::erase(catalog.desktop_default_clients, client_key);
       return encode(catalog);
     });
   }
@@ -331,23 +412,59 @@ namespace multiseat::profiles {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
       std::erase(catalog.desktop_clients, client_key);
       if (allowed) catalog.desktop_clients.emplace_back(client_key);
+      // A Default Space is a place the device may play, so Desktop stops being one with its access.
+      else std::erase(catalog.desktop_default_clients, client_key);
       return encode(catalog);
     });
   }
 
   change_result_t set_assignment(const std::filesystem::path &path,
                                std::string_view profile_key, std::string_view client_key) {
-    return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
+    return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
+      const auto listed = [&](const std::vector<std::string> &list) {
+        return std::find(list.begin(), list.end(), client_key) != list.end();
+      };
+      // Removing a device from every Space stays its own explicit request.
+      if (profile_key.empty()) {
+        for (auto &entry : catalog.profiles) {
+          std::erase(entry.client_keys, client_key);
+          std::erase(entry.access_clients, client_key);
+        }
+        std::erase(catalog.desktop_default_clients, client_key);
+        return encode(catalog);
+      }
+      const bool desktop = profile_key == desktop_profile_key;
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
         return entry.storage.profile_key == profile_key;
       });
-      if (!profile_key.empty() && (target == catalog.profiles.end() || target->archived)) {
+      if (!desktop && (target == catalog.profiles.end() || target->archived)) {
         result.error = "Unknown profile."; return std::nullopt;
       }
-      for (auto &entry : catalog.profiles) std::erase(entry.client_keys, client_key);
-      if (target != catalog.profiles.end()) target->client_keys.emplace_back(client_key);
-      if (profile_key.empty()) for (auto &entry : catalog.profiles) std::erase(entry.access_clients, client_key);
+      const auto refuse = [&](const refusal_t &refusal) -> std::optional<std::string> {
+        result.refusal = refusal;
+        result.error = std::string(refusal.message);
+        return std::nullopt;
+      };
+      if (desktop && !listed(catalog.desktop_clients)) {
+        const bool any_space = std::any_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
+          return !entry.archived && (listed(entry.client_keys) || listed(entry.access_clients));
+        });
+        // A device without a Space already opens Desktop, so there is nothing to record.
+        if (!any_space) return encode(catalog);
+        return refuse(desktop_access_required);
+      }
+      if (!desktop && !listed(target->client_keys) && !listed(target->access_clients)) return refuse(space_access_required);
+      // A default only says where the device opens first. Leaving a Space default keeps that
+      // Space open to the device under Device Access.
+      for (auto &entry : catalog.profiles) {
+        if ((!desktop && &entry == &*target) || !listed(entry.client_keys)) continue;
+        std::erase(entry.client_keys, client_key);
+        if (!listed(entry.access_clients)) entry.access_clients.emplace_back(client_key);
+      }
+      std::erase(catalog.desktop_default_clients, client_key);
+      if (desktop) catalog.desktop_default_clients.emplace_back(client_key);
+      else if (!listed(target->client_keys)) target->client_keys.emplace_back(client_key);
       return encode(catalog);
     });
   }
@@ -361,6 +478,8 @@ namespace multiseat::profiles {
       if (target == catalog.profiles.end()) { result.error = "Unknown or removed space."; return std::nullopt; }
       std::erase(target->access_clients, client_key);
       if (allowed) target->access_clients.emplace_back(client_key);
+      // Unticking a Space is how a device leaves it, so it stops being that device's Default Space too.
+      else std::erase(target->client_keys, client_key);
       return encode(catalog);
     });
   }
@@ -515,6 +634,11 @@ namespace multiseat::profiles {
 
   bool valid_edit_request(const edit_request_t &request) {
     if (!token(request.profile_id)) return false;
+    if (request.operation == edit_operation_e::remove_for_good)
+      return request.name.empty() && request_uuid(request.request_id) &&
+        !request.confirm_name.empty() && request.confirm_name.size() <= 128 &&
+        std::none_of(request.confirm_name.begin(), request.confirm_name.end(), [](unsigned char c) { return c < 32 || c == 127; });
+    if (!request.confirm_name.empty() || !request.request_id.empty()) return false;
     if (request.operation == edit_operation_e::remove || request.operation == edit_operation_e::restore) return request.name.empty();
     return request.operation == edit_operation_e::rename && !request.name.empty() && request.name.size() <= 128 &&
       request.name.front() != ' ' && request.name.back() != ' ' &&
@@ -539,6 +663,13 @@ namespace multiseat::profiles {
       } else if (operation == "remove" || operation == "restore") {
         keys(body, {"operation", "profile_id"});
         request.operation = operation == "remove" ? edit_operation_e::remove : edit_operation_e::restore;
+      } else if (operation == "delete") {
+        // Deleting data is its own operation with its own required fields; no
+        // extra field can turn an archive into a deletion.
+        keys(body, {"operation", "profile_id", "confirm_name", "request_id"});
+        request.operation = edit_operation_e::remove_for_good;
+        request.confirm_name = body.at("confirm_name").get<std::string>();
+        request.request_id = body.at("request_id").get<std::string>();
       } else return std::nullopt;
       request.profile_id = body.at("profile_id").get<std::string>();
       return valid_edit_request(request) ? std::optional {request} : std::nullopt;
@@ -546,7 +677,7 @@ namespace multiseat::profiles {
   }
 
   change_result_t edit(const std::filesystem::path &path, const edit_request_t &request) {
-    if (!valid_edit_request(request)) return {.error = "Invalid space change."};
+    if (!valid_edit_request(request) || request.operation == edit_operation_e::remove_for_good) return {.error = "Invalid space change."};
     return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
       const auto entry = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
         [&](const auto &value) { return value.storage.profile_key == request.profile_id; });
@@ -561,6 +692,99 @@ namespace multiseat::profiles {
       }
       return encode(catalog);
     });
+  }
+
+  removal_result_t remove_for_good(const std::filesystem::path &path, const edit_request_t &request,
+                                   container::host_t &host, std::chrono::milliseconds wait_for_users) {
+    using outcome_e = removal_outcome_e;
+    removal_result_t result;
+    if (request.operation != edit_operation_e::remove_for_good || !valid_edit_request(request)) return result;
+    std::string volume, profile_key;
+    bool steam = false, home_present = false;
+    // Every refusal that changes nothing is decided inside the transaction that
+    // archives the Space, so the decision and the archive read the same catalog.
+    const auto fenced = change(path, [&](catalog_t &catalog, change_result_t &) -> std::optional<std::string> {
+      const auto entry = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+        [&](const auto &value) { return value.storage.profile_key == request.profile_id; });
+      if (entry == catalog.profiles.end()) { result.outcome = outcome_e::not_found; return std::nullopt; }
+      if (entry->name != request.confirm_name) { result.outcome = outcome_e::name_mismatch; return std::nullopt; }
+      steam = entry->storage.runtime_profile == runtime_profile_e::steam;
+      // New Steam Spaces copy an existing one's runtime, so the last one stays.
+      if (steam && std::none_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &other) {
+            return &other != &*entry && other.storage.runtime_profile == runtime_profile_e::steam;
+          })) { result.outcome = outcome_e::last_space; return std::nullopt; }
+      volume = entry->storage.opaque_volume_name;
+      profile_key = entry->storage.profile_key;
+      if (!local_docker_engine(host)) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+      const auto volumes = listed_names(docker_output(host, {"volume", "ls", "--format={{json .Name}}"}));
+      if (!volumes) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+      home_present = volumes->contains(volume);
+      if (home_present) {
+        const auto inspected = docker_output(host, {"volume", "inspect", volume});
+        if (!inspected) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+        std::optional<json> values;
+        try { values = json::parse(*inspected); } catch (...) {}
+        if (!values || !created_home(*values, *entry)) {
+          result.outcome = outcome_e::storage_unverified; result.kept_volume = volume; return std::nullopt;
+        }
+        // A library read can hold the home for a few seconds; wait it out.
+        const auto deadline = std::chrono::steady_clock::now() + wait_for_users;
+        for (;;) {
+          const auto users = listed_names(docker_output(host, {"ps", "--all", "--filter=volume=" + volume, "--format={{json .ID}}"}));
+          if (!users) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+          if (users->empty()) break;
+          if (std::chrono::steady_clock::now() >= deadline) {
+            result.outcome = outcome_e::storage_in_use; result.kept_volume = volume; return std::nullopt;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+      }
+      // Archived first: if Docker stops partway, the Space cannot be opened
+      // with half a home, and a retry from Archived Spaces finishes the job.
+      entry->archived = true;
+      entry->client_keys.clear();
+      entry->access_clients.clear();
+      result.outcome = outcome_e::not_saved;
+      return encode(catalog);
+    });
+    if (fenced.status == status_e::durability_uncertain) result.status = fenced.status;
+    if (!fenced) {
+      if (result.outcome == outcome_e::invalid) result.outcome = outcome_e::not_saved;
+      return result;
+    }
+    result.archived = true;
+    if (home_present) {
+      // Docker deletes the home. Polaris never opens, walks or unlinks its files.
+      (void) docker_output(host, {"volume", "rm", volume}, std::chrono::minutes(10));
+      const auto volumes = listed_names(docker_output(host, {"volume", "ls", "--format={{json .Name}}"}));
+      if (!volumes || volumes->contains(volume)) {
+        result.outcome = outcome_e::storage_not_removed; result.kept_volume = volume;
+        return result;
+      }
+    }
+    if (steam) {
+      // The network holds no player data. One Docker will not remove is named,
+      // and a network whose identity is not the one Polaris made is left alone.
+      const auto network = container::profile_network_name(profile_key);
+      const auto networks = listed_names(docker_output(host, {"network", "ls", "--format={{json .Name}}"}));
+      if (networks && networks->contains(network) && container::profile_network_id(host, profile_key, true))
+        (void) docker_output(host, {"network", "rm", network});
+      const auto remaining = networks && !networks->contains(network) ? networks :
+        listed_names(docker_output(host, {"network", "ls", "--format={{json .Name}}"}));
+      if (!remaining || remaining->contains(network)) result.kept_network = network;
+    }
+    const auto removed = change(path, [&](catalog_t &catalog, change_result_t &) -> std::optional<std::string> {
+      const auto entry = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+        [&](const auto &value) { return value.storage.profile_key == request.profile_id; });
+      if (entry != catalog.profiles.end()) {
+        if (!entry->archived || entry->storage.opaque_volume_name != volume) return std::nullopt;
+        catalog.profiles.erase(entry);
+      }
+      return encode(catalog);
+    });
+    if (removed.status == status_e::durability_uncertain) result.status = removed.status;
+    result.outcome = removed ? outcome_e::removed : outcome_e::record_not_removed;
+    return result;
   }
 
   int command(int argc, char **argv) {

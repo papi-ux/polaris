@@ -2,15 +2,17 @@
   <div class="mt-5 border-t border-storm/20 pt-5" role="group" aria-labelledby="spaces-first-title">
     <p class="section-kicker">{{ $t('spaces.kicker') }}</p>
     <h3 id="spaces-first-title" class="text-base font-semibold text-silver">{{ $t('spaces.first_title') }}</h3>
-    <p class="mt-2 max-w-2xl text-sm text-storm">{{ $t('spaces.first_copy') }}</p>
-    <p class="mt-2 text-sm text-storm">{{ $t('spaces.first_steps') }}</p>
+    <template v-if="!runtimeNotPublished">
+      <p class="mt-2 max-w-2xl text-sm text-storm">{{ $t(runtimeOnHost ? 'spaces.first_copy_ready' : 'spaces.first_copy') }}</p>
+      <p class="mt-2 text-sm text-storm">{{ $t('spaces.first_steps') }}</p>
+    </template>
     <p v-if="error" class="mt-3 text-sm text-warning-bright" role="alert">{{ error }}</p>
     <p v-if="notice" class="mt-3 text-sm text-silver" role="status">{{ notice }}</p>
     <div v-if="snapshot && !snapshot.available && !snapshot.job" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-setup-unavailable>
       <h4 class="font-medium text-silver">{{ $t('spaces.unavailable_title') }}</h4>
       <p class="mt-2 text-sm text-storm">{{ unavailableCopy }}</p>
       <a v-if="unavailableAnchor" :href="docsUrl + unavailableAnchor" target="_blank" rel="noopener noreferrer"
-         class="focus-ring mt-3 inline-block rounded py-2 text-sm text-ice hover:underline">{{ $t('spaces.guide_section') }}</a>
+         class="focus-ring mt-3 inline-block rounded py-2 text-sm text-ice hover:underline">{{ unavailableLinkLabel }}</a>
     </div>
     <p v-else-if="snapshot?.message && !snapshot.job" class="mt-3 text-sm text-storm">{{ snapshot.message }}</p>
     <div v-if="snapshot?.job" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-setup-job>
@@ -61,7 +63,7 @@
     </div>
     <div v-else-if="pending" class="mt-4 text-sm text-storm">
       <p>{{ $t('spaces.saved_request', { name: pending.name }) }}</p>
-      <Button variant="outline" size="sm" class="mt-3" :disabled="busy || !connected || !snapshot?.available || !hostReady"
+      <Button variant="outline" size="sm" class="mt-3" :disabled="busy || !connected || !snapshot?.available || !hostReady || runtimeDownloading"
               @click="send(pending)">{{ $t('spaces.retry_saved_request') }}</Button>
     </div>
     <form v-else-if="snapshot?.available" class="mt-4 max-w-xl space-y-3" @submit.prevent="start">
@@ -77,9 +79,10 @@
         </select>
       </div>
       <p v-else class="text-sm text-storm">{{ runtimeLabel(snapshot.runtimes[0]) }}</p>
-      <p class="text-xs text-storm">{{ $t('spaces.download_note') }}</p>
+      <p v-if="!runtimeOnHost" class="text-xs text-storm">{{ $t('spaces.download_note') }}</p>
       <p v-if="!hostReady" class="text-sm text-storm">{{ $t('spaces.host_first') }}</p>
-      <Button type="submit" variant="outline" size="sm" :disabled="busy || !connected || !hostReady || !name.trim()">{{ $t('spaces.download') }}</Button>
+      <p v-else-if="runtimeDownloading" class="text-sm text-storm" data-runtime-downloading>{{ $t('spaces.runtime_downloading_wait') }}</p>
+      <Button type="submit" variant="outline" size="sm" :disabled="busy || !connected || !hostReady || !name.trim() || runtimeDownloading">{{ $t(runtimeOnHost ? 'spaces.prepare' : 'spaces.download') }}</Button>
     </form>
     <Button variant="ghost" size="sm" class="mt-3 text-ice" :loading="busy" :disabled="busy" data-setup-reconnect @click="refresh">
       {{ busy ? $t('spaces.checking_setup') : $t('spaces.reconnect') }}
@@ -101,7 +104,11 @@ import { requestForJob, validJobSnapshot, validSetupStart } from '../spaces-job.
 import { docsUrl } from '../spaces-setup.js'
 import { requestHostRestart } from '../restart-host.js'
 
-defineProps({ hostReady: { type: Boolean, default: false } })
+const props = defineProps({ hostReady: { type: Boolean, default: false }, readyRuntimeId: { type: String, default: '' } })
+// Host Setup reads the runtime state from here, so a build without a runtime is
+// not shown as a check the person has to fix. Its gaming runtime check also
+// downloads through this connection, so the page keeps a single poll.
+const emit = defineEmits(['runtime'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const snapshot = ref(null), busy = ref(false), connected = ref(false), error = ref(''), notice = ref('')
@@ -121,7 +128,10 @@ const unavailableCopy = computed(() => {
   const reason = snapshot.value?.unavailable_reason
   return unavailableReasons.includes(reason) ? t('spaces.unavailable_' + reason) : (snapshot.value?.message || t('spaces.unavailable_title'))
 })
-const unavailableAnchor = computed(() => ({ runtime_not_published: '#prepare-your-first-space', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
+// Without a published runtime the create steps cannot run, so they are not described.
+const runtimeNotPublished = computed(() => snapshot.value?.available === false && snapshot.value?.unavailable_reason === 'runtime_not_published')
+const unavailableAnchor = computed(() => ({ runtime_not_published: '#preview-limits', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
+const unavailableLinkLabel = computed(() => t(snapshot.value?.unavailable_reason === 'runtime_not_published' ? 'spaces.preview_limits_link' : 'spaces.guide_section'))
 const blockedReasons = ['journal_fault', 'runtime_withdrawn', 'no_eligible_gpu', 'closing']
 const blockedBy = computed(() => (snapshot.value?.job?.blocked_by || []).filter(reason => blockedReasons.includes(reason)))
 const blockedCopy = reason => t('spaces.blocked_' + reason)
@@ -134,8 +144,14 @@ const jobTone = computed(() => {
   return 'fail'
 })
 
+// A download-only job holds the host's setup worker until it ends.
+const runtimeDownloading = computed(() => snapshot.value?.download?.state === 'downloading')
+// Host Setup already verified the chosen runtime on this PC, so starting only prepares the Steam home.
+const runtimeOnHost = computed(() => !!props.readyRuntimeId && props.readyRuntimeId === runtimeId.value)
 function adopt(next) {
   snapshot.value = next; connected.value = true
+  emit('runtime', { available: next.available, reason: next.unavailable_reason || '',
+    download: next.download || null, job: next.job?.state || '' })
   if (next.job?.gpu_id) gpuId.value = next.job.gpu_id
   else if (!next.graphics?.some(g => g.id === gpuId.value)) gpuId.value = next.graphics?.[0]?.id || ''
   if (!next.runtimes.some(runtime => runtime.id === runtimeId.value)) runtimeId.value = next.runtimes[0]?.id || ''
@@ -145,7 +161,7 @@ function adopt(next) {
   }
 }
 function working() {
-  return ['downloading', 'preparing', 'configuring'].includes(snapshot.value?.job?.state)
+  return ['downloading', 'preparing', 'configuring'].includes(snapshot.value?.job?.state) || runtimeDownloading.value
 }
 // The job is polled only while it is doing something, only while the tab is
 // visible, and less often while the host is not answering.
@@ -158,32 +174,39 @@ function handleVisibility() {
   if (document.hidden) { clearTimeout(poll); poll = null }
   else if (working() && !busy.value) refresh()
 }
-async function exchange(action) {
-  if (busy.value || disposed) return
+// Resolves to what went wrong, or ''. A runtime action reports on its own
+// check, so its failure does not also appear on this form.
+async function exchange(action, { runtimeAction = false } = {}) {
+  if (disposed) return ''
+  if (busy.value) return t('spaces.runtime_busy')
   clearTimeout(poll); poll = null
-  busy.value = true; connected.value = false; error.value = ''
+  busy.value = true; connected.value = false
+  if (!runtimeAction) error.value = ''
   request = new AbortController()
   const timeout = setTimeout(() => request.abort(), 12000)
+  let failure = ''
   try {
     const response = await fetch('./api/spaces/setup/job', {
       credentials: 'include', cache: 'no-store', signal: request.signal,
       ...(action ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action) } : {}),
     })
-    if (disposed) return
+    if (disposed) return ''
     if (![200, 202, 409, 503].includes(response.status)) throw new Error(t(response.status === 404 ? 'spaces.job_404' : 'spaces.job_failed'))
     const next = await response.json()
-    if (disposed) return
+    if (disposed) return ''
     if (!validJobSnapshot(next)) throw new Error(t('spaces.job_unverified'))
     adopt(next)
     failures = 0
-    if (action && (!response.ok || next.accepted !== true)) error.value = t('spaces.job_rejected')
+    if (action && (!response.ok || next.accepted !== true)) failure = t('spaces.job_rejected')
   } catch (cause) {
     failures += 1
-    if (!disposed) error.value = cause.name === 'AbortError' ? t('spaces.job_timeout') : cause.message || t('spaces.job_error')
+    if (!disposed) failure = cause.name === 'AbortError' ? t('spaces.job_timeout') : cause.message || t('spaces.job_error')
   } finally {
     clearTimeout(timeout); busy.value = false
     schedule()
   }
+  if (!runtimeAction) error.value = failure
+  return failure
 }
 async function confirmRestart() {
   if (restarting.value || busy.value || !connected.value || restartRequested.value || snapshot.value?.job?.state !== 'restart_required') return
@@ -202,6 +225,18 @@ async function confirmRestart() {
 }
 const refresh = () => exchange()
 const send = action => exchange(action)
+function download(runtimeId) {
+  let action
+  try { action = { operation: 'download', request_id: crypto.randomUUID(), runtime_id: runtimeId } }
+  catch { return Promise.resolve(t('spaces.secure_needed')) }
+  return exchange(action, { runtimeAction: true })
+}
+function stopDownload() {
+  const current = snapshot.value?.download
+  if (!current?.can_cancel) return Promise.resolve('')
+  return exchange({ operation: 'cancel', request_id: current.request_id }, { runtimeAction: true })
+}
+defineExpose({ download, stopDownload })
 function start() {
   let action
   try { action = { operation: 'start', request_id: crypto.randomUUID(), runtime_id: runtimeId.value, name: name.value.trim() } }

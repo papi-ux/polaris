@@ -295,6 +295,9 @@ echo "  systemctl --user enable --now polaris"
 # Metainfo
 %{_datadir}/metainfo/*.metainfo.xml
 
+# polkit actions for host setup from the Spaces page
+%{_datadir}/polkit-1/actions/dev.polaris-stream.app.Polaris.policy
+
 # Assets
 %{_datadir}/polaris/**
 

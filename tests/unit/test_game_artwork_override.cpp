@@ -537,3 +537,73 @@ TEST(GameArtworkOverrideManifest, DecoratesWithSanitizedMatchAndDeterministicRev
   EXPECT_EQ(serialized.find("https://"), std::string::npos);
   EXPECT_EQ(serialized.find("payload"), std::string::npos);
 }
+
+TEST(GameArtworkOverride, RemoveArtworkDeletesDownloadsAndPicksKeepsTheOwnImageAndStopsLookup) {
+  using game_artwork::kind_e;
+  using game_artwork::source_e;
+  temp_dir_t temp("remove-downloaded");
+  const auto &appdata = temp.path;
+  const auto put = [&](std::string_view uuid, kind_e kind, source_e source) {
+    const auto path = game_artwork::cache_asset_path(appdata, uuid, kind, source, ".png");
+    ASSERT_TRUE(path.has_value());
+    write_text(*path, png_bytes('A'));
+  };
+  put(GAME_UUID, kind_e::poster, source_e::local);  // the copy of the entry's own image
+  put(GAME_UUID, kind_e::poster, source_e::steamgriddb);
+  put(GAME_UUID, kind_e::hero, source_e::steamgriddb);
+  put(GAME_UUID, kind_e::logo, source_e::steam);
+  put(GAME_UUID, kind_e::icon, source_e::override);
+  ASSERT_TRUE(game_artwork::save_artwork_override(appdata, valid_override()));
+  put(OTHER_UUID, kind_e::hero, source_e::steamgriddb);
+
+  EXPECT_TRUE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+  EXPECT_TRUE(game_artwork::remove_downloaded_artwork(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+
+  const auto assets = game_artwork::scan_cached_assets(appdata, GAME_UUID);
+  ASSERT_EQ(assets.size(), 1U);
+  EXPECT_EQ(assets.front().source, source_e::local);
+  EXPECT_FALSE(fs::exists(metadata_path(appdata)));
+  EXPECT_FALSE(game_artwork::load_artwork_override(appdata, GAME_UUID).has_value());
+  // The marker is never read as an image, and another game keeps its artwork and its lookup.
+  EXPECT_EQ(game_artwork::current_manifest(appdata, GAME_UUID)["assets"].size(), 1U);
+  EXPECT_EQ(game_artwork::scan_cached_assets(appdata, OTHER_UUID).size(), 1U);
+  EXPECT_TRUE(game_artwork::automatic_artwork_lookup_enabled(appdata, OTHER_UUID));
+
+  // Removing again changes nothing and still succeeds.
+  EXPECT_TRUE(game_artwork::remove_downloaded_artwork(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+
+  // Find artwork again turns lookup back on; the deleted pictures stay deleted.
+  EXPECT_TRUE(game_artwork::enable_automatic_artwork_lookup(appdata, GAME_UUID));
+  EXPECT_TRUE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+  EXPECT_EQ(game_artwork::scan_cached_assets(appdata, GAME_UUID).size(), 1U);
+  EXPECT_TRUE(game_artwork::enable_automatic_artwork_lookup(appdata, GAME_UUID));
+}
+
+TEST(GameArtworkOverride, AutomaticLookupStateFailsClosed) {
+  temp_dir_t temp("lookup-fails-closed");
+  const auto &appdata = temp.path;
+  // A game without an artwork directory yet is looked up; an invalid uuid never is.
+  EXPECT_TRUE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+  EXPECT_TRUE(game_artwork::enable_automatic_artwork_lookup(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(appdata, "not-a-uuid"));
+  EXPECT_FALSE(game_artwork::remove_downloaded_artwork(appdata, "not-a-uuid"));
+  EXPECT_FALSE(game_artwork::enable_automatic_artwork_lookup(appdata, "not-a-uuid"));
+
+  // Anything in the marker's place keeps lookup off, and a removal cannot write through it.
+  const auto game_directory = game_artwork::cache_root(appdata) / std::string(GAME_UUID);
+  fs::create_directories(game_directory / "automatic-lookup.off");
+  EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::remove_downloaded_artwork(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::enable_automatic_artwork_lookup(appdata, GAME_UUID));
+
+  // A game directory that is a symlink is unsafe: no lookup, and nothing is written through it.
+  fs::remove_all(game_directory);
+  fs::create_directories(appdata / "elsewhere");
+  fs::create_directory_symlink(appdata / "elsewhere", game_directory);
+  EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::remove_downloaded_artwork(appdata, GAME_UUID));
+  EXPECT_FALSE(game_artwork::enable_automatic_artwork_lookup(appdata, GAME_UUID));
+  EXPECT_FALSE(fs::exists(appdata / "elsewhere" / "automatic-lookup.off"));
+}

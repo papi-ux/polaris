@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Host setup Polaris can ask for from its Spaces page. Polaris runs pkexec with the installed
+  Spaces setup helper and one fixed operation; these actions give that prompt its own words.
+  Every action asks for an administrator password each time, and only in an active local session.
+-->
+<policyconfig>
+  <vendor>Polaris</vendor>
+  <vendor_url>@POLARIS_PUBLISHER_WEBSITE@</vendor_url>
+  <icon_name>@POLARIS_DESKTOP_ICON@</icon_name>
+
+  <action id="@POLARIS_POLKIT_ACTION_PREFIX@.spaces-security-install">
+    <description>Install Spaces security support</description>
+    <message>Polaris wants to install the SELinux policies and the controller rule that Spaces need on this PC.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">@CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">install</annotate>
+  </action>
+
+  <action id="@POLARIS_POLKIT_ACTION_PREFIX@.spaces-docker-access">
+    <description>Give Polaris access to Docker</description>
+    <message>Polaris wants to start Docker, have it start with this PC, and add your account to the docker group so Spaces can use it. Anyone in that group can control Docker, which is as powerful as an administrator account.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">@CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">docker-access</annotate>
+  </action>
+</policyconfig>

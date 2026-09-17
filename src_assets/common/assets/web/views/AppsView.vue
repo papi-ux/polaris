@@ -762,6 +762,14 @@
               <input type="text" class="app-editor-input app-editor-input-mono" id="appImagePath" v-model="editForm['image-path']" />
             </div>
 
+            <AppArtworkControls
+              v-if="editForm.uuid"
+              :app="editForm"
+              :lookup-off="artworkLookupOff.has(editForm.uuid)"
+              :disabled="actionDisabled"
+              @changed="onArtworkChanged"
+            />
+
             <div class="app-editor-field">
               <div class="settings-field-head">
                 <label for="gameCategory" class="settings-field-label">Game Category</label>
@@ -1017,6 +1025,7 @@
               <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
+              <Checkbox class="app-editor-toggle-card" v-if="platform === 'linux'" id="desktopMirror" label="apps.desktop_mirror" desc="apps.desktop_mirror_desc" v-model="editForm['desktop-mirror']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" v-model="editForm['virtual-display']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
@@ -1141,6 +1150,8 @@
 import { computed, ref, inject, watch } from 'vue'
 import Checkbox from '../Checkbox.vue'
 import Button from '../components/Button.vue'
+import AppArtworkControls from '../components/AppArtworkControls.vue'
+import { artworkLookupOffSet } from '../app-artwork.js'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
@@ -1238,6 +1249,10 @@ const newAppTemplate = {
   "use-app-identity": false,
   "per-client-app-identity": false,
   "allow-client-commands": true,
+  // Written explicitly so every entry records its choice. The apps.json
+  // migrations infer mirroring for a keyless entry that looks like the legacy
+  // bundled Desktop, and one already had to run twice.
+  "desktop-mirror": false,
   "virtual-display": false,
   "close-desktop-steam-for-private": false,
   "terminate-on-pause": false,
@@ -1253,6 +1268,8 @@ const editMangoHud = ref(false)
 
 // Reactive state
 const apps = ref([])
+// Entries whose automatic artwork lookup is off, from GET /api/apps.
+const artworkLookupOff = ref(new Set())
 const showEditForm = ref(false)
 const actionDisabled = ref(false)
 const pendingStopAppUuid = ref("")
@@ -1580,12 +1597,20 @@ function loadApps() {
   .then(r => r.json())
   .then(r => {
     apps.value = r.apps.filter(i => i.uuid).map(i => ({ ...i, launching: false, dragover: false }))
+    artworkLookupOff.value = artworkLookupOffSet(r)
     pendingStopAppUuid.value = ""
     currentApp.value = r.current_app
     hostName.value = r.host_name
     hostUUID.value = r.host_uuid
     listReordered.value = false
   })
+}
+
+function onArtworkChanged({ uuid, lookupOff }) {
+  const next = new Set(artworkLookupOff.value)
+  if (lookupOff) next.add(uuid)
+  else next.delete(uuid)
+  artworkLookupOff.value = next
 }
 
 function newApp() {

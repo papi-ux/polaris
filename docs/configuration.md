@@ -59,7 +59,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `headless_max_refresh_rate` | `240` | Refresh ceiling in Hz for launches where Polaris creates the display itself (Private Stream, Host Virtual Display, Desktop Takeover, Gamescope). Advertised to clients and enforced at launch from the same value; `0` uses the built-in default of 240 |
 | `linux_use_cage_compositor` | `enabled` | Enable Polaris' private stream runtime |
 | `linux_prefer_gpu_native_capture` | `enabled` | Prefer DMA-BUF/GPU-resident capture on NVIDIA and AMD-capable stacks; Polaris reports SHM/system-memory fallback truthfully when the compositor or driver cannot provide it |
-| `linux_stream_mode` | `headless_stream` | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
+| `linux_stream_mode` | `headless_stream` (new installs) | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
 | `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
 | `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel after one-time portal approval is saved (the approval session keeps it on); `off` extends onto the dongle and leaves the panel primary |
 | `fallback_mode` | `1920x1080x60` | Display mode used when the client-requested mode is unsupported, as `WxHxFPS`. The web UI's Display Planner presets write this same key, so Moonlight compatibility stays standard; Nova and per-game overrides can layer on top where client-settings support exists |
@@ -214,7 +214,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **PreRelease Notifications** (`notify_pre_releases`) | Whether to be notified of new pre-release versions of Polaris |
 | **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray |
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
-| **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. Polaris reads the key when it starts, so restart after saving before the cover search and Nova can use it. |
+| **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
 
 ### Input tab
@@ -265,6 +265,12 @@ list in CIDR form). Keys: `enable_discovery`, `enable_pairing`, `upnp`, `address
 `origin_web_ui_allowed`, `external_ip`, `lan_encryption_mode`, `wan_encryption_mode`,
 `trusted_subnets`.
 
+The first-run wizard's Network step can trust a detected home network with one click, or a
+network typed in CIDR form. It adds the network to `trusted_subnets`, keeping the entries already
+there, and turns on Trusted Subnet Auto-Pairing (`trusted_subnet_auto_pairing`). A saved trusted
+network applies to the next pairing request, with no restart. Any device on a trusted network can
+pair without a PIN, so only trust networks you control.
+
 | Field | What it does |
 | --- | --- |
 | **Enable Auto Discovery** (`enable_discovery`) | When disabled, you'll need to manually enter host IP on the client to pair. |
@@ -310,7 +316,7 @@ overrides that force a specific path when automatic selection is wrong. Keys: `l
 | **HEVC Support** (`hevc_mode`) | Allows the client to request HEVC Main or HEVC Main10 video streams. HEVC is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding. |
 | **AV1 Support** (`av1_mode`) | Allows the client to request AV1 Main 8-bit or 10-bit video streams. AV1 is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding. |
 | **Force a Specific Capture Method** (`capture`) | On automatic mode Polaris will use the first one that works. NvFBC requires patched nvidia drivers. |
-| **Force a Specific Encoder** (`encoder`) | Force a specific encoder, otherwise Polaris will select the best available option. Note: If you specify a hardware encoder on Windows, it must match the GPU where the display is connected. |
+| **Force a Specific Encoder** (`encoder`) | Force a specific encoder, otherwise Polaris will select the best available option. Note: If you specify a hardware encoder on Windows, it must match the GPU where the display is connected. The first-run wizard's GPU and Encoder step shows what Automatic picks on this host and what hardware encoding still needs, and saves this key when you choose an encoder there. A changed encoder takes effect after a restart. |
 
 ### Files tab
 
@@ -443,7 +449,8 @@ and the driver decide, `1` selects constant-QP mode, and `4` selects variable bi
 The AI optimizer is optional. Configure it in the web UI if you want connection testing before
 saving, or set it directly in `polaris.conf`. The first-run wizard offers the same provider
 choice, sign-in, model list, test and enable step; timeouts, the explanation cache and history
-stay in the AI tab. Provider settings take effect after a restart.
+stay in the AI tab. Saved provider settings take effect right away; a request that is already running
+finishes with the settings it started with.
 
 ### Anthropic
 

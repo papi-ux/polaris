@@ -1,6 +1,10 @@
 #include "src/platform/linux/spaces_runtime.h"
 #include <gtest/gtest.h>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include "spaces_runtime_catalog.h"
 
 #ifdef __linux__
 namespace {
@@ -207,5 +211,33 @@ TEST(SpacesRuntime, CancelledDownloadDoesNotReachDocker) {
   EXPECT_EQ(result.code, "download_cancelled");
   EXPECT_FALSE(result.ready);
   EXPECT_TRUE(host.calls.empty());
+}
+
+TEST(SpacesRuntime, ReferencePullsFromTheCompiledRepository) {
+  const auto r = runtime();
+  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "@" + r.registry_digest);
+}
+
+TEST(SpacesRuntime, ReleaseBuildsNeverOverrideTheRuntimeRepositoryOrCatalog) {
+  // The override exists for lab builds only. A workflow or packaging script that sets
+  // it would ship a host that trusts runtimes from somewhere else.
+  const std::filesystem::path source {POLARIS_SOURCE_DIR};
+  const auto read = [](const std::filesystem::path &path) {
+    std::ifstream in(path);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  };
+  EXPECT_NE(read(source / "cmake/compile_definitions/linux.cmake")
+              .find("set(POLARIS_SPACES_RUNTIME_REPOSITORY \"ghcr.io/papi-ux/polaris-worker-steam\" CACHE STRING"),
+            std::string::npos);
+  EXPECT_EQ(multiseat::spaces::release_runtime_repository, "ghcr.io/papi-ux/polaris-worker-steam");
+  for (const auto *directory : {".github/workflows", "scripts/ci", "packaging"}) {
+    if (!std::filesystem::exists(source / directory)) continue;
+    for (const auto &file : std::filesystem::recursive_directory_iterator(source / directory)) {
+      if (!file.is_regular_file()) continue;
+      const auto text = read(file.path());
+      EXPECT_EQ(text.find("POLARIS_SPACES_RUNTIME_REPOSITORY"), std::string::npos) << file.path();
+      EXPECT_EQ(text.find("POLARIS_SPACES_RUNTIME_CATALOG_FILE"), std::string::npos) << file.path();
+    }
+  }
 }
 #endif

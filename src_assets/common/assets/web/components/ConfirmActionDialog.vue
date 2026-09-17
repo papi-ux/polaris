@@ -34,6 +34,9 @@
           </li>
         </ul>
 
+        <!-- Choices or a typed confirmation the action needs before it can run. -->
+        <slot />
+
         <div v-if="error" class="mt-4 rounded-lg border-l-4 border-danger bg-danger/10 px-3 py-2 text-sm text-danger-bright">
           {{ error }}
         </div>
@@ -54,8 +57,9 @@
           <button
             type="button"
             data-confirm-confirm
-            class="focus-ring rounded-lg border border-danger/35 bg-danger/15 px-4 py-2 text-sm font-semibold text-danger-bright transition-colors hover:border-danger/60 hover:bg-danger/25 disabled:cursor-wait disabled:opacity-70"
-            :disabled="pending"
+            class="focus-ring rounded-lg border border-danger/35 bg-danger/15 px-4 py-2 text-sm font-semibold text-danger-bright transition-colors hover:border-danger/60 hover:bg-danger/25 disabled:opacity-70"
+            :class="pending ? 'disabled:cursor-wait' : 'disabled:cursor-not-allowed'"
+            :disabled="pending || confirmDisabled"
             @click="$emit('confirm')"
           >
             {{ pending ? pendingLabel : confirmLabel }}
@@ -78,6 +82,8 @@ const props = defineProps({
   cancelLabel: { type: String, default: 'Cancel' },
   pendingLabel: { type: String, default: 'Working…' },
   pending: { type: Boolean, default: false },
+  // Keeps the confirm button off until the slot's own condition is met.
+  confirmDisabled: { type: Boolean, default: false },
   error: { type: String, default: '' },
   eyebrow: { type: String, default: 'Confirm action' },
   impactLabel: { type: String, default: 'Host impact' },

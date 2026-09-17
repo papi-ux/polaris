@@ -35,8 +35,35 @@ configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security_data.h.in
                "${CMAKE_BINARY_DIR}/generated/spaces_security_data.h" @ONLY)
 configure_file("${CMAKE_SOURCE_DIR}/scripts/spaces/security_setup.py.in"
                "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup" @ONLY)
-# Only a catalog reviewed into the host build may authorize runtime downloads.
-set(POLARIS_SPACES_RUNTIME_SOURCE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
+# Polaris can run that helper through pkexec from its Spaces page. The polkit policy names the
+# installed helper, so the password prompt says what Polaris is about to change, and Polaris checks
+# the exact installed bytes before it offers the button. polkit action ids are lower case.
+string(TOLOWER "${PROJECT_FQDN}" POLARIS_POLKIT_ACTION_PREFIX)
+set(POLARIS_POLKIT_POLICY_NAME "${PROJECT_FQDN}.policy")
+set(POLARIS_POLKIT_POLICY_PATH "${CMAKE_INSTALL_FULL_DATAROOTDIR}/polkit-1/actions/${POLARIS_POLKIT_POLICY_NAME}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_SOURCE_DIR}/packaging/linux/${POLARIS_POLKIT_POLICY_NAME}.in")
+configure_file("${CMAKE_SOURCE_DIR}/packaging/linux/${POLARIS_POLKIT_POLICY_NAME}.in"
+               "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}" @ONLY)
+file(READ "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}" POLARIS_POLKIT_POLICY_DATA)
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin_data.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_host_admin_data.h" @ONLY)
+# Only a catalog reviewed into the host build may authorize runtime downloads. A lab build may
+# compile another catalog and pull from another repository to test Spaces end to end without
+# publishing; release workflows never set either, and a unit test fails if one does.
+set(POLARIS_SPACES_RUNTIME_REPOSITORY "ghcr.io/papi-ux/polaris-worker-steam" CACHE STRING
+    "Repository Spaces runtimes are pulled from. Change only for a lab build.")
+set(POLARIS_SPACES_RUNTIME_CATALOG_FILE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json" CACHE FILEPATH
+    "Spaces runtime catalog compiled into Polaris. Change only for a lab build.")
+if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY MATCHES "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$")
+    message(FATAL_ERROR "POLARIS_SPACES_RUNTIME_REPOSITORY must name a registry repository, such as ghcr.io/papi-ux/polaris-worker-steam")
+endif()
+if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY STREQUAL "ghcr.io/papi-ux/polaris-worker-steam" OR
+   NOT POLARIS_SPACES_RUNTIME_CATALOG_FILE STREQUAL "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
+    message(WARNING "Lab build: Spaces runtimes come from ${POLARIS_SPACES_RUNTIME_REPOSITORY} with the catalog "
+                    "${POLARIS_SPACES_RUNTIME_CATALOG_FILE}. Do not ship this build.")
+endif()
+set(POLARIS_SPACES_RUNTIME_SOURCE "${POLARIS_SPACES_RUNTIME_CATALOG_FILE}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_RUNTIME_SOURCE}")
 file(READ "${POLARIS_SPACES_RUNTIME_SOURCE}" POLARIS_SPACES_RUNTIME_CATALOG)
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_catalog.h.in"
@@ -610,6 +637,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_media.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/portal_session.h"
