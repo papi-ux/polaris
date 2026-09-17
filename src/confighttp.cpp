@@ -81,6 +81,7 @@
 #include "doctor_actions.h"
 #include "ai_optimizer.h"
 #include "game_classifier.h"
+#include "emulator_install.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
 
@@ -3150,8 +3151,8 @@ namespace confighttp {
         plan.prerequisites = emulator_library::prerequisites(*plan.preset, plan.install, source.path, home_roots);
         if (plan.install.kind == emulator_library::install_e::missing) {
           plan.warning = plan.install.location.empty() ?
-            plan.label + " is not installed on this host; imported entries launch once it is." :
-            plan.label + " was not found at " + plan.install.location + "; imported entries launch once it is back.";
+            plan.label + " is not installed on this host, so games from this folder will not start until it is." :
+            plan.label + " was not found at " + plan.install.location + ", so games from this folder will not start until it is back.";
         }
         plan.scannable = true;
       } else {
@@ -3182,6 +3183,41 @@ namespace confighttp {
       return (error || canonical.empty() ? rom.lexically_normal() : canonical).string();
     }
 
+    emulator_install::run_result_t run_flatpak_step(const std::vector<std::string> &argv, std::chrono::milliseconds timeout) {
+#ifdef __linux__
+      // Flatpak reports why an install failed on standard error, so both streams are kept.
+      const auto result = platf::run_process_argv_capture(argv, timeout, 4 * 1024 * 1024, {}, true);
+      return {result.exit_status, result.timed_out, result.output};
+#else
+      return {};
+#endif
+    }
+
+    std::optional<std::string> service_flatpak_binary() {
+      if (const auto found = emulator_library::find_on_path("flatpak", service_path_env())) {
+        return found->string();
+      }
+      return std::nullopt;
+    }
+
+    emulator_install::installer_t &emulator_installer() {
+      static emulator_install::installer_t installer {run_flatpak_step, service_flatpak_binary};
+      return installer;
+    }
+
+    nlohmann::json install_job_json(std::string_view emulator_id) {
+      const auto job = emulator_installer().job(emulator_id);
+      if (!job) {
+        return nullptr;
+      }
+      return {
+        {"state", std::string(emulator_install::state_name(job->state))},
+        {"message", job->message},
+        {"started_at", job->started_at},
+        {"finished_at", job->finished_at},
+      };
+    }
+
     nlohmann::json rom_folder_json(const emulator_library::source_t &source, const rom_folder_plan_t &plan) {
       return {
         {"id", source.id},
@@ -3196,6 +3232,8 @@ namespace confighttp {
         {"install", {{"kind", std::string(emulator_library::install_name(plan.install.kind))}, {"location", plan.install.location}}},
         {"warning", plan.warning},
         {"prerequisites", prerequisites_json(plan.prerequisites)},
+        {"installable", plan.preset != nullptr && emulator_installer().installable(*plan.preset)},
+        {"install_job", plan.preset != nullptr ? install_job_json(plan.preset->id) : nlohmann::json(nullptr)},
       };
     }
 
@@ -3226,6 +3264,8 @@ namespace confighttp {
           {"gamepad", std::string(preset.gamepad)},
           {"install", {{"kind", std::string(emulator_library::install_name(install.kind))}, {"location", install.location}}},
           {"prerequisites", prerequisites_json(emulator_library::prerequisites(preset, install, {}, home_roots))},
+          {"installable", emulator_installer().installable(preset)},
+          {"install_job", install_job_json(preset.id)},
         });
       }
       return list;
@@ -3332,6 +3372,49 @@ namespace confighttp {
       return false;
     }
 
+    std::mutex emulator_command_refresh_mutex;
+
+    /**
+     * @brief Point every entry of one emulator at the install this host has now.
+     *
+     * Launch resolves the command anyway; rewriting the saved one keeps what the console
+     * shows equal to what runs. Only entries whose command actually changes are written.
+     */
+    void refresh_emulator_entry_commands(const emulator_library::preset_t &preset) {
+      std::lock_guard lock(emulator_command_refresh_mutex);
+      std::error_code error;
+      if (!std::filesystem::is_regular_file(config::stream.file_apps, error)) {
+        return;
+      }
+      auto file_tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()), nullptr, false);
+      if (file_tree.is_discarded() || !file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+        return;
+      }
+      const auto sources = load_library_sources();
+      const auto home_roots = game_library::library_home_roots();
+      const auto path_env = service_path_env();
+      std::size_t changed = 0;
+      for (auto &app : file_tree["apps"]) {
+        if (!app.is_object() || app.value("source", "") != emulator_library::source_name || app.value("emulator", "") != preset.id) {
+          continue;
+        }
+        const auto launcher = emulator_library::configured_launcher_for(sources, app.value("rom-folder", ""));
+        const auto resolved = emulator_library::resolve_entry_launch(preset.id, app.value("rom-path", ""), launcher, home_roots, path_env);
+        if (!resolved || resolved->command.empty() || app.value("cmd", "") == resolved->command) {
+          continue;
+        }
+        app["cmd"] = resolved->command;
+        ++changed;
+      }
+      if (changed == 0) {
+        return;
+      }
+      file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+      // An install finishes minutes after the click, maybe mid stream: reload without ending it.
+      proc::refresh(config::stream.file_apps, false);
+      BOOST_LOG(info) << "Pointed " << changed << " " << preset.label << " entr" << (changed == 1 ? "y" : "ies") << " at the installed emulator.";
+    }
+
     // The emulator's own UI, published once next to its games so a stream can reach it.
     void ensure_emulator_launcher_app(nlohmann::json &file_tree, const emulator_library::preset_t &preset, const emulator_library::install_t &install) {
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -3412,6 +3495,16 @@ namespace confighttp {
       return result;
     }
   }  // namespace
+
+  void set_emulator_flatpak_for_tests(std::optional<std::string> flatpak_binary) {
+    emulator_installer().reset_for_tests(run_flatpak_step, [flatpak_binary]() {
+      return flatpak_binary;
+    });
+  }
+
+  bool wait_for_emulator_installs_for_tests(std::chrono::milliseconds timeout) {
+    return emulator_installer().wait_idle_for_tests(timeout);
+  }
 
   nlohmann::json rom_folder_scan_for_tests(const std::set<std::string> &existing_cmds, const std::set<std::string> &existing_rom_paths) {
     const auto scan = scan_rom_folders(existing_cmds, existing_rom_paths);
@@ -3513,6 +3606,58 @@ namespace confighttp {
       output["error"] = e.what();
     }
     send_response(response, output);
+  }
+
+  /**
+   * @brief Install a ROM folder preset's emulator from Flathub, for the account Polaris runs as.
+   *
+   * The body names the preset: `{"emulator": "eden"}`. The install runs in the background
+   * and answers 202 with the job; the folder list carries its progress as `install_job`.
+   * When it finishes, the saved commands of that emulator's entries follow the install.
+   * Only the preset's own Flatpak id is installed; keys, firmware and BIOS images never are.
+   *
+   * @api_examples{/api/library/emulators/install| POST| {"emulator":"eden"}}
+   */
+  void installEmulator(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    const auto body = nlohmann::json::parse(ss.str(), nullptr, false);
+    const auto emulator_it = body.is_object() ? body.find("emulator") : body.end();
+    const auto emulator_id = body.is_object() && emulator_it != body.end() && emulator_it->is_string() ?
+                               boost::trim_copy(emulator_it->get<std::string>()) :
+                               std::string {};
+    const auto *preset = emulator_library::find_preset(emulator_id);
+    if (preset == nullptr) {
+      bad_request(response, request, emulator_id.empty() ? "Name the emulator to install" : "Unknown emulator: " + emulator_id);
+      return;
+    }
+    const std::string label {preset->label};
+    if (!emulator_installer().installable(*preset)) {
+      bad_request(response, request, preset->flatpak_id.empty() ?
+                                       label + " has no Flatpak to install." :
+                                       "Flatpak is not installed on this host, so " + label + " cannot be installed from Flathub. Install Flatpak, or install " + label + " another way.");
+      return;
+    }
+    const auto install = emulator_library::detect_install(*preset, "", game_library::library_home_roots(), service_path_env());
+    if (install.kind != emulator_library::install_e::missing) {
+      send_response(response, SimpleWeb::StatusCode::client_error_conflict, {{"status", false}, {"error", label + " is already installed."}, {"install_job", install_job_json(preset->id)}});
+      return;
+    }
+    switch (emulator_installer().start(*preset, refresh_emulator_entry_commands)) {
+      case emulator_install::start_e::already_running:
+        send_response(response, SimpleWeb::StatusCode::client_error_conflict, {{"status", false}, {"error", label + " is already being installed."}, {"install_job", install_job_json(preset->id)}});
+        return;
+      case emulator_install::start_e::not_installable:
+        bad_request(response, request, label + " cannot be installed from Flathub on this host.");
+        return;
+      case emulator_install::start_e::started:
+        break;
+    }
+    BOOST_LOG(info) << "Installing " << label << " (" << preset->flatpak_id << ") from Flathub for the ROM folders.";
+    send_response(response, SimpleWeb::StatusCode::success_accepted, {{"status", true}, {"install_job", install_job_json(preset->id)}});
   }
 
   /**
@@ -8924,6 +9069,7 @@ namespace confighttp {
     server.resource["^/api/library/sources$"]["GET"] = getLibrarySources;
     server.resource["^/api/library/sources$"]["POST"] = withCsrf(addLibrarySource);
     server.resource["^/api/library/sources/([^/]+)$"]["DELETE"] = withCsrf(deleteLibrarySource);
+    server.resource["^/api/library/emulators/install$"]["POST"] = withCsrf(installEmulator);
     server.resource["^/polaris/v1/diagnostics/logs/tail$"]["GET"] = getLogTail;
     server.resource["^/polaris/v1/diagnostics/logs/previous$"]["GET"] = getPreviousLogs;
     server.resource["^/polaris/v1/diagnostics/kernel-gpu$"]["GET"] = getKernelGpuMessages;

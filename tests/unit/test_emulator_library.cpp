@@ -5,12 +5,16 @@
 #include "../tests_common.h"
 #include "../tests_paths.h"
 
+#include <src/emulator_install.h>
 #include <src/emulator_library.h>
 
 #include <boost/program_options/parsers.hpp>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <mutex>
 #include <set>
 
 namespace {
@@ -560,4 +564,118 @@ TEST(EmulatorLibraryResolve, TheFolderListSitsNextToTheAppsFileAndNamesItsLaunch
   EXPECT_EQ(emulator_library::configured_launcher_for(sources, "folder-b"), "");
   EXPECT_EQ(emulator_library::configured_launcher_for(sources, "unknown"), "");
   EXPECT_EQ(emulator_library::configured_launcher_for(sources, ""), "");
+}
+
+TEST(EmulatorInstall, FlatpakRunsForTheAccountFromFlathubWithoutAShell) {
+  EXPECT_EQ(emulator_install::remotes_argv("/usr/bin/flatpak"), (std::vector<std::string> {"/usr/bin/flatpak", "remotes", "--user", "--columns=name"}));
+  EXPECT_EQ(emulator_install::remote_add_argv("/usr/bin/flatpak"),
+            (std::vector<std::string> {"/usr/bin/flatpak", "remote-add", "--user", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"}));
+  EXPECT_EQ(emulator_install::install_argv("/usr/bin/flatpak", "dev.eden_emu.eden"),
+            (std::vector<std::string> {"/usr/bin/flatpak", "install", "--user", "--noninteractive", "-y", "flathub", "dev.eden_emu.eden"}));
+
+  EXPECT_TRUE(emulator_install::remote_listed("fedora\nflathub\n", "flathub"));
+  EXPECT_TRUE(emulator_install::remote_listed("  flathub  ", "flathub"));
+  EXPECT_FALSE(emulator_install::remote_listed("flathub-beta\nfedora\n", "flathub"));
+  EXPECT_FALSE(emulator_install::remote_listed("", "flathub"));
+}
+
+TEST(EmulatorInstall, AFailureSaysWhatWasTriedAndWhatFlatpakSaid) {
+  // Progress redraws one line with carriage returns; the reason is the last line with text.
+  EXPECT_EQ(emulator_install::last_output_line("Looking for matches\n\rDownloading 10%\rDownloading 90%\n\n"), "Downloading 90%");
+  EXPECT_EQ(emulator_install::last_output_line(std::string(1000, 'x')).size(), emulator_install::maximum_message_bytes);
+
+  emulator_install::run_result_t nothing_matches {1, false, "Looking for matches…\nerror: Nothing matches org.duckstation.DuckStation in remote flathub\n"};
+  EXPECT_EQ(emulator_install::failure_message("Installing DuckStation from Flathub", nothing_matches),
+            "Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub");
+  EXPECT_EQ(emulator_install::failure_message("Installing Eden from Flathub", {127, false, ""}),
+            "Installing Eden from Flathub failed (exit status 127).");
+  EXPECT_EQ(emulator_install::failure_message("Installing Eden from Flathub", {-1, true, "Downloading 40%"}),
+            "Installing Eden from Flathub took too long and was stopped.");
+  EXPECT_EQ(emulator_install::failure_message("Installing Eden from Flathub", {1, false, "error:\n"}),
+            "Installing Eden from Flathub failed (exit status 1).");
+}
+
+TEST(EmulatorInstall, AJobAddsFlathubOnlyWhenMissingAndOneRunsPerEmulator) {
+  const auto *eden = emulator_library::find_preset("eden");
+  const auto *dolphin = emulator_library::find_preset("dolphin");
+  ASSERT_NE(eden, nullptr);
+  ASSERT_NE(dolphin, nullptr);
+
+  std::mutex calls_mutex;
+  std::vector<std::string> calls;
+  std::string remotes_output = "fedora\n";
+  std::promise<void> release_install;
+  auto released = release_install.get_future().share();
+  std::atomic<bool> hold_install {false};
+  emulator_install::runner_t runner = [&](const std::vector<std::string> &argv, std::chrono::milliseconds) {
+    {
+      std::lock_guard lock(calls_mutex);
+      calls.push_back(argv.at(1) + (argv.size() > 1 ? " " + argv.back() : ""));
+    }
+    if (argv.at(1) == "remotes") {
+      return emulator_install::run_result_t {0, false, remotes_output};
+    }
+    if (argv.at(1) == "install" && hold_install) {
+      released.wait();
+    }
+    if (argv.at(1) == "install" && argv.back() == "org.DolphinEmu.dolphin-emu") {
+      return emulator_install::run_result_t {1, false, "error: Unable to load summary from remote flathub\n"};
+    }
+    return emulator_install::run_result_t {0, false, ""};
+  };
+  std::optional<std::string> flatpak = "/usr/bin/flatpak";
+  emulator_install::installer_t installer {runner, [&]() {
+                                             return flatpak;
+                                           }};
+
+  // Nothing to install without Flatpak, or for a preset with no Flatpak id.
+  flatpak.reset();
+  EXPECT_FALSE(installer.installable(*eden));
+  EXPECT_EQ(installer.start(*eden, {}), emulator_install::start_e::not_installable);
+  flatpak = "/usr/bin/flatpak";
+  auto no_flatpak_id = *eden;
+  no_flatpak_id.flatpak_id = {};
+  EXPECT_FALSE(installer.installable(no_flatpak_id));
+  EXPECT_TRUE(installer.installable(*eden));
+  EXPECT_FALSE(installer.job("eden").has_value());
+
+  // Flathub is added for the account first, then the emulator installs and its entries follow.
+  std::vector<std::string> installed;
+  const auto on_installed = [&](const emulator_library::preset_t &preset) {
+    std::lock_guard lock(calls_mutex);
+    installed.emplace_back(preset.id);
+  };
+  hold_install = true;
+  ASSERT_EQ(installer.start(*eden, on_installed), emulator_install::start_e::started);
+  ASSERT_TRUE(installer.job("eden").has_value());
+  EXPECT_EQ(installer.job("eden")->state, emulator_install::state_e::installing);
+  EXPECT_GT(installer.job("eden")->started_at, 0);
+  EXPECT_EQ(installer.job("eden")->finished_at, 0);
+  EXPECT_EQ(installer.start(*eden, on_installed), emulator_install::start_e::already_running);
+  release_install.set_value();
+  ASSERT_TRUE(installer.wait_idle_for_tests(std::chrono::seconds {10}));
+  hold_install = false;
+  EXPECT_EQ(calls, (std::vector<std::string> {"remotes --columns=name", "remote-add https://dl.flathub.org/repo/flathub.flatpakrepo", "install dev.eden_emu.eden"}));
+  EXPECT_EQ(installed, (std::vector<std::string> {"eden"}));
+  auto job = installer.job("eden");
+  ASSERT_TRUE(job.has_value());
+  EXPECT_EQ(job->state, emulator_install::state_e::installed);
+  EXPECT_EQ(job->message, "Eden is installed.");
+  EXPECT_GE(job->finished_at, job->started_at);
+
+  // With Flathub listed nothing is added, and a failure keeps Flatpak's reason and skips the entries.
+  calls.clear();
+  remotes_output = "fedora\nflathub\n";
+  ASSERT_EQ(installer.start(*dolphin, on_installed), emulator_install::start_e::started);
+  ASSERT_TRUE(installer.wait_idle_for_tests(std::chrono::seconds {10}));
+  EXPECT_EQ(calls, (std::vector<std::string> {"remotes --columns=name", "install org.DolphinEmu.dolphin-emu"}));
+  EXPECT_EQ(installed, (std::vector<std::string> {"eden"}));
+  job = installer.job("dolphin");
+  ASSERT_TRUE(job.has_value());
+  EXPECT_EQ(job->state, emulator_install::state_e::failed);
+  EXPECT_EQ(job->message, "Installing Dolphin from Flathub failed: Unable to load summary from remote flathub");
+
+  // A finished job does not block trying again.
+  EXPECT_EQ(installer.start(*dolphin, {}), emulator_install::start_e::started);
+  ASSERT_TRUE(installer.wait_idle_for_tests(std::chrono::seconds {10}));
 }
