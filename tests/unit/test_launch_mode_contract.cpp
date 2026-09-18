@@ -560,3 +560,19 @@ TEST(LaunchModeContractTests, ServerInfoAdvertisesTheCeilingTheLaunchWillEnforce
 
   restore();
 }
+
+TEST(HostPowerContract, ConsoleStatusCarriesReadinessWithoutClientFields) {
+  // The console's owner turns host_sleep_enabled on or off, so what it needs is
+  // whether sleep would work; the client-only fields would only mislead it.
+  const auto power = nvhttp::host_power_status();
+  EXPECT_FALSE(power.contains("sleep_endpoint"));
+  EXPECT_FALSE(power.contains("sleep_permitted"));
+  for (const auto *field : {"sleep_enabled", "sleep_supported", "sleep_blocked_reason", "sleep_blocked_message", "last_sleep_outcome", "last_sleep_message"}) {
+    EXPECT_TRUE(power.contains(field)) << field;
+  }
+  EXPECT_EQ(power["sleep_enabled"].get<bool>(), config::sunshine.host_sleep_enabled);
+  // A host that cannot sleep always says why.
+  if (!power["sleep_supported"].get<bool>()) {
+    EXPECT_FALSE(power["sleep_blocked_reason"].get<std::string>().empty());
+  }
+}

@@ -2472,6 +2472,13 @@ namespace nvhttp {
     return artwork_now_milliseconds();
   }
 
+  nlohmann::json host_power_status() {
+    auto host_power = build_host_power_contract(true);
+    host_power.erase("sleep_endpoint");
+    host_power.erase("sleep_permitted");
+    return host_power;
+  }
+
   std::optional<std::string> normalize_encoder_backend(std::string value) {
     value = lower_copy(std::move(value));
     if (value.empty() || !video::encoder_backend_selectable(value)) {

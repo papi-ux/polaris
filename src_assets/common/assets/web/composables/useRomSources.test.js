@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope } from 'vue'
 
-import { useRomSources } from './useRomSources'
+import { forgetInstallJobs, useRomSources } from './useRomSources'
 
 function respond(status, body) {
   return Promise.resolve({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) })
@@ -35,6 +35,7 @@ describe('useRomSources emulator installs', () => {
 
   afterEach(() => {
     scope.stop()
+    forgetInstallJobs()
     vi.useRealTimers()
     delete global.fetch
   })

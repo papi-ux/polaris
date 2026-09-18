@@ -1,6 +1,7 @@
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import Checkbox from '../../Checkbox.vue'
+import { hostPowerLines } from '../../host-power-status.js'
 
 const props = defineProps({
   platform: String,
@@ -42,6 +43,21 @@ function addCmd(cmdArr, template, idx) {
     cmdArr.splice(idx, 0, _tpl);
   }
 }
+
+// Whether logind would suspend this host for Polaris; nothing shows until the host answers.
+const hostPower = ref(null)
+
+async function loadHostPower() {
+  try {
+    const response = await fetch('./api/host/power', { credentials: 'include', cache: 'no-store' })
+    const body = await response.json().catch(() => null)
+    hostPower.value = response.ok && body?.status === true ? body : null
+  } catch {
+    hostPower.value = null
+  }
+}
+
+onMounted(loadHostPower)
 
 function removeCmd(cmdArr, index) {
   cmdArr.splice(index,1)
@@ -344,6 +360,12 @@ function handleSteamGridDbKeyInput() {
                 v-model="config.host_sleep_enabled"
                 default="false"
       ></Checkbox>
+      <ul v-if="hostPowerLines(hostPower, $t).length" class="mt-2 space-y-1 text-xs" data-host-power-status aria-live="polite">
+        <li v-for="line in hostPowerLines(hostPower, $t)" :key="line.text" :class="line.tone === 'ok' ? 'text-storm' : 'text-warning-bright'" :data-host-power-tone="line.tone">
+          {{ line.text }}
+          <a v-if="line.link" :href="line.link.href" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ line.link.label }}</a>
+        </li>
+      </ul>
     </section>
   </div>
 </template>

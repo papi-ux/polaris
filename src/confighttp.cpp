@@ -8867,6 +8867,27 @@ namespace confighttp {
     return item;
   }
 
+  /**
+   * @brief Whether this host could sleep, and how the last sleep request ended.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * The General tab shows it under Allow Clients To Sleep This Host, so the owner learns
+   * that polkit or logind would refuse before a client ever asks.
+   * @api_examples{/api/host/power| GET| null}
+   */
+  void getHostPower(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    auto output = nvhttp::host_power_status();
+    output["status"] = true;
+    send_response(response, output);
+  }
+
   void getNetworkPathProbe(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -9328,6 +9349,7 @@ namespace confighttp {
     server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
     server.resource["^/api/stats/stream-sse$"]["GET"] = getStreamStatsSSE;
     server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
+    server.resource["^/api/host/power$"]["GET"] = getHostPower;
     server.resource["^/api/support/gamescope-helper$"]["GET"] = getGamescopeHelperProbe;
     server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);

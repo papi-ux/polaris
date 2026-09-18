@@ -24,8 +24,14 @@ vi.mock('./composables/useGameScanner', () => ({
   useGameScanner: () => scannerState,
 }))
 
+// The console's English, so an assertion reads what a player sees and a missing key shows as itself.
+const enLocale = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
 const i18n = {
-  t(key) { return key },
+  t(key, params = {}) {
+    const message = key.split('.').reduce((node, part) => node?.[part], enLocale)
+    if (typeof message !== 'string') return key
+    return message.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
+  },
 }
 
 const webSource = (path) => readFileSync(join(process.cwd(), 'src_assets/common/assets/web', path), 'utf8')
@@ -352,6 +358,59 @@ describe('AppsView Find Cover', () => {
 
     expect(wrapper.find('[data-cover-state="error"]').text()).toContain('rate limiting')
     expect(wrapper.find('[data-cover-key-link]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('asks for a name instead of showing an empty panel when the entry has none', async () => {
+    const untitled = { ...hollowKnight, name: '' }
+    const wrapper = mountAppsView({ apps: [untitled] })
+    await flushPromises()
+    wrapper.vm.editApp(untitled)
+    await nextTick()
+    await openFinder(wrapper)
+
+    expect(coverCalls('search')).toHaveLength(0)
+    expect(wrapper.find('[data-cover-state="prompt"]').text()).toBe("Type the game's name, then search SteamGridDB for its cover.")
+
+    await wrapper.find('#coverQuery').setValue('Hollow Knight')
+    await wrapper.find('[data-cover-search]').trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('[data-cover-state="prompt"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-cover-candidate]')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('says what went wrong in words, not a status code, when the host gave no reason', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const wrapper = mountAppsView({
+      apps: [hollowKnight],
+      search: () => reply(500, null),
+    })
+    await flushPromises()
+    wrapper.vm.editApp(hollowKnight)
+    await nextTick()
+    await openFinder(wrapper)
+
+    const error = wrapper.find('[data-cover-state="error"]').text()
+    expect(error).toBe('The cover search failed. Try again in a moment.')
+    expect(error).not.toContain('HTTP')
+    expect(console.warn).toHaveBeenCalledWith('Find Cover: HTTP 500 without an error message')
+    wrapper.unmount()
+  })
+
+  it('tells a player whose console sign-in expired to sign in again', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const wrapper = mountAppsView({
+      apps: [hollowKnight],
+      // What the host's send_unauthorized answers.
+      search: () => reply(401, { status_code: 401, status: false, error: 'Unauthorized' }),
+    })
+    await flushPromises()
+    wrapper.vm.editApp(hollowKnight)
+    await nextTick()
+    await openFinder(wrapper)
+
+    expect(wrapper.find('[data-cover-state="error"]').text()).toBe('Your sign-in to this console has expired. Reload the page, sign in, then try again.')
     wrapper.unmount()
   })
 

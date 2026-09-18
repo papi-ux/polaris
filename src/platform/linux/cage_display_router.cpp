@@ -1056,12 +1056,17 @@ namespace cage_display_router {
 
     // Companion files with the same ownership contract: the root menu replaces
     // labwc's built-in Terminal + Exit fallback (the only UI a user sees on an
-    // empty private session) with one that explains what this screen is, and
-    // autostart paints a background when swaybg is present.
+    // empty private session) with one that explains what this screen is, the
+    // theme override gives that menu room to be read, and autostart paints a
+    // background when swaybg is present.
     {
       std::string menu_status;
       const bool generated_menu = platf::private_session_input::ensure_generated_menu_xml(config_dir, menu_status);
       BOOST_LOG(generated_menu ? info : warning) << "labwc: "sv << menu_status;
+
+      std::string theme_status;
+      const bool generated_theme = platf::private_session_input::ensure_generated_themerc_override(config_dir, theme_status);
+      BOOST_LOG(generated_theme ? info : warning) << "labwc: "sv << theme_status;
 
       std::string autostart_status;
       const bool generated_autostart = platf::private_session_input::ensure_generated_autostart(config_dir, autostart_status);
