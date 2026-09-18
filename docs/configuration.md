@@ -106,6 +106,65 @@ does not need a second request.
 Waking the host again is Wake-on-LAN, which Polaris does not do for you: enable it in the firmware
 and on the interface, and send the magic packet from the client.
 
+#### Before you turn it on
+
+A host that sleeps and cannot wake is worse than one that never sleeps, and four separate things can
+cause that. Linux reports none of them as a failure, so check them rather than assuming. Every one of
+these was found on a working desktop that looked correctly configured.
+
+**1. The firmware wake setting, and a cold power-down after it.** Enable the board's wake option: on
+ASUS boards it is **Advanced > APM Configuration > Power On By PCI-E/PCI**, and other vendors call it
+Wake on LAN or Resume by PCI-E. If the board offers **ErP Ready** or **EuP**, it has to be disabled,
+because it cuts standby power to the slots.
+
+Then shut the machine down fully, cut mains power for a few seconds, and start it again. Standby
+power to the PCIe slots is established at power-on, so a newly enabled wake setting does not take
+effect after an ordinary reboot. A host that was configured correctly and rebooted will still fail
+to wake.
+
+**2. The interface flag.** `ethtool <interface> | grep Wake-on` should report `g`. Persist it with
+`nmcli connection modify <connection> 802-3-ethernet.wake-on-lan magic`.
+
+Do not read `Wake-on: g` as evidence that waking works. It says the driver armed the card. It says
+nothing about whether the firmware will power that card while the host is asleep, and it reads
+exactly the same on a host that cannot wake at all.
+
+**3. Devices that wake the host straight back.** A trackball picks up desk vibration and a wireless
+receiver picks up stray RF, and either will wake the machine within seconds of every suspend, which
+looks like the host refusing to stay asleep. List what is armed:
+
+```bash
+for f in /sys/bus/usb/devices/*/power/wakeup; do
+  [ "$(cat "$f" 2>/dev/null)" = enabled ] && echo "$f"
+done
+```
+
+Turn one off with `echo disabled | sudo tee <that path>`. That resets on every boot, so make it stick
+with a udev rule matched on the device rather than on its port:
+
+```
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="1234", ATTR{idProduct}=="5678", ATTR{power/wakeup}="disabled"
+```
+
+Leave at least one way to wake the host. Turning off every USB wake source on a machine whose
+Wake-on-LAN does not work leaves nothing but the power button.
+
+**4. Anything blocked on a network or FUSE mount.** A single task that will not freeze aborts the
+whole suspend, and the host simply stays awake. The kernel blames the freezer rather than the
+process, so look for the name yourself:
+
+```bash
+journalctl -k | grep -A3 "refusing to freeze"
+```
+
+A command walking a remote filesystem is the usual culprit, and an unscoped `find /` will find one.
+Polaris reports this case: the suspend is accepted and then does not happen, and `host_power` carries
+`last_sleep_outcome` of `failed` with a reason.
+
+**Testing it.** Sleep the host once while you are standing next to it, and send a magic packet from
+another machine on the same network. If it comes back, the round trip works. If it does not, you are
+one power button press from trying again, which is the cheapest moment to find out.
+
 #### When suspend works in a terminal but not from Polaris
 
 `sleep_blocked_reason: polkit_denied` means logind will only suspend after an interactive
