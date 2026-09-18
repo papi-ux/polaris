@@ -683,8 +683,11 @@ namespace session_manager {
   // ---------------------------------------------------------------------
 
   static std::string logind_call(const std::string &method, const std::string &args) {
+    // A bounded wait: CanSuspend is asked while a console or client request
+    // waits, and logind asks polkit before it answers, so a hung polkit would
+    // otherwise hold that request for busctl's default 25 s.
     std::string cmd =
-      "busctl --system call org.freedesktop.login1 /org/freedesktop/login1 "
+      "busctl --system --timeout=5 call org.freedesktop.login1 /org/freedesktop/login1 "
       "org.freedesktop.login1.Manager ";
     cmd += method;
     if (!args.empty()) {

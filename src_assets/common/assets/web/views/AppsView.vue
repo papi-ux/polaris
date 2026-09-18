@@ -116,11 +116,11 @@
             </select>
             <div v-if="selectedRomPresetInstall" class="mt-2 flex flex-wrap items-center gap-2" data-rom-preset-install>
               <span class="text-xs" :class="selectedRomPresetInstall === 'installing' ? 'text-storm' : 'text-warning-bright'">
-                {{ selectedRomPresetInstall === 'installing' ? `${selectedRomPreset.install_job.message} ${ROM_INSTALL_WAIT_HINT}` : `${selectedRomPreset.label} is not installed on this host, so its games will not start until it is.` }}
+                {{ selectedRomPresetInstall === 'installing' ? `${selectedRomPreset.install_job.message} ${$t('apps.flathub_install_wait')}` : $t('apps.flathub_not_installed', { name: selectedRomPreset.label }) }}
               </span>
-              <Button v-if="selectedRomPresetInstall === 'offer'" type="button" variant="outline" size="sm" :disabled="!!romInstallRequests[selectedRomPreset.id]" :loading="!!romInstallRequests[selectedRomPreset.id]" data-rom-preset-install-button @click="installRomEmulator(selectedRomPreset)">Install from Flathub</Button>
+              <Button v-if="selectedRomPresetInstall === 'offer'" type="button" variant="outline" size="sm" :disabled="!!romInstallRequests[selectedRomPreset.id]" :loading="!!romInstallRequests[selectedRomPreset.id]" data-rom-preset-install-button @click="installRomEmulator(selectedRomPreset)">{{ $t('apps.flathub_install') }}</Button>
             </div>
-            <div v-if="romEmulatorInstallFailure(selectedRomPreset || {})" class="mt-1 text-xs text-warning-bright" data-rom-preset-install-failed>{{ romEmulatorInstallFailure(selectedRomPreset || {}) }}</div>
+            <div v-if="romInstallFailure(selectedRomPreset || {})" class="mt-1 text-xs text-warning-bright" data-rom-preset-install-failed>{{ romInstallFailure(selectedRomPreset || {}) }}</div>
             <div v-for="check in selectedRomPreset?.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-preset-check>
               {{ check.message }} <span class="font-mono">{{ check.action }}</span>
             </div>
@@ -159,8 +159,8 @@
               <div v-for="check in source.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-folder-check>
                 {{ check.message }} <span class="font-mono break-all">{{ check.action }}</span>
               </div>
-              <div v-if="romEmulatorInstallState(source) === 'installing'" class="mt-1 text-xs text-storm" data-rom-folder-installing>{{ source.install_job.message }} {{ ROM_INSTALL_WAIT_HINT }}</div>
-              <div v-else-if="romEmulatorInstallFailure(source)" class="mt-1 text-xs text-warning-bright" data-rom-folder-install-failed>{{ romEmulatorInstallFailure(source) }}</div>
+              <div v-if="romEmulatorInstallState(source) === 'installing'" class="mt-1 text-xs text-storm" data-rom-folder-installing>{{ source.install_job.message }} {{ $t('apps.flathub_install_wait') }}</div>
+              <div v-else-if="romInstallFailure(source)" class="mt-1 text-xs text-warning-bright" data-rom-folder-install-failed>{{ romInstallFailure(source) }}</div>
             </div>
             <div class="flex shrink-0 flex-wrap items-start justify-end gap-2">
               <Button
@@ -171,7 +171,7 @@
                 :loading="romEmulatorInstallState(source) === 'installing' || !!romInstallRequests[source.emulator]"
                 data-rom-folder-install
                 @click="installRomEmulator(source)"
-              >{{ romEmulatorInstallState(source) === 'installing' ? 'Installing' : 'Install from Flathub' }}</Button>
+              >{{ romEmulatorInstallState(source) === 'installing' ? $t('apps.flathub_installing') : $t('apps.flathub_install') }}</Button>
               <Button variant="ghost" size="sm" :disabled="romSourceSaving" data-rom-folder-remove @click="removeRomSource(source)">Remove</Button>
             </div>
           </article>
@@ -742,36 +742,39 @@
               </div>
               <div class="app-editor-inline-control">
                 <input type="text" class="app-editor-input" id="appName" v-model="editForm.name" />
-                <div class="relative" ref="coverFinderWrapper">
-                  <button class="app-editor-secondary-button" type="button" aria-controls="coverFinder" :aria-expanded="coverFinderOpen ? 'true' : 'false'" @click="showCoverFinder">
+                <div class="relative shrink-0" ref="coverFinderWrapper">
+                  <button class="app-editor-secondary-button whitespace-nowrap" type="button" aria-controls="coverFinder" :aria-expanded="coverFinderOpen ? 'true' : 'false'" @click="showCoverFinder">
                     {{ $t('apps.find_cover') }}
                   </button>
-                  <div v-if="coverFinderOpen" id="coverFinder" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
+                  <div v-if="coverFinderOpen" id="coverFinder" class="absolute left-0 sm:left-auto sm:right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-5rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
                     <div class="flex justify-between items-center p-3 border-b border-storm">
-                      <h4 class="text-silver font-medium">{{ $t('apps.covers_found') }}</h4>
-                      <button type="button" class="text-storm hover:text-silver" aria-label="Close cover search" @click="closeCoverFinder">
+                      <h4 class="text-silver font-medium">{{ $t('apps.find_cover') }}</h4>
+                      <button type="button" class="text-storm hover:text-silver" :aria-label="$t('apps.find_cover_close')" @click="closeCoverFinder">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                       </button>
                     </div>
                     <form class="flex gap-2 p-3 border-b border-storm" data-cover-search @submit.prevent="searchCovers">
-                      <label for="coverQuery" class="sr-only">Game to search SteamGridDB for</label>
-                      <input id="coverQuery" v-model="coverQuery" type="search" class="app-editor-input" placeholder="Game name" autocomplete="off" />
-                      <button type="submit" class="app-editor-secondary-button" :disabled="coverSearching || !coverQuery.trim()">Search</button>
+                      <label for="coverQuery" class="sr-only">{{ $t('apps.find_cover_query_label') }}</label>
+                      <input id="coverQuery" v-model="coverQuery" type="search" class="app-editor-input" :placeholder="$t('apps.find_cover_placeholder')" autocomplete="off" />
+                      <button type="submit" class="app-editor-secondary-button" :disabled="coverSearching || !coverQuery.trim()">{{ $t('apps.find_cover_search') }}</button>
                     </form>
                     <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }" aria-live="polite">
                       <div v-if="coverSearching && !coverGame" class="flex items-center gap-2 text-sm text-storm" data-cover-state="searching">
                         <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
-                        <span>Searching SteamGridDB for "{{ coverSearchedQuery }}"</span>
+                        <span>{{ $t('apps.find_cover_searching', { query: coverSearchedQuery }) }}</span>
                       </div>
                       <div v-if="coverError" class="mb-3 text-sm text-warning-bright" role="alert" data-cover-state="error">
                         <p>{{ coverError }}</p>
-                        <a v-if="coverNeedsKey" href="#/config#steamgriddb_api_key" target="_blank" rel="noopener" class="mt-1 inline-block text-ice hover:underline" data-cover-key-link>Open the SteamGridDB API key setting</a>
+                        <a v-if="coverNeedsKey" href="#/config#steamgriddb_api_key" target="_blank" rel="noopener" class="mt-1 inline-block text-ice hover:underline" data-cover-key-link>{{ $t('apps.find_cover_key_link') }}</a>
                       </div>
                       <p v-if="!coverGame && !coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-storm" data-cover-state="empty">
-                        No covers found for "{{ coverSearchedQuery }}". Try a shorter or different name.
+                        {{ $t('apps.find_cover_empty', { query: coverSearchedQuery }) }}
+                      </p>
+                      <p v-if="!coverGame && !coverSearching && !coverError && !coverSearchedQuery" class="text-sm text-storm" data-cover-state="prompt">
+                        {{ $t('apps.find_cover_prompt') }}
                       </p>
                       <div v-if="!coverGame && !coverSearching && coverCandidates.length" class="grid grid-cols-3 gap-3">
-                        <button v-for="cover in coverCandidates" :key="cover.token" type="button" class="min-w-0 text-left cursor-pointer hover:opacity-80 transition" :title="`Posters for ${coverLabel(cover)}`" data-cover-candidate @click="openCoverGame(cover)">
+                        <button v-for="cover in coverCandidates" :key="cover.token" type="button" class="min-w-0 text-left cursor-pointer hover:opacity-80 transition" :title="$t('apps.find_cover_posters_for', { title: coverLabel(cover) })" data-cover-candidate @click="openCoverGame(cover)">
                           <span class="cover-container block">
                             <img class="rounded" :src="cover.preview" :alt="coverLabel(cover)" />
                           </span>
@@ -781,12 +784,12 @@
                       </div>
                       <div v-if="coverGame" data-cover-game>
                         <div class="mb-3 flex items-center gap-2">
-                          <button type="button" class="app-editor-secondary-button shrink-0" data-cover-back @click="closeCoverGame">All matches</button>
+                          <button type="button" class="app-editor-secondary-button shrink-0" data-cover-back @click="closeCoverGame">{{ $t('apps.find_cover_all_matches') }}</button>
                           <p class="min-w-0 truncate text-sm text-silver" :title="coverLabel(coverGame)">{{ coverLabel(coverGame) }}</p>
                         </div>
                         <div v-if="coverChoicesLoading" class="flex items-center gap-2 text-sm text-storm" data-cover-state="loading-posters">
                           <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
-                          <span>Loading posters for "{{ coverGame.title }}"</span>
+                          <span>{{ $t('apps.find_cover_loading_posters', { title: coverGame.title }) }}</span>
                         </div>
                         <div v-else class="grid grid-cols-3 gap-3">
                           <button v-for="(poster, index) in coverPosters" :key="poster.token" type="button" class="min-w-0 cursor-pointer hover:opacity-80 transition" :title="posterLabel(index)" data-cover-poster @click="useCover(poster)">
@@ -1204,7 +1207,7 @@ import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
 import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
 import { filterImportGames, summarizeImportGames } from '../library-imports'
-import { useRomSources } from '../composables/useRomSources'
+import { romInstallsPending, useRomSources } from '../composables/useRomSources'
 import {
   CUSTOM_EMULATOR, blankRomSourceForm, romEmulatorId, romEmulatorInstallFailure, romEmulatorInstallState, romSourceCountLabel,
   romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus, validateRomSourceForm
@@ -1227,7 +1230,10 @@ const {
   error: romSourceRequestError, load: loadRomSources, add: addRomSource, remove: removeRomSourceById,
   installRequests: romInstallRequests, install: installRomEmulatorById, onInstallFinished: onRomEmulatorInstallFinished
 } = useRomSources()
-const ROM_INSTALL_WAIT_HINT = 'A download can take a few minutes; this updates when it is done.'
+// Flatpak's own reason when it gave one, else the console's.
+function romInstallFailure(entry) {
+  return romEmulatorInstallFailure(entry, i18n.t('apps.flathub_install_failed'))
+}
 const showRomSourceForm = ref(false)
 const romSourceFormError = ref('')
 const romSourceForm = ref(blankRomSourceForm())
@@ -1270,18 +1276,18 @@ async function submitRomSource() {
 async function installRomEmulator(entry) {
   const emulator = romEmulatorId(entry)
   if (await installRomEmulatorById(emulator)) {
-    showToast(`Installing ${entry.label || emulator} from Flathub`, 'info')
+    showToast(i18n.t('apps.flathub_install_started', { name: entry.label || emulator }), 'info')
   }
 }
 
 onRomEmulatorInstallFinished(({ job }) => {
   if (job?.state === 'installed') {
-    showToast(job.message || 'Emulator installed', 'success')
+    showToast(job.message || i18n.t('apps.flathub_installed'), 'success')
     // Rescan so each folder shows what the emulator still needs, such as Eden's keys.
     scanGames()
     return
   }
-  showToast(job?.message || 'The install from Flathub failed', 'error', 8000)
+  showToast(job?.message || i18n.t('apps.flathub_install_failed'), 'error', 8000)
 })
 
 async function removeRomSource(source) {
@@ -1293,6 +1299,9 @@ async function removeRomSource(source) {
 watch(showImport, (open) => {
   if (open) loadRomSources()
 })
+// An install that was running when the player left the page is read again at once, so its
+// finish is reported now rather than the next time Import Games opens.
+if (romInstallsPending()) loadRomSources()
 async function doImport() {
   const count = await importSelected()
   if (count > 0) {
@@ -1865,7 +1874,9 @@ function coverLabel(cover) {
 }
 
 function posterLabel(index) {
-  return coverGame.value ? `Poster ${index + 1} for ${coverLabel(coverGame.value)}` : `Poster ${index + 1}`
+  return coverGame.value
+    ? i18n.t('apps.find_cover_poster_for', { number: index + 1, title: coverLabel(coverGame.value) })
+    : i18n.t('apps.find_cover_poster', { number: index + 1 })
 }
 
 function showCoverFinder() {
@@ -1874,11 +1885,21 @@ function showCoverFinder() {
   if (coverQuery.value) searchCovers()
 }
 
-function showCoverFailure(response, body, fallback) {
+// The host's own sentence when it gave one. A bare status code means nothing to a player, so it
+// only goes to the browser console. An expired sign-in comes first: the host's answer to it is
+// the single word "Unauthorized".
+function showCoverFailure(response, body, fallbackKey) {
   coverErrorCode.value = typeof body?.code === 'string' ? body.code : ""
-  coverError.value = typeof body?.error === 'string' && body.error
-    ? body.error
-    : `${fallback} (HTTP ${response.status}).`
+  if (response.status === 401) {
+    coverError.value = i18n.t('apps.find_cover_signed_out')
+    return
+  }
+  if (typeof body?.error === 'string' && body.error) {
+    coverError.value = body.error
+    return
+  }
+  console.warn(`Find Cover: HTTP ${response.status} without an error message`)
+  coverError.value = i18n.t(fallbackKey)
 }
 
 async function searchCovers() {
@@ -1897,7 +1918,7 @@ async function searchCovers() {
     const body = await response.json().catch(() => null)
     if (sequence !== coverSearchSequence) return
     if (!response.ok || body?.status !== true) {
-      showCoverFailure(response, body, 'The cover search failed')
+      showCoverFailure(response, body, 'apps.find_cover_search_failed')
       return
     }
     const candidates = Array.isArray(body.candidates) ? body.candidates : []
@@ -1905,7 +1926,7 @@ async function searchCovers() {
   } catch {
     if (sequence !== coverSearchSequence) return
     coverErrorCode.value = ""
-    coverError.value = "Polaris could not run the cover search. Check the connection to the host and try again."
+    coverError.value = i18n.t('apps.find_cover_search_unreachable')
   } finally {
     if (sequence === coverSearchSequence) coverSearching.value = false
   }
@@ -1945,7 +1966,7 @@ async function openCoverGame(game) {
     const body = await response.json().catch(() => null)
     if (sequence !== coverChoicesSequence) return
     if (!response.ok || body?.status !== true) {
-      showCoverFailure(response, body, 'Polaris could not list the posters for that game')
+      showCoverFailure(response, body, 'apps.find_cover_posters_failed')
       return
     }
     const choices = Array.isArray(body.choices) ? body.choices : []
@@ -1953,7 +1974,7 @@ async function openCoverGame(game) {
   } catch {
     if (sequence !== coverChoicesSequence) return
     coverErrorCode.value = ""
-    coverError.value = "Polaris could not list the posters. Check the connection to the host and try again."
+    coverError.value = i18n.t('apps.find_cover_posters_unreachable')
   } finally {
     if (sequence === coverChoicesSequence) coverChoicesLoading.value = false
   }
@@ -1977,7 +1998,7 @@ async function useCover(cover) {
     // The editor moved on to another entry while the pick was saving.
     if (uuid !== coverSearchUuid) return
     if (!response.ok || body?.status !== true || !body.path) {
-      showCoverFailure(response, body, 'Polaris could not use that cover')
+      showCoverFailure(response, body, 'apps.find_cover_use_failed')
       return
     }
     // The pick lands in the form; the entry changes when the player saves it.
@@ -1985,7 +2006,7 @@ async function useCover(cover) {
     closeCoverFinder()
   } catch {
     if (uuid !== coverSearchUuid) return
-    coverError.value = "Polaris could not use that cover. Check the connection to the host and try again."
+    coverError.value = i18n.t('apps.find_cover_use_unreachable')
   } finally {
     // Only the newest pick clears the panel, so an answer for an entry the editor has left
     // cannot let a second pick start while this one is still saving.
