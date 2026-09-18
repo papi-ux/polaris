@@ -119,8 +119,13 @@ jobs:
           set -euo pipefail
           tag="steam-${{ inputs.variant }}-${REVISION:0:12}"
           echo "${{ github.token }}" | skopeo login ghcr.io --username ${{ github.actor }} --password-stdin
+          # Unpack first: reading oci-archive: directly makes skopeo chown into a temp
+          # directory, which fails for an unprivileged runner. tar as a normal user does
+          # not chown, and the layout copy preserves the same digests.
+          mkdir oci-layout
+          tar -xf "$DIRECTORY/worker.oci.tar" -C oci-layout
           # A docker push re-encodes layers, which catalog preparation then rejects.
-          skopeo copy --preserve-digests "oci-archive:$DIRECTORY/worker.oci.tar" "docker://$REGISTRY:$tag"
+          skopeo copy --preserve-digests "oci:oci-layout" "docker://$REGISTRY:$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Record the registry manifest bytes and immutable digest
