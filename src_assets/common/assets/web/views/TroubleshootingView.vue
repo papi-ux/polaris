@@ -1164,10 +1164,11 @@ async function collectSupportContext() {
 
 async function createSupportBundle(providedContext = null) {
   const context = providedContext || await collectSupportContext()
-  return buildAnonymizedDiagnosticsBundle({
-    ...context,
-    issue_draft: buildGithubIssueDraft(context),
-  })
+  // The bundle builds its own issue draft, from the same address book as the rest
+  // of the export. A draft built here would label addresses from a book of its
+  // own, and only agree with the bundle for as long as both happen to meet the
+  // same addresses in the same order.
+  return buildAnonymizedDiagnosticsBundle(context)
 }
 
 async function copyIssueDraft() {

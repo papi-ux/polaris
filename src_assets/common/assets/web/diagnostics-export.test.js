@@ -107,6 +107,68 @@ describe('diagnostics export redaction', () => {
   })
 })
 
+describe('diagnostics export network addresses', () => {
+  const sessionLogs = [
+    '[2026-09-17 21:25:03.178]: Info: Session started for [Steamdeck] from 192.168.1.192 [active sessions: 1]',
+    '[2026-09-17 22:02:52.694]: Info: Session started for [Steamdeck] from 100.109.196.18 [active sessions: 1]',
+  ].join('\n')
+
+  it('exports no address verbatim, anywhere in the bundle', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: sessionLogs,
+      session_snapshot: { client_ip: '192.168.1.192' },
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nlast peer 100.109.196.18' },
+    })
+    const exported = JSON.stringify(bundle)
+
+    expect(exported).not.toContain('192.168.1.192')
+    expect(exported).not.toContain('100.109.196.18')
+    // The kind survives, which is what made the original bundle diagnosable.
+    expect(bundle.logs).toContain('from [lan-')
+    expect(bundle.logs).toContain('from [cgnat-')
+  })
+
+  it('gives one address the same label in the logs, the fields and the issue draft', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: sessionLogs,
+      session_snapshot: { client_ip: '100.109.196.18' },
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nlast peer 100.109.196.18' },
+    })
+    const inLogs = /from (\[cgnat-\d+\])/.exec(bundle.logs)[1]
+
+    expect(bundle.session_snapshot.client_ip).toBe(inLogs)
+    expect(bundle.issue_draft).toContain(`last peer ${inLogs}`)
+  })
+
+  it('gives two different devices two different labels', () => {
+    // One in the logs, one in the crash evidence the draft quotes. The guard
+    // against separately built parts disagreeing lives in the AI Doctor payload
+    // test, where the parts really are sanitised from different subsets; here the
+    // draft sanitises the whole input first, so it would agree either way.
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: '[2026-09-17 21:25:03.178]: Info: Session started for [Steamdeck] from 192.168.1.192',
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nlast peer 192.168.1.135' },
+    })
+    const connected = /from (\[lan-\d+\])/.exec(bundle.logs)[1]
+    const crashed = /last peer (\[lan-\d+\])/.exec(bundle.issue_draft)[1]
+
+    expect(connected).not.toBe(crashed)
+  })
+
+  it('says so in the redaction notice', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({})
+
+    expect(bundle.redaction_notice).toContain('Network addresses are replaced with labels')
+  })
+
+  it('keeps addresses out of a prefilled public issue', () => {
+    const url = buildGithubIssueUrl({ logs: sessionLogs, crash: { ...crashedRun, evidence: 'peer 192.168.1.192' } })
+
+    expect(decodeURIComponent(url)).not.toContain('192.168.1.192')
+    expect(decodeURIComponent(url)).not.toContain('100.109.196.18')
+  })
+})
+
 
 describe('GitHub issue draft support flow', () => {
   it('builds a redacted GitHub-ready issue draft from support evidence without submitting it', () => {
@@ -1252,14 +1314,15 @@ describe('silent failure reporting', () => {
       .not.toContain('## Actions that reported success and did not land')
   })
 
-  it('carries crash and silent failures into the bundle at version 3', () => {
+  it('carries crash and silent failures into the bundle at the current version', () => {
     const bundle = buildAnonymizedDiagnosticsBundle({
       version: '1.3.11',
       crash: crashedRun,
       silent_failures: silentFailures,
     })
 
-    expect(bundle.support_bundle_version).toBe(4)
+    // 5 since network addresses became labels.
+    expect(bundle.support_bundle_version).toBe(5)
     expect(bundle.crash.outcome).toBe('crashed')
     expect(bundle.silent_failures).toHaveLength(1)
     expect(bundle.issue_draft).toContain('SIGSEGV')

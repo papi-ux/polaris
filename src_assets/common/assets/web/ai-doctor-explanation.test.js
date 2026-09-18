@@ -84,6 +84,35 @@ describe('AI Doctor explanation payload', () => {
     expect(serialized).not.toContain('api.openai.com')
     expect(serialized).not.toContain('must-never-cross-the-browser-wire')
   })
+
+  it('never gives two addresses one label, even across separately sanitised parts', () => {
+    // The evidence and the deterministic summary are sanitised from different
+    // subsets of the bundle. The summary here mentions only the other peer, so
+    // with an address book each, both addresses came out as [lan-1] and the
+    // provider would have read one device where there were two. (Mentioning the
+    // client in the summary too would hide this: both books would then meet it
+    // first and agree by coincidence.)
+    const payload = buildAiDoctorExplanationPayload({
+      supportBundle: { session_snapshot: { client_ip: '192.168.1.192' } },
+      deterministicSummary: { note: 'peer 192.168.1.135 dropped' },
+    })
+    const client = payload.evidence.session_snapshot.client_ip
+    const peer = /peer (\[lan-\d+\])/.exec(payload.deterministic_source_of_truth.note)[1]
+
+    expect(client).toMatch(/^\[lan-\d+\]$/)
+    expect(peer).not.toBe(client)
+    expect(JSON.stringify(payload)).not.toContain('192.168.1.')
+  })
+
+  it('labels one address the same in the evidence and the summary', () => {
+    const payload = buildAiDoctorExplanationPayload({
+      supportBundle: { session_snapshot: { client_ip: '192.168.1.192' } },
+      deterministicSummary: { note: 'client 192.168.1.192 reconnected' },
+    })
+    const client = payload.evidence.session_snapshot.client_ip
+
+    expect(payload.deterministic_source_of_truth.note).toBe(`client ${client} reconnected`)
+  })
 })
 
 describe('AI Doctor explanation parsing', () => {

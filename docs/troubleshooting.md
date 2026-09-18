@@ -617,6 +617,13 @@ apikey, and key when something qualifies it, as in api_key. Names that merely co
 such as keyboard, stay readable so the bundle remains worth reading. The exact rule is stated in
 the bundle itself under `redaction_notice`.
 
+Network addresses are replaced too, in the bundle, the pre-filled issue and copied support text.
+Each one becomes a label that keeps what kind of address it was, such as `[lan-1]`, `[cgnat-1]`
+(the range Tailscale uses on IPv4), `[tailscale-1]`, `[link-local-1]` or `[public-1]`, and the same
+address keeps the same label throughout one export. That keeps the part that usually matters, such
+as a client that moved from your LAN to a tailnet, without saying which address it had. Loopback,
+multicast and example addresses stay as they are.
+
 Redaction is not a promise that a bundle is safe to publish unread. Look at it first.
 
 ### Reporting a crash
