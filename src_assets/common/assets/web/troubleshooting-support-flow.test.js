@@ -73,7 +73,7 @@ describe('Troubleshooting self-service support flow', () => {
     const source = webSource('views/TroubleshootingView.vue')
 
     expect(source).toContain('const context = await collectSupportContext()')
-    expect(source).toContain('const supportBundle = await createSupportBundle(context)')
+    expect(source).toContain('const supportBundle = buildAnonymizedDiagnosticsBundle(context, { addresses })')
     expect(source).toContain('const config = context.config || {}')
     expect(source).not.toContain('const config = supportBundle.config || {}')
   })

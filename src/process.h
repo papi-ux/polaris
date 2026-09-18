@@ -585,6 +585,8 @@ namespace proc {
     std::string emulator;       // ROM folder imports: the emulator preset id ("eden") or "custom", or ""
     std::string rom_path;       // ROM folder imports: the game file the entry launches, or ""
     std::string rom_folder;     // ROM folder imports: the library_sources.json id of the folder it came from, or ""
+    std::string heroic_app_name;  // Heroic imports: Heroic's id for the game, or "" on the entry that opens Heroic
+    std::string lutris_slug;      // Lutris imports: the game's slug, or "" on the entry that opens Lutris
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
     int64_t last_launched = 0;  // unix timestamp (seconds since epoch)
@@ -654,6 +656,17 @@ namespace proc {
    * such an entry without matching its name.
    */
   bool launches_nothing(const ctx_t &app);
+
+  /**
+   * @brief Whether an entry is one particular game rather than a launcher, an emulator or the desktop.
+   *
+   * A Steam app id, a ROM file, or the id a Heroic or Lutris import carries for its game says which
+   * game an entry is. The entries that open Heroic, Lutris, an emulator or Big Picture carry none of
+   * those, and neither does one that streams the desktop. A manual entry is taken at its word.
+   * Anything that looks a game up by its title needs this: a launcher's name is an ordinary word, and
+   * a catalogue finds some game that shares it (Heroic was given Heroic Dungeon's completion time).
+   */
+  bool is_one_game(const ctx_t &app);
 
   /**
    * @brief What an entry imported from a ROM folder runs with its emulator as installed now.

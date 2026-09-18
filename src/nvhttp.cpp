@@ -2869,13 +2869,6 @@ namespace nvhttp {
     }
 
     /**
-     * @brief How long the dataset says this game takes to finish, when it knows.
-     *
-     * Local file only: How Long To Beat gates its API behind a fingerprint check and
-     * rotates the endpoint deliberately, so a distributed product cannot depend on it
-     * without breaking for every install at once.
-     */
-    /**
      * @brief The title someone has told us this entry actually is, if they have.
      *
      * Only a manual match counts. An automatic one is the same guess the estimate would
@@ -2892,6 +2885,13 @@ namespace nvhttp {
       return match->value("title", "");
     }
 
+    /**
+     * @brief How long the dataset says this game takes to finish, when it knows.
+     *
+     * Local file only: How Long To Beat gates its API behind a fingerprint check and
+     * rotates the endpoint deliberately, so a distributed product cannot depend on it
+     * without breaking for every install at once.
+     */
     std::optional<nlohmann::json> beat_time_for_app(const proc::ctx_t &app, const nlohmann::json &artwork) {
       const auto &data = beat_times::dataset();
       const auto curated = curated_title(artwork);
@@ -4687,9 +4687,19 @@ namespace nvhttp {
       BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name << "] requested to ["sv << mode_str
                       << "] source="sv
                       << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv : "client_request"sv);
+      launch_session->display_mode_requested = mode_str;
+      launch_session->display_mode_applied = mode_str;
+      launch_session->display_mode_pinned_by_host = false;
     } else {
       mode = std::stringstream(named_cert_p->display_mode);
-      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode << ']';
+      // What the client asked for is kept too, so the Doctor can say it was replaced rather
+      // than leave "I can't select 1080p" looking like a client problem.
+      const auto requested_mode = get_arg(args, "mode", "");
+      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode
+                      << "] requested=["sv << requested_mode << ']';
+      launch_session->display_mode_requested = requested_mode;
+      launch_session->display_mode_applied = named_cert_p->display_mode;
+      launch_session->display_mode_pinned_by_host = true;
     }
 
     // Split mode by the char "x", to populate width/height/fps
@@ -8863,8 +8873,13 @@ namespace nvhttp {
         if (const auto play_time = play_time_for_app(app)) {
           game["play_time"] = *play_time;
         }
-        if (const auto beat_time = beat_time_for_app(app, game["artwork"])) {
-          game["beat_time"] = *beat_time;
+        // Only one particular game has a completion time. A launcher's or an emulator's title is
+        // an ordinary word, and the lookup finds a game that shares it: Heroic was given the hours
+        // of a game called Heroic Dungeon. Skipping here also keeps it from asking at all.
+        if (!uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {
+          if (const auto beat_time = beat_time_for_app(app, game["artwork"])) {
+            game["beat_time"] = *beat_time;
+          }
         }
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
