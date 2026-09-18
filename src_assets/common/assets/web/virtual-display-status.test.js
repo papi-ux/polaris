@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 
 import {
+  VIRTUAL_DISPLAY_BACKEND_OPTIONS,
   kscreenConnectorOptions,
   presentKscreenConnector,
   presentVirtualDisplayStatus,
@@ -96,6 +97,28 @@ describe('virtual display status presentation', () => {
     expect(wrapper.text()).toContain('separate from the general capture Output Name field')
     wrapper.unmount()
   })
+  it('offers exactly the backends the host accepts, Automatic first', () => {
+    expect(VIRTUAL_DISPLAY_BACKEND_OPTIONS.map((option) => option.value)).toEqual(['auto', 'evdi', 'kwin', 'wlr', 'kscreen'])
+  })
+
+  it('saves the backend choice and explains a KWin screen only when KWin is the backend', async () => {
+    vi.stubGlobal('fetch', kscreenFetch({
+      status: { available: true, backend: 'KWin virtual output', policy_mode: 'host_virtual_display' },
+      outputs: { outputs: [] },
+    }))
+    const config = reactive({ linux_virtual_display_backend: 'auto', linux_streaming_output: '' })
+    const wrapper = shallowMount(VirtualDisplayStatus, { props: { platform: 'linux', config } })
+
+    await flushPromises()
+    expect(wrapper.find('[data-kwin-virtual-screen]').exists()).toBe(true)
+    expect(wrapper.find('[data-kwin-virtual-screen]').text()).toContain('Nothing is borrowed')
+    // The borrowed-connector field belongs to kscreen-doctor alone.
+    expect(wrapper.find('[data-kscreen-configuration]').exists()).toBe(false)
+    await wrapper.find('[data-vdisplay-backend-select]').setValue('kwin')
+    expect(config.linux_virtual_display_backend).toBe('kwin')
+    wrapper.unmount()
+  })
+
   it('keeps the KScreen connector field reachable once the backend is configured', async () => {
     vi.stubGlobal('fetch', kscreenFetch({
       status: { available: true, policy_mode: 'host_virtual_display' },

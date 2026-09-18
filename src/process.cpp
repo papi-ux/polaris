@@ -8126,9 +8126,10 @@ namespace proc {
       if (isLinuxVDisplayAvailable()) {
         int target_fps = launch_session->fps ? launch_session->fps : 60000;
 
-        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally)
+        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally).
+        // Rounded: 59940 is 60 Hz, and truncating it asked a KWin screen for 59.
         if (target_fps >= 1000) {
-          target_fps /= 1000;
+          target_fps = (target_fps + 500) / 1000;
         }
 
         if (config::video.double_refreshrate) {
@@ -8157,6 +8158,12 @@ namespace proc {
                           << " ("sv << render_width << "x"sv << render_height
                           << "@"sv << target_fps << "Hz) via "sv
                           << virtual_display::backend_name(linux_vdisplay->backend);
+          // A KWin virtual screen carries no HDR. Record why, so an HDR request
+          // that comes out SDR has an answer in the Doctor.
+          if (linux_vdisplay->backend == virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT && launch_session->enable_hdr) {
+            stream_stats::update_hdr_policy(false, "kwin_virtual_output_sdr", launch_session->device_name);
+            BOOST_LOG(info) << "Virtual Display: HDR was requested, and a KWin virtual screen carries none; streaming SDR"sv;
+          }
 
           // Set output_name to the newly created virtual display so the
           // capture pipeline uses the correct output. If platform mapping is

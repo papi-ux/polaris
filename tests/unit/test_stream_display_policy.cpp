@@ -438,7 +438,8 @@ TEST(StreamDisplayPolicyTests, HostVirtualCaptureFollowsTheVirtualDisplayBackend
       << current;
   }
 
-  for (const auto backend : {backend_e::EVDI, backend_e::KSCREEN_DOCTOR}) {
+  // A KWin-created screen is an ordinary KWin monitor, captured like EVDI's.
+  for (const auto backend : {backend_e::EVDI, backend_e::KSCREEN_DOCTOR, backend_e::KWIN_VIRTUAL_OUTPUT}) {
     EXPECT_EQ(capture_for_host_virtual_display_backend(backend, ""), "portal");
     EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "auto"), "portal");
     EXPECT_EQ(capture_for_host_virtual_display_backend(backend, "portal"), "portal");
@@ -932,7 +933,8 @@ TEST(StreamDisplayPolicyTests, EnteringKScreenHostVirtualBorrowsTheSavedConnecto
   EXPECT_EQ(d.streaming_output, "HDMI-A-2");
 
   // Backends that create their own output never take one.
-  for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::WAYLAND_WLR}) {
+  for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::WAYLAND_WLR,
+                             virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT}) {
     d.streaming_output.clear();
     stream_display_policy::normalize_host_virtual_display_state_for_backend(backend);
     EXPECT_TRUE(d.streaming_output.empty());

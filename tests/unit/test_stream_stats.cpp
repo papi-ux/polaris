@@ -1342,6 +1342,32 @@ TEST(StreamStatsDoctorTests, NamesTheSavedSettingThatSwitchedHdrOff) {
   EXPECT_TRUE(saw_warning);
 }
 
+TEST(StreamStatsDoctorTests, SaysAKwinVirtualScreenHasNoHdr) {
+  // Not a saved setting: Host Virtual Display got a screen from KWin, which cannot carry HDR,
+  // so an HDR request comes out SDR. It must not be reported as something the user switched off.
+  LinuxDisplayConfigGuard guard;
+
+  stream_stats::stats_t stats {};
+  stats.hdr_policy_hdr = false;
+  stats.hdr_policy_reason = "kwin_virtual_output_sdr";
+  stats.hdr_policy_device = "RetroidPocket6";
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "hdr_disabled_by_saved_setting");
+    if (warning.at("id") != "hdr_unavailable_on_kwin_virtual_screen") {
+      continue;
+    }
+    saw_warning = true;
+    EXPECT_NE(warning.at("message").get<std::string>().find("KWin virtual screens carry no HDR"), std::string::npos);
+    EXPECT_NE(warning.at("action").get<std::string>().find("Mirror Desktop"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+}
+
 TEST(StreamStatsDoctorTests, SaysNothingAboutSavedSettingsWhenHdrWasAllowed) {
   LinuxDisplayConfigGuard guard;
 

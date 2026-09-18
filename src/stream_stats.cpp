@@ -1117,6 +1117,7 @@ namespace stream_stats {
     if (!stats.hdr_policy_hdr && !stats.hdr_policy_reason.empty()) {
       const auto &reason = stats.hdr_policy_reason;
       const auto device = stats.hdr_policy_device.empty() ? std::string {"this device"} : stats.hdr_policy_device;
+      std::string id = "hdr_disabled_by_saved_setting";
       std::string message;
       std::string action;
       if (reason == "paired_device_hdr_unsupported") {
@@ -1134,10 +1135,17 @@ namespace stream_stats {
                   "profile when the stream was resolved.";
         action = "Check the encoder row. If NVENC or VA-API fell back, fix that first; HDR "
                  "follows the encoder.";
+      } else if (reason == "kwin_virtual_output_sdr") {
+        // Not a saved setting: the screen Host Virtual Display got cannot carry HDR at all.
+        id = "hdr_unavailable_on_kwin_virtual_screen";
+        message = "HDR was asked for, but this stream runs on a screen KWin created for Host Virtual "
+                  "Display, and KWin virtual screens carry no HDR. The stream is SDR.";
+        action = "For HDR on KDE, stream Mirror Desktop from an HDR monitor with capture = kms, as "
+                 "Linux HDR and Main10 in the configuration docs describes.";
       }
       if (!message.empty()) {
         configuration_warnings.push_back({
-          {"id", "hdr_disabled_by_saved_setting"},
+          {"id", id},
           {"severity", "info"},
           {"message", message},
           {"action", action}

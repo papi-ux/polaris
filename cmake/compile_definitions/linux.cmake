@@ -445,7 +445,9 @@ if(WAYLAND_FOUND)
                 "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.h"
                 "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_screencopy.cpp"
                 "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.h"
-                "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp")
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp"
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/kwin_virtual_output.h"
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/kwin_virtual_output.cpp")
     endif()
 endif()
 

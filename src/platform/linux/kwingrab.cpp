@@ -112,14 +112,14 @@ namespace kwingrab {
      * KWin requires a .desktop with X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
      * matching this binary. Create a user-local one when missing (Sunshine pattern).
      */
-    void ensure_screencast_permission() {
+    permission_e ensure_screencast_permission_impl() {
       if (const char *no = std::getenv("KWIN_WAYLAND_NO_PERMISSION_CHECKS"); no && std::string(no) == "1") {
         BOOST_LOG(info) << "kwingrab: KWIN_WAYLAND_NO_PERMISSION_CHECKS=1; skip desktop permission"sv;
-        return;
+        return permission_e::present;
       }
       const auto exe = executable_path();
       if (exe.empty()) {
-        return;
+        return permission_e::failed;
       }
       const auto data = xdg_data_home();
       const auto apps = data.empty() ? std::filesystem::path {} : std::filesystem::path(data) / "applications";
@@ -158,14 +158,14 @@ namespace kwingrab {
         reusable = plan.keep;
       }
       if (system_permission_present(exe)) {
-        return;
+        return permission_e::present;
       }
       if (reusable) {
         BOOST_LOG(debug) << "kwingrab: reuse user permission desktop "sv << reusable->string();
-        return;
+        return permission_e::present;
       }
       if (apps.empty()) {
-        return;
+        return permission_e::failed;
       }
       std::error_code ec;
       std::filesystem::create_directories(apps, ec);
@@ -173,7 +173,7 @@ namespace kwingrab {
       std::ofstream out(path);
       if (!out) {
         BOOST_LOG(warning) << "kwingrab: failed to write permission desktop "sv << path.string();
-        return;
+        return permission_e::failed;
       }
       out << "[Desktop Entry]\n"
           << "Exec=" << exe << '\n'
@@ -186,6 +186,7 @@ namespace kwingrab {
       BOOST_LOG(info) << "kwingrab: wrote permission desktop "sv << path.string()
                       << "; waiting 1s for KWin to notice"sv;
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      return permission_e::written;
     }
 
     struct output_param_t {
@@ -221,7 +222,7 @@ namespace kwingrab {
 
       int init(bool setup_permissions) {
         if (setup_permissions) {
-          ensure_screencast_permission();
+          ensure_screencast_permission_impl();
         }
         const char *wl_name = std::getenv("WAYLAND_DISPLAY");
         if (!wl_name || !*wl_name) {
@@ -512,6 +513,10 @@ namespace kwingrab {
       return empty;
     }
     return impl_->cast->source_;
+  }
+
+  permission_e ensure_screencast_permission() {
+    return ensure_screencast_permission_impl();
   }
 
   bool output_selection_can_fallback(std::string_view requested_output_name) {

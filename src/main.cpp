@@ -262,6 +262,21 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
+#if defined(__linux__) && defined(POLARIS_BUILD_PORTAL)
+  // File capabilities are inherited by every thread, and capset() drops them
+  // only for the thread that calls it. Drop what portal-oriented capture paths
+  // and KWin screens cannot use while this is still the only thread: logging
+  // starts one, and the drop makes the process dumpable, which would leave a
+  // privileged thread in a process same-user programs may attach to.
+  std::string capability_outcome;
+  const auto capability_result = portal_capability::prepare_process_for_capture(
+    config::video.capture,
+    config::video.linux_display.stream_mode,
+    config::video.linux_display.virtual_display_backend,
+    &capability_outcome
+  );
+#endif
+
   adaptive_bitrate::load_config();
 
   cursor::set_visible(config::input.mouse_cursor_visible);
@@ -308,13 +323,13 @@ int main(int argc, char *argv[]) {
   config::modified_config_settings.clear();
 
 #if defined(__linux__) && defined(POLARIS_BUILD_PORTAL)
-  // File capabilities are inherited by every thread. Drop capabilities that
-  // portal-oriented capture paths cannot use before any workers are started,
-  // then restore ordinary same-user /proc access for portal authorization.
-  (void) portal_capability::prepare_process_for_capture(
-    config::video.capture,
-    config::video.linux_display.stream_mode
-  );
+  if (!capability_outcome.empty()) {
+    if (capability_result == portal_capability::prepare_result_e::failed) {
+      BOOST_LOG(error) << "portal: "sv << capability_outcome;
+    } else {
+      BOOST_LOG(info) << "portal: "sv << capability_outcome;
+    }
+  }
 #endif
 
   // Initialize stream recorder from config

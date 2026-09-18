@@ -5769,6 +5769,16 @@ namespace confighttp {
       config::set_steamgriddb_api_key(it == written_vars.end() ? std::string {} : it->second);
       BOOST_LOG(info) << "SaveConfig: SteamGridDB key applied at runtime"sv;
     }
+#ifdef __linux__
+    if (std::find(changed.begin(), changed.end(), "linux_virtual_display_backend") != changed.end()) {
+      const auto it = written_vars.find("linux_virtual_display_backend");
+      const auto value = it == written_vars.end() ? std::string {"auto"} : it->second;
+      if (virtual_display::parse_backend_preference(value)) {
+        virtual_display::set_backend_preference(value);
+        BOOST_LOG(info) << "SaveConfig: Host Virtual Display backend ["sv << value << "] applied at runtime"sv;
+      }
+    }
+#endif
     // Pairing reads both through locked accessors, so the next pairing request uses them.
     if (std::any_of(changed.begin(), changed.end(), [](const std::string &key) {
           return key == "trusted_subnets" || key == "trusted_subnet_auto_pairing";
@@ -7736,12 +7746,16 @@ namespace confighttp {
     static virtual_display::backend_e cached_backend = virtual_display::backend_e::NONE;
     static std::chrono::steady_clock::time_point cache_time;
     static bool cache_valid = false;
+    // A saved backend choice must show at once, not after the cache expires.
+    static std::string cached_preference;
 
     auto now = std::chrono::steady_clock::now();
-    if (!cache_valid || (now - cache_time) > std::chrono::seconds(30)) {
+    const auto preference = virtual_display::backend_preference_value();
+    if (!cache_valid || cached_preference != preference || (now - cache_time) > std::chrono::seconds(30)) {
       cached_backend = virtual_display::detect_backend();
       cache_time = now;
       cache_valid = true;
+      cached_preference = preference;
     }
 
     nlohmann::json output_tree;
@@ -7761,6 +7775,7 @@ namespace confighttp {
     });
     output_tree["backend"] = virtual_display::backend_name(cached_backend);
     output_tree["backend_id"] = static_cast<int>(cached_backend);
+    output_tree["backend_preference"] = preference;
     output_tree["backend_detected"] = backend_detected;
     output_tree["configuration_ready"] = available;
     output_tree["unavailable_reason"] = available ? "" : virtual_display::unavailable_reason();
@@ -7923,12 +7938,15 @@ namespace confighttp {
       { virtual_display::backend_e::EVDI,
         "EVDI",
         "Extensible Virtual Display Interface - true virtual DRM connector" },
+      { virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT,
+        "KWin virtual output",
+        "KDE Plasma - KWin creates a new screen for the stream; nothing is borrowed" },
       { virtual_display::backend_e::WAYLAND_WLR,
         "Wayland (headless output)",
-        "Wayland compositor headless output (wlr-randr / hyprctl / kwin)" },
+        "Hyprland headless output created with hyprctl" },
       { virtual_display::backend_e::KSCREEN_DOCTOR,
         "kscreen-doctor",
-        "KDE kscreen-doctor - manages existing physical displays" },
+        "KDE kscreen-doctor - borrows an existing connector for the stream" },
     };
 
     for (const auto &b : all_backends) {

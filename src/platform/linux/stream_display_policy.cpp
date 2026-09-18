@@ -370,8 +370,11 @@ namespace stream_display_policy {
       return "wlr";
     }
 
+    // All three are ordinary KWin monitors to capture: kwingrab streams them by
+    // output name through portal_grab.
     if (backend == virtual_display::backend_e::EVDI ||
-        backend == virtual_display::backend_e::KSCREEN_DOCTOR) {
+        backend == virtual_display::backend_e::KSCREEN_DOCTOR ||
+        backend == virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT) {
       return "portal";
     }
 
@@ -416,8 +419,9 @@ namespace stream_display_policy {
       host_virtual_backend_creates_output(backend)
     );
     // KScreen needs the streaming connector it manages, but never the dongle
-    // profile's separate primary-output authority. EVDI and wlroots create a
-    // new output, so their old connector and capture-output pins are retired.
+    // profile's separate primary-output authority. EVDI, KWin and wlroots
+    // create a new output, so their old connector and capture-output pins are
+    // retired.
     linux_display.primary_output.clear();
     // Entering from a private or desktop mode, the active connector was retired
     // on load; KScreen borrows the saved one.
@@ -446,7 +450,8 @@ namespace stream_display_policy {
   bool host_virtual_backend_creates_output(
       virtual_display::backend_e backend) {
     return backend == virtual_display::backend_e::EVDI ||
-           backend == virtual_display::backend_e::WAYLAND_WLR;
+           backend == virtual_display::backend_e::WAYLAND_WLR ||
+           backend == virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT;
   }
 
   bool host_virtual_connector_state_matches(

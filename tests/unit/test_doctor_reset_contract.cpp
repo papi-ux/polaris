@@ -1075,11 +1075,15 @@ TEST(DoctorResetContract, ExactHostVirtualAuthorityBypassesASynchronizedCache) {
     "static bool destroy_unlocked("
   );
   EXPECT_NE(
-    unavailable_reason.find("detect_backend_with_cache_policy(false, &evdi_blocked)"),
+    unavailable_reason.find("detect_backend_with_cache_policy(false, &evdi_blocked, &kwin_reason, &preference)"),
     std::string::npos
   );
   EXPECT_EQ(unavailable_reason.find("evdi::load_library()"), std::string::npos)
     << "lazy EVDI loader state must only be touched under the detector mutex";
+  // The backend choice is written under the same mutex when a save applies it
+  // live, so the reason takes it from the detector rather than reading config.
+  EXPECT_EQ(unavailable_reason.find("linux_display.virtual_display_backend"), std::string::npos)
+    << "the backend preference must be read under the detector mutex";
 
   const auto policy = source("src/platform/linux/stream_display_policy.cpp");
   const auto fresh_validator = between(
