@@ -330,6 +330,7 @@ namespace wl {
     dev_t gbm_device_id {};
     bool gbm_device_id_valid {false};
     bool blend_cursor {false};
+    bool session_paints_cursor {false};  ///< The cursor option the live capture_session was created with
     bool constraints_ready {false};
     bool buffer_size_valid {false};
     bool device_valid {false};
