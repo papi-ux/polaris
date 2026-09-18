@@ -64,4 +64,20 @@ namespace kwingrab {
   /// True when this generation must not fall through to generic portal.
   bool require_for_generation(const capture_generation::identity_t &generation);
 
+  /// What ensure_screencast_permission found.
+  enum class permission_e {
+    present,  ///< KWin already lets this binary use the protocol, or checks are off
+    written,  ///< The entry was written just now; KWin sees it on the next connection
+    failed,   ///< No entry could be found or written
+  };
+
+  /**
+   * @brief Make sure KWin offers zkde_screencast_unstable_v1 to this binary.
+   *
+   * KWin hides the protocol from a client unless a desktop entry names its
+   * executable with X-KDE-Wayland-Interfaces. Writes a user-local one when none
+   * exists, and removes the entries left for Polaris binaries that are gone.
+   */
+  permission_e ensure_screencast_permission();
+
 }  // namespace kwingrab

@@ -1,6 +1,8 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import {
+  KWIN_VIRTUAL_OUTPUT_BACKEND,
+  VIRTUAL_DISPLAY_BACKEND_OPTIONS,
   kscreenConnectorOptions,
   presentKscreenConnector,
   presentVirtualDisplayStatus,
@@ -21,6 +23,9 @@ let requestGeneration = 0
 const presentation = computed(() => presentVirtualDisplayStatus(vdStatus.value || {}))
 const isKscreenBackend = computed(() => (
   vdStatus.value?.backend_detected === true && vdStatus.value?.backend === 'kscreen-doctor'
+))
+const isKwinBackend = computed(() => (
+  vdStatus.value?.backend_detected === true && vdStatus.value?.backend === KWIN_VIRTUAL_OUTPUT_BACKEND
 ))
 const connectorOptions = computed(() => kscreenConnectorOptions(displayOutputs.value?.outputs))
 
@@ -145,6 +150,33 @@ watch(() => props.hostGeneration, refresh)
           Detected backend: <span class="text-silver font-medium">{{ vdStatus.backend }}</span>
         </div>
 
+        <label class="block text-xs font-medium text-storm" data-vdisplay-backend-choice>
+          Backend
+          <select
+            v-model="config.linux_virtual_display_backend"
+            data-vdisplay-backend-select
+            class="mt-1 w-full rounded-lg border border-storm/40 bg-void/40 px-3 py-2 text-sm text-silver focus:border-ice focus:outline-none"
+          >
+            <option v-for="option in VIRTUAL_DISPLAY_BACKEND_OPTIONS" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+          <span class="mt-1 block font-normal">
+            Automatic tries EVDI, then a new KWin screen on KDE Plasma, then Hyprland, then a borrowed connector. Picking one uses only that one, and a launch it cannot serve is refused with the reason.
+          </span>
+        </label>
+
+        <div
+          v-if="isKwinBackend"
+          class="mt-3 rounded-xl border border-storm/20 bg-deep/40 p-3 text-sm text-storm space-y-2"
+          data-kwin-virtual-screen
+        >
+          <div class="text-silver font-medium text-xs uppercase tracking-wide">KWin Virtual Screen</div>
+          <p>
+            KWin creates a new screen at the client's resolution for each stream and removes it when the stream ends. Nothing is borrowed, and your monitors stay as they are. Polaris asks KWin for the client's refresh rate; if KWin will not run it, the stream uses the rate it gets. KWin virtual screens carry no HDR.
+          </p>
+        </div>
+
         <div v-if="backends.length > 0" class="mt-2 space-y-1">
           <div class="text-xs font-medium text-storm uppercase tracking-wide">Detected backends</div>
           <div
@@ -223,7 +255,8 @@ watch(() => props.hostGeneration, refresh)
           No virtual display backend was detected. Install one of the following only if you want to use Host Virtual Display:
           <ul class="list-disc list-inside mt-1 space-y-0.5">
             <li><span class="text-silver">EVDI</span> - kernel module + libevdi for true virtual connectors</li>
-            <li><span class="text-silver">Wayland compositor</span> - Hyprland, Sway, or wlroots-based with headless output support</li>
+            <li><span class="text-silver">KWin</span> - KDE Plasma 6 on Wayland, with kscreen-doctor, creates a new screen itself</li>
+            <li><span class="text-silver">Hyprland</span> - creates a headless output for the stream</li>
             <li><span class="text-silver">kscreen-doctor</span> - KDE Plasma display management (fallback)</li>
           </ul>
         </div>

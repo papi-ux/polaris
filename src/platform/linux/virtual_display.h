@@ -5,12 +5,14 @@
  * Provides virtual display support on Linux, analogous to SUDOVDA on Windows.
  * Supports multiple backends:
  *   1. EVDI (Extensible Virtual Display Interface) - true virtual DRM connector
- *   2. Wayland compositor headless outputs (wlr-randr, hyprctl, kwin)
- *   3. kscreen-doctor fallback - manages existing physical displays
+ *   2. KWin virtual outputs - a new screen KWin creates for a screencast stream
+ *   3. Wayland compositor headless outputs (hyprctl)
+ *   4. kscreen-doctor fallback - manages existing physical displays
  */
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -27,7 +29,46 @@ namespace virtual_display {
     EVDI,            ///< EVDI kernel module + libevdi
     WAYLAND_WLR,     ///< wlroots-based compositor (wlr-randr / hyprctl)
     KSCREEN_DOCTOR,  ///< KDE kscreen-doctor (manages existing outputs)
+    // Appended last: /api/vdisplay/status sends the backend as its number.
+    KWIN_VIRTUAL_OUTPUT,  ///< A new output KWin creates for a zkde screencast stream
   };
+
+  /**
+   * @brief Which backend Host Virtual Display uses, from linux_virtual_display_backend.
+   */
+  enum class backend_preference_e {
+    AUTO,  ///< EVDI, then a KWin virtual output, then Hyprland, then kscreen-doctor
+    EVDI,
+    KWIN,
+    WLR,
+    KSCREEN,
+  };
+
+  /**
+   * @brief Read linux_virtual_display_backend.
+   * @return AUTO for an empty value; nullopt for a value that names no backend.
+   */
+  std::optional<backend_preference_e> parse_backend_preference(std::string_view value);
+
+  /** @brief The config value for a preference, the inverse of parse_backend_preference. */
+  std::string_view backend_preference_name(backend_preference_e preference);
+
+  /** @brief What one probe found ready to create a display. */
+  struct probe_snapshot_t {
+    bool evdi = false;
+    bool kwin = false;
+    bool wlr = false;
+    bool kscreen = false;
+  };
+
+  /**
+   * @brief Choose the backend for a preference from one probe.
+   *
+   * A forced backend that is not ready yields NONE rather than another backend:
+   * a host set to KWin that quietly borrowed a monitor instead would do exactly
+   * what the setting was chosen to avoid.
+   */
+  backend_e select_backend(backend_preference_e preference, const probe_snapshot_t &probe);
 
   struct kscreen_output_state_t {
     std::string name;
@@ -115,8 +156,101 @@ namespace virtual_display {
   /** @brief Detect the preferred backend after bypassing the probe cache. */
   backend_e detect_backend_fresh();
 
-  /** @brief Select the highest-priority detected backend from one probe snapshot. */
+  /**
+   * @brief Apply a saved linux_virtual_display_backend while Polaris runs.
+   *
+   * Taken under the detection lock, which is where the value is read, so a
+   * launch probing on another thread never sees it half written.
+   */
+  void set_backend_preference(const std::string &value);
+
+  /** @brief Select the highest-priority detected backend from one probe snapshot, KWin aside. */
   backend_e select_preferred_backend(bool evdi_ready, bool wayland_ready, bool kscreen_installed);
+
+  /**
+   * @brief The name Polaris asks KWin to give the output it creates for one slot.
+   *
+   * Slots rather than pids: KWin stores a layout per output name, and a name
+   * that changed every run would add an entry to kwinoutputconfig.json each
+   * time. The slot keeps a streaming session and the web UI apart.
+   */
+  std::string kwin_output_request_name(int slot);
+
+  /** @brief The output name KWin publishes for a requested virtual output. */
+  std::string kwin_output_expected_name(std::string_view request_name);
+
+  /** @brief Whether an output name is one Polaris asked KWin to create. */
+  bool kwin_output_is_polaris_owned(std::string_view output_name);
+
+  /** @brief stream_virtual_output_with_description, the request used, arrived in version 4. */
+  bool kwin_screencast_version_supported(std::uint32_t version);
+
+  /** @brief One output as `kscreen-doctor --json` reports it. */
+  struct kscreen_output_layout_t {
+    std::string name;
+    bool enabled = false;
+    int priority = 0;
+    double scale = 1.0;
+    int x = 0;
+    int y = 0;
+    int mode_width = 0;
+    int mode_height = 0;
+    double refresh_hz = 0.0;
+    std::vector<std::string> mode_names;  ///< "WxH@R", the names kscreen-doctor selects by
+  };
+
+  /**
+   * @brief Every output in a `kscreen-doctor --json` answer.
+   * @return nullopt when the answer is not usable at all. An output whose
+   *         current mode cannot be read is kept with a zero-sized mode.
+   */
+  std::optional<std::vector<kscreen_output_layout_t>> kscreen_layout_from_json(std::string_view json);
+
+  /** @brief The enabled output ranked first, if there is one. */
+  std::optional<std::string> kscreen_primary_output(const std::vector<kscreen_output_layout_t> &layout);
+
+  /**
+   * @brief The x coordinate just past every enabled output except `excluding`.
+   *
+   * KWin can give a new virtual output a layout it stored for another one,
+   * which on the test host put it at 0,0 on top of the real monitor.
+   */
+  int kscreen_right_edge(const std::vector<kscreen_output_layout_t> &layout, std::string_view excluding);
+
+  /** @brief The mode name kscreen-doctor selects by, such as `1920x1080@120`. */
+  std::string kwin_mode_name(int width, int height, int hz);
+
+  /** @brief kscreen-doctor arguments that add a custom mode (refresh in mHz). */
+  std::vector<std::string> kwin_custom_mode_args(std::string_view output, int width, int height, int hz);
+
+  /** @brief kscreen-doctor arguments that select a mode by name. */
+  std::vector<std::string> kwin_mode_args(std::string_view output, int width, int height, int hz);
+
+  /**
+   * @brief kscreen-doctor arguments that make a virtual output the stream display.
+   *
+   * Scale 1, placed at `x`, ranked first, with the previous primary ranked
+   * second. Sent last, because adding a custom mode can reorder priorities.
+   */
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary);
+
+  /** @brief kscreen-doctor arguments that rank an output first again after the stream. */
+  std::vector<std::string> kwin_restore_priority_args(std::string_view output);
+
+  /** @brief The output runs the requested size, within half a hertz of the requested rate. */
+  bool kwin_mode_matches(const kscreen_output_layout_t &output, int width, int height, int hz);
+
+  /** @brief The output is at scale 1, at (x, 0), and ranked first. */
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x);
+
+  /**
+   * @brief Whether a persisted KWin virtual output record is left over.
+   *
+   * KWin removes the output when the connection that asked for it closes, so
+   * a record is live only while this process image holds the output. The pid
+   * alone is not enough: an in-place restart keeps it and drops the connection.
+   */
+  bool kwin_record_is_stale(int owner_pid, int self_pid, bool owner_alive, bool anchored_here);
 
   /**
    * @brief Return whether a detected backend has the configuration it needs to create a display.
@@ -257,6 +391,12 @@ namespace virtual_display {
    * @return Empty string when the combination is usable; otherwise the reason.
    */
   std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured);
+
+  /**
+   * @brief Why the backend linux_virtual_display_backend forces cannot be used.
+   * @param detail What that backend's own probe found, when it said more than no.
+   */
+  std::string forced_backend_unavailable_reason(backend_preference_e preference, std::string_view detail);
 
   /**
    * @brief Create a virtual display with the given resolution and refresh rate.

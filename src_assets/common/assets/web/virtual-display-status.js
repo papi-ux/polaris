@@ -1,5 +1,17 @@
 const PRIVATE_STREAM_MODES = new Set(['headless_stream', 'windowed_stream'])
 
+// The values linux_virtual_display_backend accepts, in the order Automatic
+// tries them. Kept in step with parse_backend_preference on the host.
+export const VIRTUAL_DISPLAY_BACKEND_OPTIONS = Object.freeze([
+  { value: 'auto', label: 'Automatic' },
+  { value: 'evdi', label: 'EVDI' },
+  { value: 'kwin', label: 'KWin Virtual Screen' },
+  { value: 'wlr', label: 'Hyprland' },
+  { value: 'kscreen', label: 'Borrowed Connector (kscreen-doctor)' },
+])
+
+export const KWIN_VIRTUAL_OUTPUT_BACKEND = 'KWin virtual output'
+
 export function presentVirtualDisplayStatus(status = {}) {
   if (PRIVATE_STREAM_MODES.has(status.policy_mode)) {
     return {

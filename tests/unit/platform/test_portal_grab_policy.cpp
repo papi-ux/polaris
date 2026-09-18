@@ -253,7 +253,7 @@ namespace platf {
 TEST(PortalGrabPolicyTests, HostVirtualDisplayCaptureRoutingDependsOnBackend) {
   using virtual_display::backend_e;
 
-  for (const auto backend : {backend_e::EVDI, backend_e::KSCREEN_DOCTOR, backend_e::NONE}) {
+  for (const auto backend : {backend_e::EVDI, backend_e::KSCREEN_DOCTOR, backend_e::KWIN_VIRTUAL_OUTPUT, backend_e::NONE}) {
     EXPECT_TRUE(platf::host_virtual_display_needs_portal_for_backend(
       "host_virtual_display", false, backend
     ));
@@ -270,7 +270,8 @@ TEST(PortalGrabPolicyTests, HostVirtualDisplayCaptureRoutingDependsOnBackend) {
     "desktop_takeover", false, backend_e::WAYLAND_WLR
   ));
 
-  for (const auto backend : {backend_e::EVDI, backend_e::WAYLAND_WLR, backend_e::KSCREEN_DOCTOR, backend_e::NONE}) {
+  for (const auto backend : {backend_e::EVDI, backend_e::WAYLAND_WLR, backend_e::KSCREEN_DOCTOR,
+                             backend_e::KWIN_VIRTUAL_OUTPUT, backend_e::NONE}) {
     EXPECT_FALSE(platf::host_virtual_display_needs_portal_for_backend(
       "host_virtual_display", true, backend
     )) << "a cage compositor owns its own capture source";

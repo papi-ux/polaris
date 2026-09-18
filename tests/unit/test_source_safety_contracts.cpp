@@ -1216,6 +1216,67 @@ TEST(SourceSafetyContracts, VirtualDisplayTeardownKeepsRecoveryUntilExactReadbac
   EXPECT_LT(process_destroy, process_reset);
 }
 
+TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream backend_in(root / "src/platform/linux/virtual_display.cpp");
+  std::ifstream wayland_in(root / "src/platform/linux/kwin_virtual_output.cpp");
+  ASSERT_TRUE(backend_in.is_open());
+  ASSERT_TRUE(wayland_in.is_open());
+  std::ostringstream backend_out, wayland_out;
+  backend_out << backend_in.rdbuf();
+  wayland_out << wayland_in.rdbuf();
+  const auto backend = backend_out.str();
+  const auto wayland = wayland_out.str();
+
+  // The backend sits after the kscreen namespace, whose own contracts find the first one.
+  const auto kscreen_end = backend.find("}  // namespace kscreen");
+  const auto kwin = backend.find("namespace kwin_vo");
+  const auto kwin_end = backend.find("}  // namespace kwin_vo", kwin);
+  ASSERT_NE(kscreen_end, std::string::npos);
+  ASSERT_NE(kwin, std::string::npos);
+  ASSERT_NE(kwin_end, std::string::npos);
+  EXPECT_LT(kscreen_end, kwin);
+  const auto body = backend.substr(kwin, kwin_end - kwin);
+
+  // KWin can make the new screen primary the moment it exists, so the previous
+  // primary is read first, and recovery intent is durable before KWin is asked.
+  const auto create = body.find("static std::optional<vdisplay_t> create(");
+  const auto primary = body.find("kscreen_primary_output(*layout_before)", create);
+  const auto intent = body.find("record_persisted_display(display, 0)", create);
+  const auto request = body.find("kwin_virtual_output::create(", create);
+  ASSERT_NE(primary, std::string::npos);
+  ASSERT_NE(intent, std::string::npos);
+  ASSERT_NE(request, std::string::npos);
+  EXPECT_LT(primary, request);
+  EXPECT_LT(intent, request);
+  // kscreen-doctor runs from an argv, never through a shell with an output name in it.
+  EXPECT_NE(body.find("platf::run_process_argv(args)"), std::string::npos);
+  EXPECT_EQ(body.find("std::system"), std::string::npos);
+  EXPECT_EQ(body.find("exec_cmd_rc("), std::string::npos);
+
+  // A name match alone could be someone else's output: the output must also be a new global.
+  const auto proof = wayland.find("!globals_before.contains(output->global)");
+  const auto held = wayland.find("anchors[expected] = std::move(anchor)");
+  ASSERT_NE(proof, std::string::npos);
+  ASSERT_NE(held, std::string::npos);
+  EXPECT_LT(proof, held);
+
+  // Callbacks run on the reader thread and only set atomics: one that took a lock
+  // could deadlock against a teardown that joins that thread.
+  const auto callbacks = wayland.find("static void on_closed(");
+  const auto callbacks_end = wayland.find("static constexpr zkde_screencast_stream_unstable_v1_listener", callbacks);
+  ASSERT_NE(callbacks, std::string::npos);
+  ASSERT_NE(callbacks_end, std::string::npos);
+  EXPECT_EQ(wayland.substr(callbacks, callbacks_end - callbacks).find("lock_guard"), std::string::npos);
+  // The reader stops before the stream it reads is closed from another thread.
+  const auto release = wayland.find("bool release(const std::string &output_name");
+  const auto stop = wayland.find("anchor->stop_reader();", release);
+  const auto close = wayland.find("anchor->close_stream();", release);
+  ASSERT_NE(stop, std::string::npos);
+  ASSERT_NE(close, std::string::npos);
+  EXPECT_LT(stop, close);
+}
+
 TEST(SourceSafetyContracts, WlgrabReinitEnumeratesFromImmutableCaptureGeneration) {
   const auto root = fs::path {POLARIS_SOURCE_DIR};
   std::ifstream wlgrab_in(root / "src/platform/linux/wlgrab.cpp");

@@ -1890,8 +1890,9 @@ std::string get_local_ip_for_gateway() {
   }
 
   // host_virtual_display can be backed by two different compositor contracts.
-  // KWin/EVDI exposes an ordinary KWin monitor, so capture must reach
-  // portal_grab and kwingrab's output-pinned KWin ScreenCast (PR #351/#352).
+  // An EVDI connector or a KWin-created virtual output is an ordinary KWin
+  // monitor, so capture must reach portal_grab and kwingrab's output-pinned
+  // KWin ScreenCast (PR #351/#352).
   // Hyprland/Sway WAYLAND_WLR creates a native wlroots headless output, which
   // wlgrab can capture directly by its exact POLARIS-HEADLESS output name.
   // Cage-compositor modes own their own capture source and never enter here.

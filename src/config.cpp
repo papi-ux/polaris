@@ -641,6 +641,7 @@ namespace config {
       "labwc",  // linux_display.private_runtime
       "privacy",  // linux_display.headless_swap_mode
       {},  // linux_display.saved_streaming_output (copied from linux_streaming_output on parse)
+      "auto",  // linux_display.virtual_display_backend
     },  // linux_display
 
     "1920x1080x60",  // fallback_mode
@@ -1526,6 +1527,12 @@ namespace config {
         video.linux_display.headless_swap_mode = legacy_swap_primary ? "privacy" : "off";
       }
     }
+    string_restricted_f(
+      vars,
+      "linux_virtual_display_backend",
+      video.linux_display.virtual_display_backend,
+      {"auto"sv, "evdi"sv, "kwin"sv, "wlr"sv, "kscreen"sv}
+    );
 
     string_f(vars, "fallback_mode", video.fallback_mode);
     string_f(vars, "display_plan", video.display_plan);

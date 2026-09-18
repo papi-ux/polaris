@@ -407,6 +407,8 @@ TEST(ConfigLiveApplyTests, OnlyKeysTheHostAppliesLiveSkipTheRestart) {
     "ai_cache_ttl_hours", "ai_codex_home", "ai_enabled", "ai_model", "ai_provider", "ai_timeout_ms", "ai_use_subscription"}));
   EXPECT_TRUE(config_change_requires_restart({"capture", "steamgriddb_api_key"}));
   EXPECT_TRUE(config_change_requires_restart({"port"}));
+  // Read at each backend probe, and the probe cache drops a changed choice.
+  EXPECT_FALSE(config_change_requires_restart({"linux_virtual_display_backend"}));
   EXPECT_FALSE(confighttp::validation::is_live_applied_config_key("ai_future_setting"));
 }
 

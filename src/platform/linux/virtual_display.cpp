@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +43,10 @@
 // local includes
 #include "misc.h"
 #include "virtual_display.h"
+#if defined(POLARIS_BUILD_WAYLAND) && defined(POLARIS_BUILD_PORTAL)
+  #include "kwin_virtual_output.h"
+  #define POLARIS_HAS_KWIN_VIRTUAL_OUTPUT 1
+#endif
 #include "src/platform/common.h"
 #include "src/config.h"
 #include "src/logging.h"
@@ -87,6 +92,8 @@ namespace virtual_display {
           return "wayland_wlr";
         case backend_e::KSCREEN_DOCTOR:
           return "kscreen_doctor";
+        case backend_e::KWIN_VIRTUAL_OUTPUT:
+          return "kwin_virtual_output";
         case backend_e::NONE:
         default:
           return "none";
@@ -102,6 +109,9 @@ namespace virtual_display {
       }
       if (name == "kscreen_doctor"sv) {
         return backend_e::KSCREEN_DOCTOR;
+      }
+      if (name == "kwin_virtual_output"sv) {
+        return backend_e::KWIN_VIRTUAL_OUTPUT;
       }
       return backend_e::NONE;
     }
@@ -371,6 +381,9 @@ namespace virtual_display {
         case backend_e::KSCREEN_DOCTOR:
           BOOST_LOG(info) << "Virtual display: kscreen-doctor backend available"sv;
           break;
+        case backend_e::KWIN_VIRTUAL_OUTPUT:
+          BOOST_LOG(info) << "Virtual display: KWin virtual output backend available"sv;
+          break;
         case backend_e::NONE:
         default:
           BOOST_LOG(info) << "Virtual display: no backend available"sv;
@@ -611,6 +624,232 @@ namespace virtual_display {
     }
 
     return all_digits(suffix.substr(0, separator)) && all_digits(suffix.substr(separator + 1));
+  }
+
+  std::optional<backend_preference_e> parse_backend_preference(std::string_view value) {
+    if (value.empty() || value == "auto"sv) {
+      return backend_preference_e::AUTO;
+    }
+    if (value == "evdi"sv) {
+      return backend_preference_e::EVDI;
+    }
+    if (value == "kwin"sv) {
+      return backend_preference_e::KWIN;
+    }
+    if (value == "wlr"sv) {
+      return backend_preference_e::WLR;
+    }
+    if (value == "kscreen"sv) {
+      return backend_preference_e::KSCREEN;
+    }
+    return std::nullopt;
+  }
+
+  std::string_view backend_preference_name(backend_preference_e preference) {
+    switch (preference) {
+      case backend_preference_e::EVDI:
+        return "evdi"sv;
+      case backend_preference_e::KWIN:
+        return "kwin"sv;
+      case backend_preference_e::WLR:
+        return "wlr"sv;
+      case backend_preference_e::KSCREEN:
+        return "kscreen"sv;
+      case backend_preference_e::AUTO:
+      default:
+        return "auto"sv;
+    }
+  }
+
+  backend_e select_backend(backend_preference_e preference, const probe_snapshot_t &probe) {
+    switch (preference) {
+      case backend_preference_e::EVDI:
+        return probe.evdi ? backend_e::EVDI : backend_e::NONE;
+      case backend_preference_e::KWIN:
+        return probe.kwin ? backend_e::KWIN_VIRTUAL_OUTPUT : backend_e::NONE;
+      case backend_preference_e::WLR:
+        return probe.wlr ? backend_e::WAYLAND_WLR : backend_e::NONE;
+      case backend_preference_e::KSCREEN:
+        return probe.kscreen ? backend_e::KSCREEN_DOCTOR : backend_e::NONE;
+      case backend_preference_e::AUTO:
+      default:
+        break;
+    }
+    // A real new screen before a borrowed monitor: EVDI and KWin create one,
+    // kscreen-doctor can only take over an output the user already has.
+    if (probe.evdi) {
+      return backend_e::EVDI;
+    }
+    if (probe.kwin) {
+      return backend_e::KWIN_VIRTUAL_OUTPUT;
+    }
+    if (probe.wlr) {
+      return backend_e::WAYLAND_WLR;
+    }
+    if (probe.kscreen) {
+      return backend_e::KSCREEN_DOCTOR;
+    }
+    return backend_e::NONE;
+  }
+
+  std::string kwin_output_request_name(int slot) {
+    return "polaris-" + std::to_string(slot);
+  }
+
+  std::string kwin_output_expected_name(std::string_view request_name) {
+    return "Virtual-" + std::string {request_name};
+  }
+
+  bool kwin_output_is_polaris_owned(std::string_view output_name) {
+    constexpr std::string_view prefix = "Virtual-polaris-";
+    if (!output_name.starts_with(prefix)) {
+      return false;
+    }
+    const auto slot = output_name.substr(prefix.size());
+    return !slot.empty() && slot.find_first_not_of("0123456789"sv) == std::string_view::npos;
+  }
+
+  bool kwin_screencast_version_supported(std::uint32_t version) {
+    return version >= 4;
+  }
+
+  std::optional<std::vector<kscreen_output_layout_t>> kscreen_layout_from_json(std::string_view json) {
+    const auto root = nlohmann::json::parse(json, nullptr, false);
+    if (!root.is_object() || !root.contains("outputs") || !root["outputs"].is_array()) {
+      return std::nullopt;
+    }
+
+    // A field of the wrong type reads as absent rather than throwing: this parses
+    // another program's output, and one odd field must not take the stream down.
+    const auto int_field = [](const nlohmann::json &node, const char *key) {
+      return node.contains(key) && node[key].is_number_integer() ? node[key].get<int>() : 0;
+    };
+
+    std::vector<kscreen_output_layout_t> layout;
+    for (const auto &node : root["outputs"]) {
+      if (!node.is_object() || !node.contains("name") || !node["name"].is_string()) {
+        return std::nullopt;
+      }
+      kscreen_output_layout_t output;
+      output.name = node["name"].get<std::string>();
+      output.enabled = node.contains("enabled") && node["enabled"].is_boolean() && node["enabled"].get<bool>();
+      output.priority = int_field(node, "priority");
+      if (node.contains("scale") && node["scale"].is_number()) {
+        output.scale = node["scale"].get<double>();
+      }
+      if (node.contains("pos") && node["pos"].is_object()) {
+        output.x = int_field(node["pos"], "x");
+        output.y = int_field(node["pos"], "y");
+      }
+      const std::string current = node.contains("currentModeId") && node["currentModeId"].is_string() ?
+                                    node["currentModeId"].get<std::string>() :
+                                    std::string {};
+      if (node.contains("modes") && node["modes"].is_array()) {
+        for (const auto &mode : node["modes"]) {
+          if (!mode.is_object()) {
+            continue;
+          }
+          if (mode.contains("name") && mode["name"].is_string()) {
+            output.mode_names.push_back(mode["name"].get<std::string>());
+          }
+          const bool is_current = mode.contains("id") && mode["id"].is_string() &&
+                                  !current.empty() && mode["id"].get_ref<const std::string &>() == current;
+          if (!is_current || !mode.contains("size") || !mode["size"].is_object()) {
+            continue;
+          }
+          output.mode_width = int_field(mode["size"], "width");
+          output.mode_height = int_field(mode["size"], "height");
+          if (mode.contains("refreshRate") && mode["refreshRate"].is_number()) {
+            output.refresh_hz = mode["refreshRate"].get<double>();
+          }
+        }
+      }
+      layout.push_back(std::move(output));
+    }
+    return layout;
+  }
+
+  std::optional<std::string> kscreen_primary_output(const std::vector<kscreen_output_layout_t> &layout) {
+    const kscreen_output_layout_t *primary = nullptr;
+    for (const auto &output : layout) {
+      if (!output.enabled || output.priority < 1) {
+        continue;
+      }
+      if (!primary || output.priority < primary->priority) {
+        primary = &output;
+      }
+    }
+    if (!primary) {
+      return std::nullopt;
+    }
+    return primary->name;
+  }
+
+  int kscreen_right_edge(const std::vector<kscreen_output_layout_t> &layout, std::string_view excluding) {
+    int edge = 0;
+    for (const auto &output : layout) {
+      if (!output.enabled || output.name == excluding || output.mode_width <= 0) {
+        continue;
+      }
+      const double scale = output.scale > 0.0 ? output.scale : 1.0;
+      const int logical_width = static_cast<int>(output.mode_width / scale + 0.5);
+      edge = std::max(edge, output.x + logical_width);
+    }
+    return edge;
+  }
+
+  std::string kwin_mode_name(int width, int height, int hz) {
+    return std::to_string(width) + "x" + std::to_string(height) + "@" + std::to_string(hz);
+  }
+
+  std::vector<std::string> kwin_custom_mode_args(std::string_view output, int width, int height, int hz) {
+    return {
+      "output."s + std::string {output} + ".addCustomMode." + std::to_string(width) + "." +
+      std::to_string(height) + "." + std::to_string(hz * 1000) + ".full"
+    };
+  }
+
+  std::vector<std::string> kwin_mode_args(std::string_view output, int width, int height, int hz) {
+    return {"output."s + std::string {output} + ".mode." + kwin_mode_name(width, height, hz)};
+  }
+
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary) {
+    const auto prefix = "output."s + std::string {output};
+    std::vector<std::string> args {
+      prefix + ".scale.1",
+      prefix + ".position." + std::to_string(x) + ",0",
+      prefix + ".priority.1",
+    };
+    if (!previous_primary.empty() && previous_primary != output) {
+      args.push_back("output."s + std::string {previous_primary} + ".priority.2");
+    }
+    return args;
+  }
+
+  std::vector<std::string> kwin_restore_priority_args(std::string_view output) {
+    return {"output."s + std::string {output} + ".priority.1"};
+  }
+
+  bool kwin_mode_matches(const kscreen_output_layout_t &output, int width, int height, int hz) {
+    return output.mode_width == width && output.mode_height == height &&
+           output.refresh_hz > 0.0 && std::abs(output.refresh_hz - hz) <= 0.5;
+  }
+
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x) {
+    return output.enabled && std::abs(output.scale - 1.0) < 0.01 && output.x == x && output.y == 0 &&
+           output.priority == 1;
+  }
+
+  bool kwin_record_is_stale(int owner_pid, int self_pid, bool owner_alive, bool anchored_here) {
+    if (anchored_here) {
+      return false;
+    }
+    if (owner_pid == self_pid) {
+      // This process image does not hold the output. An in-place restart keeps
+      // the pid and closes the connection KWin tied the output to.
+      return true;
+    }
+    return owner_pid <= 0 || !owner_alive;
   }
 
   namespace {
@@ -1764,6 +2003,263 @@ namespace virtual_display {
   }  // namespace kscreen
 
   // ---------------------------------------------------------------------------
+  // KWin virtual output — a new screen KWin creates for a screencast stream
+  // ---------------------------------------------------------------------------
+  namespace kwin_vo {
+
+    constexpr int max_output_slots = 8;
+    constexpr auto release_budget = 3s;
+
+    // Output names this process has spoken for: a streaming session and the
+    // web UI can each hold one and cannot see each other's.
+    static std::mutex reserved_names_mutex;
+    static std::set<std::string> reserved_names;
+
+    static bool reserve_name(const std::string &name) {
+      std::lock_guard lock {reserved_names_mutex};
+      return reserved_names.insert(name).second;
+    }
+
+    static void release_name(const std::string &name) {
+      std::lock_guard lock {reserved_names_mutex};
+      reserved_names.erase(name);
+    }
+
+    // The last probe's reason, so a forced backend can say why it cannot run.
+    // Written and read under backend_detection_mutex.
+    static std::string last_probe_reason;
+
+    static std::string layout_json() {
+      // Fixed argv, no output name, so no shell interpolation of user input.
+      return exec_cmd("timeout 8 env QT_QPA_PLATFORM=wayland kscreen-doctor --json 2>/dev/null");
+    }
+
+    static int run_kscreen(std::vector<std::string> args) {
+      // QT_QPA_PLATFORM=wayland keeps kscreen-doctor from aborting outside a
+      // desktop session's environment; timeout guards against a hang.
+      args.insert(args.begin(), {"timeout", "8", "env", "QT_QPA_PLATFORM=wayland", "kscreen-doctor"});
+      return platf::run_process_argv(args);
+    }
+
+    static std::optional<kscreen_output_layout_t> find_output(
+      const std::optional<std::vector<kscreen_output_layout_t>> &layout,
+      std::string_view name
+    ) {
+      if (!layout) {
+        return std::nullopt;
+      }
+      for (const auto &output : *layout) {
+        if (output.name == name) {
+          return output;
+        }
+      }
+      return std::nullopt;
+    }
+
+    /** @brief Whether this backend can create a screen here, and why not when it cannot. */
+    static bool probe(std::string &reason) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+      if (wayland_wlr::detect_compositor() != "kwin") {
+        reason = "This is not a KDE Plasma Wayland session.";
+        return false;
+      }
+      // KWin can give a new output the layout it stored for another virtual
+      // output, which on the test host meant scale 0.5 on top of the real
+      // monitor. kscreen-doctor is what puts it right.
+      if (!kscreen::is_installed()) {
+        reason = "kscreen-doctor is not installed; Polaris needs it to place the new screen.";
+        return false;
+      }
+      const auto result = kwin_virtual_output::probe();
+      reason = result.available ? std::string {} : result.reason;
+      return result.available;
+#else
+      reason = "This Polaris was built without KWin screencast support.";
+      return false;
+#endif
+    }
+
+    /**
+     * @brief Put the new screen where the stream needs it: the client's mode,
+     * scale 1, beside the other screens, ranked first.
+     *
+     * Best effort past the mode: a refresh rate KWin will not run is a warning,
+     * and the stream still gets a screen of its own.
+     */
+    static void place(const vdisplay_t &display, const std::string &previous_primary) {
+      const auto &name = display.output_name;
+      auto layout = kscreen_layout_from_json(layout_json());
+      auto output = find_output(layout, name);
+      if (!output) {
+        BOOST_LOG(warning) << "Virtual display: kscreen-doctor does not list ["sv << name
+                           << "]; it keeps the layout KWin gave it"sv;
+        return;
+      }
+
+      if (!kwin_mode_matches(*output, display.width, display.height, display.fps)) {
+        const auto mode = kwin_mode_name(display.width, display.height, display.fps);
+        if (std::find(output->mode_names.begin(), output->mode_names.end(), mode) == output->mode_names.end()) {
+          const int rc = run_kscreen(kwin_custom_mode_args(name, display.width, display.height, display.fps));
+          if (rc != 0) {
+            BOOST_LOG(warning) << "Virtual display: kscreen-doctor could not add mode ["sv << mode
+                               << "] to ["sv << name << "] (rc="sv << rc << ')';
+          }
+        }
+        const int rc = run_kscreen(kwin_mode_args(name, display.width, display.height, display.fps));
+        layout = kscreen_layout_from_json(layout_json());
+        output = find_output(layout, name);
+        if (rc != 0 || !output || !kwin_mode_matches(*output, display.width, display.height, display.fps)) {
+          BOOST_LOG(warning) << "Virtual display: ["sv << name << "] did not take mode ["sv << mode << "]; it runs at "sv
+                             << (output ? kwin_mode_name(output->mode_width, output->mode_height, static_cast<int>(output->refresh_hz + 0.5)) : "an unknown mode"s)
+                             << " and the stream is paced to that"sv;
+        }
+      }
+
+      // Placement last: adding a custom mode can reorder priorities.
+      const int x = kscreen_right_edge(layout.value_or(std::vector<kscreen_output_layout_t> {}), name);
+      const int rc = run_kscreen(kwin_placement_args(name, x, previous_primary));
+      output = find_output(kscreen_layout_from_json(layout_json()), name);
+      if (rc != 0 || !output || !kwin_placement_matches(*output, x)) {
+        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens and ranked first (rc="sv
+                           << rc << "); windows may not open on it"sv;
+        return;
+      }
+      BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1, ranked first"sv;
+    }
+
+    static std::optional<vdisplay_t> create(int width, int height, int fps) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+      // Read the layout before asking KWin: it can apply a stored layout that
+      // makes the new output primary the moment it exists.
+      const auto layout_before_json = layout_json();
+      const auto layout_before = kscreen_layout_from_json(layout_before_json);
+      if (!layout_before) {
+        BOOST_LOG(error) << "Virtual display: refusing a KWin screen because the current layout could not be read"sv;
+        return std::nullopt;
+      }
+      const auto previous_primary = kscreen_primary_output(*layout_before);
+      const auto names = kwin_virtual_output::output_names();
+      if (!names) {
+        BOOST_LOG(error) << "Virtual display: refusing a KWin screen because the output list could not be read"sv;
+        return std::nullopt;
+      }
+
+      std::string request_name;
+      std::string output_name;
+      for (int slot = 0; slot < max_output_slots && output_name.empty(); ++slot) {
+        auto candidate = kwin_output_request_name(slot);
+        auto expected = kwin_output_expected_name(candidate);
+        if (!reserve_name(expected)) {
+          continue;  // This process already holds the slot.
+        }
+        if (std::find(names->begin(), names->end(), expected) != names->end()) {
+          // Present but not reserved here: not ours to take.
+          release_name(expected);
+          continue;
+        }
+        request_name = std::move(candidate);
+        output_name = std::move(expected);
+      }
+      if (output_name.empty()) {
+        BOOST_LOG(warning) << "Virtual display: no free KWin screen slot"sv;
+        return std::nullopt;
+      }
+
+      vdisplay_t display;
+      display.output_name = output_name;
+      display.width = width;
+      display.height = height;
+      display.fps = fps;
+      display.active = true;
+      display.backend = backend_e::KWIN_VIRTUAL_OUTPUT;
+      if (previous_primary) {
+        display.kscreen_primary_before = kscreen_output_state_from_json(layout_before_json, *previous_primary);
+      }
+      if (!record_persisted_display(display, 0)) {
+        BOOST_LOG(error) << "Virtual display: refusing a KWin screen because durable recovery intent could not be committed"sv;
+        release_name(output_name);
+        return std::nullopt;
+      }
+
+      std::string error;
+      const auto created = kwin_virtual_output::create(request_name, width, height, error);
+      if (!created) {
+        // The intent record stays until stale cleanup verifies the name is absent.
+        BOOST_LOG(warning) << "Virtual display: KWin screen ["sv << output_name << "] was not created: "sv << error;
+        release_name(output_name);
+        return std::nullopt;
+      }
+
+      place(display, previous_primary.value_or(std::string {}));
+      BOOST_LOG(info) << "Virtual display: KWin screen created ["sv << output_name << "] "sv
+                      << width << "x"sv << height << "@"sv << fps << "Hz"sv;
+      return display;
+#else
+      BOOST_LOG(warning) << "Virtual display: this Polaris was built without KWin screencast support"sv;
+      return std::nullopt;
+#endif
+    }
+
+    static bool destroy(vdisplay_t &display) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+      if (!kwin_output_is_polaris_owned(display.output_name)) {
+        BOOST_LOG(warning) << "Virtual display: refusing to treat ["sv << display.output_name
+                           << "] as a KWin screen Polaris created"sv;
+        return false;
+      }
+
+      if (kwin_virtual_output::anchored(display.output_name)) {
+        if (!kwin_virtual_output::release(display.output_name, release_budget)) {
+          BOOST_LOG(error) << "Virtual display: KWin screen ["sv << display.output_name
+                           << "] is still present after release; retaining recovery authority"sv;
+          return false;
+        }
+      } else {
+        // Not held by this process image: KWin removed it with the connection
+        // that asked for it. If an output of that name exists anyway, it is not
+        // one this process can remove, and keeping the record would refuse
+        // every launch after it.
+        const auto names = kwin_virtual_output::output_names();
+        if (!names) {
+          BOOST_LOG(error) << "Virtual display: cannot list outputs to verify KWin screen ["sv
+                           << display.output_name << "] is gone; retaining recovery authority"sv;
+          return false;
+        }
+        if (std::find(names->begin(), names->end(), display.output_name) != names->end()) {
+          BOOST_LOG(warning) << "Virtual display: ["sv << display.output_name
+                             << "] exists but no connection in this process holds it; only the client that created it can remove it. Forgetting the record"sv;
+        } else {
+          BOOST_LOG(info) << "Virtual display: KWin screen ["sv << display.output_name << "] verified absent"sv;
+        }
+      }
+      release_name(display.output_name);
+
+      // KWin re-applies the layout it stored for the remaining screens when the
+      // output goes, which puts the previous primary back. Check it did.
+      if (display.kscreen_primary_before && display.kscreen_primary_before->priority == 1) {
+        const auto &previous = display.kscreen_primary_before->name;
+        auto primary = find_output(kscreen_layout_from_json(layout_json()), previous);
+        if (primary && primary->priority != 1) {
+          run_kscreen(kwin_restore_priority_args(previous));
+          primary = find_output(kscreen_layout_from_json(layout_json()), previous);
+        }
+        if (!primary || primary->priority != 1) {
+          BOOST_LOG(warning) << "Virtual display: ["sv << previous << "] was primary before the stream and is not ranked first again"sv;
+        }
+      }
+
+      display.active = false;
+      return true;
+#else
+      BOOST_LOG(error) << "Virtual display: this Polaris cannot remove KWin screen ["sv << display.output_name
+                       << "]; retaining recovery authority"sv;
+      return false;
+#endif
+    }
+
+  }  // namespace kwin_vo
+
+  // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
 
@@ -1775,6 +2271,8 @@ namespace virtual_display {
         return "Wayland (headless output)";
       case backend_e::KSCREEN_DOCTOR:
         return "kscreen-doctor";
+      case backend_e::KWIN_VIRTUAL_OUTPUT:
+        return "KWin virtual output";
       case backend_e::NONE:
       default:
         return "None";
@@ -1782,67 +2280,99 @@ namespace virtual_display {
   }
 
   backend_e select_preferred_backend(bool evdi_ready, bool wayland_ready, bool kscreen_installed) {
-    if (evdi_ready) {
-      return backend_e::EVDI;
-    }
-    if (wayland_ready) {
-      return backend_e::WAYLAND_WLR;
-    }
-    if (kscreen_installed) {
-      return backend_e::KSCREEN_DOCTOR;
-    }
-    return backend_e::NONE;
+    return select_backend(
+      backend_preference_e::AUTO,
+      {.evdi = evdi_ready, .kwin = false, .wlr = wayland_ready, .kscreen = kscreen_installed}
+    );
   }
 
   namespace {
+    std::optional<backend_preference_e> cached_preference;
+
+    backend_preference_e configured_preference() {
+      const auto &value = config::video.linux_display.virtual_display_backend;
+      const auto preference = parse_backend_preference(value);
+      if (!preference) {
+        BOOST_LOG(warning) << "Virtual display: unknown linux_virtual_display_backend ["sv << value << "]; using auto"sv;
+      }
+      return preference.value_or(backend_preference_e::AUTO);
+    }
+
     backend_e detect_backend_with_cache_policy(
       bool force_refresh,
-      bool *evdi_blocked = nullptr
+      bool *evdi_blocked = nullptr,
+      std::string *kwin_reason = nullptr,
+      backend_preference_e *preference_out = nullptr
     ) {
       // Detection touches both the cache and lazily initialized backend state
       // (including the EVDI library handle). Keep the full probe serialized,
       // rather than protecting only the two cache assignments.
       std::lock_guard cache_lock {backend_detection_mutex};
+      const auto preference = configured_preference();
+      if (preference_out) {
+        *preference_out = preference;
+      }
       const auto now = std::chrono::steady_clock::now();
-      if (!force_refresh && cached_backend.has_value() &&
+      if (!force_refresh && cached_backend.has_value() && cached_preference == preference &&
           (now - cached_backend_time) <= backend_detection_cache_ttl) {
         if (evdi_blocked) {
           *evdi_blocked = *cached_backend == backend_e::NONE &&
+                          (preference == backend_preference_e::AUTO || preference == backend_preference_e::EVDI) &&
                           evdi::is_module_loaded() &&
                           evdi::load_library() &&
                           !evdi::can_create();
         }
+        if (kwin_reason) {
+          *kwin_reason = kwin_vo::last_probe_reason;
+        }
         return *cached_backend;
       }
 
-      backend_e backend = backend_e::NONE;
+      const auto wanted = [&](backend_preference_e backend) {
+        return preference == backend_preference_e::AUTO || preference == backend;
+      };
+      const bool automatic = preference == backend_preference_e::AUTO;
+      probe_snapshot_t probe;
       bool evdi_module_ready = false;
       bool evdi_library_ready = false;
-      bool evdi_can_create = false;
 
-      // Priority 1: EVDI — creates true virtual connectors. Module + library
+      // EVDI first — it creates true virtual connectors. Module + library
       // presence alone is not enough to advertise it: creation must actually be
-      // possible, or the mode is offered and then silently fails at launch.
-      evdi_module_ready = evdi::is_module_loaded() || evdi::load_module();
-      if (evdi_module_ready) {
-        evdi_library_ready = evdi::load_library();
-        evdi_can_create = evdi_library_ready && evdi::can_create();
+      // possible, or the mode is offered and then silently fails at launch. A
+      // host set to another backend never has the module loaded on its behalf.
+      if (wanted(backend_preference_e::EVDI)) {
+        evdi_module_ready = evdi::is_module_loaded() || evdi::load_module();
+        if (evdi_module_ready) {
+          evdi_library_ready = evdi::load_library();
+          probe.evdi = evdi_library_ready && evdi::can_create();
+        }
       }
       // Probe lower-priority candidates only when no earlier backend is ready.
-      const bool wayland_ready = !evdi_can_create && wayland_wlr::is_available();
+      kwin_vo::last_probe_reason.clear();
+      if (wanted(backend_preference_e::KWIN) && !(automatic && probe.evdi)) {
+        probe.kwin = kwin_vo::probe(kwin_vo::last_probe_reason);
+      }
+      if (wanted(backend_preference_e::WLR) && !(automatic && (probe.evdi || probe.kwin))) {
+        probe.wlr = wayland_wlr::is_available();
+      }
 
-      // Priority 3: kscreen-doctor (KDE Plasma)
-      // Detect the installed backend even before its connector is configured.
-      // is_available() separately applies backend_has_required_configuration(),
-      // so launch admission stays fail-closed while the UI can explain how to
-      // make this fallback ready.
-      const bool kscreen_installed = !evdi_can_create && !wayland_ready && kscreen::is_installed();
-      backend = select_preferred_backend(evdi_can_create, wayland_ready, kscreen_installed);
+      // kscreen-doctor last. Detect the installed backend even before its
+      // connector is configured. is_available() separately applies
+      // backend_has_required_configuration(), so launch admission stays
+      // fail-closed while the UI can explain how to make this fallback ready.
+      if (wanted(backend_preference_e::KSCREEN) && !(automatic && (probe.evdi || probe.kwin || probe.wlr))) {
+        probe.kscreen = kscreen::is_installed();
+      }
+      const auto backend = select_backend(preference, probe);
 
       cached_backend = backend;
+      cached_preference = preference;
       cached_backend_time = now;
       if (evdi_blocked) {
-        *evdi_blocked = evdi_module_ready && evdi_library_ready && !evdi_can_create;
+        *evdi_blocked = evdi_module_ready && evdi_library_ready && !probe.evdi;
+      }
+      if (kwin_reason) {
+        *kwin_reason = kwin_vo::last_probe_reason;
       }
       log_detected_backend(backend);
       return backend;
@@ -1851,6 +2381,12 @@ namespace virtual_display {
 
   backend_e detect_backend() {
     return detect_backend_with_cache_policy(false);
+  }
+
+  void set_backend_preference(const std::string &value) {
+    std::lock_guard cache_lock {backend_detection_mutex};
+    config::video.linux_display.virtual_display_backend = value;
+    cached_backend.reset();
   }
 
   backend_e detect_backend_fresh() {
@@ -1865,6 +2401,7 @@ namespace virtual_display {
         return !streaming_output.empty();
       case backend_e::EVDI:
       case backend_e::WAYLAND_WLR:
+      case backend_e::KWIN_VIRTUAL_OUTPUT:
         return true;
     }
     return false;
@@ -1884,6 +2421,7 @@ namespace virtual_display {
     switch (backend) {
       case backend_e::EVDI:
       case backend_e::WAYLAND_WLR:
+      case backend_e::KWIN_VIRTUAL_OUTPUT:
         return {};
       case backend_e::KSCREEN_DOCTOR:
         if (streaming_output_configured) {
@@ -1897,9 +2435,32 @@ namespace virtual_display {
                  "/sys/devices/evdi/add is not writable by Polaris. Load evdi with "
                  "initial_device_count=1 or grant write access.";
         }
-        return "No virtual display backend is available on this host (EVDI not usable, no "
-               "supported Wayland compositor, kscreen-doctor not configured).";
+        return "No virtual display backend is available on this host (EVDI not usable, no KWin "
+               "virtual output, no supported Wayland compositor, kscreen-doctor not configured).";
     }
+  }
+
+  std::string forced_backend_unavailable_reason(backend_preference_e preference, std::string_view detail) {
+    std::string reason = "linux_virtual_display_backend is set to "s + std::string {backend_preference_name(preference)} + ", and ";
+    switch (preference) {
+      case backend_preference_e::EVDI:
+        reason += "EVDI cannot create a display on this host.";
+        break;
+      case backend_preference_e::KWIN:
+        reason += "KWin cannot create a screen here";
+        reason += detail.empty() ? "."s : ": "s + std::string {detail};
+        break;
+      case backend_preference_e::WLR:
+        reason += "no compositor that can create a named output (Hyprland) is running.";
+        break;
+      case backend_preference_e::KSCREEN:
+        reason += "kscreen-doctor is not installed.";
+        break;
+      case backend_preference_e::AUTO:
+      default:
+        return {};
+    }
+    return reason + " Set it to auto to let Polaris choose.";
   }
 
   std::string unavailable_reason() {
@@ -1907,7 +2468,12 @@ namespace virtual_display {
     // Keep diagnostics in the same serialized probe as backend selection.
     // load_library() owns lazy handle/function-pointer state and must never run
     // outside backend_detection_mutex, including on its broken-library path.
-    const auto backend = detect_backend_with_cache_policy(false, &evdi_blocked);
+    std::string kwin_reason;
+    backend_preference_e preference = backend_preference_e::AUTO;
+    const auto backend = detect_backend_with_cache_policy(false, &evdi_blocked, &kwin_reason, &preference);
+    if (backend == backend_e::NONE && preference != backend_preference_e::AUTO) {
+      return forced_backend_unavailable_reason(preference, preference == backend_preference_e::KWIN ? kwin_reason : std::string {});
+    }
     return unavailable_reason_for(backend, evdi_blocked, !host_virtual_display_connector().empty());
   }
 
@@ -1917,6 +2483,14 @@ namespace virtual_display {
     bool found = false;
     bool succeeded = true;
   };
+
+  static bool kwin_anchored_here(const std::string &output_name) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+    return kwin_virtual_output::anchored(output_name);
+#else
+    return false;
+#endif
+  }
 
   static stale_cleanup_result_t cleanup_stale_unlocked() {
     const pid_t self = getpid();
@@ -1938,7 +2512,11 @@ namespace virtual_display {
         // holds — the streaming session and the web UI each own one — so it is
         // never stale no matter how many entries the file carries. Tearing
         // those down here is what used to kill a live sibling display.
-        if (!persisted_display_is_stale(entry.owner_pid, self, pid_is_alive(entry.owner_pid))) {
+        const bool owner_alive = pid_is_alive(entry.owner_pid);
+        const bool entry_is_stale = entry.display.backend == backend_e::KWIN_VIRTUAL_OUTPUT ?
+                                      kwin_record_is_stale(entry.owner_pid, self, owner_alive, kwin_anchored_here(entry.display.output_name)) :
+                                      persisted_display_is_stale(entry.owner_pid, self, owner_alive);
+        if (!entry_is_stale) {
           BOOST_LOG(info) << "Virtual display: persisted display ["sv << entry.display.output_name
                           << "] belongs to live pid "sv << entry.owner_pid << ", skipping stale cleanup"sv;
           continue;
@@ -2011,6 +2589,9 @@ namespace virtual_display {
       case backend_e::KSCREEN_DOCTOR:
         return publish(kscreen::create(width, height, fps));
 
+      case backend_e::KWIN_VIRTUAL_OUTPUT:
+        return publish(kwin_vo::create(width, height, fps));
+
       case backend_e::NONE:
       default:
         BOOST_LOG(warning) << "Virtual display: no backend available to create virtual display"sv;
@@ -2038,6 +2619,10 @@ namespace virtual_display {
 
       case backend_e::KSCREEN_DOCTOR:
         destroyed = kscreen::destroy(display);
+        break;
+
+      case backend_e::KWIN_VIRTUAL_OUTPUT:
+        destroyed = kwin_vo::destroy(display);
         break;
 
       case backend_e::NONE:

@@ -1,5 +1,13 @@
 # KDE Wayland Host Virtual Display Research
 
+> **Status, September 2026:** answered by the KWin backend (#727). Polaris asks KWin for the
+> screen directly with `zkde_screencast_unstable_v1.stream_virtual_output_with_description`, the
+> request krfb-virtualmonitor wraps, so there is no VNC listener and no shelling out to krfb. The
+> open questions below are settled in `src/platform/linux/kwin_virtual_output.cpp` and
+> [launch modes](../launch-modes.md): the screen lives as long as Polaris holds its stream,
+> refresh comes from a kscreen-doctor custom mode, and there is no HDR. The rest of this page is
+> kept as the research that led there.
+
 This document captures public research for a future Polaris **Host Virtual Display** backend on KDE Wayland. It is intentionally generalized: do not add private hostnames, LAN addresses, pairing secrets, screenshots, or support-bundle contents.
 
 ## Source

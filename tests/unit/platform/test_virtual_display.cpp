@@ -391,6 +391,240 @@ TEST(VirtualDisplayTests, FailedVirtualDisplayRequestNeverStreamsPhysicalOutput)
   ASSERT_NE(first_failure, std::string::npos);
   EXPECT_NE(launch_path.find("return 503;", first_failure + 1), std::string::npos);
 }
+
+TEST(VirtualDisplayKwinTests, BackendPreferenceReadsEveryConfigValue) {
+  using virtual_display::backend_preference_e;
+  using virtual_display::parse_backend_preference;
+  EXPECT_EQ(parse_backend_preference(""), backend_preference_e::AUTO);
+  EXPECT_EQ(parse_backend_preference("auto"), backend_preference_e::AUTO);
+  EXPECT_EQ(parse_backend_preference("evdi"), backend_preference_e::EVDI);
+  EXPECT_EQ(parse_backend_preference("kwin"), backend_preference_e::KWIN);
+  EXPECT_EQ(parse_backend_preference("wlr"), backend_preference_e::WLR);
+  EXPECT_EQ(parse_backend_preference("kscreen"), backend_preference_e::KSCREEN);
+  EXPECT_FALSE(parse_backend_preference("KWin").has_value());
+  EXPECT_FALSE(parse_backend_preference("krfb").has_value());
+
+  for (const auto preference : {backend_preference_e::AUTO, backend_preference_e::EVDI, backend_preference_e::KWIN,
+                                backend_preference_e::WLR, backend_preference_e::KSCREEN}) {
+    EXPECT_EQ(parse_backend_preference(virtual_display::backend_preference_name(preference)), preference);
+  }
+}
+
+TEST(VirtualDisplayKwinTests, AutomaticPrefersANewScreenOverABorrowedConnector) {
+  using virtual_display::backend_e;
+  using virtual_display::backend_preference_e;
+  using virtual_display::select_backend;
+  constexpr auto automatic = backend_preference_e::AUTO;
+
+  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = true, .wlr = true, .kscreen = true}), backend_e::EVDI);
+  EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = true, .wlr = true, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
+  EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = false, .wlr = true, .kscreen = true}), backend_e::WAYLAND_WLR);
+  // pollux78's host in #633: KDE, no EVDI, only real monitors to borrow.
+  EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = true, .wlr = false, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
+  EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = false, .wlr = false, .kscreen = true}), backend_e::KSCREEN_DOCTOR);
+  EXPECT_EQ(select_backend(automatic, {}), backend_e::NONE);
+
+  // The older three-argument form keeps its order, with KWin never probed.
+  EXPECT_EQ(virtual_display::select_preferred_backend(false, false, true), backend_e::KSCREEN_DOCTOR);
+}
+
+TEST(VirtualDisplayKwinTests, AChosenBackendNeverFallsBackToAnother) {
+  using virtual_display::backend_e;
+  using virtual_display::backend_preference_e;
+  using virtual_display::select_backend;
+
+  // Set to KWin on a host where only kscreen-doctor works: borrowing a monitor
+  // would do exactly what the setting was chosen to avoid.
+  EXPECT_EQ(select_backend(backend_preference_e::KWIN, {.evdi = true, .kwin = false, .wlr = true, .kscreen = true}), backend_e::NONE);
+  EXPECT_EQ(select_backend(backend_preference_e::KWIN, {.evdi = true, .kwin = true, .wlr = false, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
+  EXPECT_EQ(select_backend(backend_preference_e::EVDI, {.evdi = false, .kwin = true, .wlr = false, .kscreen = true}), backend_e::NONE);
+  EXPECT_EQ(select_backend(backend_preference_e::KSCREEN, {.evdi = true, .kwin = true, .wlr = false, .kscreen = true}), backend_e::KSCREEN_DOCTOR);
+  EXPECT_EQ(select_backend(backend_preference_e::WLR, {.evdi = true, .kwin = true, .wlr = false, .kscreen = true}), backend_e::NONE);
+
+  const auto reason = virtual_display::forced_backend_unavailable_reason(
+    backend_preference_e::KWIN,
+    "KWin offers screencast version 3, and creating a screen needs version 4 (KDE Plasma 6)"
+  );
+  EXPECT_NE(reason.find("linux_virtual_display_backend is set to kwin"), std::string::npos);
+  EXPECT_NE(reason.find("version 3"), std::string::npos);
+  EXPECT_NE(reason.find("auto"), std::string::npos);
+  EXPECT_EQ(virtual_display::forced_backend_unavailable_reason(backend_preference_e::AUTO, "anything"), "");
+}
+
+TEST(VirtualDisplayKwinTests, KwinScreenNeedsNoExtraConfiguration) {
+  using virtual_display::backend_e;
+  EXPECT_TRUE(virtual_display::backend_has_required_configuration(backend_e::KWIN_VIRTUAL_OUTPUT, ""));
+  EXPECT_EQ(virtual_display::unavailable_reason_for(backend_e::KWIN_VIRTUAL_OUTPUT, false, false), "");
+  EXPECT_STREQ(virtual_display::backend_name(backend_e::KWIN_VIRTUAL_OUTPUT), "KWin virtual output");
+  // Still not the Hyprland backend: KWin names its outputs itself.
+  EXPECT_FALSE(virtual_display::wayland_compositor_supports_exact_output_creation("kwin"));
+}
+
+TEST(VirtualDisplayKwinTests, OutputNamesAreSlotScopedAndRecognisable) {
+  EXPECT_EQ(virtual_display::kwin_output_request_name(0), "polaris-0");
+  EXPECT_EQ(virtual_display::kwin_output_expected_name("polaris-0"), "Virtual-polaris-0");
+
+  EXPECT_TRUE(virtual_display::kwin_output_is_polaris_owned("Virtual-polaris-0"));
+  EXPECT_TRUE(virtual_display::kwin_output_is_polaris_owned("Virtual-polaris-7"));
+  EXPECT_FALSE(virtual_display::kwin_output_is_polaris_owned("Virtual-polaris-"));
+  EXPECT_FALSE(virtual_display::kwin_output_is_polaris_owned("Virtual-polaris-1a"));
+  // The screen-sharing portal's own virtual output, whose stored layout KWin
+  // once applied to a new Polaris screen.
+  EXPECT_FALSE(virtual_display::kwin_output_is_polaris_owned("Virtual-virtual-xdp-kde-"));
+  EXPECT_FALSE(virtual_display::kwin_output_is_polaris_owned("DP-2"));
+
+  EXPECT_FALSE(virtual_display::kwin_screencast_version_supported(3));
+  EXPECT_TRUE(virtual_display::kwin_screencast_version_supported(4));
+  EXPECT_TRUE(virtual_display::kwin_screencast_version_supported(6));
+}
+
+namespace {
+  // kscreen-doctor --json on pc-papi (KWin 6.7.5) just after KWin created a
+  // screen: it applied another virtual output's stored layout, so the new
+  // screen came up primary at scale 0.5 on top of the real monitor.
+  constexpr std::string_view spike_layout_after_create = R"({"outputs":[
+    {"name":"DP-2","enabled":true,"priority":0,"scale":1,"pos":{"x":0,"y":0},"currentModeId":"2",
+     "modes":[{"id":"1","name":"3840x2160@60","refreshRate":60.0,"size":{"width":3840,"height":2160}},
+              {"id":"2","name":"7680x2160@60","refreshRate":59.98699951171875,"size":{"width":7680,"height":2160}}]},
+    {"name":"Virtual-polaris-0","enabled":true,"priority":1,"scale":0.5,"pos":{"x":0,"y":0},"currentModeId":"1",
+     "modes":[{"id":"1","name":"1920x1080@60","refreshRate":60.0,"size":{"width":1920,"height":1080}}]}
+  ]})";
+  constexpr std::string_view spike_layout_before_create = R"({"outputs":[
+    {"name":"DP-2","enabled":true,"priority":1,"scale":1,"pos":{"x":0,"y":0},"currentModeId":"2",
+     "modes":[{"id":"2","name":"7680x2160@60","refreshRate":59.98699951171875,"size":{"width":7680,"height":2160}}]}
+  ]})";
+}  // namespace
+
+TEST(VirtualDisplayKwinTests, ReadsTheLayoutKscreenDoctorReports) {
+  const auto layout = virtual_display::kscreen_layout_from_json(spike_layout_after_create);
+  ASSERT_TRUE(layout.has_value());
+  ASSERT_EQ(layout->size(), 2U);
+  const auto &monitor = layout->at(0);
+  EXPECT_EQ(monitor.name, "DP-2");
+  EXPECT_EQ(monitor.mode_width, 7680);
+  EXPECT_EQ(monitor.mode_height, 2160);
+  EXPECT_NEAR(monitor.refresh_hz, 59.987, 0.001);
+  EXPECT_EQ(monitor.mode_names, (std::vector<std::string> {"3840x2160@60", "7680x2160@60"}));
+  const auto &screen = layout->at(1);
+  EXPECT_DOUBLE_EQ(screen.scale, 0.5);
+  EXPECT_EQ(screen.priority, 1);
+
+  // Read after KWin created the screen, the primary is already the new one,
+  // which is why Polaris reads it first.
+  EXPECT_EQ(virtual_display::kscreen_primary_output(*layout), "Virtual-polaris-0");
+  const auto before = virtual_display::kscreen_layout_from_json(spike_layout_before_create);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_EQ(virtual_display::kscreen_primary_output(*before), "DP-2");
+
+  // Beside the real monitor, not on top of it.
+  EXPECT_EQ(virtual_display::kscreen_right_edge(*layout, "Virtual-polaris-0"), 7680);
+}
+
+TEST(VirtualDisplayKwinTests, RightEdgeUsesLogicalWidth) {
+  const auto layout = virtual_display::kscreen_layout_from_json(R"({"outputs":[
+    {"name":"eDP-1","enabled":true,"priority":1,"scale":2,"pos":{"x":0,"y":0},"currentModeId":"a",
+     "modes":[{"id":"a","name":"3840x2160@60","refreshRate":60,"size":{"width":3840,"height":2160}}]},
+    {"name":"HDMI-A-1","enabled":false,"priority":0,"scale":1,"pos":{"x":9000,"y":0},"currentModeId":"b",
+     "modes":[{"id":"b","name":"1920x1080@60","refreshRate":60,"size":{"width":1920,"height":1080}}]}
+  ]})");
+  ASSERT_TRUE(layout.has_value());
+  // 3840 device pixels at scale 2 are 1920 logical; a disabled output takes no room.
+  EXPECT_EQ(virtual_display::kscreen_right_edge(*layout, "Virtual-polaris-0"), 1920);
+}
+
+TEST(VirtualDisplayKwinTests, OddKscreenAnswersNeverThrow) {
+  EXPECT_FALSE(virtual_display::kscreen_layout_from_json("not json").has_value());
+  EXPECT_FALSE(virtual_display::kscreen_layout_from_json(R"({"outputs":3})").has_value());
+  EXPECT_FALSE(virtual_display::kscreen_layout_from_json(R"({"outputs":[{"enabled":true}]})").has_value());
+
+  // Wrong types read as absent rather than throwing.
+  const auto layout = virtual_display::kscreen_layout_from_json(R"({"outputs":[
+    {"name":"DP-1","enabled":"yes","priority":"1","scale":"1","pos":{"x":"a","y":null},"currentModeId":1,
+     "modes":[{"id":1},"junk",{"id":"1","size":{"width":"wide"}}]}
+  ]})");
+  ASSERT_TRUE(layout.has_value());
+  ASSERT_EQ(layout->size(), 1U);
+  EXPECT_FALSE(layout->at(0).enabled);
+  EXPECT_EQ(layout->at(0).priority, 0);
+  EXPECT_EQ(layout->at(0).mode_width, 0);
+  EXPECT_FALSE(virtual_display::kscreen_primary_output(*layout).has_value());
+}
+
+TEST(VirtualDisplayKwinTests, KscreenArgumentsForModeAndPlacement) {
+  using args_t = std::vector<std::string>;
+  EXPECT_EQ(
+    virtual_display::kwin_custom_mode_args("Virtual-polaris-0", 2560, 1440, 120),
+    (args_t {"output.Virtual-polaris-0.addCustomMode.2560.1440.120000.full"})
+  );
+  EXPECT_EQ(
+    virtual_display::kwin_mode_args("Virtual-polaris-0", 2560, 1440, 120),
+    (args_t {"output.Virtual-polaris-0.mode.2560x1440@120"})
+  );
+  EXPECT_EQ(
+    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2"),
+    (args_t {
+      "output.Virtual-polaris-0.scale.1",
+      "output.Virtual-polaris-0.position.7680,0",
+      "output.Virtual-polaris-0.priority.1",
+      "output.DP-2.priority.2",
+    })
+  );
+  // No previous primary, or the screen itself: nothing else is re-ranked.
+  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "").size(), 3U);
+  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "Virtual-polaris-0").size(), 3U);
+  EXPECT_EQ(virtual_display::kwin_restore_priority_args("DP-2"), (args_t {"output.DP-2.priority.1"}));
+}
+
+TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
+  virtual_display::kscreen_output_layout_t screen;
+  screen.name = "Virtual-polaris-0";
+  screen.enabled = true;
+  screen.mode_width = 1920;
+  screen.mode_height = 1080;
+  screen.refresh_hz = 119.93;  // What KWin ran for a 120 Hz custom mode on the test host.
+  EXPECT_TRUE(virtual_display::kwin_mode_matches(screen, 1920, 1080, 120));
+  EXPECT_FALSE(virtual_display::kwin_mode_matches(screen, 1920, 1080, 60));
+  EXPECT_FALSE(virtual_display::kwin_mode_matches(screen, 2560, 1440, 120));
+  screen.refresh_hz = 0.0;
+  EXPECT_FALSE(virtual_display::kwin_mode_matches(screen, 1920, 1080, 120));
+
+  screen.scale = 1.0;
+  screen.x = 7680;
+  screen.y = 0;
+  screen.priority = 1;
+  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0));
+  screen.scale = 0.5;
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680));
+  screen.scale = 1.0;
+  screen.priority = 2;
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680));
+}
+
+TEST(VirtualDisplayKwinTests, ARecordIsLiveOnlyWhileThisProcessImageHoldsTheScreen) {
+  using virtual_display::kwin_record_is_stale;
+  EXPECT_FALSE(kwin_record_is_stale(100, 100, true, true));
+  // Restarted in place: same pid, connection gone, so KWin removed the screen.
+  EXPECT_TRUE(kwin_record_is_stale(100, 100, true, false));
+  // Another live Polaris holds its own screens.
+  EXPECT_FALSE(kwin_record_is_stale(200, 100, true, false));
+  EXPECT_TRUE(kwin_record_is_stale(200, 100, false, false));
+  EXPECT_TRUE(kwin_record_is_stale(0, 100, false, false));
+}
+
+TEST(VirtualDisplayKwinTests, PersistedKwinScreenRoundTrips) {
+  const auto entries = virtual_display::parse_persisted_displays(R"({"displays":[
+    {"pid":4242,"output_name":"Virtual-polaris-0","width":1920,"height":1080,"fps":120,"active":true,
+     "backend":"kwin_virtual_output",
+     "kscreen_primary_before":{"name":"DP-2","enabled":true,"current_mode_id":"2","priority":1}}
+  ]})");
+  ASSERT_EQ(entries.size(), 1U);
+  EXPECT_EQ(entries.front().display.backend, virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT);
+  EXPECT_EQ(entries.front().display.output_name, "Virtual-polaris-0");
+  ASSERT_TRUE(entries.front().display.kscreen_primary_before.has_value());
+  EXPECT_EQ(entries.front().display.kscreen_primary_before->name, "DP-2");
+}
+
 #else
 TEST(VirtualDisplayTests, LinuxOnly) {
   GTEST_SKIP() << "Linux-only virtual display tests";
