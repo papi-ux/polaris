@@ -347,6 +347,21 @@ namespace wl {
     extcopy_timing_tracker_t timing_tracker;
   };
 
+  /**
+   * @brief Name an ext-image-copy status for a log line.
+   */
+  constexpr std::string_view extcopy_status_name(extcopy_t::status_e status) {
+    switch (status) {
+      case extcopy_t::WAITING:
+        return "WAITING";
+      case extcopy_t::READY:
+        return "READY";
+      case extcopy_t::REINIT:
+        return "REINIT";
+    }
+    return "UNKNOWN";
+  }
+
   class monitor_t {
   public:
     explicit monitor_t(wl_output *output, std::uint32_t registry_id = 0);

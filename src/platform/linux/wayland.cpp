@@ -1545,6 +1545,9 @@ namespace wl {
 
   bool extcopy_t::allocate_buffer(display_t &display, frame_t &target) {
     if (!device_valid || !chosen_format_valid || !dmabuf_interface) {
+      BOOST_LOG(warning) << "Extcopy DMA-BUF capture cannot allocate a buffer yet: device_valid="sv
+                         << device_valid << " chosen_format_valid="sv << chosen_format_valid
+                         << " dmabuf_interface="sv << (dmabuf_interface != nullptr);
       return false;
     }
 
@@ -1758,7 +1761,15 @@ namespace wl {
       return false;
     }
 
-    if (!buffer_size_valid || !device_valid || !choose_format()) {
+    if (!buffer_size_valid || !device_valid) {
+      BOOST_LOG(warning) << "Extcopy DMA-BUF capture constraints were incomplete: buffer_size_valid="sv
+                         << buffer_size_valid << " device_valid="sv << device_valid;
+      status = REINIT;
+      return false;
+    }
+
+    // choose_format() logs its own failure.
+    if (!choose_format()) {
       status = REINIT;
       return false;
     }

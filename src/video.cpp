@@ -2975,12 +2975,14 @@ namespace video {
                                << requested_display << "] while exact display ["sv
                                << exact_display_name << "] is owned"sv;
           } else {
+            BOOST_LOG(info) << "Capture: display switch requested; reinitializing display capture"sv;
             artificial_reinit = true;
             return false;
           }
         }
 
         if (reinit_request_event.peek()) {
+          BOOST_LOG(info) << "Capture: encoder requested a rebuild of the capture path; reinitializing display capture"sv;
           artificial_reinit = true;
           return false;
         }
