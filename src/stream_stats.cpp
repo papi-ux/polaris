@@ -1221,9 +1221,10 @@ namespace stream_stats {
         {"message", "Polaris could not raise the priority of its capture, encode and audio threads (" + limits +
                       "), so they share the ordinary scheduler with the game. When the game is loading the CPU "
                       "hard, that can show up as stutter in the stream."},
-        {"action", "Run Polaris as the packaged polaris.service, which grants realtime priority, rather than "
-                   "starting it some other way, or install RealtimeKit. Troubleshooting, under Thread priority "
-                   "warning during a stream, has the commands that show which limit applies."}
+        {"action", "Run Polaris as the packaged polaris.service, which asks for realtime priority where the user "
+                   "manager allows it, rather than starting it some other way, or install RealtimeKit. "
+                   "Troubleshooting, under Thread priority warning during a stream, has the commands that show "
+                   "which limit applies."}
       });
     }
 #endif
