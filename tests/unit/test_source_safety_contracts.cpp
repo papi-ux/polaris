@@ -1238,14 +1238,14 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   EXPECT_LT(kscreen_end, kwin);
   const auto body = backend.substr(kwin, kwin_end - kwin);
 
-  // KWin can make the new screen primary the moment it exists, so the previous
-  // primary is read first.
+  // KWin can rank the new screen anywhere the moment it exists, so the ranking
+  // to keep is read first.
   const auto create = body.find("static std::optional<vdisplay_t> create(");
-  const auto primary = body.find("kscreen_primary_output(*layout_before)", create);
+  const auto before = body.find("kscreen_layout_from_json(layout_before_json)", create);
   const auto request = body.find("kwin_virtual_output::create(", create);
-  ASSERT_NE(primary, std::string::npos);
+  ASSERT_NE(before, std::string::npos);
   ASSERT_NE(request, std::string::npos);
-  EXPECT_LT(primary, request);
+  EXPECT_LT(before, request);
   // No recovery record: the screen dies with the connection, so a record could
   // only outlive it, and an older Polaris refuses a state file naming a backend
   // it does not know.
@@ -1261,9 +1261,24 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   EXPECT_EQ(body.find("std::system"), std::string::npos);
   EXPECT_EQ(body.find("exec_cmd_rc("), std::string::npos);
 
-  // The screen stays secondary; windows are moved onto it instead, after it is
-  // placed, and stop being moved before it is released.
-  EXPECT_EQ(body.find(".priority.1\""), std::string::npos);
+  // The screen is ranked after every other one, first thing and again with the
+  // placement, since a custom mode can reorder the ranking, and the result is
+  // checked. Windows are moved onto it instead, after it is placed, and stop
+  // being moved before it is released.
+  const auto place_body = body.find("static void place(");
+  const auto rank_first = body.find("run_kscreen(ranking)", place_body);
+  const auto custom_mode = body.find("kwin_custom_mode_args(", place_body);
+  const auto rank_last = body.find("args.insert(args.end(), ranking.begin(), ranking.end());", place_body);
+  const auto ranking_check = body.find("kwin_ranking_matches(*placed, layout_before, name)", place_body);
+  ASSERT_NE(place_body, std::string::npos);
+  ASSERT_NE(rank_first, std::string::npos);
+  ASSERT_NE(custom_mode, std::string::npos);
+  ASSERT_NE(rank_last, std::string::npos);
+  ASSERT_NE(ranking_check, std::string::npos);
+  EXPECT_LT(rank_first, custom_mode);
+  EXPECT_LT(custom_mode, rank_last);
+  EXPECT_LT(rank_last, ranking_check);
+  EXPECT_EQ(body.find("kscreen_primary_output("), std::string::npos);
   const auto place_call = body.find("place(display, *layout_before", create);
   const auto follow = body.find("kwin_virtual_output::follow_windows(", create);
   ASSERT_NE(place_call, std::string::npos);
@@ -1288,6 +1303,28 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   ASSERT_NE(callbacks, std::string::npos);
   ASSERT_NE(callbacks_end, std::string::npos);
   EXPECT_EQ(wayland.substr(callbacks, callbacks_end - callbacks).find("lock_guard"), std::string::npos);
+  // The window script: a short write is caught before KWin loads it, only this
+  // script is started, KWin must still hold it once it has evaluated it, and the
+  // newest screen's script is the only one loaded.
+  const auto load_script = wayland.find("bool load_follow_script(");
+  const auto write_checked = wayland.find("out.close();\n        if (!out) {", load_script);
+  const auto run = wayland.find("\"org.kde.kwin.Script\", \"run\"", load_script);
+  const auto kept = wayland.find("if (!follow_script_loaded(plugin)) {", load_script);
+  ASSERT_NE(load_script, std::string::npos);
+  ASSERT_NE(write_checked, std::string::npos);
+  ASSERT_NE(run, std::string::npos);
+  ASSERT_NE(kept, std::string::npos);
+  EXPECT_LT(write_checked, run);
+  EXPECT_LT(run, kept);
+  EXPECT_EQ(wayland.find("call_scripting(\"start\""), std::string::npos);
+  const auto follow_body = wayland.find("bool follow_windows(const std::string &output_name, std::string &error) {");
+  const auto older_unloaded = wayland.find("for (const auto &older : followed_outputs) {", follow_body);
+  const auto newest_loaded = wayland.find("load_follow_script(output_name, error)", follow_body);
+  ASSERT_NE(follow_body, std::string::npos);
+  ASSERT_NE(older_unloaded, std::string::npos);
+  ASSERT_NE(newest_loaded, std::string::npos);
+  EXPECT_LT(older_unloaded, newest_loaded);
+
   // The reader stops before the stream it reads is closed from another thread.
   const auto release = wayland.find("bool release(const std::string &output_name");
   const auto stop = wayland.find("anchor->stop_reader();", release);

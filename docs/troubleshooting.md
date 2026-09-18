@@ -547,10 +547,15 @@ tab names the backend in use and, when it cannot run, why.
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
 - **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream
   screen with a small KWin script it loads for the stream. The log says `new windows will not be
-  moved` when KWin refused to load it; the stream then shows an empty screen while the game
-  runs on your monitor.
+  moved` when KWin refused to load it or dropped it; the stream then shows an empty screen while
+  the game runs on your monitor. With two Polaris screens at once, the newer one gets new windows.
 - **A window I opened at the desk jumped to the stream.** While a stream runs, every new
-  application window is moved onto its screen. Drag it back, or use Meta+Shift+Left.
+  application window is moved onto its screen. Drag it back, or use Meta+Shift+Left. The
+  desktop's own prompts stay on your monitor: polkit password prompts, ksshaskpass, KWallet and
+  KRunner.
+- **My second monitor's desktop or panel moved.** Plasma gives each screen rank its own desktop
+  and panel. Polaris ranks the stream screen after all of yours and keeps your screens in their
+  order; the log says `not ranked as they were` when KWin would not keep that ranking.
 - **Choosing another backend.** Set Backend on the Virtual Display panel
   (`linux_virtual_display_backend`) to `evdi` or `kscreen` to use that one instead; the choice
   applies without a restart.

@@ -813,16 +813,52 @@ namespace virtual_display {
     return {"output."s + std::string {output} + ".mode." + kwin_mode_name(width, height, hz)};
   }
 
-  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary) {
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x) {
     const auto prefix = "output."s + std::string {output};
-    std::vector<std::string> args {
-      prefix + ".scale.1",
-      prefix + ".position." + std::to_string(x) + ",0",
-    };
-    if (!previous_primary.empty() && previous_primary != output) {
-      args.push_back("output."s + std::string {previous_primary} + ".priority.1");
+    return {prefix + ".scale.1", prefix + ".position." + std::to_string(x) + ",0"};
+  }
+
+  namespace {
+    /** Enabled screens in rank order; `except` is left out. */
+    std::vector<std::string> ranked_screens(const std::vector<kscreen_output_layout_t> &layout, std::string_view except) {
+      std::vector<const kscreen_output_layout_t *> ranked;
+      for (const auto &output : layout) {
+        if (output.enabled && output.priority > 0 && output.name != except) {
+          ranked.push_back(&output);
+        }
+      }
+      std::stable_sort(ranked.begin(), ranked.end(), [](const auto *a, const auto *b) {
+        return a->priority < b->priority;
+      });
+      std::vector<std::string> names;
+      names.reserve(ranked.size());
+      for (const auto *output : ranked) {
+        names.push_back(output->name);
+      }
+      return names;
     }
+  }  // namespace
+
+  std::vector<std::string> kwin_priority_args(std::string_view output, const std::vector<kscreen_output_layout_t> &layout_before) {
+    // kscreen-doctor inserts each screen at the rank it is given, so naming
+    // them in order from the first leaves exactly this order.
+    std::vector<std::string> args;
+    int rank = 1;
+    for (const auto &name : ranked_screens(layout_before, output)) {
+      args.push_back("output." + name + ".priority." + std::to_string(rank++));
+    }
+    args.push_back("output."s + std::string {output} + ".priority." + std::to_string(rank));
     return args;
+  }
+
+  bool kwin_ranking_matches(
+    const std::vector<kscreen_output_layout_t> &layout,
+    const std::vector<kscreen_output_layout_t> &layout_before,
+    std::string_view output
+  ) {
+    auto expected = ranked_screens(layout_before, output);
+    expected.emplace_back(output);
+    return ranked_screens(layout, {}) == expected;
   }
 
   std::string kwin_window_follow_plugin_name(std::string_view output_name) {
@@ -835,13 +871,22 @@ namespace virtual_display {
     const auto target = nlohmann::json(std::string {output_name}).dump();
     return "// Polaris: moves windows onto its Host Virtual Display screen while that screen exists.\n"
            "const target = " + target + ";\n"
+           "// The desktop's own prompts are for whoever sits at the host.\n"
+           "const hostPrompts = [\"polkit-kde-authentication-agent-1\", \"org.kde.polkit-kde-authentication-agent-1\",\n"
+           "  \"ksshaskpass\", \"org.kde.ksshaskpass\", \"kwalletd5\", \"org.kde.kwalletd5\", \"kwalletd6\", \"org.kde.kwalletd6\",\n"
+           "  \"krunner\", \"org.kde.krunner\", \"plasmashell\", \"org.kde.plasmashell\"];\n"
            "function outputNamed(name) {\n"
            "  const screens = workspace.screens;\n"
            "  for (let i = 0; i < screens.length; i++) { if (screens[i].name === name) return screens[i]; }\n"
            "  return null;\n"
            "}\n"
+           "function isHostPrompt(window) {\n"
+           "  return hostPrompts.indexOf(String(window.resourceClass || \"\")) >= 0 ||\n"
+           "         hostPrompts.indexOf(String(window.desktopFileName || \"\")) >= 0;\n"
+           "}\n"
            "workspace.windowAdded.connect(function (window) {\n"
            "  if (!window || !(window.normalWindow || window.dialog || window.splash)) return;\n"
+           "  if (isHostPrompt(window)) return;\n"
            "  const screen = outputNamed(target);\n"
            "  if (!screen || window.output === screen) return;\n"
            "  if (window.output && window.output.name.indexOf(\"Virtual-polaris-\") === 0) return;\n"
@@ -2087,26 +2132,37 @@ namespace virtual_display {
 
     /**
      * @brief Put the new screen where the stream needs it: the client's mode,
-     * scale 1, beside the other screens, with the previous primary kept first.
+     * scale 1, beside the other screens, ranked after every one of them.
      *
      * Best effort past the mode: a refresh rate KWin will not run is a warning,
      * and the stream still gets a screen of its own.
      *
-     * @param layout_before The layout read before KWin was asked, used to place
-     *        the screen when a later read fails rather than putting it at 0,0.
+     * @param layout_before The layout read before KWin was asked: the ranking to
+     *        keep, and where to place the screen when a later read fails rather
+     *        than putting it at 0,0.
      */
-    static void place(
-      const vdisplay_t &display,
-      const std::vector<kscreen_output_layout_t> &layout_before,
-      const std::string &previous_primary
-    ) {
+    static void place(const vdisplay_t &display, const std::vector<kscreen_output_layout_t> &layout_before) {
       const auto &name = display.output_name;
+      // kscreen can list the output a moment after its Wayland global appears.
       auto layout = kscreen_layout_from_json(layout_json());
       auto output = find_output(layout, name);
+      for (int attempt = 0; !output && attempt < 10; ++attempt) {
+        std::this_thread::sleep_for(100ms);
+        layout = kscreen_layout_from_json(layout_json());
+        output = find_output(layout, name);
+      }
       if (!output) {
         BOOST_LOG(warning) << "Virtual display: kscreen-doctor does not list ["sv << name
                            << "]; it keeps the layout KWin gave it"sv;
         return;
+      }
+
+      // Rank it last before anything else: until then a stored layout can hold
+      // a real monitor's rank, and with it that monitor's desktop and panel.
+      const auto ranking = kwin_priority_args(name, layout_before);
+      if (const int rc = run_kscreen(ranking); rc != 0) {
+        BOOST_LOG(warning) << "Virtual display: kscreen-doctor could not rank ["sv << name
+                           << "] after the other screens (rc="sv << rc << ')';
       }
 
       if (!kwin_mode_matches(*output, display.width, display.height, display.fps)) {
@@ -2128,36 +2184,37 @@ namespace virtual_display {
         }
       }
 
-      // Placement last: adding a custom mode can reorder priorities. A failed
-      // read falls back to the layout from before, never to 0,0 on top of a
-      // real monitor.
+      // Placement and the ranking again last: adding a custom mode can reorder
+      // priorities. A failed read falls back to the layout from before, never
+      // to 0,0 on top of a real monitor.
       const int x = kscreen_right_edge(layout ? *layout : layout_before, name);
-      const int rc = run_kscreen(kwin_placement_args(name, x, previous_primary));
+      auto args = kwin_placement_args(name, x);
+      args.insert(args.end(), ranking.begin(), ranking.end());
+      const int rc = run_kscreen(std::move(args));
       const auto placed = kscreen_layout_from_json(layout_json());
       output = find_output(placed, name);
       if (rc != 0 || !output || !kwin_placement_matches(*output, x)) {
         BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens (rc="sv
                            << rc << ')';
       } else {
-        BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1"sv;
+        BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1, ranked last"sv;
       }
-      if (!previous_primary.empty() && placed && kscreen_primary_output(*placed) != previous_primary) {
-        BOOST_LOG(warning) << "Virtual display: ["sv << previous_primary
-                           << "] is not the primary screen any more; Plasma may have moved the desktop and panel"sv;
+      if (placed && !kwin_ranking_matches(*placed, layout_before, name)) {
+        BOOST_LOG(warning) << "Virtual display: the screens are not ranked as they were with ["sv << name
+                           << "] last; Plasma may have moved a desktop and panel onto it"sv;
       }
     }
 
     static std::optional<vdisplay_t> create(int width, int height, int fps) {
 #ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
       // Read the layout before asking KWin: it can apply a stored layout that
-      // makes the new output primary the moment it exists.
+      // ranks the new output first the moment it exists.
       const auto layout_before_json = layout_json();
       const auto layout_before = kscreen_layout_from_json(layout_before_json);
       if (!layout_before) {
         BOOST_LOG(error) << "Virtual display: refusing a KWin screen because the current layout could not be read"sv;
         return std::nullopt;
       }
-      const auto previous_primary = kscreen_primary_output(*layout_before);
       const auto names = kwin_virtual_output::output_names();
       if (!names) {
         BOOST_LOG(error) << "Virtual display: refusing a KWin screen because the output list could not be read"sv;
@@ -2204,7 +2261,7 @@ namespace virtual_display {
         return std::nullopt;
       }
 
-      place(display, *layout_before, previous_primary.value_or(std::string {}));
+      place(display, *layout_before);
 
       // The screen stays secondary, so a game would open on the real monitor.
       // Move windows that open while it exists onto it instead.

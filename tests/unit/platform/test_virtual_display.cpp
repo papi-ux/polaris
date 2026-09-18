@@ -560,21 +560,81 @@ TEST(VirtualDisplayKwinTests, KscreenArgumentsForModeAndPlacement) {
     virtual_display::kwin_mode_args("Virtual-polaris-0", 2560, 1440, 120),
     (args_t {"output.Virtual-polaris-0.mode.2560x1440@120"})
   );
-  // The stream screen is never made primary: Plasma moves the desktop and the
-  // panel to the primary screen. The previous primary is named because KWin
-  // can apply a stored layout that ranks the new screen first.
   EXPECT_EQ(
-    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2"),
+    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680),
+    (args_t {"output.Virtual-polaris-0.scale.1", "output.Virtual-polaris-0.position.7680,0"})
+  );
+}
+
+namespace {
+  virtual_display::kscreen_output_layout_t ranked_screen(std::string name, int priority, bool enabled = true) {
+    virtual_display::kscreen_output_layout_t output;
+    output.name = std::move(name);
+    output.priority = priority;
+    output.enabled = enabled;
+    return output;
+  }
+}  // namespace
+
+TEST(VirtualDisplayKwinTests, StreamScreenIsRankedAfterEveryScreenInTheirOldOrder) {
+  using args_t = std::vector<std::string>;
+  // Plasma gives each rank its own desktop and panel, so every screen keeps its
+  // rank and the stream screen comes after all of them. Three monitors, listed
+  // out of rank order, one disabled, and KWin's stored entry for the stream
+  // screen ranked first.
+  const std::vector<virtual_display::kscreen_output_layout_t> three_monitors {
+    ranked_screen("DP-1", 3),
+    ranked_screen("HDMI-A-1", 1),
+    ranked_screen("DP-3", 0, false),
+    ranked_screen("Virtual-polaris-0", 1),
+    ranked_screen("DP-2", 2),
+  };
+  EXPECT_EQ(
+    virtual_display::kwin_priority_args("Virtual-polaris-0", three_monitors),
     (args_t {
-      "output.Virtual-polaris-0.scale.1",
-      "output.Virtual-polaris-0.position.7680,0",
-      "output.DP-2.priority.1",
+      "output.HDMI-A-1.priority.1",
+      "output.DP-2.priority.2",
+      "output.DP-1.priority.3",
+      "output.Virtual-polaris-0.priority.4",
     })
   );
-  for (const auto &arg : virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2")) {
-    EXPECT_EQ(arg.find("Virtual-polaris-0.priority"), std::string::npos) << arg;
-  }
-  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "").size(), 2U);
+  EXPECT_EQ(
+    virtual_display::kwin_priority_args("Virtual-polaris-0", {ranked_screen("DP-2", 1)}),
+    (args_t {"output.DP-2.priority.1", "output.Virtual-polaris-0.priority.2"})
+  );
+  EXPECT_EQ(
+    virtual_display::kwin_priority_args("Virtual-polaris-0", {}),
+    (args_t {"output.Virtual-polaris-0.priority.1"})
+  );
+}
+
+TEST(VirtualDisplayKwinTests, RankingCheckCatchesAStreamScreenAboveAMonitor) {
+  const std::vector<virtual_display::kscreen_output_layout_t> before {
+    ranked_screen("DP-2", 1),
+    ranked_screen("HDMI-A-1", 2),
+  };
+  EXPECT_TRUE(virtual_display::kwin_ranking_matches(
+    {ranked_screen("Virtual-polaris-0", 3), ranked_screen("HDMI-A-1", 2), ranked_screen("DP-2", 1)},
+    before,
+    "Virtual-polaris-0"
+  ));
+  // The primary kept first is not enough: the second monitor's desktop and panel
+  // would move onto the stream screen.
+  EXPECT_FALSE(virtual_display::kwin_ranking_matches(
+    {ranked_screen("DP-2", 1), ranked_screen("Virtual-polaris-0", 2), ranked_screen("HDMI-A-1", 3)},
+    before,
+    "Virtual-polaris-0"
+  ));
+  EXPECT_FALSE(virtual_display::kwin_ranking_matches(
+    {ranked_screen("Virtual-polaris-0", 1), ranked_screen("DP-2", 2), ranked_screen("HDMI-A-1", 3)},
+    before,
+    "Virtual-polaris-0"
+  ));
+  EXPECT_FALSE(virtual_display::kwin_ranking_matches(
+    {ranked_screen("HDMI-A-1", 1), ranked_screen("DP-2", 2), ranked_screen("Virtual-polaris-0", 3)},
+    before,
+    "Virtual-polaris-0"
+  ));
 }
 
 TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
@@ -601,15 +661,38 @@ TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
 }
 
 TEST(VirtualDisplayKwinTests, WindowScriptMovesApplicationWindowsOntoTheScreen) {
-  const auto script = virtual_display::kwin_window_follow_script("Virtual-polaris-0");
-  EXPECT_NE(script.find("const target = \"Virtual-polaris-0\";"), std::string::npos);
-  EXPECT_NE(script.find("workspace.windowAdded.connect("), std::string::npos);
-  EXPECT_NE(script.find("workspace.sendClientToScreen(window, screen)"), std::string::npos);
-  // Only application windows, dialogs and splash screens: never the desktop,
-  // panels, notifications or popups.
-  EXPECT_NE(script.find("window.normalWindow || window.dialog || window.splash"), std::string::npos);
-  // A window already on another Polaris screen stays there.
-  EXPECT_NE(script.find("\"Virtual-polaris-\""), std::string::npos);
+  // The whole script, because nothing in CI runs it. KWin 6.7.5 evaluated and
+  // kept this exact text, and the same script without the host prompt list
+  // moved an XWayland and a Wayland window onto the stream screen there.
+  // Change it only with a check on a live KWin.
+  //  - Only application windows, dialogs and splash screens move: never the
+  //    desktop, panels, notifications or popups.
+  //  - The desktop's own prompts stay with whoever sits at the host.
+  //  - A window already on another Polaris screen stays there.
+  EXPECT_EQ(virtual_display::kwin_window_follow_script("Virtual-polaris-0"), R"JS(// Polaris: moves windows onto its Host Virtual Display screen while that screen exists.
+const target = "Virtual-polaris-0";
+// The desktop's own prompts are for whoever sits at the host.
+const hostPrompts = ["polkit-kde-authentication-agent-1", "org.kde.polkit-kde-authentication-agent-1",
+  "ksshaskpass", "org.kde.ksshaskpass", "kwalletd5", "org.kde.kwalletd5", "kwalletd6", "org.kde.kwalletd6",
+  "krunner", "org.kde.krunner", "plasmashell", "org.kde.plasmashell"];
+function outputNamed(name) {
+  const screens = workspace.screens;
+  for (let i = 0; i < screens.length; i++) { if (screens[i].name === name) return screens[i]; }
+  return null;
+}
+function isHostPrompt(window) {
+  return hostPrompts.indexOf(String(window.resourceClass || "")) >= 0 ||
+         hostPrompts.indexOf(String(window.desktopFileName || "")) >= 0;
+}
+workspace.windowAdded.connect(function (window) {
+  if (!window || !(window.normalWindow || window.dialog || window.splash)) return;
+  if (isHostPrompt(window)) return;
+  const screen = outputNamed(target);
+  if (!screen || window.output === screen) return;
+  if (window.output && window.output.name.indexOf("Virtual-polaris-") === 0) return;
+  workspace.sendClientToScreen(window, screen);
+});
+)JS");
   EXPECT_EQ(virtual_display::kwin_window_follow_plugin_name("Virtual-polaris-0"), "polaris-follow-Virtual-polaris-0");
 
   // The name is a JSON string literal, so a quote cannot end it early.

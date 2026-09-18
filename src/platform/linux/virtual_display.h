@@ -229,18 +229,28 @@ namespace virtual_display {
   /** @brief kscreen-doctor arguments that select a mode by name. */
   std::vector<std::string> kwin_mode_args(std::string_view output, int width, int height, int hz);
 
+  /** @brief kscreen-doctor arguments that put a new KWin screen at scale 1 at (x, 0). */
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x);
+
   /**
-   * @brief kscreen-doctor arguments that put a new KWin screen beside the others.
+   * @brief kscreen-doctor arguments that rank every screen as before, with the new one last.
    *
-   * Scale 1 and placed at `x`, and the previous primary ranked first. The new
-   * screen is never made primary: Plasma moves the desktop, its icons and the
-   * panel to whichever screen is, so a primary stream screen took them off the
-   * real monitor. Windows are moved onto it instead (see
-   * kwin_window_follow_script). The previous primary is named because KWin can
-   * give a new output a stored layout that ranks it first. Sent last, because
-   * adding a custom mode can reorder priorities.
+   * Plasma gives each rank its own desktop, icons and panel, so whichever screen
+   * takes a rank a real monitor held takes that monitor's desktop with it: the
+   * first rank moved the main desktop onto the stream, and any rank above a
+   * second monitor moves that monitor's. KWin can give a new output a stored
+   * layout that ranks it anywhere, so every enabled screen is named, in its old
+   * order, and the new one after them. Windows are moved onto it instead (see
+   * kwin_window_follow_script).
    */
-  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary);
+  std::vector<std::string> kwin_priority_args(std::string_view output, const std::vector<kscreen_output_layout_t> &layout_before);
+
+  /** @brief The enabled screens are ranked as in `layout_before`, with `output` last. */
+  bool kwin_ranking_matches(
+    const std::vector<kscreen_output_layout_t> &layout,
+    const std::vector<kscreen_output_layout_t> &layout_before,
+    std::string_view output
+  );
 
   /**
    * @brief The KWin script that moves windows onto a Polaris screen while it exists.
@@ -248,8 +258,10 @@ namespace virtual_display {
    * Application windows, dialogs and splash screens that open while the screen
    * exists are sent to it, so a game lands on the stream without the screen
    * being primary. Panels, the desktop, notifications and popups stay put, and
-   * so does a window already on another Polaris screen. It does nothing once
-   * the screen is gone, so a script left behind by a crash is harmless.
+   * so do a window already on another Polaris screen and the desktop's own
+   * prompts (polkit, ksshaskpass, KWallet, KRunner), which are for whoever sits
+   * at the host. It does nothing once the screen is gone, so a script left
+   * behind by a crash is harmless.
    */
   std::string kwin_window_follow_script(std::string_view output_name);
 
