@@ -5,9 +5,12 @@ gaming PC. Two players can use their own Spaces at the same time, one person
 can keep a Space on a server without a monitor, or a handheld and a TV can share
 one Space at different times.
 
-Spaces are a preview. Two limits shape everything below: the host runs one
-Space at a time, and the gaming runtime is not published for download yet, so
-the catalog in **Host Setup** stays empty until it is.
+Spaces are a preview. One limit shapes everything below: the host runs one
+Space at a time. The gaming runtime is published, so **Host Setup** can
+download it, and which runtime you get depends on your graphics card. The
+NVIDIA runtime has been played end to end on an NVIDIA host. The other one,
+for AMD and Intel graphics, has never been run on that hardware by anyone
+here, so treat it as untried rather than supported.
 
 Spaces are optional. If you stream your usual desktop and games today, keep
 using the Library in Nova; nothing here is required for that, and you do not

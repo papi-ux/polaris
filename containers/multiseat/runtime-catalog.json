@@ -1,4 +1,31 @@
 {
   "schema": 1,
-  "runtimes": []
+  "runtimes": [
+    {
+      "id": "steam-default-75a164f68586e602",
+      "profile": "steam",
+      "variant": "default",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "d89ac2e0bcd3e6bf9042081f8d04eada49faccff",
+      "registry_digest": "sha256:75a164f68586e602a960678200a57b2c834234820e3597826738872f89637b8d",
+      "config_digest": "sha256:9502180c1fc2ac9fbcb31d69097ef7a4b91087201a7ef399c5ea623111e75bff",
+      "nvidia_driver": ""
+    },
+    {
+      "id": "steam-nvidia-a349b8c2ffcf1ced",
+      "profile": "steam",
+      "variant": "nvidia",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "d89ac2e0bcd3e6bf9042081f8d04eada49faccff",
+      "registry_digest": "sha256:a349b8c2ffcf1cedddf3623676167064b5760ae8ef765f2edecd94cc9b4c2575",
+      "config_digest": "sha256:b56d6eb68b9b06a1bef2c55f4c6158e58eed887438a47dc07b0214aab5ae5f6f",
+      "nvidia_driver": "610.57.04"
+    }
+  ]
 }
