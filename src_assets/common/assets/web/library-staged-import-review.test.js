@@ -1,7 +1,10 @@
 import { shallowMount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 
+import { forgetInstallJobs } from './composables/useRomSources'
 import AppsView from './views/AppsView.vue'
 
 const scannerState = {
@@ -32,8 +35,14 @@ vi.mock('./composables/useGameScanner', () => ({
   useGameScanner: () => scannerState,
 }))
 
+// The console's English, so an assertion reads what a player sees and a missing key shows as itself.
+const enLocale = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
 const i18n = {
-  t(key) { return key },
+  t(key, params = {}) {
+    const message = key.split('.').reduce((node, part) => node?.[part], enLocale)
+    if (typeof message !== 'string') return key
+    return message.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
+  },
 }
 
 function flushAppsViewLoad() {
@@ -141,6 +150,7 @@ describe('AppsView staged import review', () => {
 
 describe('AppsView ROM folder emulator install', () => {
   afterEach(() => {
+    forgetInstallJobs()
     vi.useRealTimers()
     vi.restoreAllMocks()
     delete global.fetch
@@ -197,7 +207,7 @@ describe('AppsView ROM folder emulator install', () => {
     const card = () => wrapper.find('[data-rom-folder]')
     expect(card().text()).toContain('Eden not found')
     expect(card().text()).toContain('will not start until it is')
-    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install from Flathub')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install From Flathub')
 
     await wrapper.find('[data-rom-folder-install]').trigger('click')
     await flushAppsViewLoad()
@@ -247,6 +257,6 @@ describe('AppsView ROM folder emulator install', () => {
     await flushAppsViewLoad()
 
     expect(wrapper.find('[data-rom-folder-install-failed]').text()).toBe('Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub')
-    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install from Flathub')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install From Flathub')
   })
 })

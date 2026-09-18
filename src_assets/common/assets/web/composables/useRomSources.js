@@ -3,6 +3,15 @@ import { getCurrentScope, onScopeDispose, ref } from 'vue'
 /** How often the folder list is read again while an emulator installs. */
 export const INSTALL_POLL_INTERVAL_MS = 2000
 
+// The last install state seen for each emulator. It outlives the page, so an install that
+// finished while the player was on another page is still reported once when they come back.
+const jobStates = new Map()
+
+/** Forget every install seen so far; for tests, which each start from a fresh console. */
+export function forgetInstallJobs() {
+  jobStates.clear()
+}
+
 async function readJson(res) {
   try {
     return await res.json()
@@ -16,7 +25,8 @@ async function readJson(res) {
  *
  * An emulator install from Flathub runs on the host in the background; while one is
  * running the folder list is read again every few seconds, and each finished install
- * is reported once to the onInstallFinished listeners.
+ * is reported once to the onInstallFinished listeners, even when it finished while the
+ * page was closed.
  *
  * @returns Reactive folder state and the add, remove, load and install functions.
  */
@@ -28,7 +38,6 @@ export function useRomSources({ pollIntervalMs = INSTALL_POLL_INTERVAL_MS } = {}
   const error = ref('')
   // Emulator ids whose install request is on its way to the host.
   const installRequests = ref({})
-  const jobStates = new Map()
   const finishedListeners = []
   let pollTimer = null
   let loadSequence = 0

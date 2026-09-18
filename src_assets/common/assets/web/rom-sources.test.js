@@ -1,6 +1,6 @@
 import { effectScope } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useRomSources } from './composables/useRomSources'
+import { forgetInstallJobs, useRomSources } from './composables/useRomSources'
 import {
   CUSTOM_EMULATOR,
   blankRomSourceForm,
@@ -92,6 +92,7 @@ describe('ROM folder forms', () => {
 
 describe('the folder list while an emulator installs', () => {
   afterEach(() => {
+    forgetInstallJobs()
     vi.useRealTimers()
     vi.restoreAllMocks()
     delete global.fetch
@@ -121,6 +122,37 @@ describe('the folder list while an emulator installs', () => {
     await vi.advanceTimersByTimeAsync(10000)
     expect(global.fetch).toHaveBeenCalledTimes(3)
   })
+
+  it('reports an install that finished while the page was closed, once', async () => {
+    const preset = { id: 'eden', label: 'Eden', installable: true }
+    let job = { state: 'installing', message: 'Installing Eden from Flathub.', started_at: 1, finished_at: 0 }
+    global.fetch = vi.fn(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ status: true, presets: [{ ...preset, install: { kind: job.state === 'installed' ? 'flatpak' : 'missing' }, install_job: job }], sources: [] }),
+    }))
+
+    // The player starts the install and leaves the Apps page before it is done.
+    const away = effectScope()
+    let first
+    away.run(() => { first = useRomSources({ pollIntervalMs: 60000 }) })
+    await first.load()
+    away.stop()
+
+    job = { state: 'installed', message: 'Eden is installed.', started_at: 1, finished_at: 2 }
+
+    // Coming back builds the page again, and the finish is still reported.
+    const back = effectScope()
+    let second
+    const finished = []
+    back.run(() => { second = useRomSources({ pollIntervalMs: 60000 }) })
+    second.onInstallFinished((entry) => finished.push(entry))
+    await second.load()
+    await second.load()
+    back.stop()
+
+    expect(finished).toEqual([{ emulator: 'eden', job }])
+  })
 })
 
 describe('installing a missing emulator from Flathub', () => {
@@ -147,6 +179,7 @@ describe('installing a missing emulator from Flathub', () => {
     const failed = { state: 'failed', message: 'Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub' }
     expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: missing, install_job: failed })).toBe(failed.message)
     expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: missing, install_job: { state: 'failed' } })).toBe('The install from Flathub failed.')
+    expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: missing, install_job: { state: 'failed' } }, 'Flathub-Installation fehlgeschlagen.')).toBe('Flathub-Installation fehlgeschlagen.')
     expect(romEmulatorInstallFailure({ emulator: 'duckstation', install: { kind: 'native', location: '/usr/bin/duckstation-qt' }, install_job: failed })).toBe('')
     expect(romEmulatorInstallFailure({ emulator: 'eden', install: missing, install_job: { state: 'installed', message: 'Eden is installed.' } })).toBe('')
   })

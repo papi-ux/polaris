@@ -95,6 +95,15 @@ namespace nvhttp {
   std::int64_t artwork_clock_milliseconds();
 
   /**
+   * @brief Whether this host could sleep, for the console.
+   *
+   * The same evaluation GET /polaris/v1/host/power serves a client, less the fields that
+   * only mean something to a client: the console's owner changes host_sleep_enabled, so
+   * what it needs is whether sleep would work and how the last request ended.
+   */
+  nlohmann::json host_power_status();
+
+  /**
    * @brief What an accepted one-time pin authorizes, lifted out under the lock.
    *
    * The OTP state itself is shared between the confighttp and nvhttp threads,

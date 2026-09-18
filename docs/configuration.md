@@ -103,6 +103,11 @@ control at all:
 The same block is served on `/polaris/v1/capabilities`, so a client that already polls capabilities
 does not need a second request.
 
+The General tab shows the same answer under the setting: whether this host can sleep, why not
+when it cannot, with a link to the polkit rule below when polkit is the reason, and whether the last
+sleep request was accepted but the host never went down. The console reads it from
+`GET /api/host/power`, which carries the fields above except `sleep_permitted` and `sleep_endpoint`.
+
 Waking the host again is Wake-on-LAN, which Polaris does not do for you: enable it in the firmware
 and on the interface, and send the magic packet from the client.
 
