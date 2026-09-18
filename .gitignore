@@ -37,15 +37,12 @@
 .idea/
 .vscode/
 .codex
-.codegraph/
 .claude/
 .hermes/
 .superpowers/
 .private/
-.tmp/
 AGENTS.md
 CLAUDE.md
-docs/qwen.md
 .githooks/
 *.code-workspace
 
