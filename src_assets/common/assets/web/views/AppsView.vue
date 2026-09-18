@@ -1207,7 +1207,7 @@ import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
 import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
 import { filterImportGames, summarizeImportGames } from '../library-imports'
-import { useRomSources } from '../composables/useRomSources'
+import { romInstallsPending, useRomSources } from '../composables/useRomSources'
 import {
   CUSTOM_EMULATOR, blankRomSourceForm, romEmulatorId, romEmulatorInstallFailure, romEmulatorInstallState, romSourceCountLabel,
   romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus, validateRomSourceForm
@@ -1299,6 +1299,9 @@ async function removeRomSource(source) {
 watch(showImport, (open) => {
   if (open) loadRomSources()
 })
+// An install that was running when the player left the page is read again at once, so its
+// finish is reported now rather than the next time Import Games opens.
+if (romInstallsPending()) loadRomSources()
 async function doImport() {
   const count = await importSelected()
   if (count > 0) {
@@ -1883,15 +1886,20 @@ function showCoverFinder() {
 }
 
 // The host's own sentence when it gave one. A bare status code means nothing to a player, so it
-// only goes to the browser console.
+// only goes to the browser console. An expired sign-in comes first: the host's answer to it is
+// the single word "Unauthorized".
 function showCoverFailure(response, body, fallbackKey) {
   coverErrorCode.value = typeof body?.code === 'string' ? body.code : ""
+  if (response.status === 401) {
+    coverError.value = i18n.t('apps.find_cover_signed_out')
+    return
+  }
   if (typeof body?.error === 'string' && body.error) {
     coverError.value = body.error
     return
   }
   console.warn(`Find Cover: HTTP ${response.status} without an error message`)
-  coverError.value = i18n.t(response.status === 401 ? 'apps.find_cover_signed_out' : fallbackKey)
+  coverError.value = i18n.t(fallbackKey)
 }
 
 async function searchCovers() {

@@ -342,12 +342,14 @@ namespace platf::private_session_input {
          << "<openbox_menu>\n"
          << "  <menu id=\"root-menu\" label=\"Polaris Private Stream\">\n"
          // Notes, not actions. labwc cuts a label off at the menu's width, which
-         // is 200 px unless themerc-override widens it, so they stay short enough
-         // to read on a labwc that ignores the wider menu.
+         // is 200 px unless themerc-override widens it, leaving about 186 px for
+         // text. Each note measures 159 px or less in Noto Sans 10, so it still
+         // fits in the wider DejaVu Sans on a labwc that ignores the override.
          << "    <item label=\"Your stream's own screen\" />\n"
-         << "    <item label=\"Start games from your client\" />\n"
-         << "    <item label=\"Desktop? Use Mirror Desktop\" />\n"
-         << "    <item label=\"or Host Virtual Display\" />\n"
+         << "    <item label=\"Pick a game on your client\" />\n"
+         << "    <item label=\"Want a desktop instead?\" />\n"
+         << "    <item label=\"Use Mirror Desktop or\" />\n"
+         << "    <item label=\"Host Virtual Display\" />\n"
          << "    <separator />\n"
          << "    <item label=\"Open terminal\">\n"
          << "      <action name=\"Execute\"><command>lab-sensible-terminal</command></action>\n"

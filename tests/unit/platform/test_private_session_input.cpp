@@ -167,21 +167,22 @@ TEST(PrivateSessionInputTests, GeneratedMenuExplainsTheSessionAndKeepsUsefulActi
   // Without these, a user who lands in an empty private session is back to
   // labwc's built-in Terminal + Exit fallback that explains nothing.
   EXPECT_NE(std::string::npos, menu.find("Your stream's own screen"));
-  EXPECT_NE(std::string::npos, menu.find("Start games from your client"));
-  EXPECT_NE(std::string::npos, menu.find("Desktop? Use Mirror Desktop"));
-  EXPECT_NE(std::string::npos, menu.find("or Host Virtual Display"));
+  EXPECT_NE(std::string::npos, menu.find("Pick a game on your client"));
+  EXPECT_NE(std::string::npos, menu.find("Want a desktop instead?"));
+  EXPECT_NE(std::string::npos, menu.find("Use Mirror Desktop or"));
+  EXPECT_NE(std::string::npos, menu.find("Host Virtual Display"));
   EXPECT_NE(std::string::npos, menu.find("lab-sensible-terminal"));
   EXPECT_NE(std::string::npos, menu.find("<action name=\"Exit\""));
 
   // labwc cuts a label off at the menu's width. A 1.4.9 user could read none
-  // of the notes and took them for broken buttons. About 28 characters fit
-  // labwc's default 200 px, so every label stays that short even where the
-  // wider menu from themerc-override is ignored.
+  // of the notes and took them for broken buttons. The notes were measured to
+  // fit labwc's default 200 px in Noto and DejaVu Sans; the character cap keeps
+  // a new one from growing past them unmeasured.
   std::size_t at = 0;
   while ((at = menu.find("label=\"", at)) != std::string::npos) {
     at += 7;
     const auto label = menu.substr(at, menu.find('"', at) - at);
-    EXPECT_LE(label.size(), 28U) << label;
+    EXPECT_LE(label.size(), 26U) << label;
   }
 }
 

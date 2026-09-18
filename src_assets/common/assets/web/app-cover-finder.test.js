@@ -402,7 +402,8 @@ describe('AppsView Find Cover', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const wrapper = mountAppsView({
       apps: [hollowKnight],
-      search: () => reply(401, null),
+      // What the host's send_unauthorized answers.
+      search: () => reply(401, { status_code: 401, status: false, error: 'Unauthorized' }),
     })
     await flushPromises()
     wrapper.vm.editApp(hollowKnight)

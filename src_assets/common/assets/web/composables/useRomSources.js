@@ -12,6 +12,11 @@ export function forgetInstallJobs() {
   jobStates.clear()
 }
 
+/** Whether an install was running the last time any page looked, so its finish is still owed. */
+export function romInstallsPending() {
+  return [...jobStates.values()].includes('installing')
+}
+
 async function readJson(res) {
   try {
     return await res.json()
@@ -75,6 +80,9 @@ export function useRomSources({ pollIntervalMs = INSTALL_POLL_INTERVAL_MS } = {}
       const data = await readJson(res)
       // A poll and a click can overlap; an answer older than one already shown is dropped.
       if (sequence < appliedSequence) return
+      // Nobody is left to tell. Noting the finish now would spend it, so the next visit
+      // reads the list again and reports it then.
+      if (disposed) return
       appliedSequence = sequence
       if (res.ok && data?.status) {
         presets.value = data.presets || []

@@ -49,8 +49,10 @@ function flushAppsViewLoad() {
   return Promise.resolve().then(() => Promise.resolve()).then(() => nextTick())
 }
 
-function mountAppsView() {
-  global.fetch = vi.fn((url) => {
+function mountAppsView(route = () => null) {
+  global.fetch = vi.fn((url, options) => {
+    const routed = route(String(url), options)
+    if (routed) return routed
     if (String(url).includes('./api/apps')) {
       return Promise.resolve({
         json: () => Promise.resolve({ apps: [], current_app: '', host_name: 'Test Host', host_uuid: 'host-1' }),
@@ -229,6 +231,41 @@ describe('AppsView ROM folder emulator install', () => {
     expect(wrapper.find('[data-rom-folder-installing]').exists()).toBe(false)
     expect(wrapper.find('[data-rom-folder-check]').text()).toContain('prod.keys')
     expect(scannerState.scan.mock.calls.length).toBe(scansBefore + 1)
+  })
+
+  it('reports an install that finished on another page as soon as the player is back on Apps', async () => {
+    resetScannerState()
+    let job = { state: 'installing', message: 'Installing Eden from Flathub.', started_at: 1, finished_at: 0 }
+    const sources = (url) => url !== './api/library/sources' ? null : Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        status: true,
+        presets: [{
+          id: 'eden', label: 'Eden', platform: 'Nintendo Switch', installable: true, install_job: job, prerequisites: [],
+          install: job.state === 'installed' ? { kind: 'flatpak', location: 'dev.eden_emu.eden' } : { kind: 'missing', location: '' },
+        }],
+        sources: [],
+      }),
+    })
+
+    // Import Games reads the folder list and sees the install running; then the player leaves.
+    const first = mountAppsView(sources)
+    await flushAppsViewLoad()
+    await first.find('button').trigger('click')
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+    first.unmount()
+
+    job = { state: 'installed', message: 'Eden is installed.', started_at: 1, finished_at: 2 }
+    const scansBefore = scannerState.scan.mock.calls.length
+    const second = mountAppsView(sources)
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+
+    // Without opening Import Games: the list is read again and the finish rescans once.
+    expect(global.fetch.mock.calls.filter(([url]) => url === './api/library/sources')).toHaveLength(1)
+    expect(scannerState.scan.mock.calls.length).toBe(scansBefore + 1)
+    second.unmount()
   })
 
   it('keeps Flatpak\'s reason on the card when an install fails', async () => {

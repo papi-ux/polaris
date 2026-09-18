@@ -1,6 +1,6 @@
 import { effectScope } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { forgetInstallJobs, useRomSources } from './composables/useRomSources'
+import { forgetInstallJobs, romInstallsPending, useRomSources } from './composables/useRomSources'
 import {
   CUSTOM_EMULATOR,
   blankRomSourceForm,
@@ -151,6 +151,40 @@ describe('the folder list while an emulator installs', () => {
     await second.load()
     back.stop()
 
+    expect(finished).toEqual([{ emulator: 'eden', job }])
+    expect(romInstallsPending()).toBe(false)
+  })
+
+  it('keeps a finish that arrived after the page closed for the next visit', async () => {
+    const preset = { id: 'eden', label: 'Eden', installable: true }
+    let job = { state: 'installing', message: 'Installing Eden from Flathub.', started_at: 1, finished_at: 0 }
+    let release
+    const answer = () => ({ ok: true, status: 200, json: () => Promise.resolve({ status: true, presets: [{ ...preset, install: { kind: 'missing' }, install_job: job }], sources: [] }) })
+    global.fetch = vi.fn(() => Promise.resolve(answer()))
+
+    const away = effectScope()
+    let first
+    away.run(() => { first = useRomSources({ pollIntervalMs: 60000 }) })
+    await first.load()
+    expect(romInstallsPending()).toBe(true)
+
+    // A poll is still out when the player leaves, and its answer says the install finished.
+    job = { state: 'installed', message: 'Eden is installed.', started_at: 1, finished_at: 2 }
+    global.fetch = vi.fn(() => new Promise((resolve) => { release = () => resolve(answer()) }))
+    const late = first.load()
+    away.stop()
+    release()
+    await late
+    expect(romInstallsPending()).toBe(true)
+
+    global.fetch = vi.fn(() => Promise.resolve(answer()))
+    const back = effectScope()
+    let second
+    const finished = []
+    back.run(() => { second = useRomSources({ pollIntervalMs: 60000 }) })
+    second.onInstallFinished((entry) => finished.push(entry))
+    await second.load()
+    back.stop()
     expect(finished).toEqual([{ emulator: 'eden', job }])
   })
 })
