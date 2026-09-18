@@ -60,7 +60,7 @@ def main():
     profile = next(p for p in json.loads(lock_path.read_text())['runtime_profiles'] if p['id'] == args.profile)
     result = dict(schema=1, profile=args.profile, platform='linux/amd64',
                   source_root=profile['reference'],
-                  snapshot='https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/',
+                  snapshot='https://snapshot.ubuntu.com/ubuntu/20260918T000000Z/',
                   source_manifest_sha256=hashlib.sha256((args.input_directory / 'source-packages.tsv').read_bytes()).hexdigest(),
                   runtime=package_lock(args.input_directory, 'runtime'),
                   build=package_lock(args.input_directory, 'build'))
