@@ -164,12 +164,46 @@ TEST(PrivateSessionInputTests, GeneratedMenuExplainsTheSessionAndKeepsUsefulActi
 
   EXPECT_NE(std::string::npos, menu.find(platf::private_session_input::generated_marker));
   EXPECT_NE(std::string::npos, menu.find("<menu id=\"root-menu\""));
-  // Without these two, a user who lands in an empty private session is back to
+  // Without these, a user who lands in an empty private session is back to
   // labwc's built-in Terminal + Exit fallback that explains nothing.
-  EXPECT_NE(std::string::npos, menu.find("private screen belongs to your stream"));
-  EXPECT_NE(std::string::npos, menu.find("Mirror Desktop or Host Virtual Display"));
+  EXPECT_NE(std::string::npos, menu.find("Your stream's own screen"));
+  EXPECT_NE(std::string::npos, menu.find("Start games from your client"));
+  EXPECT_NE(std::string::npos, menu.find("Desktop? Use Mirror Desktop"));
+  EXPECT_NE(std::string::npos, menu.find("or Host Virtual Display"));
   EXPECT_NE(std::string::npos, menu.find("lab-sensible-terminal"));
   EXPECT_NE(std::string::npos, menu.find("<action name=\"Exit\""));
+
+  // labwc cuts a label off at the menu's width. A 1.4.9 user could read none
+  // of the notes and took them for broken buttons. About 28 characters fit
+  // labwc's default 200 px, so every label stays that short even where the
+  // wider menu from themerc-override is ignored.
+  std::size_t at = 0;
+  while ((at = menu.find("label=\"", at)) != std::string::npos) {
+    at += 7;
+    const auto label = menu.substr(at, menu.find('"', at) - at);
+    EXPECT_LE(label.size(), 28U) << label;
+  }
+}
+
+TEST(PrivateSessionInputTests, GeneratedThemeGivesTheMenuRoomAndYieldsToTheUsersOwn) {
+  const auto theme = platf::private_session_input::build_themerc_override();
+  EXPECT_EQ(theme.rfind(platf::private_session_input::generated_shell_marker, 0), 0U);
+  EXPECT_NE(std::string::npos, theme.find("\nmenu.width.max: 400\n"));
+
+  const auto dir = make_temp_dir("theme-generated");
+  std::string status;
+  ASSERT_TRUE(platf::private_session_input::ensure_generated_themerc_override(dir, status));
+  EXPECT_EQ(read_file(dir / "themerc-override"), theme);
+  EXPECT_NE(std::string::npos, status.find("~/.config/labwc-polaris/themerc-override"));
+
+  // A themerc-override without the marker is the user's own.
+  {
+    std::ofstream own(dir / "themerc-override", std::ios::trunc);
+    own << "menu.width.max: 300\n";
+  }
+  EXPECT_FALSE(platf::private_session_input::ensure_generated_themerc_override(dir, status));
+  EXPECT_EQ(read_file(dir / "themerc-override"), "menu.width.max: 300\n");
+  std::filesystem::remove_all(dir);
 }
 
 TEST(PrivateSessionInputTests, GeneratedMenuAndAutostartAreWrittenBesideRcXml) {

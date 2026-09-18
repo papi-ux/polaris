@@ -341,9 +341,13 @@ namespace platf::private_session_input {
          << "     is left alone. -->\n"
          << "<openbox_menu>\n"
          << "  <menu id=\"root-menu\" label=\"Polaris Private Stream\">\n"
-         << "    <item label=\"This private screen belongs to your stream\" />\n"
-         << "    <item label=\"Launch a game from your client to play here\" />\n"
-         << "    <item label=\"For a desktop, switch the host to Mirror Desktop or Host Virtual Display\" />\n"
+         // Notes, not actions. labwc cuts a label off at the menu's width, which
+         // is 200 px unless themerc-override widens it, so they stay short enough
+         // to read on a labwc that ignores the wider menu.
+         << "    <item label=\"Your stream's own screen\" />\n"
+         << "    <item label=\"Start games from your client\" />\n"
+         << "    <item label=\"Desktop? Use Mirror Desktop\" />\n"
+         << "    <item label=\"or Host Virtual Display\" />\n"
          << "    <separator />\n"
          << "    <item label=\"Open terminal\">\n"
          << "      <action name=\"Execute\"><command>lab-sensible-terminal</command></action>\n"
@@ -366,6 +370,20 @@ namespace platf::private_session_input {
            << "# rather than as a black screen. swaybg is optional; skip when absent.\n"
            << "command -v swaybg >/dev/null 2>&1 && swaybg -c '#101418' >/dev/null 2>&1 &\n";
     return script.str();
+  }
+
+  std::string build_themerc_override() {
+    std::ostringstream theme;
+    theme << generated_shell_marker << "\n"
+          << "# Put your own themerc-override here to take over: a file without the line above\n"
+          << "# is left alone.\n"
+          << "# Room for the session menu's notes; labwc stops a menu at 200 px otherwise.\n"
+          << "menu.width.max: 400\n";
+    return theme.str();
+  }
+
+  bool ensure_generated_themerc_override(const fs::path &config_dir, std::string &status_out) {
+    return ensure_generated_companion_file(config_dir / "themerc-override", build_themerc_override(), generated_shell_marker, status_out);
   }
 
   bool ensure_generated_menu_xml(const fs::path &config_dir, std::string &status_out) {
