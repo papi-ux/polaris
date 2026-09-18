@@ -23,9 +23,9 @@ retry confirms the same home and preserves later device assignments. It never
 adopts an orphaned volume after an uncertain failure. Controller configuration,
 GPU selection and restart-based configuration are now a separate guided step;
 device assignment uses the existing authenticated controller API after restart.
-The shipped catalog is currently empty because no runtime has completed the
-publication and catalog admission process below. An unknown runtime fails
-before any Docker command. Do not fill the catalog with a guessed digest,
+The shipped catalog carries the two Steam runtimes published on
+2026-09-18 from source revision d89ac2e0, one NVIDIA and one default. An
+unknown runtime fails before any Docker command. Do not fill the catalog with a guessed digest,
 mutable tag, local image ID, or CI artifact download URL.
 
 The installer only uses the system Docker Engine through its local Unix socket.
