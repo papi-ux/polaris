@@ -265,6 +265,17 @@ namespace virtual_display {
    */
   std::string kwin_window_follow_script(std::string_view output_name);
 
+  /**
+   * @brief Why KWin will not offer its screencast protocol to a process it cannot identify.
+   *
+   * KWin matches its permission entry against /proc/<pid>/exe, which the
+   * kernel hides unless the process is dumpable (PR_GET_DUMPABLE is 1). That
+   * is usually the capability --enable-kms grants for KMS capture, and
+   * sometimes a capability-enabled binary started under NoNewPrivileges.
+   * @return Empty when the process is dumpable, so the cause is elsewhere.
+   */
+  std::string kwin_unidentifiable_process_reason(int dumpable, bool holds_capabilities);
+
   /** @brief The KWin script plugin name for one Polaris screen. */
   std::string kwin_window_follow_plugin_name(std::string_view output_name);
 

@@ -721,6 +721,21 @@ workspace.windowAdded.connect(function (window) {
   EXPECT_NE(hostile.find(R"(const target = "x\"; evil(); \"";)"), std::string::npos);
 }
 
+TEST(VirtualDisplayKwinTests, NamesWhyKwinCannotIdentifyPolaris) {
+  // Dumpable: KWin can read /proc/<pid>/exe, so the cause is elsewhere.
+  EXPECT_TRUE(virtual_display::kwin_unidentifiable_process_reason(1, true).empty());
+  // 0 by default, 2 under fs.suid_dumpable=2 (apport, some systemd-coredump setups).
+  for (int dumpable : {0, 2}) {
+    const auto held = virtual_display::kwin_unidentifiable_process_reason(dumpable, true);
+    EXPECT_NE(held.find("--enable-kms"), std::string::npos) << dumpable;
+    EXPECT_NE(held.find("leave capture on auto or portal"), std::string::npos) << dumpable;
+    // Non-dumpable without a capability: say so rather than blame one it does not hold.
+    const auto none = virtual_display::kwin_unidentifiable_process_reason(dumpable, false);
+    EXPECT_NE(none.find("NoNewPrivileges"), std::string::npos) << dumpable;
+    EXPECT_EQ(none.find("holds file capabilities"), std::string::npos) << dumpable;
+  }
+}
+
 TEST(VirtualDisplayKwinTests, PersistedKwinScreenRoundTrips) {
   const auto entries = virtual_display::parse_persisted_displays(R"({"displays":[
     {"pid":4242,"output_name":"Virtual-polaris-0","width":1920,"height":1080,"fps":120,"active":true,

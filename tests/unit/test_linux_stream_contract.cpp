@@ -113,12 +113,22 @@ TEST(LinuxStreamContractTests, PortalCapabilityDropRunsBeforeWorkerThreads) {
   const auto main = read_source("src/main.cpp");
   ASSERT_FALSE(main.empty());
   const auto prepare = main.find("portal_capability::prepare_process_for_capture(");
+  const auto logging = main.find("logging::init(config::sunshine.min_log_level");
   const auto workers = main.find("task_pool.start(1)");
   ASSERT_NE(prepare, std::string::npos);
+  ASSERT_NE(logging, std::string::npos);
   ASSERT_NE(workers, std::string::npos);
+  // Before logging too: it starts a thread, capset() covers only the calling
+  // thread, and the drop makes the whole process dumpable.
+  EXPECT_LT(prepare, logging);
   EXPECT_LT(prepare, workers);
   // The KWin backend is part of the decision: KWin refuses a process that holds file capabilities.
-  EXPECT_NE(main.find("config::video.linux_display.virtual_display_backend\n  );", prepare), std::string::npos);
+  EXPECT_NE(main.find("config::video.linux_display.virtual_display_backend,\n    &capability_outcome", prepare), std::string::npos);
+  const auto policy = read_source("src/platform/linux/portal_capability.cpp");
+  const auto guard = policy.find("if (thread_count() != 1) {");
+  const auto capset = policy.find("syscall(SYS_capset", guard);
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(capset, std::string::npos);
 }
 
 TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {

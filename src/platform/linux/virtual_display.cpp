@@ -869,6 +869,22 @@ namespace virtual_display {
     return ranked_screens(layout, {}) == expected;
   }
 
+  std::string kwin_unidentifiable_process_reason(int dumpable, bool holds_capabilities) {
+    if (dumpable == 1) {
+      return {};
+    }
+    if (holds_capabilities) {
+      return "KWin does not offer its screencast protocol to Polaris because this Polaris process holds file "
+             "capabilities (the cap_sys_admin that --enable-kms grants for KMS capture), and KWin cannot tell "
+             "which program holds them. Set linux_virtual_display_backend to kwin, leave capture on auto or "
+             "portal, and restart Polaris; it then drops them at start";
+    }
+    return "KWin does not offer its screencast protocol to Polaris because the process runs non-dumpable, so "
+           "KWin cannot tell which program it is. A binary with file capabilities started under "
+           "NoNewPrivileges does that; set linux_virtual_display_backend to kwin and restart Polaris, or remove "
+           "the capability from the binary";
+  }
+
   std::string kwin_window_follow_plugin_name(std::string_view output_name) {
     return "polaris-follow-" + std::string {output_name};
   }

@@ -403,19 +403,31 @@ namespace kwin_virtual_output {
       }
     }
 
+    /** Whether any capability is in this thread's permitted set, from /proc/self/status. */
+    bool holds_permitted_capabilities() {
+      std::ifstream status("/proc/self/status");
+      std::string line;
+      while (std::getline(status, line)) {
+        if (line.rfind("CapPrm:", 0) == 0) {
+          return line.find_first_not_of("0\t ", 7) != std::string::npos;
+        }
+      }
+      return false;
+    }
+
     std::string missing_protocol_reason(kwingrab::permission_e permission) {
       if (permission == kwingrab::permission_e::failed) {
         return "KWin does not offer its screencast protocol to Polaris, and the permission entry KWin needs "
                "(a desktop file with X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1) could not be written";
       }
       // KWin matches its permission entry against /proc/<pid>/exe, which the
-      // kernel hides for a process that holds file capabilities, such as the
-      // cap_sys_admin that --enable-kms grants for KMS capture.
-      if (::prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0) {
-        return "KWin does not offer its screencast protocol to Polaris because this Polaris process holds file "
-               "capabilities (the cap_sys_admin that --enable-kms grants for KMS capture), and KWin cannot tell "
-               "which program holds them. Set linux_virtual_display_backend to kwin with capture not set to kms "
-               "and restart Polaris; it then drops them at start";
+      // kernel hides unless the process is dumpable. With fs.suid_dumpable=2
+      // a capability-enabled binary starts at 2, not 0.
+      if (auto reason = virtual_display::kwin_unidentifiable_process_reason(
+            ::prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), holds_permitted_capabilities()
+          );
+          !reason.empty()) {
+        return reason;
       }
       return "KWin does not offer its screencast protocol to Polaris. On KDE Plasma this usually means KWin "
              "has not picked up Polaris's permission entry yet; it will on the next try";
@@ -667,14 +679,16 @@ namespace kwin_virtual_output {
 
   bool follow_windows(const std::string &output_name, std::string &error) {
     std::lock_guard lock {follow_mutex};
-    // The newest screen takes new windows; the older ones stop moving them.
     std::erase(followed_outputs, output_name);
-    for (const auto &older : followed_outputs) {
-      unload_follow_script(virtual_display::kwin_window_follow_plugin_name(older));
-    }
     followed_outputs.push_back(output_name);
+    // Load the newest screen's script first: when KWin refuses it, the screen
+    // before keeps taking new windows instead of none doing so.
     if (!load_follow_script(output_name, error)) {
       return false;
+    }
+    // The newest screen takes new windows; the older ones stop moving them.
+    for (std::size_t i = 0; i + 1 < followed_outputs.size(); ++i) {
+      unload_follow_script(virtual_display::kwin_window_follow_plugin_name(followed_outputs[i]));
     }
     BOOST_LOG(info) << "KWin virtual output: new windows follow ["sv << output_name << "] while it exists"sv;
     return true;

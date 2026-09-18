@@ -1318,12 +1318,13 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   EXPECT_LT(run, kept);
   EXPECT_EQ(wayland.find("call_scripting(\"start\""), std::string::npos);
   const auto follow_body = wayland.find("bool follow_windows(const std::string &output_name, std::string &error) {");
-  const auto older_unloaded = wayland.find("for (const auto &older : followed_outputs) {", follow_body);
+  const auto older_unloaded = wayland.find("for (std::size_t i = 0; i + 1 < followed_outputs.size(); ++i) {", follow_body);
   const auto newest_loaded = wayland.find("load_follow_script(output_name, error)", follow_body);
   ASSERT_NE(follow_body, std::string::npos);
   ASSERT_NE(older_unloaded, std::string::npos);
   ASSERT_NE(newest_loaded, std::string::npos);
-  EXPECT_LT(older_unloaded, newest_loaded);
+  // The newest loads first, so a refused script leaves the screen before still following.
+  EXPECT_LT(newest_loaded, older_unloaded);
 
   // The reader stops before the stream it reads is closed from another thread.
   const auto release = wayland.find("bool release(const std::string &output_name");

@@ -548,8 +548,8 @@ tab names the backend in use and, when it cannot run, why.
   cannot match one that holds file capabilities, such as the `cap_sys_admin` that `--enable-kms`
   grants for KMS capture. On the automatic order such a Polaris skips the KWin screen and falls back
   to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
-  off `kms`, and restart Polaris: it then drops the capability at start. KMS capture and a KWin
-  screen do not go together.
+  on `auto` or `portal`, and restart Polaris: it then drops the capability at start. KMS capture
+  and a KWin screen do not go together.
 - **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
 - **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream
