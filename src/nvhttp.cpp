@@ -4687,9 +4687,15 @@ namespace nvhttp {
       BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name << "] requested to ["sv << mode_str
                       << "] source="sv
                       << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv : "client_request"sv);
+      stream_stats::record_display_mode_decision(mode_str, mode_str, false);
     } else {
       mode = std::stringstream(named_cert_p->display_mode);
-      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode << ']';
+      // What the client asked for is recorded too, so the Doctor can say it was replaced rather
+      // than leave "I can't select 1080p" looking like a client problem.
+      const auto requested_mode = get_arg(args, "mode", "");
+      BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name <<"] overriden to ["sv << named_cert_p->display_mode
+                      << "] requested=["sv << requested_mode << ']';
+      stream_stats::record_display_mode_decision(requested_mode, named_cert_p->display_mode, true);
     }
 
     // Split mode by the char "x", to populate width/height/fps

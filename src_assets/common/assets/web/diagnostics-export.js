@@ -478,6 +478,31 @@ function linuxConfigurationWarnings(stats = {}) {
   return []
 }
 
+// Only an override that replaced a different request is worth an item: that is why a client
+// "cannot select 1080p", since the host ignores its choice without telling it.
+function displayModeOverrideItem(stats = {}) {
+  const decision = stats?.display_mode_decision || {}
+  const requested = String(decision.requested || '')
+  const applied = String(decision.applied || '')
+  if (!decision.pinned_by_host || !requested || !applied || requested === applied) return null
+  return checklistItem(
+    'display-mode',
+    'Display mode',
+    'warning',
+    `This device's Display Mode Override of ${applied} replaced the ${requested} the client asked for.`,
+    'Clear Display Mode Override for this device on the Devices page to let the client choose.'
+  )
+}
+
+function formatDisplayModeDecision(decision = {}) {
+  const applied = decision?.applied
+  if (!applied) return ''
+  if (decision.pinned_by_host && decision.requested && decision.requested !== applied) {
+    return `${applied} (Display Mode Override; the client asked for ${decision.requested})`
+  }
+  return decision.pinned_by_host ? `${applied} (Display Mode Override)` : applied
+}
+
 function hostConfigurationWarningItem(stats = {}) {
   const warning = linuxConfigurationWarnings(stats)[0]
   if (!warning) return null
@@ -565,6 +590,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
       ? checklistItem('connection', 'Connection', 'pass', 'Live telemetry is connected and a stream is active.', 'Keep this page open while reproducing the issue.')
       : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
   const hostConfig = hostConfigurationWarningItem(stats)
+  const displayMode = displayModeOverrideItem(stats)
 
   const loss = Number.isFinite(packetLoss)
     ? packetLoss > 2
@@ -635,6 +661,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   return [
     connection,
     ...(hostConfig ? [hostConfig] : []),
+    ...(displayMode ? [displayMode] : []),
     loss,
     capture,
     encoder,
@@ -836,6 +863,8 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
     issueDraftLine('Launch mode', firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend)),
     issueDraftLine('Encoder', firstNonEmpty(stats.encoder, stats.encode_target_device, config.encoder)),
     issueDraftLine('Capture', capture),
+    issueDraftLine('Network path', stats.client_network_path),
+    issueDraftLine('Display mode', formatDisplayModeDecision(stats.display_mode_decision)),
     ...gpuDiagnosticLines,
     issueDraftLine('Active stream', summarizeActiveStream(stats)),
     '',

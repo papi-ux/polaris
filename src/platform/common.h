@@ -800,6 +800,14 @@ namespace platf {
   std::string capture_backend_substitution_note();
 
   /**
+   * @brief The resource limits that stopped Polaris raising its capture, encode
+   * and audio thread priority, such as "RLIMIT_RTPRIO=0, RLIMIT_NICE=0".
+   * @return Empty unless a worker thread has actually been refused elevation, so
+   * a host that never tried reports nothing.
+   */
+  std::string thread_priority_unavailable_note();
+
+  /**
    * @brief Whether an evaluation ran and found no capture source at all.
    * @return False before any evaluation has run, so this never reports an unlooked-for problem.
    */
@@ -824,6 +832,8 @@ namespace platf {
   #ifdef POLARIS_TESTS
   /// Drive the missing-capture state directly, so the reporting can be tested without a compositor.
   void set_capture_sources_missing_for_tests(bool missing);
+  /// Pin the thread-priority note directly; empty clears it.
+  void set_thread_priority_unavailable_note_for_tests(std::string note);
   void set_kms_capture_refused_for_tests(bool refused);
   /// Pin the selected backend directly; nullopt restores what the evaluation found.
   void set_selected_capture_backend_for_tests(std::optional<std::string> backend);

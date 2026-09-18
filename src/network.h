@@ -53,6 +53,16 @@ namespace net {
 
   net_e from_address(const std::string_view &view);
 
+  /**
+   * @brief Describe the path a client reached this host by, for diagnostics only.
+   * @details Never use this for access decisions; from_address does that, and it
+   *          deliberately treats the shared 100.64.0.0/10 range and link-local as LAN.
+   * @return One of loopback, lan, cgnat (the shared IPv4 range, which Tailscale
+   *         uses), tailscale (its IPv6 range), link-local, public, or unknown when
+   *         the text is not an address.
+   */
+  std::string_view describe_client_network_path(const std::string_view &address);
+
   host_t host_create(af_e af, ENetAddress &addr, std::uint16_t port);
 
   /**

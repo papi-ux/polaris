@@ -107,6 +107,53 @@ describe('diagnostics export redaction', () => {
   })
 })
 
+describe('diagnostics export display mode and network path', () => {
+  // The support bundle that prompted these: a client that "cannot select 1080p" because its
+  // pairing pinned 4K, and microstutter from a client that had moved onto Tailscale.
+  const overridden = { requested: '1920x1080x60', applied: '3840x2160x60', pinned_by_host: true }
+
+  it('names a Display Mode Override that replaced the client\'s request in the checklist', () => {
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { streaming: true, packet_loss: 0, display_mode_decision: overridden },
+    })
+    const item = checklist.find((entry) => entry.key === 'display-mode')
+
+    expect(item.status).toBe('warning')
+    expect(item.detail).toContain('3840x2160x60')
+    expect(item.detail).toContain('1920x1080x60')
+    expect(item.action).toContain('Devices page')
+  })
+
+  it('says nothing in the checklist when the client got the mode it asked for', () => {
+    for (const decision of [
+      { requested: '1920x1080x60', applied: '1920x1080x60', pinned_by_host: true },
+      { requested: '1280x800x60', applied: '1280x800x60', pinned_by_host: false },
+      {},
+    ]) {
+      const checklist = buildFixMyStreamChecklist({
+        statsConnected: true,
+        stats: { streaming: true, display_mode_decision: decision },
+      })
+      expect(checklist.some((entry) => entry.key === 'display-mode')).toBe(false)
+    }
+  })
+
+  it('carries the path and the display mode into the issue draft without an address', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      session_snapshot: {
+        client_ip: '100.109.196.18',
+        client_network_path: 'cgnat',
+        display_mode_decision: overridden,
+      },
+    })
+
+    expect(bundle.issue_draft).toContain('- Network path: cgnat')
+    expect(bundle.issue_draft).toContain('- Display mode: 3840x2160x60 (Display Mode Override; the client asked for 1920x1080x60)')
+    expect(bundle.issue_draft).not.toContain('100.109.196.18')
+  })
+})
+
 describe('diagnostics export network addresses', () => {
   const sessionLogs = [
     '[2026-09-17 21:25:03.178]: Info: Session started for [Steamdeck] from 192.168.1.192 [active sessions: 1]',

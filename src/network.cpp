@@ -83,6 +83,65 @@ namespace net {
     return WAN;
   }
 
+  std::string_view describe_client_network_path(const std::string_view &address) {
+    // Deliberately separate from from_address, which decides access and counts the
+    // shared 100.64.0.0/10 range and link-local as LAN. That is right for deciding
+    // what a nearby client may do and wrong for explaining a stream: a support
+    // bundle's microstutter came down to one client having moved from the LAN to
+    // Tailscale, which from_address reports as LAN either way.
+    static const auto cgnat = ip::make_network_v4("100.64.0.0/10"sv);
+    static const auto link_local_v4 = ip::make_network_v4("169.254.0.0/16"sv);
+    static const std::vector<ip::network_v4> private_v4 {
+      ip::make_network_v4("10.0.0.0/8"sv),
+      ip::make_network_v4("172.16.0.0/12"sv),
+      ip::make_network_v4("192.168.0.0/16"sv),
+    };
+    // Tailscale's IPv6 range is specific to it, unlike the shared IPv4 range.
+    static const auto tailscale_v6 = ip::make_network_v6("fd7a:115c:a1e0::/48"sv);
+    static const auto unique_local_v6 = ip::make_network_v6("fc00::/7"sv);
+
+    boost::system::error_code ec;
+    const auto parsed = ip::make_address(std::string {address}, ec);
+    if (ec) {
+      return "unknown";
+    }
+    const auto addr = normalize_address(parsed);
+    if (addr.is_loopback()) {
+      return "loopback";
+    }
+
+    if (addr.is_v4()) {
+      const auto v4 = addr.to_v4();
+      const auto within = [&v4](const ip::network_v4 &range) {
+        return range.hosts().find(v4) != range.hosts().end();
+      };
+      if (within(cgnat)) {
+        return "cgnat";
+      }
+      if (within(link_local_v4)) {
+        return "link-local";
+      }
+      for (const auto &range : private_v4) {
+        if (within(range)) {
+          return "lan";
+        }
+      }
+      return "public";
+    }
+
+    const auto v6 = addr.to_v6();
+    if (tailscale_v6.hosts().find(v6) != tailscale_v6.hosts().end()) {
+      return "tailscale";
+    }
+    if (v6.is_link_local()) {
+      return "link-local";
+    }
+    if (unique_local_v6.hosts().find(v6) != unique_local_v6.hosts().end()) {
+      return "lan";
+    }
+    return "public";
+  }
+
   std::string_view to_enum_string(net_e net) {
     switch (net) {
       case PC:

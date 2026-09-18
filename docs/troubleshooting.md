@@ -352,6 +352,9 @@ journalctl --user -u polaris -b --no-pager | grep -E 'Thread priority|RealtimeKi
 Installing and running RealtimeKit can also allow priority elevation without granting broad
 capabilities to the Polaris binary.
 
+The Doctor reports this as a host configuration warning too, with the limits that applied, so a
+support bundle exported after the stream still has it.
+
 Packaged Linux user units are ordered with `graphical-session.target` and pass through common
 desktop environment variables such as `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and
 `DBUS_SESSION_BUS_ADDRESS`. In private Headless Stream mode, a missing parent `WAYLAND_DISPLAY`
@@ -524,6 +527,29 @@ When all five pass, the session logs `HDR metadata: available=true usable=true`,
 `Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)` and `stream_hdr_enabled=true` after
 `Session started for [...]`. The encoder probe logs the same lines earlier even when the session
 will not, so read the ones after the session starts.
+
+## A client cannot pick its resolution
+
+A device with a **Display Mode Override** saved on the host gets that mode whatever it asks for,
+so choosing 1080p on the client changes nothing. When the override replaced a different request,
+the Doctor checklist shows a **Display mode** warning naming the mode the client asked for, and
+Session Snapshot's **Display mode** tile shows both. Clear
+**Display Mode Override** for that device on the **Devices** page, or set it to the mode you want;
+see [Devices](devices.md). A launch that carries the client's own resolved profile, as Nova's
+does, keeps the client's mode, so the same device can behave differently in Nova and Moonlight.
+
+## Stutter over Tailscale
+
+Session Snapshot's **Network path** tile says how the client reached this host. The Doctor and
+support bundles carry the same thing as `client_network_path`: `lan`, `cgnat` (the shared
+`100.64.0.0/10` range, which Tailscale uses on IPv4), `tailscale` (its IPv6 range), `link-local`,
+`public` or `loopback`. It stays after the stream ends, so a support bundle exported afterwards
+still has it, and it never records the address itself.
+
+A tailnet stream is fine while Tailscale connects the two machines directly. When it cannot, it
+relays the traffic through its DERP servers, and the stream stutters and its latency climbs. Run
+`tailscale ping` with the host's name on the client: `via DERP` in the answer means the stream is
+relayed, an address and port mean it is direct.
 
 ## A launch was refused
 
