@@ -313,7 +313,8 @@ int main(int argc, char *argv[]) {
   // then restore ordinary same-user /proc access for portal authorization.
   (void) portal_capability::prepare_process_for_capture(
     config::video.capture,
-    config::video.linux_display.stream_mode
+    config::video.linux_display.stream_mode,
+    config::video.linux_display.virtual_display_backend
   );
 #endif
 

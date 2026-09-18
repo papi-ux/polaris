@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gio/gio.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <map>
 #include <memory>
@@ -406,6 +407,15 @@ namespace kwin_virtual_output {
       if (permission == kwingrab::permission_e::failed) {
         return "KWin does not offer its screencast protocol to Polaris, and the permission entry KWin needs "
                "(a desktop file with X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1) could not be written";
+      }
+      // KWin matches its permission entry against /proc/<pid>/exe, which the
+      // kernel hides for a process that holds file capabilities, such as the
+      // cap_sys_admin that --enable-kms grants for KMS capture.
+      if (::prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0) {
+        return "KWin does not offer its screencast protocol to Polaris because this Polaris process holds file "
+               "capabilities (the cap_sys_admin that --enable-kms grants for KMS capture), and KWin cannot tell "
+               "which program holds them. Set linux_virtual_display_backend to kwin with capture not set to kms "
+               "and restart Polaris; it then drops them at start";
       }
       return "KWin does not offer its screencast protocol to Polaris. On KDE Plasma this usually means KWin "
              "has not picked up Polaris's permission entry yet; it will on the next try";

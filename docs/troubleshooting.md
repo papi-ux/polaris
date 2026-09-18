@@ -543,6 +543,11 @@ tab names the backend in use and, when it cannot run, why.
 - **The stream runs at 60 Hz when the client asked for more.** A KWin screen starts with one
   60 Hz mode, and Polaris adds the client's rate as a custom mode with kscreen-doctor. The log
   says `did not take mode` when KWin refused it.
+- **KWin says it cannot tell which program Polaris is.** KWin offers a screen only to a program it
+  can match to its permission entry, and it cannot match one that holds file capabilities, such as
+  the `cap_sys_admin` that `--enable-kms` grants for KMS capture. Set Backend to KWin
+  (`linux_virtual_display_backend = kwin`), leave `capture` off `kms`, and restart Polaris: it then
+  drops the capability at start. KMS capture and a KWin screen do not go together.
 - **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
 - **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream

@@ -117,6 +117,8 @@ TEST(LinuxStreamContractTests, PortalCapabilityDropRunsBeforeWorkerThreads) {
   ASSERT_NE(prepare, std::string::npos);
   ASSERT_NE(workers, std::string::npos);
   EXPECT_LT(prepare, workers);
+  // The KWin backend is part of the decision: KWin refuses a process that holds file capabilities.
+  EXPECT_NE(main.find("config::video.linux_display.virtual_display_backend\n  );", prepare), std::string::npos);
 }
 
 TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {

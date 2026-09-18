@@ -37,11 +37,20 @@ namespace portal_capability {
 
   bool requires_unprivileged_process(
     std::string_view configured_capture,
-    std::string_view stream_mode
+    std::string_view stream_mode,
+    std::string_view virtual_display_backend
   ) {
     const auto capture = lower_copy(configured_capture);
     if (!capture.empty() && capture != "auto") {
       return capture == "portal";
+    }
+
+    // KWin offers its screencast protocol only to a client it can match to a
+    // permission entry by /proc/<pid>/exe, and the kernel hides that for a
+    // process holding file capabilities. A host set to KWin screens would
+    // never get one, and nothing on that path uses KMS unless capture says so.
+    if (lower_copy(virtual_display_backend) == "kwin") {
+      return true;
     }
 
     const auto mode = lower_copy(stream_mode);
@@ -53,9 +62,10 @@ namespace portal_capability {
 
   prepare_result_e prepare_process_for_capture(
     std::string_view configured_capture,
-    std::string_view stream_mode
+    std::string_view stream_mode,
+    std::string_view virtual_display_backend
   ) {
-    if (!requires_unprivileged_process(configured_capture, stream_mode)) {
+    if (!requires_unprivileged_process(configured_capture, stream_mode, virtual_display_backend)) {
       return prepare_result_e::not_needed;
     }
 

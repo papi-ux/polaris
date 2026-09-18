@@ -99,6 +99,20 @@ TEST(PortalCapabilityPolicyTests, PortalOrientedModesDropCapabilitiesForImplicit
   EXPECT_FALSE(portal_capability::requires_unprivileged_process("auto", "windowed_stream"));
 }
 
+TEST(PortalCapabilityPolicyTests, KwinScreensDropCapabilitiesUnlessCaptureIsKms) {
+  // KWin never offers a screen to a process holding file capabilities (live on
+  // KWin 6.7.5: refused with cap_sys_admin, offered without), so a host set to
+  // the KWin backend drops them, whatever the stream mode.
+  for (const char *mode : {"host_virtual_display", "headless_stream", "windowed_stream"}) {
+    EXPECT_TRUE(portal_capability::requires_unprivileged_process("", mode, "kwin")) << mode;
+    EXPECT_TRUE(portal_capability::requires_unprivileged_process("auto", mode, "KWin")) << mode;
+  }
+  // KMS capture chosen on purpose keeps them; so does any other backend.
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("kms", "host_virtual_display", "kwin"));
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("", "host_virtual_display", "auto"));
+  EXPECT_FALSE(portal_capability::requires_unprivileged_process("", "host_virtual_display", "evdi"));
+}
+
 TEST(PortalCapabilityPolicyTests, PreparationLeavesProcRootReadableToSameUserPortalPeer) {
   const auto result = portal_capability::prepare_process_for_capture("portal", "gamescope_stream");
   ASSERT_NE(result, portal_capability::prepare_result_e::failed);
