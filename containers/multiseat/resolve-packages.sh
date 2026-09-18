@@ -11,7 +11,7 @@ export DEBIAN_FRONTEND=noninteractive
 # shipped archive keyring independently authenticates the snapshot metadata.
 cat > /etc/apt/sources.list.d/ubuntu.sources <<'SOURCES'
 Types: deb
-URIs: https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/
+URIs: https://snapshot.ubuntu.com/ubuntu/20260918T000000Z/
 Suites: resolute resolute-updates resolute-security
 Components: main universe restricted multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
