@@ -57,8 +57,8 @@ namespace kwin_virtual_output {
   /** @brief Whether this process image holds the anchor for an output. */
   bool anchored(const std::string &output_name);
 
-  /** @brief Whether the anchor's connection to KWin is still up. False when not anchored. */
-  bool anchor_alive(const std::string &output_name);
+  /** @brief Every output this process image holds an anchor for. */
+  std::vector<std::string> anchored_outputs();
 
   /**
    * @brief Close the anchor so KWin removes the output, then wait until the

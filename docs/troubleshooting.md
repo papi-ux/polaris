@@ -536,10 +536,10 @@ On KDE Plasma 6, Host Virtual Display gets a new screen from KWin (see
 tab names the backend in use and, when it cannot run, why.
 
 - **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
-  desktop entry names. Polaris writes one to `~/.local/share/applications` the first time, and
-  KWin reads it when a program connects, so the very first try after an install can miss it;
-  the next one works. If it keeps failing, check that the entry exists and that its `Exec` line
-  is the Polaris binary that is running.
+  desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
+  waits a few seconds for KWin to pick it up. If a launch still misses it, Polaris checks again
+  after half a minute, so try again then. If it keeps failing, check that the entry exists and
+  that its `Exec` line is the Polaris binary that is running.
 - **The stream runs at 60 Hz when the client asked for more.** A KWin screen starts with one
   60 Hz mode, and Polaris adds the client's rate as a custom mode with kscreen-doctor. The log
   says `did not take mode` when KWin refused it.

@@ -813,13 +813,21 @@ namespace virtual_display {
     return {"output."s + std::string {output} + ".mode." + kwin_mode_name(width, height, hz)};
   }
 
-  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary) {
+  std::vector<std::string> kwin_placement_args(
+    std::string_view output,
+    int x,
+    std::string_view previous_primary,
+    bool rank_first
+  ) {
     const auto prefix = "output."s + std::string {output};
     std::vector<std::string> args {
       prefix + ".scale.1",
       prefix + ".position." + std::to_string(x) + ",0",
-      prefix + ".priority.1",
     };
+    if (!rank_first) {
+      return args;
+    }
+    args.push_back(prefix + ".priority.1");
     if (!previous_primary.empty() && previous_primary != output) {
       args.push_back("output."s + std::string {previous_primary} + ".priority.2");
     }
@@ -835,21 +843,9 @@ namespace virtual_display {
            output.refresh_hz > 0.0 && std::abs(output.refresh_hz - hz) <= 0.5;
   }
 
-  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x) {
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x, bool ranked_first) {
     return output.enabled && std::abs(output.scale - 1.0) < 0.01 && output.x == x && output.y == 0 &&
-           output.priority == 1;
-  }
-
-  bool kwin_record_is_stale(int owner_pid, int self_pid, bool owner_alive, bool anchored_here) {
-    if (anchored_here) {
-      return false;
-    }
-    if (owner_pid == self_pid) {
-      // This process image does not hold the output. An in-place restart keeps
-      // the pid and closes the connection KWin tied the output to.
-      return true;
-    }
-    return owner_pid <= 0 || !owner_alive;
+           (!ranked_first || output.priority == 1);
   }
 
   namespace {
@@ -2081,12 +2077,20 @@ namespace virtual_display {
 
     /**
      * @brief Put the new screen where the stream needs it: the client's mode,
-     * scale 1, beside the other screens, ranked first.
+     * scale 1, beside the other screens, and ranked first when `rank_first`.
      *
      * Best effort past the mode: a refresh rate KWin will not run is a warning,
      * and the stream still gets a screen of its own.
+     *
+     * @param layout_before The layout read before KWin was asked, used to place
+     *        the screen when a later read fails rather than putting it at 0,0.
      */
-    static void place(const vdisplay_t &display, const std::string &previous_primary) {
+    static void place(
+      const vdisplay_t &display,
+      const std::vector<kscreen_output_layout_t> &layout_before,
+      const std::string &previous_primary,
+      bool rank_first
+    ) {
       const auto &name = display.output_name;
       auto layout = kscreen_layout_from_json(layout_json());
       auto output = find_output(layout, name);
@@ -2115,16 +2119,19 @@ namespace virtual_display {
         }
       }
 
-      // Placement last: adding a custom mode can reorder priorities.
-      const int x = kscreen_right_edge(layout.value_or(std::vector<kscreen_output_layout_t> {}), name);
-      const int rc = run_kscreen(kwin_placement_args(name, x, previous_primary));
+      // Placement last: adding a custom mode can reorder priorities. A failed
+      // read falls back to the layout from before, never to 0,0 on top of a
+      // real monitor.
+      const int x = kscreen_right_edge(layout ? *layout : layout_before, name);
+      const int rc = run_kscreen(kwin_placement_args(name, x, previous_primary, rank_first));
       output = find_output(kscreen_layout_from_json(layout_json()), name);
-      if (rc != 0 || !output || !kwin_placement_matches(*output, x)) {
-        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens and ranked first (rc="sv
-                           << rc << "); windows may not open on it"sv;
+      if (rc != 0 || !output || !kwin_placement_matches(*output, x, rank_first)) {
+        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens"sv
+                           << (rank_first ? " and ranked first"sv : ""sv) << " (rc="sv << rc << "); windows may not open on it"sv;
         return;
       }
-      BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1, ranked first"sv;
+      BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1"sv
+                      << (rank_first ? ", ranked first"sv : ", ranking left to the Polaris screen already held"sv);
     }
 
     static std::optional<vdisplay_t> create(int width, int height, int fps) {
@@ -2172,25 +2179,26 @@ namespace virtual_display {
       display.fps = fps;
       display.active = true;
       display.backend = backend_e::KWIN_VIRTUAL_OUTPUT;
-      if (previous_primary) {
+      // With another Polaris screen already held (a stream and the web UI can
+      // each have one), that one keeps the primary: two screens taking it in
+      // turn would leave the stream on whichever came second.
+      const bool rank_first = kwin_virtual_output::anchored_outputs().empty();
+      if (rank_first && previous_primary) {
         display.kscreen_primary_before = kscreen_output_state_from_json(layout_before_json, *previous_primary);
       }
-      if (!record_persisted_display(display, 0)) {
-        BOOST_LOG(error) << "Virtual display: refusing a KWin screen because durable recovery intent could not be committed"sv;
-        release_name(output_name);
-        return std::nullopt;
-      }
+      // No recovery record, unlike the other backends: KWin removes the screen
+      // with the connection that asked for it, so a crash leaves nothing to
+      // clean up, and a record would only outlive the screen it describes.
 
       std::string error;
       const auto created = kwin_virtual_output::create(request_name, width, height, error);
       if (!created) {
-        // The intent record stays until stale cleanup verifies the name is absent.
         BOOST_LOG(warning) << "Virtual display: KWin screen ["sv << output_name << "] was not created: "sv << error;
         release_name(output_name);
         return std::nullopt;
       }
 
-      place(display, previous_primary.value_or(std::string {}));
+      place(display, *layout_before, previous_primary.value_or(std::string {}), rank_first);
       BOOST_LOG(info) << "Virtual display: KWin screen created ["sv << output_name << "] "sv
                       << width << "x"sv << height << "@"sv << fps << "Hz"sv;
       return display;
@@ -2208,35 +2216,30 @@ namespace virtual_display {
         return false;
       }
 
-      if (kwin_virtual_output::anchored(display.output_name)) {
-        if (!kwin_virtual_output::release(display.output_name, release_budget)) {
-          BOOST_LOG(error) << "Virtual display: KWin screen ["sv << display.output_name
-                           << "] is still present after release; retaining recovery authority"sv;
-          return false;
-        }
-      } else {
-        // Not held by this process image: KWin removed it with the connection
-        // that asked for it. If an output of that name exists anyway, it is not
-        // one this process can remove, and keeping the record would refuse
-        // every launch after it.
-        const auto names = kwin_virtual_output::output_names();
-        if (!names) {
-          BOOST_LOG(error) << "Virtual display: cannot list outputs to verify KWin screen ["sv
-                           << display.output_name << "] is gone; retaining recovery authority"sv;
-          return false;
-        }
-        if (std::find(names->begin(), names->end(), display.output_name) != names->end()) {
-          BOOST_LOG(warning) << "Virtual display: ["sv << display.output_name
-                             << "] exists but no connection in this process holds it; only the client that created it can remove it. Forgetting the record"sv;
-        } else {
-          BOOST_LOG(info) << "Virtual display: KWin screen ["sv << display.output_name << "] verified absent"sv;
-        }
+      if (!kwin_virtual_output::anchored(display.output_name)) {
+        // Not held by this process image, so KWin already removed it with the
+        // connection that asked for it; only that connection could remove it.
+        // Nothing to verify that could change the answer, and refusing here
+        // would refuse every later launch, EVDI's included.
+        BOOST_LOG(info) << "Virtual display: KWin screen ["sv << display.output_name
+                        << "] is not held by this process; nothing to remove"sv;
+        release_name(display.output_name);
+        display.active = false;
+        return true;
+      }
+
+      if (!kwin_virtual_output::release(display.output_name, release_budget)) {
+        BOOST_LOG(error) << "Virtual display: KWin screen ["sv << display.output_name
+                         << "] is still present after release; retaining recovery authority"sv;
+        return false;
       }
       release_name(display.output_name);
 
       // KWin re-applies the layout it stored for the remaining screens when the
-      // output goes, which puts the previous primary back. Check it did.
-      if (display.kscreen_primary_before && display.kscreen_primary_before->priority == 1) {
+      // output goes, which puts the previous primary back. Check it did, unless
+      // another Polaris screen still holds the primary.
+      if (display.kscreen_primary_before && display.kscreen_primary_before->priority == 1 &&
+          kwin_virtual_output::anchored_outputs().empty()) {
         const auto &previous = display.kscreen_primary_before->name;
         auto primary = find_output(kscreen_layout_from_json(layout_json()), previous);
         if (primary && primary->priority != 1) {
@@ -2251,9 +2254,12 @@ namespace virtual_display {
       display.active = false;
       return true;
 #else
-      BOOST_LOG(error) << "Virtual display: this Polaris cannot remove KWin screen ["sv << display.output_name
-                       << "]; retaining recovery authority"sv;
-      return false;
+      // This build cannot hold a KWin screen, so one described here died with
+      // the process that created it.
+      BOOST_LOG(info) << "Virtual display: KWin screen ["sv << display.output_name
+                      << "] belongs to a process that is gone; nothing to remove"sv;
+      display.active = false;
+      return true;
 #endif
     }
 
@@ -2288,9 +2294,13 @@ namespace virtual_display {
 
   namespace {
     std::optional<backend_preference_e> cached_preference;
+    // A choice saved while Polaris runs. Guarded by backend_detection_mutex, and
+    // kept apart from config::video, which launch threads copy and restore whole.
+    std::optional<std::string> live_backend_preference;
 
+    // Callers hold backend_detection_mutex.
     backend_preference_e configured_preference() {
-      const auto &value = config::video.linux_display.virtual_display_backend;
+      const auto value = live_backend_preference.value_or(config::video.linux_display.virtual_display_backend);
       const auto preference = parse_backend_preference(value);
       if (!preference) {
         BOOST_LOG(warning) << "Virtual display: unknown linux_virtual_display_backend ["sv << value << "]; using auto"sv;
@@ -2385,8 +2395,14 @@ namespace virtual_display {
 
   void set_backend_preference(const std::string &value) {
     std::lock_guard cache_lock {backend_detection_mutex};
-    config::video.linux_display.virtual_display_backend = value;
+    live_backend_preference = value;
     cached_backend.reset();
+  }
+
+  std::string backend_preference_value() {
+    std::lock_guard cache_lock {backend_detection_mutex};
+    const auto value = live_backend_preference.value_or(config::video.linux_display.virtual_display_backend);
+    return value.empty() ? "auto" : value;
   }
 
   backend_e detect_backend_fresh() {
@@ -2484,14 +2500,6 @@ namespace virtual_display {
     bool succeeded = true;
   };
 
-  static bool kwin_anchored_here(const std::string &output_name) {
-#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
-    return kwin_virtual_output::anchored(output_name);
-#else
-    return false;
-#endif
-  }
-
   static stale_cleanup_result_t cleanup_stale_unlocked() {
     const pid_t self = getpid();
     std::vector<persisted_display_t> stale;
@@ -2512,11 +2520,7 @@ namespace virtual_display {
         // holds — the streaming session and the web UI each own one — so it is
         // never stale no matter how many entries the file carries. Tearing
         // those down here is what used to kill a live sibling display.
-        const bool owner_alive = pid_is_alive(entry.owner_pid);
-        const bool entry_is_stale = entry.display.backend == backend_e::KWIN_VIRTUAL_OUTPUT ?
-                                      kwin_record_is_stale(entry.owner_pid, self, owner_alive, kwin_anchored_here(entry.display.output_name)) :
-                                      persisted_display_is_stale(entry.owner_pid, self, owner_alive);
-        if (!entry_is_stale) {
+        if (!persisted_display_is_stale(entry.owner_pid, self, pid_is_alive(entry.owner_pid))) {
           BOOST_LOG(info) << "Virtual display: persisted display ["sv << entry.display.output_name
                           << "] belongs to live pid "sv << entry.owner_pid << ", skipping stale cleanup"sv;
           continue;
@@ -2568,6 +2572,12 @@ namespace virtual_display {
     const auto publish = [&](std::optional<vdisplay_t> display) -> std::optional<vdisplay_t> {
       if (!display) {
         return std::nullopt;
+      }
+      if (display->backend == backend_e::KWIN_VIRTUAL_OUTPUT) {
+        // Nothing for recovery to do: KWin removes the screen with this
+        // process's connection. An older Polaris would also refuse the whole
+        // state file over a backend it does not know.
+        return display;
       }
       if (record_persisted_display(*display)) {
         return display;

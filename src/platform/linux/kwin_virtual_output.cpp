@@ -67,7 +67,9 @@ namespace kwin_virtual_output {
           zkde_screencast_unstable_v1_destroy(screencast);
         }
         for (auto &output : outputs) {
-          wl_output_destroy(output->handle);
+          // Release, not destroy: from version 3 only release frees the
+          // compositor's side too, and the anchor's connection lives long.
+          wl_output_release(output->handle);
         }
         outputs.clear();
         if (registry) {
@@ -174,7 +176,7 @@ namespace kwin_virtual_output {
           if (output->global != name) {
             return false;
           }
-          wl_output_destroy(output->handle);
+          wl_output_release(output->handle);
           return true;
         });
       }
@@ -517,10 +519,13 @@ namespace kwin_virtual_output {
     return anchors.contains(output_name);
   }
 
-  bool anchor_alive(const std::string &output_name) {
+  std::vector<std::string> anchored_outputs() {
     std::lock_guard lock {anchors_mutex};
-    const auto it = anchors.find(output_name);
-    return it != anchors.end() && !it->second->dead && !it->second->closed;
+    std::vector<std::string> names;
+    for (const auto &[name, anchor] : anchors) {
+      names.push_back(name);
+    }
+    return names;
   }
 
   bool release(const std::string &output_name, std::chrono::milliseconds budget) {
@@ -532,6 +537,10 @@ namespace kwin_virtual_output {
       }
     }
     if (anchor) {
+      if (anchor->dead || anchor->closed) {
+        BOOST_LOG(info) << "KWin virtual output: the stream holding ["sv << output_name
+                        << "] had already been "sv << (anchor->dead ? "disconnected"sv : "closed by KWin"sv);
+      }
       // Stop reading before touching the connection from this thread, then
       // close the stream; dropping the anchor disconnects, which removes the
       // output even if KWin missed the close.

@@ -8126,9 +8126,10 @@ namespace proc {
       if (isLinuxVDisplayAvailable()) {
         int target_fps = launch_session->fps ? launch_session->fps : 60000;
 
-        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally)
+        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally).
+        // Rounded: 59940 is 60 Hz, and truncating it asked a KWin screen for 59.
         if (target_fps >= 1000) {
-          target_fps /= 1000;
+          target_fps = (target_fps + 500) / 1000;
         }
 
         if (config::video.double_refreshrate) {

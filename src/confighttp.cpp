@@ -7750,7 +7750,7 @@ namespace confighttp {
     static std::string cached_preference;
 
     auto now = std::chrono::steady_clock::now();
-    const auto &preference = config::video.linux_display.virtual_display_backend;
+    const auto preference = virtual_display::backend_preference_value();
     if (!cache_valid || cached_preference != preference || (now - cache_time) > std::chrono::seconds(30)) {
       cached_backend = virtual_display::detect_backend();
       cache_time = now;
@@ -7775,7 +7775,7 @@ namespace confighttp {
     });
     output_tree["backend"] = virtual_display::backend_name(cached_backend);
     output_tree["backend_id"] = static_cast<int>(cached_backend);
-    output_tree["backend_preference"] = preference.empty() ? "auto" : preference;
+    output_tree["backend_preference"] = preference;
     output_tree["backend_detected"] = backend_detected;
     output_tree["configuration_ready"] = available;
     output_tree["unavailable_reason"] = available ? "" : virtual_display::unavailable_reason();

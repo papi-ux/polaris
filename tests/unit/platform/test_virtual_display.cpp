@@ -561,7 +561,7 @@ TEST(VirtualDisplayKwinTests, KscreenArgumentsForModeAndPlacement) {
     (args_t {"output.Virtual-polaris-0.mode.2560x1440@120"})
   );
   EXPECT_EQ(
-    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2"),
+    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2", true),
     (args_t {
       "output.Virtual-polaris-0.scale.1",
       "output.Virtual-polaris-0.position.7680,0",
@@ -570,8 +570,13 @@ TEST(VirtualDisplayKwinTests, KscreenArgumentsForModeAndPlacement) {
     })
   );
   // No previous primary, or the screen itself: nothing else is re-ranked.
-  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "").size(), 3U);
-  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "Virtual-polaris-0").size(), 3U);
+  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "", true).size(), 3U);
+  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "Virtual-polaris-0", true).size(), 3U);
+  // A second Polaris screen held beside the first leaves the ranking alone.
+  EXPECT_EQ(
+    virtual_display::kwin_placement_args("Virtual-polaris-1", 9600, "DP-2", false),
+    (args_t {"output.Virtual-polaris-1.scale.1", "output.Virtual-polaris-1.position.9600,0"})
+  );
   EXPECT_EQ(virtual_display::kwin_restore_priority_args("DP-2"), (args_t {"output.DP-2.priority.1"}));
 }
 
@@ -592,24 +597,15 @@ TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
   screen.x = 7680;
   screen.y = 0;
   screen.priority = 1;
-  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680));
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0));
+  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680, true));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0, true));
   screen.scale = 0.5;
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, true));
   screen.scale = 1.0;
   screen.priority = 2;
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680));
-}
-
-TEST(VirtualDisplayKwinTests, ARecordIsLiveOnlyWhileThisProcessImageHoldsTheScreen) {
-  using virtual_display::kwin_record_is_stale;
-  EXPECT_FALSE(kwin_record_is_stale(100, 100, true, true));
-  // Restarted in place: same pid, connection gone, so KWin removed the screen.
-  EXPECT_TRUE(kwin_record_is_stale(100, 100, true, false));
-  // Another live Polaris holds its own screens.
-  EXPECT_FALSE(kwin_record_is_stale(200, 100, true, false));
-  EXPECT_TRUE(kwin_record_is_stale(200, 100, false, false));
-  EXPECT_TRUE(kwin_record_is_stale(0, 100, false, false));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, true));
+  // Ranking is only checked when it was asked for.
+  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680, false));
 }
 
 TEST(VirtualDisplayKwinTests, PersistedKwinScreenRoundTrips) {

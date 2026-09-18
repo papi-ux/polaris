@@ -159,10 +159,13 @@ namespace virtual_display {
   /**
    * @brief Apply a saved linux_virtual_display_backend while Polaris runs.
    *
-   * Taken under the detection lock, which is where the value is read, so a
-   * launch probing on another thread never sees it half written.
+   * Kept here under the detection lock rather than written into the shared
+   * configuration, which other threads copy and restore wholesale.
    */
   void set_backend_preference(const std::string &value);
+
+  /** @brief The linux_virtual_display_backend value in effect, "auto" when unset. */
+  std::string backend_preference_value();
 
   /** @brief Select the highest-priority detected backend from one probe snapshot, KWin aside. */
   backend_e select_preferred_backend(bool evdi_ready, bool wayland_ready, bool kscreen_installed);
@@ -229,10 +232,17 @@ namespace virtual_display {
   /**
    * @brief kscreen-doctor arguments that make a virtual output the stream display.
    *
-   * Scale 1, placed at `x`, ranked first, with the previous primary ranked
-   * second. Sent last, because adding a custom mode can reorder priorities.
+   * Scale 1 and placed at `x`. With `rank_first`, also ranked first with the
+   * previous primary ranked second; a second Polaris screen held at the same
+   * time leaves the ranking to the first. Sent last, because adding a custom
+   * mode can reorder priorities.
    */
-  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary);
+  std::vector<std::string> kwin_placement_args(
+    std::string_view output,
+    int x,
+    std::string_view previous_primary,
+    bool rank_first
+  );
 
   /** @brief kscreen-doctor arguments that rank an output first again after the stream. */
   std::vector<std::string> kwin_restore_priority_args(std::string_view output);
@@ -240,17 +250,8 @@ namespace virtual_display {
   /** @brief The output runs the requested size, within half a hertz of the requested rate. */
   bool kwin_mode_matches(const kscreen_output_layout_t &output, int width, int height, int hz);
 
-  /** @brief The output is at scale 1, at (x, 0), and ranked first. */
-  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x);
-
-  /**
-   * @brief Whether a persisted KWin virtual output record is left over.
-   *
-   * KWin removes the output when the connection that asked for it closes, so
-   * a record is live only while this process image holds the output. The pid
-   * alone is not enough: an in-place restart keeps it and drops the connection.
-   */
-  bool kwin_record_is_stale(int owner_pid, int self_pid, bool owner_alive, bool anchored_here);
+  /** @brief The output is at scale 1 and at (x, 0), and ranked first when `ranked_first` is asked. */
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x, bool ranked_first);
 
   /**
    * @brief Return whether a detected backend has the configuration it needs to create a display.

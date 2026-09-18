@@ -1239,16 +1239,23 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   const auto body = backend.substr(kwin, kwin_end - kwin);
 
   // KWin can make the new screen primary the moment it exists, so the previous
-  // primary is read first, and recovery intent is durable before KWin is asked.
+  // primary is read first.
   const auto create = body.find("static std::optional<vdisplay_t> create(");
   const auto primary = body.find("kscreen_primary_output(*layout_before)", create);
-  const auto intent = body.find("record_persisted_display(display, 0)", create);
   const auto request = body.find("kwin_virtual_output::create(", create);
   ASSERT_NE(primary, std::string::npos);
-  ASSERT_NE(intent, std::string::npos);
   ASSERT_NE(request, std::string::npos);
   EXPECT_LT(primary, request);
-  EXPECT_LT(intent, request);
+  // No recovery record: the screen dies with the connection, so a record could
+  // only outlive it, and an older Polaris refuses a state file naming a backend
+  // it does not know.
+  EXPECT_EQ(body.find("record_persisted_display("), std::string::npos);
+  const auto publish = backend.find("const auto publish = [&]");
+  const auto skip = backend.find("display->backend == backend_e::KWIN_VIRTUAL_OUTPUT", publish);
+  const auto record = backend.find("record_persisted_display(*display)", publish);
+  ASSERT_NE(skip, std::string::npos);
+  ASSERT_NE(record, std::string::npos);
+  EXPECT_LT(skip, record);
   // kscreen-doctor runs from an argv, never through a shell with an output name in it.
   EXPECT_NE(body.find("platf::run_process_argv(args)"), std::string::npos);
   EXPECT_EQ(body.find("std::system"), std::string::npos);
