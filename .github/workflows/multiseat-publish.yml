@@ -1,0 +1,180 @@
+name: Publish a Spaces runtime image
+
+# The reviewed release operation named by containers/multiseat/RUNTIME-DISTRIBUTION.md.
+# It never builds an image: it republishes the exact bytes a signed Multiseat runtime
+# images run produced, then reports the registry digest a catalog entry must name.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Multiseat runtime images run that built and signed the artifact
+        required: true
+        type: string
+      variant:
+        description: Runtime variant that run built
+        required: true
+        type: choice
+        options:
+          - default
+          - nvidia
+      source_revision:
+        description: Reviewed master commit the artifact must name (40 hex characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: multiseat-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish steam/${{ inputs.variant }} to the Polaris registry
+    if: ${{ github.ref == 'refs/heads/master' && github.repository == 'papi-ux/polaris' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: runtime-registry
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io/papi-ux/polaris-worker-steam
+      REVISION: ${{ inputs.source_revision }}
+    steps:
+      - name: Reject a revision that is not reviewed master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "source_revision must be 40 hex characters"; exit 1; }
+          status=$(gh api "repos/${{ github.repository }}/compare/master...$REVISION" --jq .status)
+          [ "$status" = identical ] || [ "$status" = behind ] || {
+            echo "$REVISION is $status master; publish only reviewed master bytes"; exit 1; }
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_revision }}
+          persist-credentials: false
+
+      - name: Download the signed artifact and its bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: polaris-worker-steam-${{ inputs.source_revision }}
+          path: runtime-artifact
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: polaris-worker-steam-${{ inputs.source_revision }}-signature
+          path: runtime-signature
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Locate the exact variant directory
+        id: artifact
+        run: |
+          set -euo pipefail
+          directory=$(find runtime-artifact -type d -path "*/steam/${{ inputs.variant }}" -print -quit)
+          [ -n "$directory" ] && [ -f "$directory/worker.oci.tar" ] || {
+            echo "run ${{ inputs.run_id }} carries no steam/${{ inputs.variant }} archive"; exit 1; }
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
+
+      - name: Verify build provenance before any registry write
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIRECTORY: ${{ steps.artifact.outputs.directory }}
+        run: |
+          set -euo pipefail
+          bundle=$(find runtime-signature -type f -print -quit)
+          gh attestation verify "$DIRECTORY/worker.oci.tar" \
+            --bundle "$bundle" \
+            --repo ${{ github.repository }} \
+            --signer-workflow ${{ github.repository }}/.github/workflows/multiseat-images.yml \
+            --source-ref refs/heads/master \
+            --source-digest "$REVISION" \
+            --deny-self-hosted-runners
+
+      - name: Recheck the audit against the reviewed revision
+        env:
+          DIRECTORY: ${{ steps.artifact.outputs.directory }}
+        run: |
+          set -euo pipefail
+          python3 containers/multiseat/audit-runtime.py "$DIRECTORY" --verify --source-revision "$REVISION"
+
+      - name: Install skopeo
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+
+      - name: Copy the exact archive to the Polaris registry
+        id: copy
+        env:
+          DIRECTORY: ${{ steps.artifact.outputs.directory }}
+        run: |
+          set -euo pipefail
+          tag="steam-${{ inputs.variant }}-${REVISION:0:12}"
+          echo "${{ github.token }}" | skopeo login ghcr.io --username ${{ github.actor }} --password-stdin
+          # A docker push re-encodes layers, which catalog preparation then rejects.
+          skopeo copy --preserve-digests "oci-archive:$DIRECTORY/worker.oci.tar" "docker://$REGISTRY:$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Record the registry manifest bytes and immutable digest
+        id: manifest
+        env:
+          TAG: ${{ steps.copy.outputs.tag }}
+        run: |
+          set -euo pipefail
+          skopeo inspect --raw "docker://$REGISTRY:$TAG" > registry-manifest.json
+          digest="sha256:$(sha256sum registry-manifest.json | cut -d' ' -f1)"
+          reported=$(skopeo inspect --format '{{.Digest}}' "docker://$REGISTRY:$TAG")
+          [ "$digest" = "$reported" ] || { echo "manifest bytes do not hash to $reported"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the catalog candidate
+        env:
+          DIRECTORY: ${{ steps.artifact.outputs.directory }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 containers/multiseat/runtime_catalog.py prepare \
+            "$DIRECTORY" "$DIGEST" registry-manifest.json > runtime-candidate.json
+          cat runtime-candidate.json
+
+      - name: Read the image back without credentials
+        continue-on-error: true
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          skopeo inspect --no-creds --raw "docker://$REGISTRY@$DIGEST" > /dev/null
+          echo "anonymous pull works"
+
+      - name: Publication summary
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+          TAG: ${{ steps.copy.outputs.tag }}
+        run: |
+          {
+            echo "### steam/${{ inputs.variant }} published"
+            echo
+            echo "- registry: \`$REGISTRY:$TAG\`"
+            echo "- digest: \`$DIGEST\`"
+            echo "- source revision: \`$REVISION\`"
+            echo
+            echo "A failed anonymous read-back means the package is still private."
+            echo "Make it public in the package settings, then rerun that check."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: runtime-candidate-steam-${{ inputs.variant }}-${{ inputs.source_revision }}
+          path: |
+            runtime-candidate.json
+            registry-manifest.json
+          if-no-files-found: error
+          retention-days: 90
