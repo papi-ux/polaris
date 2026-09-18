@@ -742,13 +742,13 @@
               </div>
               <div class="app-editor-inline-control">
                 <input type="text" class="app-editor-input" id="appName" v-model="editForm.name" />
-                <div class="relative" ref="coverFinderWrapper">
-                  <button class="app-editor-secondary-button" type="button" aria-controls="coverFinder" :aria-expanded="coverFinderOpen ? 'true' : 'false'" @click="showCoverFinder">
+                <div class="relative shrink-0" ref="coverFinderWrapper">
+                  <button class="app-editor-secondary-button whitespace-nowrap" type="button" aria-controls="coverFinder" :aria-expanded="coverFinderOpen ? 'true' : 'false'" @click="showCoverFinder">
                     {{ $t('apps.find_cover') }}
                   </button>
-                  <div v-if="coverFinderOpen" id="coverFinder" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
+                  <div v-if="coverFinderOpen" id="coverFinder" class="absolute left-0 sm:left-auto sm:right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-5rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
                     <div class="flex justify-between items-center p-3 border-b border-storm">
-                      <h4 class="text-silver font-medium">{{ $t('apps.covers_found') }}</h4>
+                      <h4 class="text-silver font-medium">{{ $t('apps.find_cover') }}</h4>
                       <button type="button" class="text-storm hover:text-silver" :aria-label="$t('apps.find_cover_close')" @click="closeCoverFinder">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                       </button>
