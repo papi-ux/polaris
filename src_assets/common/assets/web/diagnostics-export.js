@@ -1242,7 +1242,7 @@ export const ISSUE_FORM_TEMPLATE = 'bug_report.yml'
 export const MAX_ISSUE_URL_LENGTH = 6000
 const TRUNCATION_NOTICE = '[truncated, see the attached support bundle for the full evidence]'
 
-function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
+function issueEvidenceSummary(input = {}, crash = {}, silentFailures = [], addresses = new NetworkAddressBook()) {
   const stats = input.session_snapshot || input.stream_stats || {}
   const lines = []
   const crashSummary = describePreviousRun(crash)
@@ -1254,7 +1254,7 @@ function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
     lines.push(`${[entry.timestamp, entry.level].filter(Boolean).join(' ')}: ${entry.message || entry.detail || ''}`.trim())
   }
   if (!lines.length && stats.capture_path_reason) lines.push(`Capture path reason: ${stats.capture_path_reason}`)
-  return redactSensitiveText(lines.join('\n'))
+  return redactSensitiveText(lines.join('\n'), addresses)
 }
 
 /**
@@ -1266,7 +1266,9 @@ function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
  * the user completes rather than an automatic submission.
  */
 export function buildGithubIssueUrl(input = {}, options = {}) {
-  const safeInput = sanitizeDiagnosticsValue(input)
+  // Pass the book the attached bundle was built with, so a device has one label in both.
+  const addresses = options.addresses || createExportAddressBook(input)
+  const safeInput = sanitizeDiagnosticsValue(input, new WeakSet(), addresses)
   const stats = safeInput.session_snapshot || safeInput.stream_stats || {}
   const config = safeInput.config || {}
   const system = safeInput.system_stats || {}
@@ -1305,7 +1307,7 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
     return `${repositoryUrl}/issues/new?${params.toString()}`
   }
 
-  const evidence = issueEvidenceSummary(safeInput, crash, silentFailures)
+  const evidence = issueEvidenceSummary(safeInput, crash, silentFailures, addresses)
   let candidate = build(evidence)
   if (candidate.length <= maxLength) return candidate
 
@@ -1324,7 +1326,8 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
  * One address book for a whole export.
  *
  * Every part of a bundle that is built separately (stream evidence, the issue
- * draft, the bundle itself) shares it. Separate books only agree when they
+ * draft, the bundle itself) shares it, and so does anything shared alongside
+ * the bundle, such as the prefilled issue or the AI explanation's summary. Separate books only agree when they
  * happen to meet the same addresses in the same order, which today they do
  * because each part sanitises the whole input first. That is a coincidence of
  * traversal rather than a guarantee, and the day one part walks a different
@@ -1333,7 +1336,7 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
  * before any part is built, so a new address never takes a label that already
  * means something else.
  */
-function addressBookFor(input) {
+export function createExportAddressBook(input) {
   const addresses = new NetworkAddressBook()
   try {
     addresses.reserveExistingLabels(JSON.stringify(input))
@@ -1345,8 +1348,7 @@ function addressBookFor(input) {
   return addresses
 }
 
-export function buildAnonymizedDiagnosticsBundle(input = {}) {
-  const addresses = addressBookFor(input)
+export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = createExportAddressBook(input) } = {}) {
   const streamEvidence = input.stream_evidence || buildStreamEvidence(input, { addresses })
   const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence }, { addresses })
   return sanitizeDiagnosticsValue({

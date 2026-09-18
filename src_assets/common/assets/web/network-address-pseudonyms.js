@@ -17,13 +17,14 @@
 // unspecified address are this machine talking to itself, multicast is a
 // protocol group rather than a host, and the documentation ranges only ever
 // appear in examples.
-const KEPT_KINDS = new Set(['loopback', 'unspecified', 'multicast', 'broadcast', 'documentation'])
+const KEPT_KINDS = new Set(['loopback', 'unspecified', 'multicast', 'broadcast', 'documentation', 'network'])
 
 // IPv4 in free text. The lookarounds keep it from matching inside something
-// longer: a version such as 1.4.9.8044d371 is not an address, and neither is the
-// middle of 1.2.3.4.5. A trailing sentence period is allowed; a trailing digit is not.
+// longer: a branch build's version such as 1.4.9.3f0e1a2b is not an address, nor
+// is v1.2.3.4 or the middle of 1.2.3.4.5. A trailing sentence period is allowed;
+// a trailing letter, digit or further dotted number is not.
 const IPV4_OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`
-const IPV4_IN_TEXT_SOURCE = String.raw`(?<![\d.])${IPV4_OCTET}(?:\.${IPV4_OCTET}){3}(?!\.?\d)`
+const IPV4_IN_TEXT_SOURCE = String.raw`(?<![\w.])${IPV4_OCTET}(?:\.${IPV4_OCTET}){3}(?!\w|\.\d)`
 
 // IPv6 candidates are found loosely and then validated strictly. Log lines are
 // full of colon-separated numbers that are not addresses (`21:25:01.845`,
@@ -33,8 +34,10 @@ const IPV4_IN_TEXT_SOURCE = String.raw`(?<![\d.])${IPV4_OCTET}(?:\.${IPV4_OCTET}
 // not end up double-bracketed, and a zone such as %eth0 is dropped with it since
 // it names an interface on this host.
 // The trailing guard applies only when there is no closing bracket, because a
-// bracketed address is normally followed by `:port`.
-const IPV6_CANDIDATE_SOURCE = String.raw`(?<![\w:.\[])(\[?)((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f.]*)(%[\w.-]+)?(?:(\])|(?![\w:]))`
+// bracketed address is normally followed by `:port`. Up to eight groups may end
+// in a colon, so a full address followed by one (`<addr>: Ping Timeout`) is still
+// nominated; resolveIpv6 then separates the address from what followed it.
+const IPV6_CANDIDATE_SOURCE = String.raw`(?<![\w:.\[])(\[?)((?:[0-9A-Fa-f]{0,4}:){2,8}[0-9A-Fa-f.]*)(%[\w.-]+)?(?:(\])|(?![\w:]))`
 
 // A label this module already wrote, such as [lan-2]. Found so a second pass can
 // number past it instead of reusing the same label for a different address.
@@ -53,8 +56,11 @@ function ipv4Octets(address) {
  * should not claim more than the address says.
  */
 function classifyIpv4(address) {
-  const [a, b, c] = ipv4Octets(address)
+  const [a, b, c, d] = ipv4Octets(address)
   if (a === 0) return 'unspecified'
+  // A whole /8, never a host. This is also the shape of a reduced browser
+  // version (Chrome/140.0.0.0), which is not an address at all.
+  if (b === 0 && c === 0 && d === 0) return 'network'
   if (a === 127) return 'loopback'
   if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return 'lan'
   if (a === 100 && b >= 64 && b <= 127) return 'cgnat'
@@ -82,6 +88,27 @@ function canonicalIpv6(candidate) {
   } catch {
     return null
   }
+}
+
+/**
+ * The address in a nominated IPv6 candidate, and whatever followed it.
+ *
+ * The loose pattern can take in the colon of `<addr>: Ping Timeout`, a
+ * sentence's period, or the port Polaris writes inside the brackets as
+ * `[<addr>:<port>]`. A candidate that does not parse as found is tried without
+ * those, so the address is still replaced and what followed it is kept.
+ */
+function resolveIpv6(candidate) {
+  const attempts = [[candidate, '']]
+  const trimmed = candidate.replace(/[.:]+$/, '')
+  if (trimmed !== candidate) attempts.push([trimmed, candidate.slice(trimmed.length)])
+  const port = /^(.*):(\d{1,5})$/.exec(trimmed)
+  if (port) attempts.push([port[1], candidate.slice(port[1].length)])
+  for (const [text, rest] of attempts) {
+    const canonical = canonicalIpv6(text)
+    if (canonical) return { canonical, rest }
+  }
+  return null
 }
 
 /**
@@ -162,16 +189,17 @@ export function pseudonymizeNetworkAddresses(text, book = new NetworkAddressBook
   const withIpv6 = source.replace(new RegExp(IPV6_CANDIDATE_SOURCE, 'g'), (whole, open, candidate, zone, close) => {
     // Brackets only belong to the address when they come as a pair.
     const bracketed = Boolean(open) && Boolean(close)
-    const canonical = canonicalIpv6(candidate)
-    if (!canonical) return whole
+    const resolved = resolveIpv6(candidate)
+    if (!resolved) return whole
+    const { canonical, rest } = resolved
     // An IPv4-mapped address is that IPv4 address, so it gets the same kind and
     // the same label as the dotted form elsewhere in the text.
     const ipv4 = mappedIpv4(canonical)
     const kind = ipv4 ? classifyIpv4(ipv4) : classifyIpv6(canonical)
     if (KEPT_KINDS.has(kind)) return whole
     const label = book.labelFor(ipv4 || canonical, kind)
-    if (bracketed) return label
-    return `${open || ''}${label}${close || ''}`
+    if (bracketed) return `${label}${rest}`
+    return `${open || ''}${label}${rest}${close || ''}`
   })
 
   return withIpv6.replace(new RegExp(IPV4_IN_TEXT_SOURCE, 'g'), (address) => {

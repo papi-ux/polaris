@@ -44,6 +44,39 @@ describe('network address pseudonyms', () => {
     expect(pseudonymizeNetworkAddresses(text)).toBe(text)
   })
 
+  it('does not mistake a branch build version or a browser version for an address', () => {
+    // A branch build is versioned 1.4.9.<hash>, and a hash that opens with a
+    // small number looked like a fourth octet. Reduced browser versions end in
+    // .0.0.0, and a v-prefixed version is a version.
+    const text = [
+      'Polaris 1.4.9.3f0e1a2b is running',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
+      'tag v1.2.3.4',
+    ].join('\n')
+
+    expect(pseudonymizeNetworkAddresses(text)).toBe(text)
+    // The first real address is still the first label.
+    expect(pseudonymizeNetworkAddresses(`${text}\nfrom 8.8.8.8`)).toBe(`${text}\nfrom [public-1]`)
+  })
+
+  it('replaces IPv6 in the shapes Polaris logs it', () => {
+    // stream.cpp writes `<addr>: Ping Timeout` unbracketed and `[<addr>:<port>]`
+    // with the port inside the brackets; neither parses as found.
+    const lines = [
+      'fd7a:115c:a1e0::5: Ping Timeout',
+      'fd7a:115c:a1e0:ab12:4843:cd96:626b:430b: Ping Timeout',
+      "Couldn't send gamepad feedback to [2606:4700::1111:47999]",
+      'last seen at 2606:4700::1111.',
+    ].join('\n')
+
+    expect(pseudonymizeNetworkAddresses(lines)).toBe([
+      '[tailscale-1]: Ping Timeout',
+      '[tailscale-2]: Ping Timeout',
+      "Couldn't send gamepad feedback to [public-1]:47999",
+      'last seen at [public-1].',
+    ].join('\n'))
+  })
+
   it('keeps a port and a sentence period that follow an address', () => {
     expect(pseudonymizeNetworkAddresses('listening on 192.168.1.5:47989. Done at 8.8.4.4.'))
       .toBe('listening on [lan-1]:47989. Done at [public-1].')

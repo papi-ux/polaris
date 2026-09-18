@@ -11,6 +11,7 @@ import {
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
+  createExportAddressBook,
   describeLinuxGpuProfile,
   describePreviousRun,
   isSensitiveFieldName,
@@ -155,6 +156,23 @@ describe('diagnostics export display mode and network path', () => {
 })
 
 describe('diagnostics export network addresses', () => {
+  it('gives a device the same label in the attachment and the prefilled issue', () => {
+    // The bundle meets the recent issues first and the issue URL meets the older
+    // run's log first, so books of their own number the two devices in opposite
+    // orders and the public issue's [lan-1] is the attachment's [lan-2].
+    const context = {
+      previous_run_logs: 'Info: Session started for [TV] from 192.168.1.135',
+      recent_issues: [{ level: 'Warning', message: 'Ping timeout from 192.168.1.192' }],
+    }
+    const addresses = createExportAddressBook(context)
+    const bundle = buildAnonymizedDiagnosticsBundle(context, { addresses })
+    const issueLogs = new URL(buildGithubIssueUrl(context, { addresses })).searchParams.get('logs')
+    const inBundle = /from (\[lan-\d+\])/.exec(bundle.recent_issues[0].message)[1]
+
+    expect(issueLogs).toContain(`Ping timeout from ${inBundle}`)
+    expect(issueLogs).not.toContain('192.168.1.192')
+  })
+
   const sessionLogs = [
     '[2026-09-17 21:25:03.178]: Info: Session started for [Steamdeck] from 192.168.1.192 [active sessions: 1]',
     '[2026-09-17 22:02:52.694]: Info: Session started for [Steamdeck] from 100.109.196.18 [active sessions: 1]',
