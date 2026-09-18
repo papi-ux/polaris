@@ -602,6 +602,16 @@ TEST(VirtualDisplayKwinTests, StreamScreenIsRankedAfterEveryScreenInTheirOldOrde
     virtual_display::kwin_priority_args("Virtual-polaris-0", {ranked_screen("DP-2", 1)}),
     (args_t {"output.DP-2.priority.1", "output.Virtual-polaris-0.priority.2"})
   );
+  // KWin 6.7.5 reports a lone monitor with priority 0. Leaving it out would
+  // rank the stream screen first, and Plasma would move the desktop onto it.
+  EXPECT_EQ(
+    virtual_display::kwin_priority_args("Virtual-polaris-0", {ranked_screen("DP-2", 0)}),
+    (args_t {"output.DP-2.priority.1", "output.Virtual-polaris-0.priority.2"})
+  );
+  EXPECT_EQ(
+    virtual_display::kwin_priority_args("Virtual-polaris-0", {ranked_screen("HDMI-A-1", 0), ranked_screen("DP-2", 1)}),
+    (args_t {"output.DP-2.priority.1", "output.HDMI-A-1.priority.2", "output.Virtual-polaris-0.priority.3"})
+  );
   EXPECT_EQ(
     virtual_display::kwin_priority_args("Virtual-polaris-0", {}),
     (args_t {"output.Virtual-polaris-0.priority.1"})
@@ -633,6 +643,17 @@ TEST(VirtualDisplayKwinTests, RankingCheckCatchesAStreamScreenAboveAMonitor) {
   EXPECT_FALSE(virtual_display::kwin_ranking_matches(
     {ranked_screen("HDMI-A-1", 1), ranked_screen("DP-2", 2), ranked_screen("Virtual-polaris-0", 3)},
     before,
+    "Virtual-polaris-0"
+  ));
+  // The lone monitor KWin reported at priority 0 counts as first.
+  EXPECT_TRUE(virtual_display::kwin_ranking_matches(
+    {ranked_screen("DP-2", 1), ranked_screen("Virtual-polaris-0", 2)},
+    {ranked_screen("DP-2", 0)},
+    "Virtual-polaris-0"
+  ));
+  EXPECT_FALSE(virtual_display::kwin_ranking_matches(
+    {ranked_screen("Virtual-polaris-0", 1), ranked_screen("DP-2", 0)},
+    {ranked_screen("DP-2", 0)},
     "Virtual-polaris-0"
   ));
 }

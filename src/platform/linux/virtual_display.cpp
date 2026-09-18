@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -819,16 +820,23 @@ namespace virtual_display {
   }
 
   namespace {
-    /** Enabled screens in rank order; `except` is left out. */
+    /**
+     * Enabled screens in rank order; `except` is left out. KWin reports a
+     * lone monitor with priority 0, so an unranked screen still counts: it
+     * comes after the ranked ones, in the order kscreen lists it.
+     */
     std::vector<std::string> ranked_screens(const std::vector<kscreen_output_layout_t> &layout, std::string_view except) {
       std::vector<const kscreen_output_layout_t *> ranked;
       for (const auto &output : layout) {
-        if (output.enabled && output.priority > 0 && output.name != except) {
+        if (output.enabled && output.name != except) {
           ranked.push_back(&output);
         }
       }
-      std::stable_sort(ranked.begin(), ranked.end(), [](const auto *a, const auto *b) {
-        return a->priority < b->priority;
+      const auto rank = [](const kscreen_output_layout_t *output) {
+        return output->priority > 0 ? output->priority : std::numeric_limits<int>::max();
+      };
+      std::stable_sort(ranked.begin(), ranked.end(), [&](const auto *a, const auto *b) {
+        return rank(a) < rank(b);
       });
       std::vector<std::string> names;
       names.reserve(ranked.size());
