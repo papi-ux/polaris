@@ -227,6 +227,131 @@ TEST(SessionManagerInhibitorTests, ReleasingWithoutAnInhibitorIsHarmless) {
   EXPECT_FALSE(session_manager::inhibitor_held_for_tests());
 }
 
+namespace {
+  struct HostSleepCommandHarness {
+    // busctl prints a string reply as: s "yes"
+    std::string can_suspend_answer = "s \"yes\"";
+    // busctl prints nothing at all when a void method succeeds.
+    std::string suspend_answer;
+    std::vector<std::string> exec_commands;
+
+    HostSleepCommandHarness() {
+      session_manager::set_command_hooks_for_tests(
+        [this](const std::string &cmd) {
+          exec_commands.push_back(cmd);
+          if (cmd.find("CanSuspend") != std::string::npos) {
+            return can_suspend_answer;
+          }
+          if (cmd.find("Manager Suspend") != std::string::npos) {
+            return suspend_answer;
+          }
+          return std::string {};
+        },
+        [](const std::string &) {
+          return true;
+        }
+      );
+    }
+
+    ~HostSleepCommandHarness() {
+      session_manager::reset_command_hooks_for_tests();
+    }
+
+    bool asked(std::string_view needle) const {
+      return std::any_of(exec_commands.begin(), exec_commands.end(), [needle](const std::string &cmd) {
+        return cmd.find(needle) != std::string::npos;
+      });
+    }
+  };
+}
+
+TEST(SessionManagerHostSleepTests, LogindYesIsSupported) {
+  HostSleepCommandHarness harness;
+
+  const auto readiness = session_manager::host_sleep_readiness();
+
+  EXPECT_TRUE(readiness.supported);
+  EXPECT_TRUE(readiness.reason.empty());
+  EXPECT_TRUE(harness.asked("org.freedesktop.login1.Manager CanSuspend"));
+}
+
+TEST(SessionManagerHostSleepTests, LogindChallengeIsReportedAsPolkitDenied) {
+  HostSleepCommandHarness harness;
+  harness.can_suspend_answer = "s \"challenge\"";
+
+  const auto readiness = session_manager::host_sleep_readiness();
+
+  EXPECT_FALSE(readiness.supported);
+  EXPECT_EQ("polkit_denied", readiness.reason);
+  // The action id is the fix, so it has to survive into the message a client shows.
+  EXPECT_NE(std::string::npos, readiness.message.find("org.freedesktop.login1.suspend"));
+}
+
+TEST(SessionManagerHostSleepTests, LogindNaIsReportedAsNotAvailable) {
+  HostSleepCommandHarness harness;
+  harness.can_suspend_answer = "s \"na\"";
+
+  const auto readiness = session_manager::host_sleep_readiness();
+
+  EXPECT_FALSE(readiness.supported);
+  EXPECT_EQ("not_available", readiness.reason);
+}
+
+TEST(SessionManagerHostSleepTests, SilentLogindIsReportedAsUnavailable) {
+  HostSleepCommandHarness harness;
+  harness.can_suspend_answer = "";
+
+  const auto readiness = session_manager::host_sleep_readiness();
+
+  EXPECT_FALSE(readiness.supported);
+  EXPECT_EQ("logind_unavailable", readiness.reason);
+}
+
+TEST(SessionManagerHostSleepTests, SuspendAsksLogindWithoutInteractiveAuthentication) {
+  HostSleepCommandHarness harness;
+
+  const auto result = session_manager::suspend_host();
+
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.reason.empty());
+  // The false argument is the point: nobody is at the host to answer a polkit
+  // prompt, and an interactive call would hang the request instead of failing.
+  EXPECT_TRUE(harness.asked("org.freedesktop.login1.Manager Suspend b false"));
+}
+
+TEST(SessionManagerHostSleepTests, SuspendIsNotAttemptedWhenLogindCannotSuspend) {
+  HostSleepCommandHarness harness;
+  harness.can_suspend_answer = "s \"na\"";
+
+  const auto result = session_manager::suspend_host();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ("not_available", result.reason);
+  EXPECT_FALSE(harness.asked("Manager Suspend"));
+}
+
+TEST(SessionManagerHostSleepTests, PolkitRefusalOfTheRequestIsNamed) {
+  HostSleepCommandHarness harness;
+  harness.suspend_answer = "Call failed: Interactive authentication required.";
+
+  const auto result = session_manager::suspend_host();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ("polkit_denied", result.reason);
+  EXPECT_NE(std::string::npos, result.message.find("org.freedesktop.login1.suspend"));
+}
+
+TEST(SessionManagerHostSleepTests, UnknownFailureKeepsLogindsOwnWords) {
+  HostSleepCommandHarness harness;
+  harness.suspend_answer = "Call failed: Transport endpoint is not connected";
+
+  const auto result = session_manager::suspend_host();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ("request_failed", result.reason);
+  EXPECT_NE(std::string::npos, result.message.find("Transport endpoint is not connected"));
+}
+
 TEST(SessionManagerUnlockTests, StillLockedAfterAllAttemptsReturnsFalse) {
   SessionManagerCommandHarness harness;
   harness.dbus_run_ok = false;

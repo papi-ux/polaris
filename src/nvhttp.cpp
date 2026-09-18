@@ -8,6 +8,7 @@
 // standard includes
 #ifdef __linux__
   #include "platform/linux/process_environment.h"
+  #include "platform/linux/session_manager.h"
 #endif
 
 #include <algorithm>
@@ -918,6 +919,51 @@ namespace nvhttp {
       output["session_generation"] = timing.session_generation;
       output["ring_complete"] = timing.ring_complete;
       return output;
+    }
+
+    // Host power state for a client deciding whether to offer a sleep control.
+    // A named function for the same reason as the builders above: the
+    // nova-contract extractor scopes to named signatures, not lambda bodies.
+    //
+    // The logind probe spawns a busctl child, and capabilities is polled, so
+    // the answer is cached briefly. Nothing here changes on a timescale where
+    // 30 seconds of staleness matters: a polkit rule or a config edit both
+    // land well before a client would act on them.
+    nlohmann::json build_host_power_contract(bool sleep_permitted) {
+      nlohmann::json host_power;
+      host_power["sleep_endpoint"] = "/polaris/v1/host/sleep";
+      // Reported separately from sleep_enabled so a client can tell "this host
+      // does not do that" apart from "this client is not allowed to".
+      host_power["sleep_permitted"] = sleep_permitted;
+      host_power["sleep_enabled"] = config::sunshine.host_sleep_enabled;
+      host_power["sleep_supported"] = false;
+      host_power["sleep_blocked_reason"] = "unsupported_platform";
+      host_power["sleep_blocked_message"] = "Host sleep is only implemented on Linux hosts.";
+
+#ifdef __linux__
+      static std::mutex probe_mutex;
+      static std::chrono::steady_clock::time_point probed_at {};
+      static session_manager::host_sleep_readiness_t cached;
+      static bool have_probed = false;
+
+      session_manager::host_sleep_readiness_t readiness;
+      {
+        std::lock_guard lock {probe_mutex};
+        const auto now = std::chrono::steady_clock::now();
+        if (!have_probed || now - probed_at > std::chrono::seconds {30}) {
+          cached = session_manager::host_sleep_readiness();
+          probed_at = now;
+          have_probed = true;
+        }
+        readiness = cached;
+      }
+
+      host_power["sleep_supported"] = readiness.supported;
+      host_power["sleep_blocked_reason"] = readiness.reason;
+      host_power["sleep_blocked_message"] = readiness.message;
+#endif
+
+      return host_power;
     }
 
     nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
@@ -7699,6 +7745,17 @@ namespace nvhttp {
 #ifdef __linux__
       features["lock_screen_control"] = true;
 #endif
+      // Speaking the protocol, not permission to use it. Whether this host
+      // will actually sleep is host_power below, which a client has to read
+      // before offering the control.
+      features["host_sleep_v1"] = false;
+#ifdef __linux__
+      features["host_sleep_v1"] = true;
+#endif
+
+      output["host_power"] = build_host_power_contract(
+        static_cast<bool>(named_cert_p->perm & PERM::launch)
+      );
 
       output["client_settings"] = {
         {"version", 1},
@@ -10458,6 +10515,90 @@ namespace nvhttp {
       }
     };
 
+    auto polarisHostPower = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      nlohmann::json output = build_host_power_contract(
+        static_cast<bool>(named_cert_p->perm & PERM::launch)
+      );
+      output["status"] = true;
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(output.dump(), headers);
+    };
+
+    auto polarisHostSleep = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      auto write_json = [&](const nlohmann::json &body, SimpleWeb::StatusCode code = SimpleWeb::StatusCode::success_ok) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(code, body.dump(), headers);
+      };
+
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      // Launch permission, not a permission of its own. A client that can
+      // launch apps can already run a configured `systemctl suspend` entry on
+      // this host, so a first-class sleep control is not a new power at that
+      // level; what gates it is the host owner turning host_sleep_enabled on.
+      // A watch-only client has no launch permission and cannot ask.
+      if (!static_cast<bool>(named_cert_p->perm & PERM::launch)) {
+        write_json(
+          {{"status", false}, {"code", "permission_denied"}, {"error", "This client may watch but not control this host"}},
+          SimpleWeb::StatusCode::client_error_forbidden
+        );
+        return;
+      }
+
+      if (!config::sunshine.host_sleep_enabled) {
+        write_json(
+          {{"status", false}, {"code", "sleep_disabled"}, {"error", "Host sleep is turned off on this host"}},
+          SimpleWeb::StatusCode::client_error_forbidden
+        );
+        return;
+      }
+
+      // Refuse rather than kill a stream somebody else is watching. There is
+      // no force path in this slice on purpose: the client that wants the host
+      // asleep has already left its own session.
+      if (rtsp_stream::session_count() != 0) {
+        write_json(
+          {{"status", false}, {"code", "session_active"}, {"error", "A stream is still running on this host"}},
+          SimpleWeb::StatusCode::client_error_conflict
+        );
+        return;
+      }
+
+#ifdef __linux__
+      const auto result = session_manager::suspend_host();
+      if (!result.ok) {
+        const auto code = result.reason == "polkit_denied" ?
+                            SimpleWeb::StatusCode::client_error_forbidden :
+                            SimpleWeb::StatusCode::server_error_internal_server_error;
+        write_json({{"status", false}, {"code", result.reason}, {"error", result.message}}, code);
+        return;
+      }
+
+      BOOST_LOG(info) << "Client "sv << named_cert_p->uuid << " asked the host to sleep"sv;
+      write_json({{"status", true}, {"sleeping", true}});
+#else
+      write_json(
+        {{"status", false}, {"code", "unsupported_platform"}, {"error", "Host sleep is only implemented on Linux hosts"}},
+        SimpleWeb::StatusCode::server_error_not_implemented
+      );
+#endif
+    };
+
     auto polarisSessionStop = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
       const auto named_cert_p = get_verified_cert(request);
@@ -11178,6 +11319,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
+    https_server.resource["^/polaris/v1/host/power$"]["GET"] = polarisHostPower;
+    https_server.resource["^/polaris/v1/host/sleep$"]["POST"] = polarisHostSleep;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/stream-policy$"]["GET"] = polarisStreamPolicy;

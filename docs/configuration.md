@@ -81,6 +81,48 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `stream_audio` | `enabled` | Capture and stream audio |
 | `steamgriddb_api_key` | key | Cover art lookups for non-Steam apps |
 | `beat_times_lookup` | `enabled` | Ask How Long To Beat about titles missing from the local completion-estimate dataset; disable to keep the host from making those requests |
+| `host_sleep_enabled` | `disabled` | Let a paired client put this host to sleep |
+
+### Host sleep
+
+`host_sleep_enabled` lets a paired client suspend the host. It is off by default: a client putting
+the host to sleep takes the machine away from everyone on it, and there is no undo from the couch.
+
+With it on, `POST /polaris/v1/host/sleep` suspends the host. The request needs a paired client
+certificate carrying launch permission, which every paired client has unless you made it watch
+only, and Polaris refuses while a stream is running.
+`GET /polaris/v1/host/power` reports what a client needs in order to decide whether to offer the
+control at all:
+
+- **sleep_supported**: logind answered that this host can suspend.
+- **sleep_enabled**: `host_sleep_enabled` is on.
+- **sleep_permitted**: the calling client may control this host rather than only watch it.
+- **sleep_blocked_reason**: `polkit_denied`, `not_available`, `logind_unavailable` or `unsupported_platform`.
+- **sleep_blocked_message**: the same thing in a sentence you can show someone.
+
+The same block is served on `/polaris/v1/capabilities`, so a client that already polls capabilities
+does not need a second request.
+
+Waking the host again is Wake-on-LAN, which Polaris does not do for you: enable it in the firmware
+and on the interface, and send the magic packet from the client.
+
+#### When suspend works in a terminal but not from Polaris
+
+`sleep_blocked_reason: polkit_denied` means logind will only suspend after an interactive
+authentication that a remote request cannot answer. That is the usual failure on a host where
+`systemctl suspend` works fine in a terminal, because the terminal has an active local session and
+Polaris may not. Allow the action for the user Polaris runs as:
+
+```javascript
+// /etc/polkit-1/rules.d/50-polaris-suspend.rules
+polkit.addRule(function (action, subject) {
+  if ((action.id == "org.freedesktop.login1.suspend" ||
+       action.id == "org.freedesktop.login1.suspend-multiple-sessions") &&
+      subject.user == "YOURUSER") {
+    return polkit.Result.YES;
+  }
+});
+```
 
 ### Linux client-gamepad access boundary
 
@@ -203,7 +245,7 @@ behaviour (pre-release update notifications, the tray icon, and whether the tray
 stop, restart, and quit controls), and metadata integrations (a SteamGridDB key for artwork on
 non-Steam entries, and whether Polaris may ask How Long To Beat for titles missing from its local
 completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`,
-`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`.
+`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`, `host_sleep_enabled`.
 
 | Field | What it does |
 | --- | --- |
@@ -216,6 +258,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
+| **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired client put this machine to sleep. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
 
 ### Input tab
 
