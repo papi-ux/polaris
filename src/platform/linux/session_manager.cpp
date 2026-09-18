@@ -26,6 +26,8 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <ctime>
+#include <mutex>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -735,6 +737,105 @@ namespace session_manager {
     return readiness;
   }
 
+  // -------------------------------------------------------------------
+  // Suspend outcome
+  //
+  // Watching two clocks is what makes the difference between "logind took the
+  // request" and "the machine actually went down". CLOCK_BOOTTIME counts time
+  // spent suspended, CLOCK_MONOTONIC does not, so the gap between their deltas
+  // is exactly the time the host was asleep. Polaris keeps running across a
+  // suspend, so it can observe this rather than assume it.
+  // -------------------------------------------------------------------
+
+  // Below this, the gap is indistinguishable from scheduling noise between the
+  // two clock reads rather than a real suspend.
+  static constexpr auto k_suspend_detection_floor = 2s;
+
+  static std::mutex g_sleep_status_mutex;
+  static host_sleep_status_t g_sleep_status;
+  static std::thread g_sleep_watcher;
+  static std::atomic<bool> g_sleep_watcher_running {false};
+  static std::chrono::milliseconds g_suspend_watch_timeout {30000};
+  static std::chrono::milliseconds g_suspend_watch_interval {500};
+
+  bool suspend_was_observed(std::chrono::nanoseconds boottime_delta,
+                            std::chrono::nanoseconds monotonic_delta) {
+    return (boottime_delta - monotonic_delta) >= k_suspend_detection_floor;
+  }
+
+  static std::chrono::nanoseconds clock_reading(clockid_t clock) {
+    timespec ts {};
+    if (clock_gettime(clock, &ts) != 0) {
+      return std::chrono::nanoseconds {0};
+    }
+    return std::chrono::seconds {ts.tv_sec} + std::chrono::nanoseconds {ts.tv_nsec};
+  }
+
+  static void set_sleep_status(host_sleep_outcome_e outcome,
+                               const std::string &reason,
+                               const std::string &message) {
+    std::lock_guard lock {g_sleep_status_mutex};
+    g_sleep_status.outcome = outcome;
+    g_sleep_status.reason = reason;
+    g_sleep_status.message = message;
+    g_sleep_status.observed_at = std::chrono::duration_cast<std::chrono::seconds>(
+                                   std::chrono::system_clock::now().time_since_epoch()
+                                 )
+                                   .count();
+  }
+
+  host_sleep_status_t host_sleep_status() {
+    std::lock_guard lock {g_sleep_status_mutex};
+    return g_sleep_status;
+  }
+
+  static void start_suspend_watcher() {
+    if (g_sleep_watcher_running.exchange(true)) {
+      // A watch is already running; the machine cannot suspend twice at once.
+      return;
+    }
+    if (g_sleep_watcher.joinable()) {
+      g_sleep_watcher.join();
+    }
+
+    set_sleep_status(host_sleep_outcome_e::pending, "", "");
+
+    // Captured here rather than read inside the thread: a caller that changes
+    // the window while the thread is starting would otherwise decide how long
+    // this watch runs, which is a race a test hits every time.
+    const auto timeout = g_suspend_watch_timeout;
+    const auto interval = g_suspend_watch_interval;
+
+    g_sleep_watcher = std::thread([timeout, interval] {
+      const auto boot_start = clock_reading(CLOCK_BOOTTIME);
+      const auto mono_start = clock_reading(CLOCK_MONOTONIC);
+      // steady_clock does not advance while suspended, so this deadline is
+      // measured in time the host spent awake, which is what we want.
+      const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+      while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(interval);
+        const auto boot_delta = clock_reading(CLOCK_BOOTTIME) - boot_start;
+        const auto mono_delta = clock_reading(CLOCK_MONOTONIC) - mono_start;
+        if (suspend_was_observed(boot_delta, mono_delta)) {
+          BOOST_LOG(info) << "session_manager: host suspended and has resumed"sv;
+          set_sleep_status(host_sleep_outcome_e::suspended, "", "");
+          g_sleep_watcher_running = false;
+          return;
+        }
+      }
+
+      BOOST_LOG(warning) << "session_manager: suspend was accepted but the host never went down"sv;
+      set_sleep_status(
+        host_sleep_outcome_e::failed,
+        "suspend_failed",
+        "logind accepted the request but the host did not sleep. A task that will not "
+        "freeze, often one blocked on a network or FUSE mount, aborts a suspend this way."
+      );
+      g_sleep_watcher_running = false;
+    });
+  }
+
   host_sleep_result_t suspend_host() {
     host_sleep_result_t result;
 
@@ -748,7 +849,10 @@ namespace session_manager {
 
     const auto answer = logind_call("Suspend", "b false");
     if (answer.empty()) {
+      // Accepted, not done. The watcher decides which, and the answer lands in
+      // host_sleep_status() for a client that asks later.
       BOOST_LOG(info) << "session_manager: host suspend requested"sv;
+      start_suspend_watcher();
       result.ok = true;
       return result;
     }
@@ -769,6 +873,30 @@ namespace session_manager {
   }
 
 #ifdef POLARIS_TESTS
+  void set_suspend_watch_timings_for_tests(std::chrono::milliseconds timeout,
+                                           std::chrono::milliseconds interval) {
+    g_suspend_watch_timeout = timeout;
+    g_suspend_watch_interval = interval;
+  }
+
+  void reset_suspend_watch_timings_for_tests() {
+    // Join before restoring the defaults, so an in-flight watch finishes on the
+    // short window it was started with rather than the long one.
+    if (g_sleep_watcher.joinable()) {
+      g_sleep_watcher.join();
+    }
+    g_suspend_watch_timeout = std::chrono::milliseconds {30000};
+    g_suspend_watch_interval = std::chrono::milliseconds {500};
+    g_sleep_watcher_running = false;
+    set_sleep_status(host_sleep_outcome_e::none, "", "");
+  }
+
+  void await_suspend_watcher_for_tests() {
+    if (g_sleep_watcher.joinable()) {
+      g_sleep_watcher.join();
+    }
+  }
+
   void set_command_hooks_for_tests(
     std::function<std::string(const std::string &)> exec_hook,
     std::function<bool(const std::string &)> run_hook

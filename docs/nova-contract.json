@@ -871,8 +871,12 @@
       }
     },
     "host_power": {
-      "$comment": "Served on the capabilities response and on GET /polaris/v1/host/power. Tells a client whether to offer a sleep control at all: sleep_supported is what logind answers, sleep_enabled is the host owner's opt in, and sleep_permitted is whether this client may control the host rather than only watch it. All three have to be true before the control is worth showing.",
+      "$comment": "Served on the capabilities response and on GET /polaris/v1/host/power. Tells a client whether to offer a sleep control at all: sleep_supported is what logind answers, sleep_enabled is the host owner's opt in, and sleep_permitted is whether this client may control the host rather than only watch it. All three have to be true before the control is worth showing. The last_sleep_* fields carry what became of the previous request, which is a different fact from whether it was accepted: logind returns as soon as a suspend is queued, and a task that will not freeze can abort the suspend afterwards.",
       "fields": [
+        "last_sleep_at",
+        "last_sleep_message",
+        "last_sleep_outcome",
+        "last_sleep_reason",
         "sleep_blocked_message",
         "sleep_blocked_reason",
         "sleep_enabled",

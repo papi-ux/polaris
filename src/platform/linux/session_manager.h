@@ -19,6 +19,8 @@
   #include <functional>
   #include <sys/types.h>
 #endif
+#include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -146,7 +148,50 @@ namespace session_manager {
    */
   host_sleep_result_t suspend_host();
 
+  /**
+   * @brief Whether the last suspend request actually put the host to sleep.
+   *
+   * logind's Suspend returns when the request is queued, not when the machine
+   * goes down, and a suspend can still be refused after that: one task that
+   * will not freeze aborts the whole thing and the machine stays up. Acceptance
+   * and outcome are different facts, and a client that told someone their host
+   * was going to sleep needs the second one.
+   */
+  enum class host_sleep_outcome_e {
+    none,       ///< Nothing has been requested this run
+    pending,    ///< Requested, still watching to see whether it happened
+    suspended,  ///< The host slept and has since resumed
+    failed      ///< The request was accepted and the host never went down
+  };
+
+  struct host_sleep_status_t {
+    host_sleep_outcome_e outcome = host_sleep_outcome_e::none;
+    std::string reason;            ///< Machine readable code when it failed
+    std::string message;           ///< Human readable detail for the client
+    std::int64_t observed_at = 0;  ///< Unix seconds when the outcome was decided
+  };
+
+  host_sleep_status_t host_sleep_status();
+
+  /**
+   * @brief Whether a suspend happened, from the gap between two clocks.
+   *
+   * CLOCK_BOOTTIME counts time the machine spent suspended and CLOCK_MONOTONIC
+   * does not, so the difference between their deltas is time spent asleep.
+   * Pure, so the rule can be tested without suspending anything.
+   */
+  bool suspend_was_observed(std::chrono::nanoseconds boottime_delta,
+                            std::chrono::nanoseconds monotonic_delta);
+
 #ifdef POLARIS_TESTS
+  /// Shorten the suspend watch so the failure path can be tested in milliseconds.
+  void set_suspend_watch_timings_for_tests(std::chrono::milliseconds timeout,
+                                           std::chrono::milliseconds interval);
+  void reset_suspend_watch_timings_for_tests();
+
+  /// Block until the suspend watcher has finished, so a test can assert on it.
+  void await_suspend_watcher_for_tests();
+
   void set_command_hooks_for_tests(
     std::function<std::string(const std::string &)> exec_hook,
     std::function<bool(const std::string &)> run_hook

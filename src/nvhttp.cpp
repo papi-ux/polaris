@@ -939,6 +939,13 @@ namespace nvhttp {
       host_power["sleep_supported"] = false;
       host_power["sleep_blocked_reason"] = "unsupported_platform";
       host_power["sleep_blocked_message"] = "Host sleep is only implemented on Linux hosts.";
+      // What became of the last request, as opposed to whether it was accepted.
+      // A client that told someone their host was going to sleep needs to be
+      // able to take that back.
+      host_power["last_sleep_outcome"] = "none";
+      host_power["last_sleep_reason"] = "";
+      host_power["last_sleep_message"] = "";
+      host_power["last_sleep_at"] = 0;
 
 #ifdef __linux__
       static std::mutex probe_mutex;
@@ -961,6 +968,25 @@ namespace nvhttp {
       host_power["sleep_supported"] = readiness.supported;
       host_power["sleep_blocked_reason"] = readiness.reason;
       host_power["sleep_blocked_message"] = readiness.message;
+
+      const auto sleep_status = session_manager::host_sleep_status();
+      const auto outcome_name = [](session_manager::host_sleep_outcome_e outcome) {
+        switch (outcome) {
+          case session_manager::host_sleep_outcome_e::pending:
+            return "pending";
+          case session_manager::host_sleep_outcome_e::suspended:
+            return "suspended";
+          case session_manager::host_sleep_outcome_e::failed:
+            return "failed";
+          case session_manager::host_sleep_outcome_e::none:
+          default:
+            return "none";
+        }
+      };
+      host_power["last_sleep_outcome"] = outcome_name(sleep_status.outcome);
+      host_power["last_sleep_reason"] = sleep_status.reason;
+      host_power["last_sleep_message"] = sleep_status.message;
+      host_power["last_sleep_at"] = sleep_status.observed_at;
 #endif
 
       return host_power;

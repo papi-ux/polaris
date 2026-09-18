@@ -8,6 +8,7 @@
   #include <src/platform/linux/session_manager.h>
 
   #include <algorithm>
+  #include <chrono>
   #include <cerrno>
   #include <csignal>
   #include <cstdlib>
@@ -236,6 +237,13 @@ namespace {
     std::vector<std::string> exec_commands;
 
     HostSleepCommandHarness() {
+      // Every accepted suspend starts a watcher thread. Without a short window
+      // here, one test's 30 second watch outlives it and the next test joins
+      // that one instead of its own, which passes for the wrong reason.
+      session_manager::set_suspend_watch_timings_for_tests(
+        std::chrono::milliseconds {60},
+        std::chrono::milliseconds {10}
+      );
       session_manager::set_command_hooks_for_tests(
         [this](const std::string &cmd) {
           exec_commands.push_back(cmd);
@@ -254,6 +262,9 @@ namespace {
     }
 
     ~HostSleepCommandHarness() {
+      // Joins the watcher and clears the recorded outcome, so no test inherits
+      // a verdict from the one before it.
+      session_manager::reset_suspend_watch_timings_for_tests();
       session_manager::reset_command_hooks_for_tests();
     }
 
@@ -339,6 +350,49 @@ TEST(SessionManagerHostSleepTests, PolkitRefusalOfTheRequestIsNamed) {
   EXPECT_FALSE(result.ok);
   EXPECT_EQ("polkit_denied", result.reason);
   EXPECT_NE(std::string::npos, result.message.find("org.freedesktop.login1.suspend"));
+}
+
+TEST(SessionManagerHostSleepTests, AClockGapIsWhatCountsAsASuspend) {
+  using namespace std::chrono_literals;
+
+  // Both clocks advanced together: the host was awake the whole time.
+  EXPECT_FALSE(session_manager::suspend_was_observed(30s, 30s));
+  // Scheduling noise between the two reads must not read as a suspend.
+  EXPECT_FALSE(session_manager::suspend_was_observed(30s + 200ms, 30s));
+  // CLOCK_BOOTTIME counts the sleep and CLOCK_MONOTONIC does not, so the gap
+  // between them is time the machine spent suspended.
+  EXPECT_TRUE(session_manager::suspend_was_observed(90s, 30s));
+}
+
+TEST(SessionManagerHostSleepTests, AnAcceptedRequestThatNeverSleepsIsReportedAsFailed) {
+  HostSleepCommandHarness harness;
+
+  const auto result = session_manager::suspend_host();
+  // logind took the request, which is all the caller can know at this point.
+  EXPECT_TRUE(result.ok);
+
+  session_manager::await_suspend_watcher_for_tests();
+  const auto status = session_manager::host_sleep_status();
+
+  // Nothing suspended, so the host never went down and the client has to be
+  // able to take back "your host is going to sleep".
+  EXPECT_EQ(session_manager::host_sleep_outcome_e::failed, status.outcome);
+  EXPECT_EQ("suspend_failed", status.reason);
+  EXPECT_FALSE(status.message.empty());
+  EXPECT_GT(status.observed_at, 0);
+}
+
+TEST(SessionManagerHostSleepTests, ARefusedRequestStartsNoWatchAndLeavesNoOutcome) {
+  HostSleepCommandHarness harness;
+  harness.can_suspend_answer = "s \"na\"";
+
+  const auto result = session_manager::suspend_host();
+
+  EXPECT_FALSE(result.ok);
+  // A request that was never accepted must not leave a pending outcome behind
+  // for a client to read as "it might still be going to sleep".
+  EXPECT_EQ(session_manager::host_sleep_outcome_e::none,
+            session_manager::host_sleep_status().outcome);
 }
 
 TEST(SessionManagerHostSleepTests, UnknownFailureKeepsLogindsOwnWords) {
