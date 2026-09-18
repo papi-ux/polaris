@@ -303,6 +303,22 @@ namespace game_artwork {
     return std::nullopt;
   }
 
+  namespace {
+    // cache_local_poster stamps a copy with its image's modification time, so equal sizes and
+    // times mean the copy still holds the image, without reading either file.
+    bool copy_matches_image(const fs::path &copy, const fs::path &image) {
+      std::error_code error;
+      const auto image_size = fs::file_size(image, error);
+      if (error) return false;
+      const auto copy_size = fs::file_size(copy, error);
+      if (error || copy_size != image_size) return false;
+      const auto image_time = fs::last_write_time(image, error);
+      if (error) return false;
+      const auto copy_time = fs::last_write_time(copy, error);
+      return !error && copy_time == image_time;
+    }
+  }  // namespace
+
   std::optional<asset_t> cache_local_poster(
     const fs::path &appdata,
     std::string_view uuid,
@@ -333,6 +349,17 @@ namespace game_artwork {
       std::error_code cleanup;
       fs::remove(temporary, cleanup);
       return std::nullopt;
+    }
+    // The image's time marks the copy as current for local_poster_needs_copy. A copy of an
+    // earlier image in another format would sort ahead of this one, so it goes.
+    const auto image_time = fs::last_write_time(candidate.path, error);
+    if (!error) fs::last_write_time(*destination, image_time, error);
+    for (const auto other_extension : image_extensions) {
+      if (other_extension == extension) continue;
+      if (const auto other = cache_asset_path(appdata, uuid, kind_e::poster, candidate.source, other_extension)) {
+        std::error_code cleanup;
+        fs::remove(*other, cleanup);
+      }
     }
     return asset_t {kind_e::poster, candidate.source, *destination, *mime};
   }
@@ -417,6 +444,49 @@ namespace game_artwork {
     return !current || source_priority(candidate_source) < source_priority(current->source);
   }
 
+  bool local_poster_needs_copy(
+    const fs::path &appdata,
+    std::string_view uuid,
+    const local_candidate_t &candidate
+  ) {
+    if (!is_valid_uuid(uuid)) return false;
+    const auto assets = scan_cached_assets(appdata, uuid);
+    const auto copy = std::find_if(assets.begin(), assets.end(), [&candidate](const asset_t &asset) {
+      return asset.kind == kind_e::poster && asset.source == candidate.source;
+    });
+    if (copy != assets.end()) {
+      // Only a configured image owns its source. Host and Steam posters can be provider
+      // downloads (Epic art is cached as host), which a legacy cover must not replace.
+      return candidate.source == source_e::local && !copy_matches_image(copy->path, candidate.path);
+    }
+    const auto current = std::find_if(assets.begin(), assets.end(), [](const asset_t &asset) {
+      return asset.kind == kind_e::poster;
+    });
+    return current == assets.end() || source_priority(candidate.source) < source_priority(current->source);
+  }
+
+  bool retire_orphaned_local_poster(
+    const fs::path &appdata,
+    std::string_view uuid,
+    const std::vector<local_candidate_t> &candidates
+  ) {
+    if (!is_valid_uuid(uuid)) return false;
+    const bool names_image = std::any_of(candidates.begin(), candidates.end(), [](const local_candidate_t &candidate) {
+      return candidate.source == source_e::local;
+    });
+    if (names_image) return false;
+    bool removed = false;
+    for (const auto extension : image_extensions) {
+      const auto copy = cache_asset_path(appdata, uuid, kind_e::poster, source_e::local, extension);
+      if (!copy) continue;
+      std::error_code error;
+      const auto status = fs::symlink_status(*copy, error);
+      if (error || !(fs::is_regular_file(status) || fs::is_symlink(status))) continue;
+      removed = fs::remove(*copy, error) || removed;
+    }
+    return removed;
+  }
+
   nlohmann::json make_manifest(std::string_view uuid, const std::vector<asset_t> &input_assets) {
     std::vector<asset_t> assets;
     std::set<kind_e> seen;
@@ -496,7 +566,7 @@ namespace game_artwork {
   std::vector<asset_t> resolve_missing_assets(const resolve_request_t &request) {
     auto assets = scan_cached_assets(request.appdata, request.uuid);
     for (const auto &candidate : request.local_posters) {
-      if (!needs_source_upgrade(request.appdata, request.uuid, kind_e::poster, candidate.source)) continue;
+      if (!local_poster_needs_copy(request.appdata, request.uuid, candidate)) continue;
       if (auto cached = cache_local_poster(request.appdata, request.uuid, candidate)) {
         assets.push_back(std::move(*cached));
         break;

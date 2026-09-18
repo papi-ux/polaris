@@ -150,6 +150,28 @@ TEST(BeatTimesTests, AcceptsAnEditionSuffixEitherWayButNotADifferentGame) {
   EXPECT_FALSE(accepts(control, beat_times::match_key("3-D Ultra Radio Control Racers Deluxe")));
 }
 
+TEST(BeatTimesTests, AShortNameGetsAShortAllowance) {
+  const auto accepts = [](std::string_view a, std::string_view b) {
+    return beat_times::is_acceptable_match(a, b, beat_times::edit_distance(a, b));
+  };
+
+  // The real one: a library entry named "Eden" against what the catalogue returns for
+  // it. Three edits apart is most of a four letter name, and a flat floor of three
+  // accepted it as confidently as an exact hit.
+  const auto eden = beat_times::match_key("Eden");
+  EXPECT_EQ(beat_times::edit_distance(eden, beat_times::match_key("BioEden")), 3);
+  EXPECT_FALSE(accepts(eden, beat_times::match_key("BioEden")));
+
+  // Removing the floor must not tighten anything longer. Seven characters allowed three
+  // edits before and still do, which is the case the floor was standing in for.
+  const auto control = beat_times::match_key("Control");
+  EXPECT_EQ(beat_times::edit_distance(control, beat_times::match_key("Controlled")), 3);
+  EXPECT_TRUE(accepts(control, beat_times::match_key("Controlled")));
+
+  // And the numerals these names really disagree about still match.
+  EXPECT_TRUE(accepts(beat_times::match_key("Slay the Spire 2"), beat_times::match_key("Slay the Spire II")));
+}
+
 TEST(BeatTimesTests, RejectsEmptyEitherSide) {
   EXPECT_FALSE(beat_times::is_acceptable_match("", "control", 7));
   EXPECT_FALSE(beat_times::is_acceptable_match("control", "", 7));

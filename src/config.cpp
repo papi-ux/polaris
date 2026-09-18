@@ -753,6 +753,7 @@ namespace config {
     {},  // state commands
     {},  // server commands
     false,  // benchmark_mode_enabled
+    false,  // host_sleep_enabled
   };
 
   recording_t recording {
@@ -1652,6 +1653,7 @@ namespace config {
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
     bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "benchmark_mode_enabled", sunshine.benchmark_mode_enabled);
+    bool_f(vars, "host_sleep_enabled", sunshine.host_sleep_enabled);
     bool_f(vars, "forward_rumble", input.forward_rumble);
 
     int port = sunshine.port;

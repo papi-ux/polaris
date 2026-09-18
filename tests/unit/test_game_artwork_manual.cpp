@@ -475,6 +475,66 @@ TEST(GameArtworkManualPreviewCache, ChoiceTokensAreOpaqueScopedAndExpire) {
   EXPECT_EQ(cache.size(), 0);
 }
 
+TEST(GameArtworkManualChoices, FindCoverStoresTheFullImageBehindAListedPoster) {
+  const std::string full_url = "https://cdn2.steamgriddb.com/grid/full.png";
+  const std::string thumb_url = "https://cdn2.steamgriddb.com/thumb/full.jpg";
+  fake_steamgriddb_t steamgriddb;
+  steamgriddb.list(POSTER_LIST_URL, {steamgriddb_image(1, full_url, thumb_url)});
+  steamgriddb.serve(thumb_url, jpeg(1));
+  steamgriddb.serve(full_url, png(9));
+
+  auto cache = sequential_cache();
+  const auto listing = game_artwork::manual::list_artwork_choices(
+    cache, GAME_UUID, kind_e::poster, choice_identity(), steamgriddb.transport(), 1'000);
+  ASSERT_FALSE(listing.failure.has_value());
+  ASSERT_EQ(listing.choices.size(), 1);
+  const auto listed = cache.lookup(GAME_UUID, listing.choices[0].token, kind_e::poster, 2'000);
+  ASSERT_TRUE(listed.has_value());
+  // The list previews SteamGridDB's thumbnail.
+  EXPECT_EQ(listed->body, jpeg(1));
+
+  // Picking it downloads the full image once, without the key, within the asset bound.
+  steamgriddb.requests.clear();
+  steamgriddb.limits.clear();
+  const auto picked = game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport());
+  EXPECT_FALSE(picked.failure.has_value());
+  ASSERT_TRUE(picked.image.has_value());
+  EXPECT_EQ(picked.image->body, png(9));
+  EXPECT_EQ(picked.image->mime_type, "image/png");
+  ASSERT_EQ(steamgriddb.requests.size(), 1);
+  EXPECT_EQ(steamgriddb.requests[0].url, full_url);
+  EXPECT_FALSE(steamgriddb.requests[0].requires_authorization);
+  EXPECT_EQ(steamgriddb.limits[0], game_artwork::maximum_asset_bytes);
+
+  // A search's poster preview already is the full image, so nothing is downloaded for it.
+  const auto searched = cache.publish(GAME_UUID, kind_e::poster, png(5), 1'000);
+  ASSERT_TRUE(searched.has_value());
+  const auto searched_preview = cache.lookup(GAME_UUID, searched->token, kind_e::poster, 2'000);
+  ASSERT_TRUE(searched_preview.has_value());
+  steamgriddb.requests.clear();
+  const auto search_pick = game_artwork::manual::cover_image_for_pick(*searched_preview, steamgriddb.transport());
+  ASSERT_TRUE(search_pick.image.has_value());
+  EXPECT_EQ(search_pick.image->body, png(5));
+  EXPECT_TRUE(steamgriddb.requests.empty());
+
+  // A full image that fails, is not an image or arrives from off the allowlist is never kept.
+  steamgriddb.responses[full_url] = {404, {}, {}};
+  const auto missing = game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport());
+  EXPECT_FALSE(missing.image.has_value());
+  EXPECT_TRUE(missing.failure.has_value());
+  const std::string text = "not an image";
+  steamgriddb.responses[full_url] = {200, {text.begin(), text.end()}, {}};
+  EXPECT_FALSE(game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport()).image.has_value());
+  steamgriddb.responses[full_url] = {200, png(9), "https://evil.example/grid/full.png"};
+  EXPECT_FALSE(game_artwork::manual::cover_image_for_pick(*listed, steamgriddb.transport()).image.has_value());
+  auto tampered = *listed;
+  tampered.choice->asset_url = "https://evil.example/grid/full.png";
+  steamgriddb.requests.clear();
+  const auto refused = game_artwork::manual::cover_image_for_pick(tampered, steamgriddb.transport());
+  EXPECT_EQ(code_of(refused.failure), "artwork_choice_expired");
+  EXPECT_TRUE(steamgriddb.requests.empty());
+}
+
 TEST(GameArtworkManualChoices, ListsBoundedAllowlistedChoicesInTheShapeNovaParses) {
   using game_artwork::manual::route_e;
   fake_steamgriddb_t steamgriddb;
@@ -856,4 +916,194 @@ TEST(GameArtworkManualApply, MatchByKindsStillReplacesTheWholeOverrideGeneration
   const auto stored = game_artwork::load_artwork_override(appdata.path, GAME_UUID);
   ASSERT_TRUE(stored.has_value());
   EXPECT_EQ(stored->provider_game_id, "12345");
+}
+
+namespace {
+  constexpr std::string_view HEROIC_SEARCH_URL = "https://www.steamgriddb.com/api/v2/search/autocomplete/Heroic";
+  constexpr std::string_view LAUNCHER_POSTER_LIST_URL =
+    "https://www.steamgriddb.com/api/v2/grids/game/777?dimensions=600x900&types=static&limit=5";
+  constexpr std::string_view LAUNCHER_POSTER_URL = "https://cdn2.steamgriddb.com/grid/heroic-launcher.png";
+
+  transport_response_t json_answer(const nlohmann::json &body) {
+    const auto text = body.dump();
+    return {200, {text.begin(), text.end()}, {}};
+  }
+
+  nlohmann::json heroic_search_answer() {
+    return {
+      {"success", true},
+      {"data", {
+        {{"id", 12345}, {"name", "Heroic Quest"}},
+        {{"id", 777}, {"name", "Heroic Games Launcher"}, {"release_year", 2021}},
+      }},
+    };
+  }
+}  // namespace
+
+TEST(GameArtworkManualCandidates, ListsEveryMatchAndPreviewsTheFirstPosterOfEach) {
+  // "Heroic" is not the launcher's SteamGridDB title. The console's old search took the first
+  // autocomplete result only and found no cover; listing every match lets the player pick it.
+  fake_steamgriddb_t steamgriddb;
+  steamgriddb.responses[std::string(HEROIC_SEARCH_URL)] = json_answer(heroic_search_answer());
+  steamgriddb.list(POSTER_LIST_URL, {});
+  steamgriddb.list(LAUNCHER_POSTER_LIST_URL, {steamgriddb_image(9, std::string(LAUNCHER_POSTER_URL), std::nullopt)});
+  steamgriddb.serve(LAUNCHER_POSTER_URL, png(7));
+
+  auto cache = sequential_cache();
+  const auto search = game_artwork::manual::search_match_candidates(cache, GAME_UUID, "Heroic", steamgriddb.transport(), 1'000);
+  ASSERT_FALSE(search.invalid_query);
+  ASSERT_FALSE(search.failure.has_value());
+  ASSERT_EQ(search.candidates.size(), 2);
+
+  // A match with no poster is still a match; only its preview is missing.
+  EXPECT_EQ(search.candidates[0].candidate.title, "Heroic Quest");
+  EXPECT_FALSE(search.candidates[0].poster_token.has_value());
+
+  const auto &launcher = search.candidates[1];
+  EXPECT_EQ(launcher.candidate.title, "Heroic Games Launcher");
+  EXPECT_EQ(launcher.candidate.release_year, std::optional<unsigned int>(2021));
+  ASSERT_TRUE(launcher.poster_token.has_value());
+  EXPECT_EQ(launcher.preview_expires_at, 61'000);
+
+  const auto preview = cache.lookup(GAME_UUID, *launcher.poster_token, kind_e::poster, 2'000);
+  ASSERT_TRUE(preview.has_value());
+  EXPECT_EQ(preview->body, png(7));
+  EXPECT_EQ(preview->mime_type, "image/png");
+  // A token belongs to the uuid it was searched for.
+  EXPECT_FALSE(cache.lookup(OTHER_UUID, *launcher.poster_token, kind_e::poster, 2'000).has_value());
+
+  // The authorized search and lists stay within the metadata bound, the CDN image within the preview bound.
+  ASSERT_EQ(steamgriddb.requests.size(), 4);
+  EXPECT_EQ(steamgriddb.requests[0].url, HEROIC_SEARCH_URL);
+  EXPECT_TRUE(steamgriddb.requests[0].requires_authorization);
+  EXPECT_EQ(steamgriddb.limits[0], game_artwork::manual::maximum_listing_bytes);
+  EXPECT_EQ(steamgriddb.requests[3].url, LAUNCHER_POSTER_URL);
+  EXPECT_FALSE(steamgriddb.requests[3].requires_authorization);
+  EXPECT_EQ(steamgriddb.limits[3], game_artwork::manual::maximum_preview_bytes);
+}
+
+TEST(GameArtworkManualCandidates, FindCoverReadsPastMatchesWithoutAPosterAndStopsAtFive) {
+  using game_artwork::manual::candidate_listing_e;
+  const auto list_url = [](int id) {
+    return "https://www.steamgriddb.com/api/v2/grids/game/" + std::to_string(id) + "?dimensions=600x900&types=static&limit=5";
+  };
+  const auto poster_url = [](int id) {
+    return "https://cdn2.steamgriddb.com/grid/heroic-" + std::to_string(id) + ".png";
+  };
+  // Ten answers for "Heroic" in SteamGridDB's shape. There the first five have no 600x900 poster
+  // and the launcher is seventh; here the sixth has none either, so no poster reaches Nova's five.
+  const auto heroic = [&](fake_steamgriddb_t &steamgriddb, int first_with_poster) {
+    auto data = nlohmann::json::array();
+    for (int id = 1; id <= 10; ++id) {
+      data.push_back({{"id", id}, {"name", id == 7 ? std::string("Heroic Games Launcher") : "Heroic " + std::to_string(id)}});
+      if (id < first_with_poster) {
+        steamgriddb.list(list_url(id), {});
+      } else {
+        steamgriddb.list(list_url(id), {steamgriddb_image(id, poster_url(id), std::nullopt)});
+        steamgriddb.serve(poster_url(id), png(static_cast<unsigned char>(id)));
+      }
+    }
+    steamgriddb.responses[std::string(HEROIC_SEARCH_URL)] = json_answer({{"success", true}, {"data", data}});
+  };
+
+  // Nova lists the first five matches as before, and none of them has a cover.
+  fake_steamgriddb_t steamgriddb;
+  heroic(steamgriddb, 7);
+  auto cache = sequential_cache();
+  const auto nova = game_artwork::manual::search_match_candidates(cache, GAME_UUID, "Heroic", steamgriddb.transport(), 1'000);
+  ASSERT_EQ(nova.candidates.size(), 5);
+  EXPECT_TRUE(std::none_of(nova.candidates.begin(), nova.candidates.end(), [](const auto &item) {
+    return item.poster_token.has_value();
+  }));
+  EXPECT_EQ(steamgriddb.requests_for(list_url(6)), 0);
+
+  // Find Cover reads every match and lists only the ones with a poster, the launcher first.
+  const auto covers = game_artwork::manual::search_match_candidates(
+    cache, GAME_UUID, "Heroic", steamgriddb.transport(), 1'000, candidate_listing_e::matches_with_posters);
+  ASSERT_FALSE(covers.failure.has_value());
+  ASSERT_EQ(covers.candidates.size(), 4);
+  EXPECT_EQ(covers.candidates[0].candidate.title, "Heroic Games Launcher");
+  EXPECT_TRUE(std::all_of(covers.candidates.begin(), covers.candidates.end(), [](const auto &item) {
+    return item.poster_token.has_value();
+  }));
+  EXPECT_EQ(steamgriddb.requests_for(list_url(10)), 1);
+
+  // A slow SteamGridDB stops the read: the console's routes share one thread, so the search
+  // answers with the matches it has instead of holding every page for ten of them.
+  fake_steamgriddb_t slow;
+  heroic(slow, 7);
+  std::int64_t clock_milliseconds = 1'000;
+  const game_artwork::manual::search_budget_t budget {
+    [&clock_milliseconds]() {
+      clock_milliseconds += 5'000;  // each match costs five seconds
+      return clock_milliseconds;
+    },
+    12'000,
+  };
+  const auto bounded = game_artwork::manual::search_match_candidates(
+    cache, GAME_UUID, "Heroic", slow.transport(), 1'000, candidate_listing_e::matches_with_posters, budget);
+  ASSERT_FALSE(bounded.failure.has_value());
+  EXPECT_TRUE(bounded.candidates.empty());
+  EXPECT_EQ(slow.requests_for(list_url(1)), 1);
+  EXPECT_EQ(slow.requests_for(list_url(4)), 0);
+
+  // Five posters are enough: the rest of the matches are never asked for.
+  fake_steamgriddb_t plenty;
+  heroic(plenty, 2);
+  const auto first_five = game_artwork::manual::search_match_candidates(
+    cache, GAME_UUID, "Heroic", plenty.transport(), 1'000, candidate_listing_e::matches_with_posters);
+  ASSERT_EQ(first_five.candidates.size(), game_artwork::manual::maximum_candidate_count);
+  EXPECT_EQ(first_five.candidates.front().candidate.provider_game_id, "2");
+  EXPECT_EQ(first_five.candidates.back().candidate.provider_game_id, "6");
+  EXPECT_EQ(plenty.requests_for(list_url(6)), 1);
+  EXPECT_EQ(plenty.requests_for(list_url(7)), 0);
+}
+
+TEST(GameArtworkManualCandidates, KeepsAMatchWhosePosterCannotBeFetched) {
+  fake_steamgriddb_t steamgriddb;
+  steamgriddb.responses[std::string(HEROIC_SEARCH_URL)] = json_answer(heroic_search_answer());
+  steamgriddb.list(LAUNCHER_POSTER_LIST_URL, {steamgriddb_image(9, std::string(LAUNCHER_POSTER_URL), std::nullopt)});
+  steamgriddb.responses[std::string(LAUNCHER_POSTER_URL)] = {404, {}, {}};
+
+  auto cache = sequential_cache();
+  const auto search = game_artwork::manual::search_match_candidates(cache, GAME_UUID, "Heroic", steamgriddb.transport(), 1'000);
+  ASSERT_FALSE(search.failure.has_value());
+  ASSERT_EQ(search.candidates.size(), 2);
+  EXPECT_FALSE(search.candidates[0].poster_token.has_value());
+  EXPECT_FALSE(search.candidates[1].poster_token.has_value());
+  EXPECT_EQ(cache.size(), 0);
+}
+
+TEST(GameArtworkManualCandidates, SearchFailuresCarryTheCodesNovaAndTheConsoleShow) {
+  const auto failure_for = [](std::optional<transport_response_t> answer) {
+    fake_steamgriddb_t steamgriddb;
+    if (answer) steamgriddb.responses[std::string(HEROIC_SEARCH_URL)] = *answer;
+    auto cache = sequential_cache();
+    const auto search = game_artwork::manual::search_match_candidates(cache, GAME_UUID, "Heroic", steamgriddb.transport(), 1'000);
+    EXPECT_TRUE(search.candidates.empty());
+    EXPECT_EQ(cache.size(), 0);
+    return search.failure;
+  };
+  const auto status = [](unsigned int code) {
+    return std::optional<transport_response_t> {transport_response_t {code, {}, {}}};
+  };
+
+  const auto unreachable = failure_for(std::nullopt);
+  ASSERT_TRUE(unreachable.has_value());
+  EXPECT_EQ(unreachable->code, "steamgriddb_unreachable");
+  EXPECT_EQ(unreachable->http_status, 502);
+  EXPECT_EQ(code_of(failure_for(status(401))), "steamgriddb_unauthorized");
+  EXPECT_EQ(code_of(failure_for(status(429))), "steamgriddb_rate_limited");
+  EXPECT_EQ(code_of(failure_for(status(500))), "steamgriddb_unavailable");
+  const auto body = heroic_search_answer().dump();
+  // An answer redirected off the allowlist is never read. Nova's search has always named that
+  // failure from the status it saw, and sharing the search keeps its answers as they were.
+  EXPECT_EQ(code_of(failure_for(transport_response_t {200, {body.begin(), body.end()}, "https://evil.example/api/v2/"})),
+            "steamgriddb_unavailable");
+
+  fake_steamgriddb_t unused;
+  auto cache = sequential_cache();
+  const auto blank = game_artwork::manual::search_match_candidates(cache, GAME_UUID, "   ", unused.transport(), 1'000);
+  EXPECT_TRUE(blank.invalid_query);
+  EXPECT_TRUE(unused.requests.empty());
 }

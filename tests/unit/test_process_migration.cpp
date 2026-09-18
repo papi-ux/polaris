@@ -4414,7 +4414,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -4479,7 +4479,7 @@ TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyFo
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
   EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
   EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
 
@@ -4544,7 +4544,7 @@ TEST(ProcessMigrationTests, VersionTenAndElevenCatalogsRepairOnlyTheExactLegacyB
 
     const auto first_payload = file_handler::read_file(file_path.string().c_str());
     const auto migrated_tree = nlohmann::json::parse(first_payload);
-    EXPECT_EQ(migrated_tree["version"], 13);
+    EXPECT_EQ(migrated_tree["version"], 14);
     EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
     EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
     EXPECT_FALSE(migrated_tree["apps"][2].value("desktop-mirror", true));
@@ -4638,7 +4638,7 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
   ASSERT_EQ(migrated_tree["apps"].size(), 6u);
 
   const auto &epic = migrated_tree["apps"][0];
@@ -4683,6 +4683,79 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
   std::filesystem::remove(file_path);
 }
 
+TEST(ProcessMigrationTests, GivesOnlyTheImagelessHeroicLauncherItsBundledPoster) {
+  const auto file_path = test_paths::root() / "v13_heroic_launcher_image_migration.json";
+  const nlohmann::json apps = {
+    {"version", 13},
+    {"apps", {
+      {
+        {"name", "Heroic"},
+        {"uuid", "88888888-8888-4888-8888-888888888881"},
+        {"source", "heroic"},
+        {"cmd", ""},
+        {"detached", {"setsid heroic"}}
+      },
+      {
+        {"name", "Heroic Flatpak"},
+        {"uuid", "88888888-8888-4888-8888-888888888882"},
+        {"source", "heroic"},
+        {"detached", {"setsid flatpak run com.heroicgameslauncher.hgl"}},
+        {"image-path", " "}
+      },
+      {
+        {"name", "Heroic With Art"},
+        {"uuid", "88888888-8888-4888-8888-888888888883"},
+        {"source", "heroic"},
+        {"detached", {"setsid heroic"}},
+        {"image-path", "/preserved/heroic-art.png"}
+      },
+      {
+        {"name", "Imported Heroic Game"},
+        {"uuid", "88888888-8888-4888-8888-888888888884"},
+        {"source", "heroic"},
+        {"detached", {"setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=Snow&runner=legendary'"}},
+        {"heroic-app-name", "Snow"},
+        {"heroic-store", "epic"},
+        {"heroic-runner", "legendary"},
+        {"heroic-install", "native"}
+      },
+      {
+        {"name", "Heroic"},
+        {"uuid", "88888888-8888-4888-8888-888888888885"},
+        {"source", "manual"},
+        {"detached", {"setsid heroic"}}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto first_payload = file_handler::read_file(file_path.string().c_str());
+  const auto migrated_tree = nlohmann::json::parse(first_payload);
+  EXPECT_EQ(migrated_tree["version"], 14);
+  ASSERT_EQ(migrated_tree["apps"].size(), 5u);
+  EXPECT_EQ(migrated_tree["apps"][0]["image-path"], "heroic.png");
+  EXPECT_EQ(migrated_tree["apps"][1]["image-path"], "heroic.png");
+  EXPECT_EQ(migrated_tree["apps"][2]["image-path"], "/preserved/heroic-art.png");
+  EXPECT_FALSE(migrated_tree["apps"][3].contains("image-path"));
+  EXPECT_FALSE(migrated_tree["apps"][4].contains("image-path"));
+
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto launcher = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.uuid == "88888888-8888-4888-8888-888888888881";
+  });
+  ASSERT_NE(launcher, parsed_apps.end());
+  EXPECT_EQ(launcher->image_path, "heroic.png");
+
+  auto parsed_again = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_again.has_value());
+  EXPECT_EQ(file_handler::read_file(file_path.string().c_str()), first_payload);
+
+  std::filesystem::remove(file_path);
+}
+
 TEST(ProcessMigrationTests, MigratesVersionTwelveFlatpakHeroicPathWithoutScannerMetadata) {
   const auto file_path = test_paths::root() / "v12_heroic_launch_migration.json";
   const nlohmann::json legacy_apps = {
@@ -4707,7 +4780,7 @@ TEST(ProcessMigrationTests, MigratesVersionTwelveFlatpakHeroicPathWithoutScanner
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
   ASSERT_EQ(migrated_tree["apps"].size(), 1u);
   const auto &alan_wake = migrated_tree["apps"][0];
   EXPECT_EQ(alan_wake["uuid"], "77777777-7777-4777-8777-777777777777");
@@ -4904,7 +4977,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
 
   std::filesystem::remove(file_path);
 }
@@ -4955,7 +5028,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 13);
+  EXPECT_EQ(parsed_tree["version"], 14);
 
   std::filesystem::remove(file_path);
 }
@@ -5168,7 +5241,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -5234,7 +5307,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 13);
+  EXPECT_EQ(migrated_tree["version"], 14);
 
   const auto &migrated_apps = migrated_tree["apps"];
   const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {
@@ -5476,4 +5549,96 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationTerminationHonoursTheAppExitTimeo
 #else
   GTEST_SKIP() << "Linux-only exact-generation termination";
 #endif
+}
+
+TEST(ProcessEmulatorEntries, AnImportedEntryRunsTheFoldersEmulatorFileAndIsRefusedWhenItIsGone) {
+  const auto root = test_paths::root() / "process_emulator_entries";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto appimage = root / "Eden.AppImage";
+  {
+    std::ofstream file(appimage);
+    file << "x";
+  }
+  {
+    std::ofstream sources(root / "library_sources.json");
+    sources << nlohmann::json {
+      {"version", 1},
+      {"sources", nlohmann::json::array({
+        {{"id", "folder-with-file"}, {"path", root.string()}, {"emulator", "eden"}, {"launcher", appimage.string()}, {"command", ""}, {"extensions", nlohmann::json::array()}},
+        {{"id", "folder-file-gone"}, {"path", root.string()}, {"emulator", "eden"}, {"launcher", (root / "Gone.AppImage").string()}, {"command", ""}, {"extensions", nlohmann::json::array()}},
+      })},
+    }.dump();
+  }
+  const auto saved_apps_file = config::stream.file_apps;
+  config::stream.file_apps = (root / "apps.json").string();
+  auto restore = util::fail_guard([&]() {
+    config::stream.file_apps = saved_apps_file;
+  });
+
+  proc::ctx_t game;
+  game.name = "Game";
+  game.source = "emulator";
+  game.emulator = "eden";
+  game.rom_path = "/roms/Game.xci";
+  game.rom_folder = "folder-with-file";
+  game.cmd = "eden -f -g '/roms/Game.xci'";
+
+  const auto resolved = proc::resolve_emulator_entry_launch(game);
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(resolved->install.kind, emulator_library::install_e::launcher);
+  EXPECT_EQ(resolved->command, "'" + appimage.string() + "' -f -g '/roms/Game.xci'");
+
+  game.rom_folder = "folder-file-gone";
+  const auto gone = proc::resolve_emulator_entry_launch(game);
+  ASSERT_TRUE(gone.has_value());
+  EXPECT_EQ(gone->install.kind, emulator_library::install_e::missing);
+
+  // A command the player edited runs as written, whether or not the emulator is there.
+  proc::ctx_t edited = game;
+  edited.cmd = "gamemoderun eden -f -g '/roms/Game.xci'";
+  EXPECT_FALSE(proc::resolve_emulator_entry_launch(edited).has_value());
+  // One written for an emulator file that has since moved is still Polaris's to update.
+  edited.cmd = "'/opt/Old/Eden.AppImage' -f -g '/roms/Game.xci'";
+  EXPECT_TRUE(proc::resolve_emulator_entry_launch(edited).has_value());
+
+  // Other entries are left exactly as saved.
+  proc::ctx_t manual;
+  manual.source = "manual";
+  manual.emulator = "eden";
+  manual.cmd = "eden";
+  EXPECT_FALSE(proc::resolve_emulator_entry_launch(manual).has_value());
+  proc::ctx_t custom = game;
+  custom.emulator = "custom";
+  EXPECT_FALSE(proc::resolve_emulator_entry_launch(custom).has_value());
+}
+
+TEST(ProcessEmulatorEntries, LaunchRefusesAMissingEmulatorBeforeSessionStateAndRunsTheResolvedCommand) {
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto execute_start = source.find("int proc_t::execute_impl(");
+  ASSERT_NE(execute_start, std::string::npos);
+  const auto execute = source.substr(execute_start);
+
+  const auto resolve = execute.find("resolve_emulator_entry_launch(app)");
+  const auto refuse = execute.find("return launch_failure::refuse(503, \"emulator_not_installed\"", resolve);
+  const auto validate = execute.find("validate_resolved_launch_profile_for_app(app, launch_session, client_profile)");
+  const auto display_semantics = execute.find("apply_app_display_semantics(app, *launch_session)");
+  const auto install_app = execute.find("    _app = app;\n");
+  const auto apply_command = execute.find("_app.cmd = *resolved_emulator_command;", install_app);
+  const auto effective_command = execute.find("std::string effective_cmd = _app.cmd;");
+  ASSERT_NE(resolve, std::string::npos);
+  ASSERT_NE(refuse, std::string::npos);
+  ASSERT_NE(validate, std::string::npos);
+  ASSERT_NE(display_semantics, std::string::npos);
+  ASSERT_NE(install_app, std::string::npos);
+  ASSERT_NE(apply_command, std::string::npos);
+  ASSERT_NE(effective_command, std::string::npos);
+  // No display, profile or generation state is touched for an emulator that cannot start.
+  EXPECT_LT(refuse, validate);
+  EXPECT_LT(refuse, display_semantics);
+  EXPECT_LT(refuse, install_app);
+  // The command the child actually runs comes from the resolved entry.
+  EXPECT_LT(install_app, apply_command);
+  EXPECT_LT(apply_command, effective_command);
 }

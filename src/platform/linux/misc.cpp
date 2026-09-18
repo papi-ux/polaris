@@ -328,7 +328,8 @@ namespace platf {
       const std::vector<std::string> &argv,
       std::chrono::milliseconds timeout,
       std::size_t max_output_bytes,
-      std::stop_token stop) {
+      std::stop_token stop,
+      bool capture_stderr) {
     process_output_t result;
     if (stop.stop_requested()) {
       result.cancelled = true;
@@ -368,16 +369,13 @@ namespace platf {
     const auto actions_guard = util::fail_guard([&actions]() {
       posix_spawn_file_actions_destroy(&actions);
     });
+    const bool stderr_ready = capture_stderr ?
+                                posix_spawn_file_actions_adddup2(&actions, write_end.el, STDERR_FILENO) == 0 :
+                                posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0;
     if (posix_spawn_file_actions_adddup2(&actions, write_end.el, STDOUT_FILENO) != 0 ||
+        !stderr_ready ||
         posix_spawn_file_actions_addclose(&actions, read_end.el) != 0 ||
-        posix_spawn_file_actions_addclose(&actions, write_end.el) != 0 ||
-        posix_spawn_file_actions_addopen(
-          &actions,
-          STDERR_FILENO,
-          "/dev/null",
-          O_WRONLY,
-          0
-        ) != 0) {
+        posix_spawn_file_actions_addclose(&actions, write_end.el) != 0) {
       return result;
     }
 

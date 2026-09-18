@@ -115,6 +115,28 @@ namespace game_artwork {
     kind_e kind,
     source_e candidate_source
   );
+
+  /**
+   * Whether a local poster candidate must be copied into the cache: nothing of its priority
+   * or better is cached, or the copy of an entry's configured image is not that image any
+   * more, because the file was replaced or the entry now names another one. Copies carry
+   * their image's size and modification time, so an unchanged image costs two stats.
+   */
+  [[nodiscard]] bool local_poster_needs_copy(
+    const std::filesystem::path &appdata,
+    std::string_view uuid,
+    const local_candidate_t &candidate
+  );
+
+  /**
+   * Remove the cached copy of a configured image once the entry names no readable image,
+   * so its poster falls back to the next source. Returns true when a copy was removed.
+   */
+  [[nodiscard]] bool retire_orphaned_local_poster(
+    const std::filesystem::path &appdata,
+    std::string_view uuid,
+    const std::vector<local_candidate_t> &candidates
+  );
   [[nodiscard]] nlohmann::json make_manifest(
     std::string_view uuid,
     const std::vector<asset_t> &assets

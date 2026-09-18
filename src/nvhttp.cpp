@@ -8,6 +8,7 @@
 // standard includes
 #ifdef __linux__
   #include "platform/linux/process_environment.h"
+  #include "platform/linux/session_manager.h"
 #endif
 
 #include <algorithm>
@@ -918,6 +919,51 @@ namespace nvhttp {
       output["session_generation"] = timing.session_generation;
       output["ring_complete"] = timing.ring_complete;
       return output;
+    }
+
+    // Host power state for a client deciding whether to offer a sleep control.
+    // A named function for the same reason as the builders above: the
+    // nova-contract extractor scopes to named signatures, not lambda bodies.
+    //
+    // The logind probe spawns a busctl child, and capabilities is polled, so
+    // the answer is cached briefly. Nothing here changes on a timescale where
+    // 30 seconds of staleness matters: a polkit rule or a config edit both
+    // land well before a client would act on them.
+    nlohmann::json build_host_power_contract(bool sleep_permitted) {
+      nlohmann::json host_power;
+      host_power["sleep_endpoint"] = "/polaris/v1/host/sleep";
+      // Reported separately from sleep_enabled so a client can tell "this host
+      // does not do that" apart from "this client is not allowed to".
+      host_power["sleep_permitted"] = sleep_permitted;
+      host_power["sleep_enabled"] = config::sunshine.host_sleep_enabled;
+      host_power["sleep_supported"] = false;
+      host_power["sleep_blocked_reason"] = "unsupported_platform";
+      host_power["sleep_blocked_message"] = "Host sleep is only implemented on Linux hosts.";
+
+#ifdef __linux__
+      static std::mutex probe_mutex;
+      static std::chrono::steady_clock::time_point probed_at {};
+      static session_manager::host_sleep_readiness_t cached;
+      static bool have_probed = false;
+
+      session_manager::host_sleep_readiness_t readiness;
+      {
+        std::lock_guard lock {probe_mutex};
+        const auto now = std::chrono::steady_clock::now();
+        if (!have_probed || now - probed_at > std::chrono::seconds {30}) {
+          cached = session_manager::host_sleep_readiness();
+          probed_at = now;
+          have_probed = true;
+        }
+        readiness = cached;
+      }
+
+      host_power["sleep_supported"] = readiness.supported;
+      host_power["sleep_blocked_reason"] = readiness.reason;
+      host_power["sleep_blocked_message"] = readiness.message;
+#endif
+
+      return host_power;
     }
 
     nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
@@ -2388,6 +2434,18 @@ namespace nvhttp {
     }
   }  // namespace
 
+  game_artwork::providers::transport_t artwork_transport(std::string api_key) {
+    return make_artwork_transport(std::move(api_key));
+  }
+
+  game_artwork::manual::preview_cache_t &artwork_candidate_previews() {
+    return artwork_preview_cache();
+  }
+
+  std::int64_t artwork_clock_milliseconds() {
+    return artwork_now_milliseconds();
+  }
+
   std::optional<std::string> normalize_encoder_backend(std::string value) {
     value = lower_copy(std::move(value));
     if (value.empty() || !video::encoder_backend_selectable(value)) {
@@ -3070,15 +3128,22 @@ namespace nvhttp {
 
     fs::path configured_artwork_image(const proc::ctx_t &app) {
       const fs::path configured = app.image_path;
-      if (!uses_bundled_utility_artwork(app) || configured.empty() || configured.is_absolute()) {
+      if (configured.empty() || configured.is_absolute()) {
         return configured;
       }
 
-      // Runtime-injected entries carry a bundled filename rather than an
-      // absolute path. Artwork resolution must use the same validated path as
-      // the legacy cover endpoint; otherwise a title such as "Virtual Display"
-      // falls through to a coincidental SteamGridDB game match.
-      return proc::validate_app_image_path(app.image_path);
+      // A relative name is a bundled image: a runtime-injected entry's, or a launcher's such as
+      // lutris.png and heroic.png. Artwork resolution must use the same validated path as the
+      // legacy cover endpoint; read against the working directory the name found nothing, so a
+      // launcher had no poster in Nova and a title such as "Virtual Display" fell through to a
+      // coincidental SteamGridDB game match.
+      const auto validated = proc::validate_app_image_path(app.image_path);
+      if (uses_bundled_utility_artwork(app)) {
+        return validated;
+      }
+      // Validation answers with the generic box art for a name it cannot find. For anything but
+      // a utility entry that is no poster: as a local image it would outrank real artwork.
+      return validated == proc::validate_app_image_path({}) ? configured : fs::path {validated};
     }
 
     std::vector<game_artwork::local_candidate_t> local_artwork_candidates(const proc::ctx_t &app) {
@@ -3098,6 +3163,8 @@ namespace nvhttp {
       const auto appdata = platf::appdata();
       const auto candidates = local_artwork_candidates(app);
       const bool bundled_utility = uses_bundled_utility_artwork(app);
+      // An entry whose image was cleared stops showing the copy of the old one.
+      (void) game_artwork::retire_orphaned_local_poster(appdata, app.uuid, candidates);
       bool candidate_already_cached = false;
       if (bundled_utility && !candidates.empty()) {
         const auto cached_before = game_artwork::scan_cached_assets(appdata, app.uuid);
@@ -3107,10 +3174,10 @@ namespace nvhttp {
                    asset.source == candidates.front().source;
           });
       }
+      // A changed image replaces its copy, so a second cover pick reaches Nova.
       if (!candidates.empty() &&
           ((bundled_utility && !candidate_already_cached) ||
-           game_artwork::needs_source_upgrade(
-             appdata, app.uuid, game_artwork::kind_e::poster, candidates.front().source))) {
+           game_artwork::local_poster_needs_copy(appdata, app.uuid, candidates.front()))) {
         (void) game_artwork::cache_local_poster(appdata, app.uuid, candidates.front());
       }
       if (bundled_utility) {
@@ -7678,6 +7745,17 @@ namespace nvhttp {
 #ifdef __linux__
       features["lock_screen_control"] = true;
 #endif
+      // Speaking the protocol, not permission to use it. Whether this host
+      // will actually sleep is host_power below, which a client has to read
+      // before offering the control.
+      features["host_sleep_v1"] = false;
+#ifdef __linux__
+      features["host_sleep_v1"] = true;
+#endif
+
+      output["host_power"] = build_host_power_contract(
+        static_cast<bool>(named_cert_p->perm & PERM::launch)
+      );
 
       output["client_settings"] = {
         {"version", 1},
@@ -9131,31 +9209,20 @@ namespace nvhttp {
         return;
       }
       const auto transport = make_artwork_transport(api_key);
-      const auto search_request = game_artwork::providers::plan_steamgriddb_search(*query);
-      if (!search_request) {
-        response->write(SimpleWeb::StatusCode::client_error_bad_request);
-        return;
-      }
       try {
-        const auto search_response = transport(*search_request, artwork_metadata_bytes);
-        if (!search_response || search_response->status_code < 200 || search_response->status_code >= 300 ||
-            !game_artwork::is_allowed_provider_url(
-              game_artwork::provider_e::steamgriddb,
-              search_response->final_url.empty() ? search_request->url : search_response->final_url)) {
-          write_artwork_search_failure(
-            response,
-            game_artwork::manual::classify_search_failure(
-              true,
-              search_response ? std::optional<long>(static_cast<long>(search_response->status_code)) : std::optional<long> {}
-            )
-          );
+        const auto search = game_artwork::manual::search_match_candidates(
+          artwork_preview_cache(), app->uuid, *query, transport, artwork_now_milliseconds());
+        if (search.invalid_query) {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request);
           return;
         }
-        const std::string search_body(search_response->body.begin(), search_response->body.end());
-        const auto candidates = game_artwork::providers::parse_steamgriddb_match_candidates(
-          *query, search_body, game_artwork::manual::maximum_candidate_count);
+        if (search.failure) {
+          write_artwork_search_failure(response, *search.failure);
+          return;
+        }
         nlohmann::json matches = nlohmann::json::array();
-        for (const auto &candidate : candidates) {
+        for (const auto &found : search.candidates) {
+          const auto &candidate = found.candidate;
           nlohmann::json item {
             {"provider", candidate.provider},
             {"provider_game_id", candidate.provider_game_id},
@@ -9164,42 +9231,10 @@ namespace nvhttp {
           };
           if (candidate.steam_appid) item["steam_appid"] = *candidate.steam_appid;
           if (candidate.release_year) item["release_year"] = *candidate.release_year;
-          try {
-            const auto id = std::stoull(candidate.provider_game_id);
-            const auto plans = game_artwork::providers::plan_steamgriddb_assets(id);
-            const auto poster = std::find_if(plans.begin(), plans.end(), [](const auto &plan) {
-              return plan.kind == game_artwork::kind_e::poster;
-            });
-            if (poster != plans.end()) {
-              const auto list_response = transport(*poster, artwork_metadata_bytes);
-              if (list_response && list_response->status_code >= 200 && list_response->status_code < 300) {
-                const std::string list_body(list_response->body.begin(), list_response->body.end());
-                const auto images = game_artwork::providers::parse_steamgriddb_assets(
-                  game_artwork::kind_e::poster, list_body);
-                if (!images.empty()) {
-                  const game_artwork::providers::request_t download {
-                    game_artwork::provider_e::steamgriddb,
-                    game_artwork::providers::operation_e::download,
-                    game_artwork::kind_e::poster,
-                    images.front().url,
-                    false,
-                  };
-                  const auto image = transport(download, game_artwork::manual::maximum_preview_bytes);
-                  const auto effective = image && !image->final_url.empty() ? image->final_url : download.url;
-                  if (image && image->status_code >= 200 && image->status_code < 300 &&
-                      game_artwork::is_allowed_provider_url(download.provider, effective)) {
-                    if (const auto preview = artwork_preview_cache().publish(
-                          app->uuid, game_artwork::kind_e::poster, image->body, artwork_now_milliseconds())) {
-                      item["preview"] = {{"poster", "/polaris/v1/games/" + app->uuid +
-                        "/artwork/candidate/" + preview->token + "/poster"}};
-                      item["preview_expires_at"] = preview->expires_at;
-                    }
-                  }
-                }
-              }
-            }
-          } catch (...) {
-            // A preview failure never removes an otherwise valid sanitized candidate.
+          if (found.poster_token) {
+            item["preview"] = {{"poster", "/polaris/v1/games/" + app->uuid +
+              "/artwork/candidate/" + *found.poster_token + "/poster"}};
+            item["preview_expires_at"] = found.preview_expires_at;
           }
           matches.push_back(std::move(item));
         }
@@ -10480,6 +10515,90 @@ namespace nvhttp {
       }
     };
 
+    auto polarisHostPower = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      nlohmann::json output = build_host_power_contract(
+        static_cast<bool>(named_cert_p->perm & PERM::launch)
+      );
+      output["status"] = true;
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(output.dump(), headers);
+    };
+
+    auto polarisHostSleep = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+      const auto named_cert_p = get_verified_cert(request);
+      auto write_json = [&](const nlohmann::json &body, SimpleWeb::StatusCode code = SimpleWeb::StatusCode::success_ok) {
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Content-Type", "application/json");
+        response->write(code, body.dump(), headers);
+      };
+
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      // Launch permission, not a permission of its own. A client that can
+      // launch apps can already run a configured `systemctl suspend` entry on
+      // this host, so a first-class sleep control is not a new power at that
+      // level; what gates it is the host owner turning host_sleep_enabled on.
+      // A watch-only client has no launch permission and cannot ask.
+      if (!static_cast<bool>(named_cert_p->perm & PERM::launch)) {
+        write_json(
+          {{"status", false}, {"code", "permission_denied"}, {"error", "This client may watch but not control this host"}},
+          SimpleWeb::StatusCode::client_error_forbidden
+        );
+        return;
+      }
+
+      if (!config::sunshine.host_sleep_enabled) {
+        write_json(
+          {{"status", false}, {"code", "sleep_disabled"}, {"error", "Host sleep is turned off on this host"}},
+          SimpleWeb::StatusCode::client_error_forbidden
+        );
+        return;
+      }
+
+      // Refuse rather than kill a stream somebody else is watching. There is
+      // no force path in this slice on purpose: the client that wants the host
+      // asleep has already left its own session.
+      if (rtsp_stream::session_count() != 0) {
+        write_json(
+          {{"status", false}, {"code", "session_active"}, {"error", "A stream is still running on this host"}},
+          SimpleWeb::StatusCode::client_error_conflict
+        );
+        return;
+      }
+
+#ifdef __linux__
+      const auto result = session_manager::suspend_host();
+      if (!result.ok) {
+        const auto code = result.reason == "polkit_denied" ?
+                            SimpleWeb::StatusCode::client_error_forbidden :
+                            SimpleWeb::StatusCode::server_error_internal_server_error;
+        write_json({{"status", false}, {"code", result.reason}, {"error", result.message}}, code);
+        return;
+      }
+
+      BOOST_LOG(info) << "Client "sv << named_cert_p->uuid << " asked the host to sleep"sv;
+      write_json({{"status", true}, {"sleeping", true}});
+#else
+      write_json(
+        {{"status", false}, {"code", "unsupported_platform"}, {"error", "Host sleep is only implemented on Linux hosts"}},
+        SimpleWeb::StatusCode::server_error_not_implemented
+      );
+#endif
+    };
+
     auto polarisSessionStop = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
       const auto named_cert_p = get_verified_cert(request);
@@ -11200,6 +11319,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
+    https_server.resource["^/polaris/v1/host/power$"]["GET"] = polarisHostPower;
+    https_server.resource["^/polaris/v1/host/sleep$"]["POST"] = polarisHostSleep;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/client-settings$"]["POST"] = polarisClientSettings;
     https_server.resource["^/polaris/v1/stream-policy$"]["GET"] = polarisStreamPolicy;

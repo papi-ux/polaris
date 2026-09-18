@@ -114,6 +114,13 @@
               <option v-for="preset in romPresets" :key="preset.id" :value="preset.id">{{ preset.label }} ({{ preset.platform }})</option>
               <option :value="CUSTOM_EMULATOR">Custom command</option>
             </select>
+            <div v-if="selectedRomPresetInstall" class="mt-2 flex flex-wrap items-center gap-2" data-rom-preset-install>
+              <span class="text-xs" :class="selectedRomPresetInstall === 'installing' ? 'text-storm' : 'text-warning-bright'">
+                {{ selectedRomPresetInstall === 'installing' ? `${selectedRomPreset.install_job.message} ${ROM_INSTALL_WAIT_HINT}` : `${selectedRomPreset.label} is not installed on this host, so its games will not start until it is.` }}
+              </span>
+              <Button v-if="selectedRomPresetInstall === 'offer'" type="button" variant="outline" size="sm" :disabled="!!romInstallRequests[selectedRomPreset.id]" :loading="!!romInstallRequests[selectedRomPreset.id]" data-rom-preset-install-button @click="installRomEmulator(selectedRomPreset)">Install from Flathub</Button>
+            </div>
+            <div v-if="romEmulatorInstallFailure(selectedRomPreset || {})" class="mt-1 text-xs text-warning-bright" data-rom-preset-install-failed>{{ romEmulatorInstallFailure(selectedRomPreset || {}) }}</div>
             <div v-for="check in selectedRomPreset?.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-preset-check>
               {{ check.message }} <span class="font-mono">{{ check.action }}</span>
             </div>
@@ -152,8 +159,21 @@
               <div v-for="check in source.prerequisites || []" :key="check.id" class="mt-1 text-xs" :class="check.severity === 'warning' ? 'text-warning-bright' : 'text-storm'" data-rom-folder-check>
                 {{ check.message }} <span class="font-mono break-all">{{ check.action }}</span>
               </div>
+              <div v-if="romEmulatorInstallState(source) === 'installing'" class="mt-1 text-xs text-storm" data-rom-folder-installing>{{ source.install_job.message }} {{ ROM_INSTALL_WAIT_HINT }}</div>
+              <div v-else-if="romEmulatorInstallFailure(source)" class="mt-1 text-xs text-warning-bright" data-rom-folder-install-failed>{{ romEmulatorInstallFailure(source) }}</div>
             </div>
-            <Button variant="ghost" size="sm" :disabled="romSourceSaving" data-rom-folder-remove @click="removeRomSource(source)">Remove</Button>
+            <div class="flex shrink-0 flex-wrap items-start justify-end gap-2">
+              <Button
+                v-if="romEmulatorInstallState(source)"
+                variant="outline"
+                size="sm"
+                :disabled="romEmulatorInstallState(source) === 'installing' || !!romInstallRequests[source.emulator]"
+                :loading="romEmulatorInstallState(source) === 'installing' || !!romInstallRequests[source.emulator]"
+                data-rom-folder-install
+                @click="installRomEmulator(source)"
+              >{{ romEmulatorInstallState(source) === 'installing' ? 'Installing' : 'Install from Flathub' }}</Button>
+              <Button variant="ghost" size="sm" :disabled="romSourceSaving" data-rom-folder-remove @click="removeRomSource(source)">Remove</Button>
+            </div>
           </article>
         </div>
         <div v-else-if="!showRomSourceForm" class="mt-3 text-xs text-storm">No ROM folders yet.</div>
@@ -723,30 +743,57 @@
               <div class="app-editor-inline-control">
                 <input type="text" class="app-editor-input" id="appName" v-model="editForm.name" />
                 <div class="relative" ref="coverFinderWrapper">
-                  <button class="app-editor-secondary-button" type="button" @click="showCoverFinder">
+                  <button class="app-editor-secondary-button" type="button" aria-controls="coverFinder" :aria-expanded="coverFinderOpen ? 'true' : 'false'" @click="showCoverFinder">
                     {{ $t('apps.find_cover') }}
                   </button>
-                  <div v-if="coverFinderOpen" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
+                  <div v-if="coverFinderOpen" id="coverFinder" class="absolute right-0 top-full mt-1 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-storm bg-deep shadow-2xl">
                     <div class="flex justify-between items-center p-3 border-b border-storm">
                       <h4 class="text-silver font-medium">{{ $t('apps.covers_found') }}</h4>
-                      <button type="button" class="text-storm hover:text-silver" @click="closeCoverFinder">
+                      <button type="button" class="text-storm hover:text-silver" aria-label="Close cover search" @click="closeCoverFinder">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                       </button>
                     </div>
-                    <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }">
-                      <div class="grid grid-cols-3 gap-3">
-                        <div v-if="coverSearching" class="col-span-1">
-                          <div class="cover-container flex items-center justify-center">
-                            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-ice"></div>
-                          </div>
+                    <form class="flex gap-2 p-3 border-b border-storm" data-cover-search @submit.prevent="searchCovers">
+                      <label for="coverQuery" class="sr-only">Game to search SteamGridDB for</label>
+                      <input id="coverQuery" v-model="coverQuery" type="search" class="app-editor-input" placeholder="Game name" autocomplete="off" />
+                      <button type="submit" class="app-editor-secondary-button" :disabled="coverSearching || !coverQuery.trim()">Search</button>
+                    </form>
+                    <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }" aria-live="polite">
+                      <div v-if="coverSearching && !coverGame" class="flex items-center gap-2 text-sm text-storm" data-cover-state="searching">
+                        <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
+                        <span>Searching SteamGridDB for "{{ coverSearchedQuery }}"</span>
+                      </div>
+                      <div v-if="coverError" class="mb-3 text-sm text-warning-bright" role="alert" data-cover-state="error">
+                        <p>{{ coverError }}</p>
+                        <a v-if="coverNeedsKey" href="#/config#steamgriddb_api_key" target="_blank" rel="noopener" class="mt-1 inline-block text-ice hover:underline" data-cover-key-link>Open the SteamGridDB API key setting</a>
+                      </div>
+                      <p v-if="!coverGame && !coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-storm" data-cover-state="empty">
+                        No covers found for "{{ coverSearchedQuery }}". Try a shorter or different name.
+                      </p>
+                      <div v-if="!coverGame && !coverSearching && coverCandidates.length" class="grid grid-cols-3 gap-3">
+                        <button v-for="cover in coverCandidates" :key="cover.token" type="button" class="min-w-0 text-left cursor-pointer hover:opacity-80 transition" :title="`Posters for ${coverLabel(cover)}`" data-cover-candidate @click="openCoverGame(cover)">
+                          <span class="cover-container block">
+                            <img class="rounded" :src="cover.preview" :alt="coverLabel(cover)" />
+                          </span>
+                          <span class="block text-xs text-center text-silver truncate mt-1">{{ cover.title }}</span>
+                          <span v-if="cover.release_year" class="block text-xs text-center text-storm">{{ cover.release_year }}</span>
+                        </button>
+                      </div>
+                      <div v-if="coverGame" data-cover-game>
+                        <div class="mb-3 flex items-center gap-2">
+                          <button type="button" class="app-editor-secondary-button shrink-0" data-cover-back @click="closeCoverGame">All matches</button>
+                          <p class="min-w-0 truncate text-sm text-silver" :title="coverLabel(coverGame)">{{ coverLabel(coverGame) }}</p>
                         </div>
-                        <div v-for="cover in coverCandidates" :key="cover.key" class="cursor-pointer hover:opacity-80 transition" @click="useCover(cover)">
-                          <div class="cover-container">
-                            <img class="rounded" :src="cover.url" />
-                          </div>
-                          <label class="block text-xs text-center text-storm truncate mt-1">
-                            {{ cover.name }}
-                          </label>
+                        <div v-if="coverChoicesLoading" class="flex items-center gap-2 text-sm text-storm" data-cover-state="loading-posters">
+                          <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
+                          <span>Loading posters for "{{ coverGame.title }}"</span>
+                        </div>
+                        <div v-else class="grid grid-cols-3 gap-3">
+                          <button v-for="(poster, index) in coverPosters" :key="poster.token" type="button" class="min-w-0 cursor-pointer hover:opacity-80 transition" :title="posterLabel(index)" data-cover-poster @click="useCover(poster)">
+                            <span class="cover-container block">
+                              <img class="rounded" :src="poster.preview" :alt="posterLabel(index)" />
+                            </span>
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -821,7 +868,7 @@
               <div class="section-kicker">Launch</div>
               <h2 class="section-title">Command path</h2>
             </div>
-            <span class="data-pill">{{ editForm.cmd?.trim() ? 'Command set' : 'Needs command' }}</span>
+            <span class="data-pill">{{ editHasLaunchCommand ? 'Command set' : 'Needs command' }}</span>
           </div>
 
           <div class="app-editor-grid">
@@ -1119,7 +1166,7 @@
             </div>
             <div class="library-health-chip">
               <span>Command</span>
-              <strong>{{ editForm.cmd?.trim() ? 'Ready' : 'Missing' }}</strong>
+              <strong>{{ editHasLaunchCommand ? 'Ready' : 'Missing' }}</strong>
             </div>
             <div class="library-health-chip">
               <span>Tweaks</span>
@@ -1155,12 +1202,12 @@ import { artworkLookupOffSet } from '../app-artwork.js'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
-import { isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
+import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
 import { filterImportGames, summarizeImportGames } from '../library-imports'
 import { useRomSources } from '../composables/useRomSources'
 import {
-  CUSTOM_EMULATOR, blankRomSourceForm, romSourceCountLabel, romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus,
-  validateRomSourceForm
+  CUSTOM_EMULATOR, blankRomSourceForm, romEmulatorId, romEmulatorInstallFailure, romEmulatorInstallState, romSourceCountLabel,
+  romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus, validateRomSourceForm
 } from '../rom-sources'
 
 const { toast: showToast } = useToast()
@@ -1177,19 +1224,27 @@ const importSearch = ref('')
 const importStatus = ref('new')
 const {
   presets: romPresets, sources: romSources, saving: romSourceSaving,
-  error: romSourceRequestError, load: loadRomSources, add: addRomSource, remove: removeRomSourceById
+  error: romSourceRequestError, load: loadRomSources, add: addRomSource, remove: removeRomSourceById,
+  installRequests: romInstallRequests, install: installRomEmulatorById, onInstallFinished: onRomEmulatorInstallFinished
 } = useRomSources()
+const ROM_INSTALL_WAIT_HINT = 'A download can take a few minutes; this updates when it is done.'
 const showRomSourceForm = ref(false)
 const romSourceFormError = ref('')
 const romSourceForm = ref(blankRomSourceForm())
 const romSourceIsCustom = computed(() => romSourceForm.value.emulator === CUSTOM_EMULATOR)
 const selectedRomPreset = computed(() => romPresets.value.find((preset) => preset.id === romSourceForm.value.emulator) || null)
+// An emulator file typed into the form wins over a Flatpak, so no install is offered then.
+const selectedRomPresetInstall = computed(() => (
+  selectedRomPreset.value ? romEmulatorInstallState({ ...selectedRomPreset.value, launcher: romSourceForm.value.launcher }) : ''
+))
 const romSourceReadyCount = computed(() => romSourceCards.value.filter((source) => romSourceReady(source)).length)
 const romSourceError = computed(() => romSourceFormError.value || romSourceRequestError.value || '')
 // The registered folders, with what the last scan learned about each (games found, warnings).
+// Where the emulator is and its install job come from the folder list, which is read
+// again while an install runs; the scan's copy of them is only as new as the last scan.
 const romSourceCards = computed(() => romSources.value.map((source) => {
   const scanned = librarySources.value.find((entry) => entry.id === source.id)
-  return scanned ? { ...source, ...scanned } : source
+  return scanned ? { ...source, ...scanned, install: source.install, installable: source.installable, install_job: source.install_job } : source
 }))
 
 function openRomSourceForm() {
@@ -1211,6 +1266,23 @@ async function submitRomSource() {
   showToast('ROM folder added', 'success')
   await scanGames()
 }
+
+async function installRomEmulator(entry) {
+  const emulator = romEmulatorId(entry)
+  if (await installRomEmulatorById(emulator)) {
+    showToast(`Installing ${entry.label || emulator} from Flathub`, 'info')
+  }
+}
+
+onRomEmulatorInstallFinished(({ job }) => {
+  if (job?.state === 'installed') {
+    showToast(job.message || 'Emulator installed', 'success')
+    // Rescan so each folder shows what the emulator still needs, such as Eden's keys.
+    scanGames()
+    return
+  }
+  showToast(job?.message || 'The install from Flathub failed', 'error', 8000)
+})
 
 async function removeRomSource(source) {
   if (!(await removeRomSourceById(source.id))) return
@@ -1274,10 +1346,32 @@ const showEditForm = ref(false)
 const actionDisabled = ref(false)
 const pendingStopAppUuid = ref("")
 const editForm = ref(null)
+// Find Cover asks the host, which runs Nova's SteamGridDB search and serves the
+// previews itself: the console's CSP loads no images from anywhere else.
 const coverSearching = ref(false)
 const coverFinderBusy = ref(false)
 const coverFinderOpen = ref(false)
 const coverCandidates = ref([])
+const coverQuery = ref("")
+const coverSearchedQuery = ref("")
+const coverError = ref("")
+const coverErrorCode = ref("")
+const coverNeedsKey = computed(() => ['steamgriddb_key_missing', 'steamgriddb_unauthorized'].includes(coverErrorCode.value))
+// A game picked from the matches lists its posters, as Nova's Artwork Studio does. Its search
+// poster stands in when the list comes back empty or fails, so there is always one to pick.
+const coverGame = ref(null)
+const coverChoices = ref([])
+const coverChoicesLoading = ref(false)
+const coverPosters = computed(() => {
+  if (coverChoices.value.length) return coverChoices.value
+  return coverGame.value ? [coverGame.value] : []
+})
+let coverChoicesSequence = 0
+let coverPickSequence = 0
+// Launcher entries such as Heroic and Lutris start through a detached command.
+const editHasLaunchCommand = computed(() => hasLaunchCommand(editForm.value))
+let coverSearchUuid = ""
+let coverSearchSequence = 0
 const platform = ref("")
 const currentApp = ref("")
 const draggingApp = ref(-1)
@@ -1614,6 +1708,7 @@ function onArtworkChanged({ uuid, lookupOff }) {
 }
 
 function newApp() {
+  resetCoverFinder()
   editForm.value = Object.assign({}, newAppTemplate)
   editEnvVars.value = []
   editMangoHud.value = false
@@ -1674,6 +1769,7 @@ function closeApp(options = {}) {
 }
 
 function editApp(app) {
+  resetCoverFinder()
   editForm.value = Object.assign({}, newAppTemplate, JSON.parse(JSON.stringify(app)))
   // Populate env vars editor from the app's env object
   const envObj = app.env || {}
@@ -1725,76 +1821,176 @@ function addCmd(cmdArr, idx) {
   else cmdArr.splice(idx, 0, template)
 }
 
-function showCoverFinder() {
+const COVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function newCoverUuid() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+// Previews and the picked file belong to the entry's uuid. A draft has none yet,
+// so it borrows a temporary one until the editor opens something else.
+function coverScopeUuid() {
+  if (!coverSearchUuid) {
+    const uuid = editForm.value?.uuid
+    coverSearchUuid = typeof uuid === 'string' && COVER_UUID.test(uuid) ? uuid : newCoverUuid()
+  }
+  return coverSearchUuid
+}
+
+function resetCoverFinder() {
+  coverSearchSequence += 1
+  coverChoicesSequence += 1
+  coverPickSequence += 1
+  coverGame.value = null
+  coverChoices.value = []
+  coverChoicesLoading.value = false
+  coverFinderOpen.value = false
+  coverSearching.value = false
+  coverFinderBusy.value = false
   coverCandidates.value = []
-  coverSearching.value = true
+  coverQuery.value = ""
+  coverSearchedQuery.value = ""
+  coverError.value = ""
+  coverErrorCode.value = ""
+  coverSearchUuid = ""
+}
+
+function coverLabel(cover) {
+  return cover.release_year ? `${cover.title} (${cover.release_year})` : cover.title
+}
+
+function posterLabel(index) {
+  return coverGame.value ? `Poster ${index + 1} for ${coverLabel(coverGame.value)}` : `Poster ${index + 1}`
+}
+
+function showCoverFinder() {
   coverFinderOpen.value = true
+  coverQuery.value = (editForm.value?.name || "").toString().trim()
+  if (coverQuery.value) searchCovers()
+}
 
-  function getSearchBucket(name) {
-    let bucket = name.substring(0, Math.min(name.length, 2)).toLowerCase().replaceAll(/[^a-z\d]/g, '')
-    if (!bucket) return '@'
-    return bucket
+function showCoverFailure(response, body, fallback) {
+  coverErrorCode.value = typeof body?.code === 'string' ? body.code : ""
+  coverError.value = typeof body?.error === 'string' && body.error
+    ? body.error
+    : `${fallback} (HTTP ${response.status}).`
+}
+
+async function searchCovers() {
+  const query = coverQuery.value.trim()
+  if (!query) return
+  closeCoverGame()
+  const sequence = ++coverSearchSequence
+  coverSearching.value = true
+  coverSearchedQuery.value = query
+  coverCandidates.value = []
+  coverError.value = ""
+  coverErrorCode.value = ""
+  try {
+    const params = new URLSearchParams({ name: query, uuid: coverScopeUuid() })
+    const response = await fetch(`./api/covers/search?${params}`, { credentials: 'include' })
+    const body = await response.json().catch(() => null)
+    if (sequence !== coverSearchSequence) return
+    if (!response.ok || body?.status !== true) {
+      showCoverFailure(response, body, 'The cover search failed')
+      return
+    }
+    const candidates = Array.isArray(body.candidates) ? body.candidates : []
+    coverCandidates.value = candidates.filter(cover => cover?.token && cover?.preview && cover?.title)
+  } catch {
+    if (sequence !== coverSearchSequence) return
+    coverErrorCode.value = ""
+    coverError.value = "Polaris could not run the cover search. Check the connection to the host and try again."
+  } finally {
+    if (sequence === coverSearchSequence) coverSearching.value = false
   }
-
-  function searchCovers(name) {
-    if (!name) return Promise.resolve([])
-    let searchName = name.replaceAll(/\s+/g, '.').toLowerCase()
-    let dbUrl = "https://raw.githubusercontent.com/LizardByte/GameDB/gh-pages"
-    let bucket = getSearchBucket(name)
-    return fetch(`${dbUrl}/buckets/${bucket}.json`).then(function (r) {
-      if (!r.ok) throw new Error("Failed to search covers")
-      return r.json()
-    }).then(maps => Promise.all(Object.keys(maps).map(id => {
-      let item = maps[id]
-      if (item.name.replaceAll(/\s+/g, '.').toLowerCase().startsWith(searchName)) {
-        return fetch(`${dbUrl}/games/${id}.json`).then(function (r) {
-          return r.json()
-        }).catch(() => null)
-      }
-      return null
-    }).filter(item => item)))
-      .then(results => results
-        .filter(item => item && item.cover && item.cover.url)
-        .map(game => {
-          const thumb = game.cover.url
-          const dotIndex = thumb.lastIndexOf('.')
-          const slashIndex = thumb.lastIndexOf('/')
-          if (dotIndex < 0 || slashIndex < 0) return null
-          const slug = thumb.substring(slashIndex + 1, dotIndex)
-          return {
-            name: game.name,
-            key: `igdb_${game.id}`,
-            url: `https://images.igdb.com/igdb/image/upload/t_cover_big/${slug}.jpg`,
-            saveUrl: `https://images.igdb.com/igdb/image/upload/t_cover_big_2x/${slug}.png`,
-          }
-        }).filter(item => item))
-  }
-
-  searchCovers(editForm.value["name"].toString().trim())
-    .then(list => coverCandidates.value = list)
-    .finally(() => coverSearching.value = false)
 }
 
 function closeCoverFinder() {
   coverFinderOpen.value = false
 }
 
-function useCover(cover) {
-  coverFinderBusy.value = true
-  fetch("./api/covers/upload", {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    method: 'POST',
-    body: JSON.stringify({
-      key: cover.key,
-      url: cover.saveUrl,
+function closeCoverGame() {
+  coverChoicesSequence += 1
+  coverGame.value = null
+  coverChoices.value = []
+  coverChoicesLoading.value = false
+  coverError.value = ""
+  coverErrorCode.value = ""
+}
+
+async function openCoverGame(game) {
+  if (coverFinderBusy.value) return
+  const uuid = coverScopeUuid()
+  const sequence = ++coverChoicesSequence
+  coverGame.value = game
+  coverChoices.value = []
+  coverChoicesLoading.value = true
+  coverError.value = ""
+  coverErrorCode.value = ""
+  try {
+    const request = { uuid, provider_game_id: game.provider_game_id, title: game.title }
+    if (game.steam_appid) request.steam_appid = game.steam_appid
+    const response = await fetch("./api/covers/choices", {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify(request),
     })
-  }).then(r => {
-    if (!r.ok) throw new Error("Failed to download covers")
-    return r.json()
-  }).then(body => editForm.value["image-path"] = body.path)
-    .then(() => closeCoverFinder())
-    .finally(() => coverFinderBusy.value = false)
+    const body = await response.json().catch(() => null)
+    if (sequence !== coverChoicesSequence) return
+    if (!response.ok || body?.status !== true) {
+      showCoverFailure(response, body, 'Polaris could not list the posters for that game')
+      return
+    }
+    const choices = Array.isArray(body.choices) ? body.choices : []
+    coverChoices.value = choices.filter(choice => choice?.token && choice?.preview)
+  } catch {
+    if (sequence !== coverChoicesSequence) return
+    coverErrorCode.value = ""
+    coverError.value = "Polaris could not list the posters. Check the connection to the host and try again."
+  } finally {
+    if (sequence === coverChoicesSequence) coverChoicesLoading.value = false
+  }
+}
+
+async function useCover(cover) {
+  if (coverFinderBusy.value) return
+  const uuid = coverScopeUuid()
+  const sequence = ++coverPickSequence
+  coverFinderBusy.value = true
+  coverError.value = ""
+  coverErrorCode.value = ""
+  try {
+    const response = await fetch("./api/covers/select", {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      body: JSON.stringify({ uuid, token: cover.token }),
+    })
+    const body = await response.json().catch(() => null)
+    // The editor moved on to another entry while the pick was saving.
+    if (uuid !== coverSearchUuid) return
+    if (!response.ok || body?.status !== true || !body.path) {
+      showCoverFailure(response, body, 'Polaris could not use that cover')
+      return
+    }
+    // The pick lands in the form; the entry changes when the player saves it.
+    editForm.value["image-path"] = body.path
+    closeCoverFinder()
+  } catch {
+    if (uuid !== coverSearchUuid) return
+    coverError.value = "Polaris could not use that cover. Check the connection to the host and try again."
+  } finally {
+    // Only the newest pick clears the panel, so an answer for an entry the editor has left
+    // cannot let a second pick start while this one is still saving.
+    if (sequence === coverPickSequence) coverFinderBusy.value = false
+  }
 }
 
 function save() {

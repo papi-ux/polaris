@@ -1099,4 +1099,160 @@ namespace emulator_library {
     }
     return source.emulator == custom_emulator_id ? "Custom command" : source.emulator;
   }
+
+  /// The folder list lives next to apps.json, wherever that is: the folders belong with the apps they feed.
+  inline std::filesystem::path sources_path_for_apps_file(const std::filesystem::path &apps_file, const std::filesystem::path &fallback_directory) {
+    const auto directory = apps_file.has_parent_path() ? apps_file.parent_path() : fallback_directory;
+    return directory / "library_sources.json";
+  }
+
+  /// The emulator file a registered folder names, or empty when it names none or is not registered.
+  inline std::string configured_launcher_for(const std::vector<source_t> &sources, std::string_view source_id) {
+    source_id = trim_view(source_id);
+    if (source_id.empty()) {
+      return {};
+    }
+    const auto it = std::find_if(sources.begin(), sources.end(), [&](const source_t &source) {
+      return source.id == source_id;
+    });
+    return it == sources.end() ? std::string {} : it->launcher;
+  }
+
+  /// The path a token holds when it is exactly one path as shell_quote writes it.
+  inline std::optional<std::string> single_quoted_path(std::string_view token) {
+    if (token.size() < 2 || token.front() != '\'' || token.back() != '\'') {
+      return std::nullopt;
+    }
+    std::string inner;
+    std::size_t start = 1;
+    while (true) {
+      const auto close = token.find('\'', start);
+      if (close == std::string_view::npos) {
+        return std::nullopt;
+      }
+      inner.append(token.substr(start, close - start));
+      if (close == token.size() - 1) {
+        return shell_quote(inner) == token ? std::optional<std::string>(inner) : std::nullopt;
+      }
+      if (token.substr(close, 4) != "'\\''") {
+        return std::nullopt;
+      }
+      inner.push_back('\'');
+      start = close + 4;
+    }
+  }
+
+  /// Whether a token is exactly one path as shell_quote writes it.
+  inline bool single_quoted_token(std::string_view token) {
+    return single_quoted_path(token).has_value();
+  }
+
+  /**
+   * @brief Whether a saved entry command is one Polaris wrote at import, under any install.
+   *
+   * Import writes the launch for the install the host had then: an emulator file, a
+   * binary on PATH, the Flatpak, or the bare binary name while the emulator was missing,
+   * followed by the preset's arguments for the game. A quoted emulator file counts when the
+   * folder names that file, or when the file is gone, since the folder may have been added again
+   * with another one. A command the player edited (other flags, a wrapper in front, an emulator
+   * file of their own that is there) matches none of them and is theirs: launch neither replaces
+   * nor refuses it.
+   */
+  inline bool generated_entry_command(
+    const preset_t &preset,
+    std::string_view rom_path,
+    std::string_view saved_command,
+    std::string_view configured_launcher = {}
+  ) {
+    const auto saved = trim_view(saved_command);
+    const auto rom = trim_view(rom_path);
+    std::string_view emulator = saved;
+    if (!rom.empty()) {
+      const auto arguments = " " + substitute_rom(preset.arguments.empty() ? rom_placeholder : preset.arguments, std::filesystem::path(rom));
+      if (saved.size() <= arguments.size() || saved.substr(saved.size() - arguments.size()) != arguments) {
+        return false;
+      }
+      emulator = saved.substr(0, saved.size() - arguments.size());
+    }
+    if (emulator == "flatpak run " + std::string(preset.flatpak_id)) {
+      return !preset.flatpak_id.empty();
+    }
+    if (std::find(preset.binaries.begin(), preset.binaries.end(), emulator) != preset.binaries.end()) {
+      return true;
+    }
+    // An emulator file, quoted the way import writes it. The folder's own launcher is Polaris's
+    // to update. So is a file that is no longer there, because the folder may have been added
+    // again with another emulator and no command can be running from a path that is gone. A
+    // path that does exist and is not the folder's is the player's, edited in deliberately.
+    const auto quoted = single_quoted_path(emulator);
+    if (!quoted) {
+      return false;
+    }
+    const auto launcher = trim_view(configured_launcher);
+    if (!launcher.empty() && *quoted == launcher) {
+      return true;
+    }
+    std::error_code error;
+    return !std::filesystem::is_regular_file(std::filesystem::path(*quoted), error);
+  }
+
+  /// What an imported entry runs with its emulator as this host has it right now.
+  struct entry_launch_t {
+    const preset_t *preset = nullptr;
+    install_t install;
+    std::string command;  ///< empty while the emulator is missing
+  };
+
+  /**
+   * @brief Resolve an imported entry's command against the emulator as it is installed now.
+   *
+   * The command saved at import names whatever was there then, and a missing emulator is
+   * saved under its bare binary name, which a later Flatpak install never provides. The
+   * game entries carry their file; the emulator's own entry carries none and gets the
+   * launcher command. A custom template or an unknown emulator has nothing to resolve.
+   */
+  inline std::optional<entry_launch_t> resolve_entry_launch(
+    std::string_view emulator_id,
+    std::string_view rom_path,
+    std::string_view configured_launcher,
+    const std::vector<std::filesystem::path> &home_roots,
+    std::string_view path_env,
+    const std::filesystem::path &system_flatpak_root = "/var/lib/flatpak"
+  ) {
+    const auto *preset = find_preset(trim_view(emulator_id));
+    if (preset == nullptr) {
+      return std::nullopt;
+    }
+    entry_launch_t result;
+    result.preset = preset;
+    result.install = detect_install(*preset, configured_launcher, home_roots, path_env, system_flatpak_root);
+    if (result.install.kind == install_e::missing) {
+      return result;
+    }
+    const auto rom = trim_view(rom_path);
+    result.command = rom.empty() ? launcher_command(*preset, result.install) : launch_command(*preset, result.install, std::filesystem::path(rom));
+    return result;
+  }
+
+  /// Why an imported entry cannot start, as the one sentence and the one fix a client shows.
+  struct missing_install_reason_t {
+    std::string message;
+    std::string action;
+  };
+
+  inline missing_install_reason_t missing_install_reason(const preset_t &preset, const install_t &install, std::string_view app_name) {
+    const std::string label {preset.label};
+    const auto name = trim_view(app_name);
+    const std::string subject = name.empty() || name == preset.label ? std::string {} : ", so " + std::string(name) + " cannot start";
+    if (!install.location.empty()) {
+      return {
+        label + " was not found at " + install.location + subject + ".",
+        "Put " + label + " back at that path, or add the ROM folder again with the file where it is now, then launch again.",
+      };
+    }
+    return {
+      label + " is not installed on this host" + subject + ".",
+      "Install " + label + " from ROM folders under Import Games in the Polaris web UI, then launch again.",
+    };
+  }
 }  // namespace emulator_library

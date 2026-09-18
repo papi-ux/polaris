@@ -113,6 +113,39 @@ namespace session_manager {
    */
   bool unlock_screen();
 
+  /**
+   * @brief Whether logind would accept a suspend request from Polaris.
+   *
+   * Probed rather than inferred from the presence of systemctl. logind's
+   * CanSuspend answers the three cases a client needs to tell apart: it will
+   * suspend, polkit will demand interactive authentication that a remote
+   * request cannot answer, or the host cannot suspend at all.
+   */
+  struct host_sleep_readiness_t {
+    bool supported = false;   ///< A suspend request would be accepted
+    std::string reason;       ///< Machine readable code when it would not be
+    std::string message;      ///< Human readable detail, safe to show a client
+  };
+
+  host_sleep_readiness_t host_sleep_readiness();
+
+  /**
+   * @brief Outcome of a host suspend request.
+   */
+  struct host_sleep_result_t {
+    bool ok = false;          ///< logind accepted the request
+    std::string reason;       ///< Machine readable code when it did not
+    std::string message;      ///< Human readable detail, safe to show a client
+  };
+
+  /**
+   * @brief Ask logind to suspend the host without an interactive polkit prompt.
+   *
+   * Checks readiness first, so a host that cannot suspend fails with a reason
+   * instead of a silent no-op.
+   */
+  host_sleep_result_t suspend_host();
+
 #ifdef POLARIS_TESTS
   void set_command_hooks_for_tests(
     std::function<std::string(const std::string &)> exec_hook,

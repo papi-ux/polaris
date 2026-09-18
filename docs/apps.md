@@ -79,7 +79,7 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 | Field | What it does |
 | --- | --- |
 | **Application Name** | The name shown on Moonlight and Nova. |
-| **Image** | The icon, picture, or box image sent to clients. PNG only; when unset, Polaris sends its default box image. |
+| **Image** | The icon, picture, or box image sent to clients: PNG, JPEG or WebP. A bare file name such as `lutris.png` or `heroic.png` names an image Polaris ships. When unset, Polaris sends its default box image. **Find Cover** searches SteamGridDB through the host for the name you type and shows up to five of the games it matches that have a poster, with their titles and years. It reads past matches without one, so "Heroic" finds Heroic Games Launcher. Picking a game shows up to five of its posters, the ones Nova's Artwork Studio offers for it, and **All matches** goes back. Picking a poster saves the full image in Polaris's covers directory and puts its path here; the entry uses it once you save. The search needs the SteamGridDB API key from Settings, General, and says so, with a link to that field, when the key is missing. |
 | **Artwork in Nova** | How Nova gets posters, backgrounds, logos and icons for a saved entry, with **Remove artwork** and **Find artwork again**. See [Artwork in Nova](#artwork-in-nova). |
 | **Game Category** | A classification hint for Auto Quality, detected from Steam genres on import. |
 | **Platform and runtime** | Filled in for titles imported from Heroic. Says what the title installs as and what will execute it, such as Windows through Proton-GE. Left blank when Heroic did not record it. |
@@ -87,6 +87,15 @@ Saving writes the launcher profile immediately; there is no separate apply step.
 | **MangoHud Overlay** | Shows GPU, CPU, temperature, and frametime in the stream from the host side. |
 
 ### Artwork in Nova
+
+An entry's image is its poster in Nova. A new image, including a second cover picked into the
+same file, replaces the poster the next time Nova loads the library, and clearing the image lets
+the next source show.
+
+Artwork picked in Nova comes before the entry's image. A cover you pick with **Find Cover** takes the
+poster back: saving the entry then drops the poster picked in Nova and keeps its background, logo and
+icon. Any other image leaves Nova's pick alone, whether you typed the path yourself or a library
+rescan refreshed the cover an import downloaded.
 
 When Nova shows an entry without artwork of its own, Polaris looks it up. A Steam title gets
 Steam's images, and with a SteamGridDB key set in Settings the rest comes from its SteamGridDB game,

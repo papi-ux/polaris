@@ -31,8 +31,13 @@ namespace stream_stats {
   struct stats_t;
 }
 
-#if defined(__linux__)
 #include "game_artwork_provider.h"
+
+namespace game_artwork::manual {
+  class preview_cache_t;
+}
+
+#if defined(__linux__)
 namespace proc {
   struct desktop_launch_safety_policy_t;
 }
@@ -75,6 +80,19 @@ namespace nvhttp {
   constexpr auto PORT_HTTPS = -5;
 
   constexpr auto OTP_EXPIRE_DURATION = 180s;
+
+  /**
+   * @brief The SteamGridDB transport behind Nova's artwork routes, carrying the given key.
+   * @details The console's cover search uses the same transport, allowlist and limits, so the
+   *          Apps page cannot fetch anything Nova's Artwork Studio would refuse.
+   */
+  game_artwork::providers::transport_t artwork_transport(std::string api_key);
+
+  /** @brief The preview cache Nova's artwork candidates and the console's cover search publish into. */
+  game_artwork::manual::preview_cache_t &artwork_candidate_previews();
+
+  /** @brief Epoch milliseconds, the clock the artwork preview cache expires against. */
+  std::int64_t artwork_clock_milliseconds();
 
   /**
    * @brief What an accepted one-time pin authorizes, lifted out under the lock.

@@ -11,9 +11,21 @@ and the custom command form, are in [Add and edit apps](apps.md#rom-folders).
 **Install the emulator on the host.** Polaris finds it in this order: the file
 you point the folder at (an AppImage in `~/Apps`, say), a binary on the
 service's `PATH`, then the Flatpak. A folder whose emulator is missing still
-imports; the entries launch once it is installed. Polaris runs as a service
-with its own `PATH`, so an emulator that only lives in `~/.local/bin` or a
-shell alias is better named as the folder's emulator file.
+imports, and its entries launch once the emulator is installed; until then a
+launch is refused with `emulator_not_installed` and the reason, instead of a
+black screen. Polaris runs as a service with its own `PATH`, so an emulator
+that only lives in `~/.local/bin` or a shell alias is better named as the
+folder's emulator file.
+
+When Flatpak is on the host, a missing preset emulator gets an **Install from
+Flathub** button on its folder card and next to it in the add-folder form. It
+runs `flatpak install --user flathub <id>` for the account Polaris runs as,
+adding the Flathub remote for that account first if it is not there. The card
+shows the install while it downloads, then what the emulator still needs, and
+the games already imported from its folders launch the Flatpak from then on.
+If Flathub refuses, the card shows Flatpak's own reason; DuckStation, for one,
+is no longer published there, so install it another way and name the file.
+Polaris never downloads keys, firmware or BIOS images.
 
 **Give it its keys or BIOS.** An emulator that cannot decrypt or boot a game
 shows a black screen on the stream and says why only on its own window, which

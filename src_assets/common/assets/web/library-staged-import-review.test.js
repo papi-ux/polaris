@@ -138,3 +138,115 @@ describe('AppsView staged import review', () => {
     expect(wrapper.find('.library-import-staged-summary').text()).toContain('No games staged')
   })
 })
+
+describe('AppsView ROM folder emulator install', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    delete global.fetch
+    document.body.innerHTML = ''
+  })
+
+  it('installs a missing emulator from Flathub, shows it running, then what the emulator needs next', async () => {
+    resetScannerState()
+    const wrapper = mountAppsView()
+    await flushAppsViewLoad()
+
+    const hostFetch = global.fetch
+    let job = null
+    let installed = false
+    const installRequests = []
+    global.fetch = vi.fn((url, options = {}) => {
+      if (url === './api/library/sources') {
+        const install = installed ? { kind: 'flatpak', location: 'dev.eden_emu.eden' } : { kind: 'missing', location: '' }
+        const prerequisites = installed
+          ? [{ id: 'eden_keys_missing', severity: 'warning', message: 'Eden has no prod.keys, so no game will boot.', action: 'Copy prod.keys into the keys folder' }]
+          : []
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            status: true,
+            presets: [{ id: 'eden', label: 'Eden', platform: 'Nintendo Switch', install, installable: true, install_job: job, prerequisites }],
+            sources: [{
+              id: 'folder-1',
+              emulator: 'eden',
+              label: 'Eden',
+              path: '/roms/switch',
+              install,
+              installable: true,
+              install_job: job,
+              warning: installed ? '' : 'Eden is not installed on this host, so games from this folder will not start until it is.',
+              prerequisites,
+            }],
+          }),
+        })
+      }
+      if (url === './api/library/emulators/install') {
+        installRequests.push({ method: options.method, body: JSON.parse(options.body) })
+        job = { state: 'installing', message: 'Installing Eden from Flathub.', started_at: 1, finished_at: 0 }
+        return Promise.resolve({ ok: true, status: 202, json: () => Promise.resolve({ status: true, install_job: job }) })
+      }
+      return hostFetch(url, options)
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+    await wrapper.find('button').trigger('click')
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+
+    const card = () => wrapper.find('[data-rom-folder]')
+    expect(card().text()).toContain('Eden not found')
+    expect(card().text()).toContain('will not start until it is')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install from Flathub')
+
+    await wrapper.find('[data-rom-folder-install]').trigger('click')
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+    expect(installRequests).toEqual([{ method: 'POST', body: { emulator: 'eden' } }])
+    expect(wrapper.find('[data-rom-folder-installing]').text()).toContain('Installing Eden from Flathub.')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Installing')
+    expect(wrapper.find('[data-rom-folder-install]').attributes('disabled')).toBeDefined()
+
+    const scansBefore = scannerState.scan.mock.calls.length
+    job = { state: 'installed', message: 'Eden is installed.', started_at: 1, finished_at: 2 }
+    installed = true
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+
+    expect(card().text()).toContain('Eden via Flatpak')
+    expect(wrapper.find('[data-rom-folder-install]').exists()).toBe(false)
+    expect(wrapper.find('[data-rom-folder-installing]').exists()).toBe(false)
+    expect(wrapper.find('[data-rom-folder-check]').text()).toContain('prod.keys')
+    expect(scannerState.scan.mock.calls.length).toBe(scansBefore + 1)
+  })
+
+  it('keeps Flatpak\'s reason on the card when an install fails', async () => {
+    resetScannerState()
+    const wrapper = mountAppsView()
+    await flushAppsViewLoad()
+
+    const hostFetch = global.fetch
+    global.fetch = vi.fn((url, options) => {
+      if (url === './api/library/sources') {
+        const failed = { state: 'failed', message: 'Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub', started_at: 1, finished_at: 2 }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            status: true,
+            presets: [{ id: 'duckstation', label: 'DuckStation', platform: 'PlayStation', install: { kind: 'missing', location: '' }, installable: true, install_job: failed }],
+            sources: [{ id: 'folder-2', emulator: 'duckstation', label: 'DuckStation', path: '/roms/psx', install: { kind: 'missing', location: '' }, installable: true, install_job: failed, prerequisites: [] }],
+          }),
+        })
+      }
+      return hostFetch(url, options)
+    })
+
+    await wrapper.find('button').trigger('click')
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+
+    expect(wrapper.find('[data-rom-folder-install-failed]').text()).toBe('Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install from Flathub')
+  })
+})

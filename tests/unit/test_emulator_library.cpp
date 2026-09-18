@@ -5,12 +5,16 @@
 #include "../tests_common.h"
 #include "../tests_paths.h"
 
+#include <src/emulator_install.h>
 #include <src/emulator_library.h>
 
 #include <boost/program_options/parsers.hpp>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <mutex>
 #include <set>
 
 namespace {
@@ -485,4 +489,243 @@ TEST(EmulatorLibraryInstall, HomeExpansion) {
   EXPECT_EQ(emulator_library::expand_home("~other/roms", "/accounts/x"), "~other/roms");
   EXPECT_EQ(emulator_library::expand_home("/roms", "/accounts/x"), "/roms");
   EXPECT_EQ(emulator_library::expand_home("~/roms", ""), "~/roms");
+}
+
+TEST(EmulatorLibraryResolve, AnEntryRunsWhatIsInstalledNotWhatWasSavedAtImport) {
+  const auto root = fresh_root("resolve");
+  const auto home = root / "home";
+  const auto system_flatpak = root / "var-lib-flatpak";
+  const auto empty_path = (root / "empty").string();
+  using install_e = emulator_library::install_e;
+
+  // Imported while Eden was missing: the saved command names the bare binary.
+  const auto missing = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", "", {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_EQ(missing->install.kind, install_e::missing);
+  EXPECT_TRUE(missing->command.empty());
+  ASSERT_NE(missing->preset, nullptr);
+  EXPECT_EQ(missing->preset->id, "eden");
+
+  // Installed from Flathub afterwards: the game and the emulator's own entry both follow it.
+  fs::create_directories(home / ".local" / "share" / "flatpak" / "app" / "dev.eden_emu.eden");
+  const auto game = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", "", {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(game.has_value());
+  EXPECT_EQ(game->install.kind, install_e::flatpak);
+  EXPECT_EQ(game->command, "flatpak run dev.eden_emu.eden -f -g '/roms/Game.xci'");
+  const auto launcher_entry = emulator_library::resolve_entry_launch("eden", "", "", {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(launcher_entry.has_value());
+  EXPECT_EQ(launcher_entry->command, "flatpak run dev.eden_emu.eden");
+
+  // The folder's own emulator file wins, and one that went away is missing with its path.
+  touch(root / "Eden.AppImage");
+  const auto appimage = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", (root / "Eden.AppImage").string(), {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(appimage.has_value());
+  EXPECT_EQ(appimage->command, "'" + (root / "Eden.AppImage").string() + "' -f -g '/roms/Game.xci'");
+  const auto gone = emulator_library::resolve_entry_launch("eden", "/roms/Game.xci", (root / "Gone.AppImage").string(), {home}, empty_path, system_flatpak);
+  ASSERT_TRUE(gone.has_value());
+  EXPECT_EQ(gone->install.kind, install_e::missing);
+  EXPECT_EQ(gone->install.location, (root / "Gone.AppImage").string());
+
+  // A custom template, an unknown emulator and an ordinary app have nothing to resolve.
+  EXPECT_FALSE(emulator_library::resolve_entry_launch("custom", "/roms/Game.sfc", "", {home}, empty_path, system_flatpak).has_value());
+  EXPECT_FALSE(emulator_library::resolve_entry_launch("retroarch", "/roms/Game.sfc", "", {home}, empty_path, system_flatpak).has_value());
+  EXPECT_FALSE(emulator_library::resolve_entry_launch("", "", "", {home}, empty_path, system_flatpak).has_value());
+}
+
+TEST(EmulatorLibraryResolve, TheRefusalNamesTheEmulatorTheGameAndTheFix) {
+  const auto *eden = emulator_library::find_preset("eden");
+  ASSERT_NE(eden, nullptr);
+
+  const auto not_installed = emulator_library::missing_install_reason(*eden, {}, "The Legend of Zelda - Breath of the Wild");
+  EXPECT_EQ(not_installed.message, "Eden is not installed on this host, so The Legend of Zelda - Breath of the Wild cannot start.");
+  EXPECT_EQ(not_installed.action, "Install Eden from ROM folders under Import Games in the Polaris web UI, then launch again.");
+
+  // The emulator's own entry does not repeat its name.
+  const auto own_entry = emulator_library::missing_install_reason(*eden, {}, "Eden");
+  EXPECT_EQ(own_entry.message, "Eden is not installed on this host.");
+
+  const auto gone = emulator_library::missing_install_reason(
+    *eden, {emulator_library::install_e::missing, "/opt/Eden.AppImage"}, "Game");
+  EXPECT_EQ(gone.message, "Eden was not found at /opt/Eden.AppImage, so Game cannot start.");
+  EXPECT_EQ(gone.action, "Put Eden back at that path, or add the ROM folder again with the file where it is now, then launch again.");
+}
+
+TEST(EmulatorLibraryResolve, TheFolderListSitsNextToTheAppsFileAndNamesItsLauncher) {
+  EXPECT_EQ(emulator_library::sources_path_for_apps_file("/accounts/x/.config/polaris/apps.json", "/fallback"),
+            fs::path("/accounts/x/.config/polaris/library_sources.json"));
+  EXPECT_EQ(emulator_library::sources_path_for_apps_file("apps.json", "/fallback"), fs::path("/fallback/library_sources.json"));
+
+  std::vector<emulator_library::source_t> sources(2);
+  sources[0].id = "folder-a";
+  sources[0].launcher = "/opt/Eden.AppImage";
+  sources[1].id = "folder-b";
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, "folder-a"), "/opt/Eden.AppImage");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, " folder-a "), "/opt/Eden.AppImage");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, "folder-b"), "");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, "unknown"), "");
+  EXPECT_EQ(emulator_library::configured_launcher_for(sources, ""), "");
+}
+
+TEST(EmulatorLibraryResolve, OnlyACommandPolarisWroteIsReplaced) {
+  const auto *eden = emulator_library::find_preset("eden");
+  const auto *cemu = emulator_library::find_preset("cemu");
+  ASSERT_NE(eden, nullptr);
+  ASSERT_NE(cemu, nullptr);
+  const std::string rom = "/roms/it's here/Game.nsp";
+  const auto arguments = " -f -g " + emulator_library::shell_quote(rom);
+
+  // Every install import can have written for, and the emulator's own entry without a game.
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, "eden" + arguments));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, "flatpak run dev.eden_emu.eden" + arguments));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, emulator_library::shell_quote("/opt/It's Eden.AppImage") + arguments));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*cemu, "", "cemu"));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*cemu, "", "Cemu"));
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, "", "flatpak run dev.eden_emu.eden"));
+
+  // The player's edits, and commands for another game or emulator.
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "gamemoderun eden" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "eden -g " + emulator_library::shell_quote(rom)));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "eden -f -g '/roms/Other.nsp'"));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "flatpak run --command=eden-cli dev.eden_emu.eden" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "dolphin-emu" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, "'/opt/Eden.AppImage' --portable" + arguments));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, "", "eden --help"));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, arguments));
+
+  // An emulator file that is still there, and not the one the folder names, is the player's.
+  const auto directory = std::filesystem::temp_directory_path() / "polaris-emulator-command";
+  std::error_code cleanup;
+  std::filesystem::remove_all(directory, cleanup);
+  std::filesystem::create_directories(directory);
+  const auto moved = directory / "Eden.AppImage";
+  { std::ofstream(moved, std::ios::binary) << "x"; }
+  const auto moved_command = emulator_library::shell_quote(moved.string()) + arguments;
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, moved_command, "/old/Eden.AppImage"));
+  EXPECT_FALSE(emulator_library::generated_entry_command(*eden, rom, moved_command));
+  // The folder's own launcher stays Polaris's to update, and so does a file that is gone.
+  EXPECT_TRUE(emulator_library::generated_entry_command(*eden, rom, moved_command, moved.string()));
+  EXPECT_TRUE(emulator_library::generated_entry_command(
+    *eden, rom, emulator_library::shell_quote((directory / "Gone.AppImage").string()) + arguments, moved.string()));
+  std::filesystem::remove_all(directory, cleanup);
+
+  EXPECT_TRUE(emulator_library::single_quoted_token("'/opt/Eden.AppImage'"));
+  EXPECT_TRUE(emulator_library::single_quoted_token(emulator_library::shell_quote("/opt/it's/Eden")));
+  EXPECT_FALSE(emulator_library::single_quoted_token("'/opt/a' '/opt/b'"));
+  EXPECT_FALSE(emulator_library::single_quoted_token("''\\''"));
+  EXPECT_FALSE(emulator_library::single_quoted_token("'"));
+  EXPECT_FALSE(emulator_library::single_quoted_token("/opt/Eden.AppImage"));
+}
+
+TEST(EmulatorInstall, FlatpakRunsForTheAccountFromFlathubWithoutAShell) {
+  EXPECT_EQ(emulator_install::remotes_argv("/usr/bin/flatpak"), (std::vector<std::string> {"/usr/bin/flatpak", "remotes", "--user", "--columns=name"}));
+  EXPECT_EQ(emulator_install::remote_add_argv("/usr/bin/flatpak"),
+            (std::vector<std::string> {"/usr/bin/flatpak", "remote-add", "--user", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"}));
+  EXPECT_EQ(emulator_install::install_argv("/usr/bin/flatpak", "dev.eden_emu.eden"),
+            (std::vector<std::string> {"/usr/bin/flatpak", "install", "--user", "--noninteractive", "-y", "flathub", "dev.eden_emu.eden"}));
+
+  EXPECT_TRUE(emulator_install::remote_listed("fedora\nflathub\n", "flathub"));
+  EXPECT_TRUE(emulator_install::remote_listed("  flathub  ", "flathub"));
+  EXPECT_FALSE(emulator_install::remote_listed("flathub-beta\nfedora\n", "flathub"));
+  EXPECT_FALSE(emulator_install::remote_listed("", "flathub"));
+}
+
+TEST(EmulatorInstall, AFailureSaysWhatWasTriedAndWhatFlatpakSaid) {
+  // Progress redraws one line with carriage returns; the reason is the last line with text.
+  EXPECT_EQ(emulator_install::last_output_line("Looking for matches\n\rDownloading 10%\rDownloading 90%\n\n"), "Downloading 90%");
+  EXPECT_EQ(emulator_install::last_output_line(std::string(1000, 'x')).size(), emulator_install::maximum_message_bytes);
+
+  emulator_install::run_result_t nothing_matches {1, false, "Looking for matches…\nerror: Nothing matches org.duckstation.DuckStation in remote flathub\n"};
+  EXPECT_EQ(emulator_install::failure_message("Installing DuckStation from Flathub", nothing_matches),
+            "Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub");
+  EXPECT_EQ(emulator_install::failure_message("Installing Eden from Flathub", {127, false, ""}),
+            "Installing Eden from Flathub failed (exit status 127).");
+  EXPECT_EQ(emulator_install::failure_message("Installing Eden from Flathub", {-1, true, "Downloading 40%"}),
+            "Installing Eden from Flathub took too long and was stopped.");
+  EXPECT_EQ(emulator_install::failure_message("Installing Eden from Flathub", {1, false, "error:\n"}),
+            "Installing Eden from Flathub failed (exit status 1).");
+}
+
+TEST(EmulatorInstall, AJobAddsFlathubOnlyWhenMissingAndOneRunsPerEmulator) {
+  const auto *eden = emulator_library::find_preset("eden");
+  const auto *dolphin = emulator_library::find_preset("dolphin");
+  ASSERT_NE(eden, nullptr);
+  ASSERT_NE(dolphin, nullptr);
+
+  std::mutex calls_mutex;
+  std::vector<std::string> calls;
+  std::string remotes_output = "fedora\n";
+  std::promise<void> release_install;
+  auto released = release_install.get_future().share();
+  std::atomic<bool> hold_install {false};
+  emulator_install::runner_t runner = [&](const std::vector<std::string> &argv, std::chrono::milliseconds) {
+    {
+      std::lock_guard lock(calls_mutex);
+      calls.push_back(argv.at(1) + (argv.size() > 1 ? " " + argv.back() : ""));
+    }
+    if (argv.at(1) == "remotes") {
+      return emulator_install::run_result_t {0, false, remotes_output};
+    }
+    if (argv.at(1) == "install" && hold_install) {
+      released.wait();
+    }
+    if (argv.at(1) == "install" && argv.back() == "org.DolphinEmu.dolphin-emu") {
+      return emulator_install::run_result_t {1, false, "error: Unable to load summary from remote flathub\n"};
+    }
+    return emulator_install::run_result_t {0, false, ""};
+  };
+  std::optional<std::string> flatpak = "/usr/bin/flatpak";
+  emulator_install::installer_t installer {runner, [&]() {
+                                             return flatpak;
+                                           }};
+
+  // Nothing to install without Flatpak, or for a preset with no Flatpak id.
+  flatpak.reset();
+  EXPECT_FALSE(installer.installable(*eden));
+  EXPECT_EQ(installer.start(*eden, {}), emulator_install::start_e::not_installable);
+  flatpak = "/usr/bin/flatpak";
+  auto no_flatpak_id = *eden;
+  no_flatpak_id.flatpak_id = {};
+  EXPECT_FALSE(installer.installable(no_flatpak_id));
+  EXPECT_TRUE(installer.installable(*eden));
+  EXPECT_FALSE(installer.job("eden").has_value());
+
+  // Flathub is added for the account first, then the emulator installs and its entries follow.
+  std::vector<std::string> installed;
+  const auto on_installed = [&](const emulator_library::preset_t &preset) {
+    std::lock_guard lock(calls_mutex);
+    installed.emplace_back(preset.id);
+  };
+  hold_install = true;
+  ASSERT_EQ(installer.start(*eden, on_installed), emulator_install::start_e::started);
+  ASSERT_TRUE(installer.job("eden").has_value());
+  EXPECT_EQ(installer.job("eden")->state, emulator_install::state_e::installing);
+  EXPECT_GT(installer.job("eden")->started_at, 0);
+  EXPECT_EQ(installer.job("eden")->finished_at, 0);
+  EXPECT_EQ(installer.start(*eden, on_installed), emulator_install::start_e::already_running);
+  release_install.set_value();
+  ASSERT_TRUE(installer.wait_idle_for_tests(std::chrono::seconds {10}));
+  hold_install = false;
+  EXPECT_EQ(calls, (std::vector<std::string> {"remotes --columns=name", "remote-add https://dl.flathub.org/repo/flathub.flatpakrepo", "install dev.eden_emu.eden"}));
+  EXPECT_EQ(installed, (std::vector<std::string> {"eden"}));
+  auto job = installer.job("eden");
+  ASSERT_TRUE(job.has_value());
+  EXPECT_EQ(job->state, emulator_install::state_e::installed);
+  EXPECT_EQ(job->message, "Eden is installed.");
+  EXPECT_GE(job->finished_at, job->started_at);
+
+  // With Flathub listed nothing is added, and a failure keeps Flatpak's reason and skips the entries.
+  calls.clear();
+  remotes_output = "fedora\nflathub\n";
+  ASSERT_EQ(installer.start(*dolphin, on_installed), emulator_install::start_e::started);
+  ASSERT_TRUE(installer.wait_idle_for_tests(std::chrono::seconds {10}));
+  EXPECT_EQ(calls, (std::vector<std::string> {"remotes --columns=name", "install org.DolphinEmu.dolphin-emu"}));
+  EXPECT_EQ(installed, (std::vector<std::string> {"eden"}));
+  job = installer.job("dolphin");
+  ASSERT_TRUE(job.has_value());
+  EXPECT_EQ(job->state, emulator_install::state_e::failed);
+  EXPECT_EQ(job->message, "Installing Dolphin from Flathub failed: Unable to load summary from remote flathub");
+
+  // A finished job does not block trying again.
+  EXPECT_EQ(installer.start(*dolphin, {}), emulator_install::start_e::started);
+  ASSERT_TRUE(installer.wait_idle_for_tests(std::chrono::seconds {10}));
 }

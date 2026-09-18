@@ -160,13 +160,16 @@ namespace platf {
    *
    * The child is killed when @p timeout expires. Output beyond @p max_output_bytes
    * is drained but not retained, so an unexpected helper response cannot grow
-   * Polaris without bound.
+   * Polaris without bound. Standard error is discarded unless @p capture_stderr
+   * asks for it to be interleaved with standard output, for tools that report
+   * their failures there.
    */
   process_output_t run_process_argv_capture(
     const std::vector<std::string> &argv,
     std::chrono::milliseconds timeout = std::chrono::seconds {2},
     std::size_t max_output_bytes = 1024 * 1024,
-    std::stop_token stop = {}
+    std::stop_token stop = {},
+    bool capture_stderr = false
   );
 
 }  // namespace platf
