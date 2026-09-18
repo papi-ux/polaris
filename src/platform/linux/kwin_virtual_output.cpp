@@ -14,6 +14,10 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <gio/gio.h>
+#include <sys/stat.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -519,13 +523,95 @@ namespace kwin_virtual_output {
     return anchors.contains(output_name);
   }
 
-  std::vector<std::string> anchored_outputs() {
-    std::lock_guard lock {anchors_mutex};
-    std::vector<std::string> names;
-    for (const auto &[name, anchor] : anchors) {
-      names.push_back(name);
+  namespace {
+    constexpr int dbus_timeout_ms = 5000;
+
+    std::filesystem::path follow_script_path(const std::string &output_name) {
+      const char *runtime = std::getenv("XDG_RUNTIME_DIR");
+      const std::filesystem::path directory = runtime && *runtime ? runtime : "/tmp";
+      return directory / ("polaris-" + virtual_display::kwin_window_follow_plugin_name(output_name) + ".js");
     }
-    return names;
+
+    /** One call to KWin's scripting interface; nullptr and `error` set on failure. */
+    GVariant *call_scripting(const char *method, GVariant *arguments, const GVariantType *reply, std::string &error) {
+      GError *failure = nullptr;
+      GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &failure);
+      if (!bus) {
+        error = std::string {"no session bus: "} + (failure ? failure->message : "unknown");
+        if (failure) {
+          g_error_free(failure);
+        }
+        if (arguments) {
+          g_variant_unref(g_variant_ref_sink(arguments));
+        }
+        return nullptr;
+      }
+      GVariant *result = g_dbus_connection_call_sync(
+        bus, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", method,
+        arguments, reply, G_DBUS_CALL_FLAGS_NONE, dbus_timeout_ms, nullptr, &failure
+      );
+      g_object_unref(bus);
+      if (!result) {
+        error = std::string {"KWin scripting "} + method + " failed: " + (failure ? failure->message : "unknown");
+        if (failure) {
+          g_error_free(failure);
+        }
+      }
+      return result;
+    }
+
+    void unload_follow_script(const std::string &plugin) {
+      std::string ignored;
+      if (GVariant *result = call_scripting("unloadScript", g_variant_new("(s)", plugin.c_str()), G_VARIANT_TYPE("(b)"), ignored)) {
+        g_variant_unref(result);
+      }
+    }
+  }  // namespace
+
+  bool follow_windows(const std::string &output_name, std::string &error) {
+    const auto plugin = virtual_display::kwin_window_follow_plugin_name(output_name);
+    const auto path = follow_script_path(output_name);
+    {
+      std::ofstream out(path, std::ios::trunc);
+      if (!out) {
+        error = "could not write " + path.string();
+        return false;
+      }
+      out << virtual_display::kwin_window_follow_script(output_name);
+    }
+    ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+
+    // A copy left by a Polaris that stopped without unloading it would keep its
+    // own handler; replace it rather than run two.
+    unload_follow_script(plugin);
+    GVariant *loaded = call_scripting(
+      "loadScript", g_variant_new("(ss)", path.c_str(), plugin.c_str()), G_VARIANT_TYPE("(i)"), error
+    );
+    if (!loaded) {
+      return false;
+    }
+    gint32 id = -1;
+    g_variant_get(loaded, "(i)", &id);
+    g_variant_unref(loaded);
+    if (id < 0) {
+      error = "KWin refused the window script";
+      return false;
+    }
+    // start() runs every loaded script that is not running yet.
+    GVariant *started = call_scripting("start", nullptr, nullptr, error);
+    if (!started) {
+      unload_follow_script(plugin);
+      return false;
+    }
+    g_variant_unref(started);
+    BOOST_LOG(info) << "KWin virtual output: new windows follow ["sv << output_name << "] while it exists"sv;
+    return true;
+  }
+
+  void stop_following_windows(const std::string &output_name) {
+    unload_follow_script(virtual_display::kwin_window_follow_plugin_name(output_name));
+    std::error_code ignored;
+    std::filesystem::remove(follow_script_path(output_name), ignored);
   }
 
   bool release(const std::string &output_name, std::chrono::milliseconds budget) {

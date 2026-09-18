@@ -545,6 +545,12 @@ tab names the backend in use and, when it cannot run, why.
   says `did not take mode` when KWin refused it.
 - **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
+- **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream
+  screen with a small KWin script it loads for the stream. The log says `new windows will not be
+  moved` when KWin refused to load it; the stream then shows an empty screen while the game
+  runs on your monitor.
+- **A window I opened at the desk jumped to the stream.** While a stream runs, every new
+  application window is moved onto its screen. Drag it back, or use Meta+Shift+Left.
 - **Choosing another backend.** Set Backend on the Virtual Display panel
   (`linux_virtual_display_backend`) to `evdi` or `kscreen` to use that one instead; the choice
   applies without a restart.

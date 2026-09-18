@@ -560,24 +560,21 @@ TEST(VirtualDisplayKwinTests, KscreenArgumentsForModeAndPlacement) {
     virtual_display::kwin_mode_args("Virtual-polaris-0", 2560, 1440, 120),
     (args_t {"output.Virtual-polaris-0.mode.2560x1440@120"})
   );
+  // The stream screen is never made primary: Plasma moves the desktop and the
+  // panel to the primary screen. The previous primary is named because KWin
+  // can apply a stored layout that ranks the new screen first.
   EXPECT_EQ(
-    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2", true),
+    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2"),
     (args_t {
       "output.Virtual-polaris-0.scale.1",
       "output.Virtual-polaris-0.position.7680,0",
-      "output.Virtual-polaris-0.priority.1",
-      "output.DP-2.priority.2",
+      "output.DP-2.priority.1",
     })
   );
-  // No previous primary, or the screen itself: nothing else is re-ranked.
-  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "", true).size(), 3U);
-  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "Virtual-polaris-0", true).size(), 3U);
-  // A second Polaris screen held beside the first leaves the ranking alone.
-  EXPECT_EQ(
-    virtual_display::kwin_placement_args("Virtual-polaris-1", 9600, "DP-2", false),
-    (args_t {"output.Virtual-polaris-1.scale.1", "output.Virtual-polaris-1.position.9600,0"})
-  );
-  EXPECT_EQ(virtual_display::kwin_restore_priority_args("DP-2"), (args_t {"output.DP-2.priority.1"}));
+  for (const auto &arg : virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, "DP-2")) {
+    EXPECT_EQ(arg.find("Virtual-polaris-0.priority"), std::string::npos) << arg;
+  }
+  EXPECT_EQ(virtual_display::kwin_placement_args("Virtual-polaris-0", 0, "").size(), 2U);
 }
 
 TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
@@ -596,16 +593,28 @@ TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
   screen.scale = 1.0;
   screen.x = 7680;
   screen.y = 0;
-  screen.priority = 1;
-  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680, true));
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0, true));
-  screen.scale = 0.5;
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, true));
-  screen.scale = 1.0;
   screen.priority = 2;
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, true));
-  // Ranking is only checked when it was asked for.
-  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680, false));
+  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0));
+  screen.scale = 0.5;
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680));
+}
+
+TEST(VirtualDisplayKwinTests, WindowScriptMovesApplicationWindowsOntoTheScreen) {
+  const auto script = virtual_display::kwin_window_follow_script("Virtual-polaris-0");
+  EXPECT_NE(script.find("const target = \"Virtual-polaris-0\";"), std::string::npos);
+  EXPECT_NE(script.find("workspace.windowAdded.connect("), std::string::npos);
+  EXPECT_NE(script.find("workspace.sendClientToScreen(window, screen)"), std::string::npos);
+  // Only application windows, dialogs and splash screens: never the desktop,
+  // panels, notifications or popups.
+  EXPECT_NE(script.find("window.normalWindow || window.dialog || window.splash"), std::string::npos);
+  // A window already on another Polaris screen stays there.
+  EXPECT_NE(script.find("\"Virtual-polaris-\""), std::string::npos);
+  EXPECT_EQ(virtual_display::kwin_window_follow_plugin_name("Virtual-polaris-0"), "polaris-follow-Virtual-polaris-0");
+
+  // The name is a JSON string literal, so a quote cannot end it early.
+  const auto hostile = virtual_display::kwin_window_follow_script("x\"; evil(); \"");
+  EXPECT_NE(hostile.find(R"(const target = "x\"; evil(); \"";)"), std::string::npos);
 }
 
 TEST(VirtualDisplayKwinTests, PersistedKwinScreenRoundTrips) {

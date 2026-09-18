@@ -57,8 +57,18 @@ namespace kwin_virtual_output {
   /** @brief Whether this process image holds the anchor for an output. */
   bool anchored(const std::string &output_name);
 
-  /** @brief Every output this process image holds an anchor for. */
-  std::vector<std::string> anchored_outputs();
+  /**
+   * @brief Load the KWin script that moves new windows onto an output.
+   *
+   * The output stays secondary, so Plasma leaves the desktop and panel where
+   * they are, and a game still opens on the stream. Replaces a copy a crashed
+   * Polaris left loaded.
+   * @param error Set to the reason when this returns false.
+   */
+  bool follow_windows(const std::string &output_name, std::string &error);
+
+  /** @brief Unload the script follow_windows loaded for an output. Safe when none is loaded. */
+  void stop_following_windows(const std::string &output_name);
 
   /**
    * @brief Close the anchor so KWin removes the output, then wait until the

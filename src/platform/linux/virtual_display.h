@@ -230,28 +230,37 @@ namespace virtual_display {
   std::vector<std::string> kwin_mode_args(std::string_view output, int width, int height, int hz);
 
   /**
-   * @brief kscreen-doctor arguments that make a virtual output the stream display.
+   * @brief kscreen-doctor arguments that put a new KWin screen beside the others.
    *
-   * Scale 1 and placed at `x`. With `rank_first`, also ranked first with the
-   * previous primary ranked second; a second Polaris screen held at the same
-   * time leaves the ranking to the first. Sent last, because adding a custom
-   * mode can reorder priorities.
+   * Scale 1 and placed at `x`, and the previous primary ranked first. The new
+   * screen is never made primary: Plasma moves the desktop, its icons and the
+   * panel to whichever screen is, so a primary stream screen took them off the
+   * real monitor. Windows are moved onto it instead (see
+   * kwin_window_follow_script). The previous primary is named because KWin can
+   * give a new output a stored layout that ranks it first. Sent last, because
+   * adding a custom mode can reorder priorities.
    */
-  std::vector<std::string> kwin_placement_args(
-    std::string_view output,
-    int x,
-    std::string_view previous_primary,
-    bool rank_first
-  );
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary);
 
-  /** @brief kscreen-doctor arguments that rank an output first again after the stream. */
-  std::vector<std::string> kwin_restore_priority_args(std::string_view output);
+  /**
+   * @brief The KWin script that moves windows onto a Polaris screen while it exists.
+   *
+   * Application windows, dialogs and splash screens that open while the screen
+   * exists are sent to it, so a game lands on the stream without the screen
+   * being primary. Panels, the desktop, notifications and popups stay put, and
+   * so does a window already on another Polaris screen. It does nothing once
+   * the screen is gone, so a script left behind by a crash is harmless.
+   */
+  std::string kwin_window_follow_script(std::string_view output_name);
+
+  /** @brief The KWin script plugin name for one Polaris screen. */
+  std::string kwin_window_follow_plugin_name(std::string_view output_name);
 
   /** @brief The output runs the requested size, within half a hertz of the requested rate. */
   bool kwin_mode_matches(const kscreen_output_layout_t &output, int width, int height, int hz);
 
-  /** @brief The output is at scale 1 and at (x, 0), and ranked first when `ranked_first` is asked. */
-  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x, bool ranked_first);
+  /** @brief The output is at scale 1 and at (x, 0). */
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x);
 
   /**
    * @brief Return whether a detected backend has the configuration it needs to create a display.

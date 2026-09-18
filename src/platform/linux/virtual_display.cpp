@@ -813,29 +813,40 @@ namespace virtual_display {
     return {"output."s + std::string {output} + ".mode." + kwin_mode_name(width, height, hz)};
   }
 
-  std::vector<std::string> kwin_placement_args(
-    std::string_view output,
-    int x,
-    std::string_view previous_primary,
-    bool rank_first
-  ) {
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x, std::string_view previous_primary) {
     const auto prefix = "output."s + std::string {output};
     std::vector<std::string> args {
       prefix + ".scale.1",
       prefix + ".position." + std::to_string(x) + ",0",
     };
-    if (!rank_first) {
-      return args;
-    }
-    args.push_back(prefix + ".priority.1");
     if (!previous_primary.empty() && previous_primary != output) {
-      args.push_back("output."s + std::string {previous_primary} + ".priority.2");
+      args.push_back("output."s + std::string {previous_primary} + ".priority.1");
     }
     return args;
   }
 
-  std::vector<std::string> kwin_restore_priority_args(std::string_view output) {
-    return {"output."s + std::string {output} + ".priority.1"};
+  std::string kwin_window_follow_plugin_name(std::string_view output_name) {
+    return "polaris-follow-" + std::string {output_name};
+  }
+
+  std::string kwin_window_follow_script(std::string_view output_name) {
+    // The name goes in as a JSON string literal, which is also a valid
+    // JavaScript one, so no output name can end the string early.
+    const auto target = nlohmann::json(std::string {output_name}).dump();
+    return "// Polaris: moves windows onto its Host Virtual Display screen while that screen exists.\n"
+           "const target = " + target + ";\n"
+           "function outputNamed(name) {\n"
+           "  const screens = workspace.screens;\n"
+           "  for (let i = 0; i < screens.length; i++) { if (screens[i].name === name) return screens[i]; }\n"
+           "  return null;\n"
+           "}\n"
+           "workspace.windowAdded.connect(function (window) {\n"
+           "  if (!window || !(window.normalWindow || window.dialog || window.splash)) return;\n"
+           "  const screen = outputNamed(target);\n"
+           "  if (!screen || window.output === screen) return;\n"
+           "  if (window.output && window.output.name.indexOf(\"Virtual-polaris-\") === 0) return;\n"
+           "  workspace.sendClientToScreen(window, screen);\n"
+           "});\n";
   }
 
   bool kwin_mode_matches(const kscreen_output_layout_t &output, int width, int height, int hz) {
@@ -843,9 +854,8 @@ namespace virtual_display {
            output.refresh_hz > 0.0 && std::abs(output.refresh_hz - hz) <= 0.5;
   }
 
-  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x, bool ranked_first) {
-    return output.enabled && std::abs(output.scale - 1.0) < 0.01 && output.x == x && output.y == 0 &&
-           (!ranked_first || output.priority == 1);
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x) {
+    return output.enabled && std::abs(output.scale - 1.0) < 0.01 && output.x == x && output.y == 0;
   }
 
   namespace {
@@ -2077,7 +2087,7 @@ namespace virtual_display {
 
     /**
      * @brief Put the new screen where the stream needs it: the client's mode,
-     * scale 1, beside the other screens, and ranked first when `rank_first`.
+     * scale 1, beside the other screens, with the previous primary kept first.
      *
      * Best effort past the mode: a refresh rate KWin will not run is a warning,
      * and the stream still gets a screen of its own.
@@ -2088,8 +2098,7 @@ namespace virtual_display {
     static void place(
       const vdisplay_t &display,
       const std::vector<kscreen_output_layout_t> &layout_before,
-      const std::string &previous_primary,
-      bool rank_first
+      const std::string &previous_primary
     ) {
       const auto &name = display.output_name;
       auto layout = kscreen_layout_from_json(layout_json());
@@ -2123,15 +2132,19 @@ namespace virtual_display {
       // read falls back to the layout from before, never to 0,0 on top of a
       // real monitor.
       const int x = kscreen_right_edge(layout ? *layout : layout_before, name);
-      const int rc = run_kscreen(kwin_placement_args(name, x, previous_primary, rank_first));
-      output = find_output(kscreen_layout_from_json(layout_json()), name);
-      if (rc != 0 || !output || !kwin_placement_matches(*output, x, rank_first)) {
-        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens"sv
-                           << (rank_first ? " and ranked first"sv : ""sv) << " (rc="sv << rc << "); windows may not open on it"sv;
-        return;
+      const int rc = run_kscreen(kwin_placement_args(name, x, previous_primary));
+      const auto placed = kscreen_layout_from_json(layout_json());
+      output = find_output(placed, name);
+      if (rc != 0 || !output || !kwin_placement_matches(*output, x)) {
+        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens (rc="sv
+                           << rc << ')';
+      } else {
+        BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1"sv;
       }
-      BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1"sv
-                      << (rank_first ? ", ranked first"sv : ", ranking left to the Polaris screen already held"sv);
+      if (!previous_primary.empty() && placed && kscreen_primary_output(*placed) != previous_primary) {
+        BOOST_LOG(warning) << "Virtual display: ["sv << previous_primary
+                           << "] is not the primary screen any more; Plasma may have moved the desktop and panel"sv;
+      }
     }
 
     static std::optional<vdisplay_t> create(int width, int height, int fps) {
@@ -2179,13 +2192,6 @@ namespace virtual_display {
       display.fps = fps;
       display.active = true;
       display.backend = backend_e::KWIN_VIRTUAL_OUTPUT;
-      // With another Polaris screen already held (a stream and the web UI can
-      // each have one), that one keeps the primary: two screens taking it in
-      // turn would leave the stream on whichever came second.
-      const bool rank_first = kwin_virtual_output::anchored_outputs().empty();
-      if (rank_first && previous_primary) {
-        display.kscreen_primary_before = kscreen_output_state_from_json(layout_before_json, *previous_primary);
-      }
       // No recovery record, unlike the other backends: KWin removes the screen
       // with the connection that asked for it, so a crash leaves nothing to
       // clean up, and a record would only outlive the screen it describes.
@@ -2198,7 +2204,14 @@ namespace virtual_display {
         return std::nullopt;
       }
 
-      place(display, *layout_before, previous_primary.value_or(std::string {}), rank_first);
+      place(display, *layout_before, previous_primary.value_or(std::string {}));
+
+      // The screen stays secondary, so a game would open on the real monitor.
+      // Move windows that open while it exists onto it instead.
+      if (std::string follow_error; !kwin_virtual_output::follow_windows(output_name, follow_error)) {
+        BOOST_LOG(warning) << "Virtual display: new windows will not be moved onto ["sv << output_name
+                           << "]; a game may open on another screen: "sv << follow_error;
+      }
       BOOST_LOG(info) << "Virtual display: KWin screen created ["sv << output_name << "] "sv
                       << width << "x"sv << height << "@"sv << fps << "Hz"sv;
       return display;
@@ -2223,34 +2236,21 @@ namespace virtual_display {
         // would refuse every later launch, EVDI's included.
         BOOST_LOG(info) << "Virtual display: KWin screen ["sv << display.output_name
                         << "] is not held by this process; nothing to remove"sv;
+        // Its window script may still be loaded if that process crashed.
+        kwin_virtual_output::stop_following_windows(display.output_name);
         release_name(display.output_name);
         display.active = false;
         return true;
       }
 
+      // Stop moving windows first, so none is sent to a screen on its way out.
+      kwin_virtual_output::stop_following_windows(display.output_name);
       if (!kwin_virtual_output::release(display.output_name, release_budget)) {
         BOOST_LOG(error) << "Virtual display: KWin screen ["sv << display.output_name
                          << "] is still present after release; retaining recovery authority"sv;
         return false;
       }
       release_name(display.output_name);
-
-      // KWin re-applies the layout it stored for the remaining screens when the
-      // output goes, which puts the previous primary back. Check it did, unless
-      // another Polaris screen still holds the primary.
-      if (display.kscreen_primary_before && display.kscreen_primary_before->priority == 1 &&
-          kwin_virtual_output::anchored_outputs().empty()) {
-        const auto &previous = display.kscreen_primary_before->name;
-        auto primary = find_output(kscreen_layout_from_json(layout_json()), previous);
-        if (primary && primary->priority != 1) {
-          run_kscreen(kwin_restore_priority_args(previous));
-          primary = find_output(kscreen_layout_from_json(layout_json()), previous);
-        }
-        if (!primary || primary->priority != 1) {
-          BOOST_LOG(warning) << "Virtual display: ["sv << previous << "] was primary before the stream and is not ranked first again"sv;
-        }
-      }
-
       display.active = false;
       return true;
 #else

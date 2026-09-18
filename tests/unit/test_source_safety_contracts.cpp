@@ -1261,6 +1261,19 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   EXPECT_EQ(body.find("std::system"), std::string::npos);
   EXPECT_EQ(body.find("exec_cmd_rc("), std::string::npos);
 
+  // The screen stays secondary; windows are moved onto it instead, after it is
+  // placed, and stop being moved before it is released.
+  EXPECT_EQ(body.find(".priority.1\""), std::string::npos);
+  const auto place_call = body.find("place(display, *layout_before", create);
+  const auto follow = body.find("kwin_virtual_output::follow_windows(", create);
+  ASSERT_NE(place_call, std::string::npos);
+  ASSERT_NE(follow, std::string::npos);
+  EXPECT_LT(place_call, follow);
+  const auto destroy_body = body.find("static bool destroy(vdisplay_t &display)");
+  const auto stop_following = body.find("kwin_virtual_output::stop_following_windows(display.output_name);\n      if (!kwin_virtual_output::release(", destroy_body);
+  ASSERT_NE(destroy_body, std::string::npos);
+  EXPECT_NE(stop_following, std::string::npos);
+
   // A name match alone could be someone else's output: the output must also be a new global.
   const auto proof = wayland.find("!globals_before.contains(output->global)");
   const auto held = wayland.find("anchors[expected] = std::move(anchor)");
