@@ -917,6 +917,161 @@ TEST(StreamStatsDoctorTests, ReportsAHostWithNoCaptureBackendAsFailed) {
   platf::set_capture_sources_missing_for_tests(false);
 }
 
+TEST(StreamStatsDoctorTests, ReportsThreadPriorityThatCouldNotBeRaised) {
+  // Logged once at the first stream and then gone from view. A support bundle carried it only
+  // in raw log text, beside a microstutter report it may have explained.
+  platf::set_thread_priority_unavailable_note_for_tests("RLIMIT_RTPRIO=0, RLIMIT_NICE=0");
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  bool saw_warning = false;
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    if (warning.at("id") != "thread_priority_unavailable") {
+      continue;
+    }
+    saw_warning = true;
+    EXPECT_EQ(warning.at("severity"), "warning");
+    // The limits that applied, so a reader can tell RLIMIT_RTPRIO from RLIMIT_NICE.
+    EXPECT_NE(warning.at("message").get<std::string>().find("RLIMIT_RTPRIO=0, RLIMIT_NICE=0"), std::string::npos);
+    EXPECT_NE(warning.at("action").get<std::string>().find("polaris.service"), std::string::npos);
+  }
+  EXPECT_TRUE(saw_warning);
+
+  platf::set_thread_priority_unavailable_note_for_tests("");
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingAboutThreadPriorityUntilElevationIsRefused) {
+  platf::set_thread_priority_unavailable_note_for_tests("");
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  for (const auto &warning :
+       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+    EXPECT_NE(warning.at("id"), "thread_priority_unavailable");
+  }
+}
+
+namespace {
+  const nlohmann::json *find_doctor_evidence(const nlohmann::json &doctor, const std::string &id) {
+    for (const auto &item : doctor.at("evidence")) {
+      if (item.value("id", std::string {}) == id) {
+        return &item;
+      }
+    }
+    return nullptr;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, NamesADisplayModeOverrideThatReplacedTheClientsRequest) {
+  // A support bundle said "can't select 1080p". The pairing pinned 4K, the client's 1080p request
+  // was replaced without a word to the client, and only raw log text said so.
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.display_mode_requested = "1920x1080x60";
+  stats.display_mode_applied = "3840x2160x60";
+  stats.display_mode_pinned_by_host = true;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto *row = find_doctor_evidence(doctor, "display_mode_decision");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("value"), "3840x2160x60");
+  EXPECT_EQ(row->at("status"), "watch");
+  const auto detail = row->at("detail").get<std::string>();
+  EXPECT_NE(detail.find("Display Mode Override"), std::string::npos);
+  EXPECT_NE(detail.find("1920x1080x60"), std::string::npos);
+  // Where to clear it, by the name the web UI gives that page.
+  EXPECT_NE(detail.find("Devices page"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, AnOverrideThatMatchesTheRequestIsOnlyInformation) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.display_mode_requested = "1920x1080x60";
+  stats.display_mode_applied = "1920x1080x60";
+  stats.display_mode_pinned_by_host = true;
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto *row = find_doctor_evidence(doctor, "display_mode_decision");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("status"), "info");
+  EXPECT_NE(row->at("detail").get<std::string>().find("matches"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, TheClientsOwnDisplayModeIsOnlyInformation) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.display_mode_requested = "1280x800x60";
+  stats.display_mode_applied = "1280x800x60";
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto *row = find_doctor_evidence(doctor, "display_mode_decision");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("status"), "info");
+  EXPECT_EQ(row->at("detail"), "Polaris used the display mode the client asked for.");
+}
+
+TEST(StreamStatsDoctorTests, PointsATailnetClientAtTheRelayCheck) {
+  // The same bundle's microstutter came from a client that had moved from the LAN to Tailscale.
+  // Informational: a direct tailnet path is fine, so the row says what to check, not what is wrong.
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.client_network_path = "cgnat";
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto *row = find_doctor_evidence(doctor, "client_network_path");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("value"), "cgnat");
+  EXPECT_EQ(row->at("status"), "info");
+  EXPECT_NE(row->at("detail").get<std::string>().find("tailscale ping"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingAboutPathOrDisplayModeBeforeAnyLaunch) {
+  stream_stats::stats_t stats {};
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  EXPECT_EQ(find_doctor_evidence(doctor, "client_network_path"), nullptr);
+  EXPECT_EQ(find_doctor_evidence(doctor, "display_mode_decision"), nullptr);
+}
+
+TEST(StreamStatsDoctorTests, PathAndDisplayModeSurviveTheEndOfTheStream) {
+  // Support bundles get exported after disconnecting, and that bundle was. The path is kept as
+  // its kind; the address itself goes with the rest of the session.
+  stream_stats::record_display_mode_decision("1920x1080x60", "3840x2160x60", true);
+  stream_stats::update_stream_active(true, "client", "100.109.196.18");
+
+  stream_stats::update_stream_active(false, "", "");
+
+  const auto after = stream_stats::get_current();
+  EXPECT_FALSE(after.streaming);
+  EXPECT_EQ(after.client_ip, "");
+  EXPECT_EQ(after.client_network_path, "cgnat");
+  EXPECT_EQ(after.display_mode_requested, "1920x1080x60");
+  EXPECT_EQ(after.display_mode_applied, "3840x2160x60");
+  EXPECT_TRUE(after.display_mode_pinned_by_host);
+
+  const auto doctor = stream_stats::build_doctor_json(after, nlohmann::json::object());
+  const auto *path_row = find_doctor_evidence(doctor, "client_network_path");
+  ASSERT_NE(path_row, nullptr);
+  EXPECT_EQ(path_row->at("detail").get<std::string>().rfind("From the last stream. ", 0), 0U);
+  const auto *mode_row = find_doctor_evidence(doctor, "display_mode_decision");
+  ASSERT_NE(mode_row, nullptr);
+  EXPECT_EQ(mode_row->at("detail").get<std::string>().rfind("From the last launch. ", 0), 0U);
+
+  const auto json = nlohmann::json::parse(after.to_json());
+  EXPECT_EQ(json.at("client_network_path"), "cgnat");
+  EXPECT_EQ(json.at("display_mode_decision").at("applied"), "3840x2160x60");
+
+  stream_stats::record_display_mode_decision("", "", false);
+}
+
 TEST(StreamStatsDoctorTests, SaysNothingAboutCaptureBeforeAnythingHasBeenEvaluated) {
   // The accessor must not report a problem it has never looked for: Doctor is asked for a report
   // before startup has finished, and an empty source set then means "not yet", not "broken".

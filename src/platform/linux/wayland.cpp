@@ -31,6 +31,7 @@
 #include "src/round_robin.h"
 #include "src/utility.h"
 #include "wayland.h"
+#include "wlgrab_frame_source.h"
 
 extern const wl_interface wl_output_interface;
 
@@ -1545,6 +1546,9 @@ namespace wl {
 
   bool extcopy_t::allocate_buffer(display_t &display, frame_t &target) {
     if (!device_valid || !chosen_format_valid || !dmabuf_interface) {
+      BOOST_LOG(warning) << "Extcopy DMA-BUF capture cannot allocate a buffer yet: device_valid="sv
+                         << device_valid << " chosen_format_valid="sv << chosen_format_valid
+                         << " dmabuf_interface="sv << (dmabuf_interface != nullptr);
       return false;
     }
 
@@ -1723,8 +1727,15 @@ namespace wl {
   }
 
   bool extcopy_t::ensure_session(display_t &display) {
-    if (capture_session && constraints_ready && chosen_format_valid) {
+    const bool session_ready = capture_session && constraints_ready && chosen_format_valid;
+    if (extcopy_session_reusable(session_ready, session_paints_cursor, blend_cursor)) {
       return true;
+    }
+    if (session_ready) {
+      // The frame buffers stay: they belong to the output, not to the session, and the
+      // encoder may still hold the current one.
+      BOOST_LOG(info) << "Extcopy DMA-BUF: recreating the capture session to "sv
+                      << (blend_cursor ? "paint"sv : "stop painting"sv) << " the cursor"sv;
     }
 
     destroy_session();
@@ -1744,6 +1755,7 @@ namespace wl {
       status = REINIT;
       return false;
     }
+    session_paints_cursor = blend_cursor;
 
     ext_image_copy_capture_session_v1_add_listener(capture_session, &session_listener, this);
 
@@ -1758,7 +1770,15 @@ namespace wl {
       return false;
     }
 
-    if (!buffer_size_valid || !device_valid || !choose_format()) {
+    if (!buffer_size_valid || !device_valid) {
+      BOOST_LOG(warning) << "Extcopy DMA-BUF capture constraints were incomplete: buffer_size_valid="sv
+                         << buffer_size_valid << " device_valid="sv << device_valid;
+      status = REINIT;
+      return false;
+    }
+
+    // choose_format() logs its own failure.
+    if (!choose_format()) {
       status = REINIT;
       return false;
     }

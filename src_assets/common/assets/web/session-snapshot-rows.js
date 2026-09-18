@@ -90,6 +90,34 @@ export function fpsTargetGapDescription(s = {}, t) {
   return t('troubleshooting.snapshot_fps_gap_value', { encoded: formatFps(encoded), target: formatFps(target) })
 }
 
+// How the client reached the host, as a kind and never an address. Informational: a tailnet
+// stream is fine while Tailscale connects directly, so this names what to check, not a fault.
+export const NETWORK_PATH_KINDS = Object.freeze(['lan', 'cgnat', 'tailscale', 'link-local', 'public', 'loopback'])
+
+export function networkPathDescription(path, t) {
+  const kind = String(path || '').toLowerCase()
+  if (!NETWORK_PATH_KINDS.includes(kind)) return t('troubleshooting.snapshot_unknown')
+  return t(`troubleshooting.snapshot_network_path_${kind.replace('-', '_')}`)
+}
+
+function networkPathRow(s, t) {
+  const row = { label: t('troubleshooting.snapshot_network_path'), value: networkPathDescription(s.client_network_path, t) }
+  const kind = String(s.client_network_path || '').toLowerCase()
+  if (kind === 'cgnat' || kind === 'tailscale') row.note = t('troubleshooting.snapshot_network_path_relay_note')
+  return row
+}
+
+export function displayModeDecisionDescription(decision, t) {
+  const applied = decision?.applied
+  if (!applied) return t('troubleshooting.snapshot_unknown')
+  const requested = decision.requested
+  if (decision.pinned_by_host && requested && requested !== applied) {
+    return t('troubleshooting.snapshot_display_mode_overridden', { applied, requested })
+  }
+  if (decision.pinned_by_host) return t('troubleshooting.snapshot_display_mode_pinned', { applied })
+  return applied
+}
+
 function streamDisplayRow(s, t, streamDisplay) {
   const label = t('troubleshooting.snapshot_stream_display_mode')
   const hostLabel = streamDisplay?.effective_label || streamDisplay?.configured_label
@@ -131,6 +159,8 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_fps'), value: t('troubleshooting.snapshot_fps_value', { encoded: formatFps(s.fps), target: formatFps(s.session_target_fps) }) },
     { label: t('troubleshooting.snapshot_bitrate'), value: t('troubleshooting.snapshot_bitrate_value', { kbps: s.bitrate_kbps || 0 }) },
     { label: t('troubleshooting.snapshot_client_ip'), value: s.client_ip || unknown },
+    networkPathRow(s, t),
+    { label: t('troubleshooting.snapshot_display_mode'), value: displayModeDecisionDescription(s.display_mode_decision, t) },
     { label: t('troubleshooting.snapshot_active_sessions'), value: `${s.active_sessions ?? 0}` },
     { label: t('troubleshooting.snapshot_requested_fps'), value: formatFps(s.requested_client_fps) },
     { label: t('troubleshooting.snapshot_runtime_backend'), value: s.runtime_backend || unknown },

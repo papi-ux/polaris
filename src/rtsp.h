@@ -193,6 +193,12 @@ namespace rtsp_stream {
     std::string optimization_normalization_reason;
     int optimization_recommendation_version = 0;
     std::string pacing_policy;
+    // How the display mode was chosen, for the Doctor. Only recorded once the stream starts:
+    // a launch can still be refused after the decision (another client's session, a watch
+    // request that does not match), and a refused launch must not describe a running stream.
+    std::string display_mode_requested;
+    std::string display_mode_applied;
+    bool display_mode_pinned_by_host = false;
 
     std::atomic<setup_state_e> setup_state {setup_state_e::pending};
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;

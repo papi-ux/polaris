@@ -49,6 +49,33 @@ describe('session snapshot rows', () => {
     expect(rows.details.some((row) => row.label === 'snapshot_last_write')).toBe(false)
   })
 
+  it('names the network path by kind and points a tailnet at the relay check', () => {
+    const tailnet = buildSessionSnapshotRows({ ...streaming, client_network_path: 'cgnat' }, t)
+    const row = tailnet.details.find((entry) => entry.label === 'snapshot_network_path')
+    expect(row.value).toBe('snapshot_network_path_cgnat')
+    expect(row.note).toBe('snapshot_network_path_relay_note')
+
+    const lan = buildSessionSnapshotRows({ ...streaming, client_network_path: 'link-local' }, t)
+    const lanRow = lan.details.find((entry) => entry.label === 'snapshot_network_path')
+    expect(lanRow.value).toBe('snapshot_network_path_link_local')
+    expect(lanRow.note).toBeUndefined()
+  })
+
+  it('says when a Display Mode Override replaced the mode the client asked for', () => {
+    const rows = buildSessionSnapshotRows({
+      ...streaming,
+      display_mode_decision: { requested: '1920x1080x60', applied: '3840x2160x60', pinned_by_host: true },
+    }, t)
+    expect(rows.details.find((entry) => entry.label === 'snapshot_display_mode').value)
+      .toBe('snapshot_display_mode_overridden(applied=3840x2160x60,requested=1920x1080x60)')
+
+    const chosen = buildSessionSnapshotRows({
+      ...streaming,
+      display_mode_decision: { requested: '1280x800x60', applied: '1280x800x60', pinned_by_host: false },
+    }, t)
+    expect(chosen.details.find((entry) => entry.label === 'snapshot_display_mode').value).toBe('1280x800x60')
+  })
+
   it('never renders undefined, NaN, or an empty value for a sparse payload', () => {
     const rows = buildSessionSnapshotRows({ streaming: true }, t)
     const values = [...rows.summary, ...rows.details].map((row) => row.value)

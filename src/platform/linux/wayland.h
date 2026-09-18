@@ -330,6 +330,7 @@ namespace wl {
     dev_t gbm_device_id {};
     bool gbm_device_id_valid {false};
     bool blend_cursor {false};
+    bool session_paints_cursor {false};  ///< The cursor option the live capture_session was created with
     bool constraints_ready {false};
     bool buffer_size_valid {false};
     bool device_valid {false};
@@ -346,6 +347,21 @@ namespace wl {
     std::uint64_t next_buffer_key {1};
     extcopy_timing_tracker_t timing_tracker;
   };
+
+  /**
+   * @brief Name an ext-image-copy status for a log line.
+   */
+  constexpr std::string_view extcopy_status_name(extcopy_t::status_e status) {
+    switch (status) {
+      case extcopy_t::WAITING:
+        return "WAITING";
+      case extcopy_t::READY:
+        return "READY";
+      case extcopy_t::REINIT:
+        return "REINIT";
+    }
+    return "UNKNOWN";
+  }
 
   class monitor_t {
   public:

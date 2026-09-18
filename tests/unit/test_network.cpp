@@ -27,6 +27,45 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
+struct ClientNetworkPathTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
+
+TEST_P(ClientNetworkPathTest, Run) {
+  auto [address, expected] = GetParam();
+  EXPECT_EQ(net::describe_client_network_path(address), expected);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  ClientNetworkPathTests,
+  ClientNetworkPathTest,
+  testing::Values(
+    // The two client addresses from the support bundle that prompted this.
+    std::make_tuple("192.168.1.192", "lan"),
+    std::make_tuple("100.109.196.18", "cgnat"),
+    std::make_tuple("10.0.0.4", "lan"),
+    std::make_tuple("172.20.1.9", "lan"),
+    std::make_tuple("169.254.3.4", "link-local"),
+    std::make_tuple("127.0.0.1", "loopback"),
+    std::make_tuple("8.8.8.8", "public"),
+    std::make_tuple("fd7a:115c:a1e0::5", "tailscale"),
+    std::make_tuple("fd00::1", "lan"),
+    std::make_tuple("fe80::1", "link-local"),
+    std::make_tuple("::1", "loopback"),
+    std::make_tuple("2606:4700::1111", "public"),
+    // A mapped address is the IPv4 address it carries.
+    std::make_tuple("::ffff:100.109.196.18", "cgnat"),
+    std::make_tuple("not an address", "unknown"),
+    std::make_tuple("", "unknown")
+  )
+);
+
+TEST(ClientNetworkPath, LeavesAccessDecisionsTreatingTheSharedRangeAsLan) {
+  // The diagnostic split must not leak into access control. from_address decides
+  // what a nearby client may do, and it counts the Tailscale range as LAN on
+  // purpose; only the explanation of a stream tells the two apart.
+  EXPECT_EQ(net::from_address("100.109.196.18"), net::LAN);
+  EXPECT_EQ(net::describe_client_network_path("100.109.196.18"), "cgnat");
+}
+
 TEST(NetworkPathProbe, ClassifiesNativeProbeHostsWithoutTouchingTheNetwork) {
   EXPECT_EQ(net::network_path_probe_classification("127.0.0.1"), "pc");
   EXPECT_EQ(net::network_path_probe_classification("192.168.50.25"), "lan");

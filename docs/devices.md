@@ -77,7 +77,9 @@ durable pairing store; changing it back to permanent saves it again.
 **Display Profile** overrides what the client asks for:
 
 - **Display Mode Override**, as `WxHxFPS`, makes Polaris ignore the client's requested mode and
-  configure displays to this value. Leave it blank for automatic matching.
+  configure displays to this value. Leave it blank for automatic matching. When it replaces a
+  different request, the Doctor checklist shows a **Display mode** warning naming the mode the
+  client asked for.
 - **Output Name** pins the device to a specific host output.
 - **Color Range** forces limited or full range when a client reports it wrong.
 - **WoL MAC Address** enables the Wake action.

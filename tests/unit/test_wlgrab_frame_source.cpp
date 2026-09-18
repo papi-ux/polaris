@@ -48,6 +48,17 @@ TEST(ExtcopyFrameSource, ReinitializationSupersedesStalePrefetchedFrame) {
   EXPECT_FALSE(prefetched_frame_pending);
 }
 
+TEST(ExtcopySession, IsRecreatedWhenTheCursorSettingChanges) {
+  // Displays start without cursor painting and the stream turns it on at the first frame,
+  // since mouse_cursor_visible defaults to true. Reusing the session there kept the cursor
+  // out of the stream and made an idle output rebuild the pipeline about once a second.
+  EXPECT_FALSE(wl::extcopy_session_reusable(true, false, true));
+  EXPECT_FALSE(wl::extcopy_session_reusable(true, true, false));
+  EXPECT_TRUE(wl::extcopy_session_reusable(true, true, true));
+  EXPECT_TRUE(wl::extcopy_session_reusable(true, false, false));
+  EXPECT_FALSE(wl::extcopy_session_reusable(false, false, false));
+}
+
 TEST(WlgrabCapturePacing, FixedIntervalStartsImmediatelyThenWaits) {
   const wl::capture_pacer_t::time_point_t start {10s};
   wl::capture_pacer_t pacer {

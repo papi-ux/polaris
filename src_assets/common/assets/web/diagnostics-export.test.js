@@ -11,6 +11,7 @@ import {
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
+  createExportAddressBook,
   describeLinuxGpuProfile,
   describePreviousRun,
   isSensitiveFieldName,
@@ -104,6 +105,132 @@ describe('diagnostics export redaction', () => {
     expect(bundle.stream.doctor.safe_recovery_action.payload_preview.session_token).toBe(REDACTED_VALUE)
     expect(bundle.stream.doctor.evidence[0].detail).toContain(`Bearer ${REDACTED_VALUE}`)
     expect(JSON.stringify(bundle)).not.toContain('tok_live_secret')
+  })
+})
+
+describe('diagnostics export display mode and network path', () => {
+  // The support bundle that prompted these: a client that "cannot select 1080p" because its
+  // pairing pinned 4K, and microstutter from a client that had moved onto Tailscale.
+  const overridden = { requested: '1920x1080x60', applied: '3840x2160x60', pinned_by_host: true }
+
+  it('names a Display Mode Override that replaced the client\'s request in the checklist', () => {
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { streaming: true, packet_loss: 0, display_mode_decision: overridden },
+    })
+    const item = checklist.find((entry) => entry.key === 'display-mode')
+
+    expect(item.status).toBe('warning')
+    expect(item.detail).toContain('3840x2160x60')
+    expect(item.detail).toContain('1920x1080x60')
+    expect(item.action).toContain('Devices page')
+  })
+
+  it('says nothing in the checklist when the client got the mode it asked for', () => {
+    for (const decision of [
+      { requested: '1920x1080x60', applied: '1920x1080x60', pinned_by_host: true },
+      { requested: '1280x800x60', applied: '1280x800x60', pinned_by_host: false },
+      {},
+    ]) {
+      const checklist = buildFixMyStreamChecklist({
+        statsConnected: true,
+        stats: { streaming: true, display_mode_decision: decision },
+      })
+      expect(checklist.some((entry) => entry.key === 'display-mode')).toBe(false)
+    }
+  })
+
+  it('carries the path and the display mode into the issue draft without an address', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      session_snapshot: {
+        client_ip: '100.109.196.18',
+        client_network_path: 'cgnat',
+        display_mode_decision: overridden,
+      },
+    })
+
+    expect(bundle.issue_draft).toContain('- Network path: cgnat')
+    expect(bundle.issue_draft).toContain('- Display mode: 3840x2160x60 (Display Mode Override; the client asked for 1920x1080x60)')
+    expect(bundle.issue_draft).not.toContain('100.109.196.18')
+  })
+})
+
+describe('diagnostics export network addresses', () => {
+  it('gives a device the same label in the attachment and the prefilled issue', () => {
+    // The bundle meets the recent issues first and the issue URL meets the older
+    // run's log first, so books of their own number the two devices in opposite
+    // orders and the public issue's [lan-1] is the attachment's [lan-2].
+    const context = {
+      previous_run_logs: 'Info: Session started for [TV] from 192.168.1.135',
+      recent_issues: [{ level: 'Warning', message: 'Ping timeout from 192.168.1.192' }],
+    }
+    const addresses = createExportAddressBook(context)
+    const bundle = buildAnonymizedDiagnosticsBundle(context, { addresses })
+    const issueLogs = new URL(buildGithubIssueUrl(context, { addresses })).searchParams.get('logs')
+    const inBundle = /from (\[lan-\d+\])/.exec(bundle.recent_issues[0].message)[1]
+
+    expect(issueLogs).toContain(`Ping timeout from ${inBundle}`)
+    expect(issueLogs).not.toContain('192.168.1.192')
+  })
+
+  const sessionLogs = [
+    '[2026-09-17 21:25:03.178]: Info: Session started for [Steamdeck] from 192.168.1.192 [active sessions: 1]',
+    '[2026-09-17 22:02:52.694]: Info: Session started for [Steamdeck] from 100.109.196.18 [active sessions: 1]',
+  ].join('\n')
+
+  it('exports no address verbatim, anywhere in the bundle', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: sessionLogs,
+      session_snapshot: { client_ip: '192.168.1.192' },
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nlast peer 100.109.196.18' },
+    })
+    const exported = JSON.stringify(bundle)
+
+    expect(exported).not.toContain('192.168.1.192')
+    expect(exported).not.toContain('100.109.196.18')
+    // The kind survives, which is what made the original bundle diagnosable.
+    expect(bundle.logs).toContain('from [lan-')
+    expect(bundle.logs).toContain('from [cgnat-')
+  })
+
+  it('gives one address the same label in the logs, the fields and the issue draft', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: sessionLogs,
+      session_snapshot: { client_ip: '100.109.196.18' },
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nlast peer 100.109.196.18' },
+    })
+    const inLogs = /from (\[cgnat-\d+\])/.exec(bundle.logs)[1]
+
+    expect(bundle.session_snapshot.client_ip).toBe(inLogs)
+    expect(bundle.issue_draft).toContain(`last peer ${inLogs}`)
+  })
+
+  it('gives two different devices two different labels', () => {
+    // One in the logs, one in the crash evidence the draft quotes. The guard
+    // against separately built parts disagreeing lives in the AI Doctor payload
+    // test, where the parts really are sanitised from different subsets; here the
+    // draft sanitises the whole input first, so it would agree either way.
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: '[2026-09-17 21:25:03.178]: Info: Session started for [Steamdeck] from 192.168.1.192',
+      crash: { ...crashedRun, evidence: 'polaris-crash-v1\nlast peer 192.168.1.135' },
+    })
+    const connected = /from (\[lan-\d+\])/.exec(bundle.logs)[1]
+    const crashed = /last peer (\[lan-\d+\])/.exec(bundle.issue_draft)[1]
+
+    expect(connected).not.toBe(crashed)
+  })
+
+  it('says so in the redaction notice', () => {
+    const bundle = buildAnonymizedDiagnosticsBundle({})
+
+    expect(bundle.redaction_notice).toContain('Network addresses are replaced with labels')
+  })
+
+  it('keeps addresses out of a prefilled public issue', () => {
+    const url = buildGithubIssueUrl({ logs: sessionLogs, crash: { ...crashedRun, evidence: 'peer 192.168.1.192' } })
+
+    expect(decodeURIComponent(url)).not.toContain('192.168.1.192')
+    expect(decodeURIComponent(url)).not.toContain('100.109.196.18')
   })
 })
 
@@ -1252,14 +1379,15 @@ describe('silent failure reporting', () => {
       .not.toContain('## Actions that reported success and did not land')
   })
 
-  it('carries crash and silent failures into the bundle at version 3', () => {
+  it('carries crash and silent failures into the bundle at the current version', () => {
     const bundle = buildAnonymizedDiagnosticsBundle({
       version: '1.3.11',
       crash: crashedRun,
       silent_failures: silentFailures,
     })
 
-    expect(bundle.support_bundle_version).toBe(4)
+    // 5 since network addresses became labels.
+    expect(bundle.support_bundle_version).toBe(5)
     expect(bundle.crash.outcome).toBe('crashed')
     expect(bundle.silent_failures).toHaveLength(1)
     expect(bundle.issue_draft).toContain('SIGSEGV')

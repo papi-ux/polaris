@@ -133,6 +133,16 @@ namespace stream_stats {
     bool streaming = false;
     std::string client_name;
     std::string client_ip;
+    /// The kind of path the client reached the host by (lan, cgnat, tailscale,
+    /// public...), never the address. Outlives the stream, like the HDR facts,
+    /// because people export diagnostics after disconnecting.
+    std::string client_network_path;
+    /// The display mode the last launch asked for and the one it got. They differ
+    /// when a paired client has a Display Mode Override, which silently replaces
+    /// whatever the client chooses. Outlives the stream for the same reason.
+    std::string display_mode_requested;
+    std::string display_mode_applied;
+    bool display_mode_pinned_by_host = false;
     std::string runtime_backend;
     bool runtime_requested_headless = false;
     bool runtime_effective_headless = false;
@@ -395,6 +405,15 @@ namespace stream_stats {
    * @param client_ip IP address of the connected client.
    */
   void update_stream_active(bool active, const std::string &client_name = "", const std::string &client_ip = "");
+
+  /**
+   * @brief Record how a launch's display mode was decided.
+   * @param requested The mode the client asked for, empty if it asked for none.
+   * @param applied The mode Polaris used.
+   * @param pinned_by_host Whether a paired client's Display Mode Override chose it
+   *        rather than the client.
+   */
+  void record_display_mode_decision(const std::string &requested, const std::string &applied, bool pinned_by_host);
 
   /**
    * @brief Add a new client session to the stats tracker.

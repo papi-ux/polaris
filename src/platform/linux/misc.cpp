@@ -96,6 +96,10 @@ namespace portal {
 namespace {
   std::atomic_bool thread_priority_permission_denied {false};
   std::atomic_bool thread_priority_permission_warning_logged {false};
+  // Written on the thread that failed to raise its priority, read by the Doctor
+  // on a web request, hence the lock. Empty until elevation has been refused.
+  std::mutex thread_priority_unavailable_mutex;
+  std::string thread_priority_unavailable_limits;
 
 #ifdef POLARIS_BUILD_VULKAN
   void append_environment_token(const char *name, std::string_view token) {
@@ -165,6 +169,19 @@ namespace {
 
     message << ". Configure LimitRTPRIO/LimitNICE, CAP_SYS_NICE, or RealtimeKit to enable realtime or negative-nice worker threads.";
     BOOST_LOG(warning) << message.str();
+
+    // Kept for the Doctor. This warning is logged once, at the first stream, and
+    // scrolls away; a support bundle exported later showed it only in raw log
+    // text, next to a microstutter report it may well explain.
+    std::string limits;
+    if (have_rtprio_limit) {
+      limits = "RLIMIT_RTPRIO=" + format_rlimit_value(rtprio_limit.rlim_cur);
+    }
+    if (have_nice_limit) {
+      limits += (limits.empty() ? "" : ", ") + std::string {"RLIMIT_NICE="} + format_rlimit_value(nice_limit.rlim_cur);
+    }
+    std::lock_guard lock {thread_priority_unavailable_mutex};
+    thread_priority_unavailable_limits = limits.empty() ? "limits unknown" : limits;
   }
 
   std::uint64_t current_thread_id() {
@@ -2063,6 +2080,18 @@ std::string get_local_ip_for_gateway() {
   std::string capture_backend_substitution_note() {
     return capture_backend_substitution;
   }
+
+  std::string thread_priority_unavailable_note() {
+    std::lock_guard lock {thread_priority_unavailable_mutex};
+    return thread_priority_unavailable_limits;
+  }
+
+#ifdef POLARIS_TESTS
+  void set_thread_priority_unavailable_note_for_tests(std::string note) {
+    std::lock_guard lock {thread_priority_unavailable_mutex};
+    thread_priority_unavailable_limits = std::move(note);
+  }
+#endif
 
   bool capture_sources_missing() {
     return capture_sources_evaluated && sources.none();

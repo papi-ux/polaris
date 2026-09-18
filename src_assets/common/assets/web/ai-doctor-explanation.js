@@ -1,4 +1,5 @@
 import { buildStreamEvidence, sanitizeDiagnosticsValue } from './diagnostics-export.js'
+import { NetworkAddressBook } from './network-address-pseudonyms.js'
 
 export const AI_DOCTOR_EXPLANATION_SCHEMA = Object.freeze({
   type: 'object',
@@ -36,19 +37,27 @@ function hasConfiguredProvider(config = {}) {
 }
 
 export function buildAiDoctorExplanationPayload({ supportBundle = {}, deterministicSummary = null } = {}) {
+  // This payload goes to an outside AI provider. One address book across all
+  // three passes keeps an address's label the same in the evidence and the
+  // summary, so the explanation cannot mistake one device for two.
+  const addresses = new NetworkAddressBook()
   const rawEvidence = {
-    ...buildStreamEvidence(supportBundle),
+    ...buildStreamEvidence(supportBundle, { addresses }),
     session_snapshot: supportBundle.session_snapshot || supportBundle.stream_stats || {},
     doctor: supportBundle.session_snapshot?.doctor || supportBundle.stream_stats?.doctor || supportBundle.doctor || {},
     fix_my_stream_checklist: supportBundle.fix_my_stream_checklist || [],
     recent_issues: supportBundle.recent_issues || [],
   }
-  const evidence = sanitizeDiagnosticsValue(JSON.parse(JSON.stringify(rawEvidence)))
+  const evidence = sanitizeDiagnosticsValue(JSON.parse(JSON.stringify(rawEvidence)), new WeakSet(), addresses)
 
   return {
     categories: [...AI_DOCTOR_EXPLANATION_CATEGORIES],
     schema: AI_DOCTOR_EXPLANATION_SCHEMA,
-    deterministic_source_of_truth: sanitizeDiagnosticsValue(deterministicSummary || supportBundle.deterministic_summary || null),
+    deterministic_source_of_truth: sanitizeDiagnosticsValue(
+      deterministicSummary || supportBundle.deterministic_summary || null,
+      new WeakSet(),
+      addresses
+    ),
     evidence,
   }
 }

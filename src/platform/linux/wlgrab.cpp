@@ -682,15 +682,31 @@ namespace wl {
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, bool *cursor) {
       auto capture_start = std::chrono::steady_clock::now();
       auto cursor_enabled = cursor ? *cursor : false;
+      // Read before select_extcopy_frame_source, which is what decides to
+      // reinitialise: the log below has to say which of the two reasons it was.
+      const bool was_capture_ready = capture_ready;
+      const bool cursor_changed = cursor_enabled != blend_cursor;
       const auto frame_source = select_extcopy_frame_source(
         capture_ready,
-        cursor_enabled != blend_cursor,
+        cursor_changed,
         prefetched_frame_pending
       );
 
       if (frame_source == extcopy_frame_source_e::initialize) {
+        const bool previous_blend_cursor = blend_cursor;
         blend_cursor = cursor_enabled;
         if (extcopy.init(display, interface.copy_capture_manager, interface.output_capture_source_manager, interface.dmabuf_interface, output, blend_cursor)) {
+          // Every return below rebuilds the whole capture and encode pipeline, and
+          // none of them used to say why. A support bundle showed ten rebuilds a
+          // second apart at session start with no reason anywhere in the log. A
+          // status of WAITING here means the compositor produced no new frame
+          // within the probe window, which on an idle output is not a failure.
+          BOOST_LOG(warning) << "wlr: ext-image-copy "sv
+                             << (was_capture_ready ? "re-initialization"sv : "initialization"sv)
+                             << " failed; reinitializing display capture. cause="sv
+                             << (was_capture_ready && cursor_changed ? "cursor_changed"sv : "not_ready"sv)
+                             << " blend_cursor="sv << previous_blend_cursor << "->"sv << blend_cursor
+                             << " status="sv << extcopy_status_name(extcopy.status);
           return platf::capture_e::reinit;
         }
         capture_ready = true;
@@ -711,6 +727,11 @@ namespace wl {
           return platf::capture_e::timeout;
         }
         if (extcopy.status != wl::extcopy_t::READY) {
+          BOOST_LOG(warning) << "wlr: ext-image-copy capture ended in status="sv
+                             << extcopy_status_name(extcopy.status)
+                             << " after a "sv
+                             << (frame_source == extcopy_frame_source_e::prefetched ? "prefetched"sv : "requested"sv)
+                             << " frame; reinitializing display capture"sv;
           return platf::capture_e::reinit;
         }
       }

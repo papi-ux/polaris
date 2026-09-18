@@ -35,4 +35,18 @@ namespace wl {
 
     return extcopy_frame_source_e::capture;
   }
+
+  /**
+   * @brief Whether an existing ext-image-copy session can serve a capture as requested.
+   *
+   * Whether the compositor paints the cursor is fixed when a session is created, so a
+   * session made without it cannot start painting it later. Reusing one after the cursor
+   * setting changed kept the cursor out of the stream, and asked the old session for a
+   * second frame: on an idle output none comes within the probe window, initialization
+   * failed, and the whole pipeline rebuilt about once a second until the screen changed.
+   * A new session delivers its first frame straight away.
+   */
+  inline bool extcopy_session_reusable(bool session_ready, bool session_paints_cursor, bool blend_cursor) {
+    return session_ready && session_paints_cursor == blend_cursor;
+  }
 }  // namespace wl

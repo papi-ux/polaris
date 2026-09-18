@@ -524,7 +524,9 @@ import {
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
   buildSupportSelfTestCopy,
+  createExportAddressBook,
   redactSensitiveText,
+  sanitizeDiagnosticsValue,
 } from '../diagnostics-export.js'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 import { aiReadinessCopy, describeAiReadiness } from '../doctor-ai-readiness.js'
@@ -967,7 +969,7 @@ function copyRecentIssues() {
     return
   }
 
-  navigator.clipboard.writeText(recentIssueSummaryText.value)
+  navigator.clipboard.writeText(redactSensitiveText(recentIssueSummaryText.value))
   showToast(i18n.t('troubleshooting.copy_recent_issues_success') || 'Recent warnings and errors copied.', 'success')
 }
 
@@ -1038,12 +1040,16 @@ async function openPrefilledIssue() {
   generatingIssueDraft.value = true
   try {
     const context = await collectSupportContext()
+    // One address book for the attachment and the public issue, so a device has
+    // the same label in both. Separate books number addresses in the order each
+    // one meets them, and the two walk the context in different orders.
+    const addresses = createExportAddressBook(context)
     // The bundle is downloaded first so the user has the attachment in hand by
     // the time the form opens. Nothing is submitted for them.
-    const bundle = buildAnonymizedDiagnosticsBundle(context)
+    const bundle = buildAnonymizedDiagnosticsBundle(context, { addresses })
     const timestamp = new Date().toISOString().replace(/[:]/g, '-')
     triggerDownload(`polaris-anonymized-diagnostics-${timestamp}.json`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8')
-    window.open(buildGithubIssueUrl(context), '_blank', 'noopener')
+    window.open(buildGithubIssueUrl(context, { addresses }), '_blank', 'noopener')
     showToast(i18n.t('troubleshooting.report_problem_success') || 'Support bundle downloaded. Attach it to the issue that just opened.', 'success')
   } catch (error) {
     console.error(error)
@@ -1164,10 +1170,11 @@ async function collectSupportContext() {
 
 async function createSupportBundle(providedContext = null) {
   const context = providedContext || await collectSupportContext()
-  return buildAnonymizedDiagnosticsBundle({
-    ...context,
-    issue_draft: buildGithubIssueDraft(context),
-  })
+  // The bundle builds its own issue draft, from the same address book as the rest
+  // of the export. A draft built here would label addresses from a book of its
+  // own, and only agree with the bundle for as long as both happen to meet the
+  // same addresses in the same order.
+  return buildAnonymizedDiagnosticsBundle(context)
 }
 
 async function copyIssueDraft() {
@@ -1206,13 +1213,17 @@ async function requestAiDoctorExplanation() {
     // intentionally anonymized, so fields such as ai_auth_mode are redacted
     // and must never be recycled as live provider configuration.
     const context = await collectSupportContext()
-    const supportBundle = await createSupportBundle(context)
+    // The summary is labelled with the bundle's own book. Handed over raw, an
+    // address the bundle already calls [lan-1] would be numbered afresh in the
+    // summary, and the explanation would read one device as two.
+    const addresses = createExportAddressBook(context)
+    const supportBundle = buildAnonymizedDiagnosticsBundle(context, { addresses })
     const config = context.config || {}
     const result = await explainDoctorWithAi({
       aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
       config,
       supportBundle,
-      deterministicSummary: doctorPlainDiagnosis.value,
+      deterministicSummary: sanitizeDiagnosticsValue(doctorPlainDiagnosis.value, new WeakSet(), addresses),
     })
     aiDoctorExplanation.value = result.explanation || null
     if (result.disabled) {
