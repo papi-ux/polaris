@@ -97,3 +97,17 @@ TEST(BuiltinArtworkContract, UtilityEntriesNeverAdvertiseOrServeAnAutomaticMatch
   EXPECT_NE(asset_route.find("asset->source == game_artwork::source_e::steamgriddb && uses_bundled_utility_artwork(*app)"),
             std::string::npos);
 }
+
+TEST(BuiltinArtworkContract, OnlyOneParticularGameIsGivenACompletionTime) {
+  // A launcher's title found a game that shares its name: the Heroic entry was served the
+  // completion time of a game called Heroic Dungeon, and asked the lookup again for it.
+  const auto source = read_nvhttp_source();
+  const auto guard = source.find("if (!uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {");
+  ASSERT_NE(guard, std::string::npos);
+  const auto call = source.find("beat_time_for_app(app, game[\"artwork\"])");
+  ASSERT_NE(call, std::string::npos);
+  // The lookup is the first statement inside that guard, and the library asks nowhere else.
+  EXPECT_GT(call, guard);
+  EXPECT_LT(call - guard, 200U);
+  EXPECT_EQ(source.find("beat_time_for_app(app, game[\"artwork\"])", call + 1), std::string::npos);
+}
