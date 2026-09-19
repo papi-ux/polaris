@@ -83,4 +83,22 @@ namespace kwin_virtual_output {
    */
   bool release(const std::string &output_name, std::chrono::milliseconds budget);
 
+  /**
+   * @brief The name KWin gives an input device, looked up by its kernel event name.
+   * @param sys_name The device's `eventN`.
+   * @param error Set to the reason when this returns nullopt, including while
+   *        KWin has not picked up a device that was just created.
+   */
+  std::optional<std::string> input_device_name(const std::string &sys_name, std::string &error);
+
+  /**
+   * @brief Point an input device at an output, or at none with an empty name.
+   *
+   * KWin maps a touch screen, a tablet or an absolute pointer onto the output
+   * named here, and saves the choice in kcminputrc under the device's name, so
+   * it outlives the device and the output alike.
+   * @param error Set to the reason when this returns false.
+   */
+  bool set_input_device_output(const std::string &sys_name, const std::string &output_name, std::string &error);
+
 }  // namespace kwin_virtual_output

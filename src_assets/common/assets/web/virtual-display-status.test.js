@@ -119,6 +119,25 @@ describe('virtual display status presentation', () => {
     wrapper.unmount()
   })
 
+  it('says why Plasma is not getting a KWin screen when the host reports a reason', async () => {
+    vi.stubGlobal('fetch', kscreenFetch({
+      status: {
+        available: true,
+        backend: 'EVDI',
+        backend_detected: true,
+        kwin_reason: 'kscreen-doctor is not installed; Polaris needs it to place the new screen.',
+        policy_mode: 'host_virtual_display',
+      },
+      outputs: { outputs: [] },
+    }))
+    const config = reactive({ linux_virtual_display_backend: 'auto', linux_streaming_output: '' })
+    const wrapper = shallowMount(VirtualDisplayStatus, { props: { platform: 'linux', config } })
+
+    await flushPromises()
+    expect(wrapper.find('[data-kwin-unavailable-reason]').text()).toContain('kscreen-doctor is not installed')
+    wrapper.unmount()
+  })
+
   it('keeps the KScreen connector field reachable once the backend is configured', async () => {
     vi.stubGlobal('fetch', kscreenFetch({
       status: { available: true, policy_mode: 'host_virtual_display' },

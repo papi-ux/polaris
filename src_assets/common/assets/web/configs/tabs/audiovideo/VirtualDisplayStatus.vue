@@ -149,6 +149,9 @@ watch(() => props.hostGeneration, refresh)
         <div v-if="vdStatus.backend_detected" class="text-sm text-storm">
           Detected backend: <span class="text-silver font-medium">{{ vdStatus.backend }}</span>
         </div>
+        <div v-if="vdStatus.kwin_reason" class="text-sm text-storm" data-kwin-unavailable-reason>
+          Why not a KWin screen: <span class="text-silver">{{ vdStatus.kwin_reason }}</span>
+        </div>
 
         <label class="block text-xs font-medium text-storm" data-vdisplay-backend-choice>
           Backend
@@ -162,7 +165,7 @@ watch(() => props.hostGeneration, refresh)
             </option>
           </select>
           <span class="mt-1 block font-normal">
-            Automatic tries EVDI, then a new KWin screen on KDE Plasma, then Hyprland, then a borrowed connector. Picking one uses only that one, and a launch it cannot serve is refused with the reason.
+            Automatic tries a new KWin screen on KDE Plasma, then EVDI, then Hyprland, then a borrowed connector. Picking one uses only that one, and a launch it cannot serve is refused with the reason.
           </span>
         </label>
 
@@ -173,7 +176,7 @@ watch(() => props.hostGeneration, refresh)
         >
           <div class="text-silver font-medium text-xs uppercase tracking-wide">KWin Virtual Screen</div>
           <p>
-            KWin creates a new screen at the client's resolution for each stream and removes it when the stream ends. Nothing is borrowed, and your desktop, icons and panel stay on your monitor: windows that open during the stream, the game included, are moved onto the new screen instead. Polaris asks KWin for the client's refresh rate; if KWin will not run it, the stream uses the rate it gets. KWin virtual screens carry no HDR.
+            KWin creates a new screen at the client's resolution for each stream and removes it when the stream ends. Nothing is borrowed, and your desktop, icons and panel stay on your monitor: windows that open during the stream, the game included, are moved onto the new screen and get the focus, and the client's touch, pen and mouse land on it. Your other monitors stay where they are. Polaris asks KWin for the client's refresh rate; if KWin will not run it, the stream uses the rate it gets. KWin virtual screens carry no HDR.
           </p>
         </div>
 

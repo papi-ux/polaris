@@ -503,22 +503,28 @@ function formatDisplayModeDecision(decision = {}) {
   return decision.pinned_by_host ? `${applied} (Display Mode Override)` : applied
 }
 
-function hostConfigurationWarningItem(stats = {}) {
-  const warning = linuxConfigurationWarnings(stats)[0]
-  if (!warning) return null
-
-  const severity = lower(warning.severity)
-  const status = severity === 'fail' || severity === 'error' ? 'fail' : 'warning'
-  const detail = warning.message || warning.detail || 'Linux host configuration warning.'
-  const action = warning.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
-
-  return checklistItem(
-    'host-config',
+// Every finding gets its own card: a host can have more than one thing wrong, and the Doctor
+// used to show only the first, so a second finding stayed out of sight until the first was fixed.
+// A fail comes first, then a warning, then a note; the first card keeps the plain key.
+function hostConfigurationWarningItems(stats = {}) {
+  const rank = { fail: 0, warning: 1, info: 2 }
+  const items = linuxConfigurationWarnings(stats).map((warning, index) => {
+    const severity = lower(warning?.severity)
+    const status = severity === 'fail' || severity === 'error'
+      ? 'fail'
+      : severity === 'info' ? 'info' : 'warning'
+    const detail = warning?.message || warning?.detail || 'Linux host configuration warning.'
+    const action = warning?.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
+    return { index, status, id: String(warning?.id || index), detail, action }
+  })
+  items.sort((a, b) => rank[a.status] - rank[b.status] || a.index - b.index)
+  return items.map((item, position) => checklistItem(
+    position === 0 ? 'host-config' : `host-config-${item.id}`,
     'Host configuration',
-    status,
-    redactSensitiveText(detail),
-    redactSensitiveText(action)
-  )
+    item.status,
+    redactSensitiveText(item.detail),
+    redactSensitiveText(item.action)
+  ))
 }
 
 export function describeLinuxGpuProfile(stats = {}) {
@@ -589,7 +595,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
     : streaming
       ? checklistItem('connection', 'Connection', 'pass', 'Live telemetry is connected and a stream is active.', 'Keep this page open while reproducing the issue.')
       : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
-  const hostConfig = hostConfigurationWarningItem(stats)
+  const hostConfig = hostConfigurationWarningItems(stats)
   const displayMode = displayModeOverrideItem(stats)
 
   const loss = Number.isFinite(packetLoss)
@@ -660,7 +666,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
 
   return [
     connection,
-    ...(hostConfig ? [hostConfig] : []),
+    ...hostConfig,
     ...(displayMode ? [displayMode] : []),
     loss,
     capture,

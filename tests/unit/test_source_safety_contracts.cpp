@@ -1289,6 +1289,30 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   ASSERT_NE(destroy_body, std::string::npos);
   EXPECT_NE(stop_following, std::string::npos);
 
+  // The other screens go back where they were before KWin applied its stored
+  // layout, in the same kscreen-doctor call that places the new one, and the new
+  // one is measured against them as they were: pc-papi's DP-2 moved to 1024,0
+  // on every stream when x came from the layout read after KWin had moved it.
+  const auto keep_positions = body.find("kwin_keep_positions_args(name, layout_before)", place_body);
+  const auto placement = body.find("kwin_placement_args(name, x)", place_body);
+  ASSERT_NE(keep_positions, std::string::npos);
+  ASSERT_NE(placement, std::string::npos);
+  EXPECT_LT(custom_mode, keep_positions);
+  EXPECT_LT(keep_positions, placement);
+  EXPECT_LT(placement, rank_last);
+  EXPECT_NE(body.find("const int x = kscreen_right_edge(layout_before, name);", place_body), std::string::npos);
+  EXPECT_NE(body.find("kwin_positions_match(*placed, layout_before, name)", place_body), std::string::npos);
+
+  // Touch, pen and the absolute mouse follow the screen once it exists, and stop
+  // before it is released, like the windows.
+  const auto input_follows = body.find("input_routing::screen_added(output_name);", create);
+  ASSERT_NE(input_follows, std::string::npos);
+  EXPECT_LT(follow, input_follows);
+  EXPECT_NE(
+    body.find("input_routing::screen_removed(display.output_name);\n      kwin_virtual_output::stop_following_windows(display.output_name);\n      if (!kwin_virtual_output::release(", destroy_body),
+    std::string::npos
+  );
+
   // A name match alone could be someone else's output: the output must also be a new global.
   const auto proof = wayland.find("!globals_before.contains(output->global)");
   const auto held = wayland.find("anchors[expected] = std::move(anchor)");

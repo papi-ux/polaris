@@ -21,6 +21,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/platform/gamepad_feedback_router.h"
+#include "src/platform/linux/virtual_display.h"
 #include "src/utility.h"
 
 using namespace std::literals;
@@ -82,6 +83,10 @@ namespace platf {
         }));
         if (!*mouse) {
           BOOST_LOG(warning) << "Unable to create virtual mouse: " << mouse->getErrorMessage();
+        } else {
+          // Its absolute half lands on a point of the screen, so on Plasma it
+          // follows the stream screen; the relative half is dropped there.
+          virtual_display::route_absolute_input((**mouse).get_nodes());
         }
         warn_if_seat_isolation_inert(*mouse, "mouse");
       }
@@ -152,6 +157,23 @@ namespace platf {
         BOOST_LOG(warning) << "Unable to create virtual pen tablet: " << pen.getErrorMessage();
       }
       warn_if_seat_isolation_inert(pen, "pen tablet");
+      // A tap or a pen stroke lands on a point of the screen, so on Plasma both
+      // follow the stream screen instead of spanning every monitor.
+      if (touch) {
+        virtual_display::route_absolute_input((*touch).get_nodes());
+      }
+      if (pen) {
+        virtual_display::route_absolute_input((*pen).get_nodes());
+      }
+    }
+
+    ~client_input_raw_t() override {
+      if (touch) {
+        virtual_display::forget_absolute_input((*touch).get_nodes());
+      }
+      if (pen) {
+        virtual_display::forget_absolute_input((*pen).get_nodes());
+      }
     }
 
     input_raw_t *global;

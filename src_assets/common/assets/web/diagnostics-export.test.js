@@ -661,6 +661,28 @@ describe('Fix My Stream checklist', () => {
     expect(hostConfig.action).toContain('linux_prefer_gpu_native_capture = enabled')
     expect(checklist.map((item) => item.key)[1]).toBe('host-config')
   })
+
+  it('shows every host finding, the worst first, and a note as a note', () => {
+    // The Doctor used to show only the first finding, so a KWin note hid a failing input mapping.
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: {
+        streaming: true,
+        linux_gpu_profile: {
+          configuration_warnings: [
+            { id: 'hvd_kwin_screen_unused', severity: 'info', message: 'Host Virtual Display used EVDI.', action: 'Set it to Automatic.' },
+            { id: 'hvd_input_not_mapped', severity: 'warning', message: 'Touch passthrough is not on the stream screen.', action: 'Run Polaris in the Plasma session.' },
+            { id: 'no_capture_backend', severity: 'fail', message: 'No capture backend.', action: 'Check capture.' },
+          ],
+        },
+      },
+    })
+
+    const host = checklist.filter((item) => item.key.startsWith('host-config'))
+    expect(host.map((item) => item.status)).toEqual(['fail', 'warning', 'info'])
+    expect(host.map((item) => item.key)).toEqual(['host-config', 'host-config-hvd_input_not_mapped', 'host-config-hvd_kwin_screen_unused'])
+    expect(host[2].detail).toContain('used EVDI')
+  })
 })
 
 

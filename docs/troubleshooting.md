@@ -533,7 +533,10 @@ will not, so read the ones after the session starts.
 
 On KDE Plasma 6, Host Virtual Display gets a new screen from KWin (see
 [Launch modes and capture paths](launch-modes.md)). The Virtual Display panel on the Audio/Video
-tab names the backend in use and, when it cannot run, why.
+tab names the backend in use and, when it cannot run, why. The Doctor names three problems here
+on its own: `hvd_kwin_screen_unused` when Plasma got another backend, and why;
+`hvd_screen_scaled` when the stream screen runs at a scale other than 100%; and
+`hvd_input_not_mapped` when touch, pen or the mouse could not be put on the stream screen.
 
 - **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
   desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
@@ -559,6 +562,25 @@ tab names the backend in use and, when it cannot run, why.
   screen with a small KWin script it loads for the stream. The log says `new windows will not be
   moved` when KWin refused to load it or dropped it; the stream then shows an empty screen while
   the game runs on your monitor. With two Polaris screens at once, the newer one gets new windows.
+  A window the script moves also gets the focus, so the controller drives the game from the first
+  press.
+- **A tap from the client landed on another monitor, or the game ignored it.** KWin spreads a touch
+  screen, a pen and an absolute mouse over every monitor unless each is tied to one, so Polaris
+  ties the client's to the stream screen while it exists (the log says `lands on`) and unties them
+  when it goes. KWin remembers the tie in `~/.config/kcminputrc` under each device's name, and
+  Polaris sets it again at the start of every stream on Plasma, whatever the backend, so one left
+  by a crash does not stick. The Doctor's `hvd_input_not_mapped` carries KWin's answer when the
+  tie failed; the usual cause is a Polaris started outside the Plasma session, which cannot reach
+  KWin on that session's bus.
+- **My monitors moved when the stream started.** KWin keeps a layout for each set of screens and
+  applies it when the set changes, and the one it kept for "your monitors plus the stream screen"
+  can have your monitors somewhere else. Polaris puts every monitor back where it was in the same
+  step that places the stream screen, and the log says `did not go back where they were` when KWin
+  would not. When the stream ends KWin applies the layout it kept for your monitors alone.
+- **The stream screen is at 135% (or another scale).** An EVDI screen on Plasma gets the scale KWin
+  stored for it, and the Doctor says `hvd_screen_scaled`. While a stream runs, set that screen to
+  100% under System Settings, Display & Monitor; KWin keeps it for next time. Polaris's own KWin
+  screen is always put at 100%.
 - **A window I opened at the desk jumped to the stream.** While a stream runs, every new
   application window is moved onto its screen. Drag it back, or use Meta+Shift+Left. The
   desktop's own prompts stay on your monitor: polkit password prompts, ksshaskpass, KWallet and

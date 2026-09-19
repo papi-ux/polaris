@@ -40,6 +40,7 @@ namespace video {
   #include "platform/linux/user_unit_override.h"
   #include "platform/linux/wayland.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/virtual_display.h"
 #endif
 
 namespace stream_stats {
@@ -906,6 +907,98 @@ namespace stream_stats {
     };
   }
 
+#ifdef __linux__
+  namespace {
+    std::string backend_setting_label(std::string_view preference) {
+      if (preference == "evdi") {
+        return "EVDI";
+      }
+      if (preference == "kwin") {
+        return "KWin";
+      }
+      if (preference == "wlr") {
+        return "Hyprland";
+      }
+      if (preference == "kscreen") {
+        return "kscreen-doctor";
+      }
+      return "Automatic";
+    }
+
+    /**
+     * Host Virtual Display on KDE Plasma: the three ways a stream screen there went wrong in
+     * testing, each silent until now. The game opened on the desk's monitor because the screen
+     * came from EVDI, a tap landed on the wrong monitor because KWin spread the touch screen
+     * over all of them, and an EVDI screen kept a 1.35 scale KWin had stored for it.
+     */
+    void append_host_virtual_display_warnings(nlohmann::json &warnings, const virtual_display::doctor_notes_t &notes) {
+      if (!notes.plasma) {
+        return;
+      }
+
+      for (const auto &route : notes.input_routes) {
+        if (route.routed || route.output.empty()) {
+          continue;
+        }
+        const auto device = route.device.empty() ? std::string {"an input device"} : route.device;
+        warnings.push_back({
+          {"id", "hvd_input_not_mapped"},
+          {"severity", "warning"},
+          {"message", "Polaris could not point " + device + " at the stream screen [" + route.output +
+                        "], so a tap or a pen stroke from the client can land on another monitor. KWin said: " +
+                        route.error},
+          {"action", "Run Polaris inside the Plasma session it streams, as the packaged polaris.service does, "
+                     "so it can reach KWin on that session's bus. A support bundle from one stream carries the "
+                     "whole KWin answer."}
+        });
+        break;  // One is enough: the cause is the same for every device.
+      }
+
+      if (!notes.scaled_screen.empty()) {
+        const auto percent = std::to_string(static_cast<int>(notes.scaled_screen_scale * 100.0 + 0.5));
+        warnings.push_back({
+          {"id", "hvd_screen_scaled"},
+          {"severity", "warning"},
+          {"message", "KWin runs the stream screen [" + notes.scaled_screen + "] at " + percent +
+                        "% scale, from a layout it stored for that screen. Everything on it is drawn larger, and "
+                        "its desktop is smaller than the stream's resolution."},
+          {"action", "While a stream is running, set that screen to 100% in System Settings, under Display & "
+                     "Monitor; KWin keeps the choice for next time. Or set Host Virtual Display Backend to "
+                     "Automatic, so Plasma gets Polaris's own KWin screen, which Polaris always puts at 100%."}
+        });
+      }
+
+      if (notes.last_backend &&
+          *notes.last_backend != virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT) {
+        const auto used = std::string {virtual_display::backend_name(*notes.last_backend)};
+        const bool chosen = notes.preference != "auto" && notes.preference != "kwin";
+        std::string message;
+        std::string action;
+        if (chosen) {
+          message = "Host Virtual Display used " + used + " because Host Virtual Display Backend is set to " +
+                    backend_setting_label(notes.preference) +
+                    ". On Plasma that screen is a monitor like any other, so a game opens on your primary one "
+                    "rather than on the stream.";
+          action = "Set Host Virtual Display Backend to Automatic, unless you chose " +
+                   backend_setting_label(notes.preference) + " for a reason.";
+        } else {
+          message = "Host Virtual Display used " + used + " because Polaris could not create a KWin screen: " +
+                    (notes.kwin_reason.empty() ? std::string {"no reason was recorded."} : notes.kwin_reason) +
+                    " A game may open on your primary monitor rather than on the stream.";
+          action = "Fix what the reason names and restart Polaris. Troubleshooting, under Host Virtual Display "
+                   "on KDE, covers each one.";
+        }
+        warnings.push_back({
+          {"id", "hvd_kwin_screen_unused"},
+          {"severity", "info"},
+          {"message", std::move(message)},
+          {"action", std::move(action)}
+        });
+      }
+    }
+  }  // namespace
+#endif
+
   nlohmann::json linux_gpu_profile_json(const stats_t &stats) {
     const auto &linux_display = config::video.linux_display;
     const bool gpu_native_requested =
@@ -1237,6 +1330,8 @@ namespace stream_stats {
                    "which limit applies."}
       });
     }
+
+    append_host_virtual_display_warnings(configuration_warnings, virtual_display::doctor_notes());
 #endif
 
     nlohmann::json profile = {

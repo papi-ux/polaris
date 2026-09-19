@@ -662,6 +662,76 @@ TEST(VirtualDisplayKwinTests, RankingCheckCatchesAStreamScreenAboveAMonitor) {
   ));
 }
 
+namespace {
+  virtual_display::kscreen_output_layout_t placed_screen(std::string name, int x, int y, int width, bool enabled = true) {
+    virtual_display::kscreen_output_layout_t output;
+    output.name = std::move(name);
+    output.enabled = enabled;
+    output.x = x;
+    output.y = y;
+    output.mode_width = width;
+    output.mode_height = 2160;
+    return output;
+  }
+}  // namespace
+
+TEST(VirtualDisplayKwinTests, OtherScreensGoBackWhereTheyWere) {
+  using args_t = std::vector<std::string>;
+  // pc-papi: DP-2 at 0,0 before the stream. KWin then applied the layout it had
+  // stored for "DP-2 plus a Polaris screen", which put DP-2 at 1024,0 and the
+  // screen at 8704,0, and the monitor stayed moved for the whole stream.
+  const std::vector<virtual_display::kscreen_output_layout_t> before {
+    placed_screen("DP-2", 0, 0, 7680),
+    placed_screen("HDMI-A-1", 7680, -200, 1920),
+    placed_screen("DP-3", 9000, 0, 1920, false),
+  };
+  EXPECT_EQ(
+    virtual_display::kwin_keep_positions_args("Virtual-polaris-0", before),
+    (args_t {"output.DP-2.position.0,0", "output.HDMI-A-1.position.7680,-200"})
+  );
+  // The new screen goes past them as they were, not as KWin's stored layout had them.
+  EXPECT_EQ(virtual_display::kscreen_right_edge(before, "Virtual-polaris-0"), 9600);
+
+  const std::vector<virtual_display::kscreen_output_layout_t> shifted {
+    placed_screen("DP-2", 1024, 0, 7680),
+    placed_screen("HDMI-A-1", 7680, -200, 1920),
+    placed_screen("Virtual-polaris-0", 8704, 0, 1920),
+  };
+  EXPECT_FALSE(virtual_display::kwin_positions_match(shifted, before, "Virtual-polaris-0"));
+  const std::vector<virtual_display::kscreen_output_layout_t> restored {
+    placed_screen("DP-2", 0, 0, 7680),
+    placed_screen("HDMI-A-1", 7680, -200, 1920),
+    placed_screen("Virtual-polaris-0", 9600, 0, 1920),
+  };
+  EXPECT_TRUE(virtual_display::kwin_positions_match(restored, before, "Virtual-polaris-0"));
+  // A monitor that went missing or dark is not where it was.
+  EXPECT_FALSE(virtual_display::kwin_positions_match({restored[0], restored[2]}, before, "Virtual-polaris-0"));
+  // A screen listed before under the stream screen's own name is left to the placement.
+  EXPECT_TRUE(virtual_display::kwin_keep_positions_args("DP-2", {placed_screen("DP-2", 0, 0, 7680)}).empty());
+}
+
+TEST(VirtualDisplayKwinTests, OnlyAbsoluteDevicesFollowTheStreamScreen) {
+  // A tap and a pen stroke land on a point of the screen, and so does the mouse's
+  // absolute half; KWin spread all three over every monitor.
+  EXPECT_TRUE(virtual_display::routes_to_stream_screen("Touch passthrough"));
+  EXPECT_TRUE(virtual_display::routes_to_stream_screen("Pen passthrough"));
+  EXPECT_TRUE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough (absolute)"));
+  // The relative mouse moves the cursor wherever it is, and a keyboard follows the focus.
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough"));
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Keyboard passthrough"));
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Logitech USB Receiver Mouse"));
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen(""));
+
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event31"), "event31");
+  EXPECT_EQ(virtual_display::input_event_name("event7"), "event7");
+  // Anything else never becomes part of a KWin object path.
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/js0"), "");
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event"), "");
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event3/../../x"), "");
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event3x"), "");
+  EXPECT_EQ(virtual_display::input_event_name(""), "");
+}
+
 TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
   virtual_display::kscreen_output_layout_t screen;
   screen.name = "Virtual-polaris-0";
