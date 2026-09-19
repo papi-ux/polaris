@@ -296,9 +296,10 @@ namespace virtual_display {
   /**
    * @brief Whether Polaris points this input device at the stream screen.
    *
-   * Only the devices that land on a point of the screen: the client's touch
-   * screen and pen, and the absolute half of the mouse. A relative pointer
-   * moves the cursor wherever it is, and a keyboard follows the focus.
+   * The client's touch screen and pen, the devices KWin maps onto one output.
+   * KWin places an absolute pointer over the whole workspace whatever it is
+   * told, a relative pointer moves the cursor wherever it is, and a keyboard
+   * follows the focus.
    * @param kwin_device_name The name KWin lists the device under.
    */
   bool routes_to_stream_screen(std::string_view kwin_device_name);
@@ -307,14 +308,14 @@ namespace virtual_display {
   std::string input_event_name(std::string_view node);
 
   /**
-   * @brief Point Polaris's absolute input devices at the stream screen on KDE Plasma.
+   * @brief Point Polaris's touch and pen devices at the stream screen on KDE Plasma.
    *
-   * KWin spreads a touch screen, a tablet and an absolute pointer over every
-   * monitor unless told otherwise, so a tap on the client landed wherever that
-   * point fell on the whole desk while the game ran on the KWin screen. While a
-   * KWin screen exists these devices are pointed at the newest one; without one
-   * they are pointed at none, which also undoes a mapping KWin saved for them
-   * before a crash. The work runs on a thread of its own: KWin lists a new
+   * KWin spreads a touch screen and a tablet over every monitor unless told
+   * otherwise, so a tap on the client landed wherever that point fell on the
+   * whole desk while the game ran on the KWin screen. While a KWin screen exists
+   * these devices are pointed at the newest one. Without one, a tie to a Polaris
+   * screen that KWin saved before a crash is undone, and a tie the owner made to
+   * any other screen is left alone. The work runs on a thread of its own: KWin lists a new
    * device a moment after the kernel creates it. Nothing happens off Plasma or
    * under seat isolation, where KWin does not see the devices.
    * @param nodes The device's `/dev/input/eventN` nodes. Nodes that turn out not

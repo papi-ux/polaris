@@ -176,7 +176,7 @@ watch(() => props.hostGeneration, refresh)
         >
           <div class="text-silver font-medium text-xs uppercase tracking-wide">KWin Virtual Screen</div>
           <p>
-            KWin creates a new screen at the client's resolution for each stream and removes it when the stream ends. Nothing is borrowed, and your desktop, icons and panel stay on your monitor: windows that open during the stream, the game included, are moved onto the new screen and get the focus, and the client's touch, pen and mouse land on it. Your other monitors stay where they are. Polaris asks KWin for the client's refresh rate; if KWin will not run it, the stream uses the rate it gets. KWin virtual screens carry no HDR.
+            KWin creates a new screen at the client's resolution for each stream and removes it when the stream ends. Nothing is borrowed, and your desktop, icons and panel stay on your monitor: windows that open during the stream, the game included, are moved onto the new screen and get the focus, and the client's touch and pen land on it. Your other monitors stay where they are. Polaris asks KWin for the client's refresh rate; if KWin will not run it, the stream uses the rate it gets. KWin virtual screens carry no HDR.
           </p>
         </div>
 

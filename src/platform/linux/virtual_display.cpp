@@ -858,11 +858,11 @@ namespace virtual_display {
   }
 
   bool routes_to_stream_screen(std::string_view kwin_device_name) {
-    // The names inputtino_common.h gives the devices; the mouse's absolute half
-    // is the one KWin lists with the "(absolute)" suffix.
+    // The names inputtino_common.h gives the devices. The absolute mouse is left
+    // out: KWin places an absolute pointer over the whole workspace whatever its
+    // outputName says, so pointing it at the stream screen changes nothing.
     return kwin_device_name == "Touch passthrough"sv ||
-           kwin_device_name == "Pen passthrough"sv ||
-           kwin_device_name == "Polaris Mouse passthrough (absolute)"sv;
+           kwin_device_name == "Pen passthrough"sv;
   }
 
   std::string input_event_name(std::string_view node) {
@@ -2241,6 +2241,22 @@ namespace virtual_display {
         target = target_unlocked(s);
       }
 
+      // Without a Polaris screen there is only a leftover of ours to undo. A tie to
+      // any other screen is the owner's choice in System Settings, kept as it is.
+      if (target.empty()) {
+        std::string ignored;
+        const auto current = kwin_virtual_output::input_device_output(sys_name, ignored);
+        if (!current || !current->starts_with("Virtual-polaris-"sv)) {
+          std::lock_guard lock {s.mutex};
+          if (const auto it = s.devices.find(sys_name); it != s.devices.end()) {
+            it->second.output.clear();
+            it->second.routed = true;
+            it->second.error.clear();
+          }
+          return;
+        }
+      }
+
       const bool routed = kwin_virtual_output::set_input_device_output(sys_name, target, error);
       std::lock_guard lock {s.mutex};
       const auto it = s.devices.find(sys_name);
@@ -2635,7 +2651,9 @@ namespace virtual_display {
         std::lock_guard lock {doctor_mutex};
         last_created_backend = display.backend;
       }
-      if (!plasma_session() || !kscreen::is_installed() || display.output_name.empty()) {
+      // A borrowed kscreen connector is the owner's own monitor, at the scale they chose.
+      if (display.backend == backend_e::KSCREEN_DOCTOR || !plasma_session() || !kscreen::is_installed() ||
+          display.output_name.empty()) {
         return;
       }
       // kscreen can list the output a moment after it appears.
@@ -2681,8 +2699,12 @@ namespace virtual_display {
     notes.plasma = plasma_session();
     notes.preference = backend_preference_value();
     {
-      std::lock_guard lock {backend_detection_mutex};
-      notes.kwin_reason = kwin_vo::last_probe_reason;
+      // The Doctor and the stats stream read this; a probe in progress (a KWin round
+      // trip, loading EVDI) must not stall them, and its reason is being rewritten anyway.
+      std::unique_lock lock {backend_detection_mutex, std::try_to_lock};
+      if (lock.owns_lock()) {
+        notes.kwin_reason = kwin_vo::last_probe_reason;
+      }
     }
     {
       std::lock_guard lock {doctor_mutex};

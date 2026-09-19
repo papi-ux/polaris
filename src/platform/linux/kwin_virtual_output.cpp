@@ -771,28 +771,38 @@ namespace kwin_virtual_output {
     }
   }  // namespace
 
+  namespace {
+    std::optional<std::string> input_device_string(const std::string &sys_name, const char *property, std::string &error) {
+      const auto object = input_device_object(sys_name);
+      GVariant *reply = call_kwin(
+        object.c_str(), "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", "org.kde.KWin.InputDevice", property), G_VARIANT_TYPE("(v)"), error
+      );
+      if (!reply) {
+        return std::nullopt;
+      }
+      GVariant *value = nullptr;
+      g_variant_get(reply, "(v)", &value);
+      std::optional<std::string> text;
+      if (value && g_variant_is_of_type(value, G_VARIANT_TYPE_STRING)) {
+        text = g_variant_get_string(value, nullptr);
+      } else {
+        error = "KWin gave " + sys_name + " a " + property + " that is not a string";
+      }
+      if (value) {
+        g_variant_unref(value);
+      }
+      g_variant_unref(reply);
+      return text;
+    }
+  }  // namespace
+
+  std::optional<std::string> input_device_output(const std::string &sys_name, std::string &error) {
+    return input_device_string(sys_name, "outputName", error);
+  }
+
   std::optional<std::string> input_device_name(const std::string &sys_name, std::string &error) {
-    const auto object = input_device_object(sys_name);
-    GVariant *reply = call_kwin(
-      object.c_str(), "org.freedesktop.DBus.Properties", "Get",
-      g_variant_new("(ss)", "org.kde.KWin.InputDevice", "name"), G_VARIANT_TYPE("(v)"), error
-    );
-    if (!reply) {
-      return std::nullopt;
-    }
-    GVariant *value = nullptr;
-    g_variant_get(reply, "(v)", &value);
-    std::optional<std::string> name;
-    if (value && g_variant_is_of_type(value, G_VARIANT_TYPE_STRING)) {
-      name = g_variant_get_string(value, nullptr);
-    } else {
-      error = "KWin gave " + sys_name + " a name that is not a string";
-    }
-    if (value) {
-      g_variant_unref(value);
-    }
-    g_variant_unref(reply);
-    return name;
+    return input_device_string(sys_name, "name", error);
   }
 
   bool set_input_device_output(const std::string &sys_name, const std::string &output_name, std::string &error) {

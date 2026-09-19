@@ -83,10 +83,6 @@ namespace platf {
         }));
         if (!*mouse) {
           BOOST_LOG(warning) << "Unable to create virtual mouse: " << mouse->getErrorMessage();
-        } else {
-          // Its absolute half lands on a point of the screen, so on Plasma it
-          // follows the stream screen; the relative half is dropped there.
-          virtual_display::route_absolute_input((**mouse).get_nodes());
         }
         warn_if_seat_isolation_inert(*mouse, "mouse");
       }

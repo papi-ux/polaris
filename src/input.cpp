@@ -1231,7 +1231,7 @@ namespace input {
     }
 
     // A Steam Controller has two touchpads and names the one a touch is on in the packet's
-    // second reserved byte, which moonlight-common-c#148 calls touchpadIndex.
+    // second reserved byte, which upstream moonlight-common-c now calls touchpadIndex.
     const auto point = controller_touch_point(
       from_clamped_netfloat(packet->x, 0.0f, 1.0f),
       util::endian::little(packet->pointerId),

@@ -648,9 +648,13 @@ namespace stream_stats {
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
     j["headless_mode"] = config::video.linux_display.headless_mode;
     j["ai_enabled"] = config::video.ai_optimizer.enabled;
+    auto by_creation = input_virtual_pads;
+    std::sort(by_creation.begin(), by_creation.end(), [](const virtual_pad_t &a, const virtual_pad_t &b) {
+      return a.created < b.created;
+    });
     nlohmann::json pads = nlohmann::json::array();
-    for (const auto &pad : input_virtual_pads) {
-      pads.push_back({{"player", pad.controller_number + 1}, {"kind", pad.kind}});
+    for (std::size_t i = 0; i < by_creation.size(); ++i) {
+      pads.push_back({{"player", static_cast<int>(i) + 1}, {"kind", by_creation[i].kind}});
     }
     j["controller_input"] = {
       {"pads", std::move(pads)},
@@ -3303,15 +3307,16 @@ namespace stream_stats {
   }
 
   void note_virtual_pad(int global_index, int controller_number, const std::string &kind) {
+    // Players are numbered by when their pad appeared, the order a game enumerates them in.
+    // Controller numbers restart at 0 in every session, so two clients with a pad each both
+    // held controller 0 and both read as player 1.
+    static std::uint64_t pads_created = 0;
     std::lock_guard<std::mutex> lock(stats_mutex);
     auto &pads = current_stats.input_virtual_pads;
     std::erase_if(pads, [&](const virtual_pad_t &pad) {
       return pad.global_index == global_index;
     });
-    pads.push_back({global_index, controller_number, kind});
-    std::sort(pads.begin(), pads.end(), [](const virtual_pad_t &a, const virtual_pad_t &b) {
-      return a.controller_number != b.controller_number ? a.controller_number < b.controller_number : a.global_index < b.global_index;
-    });
+    pads.push_back({global_index, controller_number, kind, ++pads_created});
   }
 
   void forget_virtual_pad(int global_index) {

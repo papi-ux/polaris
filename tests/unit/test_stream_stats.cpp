@@ -1024,6 +1024,26 @@ TEST(StreamStatsDoctorTests, NamesTheHostVirtualDisplayProblemsFoundOnPlasma) {
   virtual_display::set_doctor_notes_for_tests(std::nullopt);
 }
 
+TEST(StreamStatsTests, PlayersAreNumberedInTheOrderTheirPadsAppeared) {
+  // Two clients with a pad each both hold controller 0 in their own session, and both read as
+  // player 1. A game numbers them by when each pad appeared, and so does the list.
+  stream_stats::note_virtual_pad(3, 0, "Xbox One");
+  stream_stats::note_virtual_pad(1, 0, "DualSense");
+  stream_stats::note_virtual_pad(2, 1, "Nintendo Pro");
+  stream_stats::forget_virtual_pad(2);
+
+  const auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  const auto &pads = json.at("controller_input").at("pads");
+  ASSERT_EQ(pads.size(), 2U);
+  EXPECT_EQ(pads[0].at("player"), 1);
+  EXPECT_EQ(pads[0].at("kind"), "Xbox One");
+  EXPECT_EQ(pads[1].at("player"), 2);
+  EXPECT_EQ(pads[1].at("kind"), "DualSense");
+
+  stream_stats::forget_virtual_pad(3);
+  stream_stats::forget_virtual_pad(1);
+}
+
 TEST(StreamStatsDoctorTests, SaysNothingAboutHostVirtualDisplayWhenItWorkedOrIsNotPlasma) {
   virtual_display::doctor_notes_t notes;
   notes.plasma = true;
@@ -1031,7 +1051,7 @@ TEST(StreamStatsDoctorTests, SaysNothingAboutHostVirtualDisplayWhenItWorkedOrIsN
   notes.preference = "auto";
   // Pointed at the screen, and a device pointed at no screen after the stream: nothing to say.
   notes.input_routes.push_back({"Touch passthrough", "Virtual-polaris-0", true, ""});
-  notes.input_routes.push_back({"Polaris Mouse passthrough (absolute)", "", false, "KWin went away"});
+  notes.input_routes.push_back({"Pen passthrough", "", false, "KWin went away"});
   virtual_display::set_doctor_notes_for_tests(notes);
   EXPECT_TRUE(host_virtual_display_warnings().empty());
 

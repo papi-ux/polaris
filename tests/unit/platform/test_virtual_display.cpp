@@ -710,12 +710,14 @@ TEST(VirtualDisplayKwinTests, OtherScreensGoBackWhereTheyWere) {
   EXPECT_TRUE(virtual_display::kwin_keep_positions_args("DP-2", {placed_screen("DP-2", 0, 0, 7680)}).empty());
 }
 
-TEST(VirtualDisplayKwinTests, OnlyAbsoluteDevicesFollowTheStreamScreen) {
-  // A tap and a pen stroke land on a point of the screen, and so does the mouse's
-  // absolute half; KWin spread all three over every monitor.
+TEST(VirtualDisplayKwinTests, OnlyTouchAndPenFollowTheStreamScreen) {
+  // A tap and a pen stroke land on a point of the screen, and KWin spread both over
+  // every monitor until they were tied to the stream screen.
   EXPECT_TRUE(virtual_display::routes_to_stream_screen("Touch passthrough"));
   EXPECT_TRUE(virtual_display::routes_to_stream_screen("Pen passthrough"));
-  EXPECT_TRUE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough (absolute)"));
+  // KWin places an absolute pointer over the whole workspace whatever its outputName
+  // says, so tying it would change nothing and report a tie that does not hold.
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough (absolute)"));
   // The relative mouse moves the cursor wherever it is, and a keyboard follows the focus.
   EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough"));
   EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Keyboard passthrough"));

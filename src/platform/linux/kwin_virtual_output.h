@@ -91,6 +91,9 @@ namespace kwin_virtual_output {
    */
   std::optional<std::string> input_device_name(const std::string &sys_name, std::string &error);
 
+  /** @brief The output an input device is tied to, empty for none; nullopt when KWin cannot say. */
+  std::optional<std::string> input_device_output(const std::string &sys_name, std::string &error);
+
   /**
    * @brief Point an input device at an output, or at none with an empty name.
    *

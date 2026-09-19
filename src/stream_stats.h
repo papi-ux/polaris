@@ -129,8 +129,9 @@ namespace stream_stats {
   /** @brief One emulated pad on the host. */
   struct virtual_pad_t {
     int global_index = -1;  ///< The host-wide pad slot
-    int controller_number = 0;  ///< The client's controller number, 0 for player 1
+    int controller_number = 0;  ///< The client's controller number within its session
     std::string kind;  ///< The emulated pad, such as "Xbox One" or "DualSense"
+    std::uint64_t created = 0;  ///< Creation order: a game numbers its players the same way
   };
 
   struct stats_t {
