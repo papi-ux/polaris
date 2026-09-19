@@ -25,6 +25,22 @@ describe('Vulkan Video settings contract', () => {
     expect(encoder).toContain('Doctor reports the detected driver')
     expect(encoder).toContain('id="vk_tune" class="settings-input"')
     expect(encoder).toContain('id="vk_rc_mode" class="settings-input"')
+    expect(encoder).toContain('id="vk_quality" class="settings-input"')
+  })
+
+  it('caps the vk_quality select at the levels drivers expose (0 through max-1)', () => {
+    const encoder = webSource('configs/tabs/encoders/VulkanEncoder.vue')
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
+
+    expect(locale.vk_quality_default).toBe('Level 0 (default)')
+    expect(locale.vk_quality_desc).toContain("one less than the driver's reported maximum")
+
+    // Vulkan requires qualityLevel < maxQualityLevels; current AMD GPUs report four,
+    // so the select may offer 0-3 and nothing at or above the reported count.
+    const qualitySelect = encoder.match(/<select id="vk_quality"[\s\S]*?<\/select>/)?.[0] ?? ''
+    expect(qualitySelect).toContain('<option value="0">')
+    expect(qualitySelect).toMatch(/v-for="level in 3"/)
+    expect(qualitySelect).not.toMatch(/value="[4-9]"/)
   })
 
   it('registers low-latency CBR defaults and renders the encoder panel', () => {
