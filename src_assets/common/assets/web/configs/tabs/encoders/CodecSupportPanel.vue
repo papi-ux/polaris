@@ -10,6 +10,17 @@ const props = defineProps([
 const support = computed(() => props.config?.encoder_codec_support ?? null)
 const ready = computed(() => !!support.value && support.value.ready === true)
 const activeEncoder = computed(() => (ready.value ? String(support.value.encoder || '').trim() : ''))
+
+// Why a codec is not advertised, as a locale key. The host reports
+// "disabled_in_config" when the user switched it off and
+// "not_available_on_encoder" once probing found the encoder cannot do it;
+// anything else (including null while probing) renders no reason line.
+const reasonKey = (reason, supported) => {
+  if (!ready.value || supported || !reason) return ''
+  return reason === 'disabled_in_config' ? 'config.codec_support_reason_disabled' : 'config.codec_support_reason_unavailable'
+}
+const hevcReasonKey = computed(() => reasonKey(support.value?.hevc_reason, support.value?.hevc_supported))
+const av1ReasonKey = computed(() => reasonKey(support.value?.av1_reason, support.value?.av1_supported))
 </script>
 
 <template>
@@ -42,6 +53,8 @@ const activeEncoder = computed(() => (ready.value ? String(support.value.encoder
           </div>
         </div>
 
+        <p v-if="hevcReasonKey" class="text-xs leading-relaxed text-storm">{{ $t(hevcReasonKey) }}</p>
+
         <div class="flex items-center justify-between gap-3">
           <span class="text-sm font-medium text-silver">{{ $t('config.codec_support_av1') }}</span>
           <div class="flex flex-wrap items-center gap-1.5">
@@ -51,6 +64,8 @@ const activeEncoder = computed(() => (ready.value ? String(support.value.encoder
             </span>
           </div>
         </div>
+
+        <p v-if="av1ReasonKey" class="text-xs leading-relaxed text-storm">{{ $t(av1ReasonKey) }}</p>
       </div>
 
       <p class="mt-3 text-sm leading-relaxed text-storm">{{ $t('config.codec_support_note') }}</p>

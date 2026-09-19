@@ -1002,8 +1002,9 @@ async function refreshHostCapabilities(generation) {
       responseOnlyConfig.value.stream_display_mode_options = data.stream_display_mode_options
     }
     // The Host Virtual Display card words itself by backend, and installing
-    // EVDI changes the backend across a restart.
-    for (const key of ['vdisplayAvailable', 'vdisplayBackend']) {
+    // EVDI changes the backend across a restart. The codec support panel is a
+    // live probe result: encoder selection can change what Polaris advertises.
+    for (const key of ['vdisplayAvailable', 'vdisplayBackend', 'encoder_codec_support']) {
       if (key in data) {
         config.value[key] = data[key]
         responseOnlyConfig.value[key] = data[key]

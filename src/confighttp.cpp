@@ -5419,16 +5419,34 @@ namespace confighttp {
     }
     // Read-only codec capability snapshot for the web UI encoder tabs. Mirrors
     // what Nova is advertised: post-probe modes are 2 (SDR) or 3 (HDR), so a
-    // mode >= 2 means the codec passed validation on this host.
+    // mode >= 2 means the codec passed validation on this host. When a codec is
+    // not supported, *_reason tells the panel why: "disabled_in_config" when the
+    // user switched it off, "not_available_on_encoder" once the probe found the
+    // encoder cannot do it, or null while probing has not finished yet.
     {
       const auto codec_state = video::advertised_codec_capability_state();
+      const bool ready = video::advertised_codec_capability_state_ready();
+      const auto off_reason = [ready](int configured_mode, int effective_mode) -> nlohmann::json {
+        if (effective_mode >= 2) {
+          return nlohmann::json {};
+        }
+        if (configured_mode == 1) {
+          return "disabled_in_config"s;
+        }
+        if (!ready) {
+          return nlohmann::json {};
+        }
+        return "not_available_on_encoder"s;
+      };
       output_tree["encoder_codec_support"] = nlohmann::json {
-        {"ready", video::advertised_codec_capability_state_ready()},
+        {"ready", ready},
         {"encoder", video::active_encoder_name()},
         {"hevc_supported", codec_state.hevc_mode >= 2},
         {"av1_supported", codec_state.av1_mode >= 2},
         {"hevc_hdr", codec_state.hevc_mode == 3},
         {"av1_hdr", codec_state.av1_mode == 3},
+        {"hevc_reason", off_reason(config::video.hevc_mode, codec_state.hevc_mode)},
+        {"av1_reason", off_reason(config::video.av1_mode, codec_state.av1_mode)},
       };
     }
 #ifdef _WIN32
