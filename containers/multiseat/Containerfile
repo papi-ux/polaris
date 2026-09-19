@@ -309,7 +309,7 @@ FROM runtime-root-build AS nvidia-userspace
 COPY containers/multiseat/locks/nvidia.json /nvidia.lock.json
 COPY containers/multiseat/package-nvidia.py /package-nvidia.py
 COPY containers/multiseat/nvidia_runtime.py /nvidia_runtime.py
-COPY build/runtime-inputs/NVIDIA-Linux-x86_64-610.57.04.run /nvidia.run
+COPY build/runtime-inputs/NVIDIA-Linux-x86_64-615.71.09.run /nvidia.run
 RUN python3 /package-nvidia.py
 
 FROM worker-base AS worker-nvidia
@@ -319,7 +319,7 @@ COPY containers/multiseat/check-runtime.py /check-nvidia-runtime.py
 COPY containers/multiseat/nvidia_runtime.py /nvidia_runtime.py
 RUN ldconfig && PYTHONDONTWRITEBYTECODE=1 python3 /check-nvidia-runtime.py --nvidia && \
     rm /check-nvidia-runtime.py /nvidia_runtime.py
-LABEL io.polaris.multiseat.nvidia.driver="610.57.04"
+LABEL io.polaris.multiseat.nvidia.driver="615.71.09"
 
 FROM worker-nvidia AS provider-nvidia-test
 RUN install -d -m 1777 /tmp/.X11-unix
