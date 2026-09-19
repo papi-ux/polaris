@@ -648,7 +648,12 @@ namespace stream_stats {
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
     j["headless_mode"] = config::video.linux_display.headless_mode;
     j["ai_enabled"] = config::video.ai_optimizer.enabled;
+    nlohmann::json pads = nlohmann::json::array();
+    for (const auto &pad : input_virtual_pads) {
+      pads.push_back({{"player", pad.controller_number + 1}, {"kind", pad.kind}});
+    }
     j["controller_input"] = {
+      {"pads", std::move(pads)},
       {"virtual_controller_created", input_virtual_controller_created},
       {"virtual_controller_number", input_virtual_controller_number},
       {"virtual_controller_kind", input_virtual_controller_kind},
@@ -3295,6 +3300,25 @@ namespace stream_stats {
     current_stats.input_host_controller_isolation_detail = host_controller_isolation_detail;
     current_stats.input_haptics_supported = haptics_supported;
     current_stats.input_haptics_detail = haptics_detail;
+  }
+
+  void note_virtual_pad(int global_index, int controller_number, const std::string &kind) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    auto &pads = current_stats.input_virtual_pads;
+    std::erase_if(pads, [&](const virtual_pad_t &pad) {
+      return pad.global_index == global_index;
+    });
+    pads.push_back({global_index, controller_number, kind});
+    std::sort(pads.begin(), pads.end(), [](const virtual_pad_t &a, const virtual_pad_t &b) {
+      return a.controller_number != b.controller_number ? a.controller_number < b.controller_number : a.global_index < b.global_index;
+    });
+  }
+
+  void forget_virtual_pad(int global_index) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    std::erase_if(current_stats.input_virtual_pads, [&](const virtual_pad_t &pad) {
+      return pad.global_index == global_index;
+    });
   }
 
   void update_steam_input_state(const std::string &status,

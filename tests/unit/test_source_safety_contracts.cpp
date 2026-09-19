@@ -1216,6 +1216,42 @@ TEST(SourceSafetyContracts, VirtualDisplayTeardownKeepsRecoveryUntilExactReadbac
   EXPECT_LT(process_destroy, process_reset);
 }
 
+TEST(SourceSafetyContracts, AWatcherHoldsNoControllerOfItsOwn) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream stream_in(root / "src/stream.cpp");
+  std::ifstream input_in(root / "src/input.cpp");
+  ASSERT_TRUE(stream_in.is_open());
+  ASSERT_TRUE(input_in.is_open());
+  std::ostringstream stream_out, input_out;
+  stream_out << stream_in.rdbuf();
+  input_out << input_in.rdbuf();
+  const auto stream = stream_out.str();
+  const auto input = input_out.str();
+
+  // A watch-only session used to create controller 0 like the player's, so the host had a
+  // second pad nobody held, and a couch co-op game counted it as player 2.
+  const auto rule = stream.find("bool has_controllers(const session_t &session) {");
+  ASSERT_NE(rule, std::string::npos);
+  EXPECT_NE(
+    stream.find("return !session.watch_only && !!(session.permission & crypto::PERM::input_controller);", rule),
+    std::string::npos
+  );
+  std::size_t allocs = 0;
+  for (auto at = stream.find("input::alloc("); at != std::string::npos; at = stream.find("input::alloc(", at + 1)) {
+    ++allocs;
+    EXPECT_EQ(stream.compare(at, 52, "input::alloc(session.mail, has_controllers(session))"), 0);
+  }
+  EXPECT_EQ(allocs, 2U);
+
+  const auto alloc = input.find("std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers) {");
+  ASSERT_NE(alloc, std::string::npos);
+  const auto guard = input.find("if (controllers) {\n      task_pool.push([input, adopted_preallocated_gamepad]()", alloc);
+  const auto startup_pad = input.find("ensure_gamepad_allocated(input, 0, {}, \"session startup\")", alloc);
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(startup_pad, std::string::npos);
+  EXPECT_LT(guard, startup_pad);
+}
+
 TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   const auto root = fs::path {POLARIS_SOURCE_DIR};
   std::ifstream backend_in(root / "src/platform/linux/virtual_display.cpp");

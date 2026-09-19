@@ -687,6 +687,20 @@ describe('Fix My Stream checklist', () => {
 
 
 describe('support self-service reports', () => {
+  it('names every player the host emulates a pad for', () => {
+    const report = buildControllerInputTestReport({
+      events: [],
+      native: {
+        virtual_controller_created: true,
+        virtual_controller_number: 2,
+        pads: [{ player: 1, kind: 'Xbox One' }, { player: 2, kind: 'DualSense' }],
+      },
+    })
+    const multiPad = report.checks.find((check) => check.key === 'multi-pad')
+    expect(multiPad.status).toBe('pass')
+    expect(multiPad.detail).toContain('Players on the host: P1 Xbox One, P2 DualSense.')
+  })
+
   it('classifies a lossy remote network path and recommends a safer bitrate ceiling', () => {
     const report = buildNetworkPathTestReport({
       host: '203.0.113.40',

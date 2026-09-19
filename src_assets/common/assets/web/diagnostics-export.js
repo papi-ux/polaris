@@ -1090,6 +1090,10 @@ export function buildControllerInputTestReport(input = {}) {
   const hapticsDetail = native.hapticsDetail ?? native.haptics_detail
   const pads = new Set(events.map((event) => event.pad ?? event.gamepadIndex ?? 1))
   const visiblePadCount = Math.max(pads.size, gamepads.length)
+  // Every pad the host emulates now, one per player: who is player 2 in a couch co-op game.
+  const hostPads = (Array.isArray(native.pads) ? native.pads : [])
+    .filter((pad) => Number.isFinite(Number(pad?.player)))
+  const hostPlayers = hostPads.map((pad) => `P${Number(pad.player)} ${pad.kind || 'controller'}`).join(', ')
   const virtualPadLabel = virtual.created
     ? `Native virtual controller${virtual.number ? ` #${virtual.number}` : ''}${virtual.kind ? ` (${virtual.kind})` : ''} is reported created.`
     : virtual.error
@@ -1100,7 +1104,7 @@ export function buildControllerInputTestReport(input = {}) {
   const checks = [
     checklistItem('client-events', 'Client button events', events.length ? 'pass' : 'warning', events.length ? `${events.length} client control event${events.length === 1 ? '' : 's'} detected.` : 'No client button or axis events detected yet.', events.length ? 'Input is reaching the browser/client layer.' : 'Press buttons/sticks on the client controller while this panel is open.'),
     checklistItem('virtual-controller', 'Native virtual controller', virtual.created ? 'pass' : virtual.error ? 'fail' : 'warning', virtualPadLabel, virtual.created ? 'Launch a game and verify the same controller number is selected.' : 'If games see no pad, check virtual gamepad permissions/driver state.'),
-    checklistItem('multi-pad', 'Controller number / multi-pad', visiblePadCount > 1 ? 'pass' : 'warning', `${visiblePadCount} client pad${visiblePadCount === 1 ? '' : 's'} visible${virtual.number ? `; native virtual pad #${virtual.number}` : ''}.`, 'Keep controller order stable before starting split-screen or multi-pad games.'),
+    checklistItem('multi-pad', 'Controller number / multi-pad', visiblePadCount > 1 || hostPads.length > 1 ? 'pass' : 'warning', `${visiblePadCount} client pad${visiblePadCount === 1 ? '' : 's'} visible${virtual.number ? `; native virtual pad #${virtual.number}` : ''}.${hostPlayers ? ` Players on the host: ${hostPlayers}.` : ''}`, 'Keep controller order stable before starting split-screen or multi-pad games. In Nova, Players in Command Center shows who is who and sets the order again.'),
     checklistItem('rumble', 'Rumble / haptics', hapticsSupported === true ? 'pass' : 'warning', hapticsSupported === true ? (hapticsDetail || 'Rumble/haptics feedback is available for the native virtual controller.') : 'Rumble/haptics support is not available or not exposed by this browser/client.', hapticsSupported === true ? 'Use the optional rumble pulse only after input is mapped correctly.' : 'Treat missing rumble as non-blocking unless the game requires it.'),
     checklistItem('host-isolation', 'Host physical controller isolation', isolationPass ? 'pass' : isolationFail ? 'fail' : 'warning', isolationPass ? `Isolation state: ${hostIsolationRaw}${hostIsolationDetail ? ` — ${hostIsolationDetail}` : ''}.` : hostIsolation ? `Isolation state: ${hostIsolationRaw}${hostIsolationDetail ? ` — ${hostIsolationDetail}` : ''}.` : 'Host physical controller isolation has not been reported yet.', isolationPass ? 'No host-side controller conflict stands out.' : 'If inputs double-fire, unplug/disable the host physical controller or isolate it before retesting.'),
   ]

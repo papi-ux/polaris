@@ -16,6 +16,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/stream_stats.h"
 #include "src/utility.h"
 
 using namespace std::literals;
@@ -120,36 +121,15 @@ namespace platf::gamepad {
     BOOST_LOG(info) << "Gamepad " << id.globalIndex << " client seat isolation: "
                     << (config::input.client_gamepad_seat_isolation ? "seat-polaris" : "disabled");
 
-    ControllerType selectedGamepadType;
-
-    if (config::input.gamepad == "xone"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox One controller (manual selection)"sv;
-      selectedGamepadType = XboxOneWired;
-    } else if (config::input.gamepad == "ds5"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualSense 5 controller (manual selection)"sv;
-      selectedGamepadType = DualSenseWired;
-    } else if (config::input.gamepad == "switch"sv) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Nintendo Pro controller (manual selection)"sv;
-      selectedGamepadType = SwitchProWired;
-    } else if (metadata.type == LI_CTYPE_XBOX) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox One controller (auto-selected by client-reported type)"sv;
-      selectedGamepadType = XboxOneWired;
-    } else if (metadata.type == LI_CTYPE_PS) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 5 controller (auto-selected by client-reported type)"sv;
-      selectedGamepadType = DualSenseWired;
-    } else if (metadata.type == LI_CTYPE_NINTENDO) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Nintendo Pro controller (auto-selected by client-reported type)"sv;
-      selectedGamepadType = SwitchProWired;
-    } else if (config::input.motion_as_ds4 && (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO))) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 5 controller (auto-selected by motion sensor presence)"sv;
-      selectedGamepadType = DualSenseWired;
-    } else if (config::input.touchpad_as_ds4 && (metadata.capabilities & LI_CCAP_TOUCHPAD)) {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be DualShock 5 controller (auto-selected by touchpad presence)"sv;
-      selectedGamepadType = DualSenseWired;
-    } else {
-      BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be Xbox One controller (default)"sv;
-      selectedGamepadType = XboxOneWired;
-    }
+    const auto choice = select_controller_type(
+      config::input.gamepad,
+      metadata,
+      config::input.motion_as_ds4,
+      config::input.touchpad_as_ds4
+    );
+    const ControllerType selectedGamepadType = choice.type;
+    BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will be " << controller_type_label(selectedGamepadType)
+                    << " controller ("sv << choice.reason << ')';
 
     if (selectedGamepadType == XboxOneWired || selectedGamepadType == SwitchProWired) {
       if (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO)) {
@@ -191,6 +171,7 @@ namespace platf::gamepad {
             (*xOne).set_on_rumble(on_rumble_fn);
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*xOne));
             register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
+            stream_stats::note_virtual_pad(id.globalIndex, id.clientRelativeIndex, std::string {controller_type_label(selectedGamepadType)});
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
           } else {
@@ -205,6 +186,7 @@ namespace platf::gamepad {
             (*switchPro).set_on_rumble(on_rumble_fn);
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*switchPro));
             register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
+            stream_stats::note_virtual_pad(id.globalIndex, id.clientRelativeIndex, std::string {controller_type_label(selectedGamepadType)});
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
           } else {
@@ -238,6 +220,7 @@ namespace platf::gamepad {
 
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*ds5));
             register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
+            stream_stats::note_virtual_pad(id.globalIndex, id.clientRelativeIndex, std::string {controller_type_label(selectedGamepadType)});
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
           } else {
@@ -261,6 +244,7 @@ namespace platf::gamepad {
 
   void free(input_raw_t *raw, int nr) {
     isolation::unregister_virtual_gamepad_nodes(nr);
+    stream_stats::forget_virtual_pad(nr);
     // This will call the destructor which in turn will stop the background threads for rumble and LED (and ultimately remove the joypad device)
     raw->gamepads[nr]->joypad.reset();
     raw->gamepads[nr].reset();

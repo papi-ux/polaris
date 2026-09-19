@@ -344,7 +344,7 @@ events), and extras (an input-only app entry for TV workflows, rumble forwarding
 | Field | What it does |
 | --- | --- |
 | **Enable Gamepad Input** (`controller`) | Allows guests to control the host system with a gamepad / controller |
-| **Emulated Gamepad Type** (`gamepad`) | Choose which type of gamepad to emulate on the host |
+| **Emulated Gamepad Type** (`gamepad`) | Choose which type of gamepad to emulate on the host. Automatic follows the client's controller: an Xbox, PlayStation or Nintendo pad gets its own kind, a Steam Controller gets a DualSense (its gyro and both touchpads fit there), and anything else gets a DualSense when it reports motion or a touchpad and an Xbox One pad otherwise. |
 | **Emulate a DS4 gamepad if the client gamepad reports motion sensors are present** (`motion_as_ds4`) | If disabled, motion sensors will not be taken into account during gamepad type selection. |
 | **Emulate a DS4 gamepad if the client gamepad reports a touchpad is present** (`touchpad_as_ds4`) | If disabled, touchpad presence will not be taken into account during gamepad type selection. |
 | **Map Back/Select to Touchpad Click** (`ds4_back_as_touchpad_click`) | When forcing DS4 emulation, map Back/Select to Touchpad Click |

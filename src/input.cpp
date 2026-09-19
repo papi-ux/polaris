@@ -165,6 +165,10 @@ namespace input {
 
     int id;
 
+    // What the client declared the controller can do (LI_CCAP_*), kept for the pad's whole
+    // life, including a pad created before launch whose arrival came too late to shape it.
+    std::uint16_t capabilities = 0;
+
     // When emulating the HOME button, we may need to artificially release the back button.
     // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
     // To prevent Sunshine from sending erroneous input data to the active application,
@@ -248,6 +252,7 @@ namespace input {
     }
 
     gamepad.id = id;
+    gamepad.capabilities = arrival.capabilities;
     update_controller_diagnostics(true, controller_number);
     if (reason && *reason) {
       BOOST_LOG(info) << "ControllerNumber ["sv << controller_number << "] allocated for "sv << reason;
@@ -1076,6 +1081,7 @@ namespace input {
       // client asked for instead, and say so, because silently emulating the wrong pad for a
       // whole session used to leave nothing in the log at all.
       stream_stats::update_client_declared_controller_type(packet->type);
+      input->gamepads[packet->controllerNumber].capabilities = util::endian::little(packet->capabilities);
       BOOST_LOG(debug) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }
@@ -1224,11 +1230,19 @@ namespace input {
       return;
     }
 
+    // A Steam Controller has two touchpads and names the one a touch is on in the packet's
+    // second reserved byte, which moonlight-common-c#148 calls touchpadIndex.
+    const auto point = controller_touch_point(
+      from_clamped_netfloat(packet->x, 0.0f, 1.0f),
+      util::endian::little(packet->pointerId),
+      packet->zero[1],
+      (gamepad.capabilities & LI_CCAP_DUAL_TOUCHPAD) != 0
+    );
     platf::gamepad_touch_t touch {
       {gamepad.id, packet->controllerNumber},
       packet->eventType,
-      util::endian::little(packet->pointerId),
-      from_clamped_netfloat(packet->x, 0.0f, 1.0f),
+      point.finger,
+      point.x,
       from_clamped_netfloat(packet->y, 0.0f, 1.0f),
       from_clamped_netfloat(packet->pressure, 0.0f, 1.0f),
     };
@@ -1984,7 +1998,15 @@ namespace input {
     return true;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail) {
+  controller_touch_point_t controller_touch_point(float x, std::uint32_t pointer_id, std::uint8_t touchpad_index, bool dual_touchpad) {
+    if (!dual_touchpad) {
+      return {x, pointer_id};
+    }
+    const std::uint32_t pad = touchpad_index > 1 ? 1 : touchpad_index;
+    return {(x + static_cast<float>(pad)) / 2.0f, pad};
+  }
+
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback),
@@ -1992,7 +2014,7 @@ namespace input {
     );
 
     bool adopted_preallocated_gamepad = false;
-    {
+    if (controllers) {
       std::scoped_lock lock {preallocated_gamepad_mutex};
       if (preallocated_controller_number == 0 && preallocated_gamepad_id >= 0) {
         input->gamepads[0].id = preallocated_gamepad_id;
@@ -2006,11 +2028,15 @@ namespace input {
       }
     }
 
-    task_pool.push([input, adopted_preallocated_gamepad]() {
-      if (adopted_preallocated_gamepad || ensure_gamepad_allocated(input, 0, {}, "session startup")) {
-        platf::gamepad_update(platf_input, input->gamepads[0].id, {});
-      }
-    });
+    // A session that sends no controller input gets no pad: the player who holds one is on
+    // another session, and a pad here would be a second player nobody plays.
+    if (controllers) {
+      task_pool.push([input, adopted_preallocated_gamepad]() {
+        if (adopted_preallocated_gamepad || ensure_gamepad_allocated(input, 0, {}, "session startup")) {
+          platf::gamepad_update(platf_input, input->gamepads[0].id, {});
+        }
+      });
+    }
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

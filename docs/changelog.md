@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A device that only watches a stream no longer adds a controller to the host. Every session created controller 0 when it started, a watcher's included, so a couch co-op game counted a second player that nobody held.
+- The Steam Controller (2026) gets an emulated DualSense when the client says that is what it has, as Moonlight now does. The DualSense carries the controller's gyro and its touchpads, which an Xbox pad dropped, and the two touchpads land on the left and right halves of the DualSense touchpad so a game sees both. A pad created before the app launched keeps what the client declared, so the split works there too.
+- Troubleshooting's controller test names every player on the host and the pad each one emulates.
+
 - Host Virtual Display on KDE Plasma gives the game the focus on the stream screen. KWin moved the window there but kept the focus at the desk, so the game ignored the controller and taps until someone clicked it on the host.
 - Touch, pen and the absolute mouse from the client land on the KWin stream screen. KWin spread them over every monitor, so a tap landed wherever that point fell on the whole desk. Polaris ties them to the stream screen while it exists and unties them when it goes, and sets the tie again at every stream on Plasma so one left by a crash does not stick.
 - Your monitors stay where they are when Host Virtual Display starts on Plasma. KWin applied a layout it had stored for "these monitors plus a Polaris screen", which on the test host moved a monitor 1024 pixels to the right for the whole stream. Polaris now puts every monitor back where it was in the same step that places the stream screen.
