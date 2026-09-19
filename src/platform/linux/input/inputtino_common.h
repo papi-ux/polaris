@@ -156,19 +156,19 @@ namespace platf {
       // A tap or a pen stroke lands on a point of the screen, so on Plasma both
       // follow the stream screen instead of spanning every monitor.
       if (touch) {
-        virtual_display::route_absolute_input((*touch).get_nodes());
+        virtual_display::route_stream_screen_input((*touch).get_nodes());
       }
       if (pen) {
-        virtual_display::route_absolute_input((*pen).get_nodes());
+        virtual_display::route_stream_screen_input((*pen).get_nodes());
       }
     }
 
     ~client_input_raw_t() override {
       if (touch) {
-        virtual_display::forget_absolute_input((*touch).get_nodes());
+        virtual_display::forget_stream_screen_input((*touch).get_nodes());
       }
       if (pen) {
-        virtual_display::forget_absolute_input((*pen).get_nodes());
+        virtual_display::forget_stream_screen_input((*pen).get_nodes());
       }
     }
 

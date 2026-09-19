@@ -321,10 +321,10 @@ namespace virtual_display {
    * @param nodes The device's `/dev/input/eventN` nodes. Nodes that turn out not
    *        to be absolute devices are dropped once KWin names them.
    */
-  void route_absolute_input(const std::vector<std::string> &nodes);
+  void route_stream_screen_input(const std::vector<std::string> &nodes);
 
   /** @brief Stop routing devices that are about to be destroyed. */
-  void forget_absolute_input(const std::vector<std::string> &nodes);
+  void forget_stream_screen_input(const std::vector<std::string> &nodes);
 
   /** @brief How one routed device was last pointed. */
   struct input_route_t {

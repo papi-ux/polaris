@@ -2144,7 +2144,7 @@ namespace virtual_display {
   }  // namespace kscreen
 
   // ---------------------------------------------------------------------------
-  // Absolute input on the stream screen (KDE Plasma)
+  // Touch and pen on the stream screen (KDE Plasma)
   // ---------------------------------------------------------------------------
   namespace input_routing {
 
@@ -2725,7 +2725,7 @@ namespace virtual_display {
   }
 #endif
 
-  void route_absolute_input(const std::vector<std::string> &nodes) {
+  void route_stream_screen_input(const std::vector<std::string> &nodes) {
 #ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
     if (!input_routing::applies()) {
       return;
@@ -2744,7 +2744,7 @@ namespace virtual_display {
 #endif
   }
 
-  void forget_absolute_input(const std::vector<std::string> &nodes) {
+  void forget_stream_screen_input(const std::vector<std::string> &nodes) {
     auto &s = input_routing::state();
     std::lock_guard lock {s.mutex};
     for (const auto &node : nodes) {
