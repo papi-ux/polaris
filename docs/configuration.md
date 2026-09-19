@@ -558,18 +558,23 @@ Selects FFmpeg's Vulkan Video latency/quality target. `2` (low latency) is the s
 ### vk_rc_mode
 
 Selects Vulkan Video rate control. `2` (constant bitrate) is the streaming default. `0` lets FFmpeg
-and the driver decide, `1` selects constant-QP mode, and `4` selects variable bitrate.
+decide; because Polaris always sets a stream bitrate, auto resolves to variable bitrate when the
+driver advertises VBR and to constant bitrate otherwise. `1` selects constant-QP mode, and `4`
+selects variable bitrate.
 
 ### vk_quality
 
-Selects the Vulkan Video quality level passed to FFmpeg. `0` uses the driver default and always works;
-higher levels trade encode speed for quality where the driver exposes them. The allowed range is
-`0..maxQualityLevels`, which varies by driver and codec — with verbose logging enabled, Polaris logs
-the driver's maximum as `Encoder max quality: N`. A value above the maximum fails the encoder open with
-`Invalid quality level <n>: allowed range is 0 to <N>`, and because an explicit Vulkan selection is
-strict, Polaris does not fall back to another encoder; lower the value or switch back to `vaapi`.
+Selects the Vulkan Video quality level passed to FFmpeg. `0` selects quality level 0 and always
+works; higher levels trade encode speed for quality where the driver exposes them. The allowed range
+is `0..maxQualityLevels − 1`, which varies by driver and codec, so check before raising it: with verbose
+logging enabled, Polaris logs the driver's count as `Encoder max quality: N`. FFmpeg's own guard repeats
+the off-by-one in its error message (`Invalid quality level <n>: allowed range is 0 to <N>`), so a value
+of exactly N slips past that check and fails the Vulkan query instead. Because an explicit Vulkan
+selection is strict, Polaris does not fall back to another encoder; lower the value or switch back to
+`vaapi`.
 
-On an RX 7900 XTX (RADV, navi31) the maximum quality level is 4 for both H.264 and HEVC.
+On an RX 7900 XTX (RADV, navi31) the driver reports four quality levels for both H.264 and HEVC
+(`Encoder max quality: 4`), so valid values are 0–3.
 
 ## AI provider settings
 

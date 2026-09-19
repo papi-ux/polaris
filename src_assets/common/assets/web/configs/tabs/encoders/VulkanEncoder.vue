@@ -53,7 +53,8 @@ const config = ref(props.config)
         <label for="vk_quality" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vk_quality') }}</label>
         <select id="vk_quality" class="settings-input" v-model="config.vk_quality">
           <option value="0">{{ $t('config.vk_quality_default') }}</option>
-          <option v-for="level in 8" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
+          <!-- Levels run 0..maxQualityLevels-1; current AMD GPUs report four, so offer 0-3. -->
+          <option v-for="level in 3" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.vk_quality_desc') }}</div>
       </div>
