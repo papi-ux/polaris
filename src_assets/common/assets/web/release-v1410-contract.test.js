@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentRelease = () => {
+const historicalRelease = () => {
   const changelog = read('docs/changelog.md')
   const start = changelog.indexOf('## v1.4.10 - 2026-09-18')
   const end = changelog.indexOf('## v1.4.9 - 2026-09-16')
@@ -13,7 +13,7 @@ const currentRelease = () => {
   return changelog.slice(start, end)
 }
 
-const currentNotes = () => read('docs/release-notes/v1.4.10.md')
+const historicalNotes = () => read('docs/release-notes/v1.4.10.md')
 
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
@@ -23,18 +23,9 @@ const expectedAssets = [
 ].sort()
 const withdrawnSysextAsset = 'Polaris-sysext-x86_64.raw'
 
-describe('v1.4.10 release contract', () => {
-  it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.10')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.10"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.10',
-    )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.10-1|x86_64'")
-  })
-
+describe('historical v1.4.10 release contract', () => {
   it('leads with Spaces, host sleep and the KWin screen, and says which Nova goes with it', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const intro = notes.split('\n')[2]
     expect(intro).toMatch(/^Spaces open up, the couch can put your host to sleep/)
     expect(intro).toContain('This is the first Polaris that can create a Space')
@@ -69,7 +60,7 @@ describe('v1.4.10 release contract', () => {
   })
 
   it('names every change in the changelog section', () => {
-    const section = currentRelease()
+    const section = historicalRelease()
     for (const fact of [
       'A Space can be created on a released Polaris',
       'gets a screen of its own from KWin',
@@ -89,7 +80,7 @@ describe('v1.4.10 release contract', () => {
   })
 
   it('keeps the heads up honest about sleep, KMS, KWin and what Spaces still lacks', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const headsUp = notes.slice(notes.indexOf('**Heads up**'))
     for (const fact of [
       'Host sleep is off by default',
@@ -107,7 +98,7 @@ describe('v1.4.10 release contract', () => {
   })
 
   it('ships exactly the four supported packages and installs them from this tag', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const blocks = [...notes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
       .map((match) => match[1])
       .filter((block) => block.includes('wget --output-document='))
