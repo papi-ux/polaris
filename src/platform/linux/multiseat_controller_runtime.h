@@ -28,6 +28,8 @@ namespace multiseat {
     bool archived = false;
     std::vector<std::string> access_clients;
     bool library_enabled = false;
+    /// The local image ID the Space launches, exactly as its catalog entry pins it.
+    std::string image;
   };
 
   struct profile_activity_t {

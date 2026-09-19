@@ -158,6 +158,51 @@ namespace multiseat::profiles {
   [[nodiscard]] removal_result_t remove_for_good(const std::filesystem::path &path,
     const edit_request_t &request, container::host_t &host,
     std::chrono::milliseconds wait_for_users = std::chrono::seconds(20));
+
+  /// One Space moved to another gaming runtime. The caller decides the move
+  /// from what it read (from_image and its media contract) and names the
+  /// verified local image to move to and what that runtime needs of a home.
+  struct runtime_move_t {
+    std::string profile_id;
+    std::string from_image, from_media_contract;
+    std::string to_image, to_media_contract;
+    runtime_profile_e to_profile = runtime_profile_e::unknown;
+    std::uint32_t to_uid = 0, to_gid = 0;
+    bool operator==(const runtime_move_t &) const = default;
+  };
+  [[nodiscard]] bool valid_runtime_move(const runtime_move_t &move);
+  enum class runtime_move_outcome_e {
+    moved,                   ///< the Space now launches to_image
+    already_moved,           ///< it already did; the unchanged catalog was saved again to confirm it
+    invalid,                 ///< not a valid move
+    not_found,               ///< no such Space in the catalog
+    space_changed,           ///< its runtime is neither from_image nor to_image any more
+    profile_mismatch,        ///< the new runtime runs a different kind of Space
+    media_contract_mismatch, ///< the new runtime streams under a different media contract
+    identity_mismatch,       ///< the new runtime's account is not the one the home belongs to
+    docker_unavailable,      ///< Docker did not answer before anything changed
+    storage_unverified,      ///< the home is missing or not the storage Polaris made; nothing changed
+    not_saved,               ///< the catalog was busy, unsafe or could not be written
+  };
+  struct runtime_move_result_t {
+    runtime_move_outcome_e outcome = runtime_move_outcome_e::invalid;
+    /// durability_uncertain when the write may or may not have landed; callers fail closed.
+    private_state_file::write_status_e status = private_state_file::write_status_e::not_committed;
+    std::string previous_image;  ///< what the Space launched before, when it was found
+    explicit operator bool() const {
+      return outcome == runtime_move_outcome_e::moved || outcome == runtime_move_outcome_e::already_moved;
+    }
+  };
+  // Changes only the Space's image under the catalog's own lock: its id, name,
+  // home volume, network, target and device access stay as they are. The home
+  // is checked, not touched: Docker must list it and it must be exactly the
+  // volume Polaris made for this Space. It is never initialized again, since the
+  // only thing creation did to it was give the empty volume to the account both
+  // runtimes run as, and the worker mounts it without copying image content.
+  // The write is one atomic replacement, so a retry after a crash reads either
+  // the old image and moves it, or the new one and confirms it.
+  [[nodiscard]] runtime_move_result_t move_runtime(const std::filesystem::path &path,
+    const runtime_move_t &move, container::host_t &host);
   int command(int argc, char **argv);
 }  // namespace multiseat::profiles
 #endif

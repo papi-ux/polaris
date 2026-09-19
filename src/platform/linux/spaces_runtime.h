@@ -7,6 +7,11 @@
 namespace multiseat::spaces {
   struct runtime_t {
     std::string id, variant, source_revision, registry_digest, config_digest, nvidia_driver;
+    // What the Space's home has to agree with. The catalog admits only steam,
+    // contract 1 and 1000:1000 today, so these defaults are what it holds.
+    std::string profile = "steam";
+    std::string media_contract = "1";
+    std::uint32_t uid = 1000, gid = 1000;
     [[nodiscard]] std::string reference() const;
     [[nodiscard]] bool matches_image_id(std::string_view image) const;
   };

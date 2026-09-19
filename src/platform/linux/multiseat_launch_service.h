@@ -31,6 +31,33 @@ namespace multiseat {
   inline constexpr profile_launch_result_t space_start_timeout_result {
     504, "The Space did not start in time.", "space_start_timeout",
     "Try again. If it keeps happening, open Spaces in Polaris and check Host Setup."};
+  // The Space's image carries the NVIDIA userspace for one driver, and the host
+  // loaded another: NVML and NVENC inside it would fail against the kernel module.
+  inline constexpr profile_launch_result_t space_runtime_driver_mismatch_result {
+    409, "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs.",
+    "space_runtime_driver_mismatch",
+    "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay."};
+  // Moving a Space to another runtime refuses in these words, whether the decision is made before
+  // the move starts or again inside the catalog transaction.
+  inline constexpr profile_launch_result_t space_open_for_move_result {
+    409, "This Space is open on a device.", "space_active", "End that stream, then move the Space."};
+  inline constexpr profile_launch_result_t spaces_change_running_result {
+    409, "Polaris is saving another change to Spaces.", "spaces_change_running", "Try again when it finishes."};
+  inline constexpr profile_launch_result_t spaces_streaming_result {
+    409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming",
+    "End the running Space streams, then try again."};
+  inline constexpr profile_launch_result_t space_runtime_changed_result {
+    409, "This Space's gaming runtime, or the runtime for this PC's driver, changed since Spaces was loaded.",
+    "space_runtime_changed", "Refresh Spaces and try again."};
+  inline constexpr profile_launch_result_t space_runtime_profile_mismatch_result {
+    409, "The runtime for this driver runs a different kind of Space, so this Space's home would not carry over.",
+    "space_runtime_profile_mismatch", "Keep this Space on its runtime, or make a new Space."};
+  inline constexpr profile_launch_result_t space_runtime_media_mismatch_result {
+    409, "The runtime for this driver streams in a way this Space's runtime does not, so Polaris will not move it.",
+    "space_runtime_media_mismatch", "Update Polaris, then try again."};
+  inline constexpr profile_launch_result_t space_runtime_identity_mismatch_result {
+    409, "The runtime for this driver runs as a different Linux account than the one this Space's home belongs to.",
+    "space_runtime_identity_mismatch", "Keep this Space on its runtime. Do not change your Linux user ID."};
   // While an administrator approves a change to this PC's setup from the Spaces page.
   inline constexpr profile_launch_result_t spaces_host_setup_running_result {
     409, "Polaris is changing this PC's Spaces setup.", "spaces_host_setup_running",
@@ -76,6 +103,11 @@ namespace multiseat {
     std::function<profiles::change_result_t(std::string_view, std::string_view, bool)> access;
     // Deletes a Space's home through Docker; the stop token ends a long removal at shutdown.
     std::function<profiles::removal_result_t(const profiles::edit_request_t &, std::stop_token)> remove_for_good;
+    // Points one Space at another runtime image; runs on the owner thread once the controller closed.
+    std::function<profiles::runtime_move_result_t(const profiles::runtime_move_t &, std::stop_token)> move_runtime;
+    // False only when a Space's image is proven to be built for an NVIDIA driver the host no longer
+    // runs. Checked before a launch starts anything; an answer it cannot get lets the launch go on.
+    std::function<bool(std::string_view image)> runtime_matches_host;
   };
   struct profile_admin_snapshot_t {
     bool available = false, changing = false, failed = false;
@@ -86,6 +118,7 @@ namespace multiseat {
     std::optional<gpu_usage_t> capacity;
     bool removal_available = false;  ///< a Space can be removed for good, not only archived
     std::vector<std::string> desktop_default_clients;  ///< devices whose Default Space is Desktop
+    bool runtime_move_available = false;  ///< a Space can be moved to another gaming runtime
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -151,6 +184,10 @@ namespace multiseat {
     // or any Space stream is active, when the typed name is not the Space's name,
     // and for the last Steam Space. A finished request answers its own retry.
     [[nodiscard]] profile_removal_result_t remove_space_for_good(profiles::edit_request_t request);
+    // Points one Space at another runtime image and keeps everything else it has. Refused while
+    // that Space or any Space stream is active or another change is being saved. The same move
+    // asked again joins the one running, and after it finished it is confirmed as already moved.
+    [[nodiscard]] profile_launch_result_t move_space_runtime(profiles::runtime_move_t move);
     // Cancellation only marks launches. Docker and input teardown remain on the
     // owner thread. Empty tokens allow an authenticated owner to cancel itself.
     [[nodiscard]] bool cancel_client(std::string_view client, std::string_view token = {});

@@ -1,0 +1,522 @@
+#include "src/platform/linux/spaces_runtime_move.h"
+#include "src/private_state_file.h"
+
+#include <gtest/gtest.h>
+#include <array>
+#include <cstdlib>
+#include <atomic>
+#include <condition_variable>
+#include <fstream>
+#include <future>
+#include <mutex>
+#include <unistd.h>
+
+#ifdef __linux__
+namespace {
+  using namespace multiseat;
+  using json = nlohmann::json;
+  using namespace std::chrono_literals;
+
+  spaces::runtime_t catalog_runtime(const char *id, const char *variant, const char *driver, char digest) {
+    return {id, variant, std::string(40, 'a'), "sha256:" + std::string(64, digest),
+      "sha256:" + std::string(64, static_cast<char>(digest + 1)), driver};
+  }
+  const auto nvidia610 = catalog_runtime("steam-nvidia-610", "nvidia", "610.57.04", '1');
+  const auto nvidia615 = catalog_runtime("steam-nvidia-615", "nvidia", "615.71.09", '3');
+  const auto amd_intel = catalog_runtime("steam-default", "default", "", '5');
+  const std::vector<spaces::runtime_t> catalog {amd_intel, nvidia610, nvidia615};
+  // A lab-built image the catalog does not name, as the maintainer's first Space was made from.
+  const std::string lab_image = "sha256:" + std::string(64, 'e');
+
+  json labeled(const std::string &image, json labels) {
+    return json::array({{{"Id", image}, {"Os", "linux"}, {"Config", {{"Labels", std::move(labels)}}}}});
+  }
+  json nvidia_labels(const std::string &driver) {
+    return {{"io.polaris.multiseat.profile", "steam"}, {"io.polaris.multiseat.media-contract", "1"},
+      {"io.polaris.multiseat.architecture", "linux/amd64"}, {"io.polaris.multiseat.nvidia.driver", driver}};
+  }
+
+  // Answers `docker image inspect`: labelled images by id, the catalog runtimes by reference.
+  class inspect_host_t : public container::host_t {
+  public:
+    std::vector<std::vector<std::string>> calls;
+    std::map<std::string, json> images;
+    std::map<std::string, json> runtimes;  // reference -> inspection
+    bool silent = false;
+    std::uint64_t effective_uid() const override { return 1000; }
+    bool executable_file(const std::filesystem::path &) const override { return true; }
+    bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return std::vector<std::uint64_t> {}; }
+    bool readable_directory(const std::filesystem::path &) const override { return false; }
+    bool private_read_write_directory(const std::filesystem::path &) const override { return false; }
+    bool private_readable_file(const std::filesystem::path &) const override { return false; }
+    std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &) const override { return std::nullopt; }
+    std::optional<std::string> read_owned_regular_file(const std::filesystem::path &, std::size_t) const override { return std::nullopt; }
+    container::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds timeout, std::size_t bound) override {
+      const auto prefix = container::command_prefix({});
+      EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), argv.begin()));
+      const std::vector<std::string> args(argv.begin() + prefix.size(), argv.end());
+      calls.push_back(args);
+      EXPECT_EQ(timeout, 5s);
+      EXPECT_EQ(bound, 65536U);
+      if (args.size() != 3 || args[0] != "image" || args[1] != "inspect") {
+        ADD_FAILURE() << "Only image inspection is expected";
+        return {.exit_status = 1};
+      }
+      if (silent) return {.exit_status = 1, .timed_out = true};
+      if (const auto found = images.find(args[2]); found != images.end()) return {.exit_status = 0, .output = found->second.dump()};
+      if (const auto found = runtimes.find(args[2]); found != runtimes.end()) return {.exit_status = 0, .output = found->second.dump()};
+      return {.exit_status = 1, .output = "[]\n"};
+    }
+  };
+
+  // What `docker image inspect` prints for a verified catalog runtime.
+  json verified(const spaces::runtime_t &r) {
+    return json::array({{{"Id", r.config_digest}, {"Os", "linux"}, {"Architecture", "amd64"},
+      {"RepoDigests", json::array({r.reference()})}, {"Config", {
+        {"Entrypoint", json::array({"/usr/bin/polaris-seat-worker"})}, {"Cmd", json::array({"run"})},
+        {"Labels", {{"org.opencontainers.image.source", "https://github.com/papi-ux/polaris"},
+          {"org.opencontainers.image.revision", r.source_revision}, {"io.polaris.multiseat.profile", "steam"},
+          {"io.polaris.multiseat.architecture", "linux/amd64"}, {"io.polaris.multiseat.media-contract", "1"},
+          {"io.polaris.multiseat.nvidia.driver", r.nvidia_driver}}}}}}});
+  }
+
+  TEST(SpacesRuntimeMove, TheCatalogNamesWhatEachRuntimeNeedsOfAHome) {
+    const auto decoded = spaces::trusted_runtimes();
+    ASSERT_TRUE(decoded);
+    ASSERT_FALSE(decoded->empty());
+    for (const auto &runtime : *decoded) {
+      EXPECT_EQ(runtime.profile, "steam") << runtime.id;
+      EXPECT_EQ(runtime.media_contract, "1") << runtime.id;
+      EXPECT_EQ(runtime.uid, 1000U) << runtime.id;
+      EXPECT_EQ(runtime.gid, 1000U) << runtime.id;
+    }
+    // The maintainer's host: a Space made on 610.57.04 after the driver moved to 615.71.09.
+    const auto choice = spaces::choose_runtime(*decoded, std::string("615.71.09"));
+    ASSERT_TRUE(choice.runtime);
+    EXPECT_EQ(choice.runtime->nvidia_driver, "615.71.09");
+    const auto made_for_610 = std::find_if(decoded->begin(), decoded->end(), [](const auto &r) { return r.nvidia_driver == "610.57.04"; });
+    ASSERT_NE(made_for_610, decoded->end());
+    const auto identity = spaces::catalog_image_runtime(made_for_610->config_digest, *decoded);
+    ASSERT_TRUE(identity);
+    EXPECT_TRUE(spaces::driver_mismatch(*identity, std::string("615.71.09")));
+  }
+
+  TEST(SpacesRuntimeMove, ReadsTheLoadedDriverOnlyAsAPlainVersion) {
+    std::array<char, 64> pattern {};
+    const std::string value = "/tmp/polaris-driver-XXXXXX";
+    std::copy(value.begin(), value.end(), pattern.begin());
+    ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
+    const std::filesystem::path root = pattern.data();
+    const auto version = root / "version";
+    EXPECT_EQ(spaces::loaded_nvidia_driver(version), std::nullopt) << "no module loaded";
+    std::ofstream(version) << "615.71.09\n";
+    EXPECT_EQ(spaces::loaded_nvidia_driver(version), std::optional<std::string>("615.71.09"));
+    std::ofstream(version) << "615.71.09; rm -rf /\n";
+    EXPECT_EQ(spaces::loaded_nvidia_driver(version), std::optional<std::string>(""));
+    std::filesystem::remove_all(root);
+  }
+
+  TEST(SpacesRuntimeMove, ACatalogImageIsKnownWithoutAskingDocker) {
+    for (const auto &image : {nvidia610.config_digest, nvidia610.registry_digest}) {
+      const auto found = spaces::catalog_image_runtime(image, catalog);
+      ASSERT_TRUE(found) << image;
+      EXPECT_EQ(*found, (spaces::image_runtime_t {true, "steam-nvidia-610", "steam", "1", "610.57.04"}));
+    }
+    EXPECT_FALSE(spaces::catalog_image_runtime(lab_image, catalog));
+    inspect_host_t host;
+    EXPECT_EQ(spaces::identify_image(host, nvidia615.config_digest, catalog).nvidia_driver, "615.71.09");
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  TEST(SpacesRuntimeMove, AnImageOutsideTheCatalogIsReadFromItsOwnLabels) {
+    const auto found = spaces::labeled_image_runtime(lab_image, labeled(lab_image, nvidia_labels("610.57.04")).dump());
+    ASSERT_TRUE(found);
+    EXPECT_EQ(*found, (spaces::image_runtime_t {true, "", "steam", "1", "610.57.04"}));
+    // The AMD and Intel runtime carries no driver label at all.
+    auto plain = nvidia_labels("");
+    plain.erase("io.polaris.multiseat.nvidia.driver");
+    const auto amd = spaces::labeled_image_runtime(lab_image, labeled(lab_image, plain).dump());
+    ASSERT_TRUE(amd);
+    EXPECT_EQ(amd->nvidia_driver, "");
+    EXPECT_FALSE(spaces::driver_mismatch(*amd, std::string("615.71.09")));
+
+    const std::vector<json> refused {
+      labeled("sha256:" + std::string(64, 'f'), nvidia_labels("610.57.04")),  // another image answered
+      json::array({labeled(lab_image, nvidia_labels("610.57.04"))[0], labeled(lab_image, nvidia_labels("610.57.04"))[0]}),
+      labeled(lab_image, nvidia_labels("610.57.04 or so")),
+      labeled(lab_image, nvidia_labels("610..57")),
+      labeled(lab_image, json::object()),
+      labeled(lab_image, {{"io.polaris.multiseat.profile", "Steam!"}, {"io.polaris.multiseat.media-contract", "1"}}),
+      labeled(lab_image, {{"io.polaris.multiseat.profile", "steam"}, {"io.polaris.multiseat.media-contract", "one"}}),
+      labeled(lab_image, nullptr),
+      json::object(),
+    };
+    for (std::size_t i = 0; i < refused.size(); ++i)
+      EXPECT_FALSE(spaces::labeled_image_runtime(lab_image, refused[i].dump())) << i;
+    EXPECT_FALSE(spaces::labeled_image_runtime(lab_image, "not json"));
+    EXPECT_FALSE(spaces::labeled_image_runtime("latest", labeled("latest", nvidia_labels("610.57.04")).dump()));
+  }
+
+  TEST(SpacesRuntimeMove, DockerIsAskedOncePerImageAndOnlyAnswersAreKept) {
+    inspect_host_t host;
+    spaces::image_runtime_cache_t cache;
+    host.silent = true;
+    EXPECT_FALSE(spaces::identify_image(host, lab_image, catalog, &cache).known);
+    EXPECT_EQ(host.calls.size(), 1U);
+    host.silent = false;
+    EXPECT_FALSE(spaces::identify_image(host, lab_image, catalog, &cache).known) << "not in Docker";
+    EXPECT_EQ(host.calls.size(), 2U) << "a silent Docker and a missing image are asked again";
+    host.images[lab_image] = labeled(lab_image, nvidia_labels("610.57.04"));
+    EXPECT_EQ(spaces::identify_image(host, lab_image, catalog, &cache).nvidia_driver, "610.57.04");
+    EXPECT_EQ(spaces::identify_image(host, lab_image, catalog, &cache).nvidia_driver, "610.57.04");
+    EXPECT_EQ(host.calls.size(), 3U) << "an image ID's labels never change";
+    EXPECT_EQ(host.calls.back(), (std::vector<std::string> {"image", "inspect", lab_image}));
+    // Never a reference Docker would resolve through a tag.
+    EXPECT_FALSE(spaces::identify_image(host, "ubuntu:latest", catalog, &cache).known);
+    EXPECT_EQ(host.calls.size(), 3U);
+  }
+
+  TEST(SpacesRuntimeMove, OnlyAReadableDifferentNvidiaDriverIsAMismatch) {
+    const spaces::image_runtime_t made_for_610 {true, "", "steam", "1", "610.57.04"};
+    EXPECT_TRUE(spaces::driver_mismatch(made_for_610, std::string("615.71.09")));
+    EXPECT_FALSE(spaces::driver_mismatch(made_for_610, std::string("610.57.04")));
+    EXPECT_FALSE(spaces::driver_mismatch(made_for_610, std::nullopt)) << "no NVIDIA driver loaded";
+    EXPECT_FALSE(spaces::driver_mismatch(made_for_610, std::string())) << "a driver whose version could not be read";
+    EXPECT_FALSE(spaces::driver_mismatch({}, std::string("615.71.09"))) << "an image Polaris could not read";
+    EXPECT_FALSE(spaces::driver_mismatch({true, "", "steam", "1", ""}, std::string("615.71.09")));
+  }
+
+  TEST(SpacesRuntimeMove, TheSpacesPageLearnsWhyAndWhereTheSpaceCanMove) {
+    const spaces::image_runtime_t made_for_610 {true, "steam-nvidia-610", "steam", "1", "610.57.04"};
+    const auto choice = spaces::choose_runtime(catalog, std::string("615.71.09"));
+    const auto ready = spaces::describe_space_runtime(made_for_610, std::string("615.71.09"), choice, spaces::runtime_image_e::verified);
+    EXPECT_EQ(ready["runtime_driver"], "610.57.04");
+    EXPECT_EQ(ready["runtime_id"], "steam-nvidia-610");
+    EXPECT_EQ(ready["host_driver"], "615.71.09");
+    EXPECT_EQ(ready["runtime_mismatch"], true);
+    EXPECT_EQ(ready["runtime_move"], (json {{"available", true}, {"runtime_id", "steam-nvidia-615"},
+      {"nvidia_driver", "615.71.09"}, {"installed", true}, {"code", "runtime_ready"}}));
+    const auto absent = spaces::describe_space_runtime(made_for_610, std::string("615.71.09"), choice, spaces::runtime_image_e::absent);
+    EXPECT_EQ(absent["runtime_move"]["installed"], false);
+    EXPECT_EQ(absent["runtime_move"]["code"], "not_downloaded");
+    EXPECT_EQ(spaces::describe_space_runtime(made_for_610, std::string("615.71.09"), choice,
+      spaces::runtime_image_e::unverifiable)["runtime_move"]["code"], "inspection_failed");
+    EXPECT_EQ(spaces::describe_space_runtime(made_for_610, std::string("615.71.09"), choice,
+      spaces::runtime_image_e::mismatch)["runtime_move"]["code"], "runtime_identity_mismatch");
+    // A driver this build has no runtime for: the mismatch shows, and nothing to move to.
+    const auto newer = spaces::describe_space_runtime(made_for_610, std::string("620.10.01"),
+      spaces::choose_runtime(catalog, std::string("620.10.01")), spaces::runtime_image_e::unverifiable);
+    EXPECT_EQ(newer["runtime_mismatch"], true);
+    EXPECT_EQ(newer["runtime_move"], (json {{"available", false}, {"code", "runtime_not_published"}}));
+    const auto current = spaces::describe_space_runtime(made_for_610, std::string("610.57.04"),
+      spaces::choose_runtime(catalog, std::string("610.57.04")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(current["runtime_mismatch"], false);
+    EXPECT_TRUE(current["runtime_move"].is_null());
+    const auto unknown = spaces::describe_space_runtime({}, std::string("615.71.09"), choice, spaces::runtime_image_e::verified);
+    EXPECT_TRUE(unknown["runtime_driver"].is_null());
+    EXPECT_EQ(unknown["runtime_mismatch"], false);
+    EXPECT_TRUE(spaces::describe_space_runtime(made_for_610, std::nullopt,
+      spaces::choose_runtime(catalog, std::nullopt), spaces::runtime_image_e::verified)["host_driver"].is_null());
+  }
+
+  TEST(SpacesRuntimeMove, TheSpacesListAsksDockerOnlyWhatItNeeds) {
+    inspect_host_t host;
+    spaces::image_runtime_cache_t images;
+    spaces::runtime_inspection_cache_t targets;
+    host.images[lab_image] = labeled(lab_image, nvidia_labels("610.57.04"));
+    const std::vector<profile_summary_t> profiles {
+      {"space-a", "Alex", {}, true, false, {}, true, lab_image},
+      {"space-b", "Sam", {}, true, false, {}, true, nvidia610.config_digest},
+      {"space-c", "Kai", {}, true, false, {}, true, nvidia615.config_digest},
+    };
+    // A PC without an NVIDIA driver cannot mismatch: Docker is not asked.
+    const auto amd = spaces::describe_space_runtimes(host, profiles, catalog, std::nullopt, &images, &targets);
+    EXPECT_TRUE(host.calls.empty());
+    EXPECT_TRUE(amd["space-a"]["runtime_driver"].is_null());
+    EXPECT_EQ(amd["space-b"]["runtime_driver"], "610.57.04");
+    EXPECT_EQ(amd["space-b"]["runtime_mismatch"], false);
+
+    host.runtimes[nvidia615.reference()] = verified(nvidia615);
+    const auto nvidia = spaces::describe_space_runtimes(host, profiles, catalog, std::string("615.71.09"), &images, &targets);
+    EXPECT_EQ(nvidia["space-a"]["runtime_mismatch"], true);
+    EXPECT_EQ(nvidia["space-b"]["runtime_mismatch"], true);
+    EXPECT_EQ(nvidia["space-c"]["runtime_mismatch"], false);
+    EXPECT_EQ(nvidia["space-a"]["runtime_move"]["installed"], true);
+    EXPECT_EQ(nvidia["space-b"]["runtime_move"]["runtime_id"], "steam-nvidia-615");
+    // One label read for the lab image and one look at the target, shared by both Spaces.
+    ASSERT_EQ(host.calls.size(), 2U);
+    EXPECT_EQ(host.calls[0], (std::vector<std::string> {"image", "inspect", lab_image}));
+    EXPECT_EQ(host.calls[1], (std::vector<std::string> {"image", "inspect", nvidia615.reference()}));
+    (void) spaces::describe_space_runtimes(host, profiles, catalog, std::string("615.71.09"), &images, &targets);
+    EXPECT_EQ(host.calls.size(), 2U) << "the next refresh reads both answers from their caches";
+  }
+
+  // Opt-in and read-only, against the local Docker Engine: POLARIS_TEST_SPACES_RUNTIME_IMAGE names
+  // a local runtime image ID and POLARIS_TEST_SPACES_RUNTIME_DRIVER the NVIDIA driver it was built
+  // for. Only `docker image inspect` runs.
+  TEST(SpacesRuntimeMove, PhysicalDockerReadsWhatALocalImageWasBuiltFor) {
+    const char *image = std::getenv("POLARIS_TEST_SPACES_RUNTIME_IMAGE");
+    const char *driver = std::getenv("POLARIS_TEST_SPACES_RUNTIME_DRIVER");
+    if (!image || !driver) GTEST_SKIP() << "Opt-in image inspection against the local Docker Engine";
+    container::local_host_t docker;
+    spaces::image_runtime_cache_t cache;
+    // An empty catalog makes Docker answer, as it does for an image the build does not name.
+    const auto identity = spaces::identify_image(docker, image, {}, &cache);
+    ASSERT_TRUE(identity.known);
+    EXPECT_EQ(identity.profile, "steam");
+    EXPECT_EQ(identity.media_contract, "1");
+    EXPECT_EQ(identity.nvidia_driver, driver);
+    EXPECT_EQ(cache.find(image), identity);
+  }
+
+  spaces::move_facts_t movable() {
+    spaces::move_facts_t facts;
+    facts.admin_available = true;
+    facts.space = profile_summary_t {"space-a", "Alex", {"client-a"}, true, false, {}, true, lab_image};
+    facts.image = {true, "", "steam", "1", "610.57.04"};
+    facts.host_driver = "615.71.09";
+    facts.choice = spaces::choose_runtime(catalog, facts.host_driver);
+    facts.target = spaces::runtime_image_e::absent;
+    facts.home_uid = facts.home_gid = 1000;
+    return facts;
+  }
+
+  TEST(SpacesRuntimeMove, AMismatchedSpaceMovesToTheRuntimeForTheLoadedDriver) {
+    const auto decision = spaces::decide_move(movable(), "steam-nvidia-615");
+    EXPECT_EQ(decision.result.status, 202);
+    ASSERT_TRUE(decision.target);
+    EXPECT_EQ(decision.target->id, "steam-nvidia-615");
+    // Asked again after it finished: already there, whatever else is going on.
+    auto done = movable();
+    done.space->image = nvidia615.registry_digest;
+    done.image = *spaces::catalog_image_runtime(nvidia615.registry_digest, catalog);
+    done.streaming = done.space_active = true;
+    const auto again = spaces::decide_move(done, "steam-nvidia-615");
+    EXPECT_EQ(again.result.status, 200);
+    EXPECT_TRUE(again.result.code.empty());
+  }
+
+  TEST(SpacesRuntimeMove, EveryRefusalSaysWhyAndChangesNothing) {
+    struct case_t {
+      const char *name;
+      std::function<void(spaces::move_facts_t &)> change;
+      int status;
+      std::string_view code;
+      std::string runtime_id = "steam-nvidia-615";
+    };
+    const std::vector<case_t> cases {
+      {"no Spaces owner", [](auto &f) { f.admin_available = false; }, 503, "spaces_admin_unavailable"},
+      {"unknown Space", [](auto &f) { f.space.reset(); }, 404, "space_unknown"},
+      {"unreadable runtime", [](auto &f) { f.image = {}; }, 503, "space_runtime_unknown"},
+      {"already on this driver", [](auto &f) { f.image.nvidia_driver = "615.71.09"; }, 409, "space_runtime_current"},
+      {"no NVIDIA driver", [](auto &f) { f.host_driver.reset(); f.choice = spaces::choose_runtime(catalog, std::nullopt); },
+        409, "space_runtime_current"},
+      {"AMD and Intel runtime", [](auto &f) { f.image.nvidia_driver.clear(); }, 409, "space_runtime_current"},
+      {"no runtime for this driver", [](auto &f) {
+        f.host_driver = "620.10.01"; f.choice = spaces::choose_runtime(catalog, f.host_driver); }, 409, "space_runtime_not_published"},
+      {"stale page", [](auto &) {}, 409, "space_runtime_changed", "steam-nvidia-610"},
+      {"another kind of Space", [](auto &f) { f.image.profile = "gamescope"; }, 409, "space_runtime_profile_mismatch"},
+      {"not a Steam Space", [](auto &f) { f.space->steam = false; }, 409, "space_runtime_profile_mismatch"},
+      {"another media contract", [](auto &f) { f.image.media_contract = "2"; }, 409, "space_runtime_media_mismatch"},
+      {"another account", [](auto &f) { f.home_uid = 1001; }, 409, "space_runtime_identity_mismatch"},
+      {"another group", [](auto &f) { f.home_gid = 1001; }, 409, "space_runtime_identity_mismatch"},
+      {"host setup", [](auto &f) { f.host_setup_running = true; }, 409, "spaces_host_setup_running"},
+      {"first Space setup", [](auto &f) { f.setup_running = true; }, 409, "spaces_setup_running"},
+      {"another change", [](auto &f) { f.changing = true; }, 409, "spaces_change_running"},
+      {"this Space is open", [](auto &f) { f.space_active = f.streaming = true; }, 409, "space_active"},
+      {"another Space is open", [](auto &f) { f.streaming = true; }, 409, "spaces_streaming"},
+    };
+    for (const auto &item : cases) {
+      auto facts = movable();
+      item.change(facts);
+      const auto decision = spaces::decide_move(facts, item.runtime_id);
+      EXPECT_EQ(decision.result.status, item.status) << item.name;
+      EXPECT_EQ(decision.result.code, item.code) << item.name;
+      EXPECT_FALSE(decision.result.message.empty()) << item.name;
+      EXPECT_FALSE(decision.result.action.empty()) << item.name;
+      EXPECT_FALSE(decision.target) << item.name;
+    }
+    // What the Space is outranks what is happening: a Space that cannot move says so while it is open.
+    auto open = movable();
+    open.image.media_contract = "2";
+    open.space_active = open.streaming = true;
+    EXPECT_EQ(spaces::decide_move(open, "steam-nvidia-615").result.code, "space_runtime_media_mismatch");
+  }
+
+  TEST(SpacesRuntimeMove, AMoveRequestNamesOneSpaceOneRuntimeAndItsOwnIdentity) {
+    const auto valid = R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":"space-a","runtime_id":"steam-nvidia-615"})";
+    const auto request = spaces::decode_move_request(valid);
+    ASSERT_TRUE(request);
+    EXPECT_EQ(*request, (spaces::move_request_t {"12345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}));
+    for (const auto *payload : {
+           R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":"space-a"})",
+           R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":"space-a","runtime_id":"steam-nvidia-615","image":"sha256:00"})",
+           R"({"request_id":"12345678-1234-4234-8234-123456789ABC","profile_id":"space-a","runtime_id":"steam-nvidia-615"})",
+           R"({"request_id":"move","profile_id":"space-a","runtime_id":"steam-nvidia-615"})",
+           R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":"../space-a","runtime_id":"steam-nvidia-615"})",
+           R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":"space-a","runtime_id":"ghcr.io/other@sha256:00"})",
+           R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":"space-a","profile_id":"space-b","runtime_id":"steam-nvidia-615"})",
+           R"({"request_id":"12345678-1234-4234-8234-123456789abc","profile_id":{"id":"space-a"},"runtime_id":"steam-nvidia-615"})",
+           "", "[]"}) {
+      EXPECT_FALSE(spaces::decode_move_request(payload)) << payload;
+    }
+  }
+
+  // Drives the move service with fakes: facts, a download and the Spaces owner.
+  class SpacesMoveService : public ::testing::Test {
+  protected:
+    spaces::move_facts_t facts = movable();
+    std::atomic<unsigned> fact_reads {0}, installs {0}, moves {0};
+    spaces::runtime_install_result_t install_answer {true, "runtime_ready", "The approved gaming runtime is available.", nvidia615.config_digest};
+    std::deque<profile_launch_result_t> move_answers;
+    std::vector<profiles::runtime_move_t> moved;
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool hold_install = false;
+    std::unique_ptr<spaces::move_service_t> service;
+    const spaces::move_request_t request {"12345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"};
+    void SetUp() override {
+      service = std::make_unique<spaces::move_service_t>(spaces::move_operations_t {
+        .facts = [this](const spaces::move_request_t &) { ++fact_reads; return facts; },
+        .install = [this](const spaces::runtime_t &target, std::stop_token stop) {
+          ++installs;
+          EXPECT_EQ(target.id, "steam-nvidia-615");
+          std::unique_lock lock(mutex);
+          changed.wait(lock, stop, [&] { return !hold_install; });
+          if (stop.stop_requested()) return spaces::runtime_install_result_t {false, "download_cancelled", "Setup stopped.", {}};
+          return install_answer;
+        },
+        .move = [this](const profiles::runtime_move_t &move) -> profile_launch_result_t {
+          std::lock_guard lock(mutex);
+          ++moves;
+          moved.push_back(move);
+          if (move_answers.empty()) return {200, "Space moved to the new gaming runtime"};
+          const auto answer = move_answers.front();
+          move_answers.pop_front();
+          return answer;
+        },
+      }, 1ms);
+    }
+    void TearDown() override {
+      release();
+      service.reset();
+    }
+    void release() {
+      { std::lock_guard lock(mutex); hold_install = false; }
+      changed.notify_all();
+    }
+    json settled() {
+      for (int i = 0; i < 400 && service->active(); ++i) std::this_thread::sleep_for(5ms);
+      EXPECT_FALSE(service->active());
+      return service->snapshot();
+    }
+  };
+
+  TEST_F(SpacesMoveService, DownloadsTheRuntimeThenMovesTheSpaceKeepingItsHome) {
+    hold_install = true;
+    const auto started = service->submit(request);
+    EXPECT_EQ(started.status, 202);
+    auto job = service->snapshot();
+    EXPECT_EQ(job["state"], "downloading");
+    EXPECT_EQ(job["profile_id"], "space-a");
+    EXPECT_EQ(job["runtime_id"], "steam-nvidia-615");
+    EXPECT_EQ(job["nvidia_driver"], "615.71.09");
+    EXPECT_TRUE(service->active());
+    // The same request while it runs joins it; another one waits its turn.
+    EXPECT_EQ(service->submit(request).status, 202);
+    const auto second = service->submit({"22345678-1234-4234-8234-123456789abc", "space-b", "steam-nvidia-615"});
+    EXPECT_EQ(second.status, 409);
+    EXPECT_EQ(second.code, "space_move_running");
+    release();
+    job = settled();
+    EXPECT_EQ(job["state"], "done");
+    EXPECT_EQ(job["code"], "space_runtime_moved");
+    ASSERT_EQ(moved.size(), 1U);
+    EXPECT_EQ(moved[0], (profiles::runtime_move_t {"space-a", lab_image, "1", nvidia615.config_digest, "1",
+      runtime_profile_e::steam, 1000, 1000}));
+    EXPECT_EQ(installs, 1U);
+    EXPECT_EQ(fact_reads, 1U) << "joining and refusing never read the facts again";
+    const auto answered = service->submit(request);
+    EXPECT_EQ(answered.status, 200);
+    EXPECT_EQ(answered.code, "space_runtime_moved");
+    EXPECT_EQ(moves, 1U);
+    const auto reused = service->submit({request.request_id, "space-b", "steam-nvidia-615"});
+    EXPECT_EQ(reused.status, 409);
+    EXPECT_EQ(reused.code, "move_request_in_use");
+  }
+
+  TEST_F(SpacesMoveService, ADownloadedRuntimeGoesStraightToTheMoveAndItsCheckStillRuns) {
+    facts.target = spaces::runtime_image_e::verified;
+    hold_install = true;
+    ASSERT_EQ(service->submit(request).status, 202);
+    EXPECT_EQ(service->snapshot()["state"], "moving");
+    release();
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(installs, 1U) << "the verified image ID comes from the same check that would download it";
+  }
+
+  TEST_F(SpacesMoveService, ARefusedMoveStartsNoJobAndNoDownload) {
+    facts.space_active = facts.streaming = true;
+    const auto refused = service->submit(request);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "space_active");
+    EXPECT_EQ(refused.message, "This Space is open on a device.");
+    EXPECT_TRUE(service->snapshot().is_null());
+    EXPECT_FALSE(service->active());
+    // Once the stream ends the same request can start.
+    facts.space_active = facts.streaming = false;
+    EXPECT_EQ(service->submit(request).status, 202);
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(installs, 1U);
+  }
+
+  TEST_F(SpacesMoveService, AFailedOrUnapprovedDownloadNeverTouchesTheSpace) {
+    install_answer = {false, "download_incomplete", "The runtime download did not finish. Retry the same runtime to reuse verified layers.", {}};
+    ASSERT_EQ(service->submit(request).status, 202);
+    auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "download_incomplete");
+    EXPECT_NE(job["message"].get<std::string>().find("The Space was not changed."), std::string::npos);
+    EXPECT_EQ(moves, 0U);
+    // An image the catalog does not approve for this runtime is never pinned.
+    install_answer = {true, "runtime_ready", "", nvidia610.config_digest};
+    ASSERT_EQ(service->submit({"32345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).status, 202);
+    job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "runtime_verification_failed");
+    EXPECT_EQ(moves, 0U);
+  }
+
+  TEST_F(SpacesMoveService, APendingChangeIsAskedAgainAndARefusalIsReportedInItsWords) {
+    move_answers = {{202, "The Space is still being moved. Refresh before retrying.", "spaces_change_pending"},
+      {202, "The Space is still being moved. Refresh before retrying.", "spaces_change_pending"}};
+    ASSERT_EQ(service->submit(request).status, 202);
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(moves, 3U);
+    for (const auto &move : moved) EXPECT_EQ(move, moved.front()) << "the retry is the same move, so the owner joins it";
+
+    move_answers = {space_runtime_changed_result};
+    ASSERT_EQ(service->submit({"42345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).status, 202);
+    const auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "space_runtime_changed");
+    EXPECT_EQ(job["message"], std::string(space_runtime_changed_result.message));
+    EXPECT_EQ(job["action"], "Refresh Spaces and try again.");
+  }
+
+  TEST_F(SpacesMoveService, StoppingPolarisMidDownloadLeavesTheSpaceAsItWas) {
+    hold_install = true;
+    ASSERT_EQ(service->submit(request).status, 202);
+    for (int i = 0; i < 200 && installs == 0; ++i) std::this_thread::sleep_for(5ms);
+    ASSERT_EQ(installs, 1U);
+    service->shutdown();
+    const auto job = service->snapshot();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "download_cancelled");
+    EXPECT_EQ(moves, 0U);
+    EXPECT_FALSE(service->active());
+    EXPECT_EQ(service->submit({"52345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).code, "spaces_stopping");
+  }
+}  // namespace
+#endif

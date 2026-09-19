@@ -633,6 +633,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_move.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_move.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.h"

@@ -7,22 +7,6 @@
 namespace multiseat::spaces {
   namespace {
     using json = nlohmann::json;
-    bool driver_version(std::string_view value) {
-      return value.size() >= 3 && value.size() <= 32 && value.front() != '.' && value.back() != '.' &&
-        value.find_first_not_of("0123456789.") == std::string_view::npos &&
-        value.find("..") == std::string_view::npos && value.find('.') != std::string_view::npos;
-    }
-    // The loaded NVIDIA kernel module names its version. Only a plain dotted
-    // version is ever repeated to the reader.
-    std::optional<std::string> loaded_nvidia_driver() {
-      std::ifstream file("/sys/module/nvidia/version");
-      if (!file) return std::nullopt;
-      std::string version(33, '\0');
-      file.read(version.data(), static_cast<std::streamsize>(version.size()));
-      version.resize(static_cast<std::size_t>(file.gcount()));
-      while (!version.empty() && (version.back() == '\n' || version.back() == ' ')) version.pop_back();
-      return driver_version(version) ? version : std::string {};
-    }
     std::string either(const std::vector<std::string> &drivers) {
       std::string text;
       for (std::size_t i = 0; i < drivers.size(); ++i)
@@ -63,6 +47,24 @@ namespace multiseat::spaces {
         {"action", r.status == "available" ? "download_runtime" : r.status == "failed" ? "retry_runtime" : ""},
         {"doc_anchor", "#download-the-gaming-runtime"}, {"runtime", std::move(runtime)}};
     }
+  }
+
+  bool nvidia_driver_version(std::string_view value) {
+    return value.size() >= 3 && value.size() <= 32 && value.front() != '.' && value.back() != '.' &&
+      value.find_first_not_of("0123456789.") == std::string_view::npos &&
+      value.find("..") == std::string_view::npos && value.find('.') != std::string_view::npos;
+  }
+
+  // The loaded NVIDIA kernel module names its version. Only a plain dotted
+  // version is ever repeated to the reader.
+  std::optional<std::string> loaded_nvidia_driver(const std::filesystem::path &module_version) {
+    std::ifstream file(module_version);
+    if (!file) return std::nullopt;
+    std::string version(33, '\0');
+    file.read(version.data(), static_cast<std::streamsize>(version.size()));
+    version.resize(static_cast<std::size_t>(file.gcount()));
+    while (!version.empty() && (version.back() == '\n' || version.back() == ' ')) version.pop_back();
+    return nvidia_driver_version(version) ? version : std::string {};
   }
 
   runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog, const std::optional<std::string> &nvidia_driver) {
