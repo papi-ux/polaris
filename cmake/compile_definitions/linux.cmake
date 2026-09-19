@@ -637,6 +637,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_activation.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_gpu_nodes.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_gpu_nodes.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_security.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin.h"

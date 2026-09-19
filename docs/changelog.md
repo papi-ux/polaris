@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Spaces survive a reboot that renumbers the graphics devices. Guided setup saved the card's `/dev/dri/cardN` and `renderDN` paths, and the kernel does not keep those numbers from one boot to the next: an EVDI display or another GPU that starts first takes them, so after an ordinary reboot Spaces stayed off with a log line about the separate input owner that had nothing to do with it. Polaris now finds the card by the PCI address setup saved with it and uses the card and render nodes that address has on this boot, in memory only, so the saved configuration is left as setup wrote it. Only nodes the kernel lists under that exact device are used, the container still gets real `/dev/dri` names, and the NVIDIA device nodes are checked as before and never rewritten. When the card is gone, its driver has not loaded yet, or its nodes no longer match setup, Spaces stay off and the log says which, and turning on `multiseat_moonlight_input` alongside Spaces gets a line of its own.
+
 ## v1.4.10 - 2026-09-18
 
 Spaces open up, a paired client can put the host to sleep, and Host Virtual Display on KDE Plasma gets a screen of its own from KWin. This is the first release whose compiled runtime catalog admits published Steam runtimes, so a Space can be created on a released build. Completion estimates, Find Cover, ROM folder emulators and support bundles got attention too. Nova 1.4.10 comes out alongside it, and Sleep Host needs both. Existing configurations and paired devices remain valid.

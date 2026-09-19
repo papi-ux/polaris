@@ -12,7 +12,7 @@ namespace multiseat::spaces {
   };
   // Browser selections name a discovered GPU; no browser paths or device lists.
   struct graphics_roots_t {
-    std::filesystem::path drm = "/sys/class/drm", nvidia = "/proc/driver/nvidia/gpus";
+    std::filesystem::path drm = "/sys/class/drm", nvidia = "/proc/driver/nvidia/gpus", pci = "/sys/bus/pci/devices";
   };
   std::vector<graphics_t> discover_graphics(container::host_t &host, const graphics_roots_t &roots = {});
   nlohmann::json graphics_choices(const runtime_t &runtime);
@@ -27,7 +27,16 @@ namespace multiseat::spaces {
     const profiles::first_steam_request_t &request, std::string_view image,
     const graphics_t &graphics, std::string_view selinux_type,
     container::host_t &host);
-  bool managed_graphics_current(const activation_paths_t &paths);
+  struct managed_controller_t {
+    std::optional<production_controller_options_t> options;
+    std::string problem;  // what failed, for the log, when options is empty
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;  // saved, used now
+  };
+  // The saved GPU id (its PCI address) is the identity. Its DRM card and render nodes are looked up
+  // again for this start and replaced in memory only; the saved file is never rewritten. The GPU
+  // must still be discovered with the same NVIDIA nodes, or Spaces stay off with the reason.
+  managed_controller_t load_managed_controller(const activation_paths_t &paths, container::host_t &host,
+    const graphics_roots_t &roots = {});
   bool prepare_managed_ipc(const activation_paths_t &paths);
   bool activate_first_space(const std::filesystem::path &directory,
     const profiles::first_steam_request_t &request, const runtime_t &runtime,

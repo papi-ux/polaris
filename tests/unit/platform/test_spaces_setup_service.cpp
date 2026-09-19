@@ -13,6 +13,7 @@
 #include <atomic>
 #include <fstream>
 #include <future>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <unistd.h>
@@ -415,6 +416,7 @@ namespace {
   class activation_host_t : public container::host_t {
   public:
     std::set<std::string> denied;
+    std::map<std::string, std::pair<unsigned, unsigned>> numbers;  // path -> character major, minor
     std::uint64_t effective_uid() const override { return geteuid(); }
     std::uint64_t effective_gid() const override { return getegid(); }
     bool executable_file(const std::filesystem::path &) const override { return true; }
@@ -425,6 +427,8 @@ namespace {
     bool private_readable_file(const std::filesystem::path &) const override { return true; }
     std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &path) const override {
       if (denied.contains(path)) return {};
+      if (const auto found = numbers.find(path.string()); found != numbers.end())
+        return container::character_device_identity_t {1, 1, found->second.first, found->second.second};
       return container::character_device_identity_t {1, 1, 226, static_cast<unsigned>(std::hash<std::string>{}(path.string()))};
     }
     std::optional<std::string> read_owned_regular_file(const std::filesystem::path &, std::size_t) const override { return {}; }
@@ -445,7 +449,7 @@ TEST_F(SpacesSetupService, ConfigurationCommitsLastPreservesSettingsAndRecreates
   }}};
   const auto original = profiles::encode(catalog);
   ASSERT_TRUE(psf::write_atomic(paths.profiles, original));
-  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
+  const spaces::graphics_t graphics {{"pci-0000_01_00.0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
   auto configure = [&] { return spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host); };
   ASSERT_TRUE(configure());
   const auto committed = configuration_store::read(paths.native);
@@ -482,7 +486,7 @@ TEST_F(SpacesSetupService, PreparationMovesAnEarlierMarkerOutOfTheWorkerDirector
     .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
   }}};
   ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
-  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
+  const spaces::graphics_t graphics {{"pci-0000_01_00.0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
   ASSERT_TRUE(spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host));
   // The layout earlier builds left: the marker and its lock inside the worker directory, which
   // blocked worker recovery, so no Space could start and every Space change failed.
@@ -516,7 +520,7 @@ TEST_F(SpacesSetupService, ConfigurationRefusesExistingAuthoritySymlinksAndUncer
     .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
   }}};
   ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
-  const spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128"}, 1, 1}, "Test", "default"};
+  const spaces::graphics_t graphics {{"pci-0000_01_00.0", "/dev/dri/renderD128", {"/dev/dri/renderD128"}, 1, 1}, "Test", "default"};
   auto configure = [&] { return spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host); };
   for (const auto &contents : {"multiseat_enabled = true\n", "multiseat_config = /existing/controller.json\n", "multiseat_moonlight_input = true\n"}) {
     ASSERT_TRUE(psf::write_atomic(paths.native, contents));
@@ -563,6 +567,109 @@ TEST_F(SpacesSetupService, GraphicsDiscoveryPairsPhysicalNodesAndRejectsMissingA
   fs::create_directory_symlink(device, roots.drm / "renderD129/device");
   EXPECT_EQ(spaces::discover_graphics(host, roots).size(), 1U);
 }
+TEST_F(SpacesSetupService, ConfigurationSavesTheGpuByItsPciIdentity) {
+  activation_host_t host;
+  const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
+  ASSERT_TRUE(psf::write_atomic(paths.native, "port = 47989\n"));
+  const profiles::catalog_t catalog {static_cast<unsigned>(geteuid()), static_cast<unsigned>(getegid()), {{
+    .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, runtime().config_digest},
+    .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+  }}};
+  ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
+  // An id that names no PCI device could not be found again after the kernel renumbers its nodes.
+  spaces::graphics_t graphics {{"gpu-0", "/dev/dri/renderD128", {"/dev/dri/renderD128", "/dev/dri/card0"}, 1, 1}, "Test", "default"};
+  auto configure = [&] { return spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, graphics, "", host); };
+  EXPECT_FALSE(configure());
+  EXPECT_FALSE(std::filesystem::exists(paths.controller));
+  graphics.gpu.logical_gpu_id = "pci-0000_01_00.0";
+  ASSERT_TRUE(configure());
+  const auto saved = json::parse(psf::read_secure(paths.controller, 65536).payload);
+  EXPECT_EQ(saved["gpus"][0]["id"], "pci-0000_01_00.0");
+}
+
+TEST_F(SpacesSetupService, ManagedControllerFollowsItsPciGpuAcrossDrmRenumbering) {
+  namespace fs = std::filesystem;
+  activation_host_t host;
+  const spaces::graphics_roots_t roots {root / "class", root / "nvidia", root / "pci"};
+  const auto device = roots.pci / "0000:01:00.0";
+  auto node = [&](const std::string &name, const std::string &dev) {
+    fs::create_directories(device / "drm" / name);
+    std::ofstream(device / "drm" / name / "dev", std::ios::trunc) << dev << '\n';
+  };
+  node("card2", "226:2");
+  node("renderD128", "226:128");
+  fs::create_directories(roots.drm / "renderD128");
+  fs::create_directory_symlink(device, roots.drm / "renderD128/device");
+  std::ofstream(device / "vendor") << "0x10de\n";
+  fs::create_directories(roots.nvidia / "0000:01:00.0");
+  const auto nvidia_minor = [&](int value) {
+    std::ofstream(roots.nvidia / "0000:01:00.0/information", std::ios::trunc) << "Device Minor: \t " << value << "\n";
+  };
+  nvidia_minor(0);
+  host.numbers = {{"/dev/dri/card2", {226, 2}}, {"/dev/dri/renderD128", {226, 128}}, {"/dev/dri/card1", {226, 1}}};
+
+  // Guided setup on the boot before: the GPU was card2.
+  const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
+  ASSERT_TRUE(psf::write_atomic(paths.native, "port = 47989\n"));
+  const profiles::catalog_t catalog {static_cast<unsigned>(geteuid()), static_cast<unsigned>(getegid()), {{
+    .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, runtime().config_digest},
+    .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+  }}};
+  ASSERT_TRUE(psf::write_atomic(paths.profiles, profiles::encode(catalog)));
+  const auto choices = spaces::discover_graphics(host, roots);
+  ASSERT_EQ(choices.size(), 1U);
+  ASSERT_TRUE(spaces::configure_first_space(paths, {request.request_id, request.name}, runtime().config_digest, choices[0], "", host));
+  const auto saved = psf::read_secure(paths.controller, 65536).payload;
+  auto loaded = spaces::load_managed_controller(paths, host, roots);
+  ASSERT_TRUE(loaded.options) << loaded.problem;
+  EXPECT_TRUE(loaded.moved.empty());
+  EXPECT_EQ(loaded.options->gpus[0].devices, choices[0].gpu.devices);
+
+  // This boot: an EVDI display took an earlier number and the GPU is card1. /dev/dri/card2 may
+  // still exist, but it is not this GPU, so it must not be what the container gets.
+  fs::rename(device / "drm/card2", device / "drm/card1");
+  node("card1", "226:1");
+  loaded = spaces::load_managed_controller(paths, host, roots);
+  ASSERT_TRUE(loaded.options) << loaded.problem;
+  const std::vector<fs::path> current {"/dev/dri/renderD128", "/dev/dri/card1", "/dev/nvidia0", "/dev/nvidiactl",
+    "/dev/nvidia-modeset", "/dev/nvidia-uvm"};
+  EXPECT_EQ(loaded.options->gpus[0].devices, current);
+  EXPECT_EQ(loaded.options->gpus[0].render_node, "/dev/dri/renderD128");
+  EXPECT_EQ(loaded.moved, (std::vector<std::pair<fs::path, fs::path>> {{"/dev/dri/card2", "/dev/dri/card1"}}));
+  // In memory only: the saved selection stays byte for byte what setup wrote.
+  EXPECT_EQ(psf::read_secure(paths.controller, 65536).payload, saved);
+
+  // The /dev node of that name has to be the minor the kernel lists for the device.
+  host.numbers["/dev/dri/card1"] = {226, 7};
+  loaded = spaces::load_managed_controller(paths, host, roots);
+  EXPECT_FALSE(loaded.options);
+  EXPECT_NE(loaded.problem.find("/dev/dri/card1"), std::string::npos) << loaded.problem;
+  host.numbers["/dev/dri/card1"] = {226, 1};
+  ASSERT_TRUE(spaces::load_managed_controller(paths, host, roots).options);
+
+  // NVIDIA nodes are not rewritten: another minor is a changed setup, not a renumbering.
+  nvidia_minor(1);
+  loaded = spaces::load_managed_controller(paths, host, roots);
+  EXPECT_FALSE(loaded.options);
+  EXPECT_NE(loaded.problem.find("run Spaces setup again"), std::string::npos) << loaded.problem;
+  nvidia_minor(0);
+
+  // The card is on the bus but its driver has not bound yet.
+  fs::rename(device / "drm", root / "drm-away");
+  loaded = spaces::load_managed_controller(paths, host, roots);
+  EXPECT_FALSE(loaded.options);
+  EXPECT_NE(loaded.problem.find("driver may not be loaded"), std::string::npos) << loaded.problem;
+  fs::rename(root / "drm-away", device / "drm");
+  ASSERT_TRUE(spaces::load_managed_controller(paths, host, roots).options);
+
+  // The card is gone: Spaces stay off and say which one.
+  fs::remove_all(device);
+  loaded = spaces::load_managed_controller(paths, host, roots);
+  EXPECT_FALSE(loaded.options);
+  EXPECT_NE(loaded.problem.find("PCI 0000:01:00.0 is gone"), std::string::npos) << loaded.problem;
+  EXPECT_EQ(psf::read_secure(paths.controller, 65536).payload, saved);
+}
+
 TEST_F(SpacesSetupService, ManagedSocketPathsLeaveRoomForGenerationGrowth) {
   const auto paths = spaces::activation_paths(root, root / "polaris.conf");
   const auto socket = paths.ipc / ("polaris-runtime-" + request.request_id + "-1000000") / "ipc/control.sock";
