@@ -410,7 +410,11 @@ namespace {
       << "      with no monitor, desktop login, or Game Mode session required"sv << std::endl
       << std::endl
       << "  Options:"sv << std::endl
-      << "    --enable-kms            Also run setcap cap_sys_admin+ep on the Polaris binary"sv << std::endl
+      << "    --enable-kms            Also run setcap cap_sys_admin+ep on the Polaris binary."sv << std::endl
+      << "                            Only KMS capture (capture = kms) needs it. It grants a"sv << std::endl
+      << "                            permission and does not change the capture setting."sv << std::endl
+      << "                            Every install or update replaces the binary without it."sv << std::endl
+      << "                            Remove it with: sudo setcap -r <the Polaris binary>"sv << std::endl
       << "    --enable-headless-boot  Enable lingering for the invoking account and hook the"sv << std::endl
       << "                            Polaris user service into default.target, so it starts at"sv << std::endl
       << "                            boot before anyone logs in"sv << std::endl
