@@ -428,6 +428,35 @@ finishes the job. The last Space can be archived but not removed for good,
 because Polaris makes a new Space from an existing one; create another Space
 first.
 
+## After an NVIDIA driver update
+
+The NVIDIA gaming runtime carries the NVIDIA userspace for one driver version,
+and a Space keeps the runtime it was made with. After the host moves to another
+NVIDIA driver, that runtime no longer matches the kernel module, so Polaris
+refuses to start the Space before anything runs. Nova shows why and says to
+move the Space; the refusal's code is `space_runtime_driver_mismatch`.
+
+The Space card says why, for example **Made for NVIDIA driver 610.57.04. This
+PC runs 615.71.09.**, and offers **Move To The Runtime For Driver 615.71.09**
+when this Polaris build has a runtime for the new driver. Moving points the
+Space at that runtime and changes nothing else: its Steam sign-in, installed
+games and saves, name, devices and Default Space stay. The Steam home is not
+prepared again; both runtimes run as the same account and use it as it is.
+
+1. End every Space stream.
+2. Select **Move To The Runtime For Driver** on the Space's card and confirm.
+3. If the runtime is not on this PC yet, Polaris downloads it first. The
+   download is several gigabytes, and you can leave the page while it runs.
+4. Move each other Space that shows the same notice, one at a time.
+
+A move is refused, in words, while the Space or any Space stream is open,
+while another change to Spaces or Host Setup is running, when the runtime
+cannot be verified, or when the new runtime needs a different kind of home.
+Nothing changes when a move is refused or stops partway; move it again. When
+this build has no runtime for the new driver, the card says so: update Polaris,
+or go back to the driver the Space was made for. First Space setup keeps its
+own record of the runtime it started with, and a move does not change it.
+
 ## Check sound and stuttering
 
 If sound crackles or drops, note the time, the Space, the game, the frame rate,
@@ -443,8 +472,10 @@ for **Doctor & Support**.
 
 - A refused launch in Nova names the reason and the fix: the Space is in use
   on another device, this device already has a Space running, every Space
-  slot or the encoder is taken, no Space is assigned or selected, or the
-  assignment changed. Do what it says, then try again.
+  slot or the encoder is taken, no Space is assigned or selected, the
+  assignment changed, or the Space's runtime was made for another NVIDIA
+  driver (see [After an NVIDIA driver update](#after-an-nvidia-driver-update)).
+  Do what it says, then try again.
 - A failing host check links its section above. **Doctor & Support** covers
   controller and graphics access with the host's own evidence.
 - If a Space stops on its own or loses sound, keep the time and the Space name
