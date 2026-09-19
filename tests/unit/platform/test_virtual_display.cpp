@@ -694,6 +694,9 @@ TEST(VirtualDisplayKwinTests, WindowScriptMovesApplicationWindowsOntoTheScreen) 
   //    desktop, panels, notifications or popups.
   //  - The desktop's own prompts stay with whoever sits at the host.
   //  - A window already on another Polaris screen stays there.
+  //  - An application window or dialog on the stream screen takes the focus:
+  //    KWin kept it at the desk, and Control on pc-papi then ignored the
+  //    Retroid's controller and taps until it was activated by hand.
   EXPECT_EQ(virtual_display::kwin_window_follow_script("Virtual-polaris-0"), R"JS(// Polaris: moves windows onto its Host Virtual Display screen while that screen exists.
 const target = "Virtual-polaris-0";
 // The desktop's own prompts are for whoever sits at the host.
@@ -713,9 +716,14 @@ workspace.windowAdded.connect(function (window) {
   if (!window || !(window.normalWindow || window.dialog || window.splash)) return;
   if (isHostPrompt(window)) return;
   const screen = outputNamed(target);
-  if (!screen || window.output === screen) return;
-  if (window.output && window.output.name.indexOf("Virtual-polaris-") === 0) return;
-  workspace.sendClientToScreen(window, screen);
+  if (!screen) return;
+  if (window.output !== screen) {
+    if (window.output && window.output.name.indexOf("Virtual-polaris-") === 0) return;
+    workspace.sendClientToScreen(window, screen);
+  }
+  // The player is at the stream, so the window they started takes the focus too. KWin
+  // otherwise leaves it at the desk, and an unfocused game ignores its controller and taps.
+  if (window.normalWindow || window.dialog) workspace.activeWindow = window;
 });
 )JS");
   EXPECT_EQ(virtual_display::kwin_window_follow_plugin_name("Virtual-polaris-0"), "polaris-follow-Virtual-polaris-0");

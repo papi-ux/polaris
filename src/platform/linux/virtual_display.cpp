@@ -916,9 +916,14 @@ namespace virtual_display {
            "  if (!window || !(window.normalWindow || window.dialog || window.splash)) return;\n"
            "  if (isHostPrompt(window)) return;\n"
            "  const screen = outputNamed(target);\n"
-           "  if (!screen || window.output === screen) return;\n"
-           "  if (window.output && window.output.name.indexOf(\"Virtual-polaris-\") === 0) return;\n"
-           "  workspace.sendClientToScreen(window, screen);\n"
+           "  if (!screen) return;\n"
+           "  if (window.output !== screen) {\n"
+           "    if (window.output && window.output.name.indexOf(\"Virtual-polaris-\") === 0) return;\n"
+           "    workspace.sendClientToScreen(window, screen);\n"
+           "  }\n"
+           "  // The player is at the stream, so the window they started takes the focus too. KWin\n"
+           "  // otherwise leaves it at the desk, and an unfocused game ignores its controller and taps.\n"
+           "  if (window.normalWindow || window.dialog) workspace.activeWindow = window;\n"
            "});\n";
   }
 
