@@ -31,6 +31,16 @@
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
+
+// The Steam Controller (2026) came to moonlight-common-c after the copy Polaris pins
+// (upstream master, August 2026). These are the protocol's values, so a client that
+// sends them is understood before the pinned copy moves.
+#ifndef LI_CTYPE_STEAM
+  #define LI_CTYPE_STEAM 0x04
+#endif
+#ifndef LI_CCAP_DUAL_TOUCHPAD
+  #define LI_CCAP_DUAL_TOUCHPAD 0x100
+#endif
 }
 
 using namespace std::literals;

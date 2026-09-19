@@ -26,6 +26,7 @@
 #ifdef __linux__
   #include <src/platform/linux/misc.h>
   #include <src/platform/linux/user_unit_override.h>
+  #include <src/platform/linux/virtual_display.h>
   #include <unistd.h>
 #endif
 
@@ -953,6 +954,123 @@ TEST(StreamStatsDoctorTests, SaysNothingAboutThreadPriorityUntilElevationIsRefus
     EXPECT_NE(warning.at("id"), "thread_priority_unavailable");
   }
 }
+
+#ifdef __linux__
+namespace {
+  std::vector<nlohmann::json> host_virtual_display_warnings() {
+    stream_stats::stats_t stats {};
+    const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+    std::vector<nlohmann::json> found;
+    for (const auto &warning :
+         doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+      if (warning.at("id").get<std::string>().rfind("hvd_", 0) == 0) {
+        found.push_back(warning);
+      }
+    }
+    return found;
+  }
+
+  const nlohmann::json *warning_with_id(const std::vector<nlohmann::json> &warnings, std::string_view id) {
+    for (const auto &warning : warnings) {
+      if (warning.at("id") == id) {
+        return &warning;
+      }
+    }
+    return nullptr;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, NamesTheHostVirtualDisplayProblemsFoundOnPlasma) {
+  // Each was silent on pc-papi: the game opened on the desk's monitor because the screen came
+  // from EVDI, which KWin ran at a stored 1.35 scale, and a tap missed the stream screen.
+  virtual_display::doctor_notes_t notes;
+  notes.plasma = true;
+  notes.last_backend = virtual_display::backend_e::EVDI;
+  notes.preference = "auto";
+  notes.kwin_reason = "kscreen-doctor is not installed; Polaris needs it to place the new screen.";
+  notes.scaled_screen = "DVI-I-1";
+  notes.scaled_screen_scale = 1.35;
+  notes.input_routes.push_back({"Touch passthrough", "Virtual-polaris-0", false, "No such object path"});
+  notes.input_routes.push_back({"Pen passthrough", "Virtual-polaris-0", true, ""});
+  virtual_display::set_doctor_notes_for_tests(notes);
+
+  const auto warnings = host_virtual_display_warnings();
+  const auto *input = warning_with_id(warnings, "hvd_input_not_mapped");
+  ASSERT_NE(input, nullptr);
+  EXPECT_EQ(input->at("severity"), "warning");
+  EXPECT_NE(input->at("message").get<std::string>().find("Touch passthrough"), std::string::npos);
+  EXPECT_NE(input->at("message").get<std::string>().find("No such object path"), std::string::npos);
+
+  const auto *scaled = warning_with_id(warnings, "hvd_screen_scaled");
+  ASSERT_NE(scaled, nullptr);
+  EXPECT_NE(scaled->at("message").get<std::string>().find("[DVI-I-1] at 135%"), std::string::npos);
+  EXPECT_NE(scaled->at("action").get<std::string>().find("100%"), std::string::npos);
+
+  const auto *unused = warning_with_id(warnings, "hvd_kwin_screen_unused");
+  ASSERT_NE(unused, nullptr);
+  EXPECT_EQ(unused->at("severity"), "info");
+  EXPECT_NE(unused->at("message").get<std::string>().find("used EVDI because Polaris could not create a KWin screen: kscreen-doctor is not installed"), std::string::npos);
+
+  // A backend the user picked is named as the reason, with the way back.
+  notes.preference = "evdi";
+  notes.scaled_screen.clear();
+  notes.input_routes.clear();
+  virtual_display::set_doctor_notes_for_tests(notes);
+  const auto chosen = host_virtual_display_warnings();
+  ASSERT_EQ(chosen.size(), 1U);
+  EXPECT_NE(chosen[0].at("message").get<std::string>().find("Host Virtual Display Backend is set to EVDI"), std::string::npos);
+  EXPECT_NE(chosen[0].at("action").get<std::string>().find("Automatic"), std::string::npos);
+
+  virtual_display::set_doctor_notes_for_tests(std::nullopt);
+}
+
+TEST(StreamStatsTests, PlayersAreNumberedInTheOrderTheirPadsAppeared) {
+  // Two clients with a pad each both hold controller 0 in their own session, and both read as
+  // player 1. A game numbers them by when each pad appeared, and so does the list.
+  stream_stats::note_virtual_pad(3, 0, "Xbox One");
+  stream_stats::note_virtual_pad(1, 0, "DualSense");
+  stream_stats::note_virtual_pad(2, 1, "Nintendo Pro");
+  stream_stats::forget_virtual_pad(2);
+
+  const auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  const auto &pads = json.at("controller_input").at("pads");
+  ASSERT_EQ(pads.size(), 2U);
+  EXPECT_EQ(pads[0].at("player"), 1);
+  EXPECT_EQ(pads[0].at("kind"), "Xbox One");
+  EXPECT_EQ(pads[1].at("player"), 2);
+  EXPECT_EQ(pads[1].at("kind"), "DualSense");
+
+  stream_stats::forget_virtual_pad(3);
+  stream_stats::forget_virtual_pad(1);
+}
+
+TEST(StreamStatsDoctorTests, SaysNothingAboutHostVirtualDisplayWhenItWorkedOrIsNotPlasma) {
+  virtual_display::doctor_notes_t notes;
+  notes.plasma = true;
+  notes.last_backend = virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT;
+  notes.preference = "auto";
+  // Pointed at the screen, and a device pointed at no screen after the stream: nothing to say.
+  notes.input_routes.push_back({"Touch passthrough", "Virtual-polaris-0", true, ""});
+  notes.input_routes.push_back({"Pen passthrough", "", false, "KWin went away"});
+  virtual_display::set_doctor_notes_for_tests(notes);
+  EXPECT_TRUE(host_virtual_display_warnings().empty());
+
+  // No screen made yet: no backend to question.
+  notes.last_backend.reset();
+  virtual_display::set_doctor_notes_for_tests(notes);
+  EXPECT_TRUE(host_virtual_display_warnings().empty());
+
+  // Off Plasma none of this applies, whatever the notes say.
+  notes.plasma = false;
+  notes.last_backend = virtual_display::backend_e::EVDI;
+  notes.scaled_screen = "DVI-I-1";
+  notes.scaled_screen_scale = 1.35;
+  virtual_display::set_doctor_notes_for_tests(notes);
+  EXPECT_TRUE(host_virtual_display_warnings().empty());
+
+  virtual_display::set_doctor_notes_for_tests(std::nullopt);
+}
+#endif
 
 namespace {
   const nlohmann::json *find_doctor_evidence(const nlohmann::json &doctor, const std::string &id) {

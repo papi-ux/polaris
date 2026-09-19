@@ -263,3 +263,26 @@ TEST(InputPacketValidationTest, BatchesScrollOnlyWhenTheSumFits) {
     EXPECT_EQ(packet, unchanged);
   }
 }
+
+TEST(ControllerTouchPoint, ASteamControllersTwoTouchpadsTakeAHalfEach) {
+  // The DualSense Polaris emulates has one touchpad with two finger slots. A Steam Controller's
+  // left pad takes the left half and slot 0, its right pad the right half and slot 1, so a game
+  // sees both thumbs at once instead of one pad's touch replacing the other's.
+  const auto left = input::controller_touch_point(0.5f, 7, 0, true);
+  const auto right = input::controller_touch_point(0.5f, 7, 1, true);
+  EXPECT_FLOAT_EQ(left.x, 0.25f);
+  EXPECT_EQ(left.finger, 0U);
+  EXPECT_FLOAT_EQ(right.x, 0.75f);
+  EXPECT_EQ(right.finger, 1U);
+  EXPECT_FLOAT_EQ(input::controller_touch_point(0.0f, 0, 1, true).x, 0.5f);
+  EXPECT_FLOAT_EQ(input::controller_touch_point(1.0f, 0, 1, true).x, 1.0f);
+  // Only indices 0 and 1 exist; anything else is the right pad rather than off the touchpad.
+  EXPECT_EQ(input::controller_touch_point(0.5f, 0, 9, true).finger, 1U);
+
+  // A pad with one touchpad keeps the whole width and its own pointer ids.
+  const auto single = input::controller_touch_point(0.5f, 1, 0, false);
+  EXPECT_FLOAT_EQ(single.x, 0.5f);
+  EXPECT_EQ(single.finger, 1U);
+  // An older client leaves the byte at zero, which reads as the one touchpad it has.
+  EXPECT_FLOAT_EQ(input::controller_touch_point(0.3f, 0, 0, false).x, 0.3f);
+}

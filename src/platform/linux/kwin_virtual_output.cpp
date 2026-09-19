@@ -591,7 +591,7 @@ namespace kwin_virtual_output {
       );
       g_object_unref(bus);
       if (!result) {
-        error = std::string {"KWin scripting "} + method + " failed: " + (failure ? failure->message : "unknown");
+        error = std::string {"KWin "} + interface + "." + method + " failed: " + (failure ? failure->message : "unknown");
         if (failure) {
           g_error_free(failure);
         }
@@ -763,6 +763,60 @@ namespace kwin_virtual_output {
 
     BOOST_LOG(error) << "KWin virtual output: ["sv << output_name << "] is still present after releasing it"sv;
     return false;
+  }
+
+  namespace {
+    std::string input_device_object(const std::string &sys_name) {
+      return "/org/kde/KWin/InputDevice/" + sys_name;
+    }
+  }  // namespace
+
+  namespace {
+    std::optional<std::string> input_device_string(const std::string &sys_name, const char *property, std::string &error) {
+      const auto object = input_device_object(sys_name);
+      GVariant *reply = call_kwin(
+        object.c_str(), "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", "org.kde.KWin.InputDevice", property), G_VARIANT_TYPE("(v)"), error
+      );
+      if (!reply) {
+        return std::nullopt;
+      }
+      GVariant *value = nullptr;
+      g_variant_get(reply, "(v)", &value);
+      std::optional<std::string> text;
+      if (value && g_variant_is_of_type(value, G_VARIANT_TYPE_STRING)) {
+        text = g_variant_get_string(value, nullptr);
+      } else {
+        error = "KWin gave " + sys_name + " a " + property + " that is not a string";
+      }
+      if (value) {
+        g_variant_unref(value);
+      }
+      g_variant_unref(reply);
+      return text;
+    }
+  }  // namespace
+
+  std::optional<std::string> input_device_output(const std::string &sys_name, std::string &error) {
+    return input_device_string(sys_name, "outputName", error);
+  }
+
+  std::optional<std::string> input_device_name(const std::string &sys_name, std::string &error) {
+    return input_device_string(sys_name, "name", error);
+  }
+
+  bool set_input_device_output(const std::string &sys_name, const std::string &output_name, std::string &error) {
+    const auto object = input_device_object(sys_name);
+    GVariant *reply = call_kwin(
+      object.c_str(), "org.freedesktop.DBus.Properties", "Set",
+      g_variant_new("(ssv)", "org.kde.KWin.InputDevice", "outputName", g_variant_new_string(output_name.c_str())),
+      nullptr, error
+    );
+    if (!reply) {
+      return false;
+    }
+    g_variant_unref(reply);
+    return true;
   }
 
 }  // namespace kwin_virtual_output

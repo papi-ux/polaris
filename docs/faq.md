@@ -58,6 +58,27 @@ The device has **Browse & Watch** access, which lists the library and joins an e
 cannot launch or send input. Open **Devices**, choose **Edit Access** on that device, and pick
 **Game Control**. The presets are explained in [Pair and manage devices](devices.md#access-presets).
 
+### How do we play couch co-op on one device?
+
+Pair a second controller to the device that streams, such as a Bluetooth pad next to a
+Retroid's own controls, and press a button on each. Each pad becomes a player on the host in the
+order its first button press arrives: the first is player 1, the next player 2. In Nova,
+**Players** in Command Center lists who is which player, names a pad that has not pressed
+anything yet, and **Reassign** lets everyone press again in the order you want without ending
+the stream. On a handheld whose own controls Android reports as built in, those controls stay
+player 1. Nova's **Automatic Gamepad Presence Detection** must be on; with it off, every pad is
+player 1. On the host, the controller test in **Troubleshooting** lists each player and the pad
+it emulates. A device that only watches a stream never adds a pad of its own.
+
+### Does the Steam Controller (2026) work?
+
+On the host, yes: a client that says it has a Steam Controller (Moonlight sends this type) gets
+an emulated DualSense, the one pad that carries the controller's gyro and its touchpads. Its two
+touchpads land on the left and right halves of the DualSense's touchpad, so a game sees both
+thumbs. The back grip buttons have no place on a DualSense and are not passed on. Android shows
+the controller to apps only as a keyboard and mouse, so Nova cannot read its sticks, gyro or
+touchpads yet.
+
 ### Can multiple people watch the same stream?
 
 Yes. Set `max_sessions` above `1`. Polaris tracks owner and viewer roles explicitly, and passive

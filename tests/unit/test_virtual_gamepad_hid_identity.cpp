@@ -78,3 +78,40 @@ TEST(VirtualGamepadHidIdentity, TheDualSenseCallSiteUsesTheNamedVersion) {
     << "0x8111 must not come back as a bare literal. It is right for one pad and wrong for "
        "the other, so it is the one version number that has to say which bus it means.";
 }
+
+TEST(VirtualGamepadSelection, ASteamControllerBecomesADualSense) {
+  using platf::gamepad::DualSenseWired;
+  using platf::gamepad::SwitchProWired;
+  using platf::gamepad::XboxOneWired;
+  using platf::gamepad::select_controller_type;
+  const auto kind = [](std::string_view setting, std::uint8_t type, std::uint16_t caps, bool motion = true, bool touchpad = true) {
+    return select_controller_type(setting, platf::gamepad_arrival_t {type, caps, 0}, motion, touchpad).type;
+  };
+
+  // Moonlight sends LI_CTYPE_STEAM for the Steam Controller (2026). An Xbox pad would drop its
+  // gyro and both touchpads; the DualSense carries them, whatever the client says it can do,
+  // so a pad created before launch from the remembered type (no capabilities) agrees with the
+  // arrival that comes later.
+  EXPECT_EQ(kind("auto", LI_CTYPE_STEAM, LI_CCAP_ACCEL | LI_CCAP_GYRO | LI_CCAP_TOUCHPAD | LI_CCAP_DUAL_TOUCHPAD), DualSenseWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_STEAM, 0), DualSenseWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_STEAM, 0, false, false), DualSenseWired);
+  EXPECT_EQ(LI_CTYPE_STEAM, 0x04);
+  EXPECT_EQ(LI_CCAP_DUAL_TOUCHPAD, 0x100);
+
+  // A pad chosen in settings is still the one used.
+  EXPECT_EQ(kind("xone", LI_CTYPE_STEAM, LI_CCAP_GYRO), XboxOneWired);
+  EXPECT_EQ(kind("switch", LI_CTYPE_PS, 0), SwitchProWired);
+
+  // The rest of the ladder is unchanged.
+  EXPECT_EQ(kind("auto", LI_CTYPE_XBOX, LI_CCAP_GYRO), XboxOneWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_PS, 0), DualSenseWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_NINTENDO, 0), SwitchProWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_UNKNOWN, LI_CCAP_GYRO), DualSenseWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_UNKNOWN, LI_CCAP_GYRO, false), XboxOneWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_UNKNOWN, LI_CCAP_TOUCHPAD), DualSenseWired);
+  EXPECT_EQ(kind("auto", LI_CTYPE_UNKNOWN, 0), XboxOneWired);
+
+  EXPECT_EQ(platf::gamepad::controller_type_label(DualSenseWired), "DualSense");
+  EXPECT_EQ(platf::gamepad::controller_type_label(XboxOneWired), "Xbox One");
+  EXPECT_EQ(platf::gamepad::controller_type_label(SwitchProWired), "Nintendo Pro");
+}

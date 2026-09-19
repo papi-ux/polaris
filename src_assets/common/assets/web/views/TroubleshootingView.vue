@@ -815,6 +815,7 @@ watch(streamStats, (next, previous) => {
 function fixMyStreamStatusLabel(status) {
   if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')
   if (status === 'fail') return i18n.t('troubleshooting.fix_my_stream_status_fail')
+  if (status === 'info') return i18n.t('troubleshooting.fix_my_stream_status_info')
   return i18n.t('troubleshooting.fix_my_stream_status_warning')
 }
 

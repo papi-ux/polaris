@@ -126,6 +126,14 @@ namespace stream_stats {
     std::string fallback = "none";
   };
 
+  /** @brief One emulated pad on the host. */
+  struct virtual_pad_t {
+    int global_index = -1;  ///< The host-wide pad slot
+    int controller_number = 0;  ///< The client's controller number within its session
+    std::string kind;  ///< The emulated pad, such as "Xbox One" or "DualSense"
+    std::uint64_t created = 0;  ///< Creation order: a game numbers its players the same way
+  };
+
   struct stats_t {
     std::uint64_t session_generation = 0;
     std::string app_session_id;
@@ -249,6 +257,8 @@ namespace stream_stats {
     double gpu_usage = 0;
 
     // Controller/input runtime evidence
+    /// Every emulated pad on the host now, one per player: couch co-op reads who is who here.
+    std::vector<virtual_pad_t> input_virtual_pads;
     bool input_virtual_controller_created = false;
     int input_virtual_controller_number = 0;
     std::string input_virtual_controller_kind;
@@ -838,6 +848,12 @@ namespace stream_stats {
                                      const std::string &host_controller_isolation_detail,
                                      bool haptics_supported,
                                      const std::string &haptics_detail);
+
+  /** @brief Record an emulated pad the host created, replacing one in the same slot. */
+  void note_virtual_pad(int global_index, int controller_number, const std::string &kind);
+
+  /** @brief Drop an emulated pad the host removed. */
+  void forget_virtual_pad(int global_index);
 
   /**
    * @brief Update the PII-free Steam Input compatibility snapshot for Doctor.
