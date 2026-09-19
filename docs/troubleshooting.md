@@ -547,12 +547,15 @@ tab names the backend in use and, when it cannot run, why.
   instead.** KWin offers a screen only to a program it can match to its permission entry, and it
   cannot match one that holds file capabilities, such as the `cap_sys_admin` that `--enable-kms`
   grants for KMS capture. On the automatic order such a Polaris skips the KWin screen and falls back
-  to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
+  to EVDI when it can create a display, otherwise to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
   on `auto` or `portal`, and restart Polaris: it then drops the capability at start. KMS capture
   and a KWin screen do not go together.
 - **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
-- **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream
+- **A game opened on my monitor instead of the stream.** Check the log for the backend: with
+  `using backend: EVDI` on Plasma, Backend is set to `evdi` or the KWin screen could not start, and
+  an EVDI screen is a monitor like any other, so games open on your primary one; set Backend back
+  to Automatic or to KWin. On the KWin screen, Polaris moves windows onto the stream
   screen with a small KWin script it loads for the stream. The log says `new windows will not be
   moved` when KWin refused to load it or dropped it; the stream then shows an empty screen while
   the game runs on your monitor. With two Polaris screens at once, the newer one gets new windows.

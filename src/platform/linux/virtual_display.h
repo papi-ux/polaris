@@ -37,7 +37,7 @@ namespace virtual_display {
    * @brief Which backend Host Virtual Display uses, from linux_virtual_display_backend.
    */
   enum class backend_preference_e {
-    AUTO,  ///< EVDI, then a KWin virtual output, then Hyprland, then kscreen-doctor
+    AUTO,  ///< A KWin virtual output on Plasma, then EVDI, then Hyprland, then kscreen-doctor
     EVDI,
     KWIN,
     WLR,

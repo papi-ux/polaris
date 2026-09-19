@@ -676,13 +676,17 @@ namespace virtual_display {
       default:
         break;
     }
-    // A real new screen before a borrowed monitor: EVDI and KWin create one,
-    // kscreen-doctor can only take over an output the user already has.
-    if (probe.evdi) {
-      return backend_e::EVDI;
-    }
+    // A real new screen before a borrowed monitor: KWin and EVDI create one,
+    // kscreen-doctor can only take over an output the user already has. On a
+    // Plasma session KWin's own screen comes first: Polaris places it at scale 1,
+    // ranks it last and moves new windows onto it, while an EVDI screen there
+    // kept whatever layout KWin had stored for it (a 1.35 scale on the test
+    // host) and the game opened on the primary monitor instead of the stream.
     if (probe.kwin) {
       return backend_e::KWIN_VIRTUAL_OUTPUT;
+    }
+    if (probe.evdi) {
+      return backend_e::EVDI;
     }
     if (probe.wlr) {
       return backend_e::WAYLAND_WLR;
@@ -2427,21 +2431,24 @@ namespace virtual_display {
       bool evdi_module_ready = false;
       bool evdi_library_ready = false;
 
-      // EVDI first — it creates true virtual connectors. Module + library
-      // presence alone is not enough to advertise it: creation must actually be
-      // possible, or the mode is offered and then silently fails at launch. A
-      // host set to another backend never has the module loaded on its behalf.
-      if (wanted(backend_preference_e::EVDI)) {
+      // KWin first: its probe answers at once off a Plasma session, and on one
+      // its screen is the one games land on (see select_backend). A Plasma host
+      // that gets the KWin screen never has the EVDI module loaded for it.
+      kwin_vo::last_probe_reason.clear();
+      if (wanted(backend_preference_e::KWIN)) {
+        probe.kwin = kwin_vo::probe(kwin_vo::last_probe_reason);
+      }
+      // EVDI next: it creates true virtual connectors. Module + library presence
+      // alone is not enough to advertise it: creation must actually be possible,
+      // or the mode is offered and then silently fails at launch. A host set to
+      // another backend never has the module loaded on its behalf.
+      // Probe lower-priority candidates only when no earlier backend is ready.
+      if (wanted(backend_preference_e::EVDI) && !(automatic && probe.kwin)) {
         evdi_module_ready = evdi::is_module_loaded() || evdi::load_module();
         if (evdi_module_ready) {
           evdi_library_ready = evdi::load_library();
           probe.evdi = evdi_library_ready && evdi::can_create();
         }
-      }
-      // Probe lower-priority candidates only when no earlier backend is ready.
-      kwin_vo::last_probe_reason.clear();
-      if (wanted(backend_preference_e::KWIN) && !(automatic && probe.evdi)) {
-        probe.kwin = kwin_vo::probe(kwin_vo::last_probe_reason);
       }
       if (wanted(backend_preference_e::WLR) && !(automatic && (probe.evdi || probe.kwin))) {
         probe.wlr = wayland_wlr::is_available();

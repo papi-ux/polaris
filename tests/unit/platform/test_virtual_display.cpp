@@ -416,7 +416,11 @@ TEST(VirtualDisplayKwinTests, AutomaticPrefersANewScreenOverABorrowedConnector) 
   using virtual_display::select_backend;
   constexpr auto automatic = backend_preference_e::AUTO;
 
-  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = true, .wlr = true, .kscreen = true}), backend_e::EVDI);
+  // On Plasma the KWin screen wins even with EVDI loaded: an EVDI screen there kept
+  // a stored 1.35 scale and the game opened on the primary monitor, not the stream.
+  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = true, .wlr = true, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
+  // Off Plasma (GNOME, a wlroots desktop) the KWin probe is false and EVDI leads.
+  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = false, .wlr = true, .kscreen = true}), backend_e::EVDI);
   EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = true, .wlr = true, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
   EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = false, .wlr = true, .kscreen = true}), backend_e::WAYLAND_WLR);
   // pollux78's host in #633: KDE, no EVDI, only real monitors to borrow.
