@@ -125,9 +125,10 @@ namespace {
   class MultiseatAssignments : public MultiseatLaunchService {
   protected:
     std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, true}, {"profile-b", "Sam", {"client-b"}}};
-    std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0}, removals {0};
+    std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0}, removals {0}, runtime_moves {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
+    profiles::runtime_move_result_t move_answer {.outcome = profiles::runtime_move_outcome_e::moved};
     std::optional<profiles::refusal_t> persist_refusal;
     bool reload_fails = false;
     std::function<void()> before_write;
@@ -183,8 +184,22 @@ namespace {
             else if (answer.archived)
               for (auto &entry : catalog) if (entry.id == request.profile_id) { entry.archived = true; entry.clients.clear(); }
             return answer;
+          },
+          .move_runtime = [&](const profiles::runtime_move_t &move, std::stop_token) {
+            state->called(); ++runtime_moves;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            if (before_write) before_write();
+            auto answer = move_answer;
+            answer.status = write_status;
+            if (answer.outcome == profiles::runtime_move_outcome_e::moved && write_status != private_state_file::write_status_e::not_committed)
+              for (auto &entry : catalog) if (entry.id == move.profile_id) entry.image = move.to_image;
+            return answer;
           }
         });
+    }
+    static profiles::runtime_move_t runtime_move(std::string id = "profile-b") {
+      return {std::move(id), "sha256:" + std::string(64, 'a'), "1", "sha256:" + std::string(64, '9'), "1",
+        runtime_profile_e::steam, 1000, 1000};
     }
     static profiles::edit_request_t removal(std::string name = "Sam", std::string id = "profile-b",
                                             std::string request_id = "22345678-1234-4234-8234-123456789abc") {
@@ -369,6 +384,117 @@ namespace {
     EXPECT_EQ(reloads, 0U);
     EXPECT_EQ(service->remove_space_for_good(removal()).result.status, 503);
     EXPECT_EQ(removals, 1U);
+  }
+
+  TEST_F(MultiseatAssignments, MovingARuntimeRunsUnderTheOwnerAndKeepsEveryRoute) {
+    EXPECT_TRUE(service->admin_snapshot().runtime_move_available);
+    const auto moved = service->move_space_runtime(runtime_move());
+    ASSERT_EQ(moved.status, 200);
+    EXPECT_EQ(runtime_moves, 1U);
+    EXPECT_EQ(state->shutdowns, 1U);
+    EXPECT_EQ(reloads, 1U);
+    const auto snapshot = service->admin_snapshot();
+    ASSERT_EQ(snapshot.profiles.size(), 2U);
+    EXPECT_EQ(snapshot.profiles[1].image, "sha256:" + std::string(64, '9'));
+    EXPECT_EQ(snapshot.profiles[1].name, "Sam");
+    EXPECT_EQ(service->profile_for_client("client-b"), "profile-b");
+    EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+    EXPECT_FALSE(snapshot.changing);
+    EXPECT_FALSE(snapshot.failed);
+    std::lock_guard lock(state->mutex);
+    for (const auto owner : state->owners) EXPECT_EQ(owner, state->owners.front());
+  }
+
+  TEST_F(MultiseatAssignments, MovingARuntimeRefusesInvalidRequestsAndStreamsBeforeShutdown) {
+    auto invalid = runtime_move();
+    invalid.to_image = "ghcr.io/papi-ux/polaris-worker-steam:latest";
+    EXPECT_EQ(service->move_space_runtime(invalid).status, 400);
+    const auto unknown = service->move_space_runtime(runtime_move("profile-z"));
+    EXPECT_EQ(unknown.status, 404);
+    EXPECT_EQ(unknown.code, "space_unknown");
+
+    const auto own = launch("client-b");
+    ASSERT_EQ(service->prepare(own, "profile-b").status, 200);
+    const auto open = service->move_space_runtime(runtime_move());
+    EXPECT_EQ(open.status, 409);
+    EXPECT_EQ(open.code, "space_active");
+    EXPECT_EQ(std::string(open.action), "End that stream, then move the Space.");
+    EXPECT_FALSE(own->is_cancelled()) << "a refused move never ends a stream";
+    own->cancel();
+    { std::lock_guard lock(state->mutex); state->activity = {{"profile-b", "client-b", "stopping"}}; }
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).code, "space_active");
+    { std::lock_guard lock(state->mutex); state->activity = {{"profile-a", "client-a", "running"}}; }
+    const auto other = launch("client-a");
+    ASSERT_EQ(service->prepare(other, "profile-a").status, 200);
+    const auto streaming = service->move_space_runtime(runtime_move());
+    EXPECT_EQ(streaming.status, 409);
+    EXPECT_EQ(streaming.code, "spaces_streaming");
+    other->cancel();
+    // Cleanup that has not finished is found by the owner before anything is written.
+    state->idle = false;
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).code, "spaces_streaming");
+    EXPECT_EQ(runtime_moves, 0U);
+    EXPECT_EQ(state->shutdowns, 0U);
+    EXPECT_TRUE(service->routes_client("client-b"));
+  }
+
+  TEST_F(MultiseatAssignments, AMoveWaitsForAnotherChangeAndJoinsItsOwnRetry) {
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    before_write = [&] { entered.set_value(); released.wait(); };
+    auto rename = std::async(std::launch::async, [&] {
+      return service->edit_profile({profiles::edit_operation_e::rename, "profile-a", "Player one"});
+    });
+    EXPECT_EQ(entered.get_future().wait_for(2s), std::future_status::ready);
+    const auto busy = service->move_space_runtime(runtime_move());
+    EXPECT_EQ(busy.status, 409);
+    EXPECT_EQ(busy.code, "spaces_change_running");
+    release.set_value();
+    EXPECT_EQ(rename.get().status, 200);
+    EXPECT_EQ(runtime_moves, 0U);
+
+    std::promise<void> entered_move, release_move;
+    auto move_released = release_move.get_future().share();
+    before_write = [&] { entered_move.set_value(); move_released.wait(); };
+    auto first = std::async(std::launch::async, [&] { return service->move_space_runtime(runtime_move()); });
+    EXPECT_EQ(entered_move.get_future().wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).status, 202) << "the same move joins the one saving";
+    release_move.set_value();
+    // Both callers may have stopped waiting; the one move still finishes once.
+    const auto status = first.get().status;
+    EXPECT_TRUE(status == 200 || status == 202) << status;
+    for (int i = 0; i < 100 && service->admin_snapshot().changing; ++i) std::this_thread::sleep_for(10ms);
+    EXPECT_FALSE(service->admin_snapshot().changing);
+    EXPECT_EQ(service->admin_snapshot().profiles[1].image, "sha256:" + std::string(64, '9'));
+    EXPECT_EQ(runtime_moves, 1U);
+    // Asked again once it finished, the owner runs it and the catalog confirms it.
+    before_write = nullptr;
+    move_answer = {.outcome = profiles::runtime_move_outcome_e::already_moved};
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).status, 200);
+    EXPECT_EQ(runtime_moves, 2U);
+  }
+
+  TEST_F(MultiseatAssignments, AMoveTheCatalogRefusesKeepsTheSpaceAndSaysWhy) {
+    move_answer = {.outcome = profiles::runtime_move_outcome_e::storage_unverified};
+    const auto unverified = service->move_space_runtime(runtime_move());
+    EXPECT_EQ(unverified.status, 409);
+    EXPECT_EQ(unverified.code, "space_storage_unverified");
+    move_answer = {.outcome = profiles::runtime_move_outcome_e::identity_mismatch};
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).code, "space_runtime_identity_mismatch");
+    move_answer = {.outcome = profiles::runtime_move_outcome_e::space_changed};
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).code, "space_runtime_changed");
+    move_answer = {.outcome = profiles::runtime_move_outcome_e::already_moved};
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).status, 200);
+    EXPECT_FALSE(service->admin_snapshot().failed);
+    EXPECT_TRUE(service->admin_snapshot().profiles[1].image.empty());
+    EXPECT_EQ(service->profile_for_client("client-b"), "profile-b");
+    // A write that may or may not have landed closes Spaces until a restart reads it back.
+    move_answer = {.outcome = profiles::runtime_move_outcome_e::not_saved};
+    write_status = private_state_file::write_status_e::durability_uncertain;
+    EXPECT_EQ(service->move_space_runtime(runtime_move()).status, 503);
+    EXPECT_TRUE(service->admin_snapshot().failed);
+    EXPECT_EQ(service->prepare(launch("client-b"), "profile-b").status, 503);
+    EXPECT_EQ(runtime_moves, 5U);
   }
 
   TEST_F(MultiseatAssignments, CreatesAnUnassignedSteamProfileUnderTheControllerOwner) {
@@ -883,6 +1009,53 @@ namespace {
     EXPECT_FALSE(load_controller_options(link));
   }
 
+  // A Space whose image carries another NVIDIA driver's userspace is refused before it starts.
+  class MultiseatRuntimeGuard : public MultiseatLaunchService {
+  protected:
+    const std::string image = "sha256:" + std::string(64, 'a');
+    std::mutex asked_mutex;
+    std::vector<std::string> asked;
+    std::atomic<bool> matches {true};
+    void SetUp() override {
+      service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+        std::vector<profile_summary_t> {{"profile-a", "Alex", {"client-a"}, true, false, {}, true, image}}), 2s,
+        profile_admin_options_t {.runtime_matches_host = [this](std::string_view value) {
+          std::lock_guard lock(asked_mutex);
+          asked.emplace_back(value);
+          return matches.load();
+        }});
+      state->desktops = {"client-d"};
+    }
+  };
+
+  TEST_F(MultiseatRuntimeGuard, ARuntimeForAnotherDriverIsRefusedBeforeAnyWorkerStarts) {
+    matches = false;
+    const auto refused = service->prepare(launch(), "profile-a");
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "space_runtime_driver_mismatch");
+    EXPECT_EQ(std::string(refused.message), "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs.");
+    EXPECT_EQ(std::string(refused.action),
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+    EXPECT_EQ(state->begins.load(), 0U);
+    {
+      std::lock_guard lock(asked_mutex);
+      EXPECT_EQ(asked, std::vector<std::string> {image});
+    }
+    matches = true;
+    const auto allowed = launch();
+    EXPECT_EQ(service->prepare(allowed, "profile-a").status, 200);
+    EXPECT_EQ(state->begins.load(), 1U);
+    allowed->cancel();
+  }
+
+  TEST_F(MultiseatRuntimeGuard, DesktopAndUnassignedDevicesNeverAskAboutARuntime) {
+    matches = false;
+    EXPECT_EQ(service->prepare(launch("client-z")).code, "no_space_assigned");
+    EXPECT_FALSE(service->routes_client("client-d")) << "a Desktop device takes the ordinary launch path";
+    std::lock_guard lock(asked_mutex);
+    EXPECT_TRUE(asked.empty());
+  }
+
   class MultiseatProfileHttp : public MultiseatLaunchService {
   protected:
     std::filesystem::path root;
@@ -1202,6 +1375,33 @@ namespace {
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "space_capacity");
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"), "Wait for a Space to finish.");
     EXPECT_EQ(tree.get<int>("root.gamesession"), 0);
+  }
+
+  // Nova shows the host's words and fix for any coded refusal, so this one needs no new client string.
+  TEST_F(MultiseatProfileHttp, ADriverMismatchReachesTheClientWithItsCodeAndFix) {
+    uninstall_profile_launch_service(service);
+    ASSERT_TRUE(service->shutdown(2s));
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t> {{"12345678-1234-4234-8234-123456789abc", "Primary", {"client-a"}, true, false, {}, true,
+        "sha256:" + std::string(64, 'a')}}), 2s,
+      profile_admin_options_t {.runtime_matches_host = [](std::string_view) { return false; }});
+    ASSERT_TRUE(install_profile_launch_service(service));
+    unsigned published = 0;
+    const auto result = nvhttp::launch_profile_request(client, args(), false, [&](const auto &) { ++published; return true; });
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 409);
+    EXPECT_EQ(result->code, "space_runtime_driver_mismatch");
+    boost::property_tree::ptree tree;
+    nvhttp::put_profile_launch_response_for_tests(tree, *result, false);
+    EXPECT_EQ(tree.get<int>("root.<xmlattr>.status_code"), 409);
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "space_runtime_driver_mismatch");
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"),
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+    EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"),
+      "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs. "
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+    EXPECT_EQ(published, 0U);
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, ARefusalWithoutACodeKeepsItsPlainMessageAndDropsStaleRecords) {

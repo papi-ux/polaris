@@ -787,6 +787,61 @@ namespace multiseat::profiles {
     return result;
   }
 
+  bool valid_runtime_move(const runtime_move_t &move) {
+    const auto contract = [](std::string_view value) {
+      return !value.empty() && value.size() <= 16 && value.find_first_not_of("0123456789") == std::string_view::npos;
+    };
+    return token(move.profile_id) && image_id(move.from_image) && image_id(move.to_image) &&
+      contract(move.from_media_contract) && contract(move.to_media_contract) &&
+      move.to_profile != runtime_profile_e::unknown && move.to_uid != 0 && move.to_gid != 0;
+  }
+
+  runtime_move_result_t move_runtime(const std::filesystem::path &path, const runtime_move_t &move, container::host_t &host) {
+    using outcome_e = runtime_move_outcome_e;
+    runtime_move_result_t result;
+    if (!valid_runtime_move(move)) return result;
+    const auto saved = change(path, [&](catalog_t &catalog, change_result_t &) -> std::optional<std::string> {
+      const auto entry = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+        [&](const auto &value) { return value.storage.profile_key == move.profile_id; });
+      if (entry == catalog.profiles.end()) { result.outcome = outcome_e::not_found; return std::nullopt; }
+      result.previous_image = entry->storage.image_reference;
+      // A retry after the move landed: save the same catalog again, which
+      // confirms a replacement whose durability was uncertain.
+      if (entry->storage.image_reference == move.to_image) {
+        result.outcome = outcome_e::already_moved;
+        return encode(catalog);
+      }
+      if (entry->storage.image_reference != move.from_image) { result.outcome = outcome_e::space_changed; return std::nullopt; }
+      if (entry->storage.runtime_profile != move.to_profile) { result.outcome = outcome_e::profile_mismatch; return std::nullopt; }
+      if (move.from_media_contract != move.to_media_contract) { result.outcome = outcome_e::media_contract_mismatch; return std::nullopt; }
+      if (catalog.owner_uid != move.to_uid || catalog.owner_gid != move.to_gid ||
+          host.effective_uid() != catalog.owner_uid || host.effective_gid() != catalog.owner_gid) {
+        result.outcome = outcome_e::identity_mismatch; return std::nullopt;
+      }
+      if (!local_docker_engine(host)) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+      const auto &volume = entry->storage.opaque_volume_name;
+      const auto volumes = listed_names(docker_output(host, {"volume", "ls", "--format={{json .Name}}"}));
+      if (!volumes) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+      if (!volumes->contains(volume)) { result.outcome = outcome_e::storage_unverified; return std::nullopt; }
+      const auto inspected = docker_output(host, {"volume", "inspect", volume});
+      if (!inspected) { result.outcome = outcome_e::docker_unavailable; return std::nullopt; }
+      std::optional<json> values;
+      try { values = json::parse(*inspected); } catch (...) {}
+      if (!values || !created_home(*values, *entry)) { result.outcome = outcome_e::storage_unverified; return std::nullopt; }
+      entry->storage.image_reference = move.to_image;
+      result.outcome = outcome_e::moved;
+      return encode(catalog);
+    });
+    result.status = saved.status;
+    // A refusal is its own answer. A write that did not commit, or a catalog
+    // that could not be read at all, is not_saved; with durability_uncertain
+    // the replacement may have landed, and a retry confirms which.
+    const bool writing = result.outcome == outcome_e::moved || result.outcome == outcome_e::already_moved ||
+      result.outcome == outcome_e::invalid;
+    if (!saved && writing) result.outcome = outcome_e::not_saved;
+    return result;
+  }
+
   int command(int argc, char **argv) {
     if (argc < 2) {
       std::cerr << "Usage: polaris --multiseat-profiles init|list CATALOG\n"

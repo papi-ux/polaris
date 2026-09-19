@@ -26,6 +26,19 @@
       "registry_digest": "sha256:a349b8c2ffcf1cedddf3623676167064b5760ae8ef765f2edecd94cc9b4c2575",
       "config_digest": "sha256:b56d6eb68b9b06a1bef2c55f4c6158e58eed887438a47dc07b0214aab5ae5f6f",
       "nvidia_driver": "610.57.04"
+    },
+    {
+      "id": "steam-nvidia-cb1dd831b125de6c",
+      "profile": "steam",
+      "variant": "nvidia",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "ae4760dc57cc03ddd3459c98cd4d4b6aa2073f06",
+      "registry_digest": "sha256:cb1dd831b125de6ce5cb051eee0ad348d4cbeb51e520556b9930d9b79e8a471b",
+      "config_digest": "sha256:5c57f0954f6df84825deeee9bd501580dc4dfa5fbfa7fcc5dcb4c753c97b6693",
+      "nvidia_driver": "615.71.09"
     }
   ]
 }

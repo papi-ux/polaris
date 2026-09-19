@@ -1225,6 +1225,174 @@ namespace {
     EXPECT_NE(find(loaded->catalog, impostor), nullptr);
   }
 
+  // Moving a Space to another runtime: the removal Docker answers the questions a move asks.
+  class MultiseatRuntimeMove : public MultiseatSpaceRemoval {
+  protected:
+    const std::string old_image = "sha256:" + std::string(64, 'a');
+    const std::string new_image = "sha256:" + std::string(64, '9');
+    profiles::runtime_move_t move() const {
+      return {"space-b", old_image, "1", new_image, "1", runtime_profile_e::steam, 1000, 1000};
+    }
+    std::string bytes() const {
+      const auto read = psf::read_secure(path, profiles::maximum_catalog_bytes, false, false);
+      EXPECT_TRUE(read);
+      return read.payload;
+    }
+    profiles::catalog_t now() const { return *profiles::decode(bytes()); }
+    // A move asks Docker and never tells it to change anything or start a container.
+    void expect_only_questions() const {
+      for (const auto &args : host.calls) {
+        EXPECT_TRUE(args[0] == "info" || (args.size() > 1 && (args[1] == "ls" || args[1] == "inspect")))
+          << args[0] << ' ' << (args.size() > 1 ? args[1] : "");
+      }
+    }
+  };
+
+  TEST_F(MultiseatRuntimeMove, ChangesOnlyTheImageAndKeepsTheHomeNetworkNameAndDevices) {
+    save(two_spaces());
+    auto expected = two_spaces();
+    expected.profiles[1].storage.image_reference = new_image;
+    const auto result = profiles::move_runtime(path, move(), host);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result.outcome, profiles::runtime_move_outcome_e::moved);
+    EXPECT_EQ(result.status, psf::write_status_e::committed);
+    EXPECT_EQ(result.previous_image, old_image);
+    // Byte for byte the catalog it was, but for this Space's image.
+    EXPECT_EQ(bytes(), profiles::encode(expected));
+    const auto after = now();
+    const auto *entry = find(after, "space-b");
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->storage.opaque_volume_name, "pv-space-b");
+    EXPECT_EQ(entry->name, "Sam");
+    EXPECT_EQ(entry->client_keys, std::vector<std::string> {"client-b"});
+    EXPECT_EQ(entry->access_clients, std::vector<std::string> {"client-a"});
+    EXPECT_EQ(find(now(), "space-a")->storage.image_reference, old_image) << "another Space keeps its runtime";
+    expect_only_questions();
+    EXPECT_EQ(host.count("inspect", "volume"), 1U);
+    EXPECT_TRUE(host.volumes.contains("pv-space-b"));
+    EXPECT_TRUE(host.networks.contains("pn-space-b"));
+  }
+
+  TEST_F(MultiseatRuntimeMove, AMoveThatAlreadyLandedIsConfirmedWithoutDocker) {
+    auto moved = two_spaces();
+    moved.profiles[1].storage.image_reference = new_image;
+    save(moved);
+    const auto before = bytes();
+    const auto result = profiles::move_runtime(path, move(), host);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result.outcome, profiles::runtime_move_outcome_e::already_moved);
+    EXPECT_EQ(result.status, psf::write_status_e::committed);
+    EXPECT_EQ(bytes(), before);
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  TEST_F(MultiseatRuntimeMove, EveryRefusalLeavesTheCatalogAsItWas) {
+    using outcome_e = profiles::runtime_move_outcome_e;
+    struct case_t {
+      const char *name;
+      std::function<void(profiles::catalog_t &, profiles::runtime_move_t &, removal_host_t &)> change;
+      outcome_e outcome;
+      bool asks_docker;
+    };
+    const std::vector<case_t> cases {
+      {"unknown Space", [](auto &, auto &m, auto &) { m.profile_id = "space-z"; }, outcome_e::not_found, false},
+      {"runtime changed meanwhile", [](auto &c, auto &, auto &) { c.profiles[1].storage.image_reference = "sha256:" + std::string(64, 'c'); },
+        outcome_e::space_changed, false},
+      {"another kind of Space", [](auto &, auto &m, auto &) { m.to_profile = runtime_profile_e::gamescope; }, outcome_e::profile_mismatch, false},
+      {"another media contract", [](auto &, auto &m, auto &) { m.to_media_contract = "2"; }, outcome_e::media_contract_mismatch, false},
+      {"another runtime account", [](auto &, auto &m, auto &) { m.to_uid = 1001; }, outcome_e::identity_mismatch, false},
+      {"another runtime group", [](auto &, auto &m, auto &) { m.to_gid = 1001; }, outcome_e::identity_mismatch, false},
+      {"a home owned by another account", [](auto &c, auto &m, auto &) { c.owner_uid = 1001; m.to_uid = 1001; },
+        outcome_e::identity_mismatch, false},
+      {"Docker down", [](auto &, auto &, auto &h) { h.docker_down = true; }, outcome_e::docker_unavailable, true},
+      {"rootless Docker", [](auto &, auto &, auto &h) { h.rootless = true; }, outcome_e::docker_unavailable, true},
+      {"home gone", [](auto &, auto &, auto &h) { h.volumes.erase("pv-space-b"); }, outcome_e::storage_unverified, true},
+      {"home someone else labelled", [](auto &, auto &, auto &h) { h.home[0]["Labels"]["io.polaris.multiseat.profile"] = "space-a"; },
+        outcome_e::storage_unverified, true},
+      {"home bound to a host directory", [](auto &, auto &, auto &h) {
+        h.home[0]["Options"] = {{"type", "none"}, {"o", "bind"}, {"device", "/srv/player"}}; }, outcome_e::storage_unverified, true},
+    };
+    for (const auto &item : cases) {
+      auto catalog = two_spaces();
+      auto request = move();
+      host = removal_host_t {};
+      item.change(catalog, request, host);
+      save(catalog);
+      const auto before = bytes();
+      const auto result = profiles::move_runtime(path, request, host);
+      EXPECT_FALSE(result) << item.name;
+      EXPECT_EQ(result.outcome, item.outcome) << item.name;
+      EXPECT_EQ(result.status, psf::write_status_e::not_committed) << item.name;
+      EXPECT_EQ(bytes(), before) << item.name;
+      EXPECT_EQ(!host.calls.empty(), item.asks_docker) << item.name;
+      expect_only_questions();
+    }
+  }
+
+  TEST_F(MultiseatRuntimeMove, AnInvalidMoveTouchesNeitherTheCatalogNorDocker) {
+    save(two_spaces());
+    const auto before = bytes();
+    std::vector<profiles::runtime_move_t> invalid(7, move());
+    invalid[0].to_image = "ghcr.io/papi-ux/polaris-worker-steam:latest";
+    invalid[1].from_image.clear();
+    invalid[2].profile_id = "../space-b";
+    invalid[3].to_profile = runtime_profile_e::unknown;
+    invalid[4].to_uid = 0;
+    invalid[5].to_media_contract = "one";
+    invalid[6].from_media_contract.clear();
+    for (std::size_t i = 0; i < invalid.size(); ++i) {
+      EXPECT_FALSE(profiles::valid_runtime_move(invalid[i])) << i;
+      EXPECT_EQ(profiles::move_runtime(path, invalid[i], host).outcome, profiles::runtime_move_outcome_e::invalid) << i;
+    }
+    EXPECT_TRUE(profiles::valid_runtime_move(move()));
+    EXPECT_EQ(bytes(), before);
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  TEST_F(MultiseatRuntimeMove, ARetryAfterAnInterruptedWriteConvergesOnTheMovedSpace) {
+    save(two_spaces());
+    const auto before = bytes();
+    // The replacement never reached the catalog: nothing changed, and the retry moves it.
+    psf::set_write_fault_for_tests(psf::write_fault_e::rename);
+    const auto unsaved = profiles::move_runtime(path, move(), host);
+    psf::set_write_fault_for_tests(psf::write_fault_e::none);
+    EXPECT_FALSE(unsaved);
+    EXPECT_EQ(unsaved.outcome, profiles::runtime_move_outcome_e::not_saved);
+    EXPECT_EQ(unsaved.status, psf::write_status_e::not_committed);
+    EXPECT_EQ(bytes(), before);
+    // The replacement landed but its durability is uncertain: the caller fails closed, and the
+    // retry finds the new image and saves it again to confirm it.
+    psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
+    const auto uncertain = profiles::move_runtime(path, move(), host);
+    psf::set_write_fault_for_tests(psf::write_fault_e::none);
+    EXPECT_FALSE(uncertain);
+    EXPECT_EQ(uncertain.status, psf::write_status_e::durability_uncertain);
+    EXPECT_EQ(find(now(), "space-b")->storage.image_reference, new_image);
+    host.calls.clear();
+    const auto confirmed = profiles::move_runtime(path, move(), host);
+    ASSERT_TRUE(confirmed);
+    EXPECT_EQ(confirmed.outcome, profiles::runtime_move_outcome_e::already_moved);
+    EXPECT_EQ(confirmed.status, psf::write_status_e::committed);
+    EXPECT_TRUE(host.calls.empty());
+    auto expected = two_spaces();
+    expected.profiles[1].storage.image_reference = new_image;
+    EXPECT_EQ(bytes(), profiles::encode(expected));
+  }
+
+  TEST_F(MultiseatRuntimeMove, AControllerHoldingTheCatalogKeepsTheMoveOut) {
+    save(two_spaces());
+    const auto before = bytes();
+    {
+      const auto leased = profiles::load(path);
+      ASSERT_TRUE(leased);
+      const auto busy = profiles::move_runtime(path, move(), host);
+      EXPECT_EQ(busy.outcome, profiles::runtime_move_outcome_e::not_saved);
+      EXPECT_EQ(busy.status, psf::write_status_e::not_committed);
+    }
+    EXPECT_EQ(bytes(), before);
+    EXPECT_TRUE(profiles::move_runtime(path, move(), host));
+  }
+
   TEST(SpacesLibraryHost, UsesOnlyItsOwnedVolumeWithAnIsolatedReadOnlyHelper) {
     provisioning_host_t host; host.library_mode = true; host.volume = "pv-alex";
     host.profile = "alex"; host.image_family = "steam";

@@ -1,6 +1,7 @@
 #include "spaces_activation.h"
 #ifdef __linux__
 #include "spaces_setup.h"
+#include "spaces_gpu_nodes.h"
 #include "multiseat_launch_service.h"
 #include "spaces_security.h"
 #include "src/config.h"
@@ -116,17 +117,69 @@ namespace multiseat::spaces {
       fs::path("/run/user") / std::to_string(geteuid()) / ("ps-" + key)};
   }
 
-  bool managed_graphics_current(const activation_paths_t &paths) {
-    const auto options = load_controller_options(paths.controller);
-    if (!options || options->gpus.size() != 1) return false;
-    container::local_host_t host;
-    const auto choices = discover_graphics(host);
-    const auto &selected = options->gpus.front();
-    return std::any_of(choices.begin(), choices.end(), [&](const auto &entry) {
-      return entry.gpu.logical_gpu_id == selected.logical_gpu_id && entry.gpu.render_node == selected.render_node &&
-        std::set<std::filesystem::path>(entry.gpu.devices.begin(), entry.gpu.devices.end()) ==
-          std::set<std::filesystem::path>(selected.devices.begin(), selected.devices.end());
+  managed_controller_t load_managed_controller(const activation_paths_t &paths, container::host_t &host,
+    const graphics_roots_t &roots) {
+    managed_controller_t result;
+    auto options = load_controller_options(paths.controller);
+    if (!options) {
+      result.problem = "the Spaces configuration " + paths.controller.string() + " is missing, unreadable or invalid";
+      return result;
+    }
+    if (options->gpus.size() != 1) {
+      result.problem = "the Spaces configuration " + paths.controller.string() + " names " +
+        std::to_string(options->gpus.size()) + " graphics devices; Spaces setup saves exactly one";
+      return result;
+    }
+    auto &gpu = options->gpus.front();
+    const auto address = pci_address_of(gpu.logical_gpu_id);
+    if (!address) {
+      result.problem = "the saved graphics id " + gpu.logical_gpu_id + " is not a PCI address; run Spaces setup again";
+      return result;
+    }
+    const auto drm = roots.pci / *address / "drm";
+    const auto nodes = resolve_drm_nodes(*address, roots.pci);
+    if (!nodes) {
+      std::error_code error;
+      result.problem = fs::exists(roots.pci / *address, error) ?
+        "the graphics card at PCI " + *address + " has no usable DRM nodes under " + drm.string() +
+          "; its driver may not be loaded yet" :
+        "the graphics card at PCI " + *address + " is gone from this host";
+      return result;
+    }
+    auto refresh = refresh_drm_nodes(gpu, *nodes);
+    if (!refresh.ok) {
+      result.problem = refresh.unresolved.empty() ?
+        "the saved graphics entry for PCI " + *address + " lists two card or render nodes" :
+        "the graphics card at PCI " + *address + " no longer has a " +
+          (refresh.unresolved.filename().string().starts_with("card") ? "card" : "render") +
+          " node; setup saved " + refresh.unresolved.string();
+      return result;
+    }
+    // sysfs says which minor each node is; the /dev entry of that name must be that character device.
+    for (const auto &node : {nodes->card, nodes->render}) {
+      if (!node || std::find(gpu.devices.begin(), gpu.devices.end(), node->path) == gpu.devices.end()) continue;
+      const auto identity = host.read_write_character_device(node->path);
+      if (!identity || identity->character_major != node->major || identity->character_minor != node->minor) {
+        result.problem = node->path.string() + " is missing, not accessible, or not the device " +
+          std::to_string(node->major) + ":" + std::to_string(node->minor) + " the kernel lists for PCI " + *address;
+        return result;
+      }
+    }
+    // Discovery still has to offer this GPU with exactly these nodes, NVIDIA's included, as it did at setup.
+    const auto choices = discover_graphics(host, roots);
+    const auto current = std::find_if(choices.begin(), choices.end(), [&](const auto &entry) {
+      return entry.gpu.logical_gpu_id == gpu.logical_gpu_id;
     });
+    if (current == choices.end() || current->gpu.render_node != gpu.render_node ||
+        std::set<fs::path>(current->gpu.devices.begin(), current->gpu.devices.end()) !=
+          std::set<fs::path>(gpu.devices.begin(), gpu.devices.end())) {
+      result.problem = "the graphics card at PCI " + *address +
+        " is no longer offered with the devices saved at setup; run Spaces setup again";
+      return result;
+    }
+    result.moved = std::move(refresh.moved);
+    result.options = std::move(options);
+    return result;
   }
 
   bool prepare_managed_ipc(const activation_paths_t &paths) {
@@ -181,6 +234,9 @@ namespace multiseat::spaces {
     if (profile.storage.profile_key != request.request_id || profile.name != request.name ||
         profile.storage.image_reference != image || profile.workload.kind != workload_kind_e::steam) return false;
     const auto &gpu = graphics.gpu;
+    // The PCI id is what finds this GPU's DRM nodes again after the kernel renumbers them, so a
+    // selection without one could never start after a reboot.
+    if (!pci_address_of(gpu.logical_gpu_id)) return false;
     json devices = json::array();
     for (const auto &path : gpu.devices) {
       if (!host.read_write_character_device(path)) return false;
