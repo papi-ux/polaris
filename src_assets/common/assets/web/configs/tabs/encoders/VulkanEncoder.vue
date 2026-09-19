@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import CodecSupportPanel from "./CodecSupportPanel.vue";
 
 const props = defineProps([
   'platform',
@@ -17,6 +18,8 @@ const config = ref(props.config)
         <h3 class="settings-section-title">Vulkan Video behavior</h3>
         <p class="settings-section-copy">Tune Polaris's experimental Vulkan Video path for low-latency hardware encoding.</p>
       </div>
+
+      <CodecSupportPanel :config="config" />
 
       <div class="surface-subtle mb-4 p-4 text-sm leading-relaxed text-storm">
         Auto can prefer Vulkan Video on a compatible AMD private-stream route after Polaris verifies the exact live GPU-native frame path. NVIDIA's proprietary driver remains on NVENC, Nouveau uses capability probing, and Intel remains on VA-API by default.
@@ -44,6 +47,15 @@ const config = ref(props.config)
           <option value="4">{{ $t('config.vk_rc_vbr') }}</option>
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.vk_rc_mode_desc') }}</div>
+      </div>
+
+      <div class="mb-0">
+        <label for="vk_quality" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vk_quality') }}</label>
+        <select id="vk_quality" class="settings-input" v-model="config.vk_quality">
+          <option value="0">{{ $t('config.vk_quality_default') }}</option>
+          <option v-for="level in 8" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
+        </select>
+        <div class="text-sm text-storm mt-1">{{ $t('config.vk_quality_desc') }}</div>
       </div>
     </section>
   </div>

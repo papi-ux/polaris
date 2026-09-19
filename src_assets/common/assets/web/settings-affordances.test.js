@@ -23,6 +23,7 @@ const migratedSettingsSources = [
   'configs/tabs/encoders/IntelQuickSyncEncoder.vue',
   'configs/tabs/encoders/NvidiaNvencEncoder.vue',
   'configs/tabs/encoders/SoftwareEncoder.vue',
+  'configs/tabs/encoders/VAAPIEncoder.vue',
   'configs/tabs/encoders/VideotoolboxEncoder.vue',
   'configs/tabs/encoders/VulkanEncoder.vue',
   'views/PasswordView.vue',

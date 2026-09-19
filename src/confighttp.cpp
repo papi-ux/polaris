@@ -5417,6 +5417,20 @@ namespace confighttp {
       }
       output_tree["config_response_only_keys"] = std::move(response_only_keys);
     }
+    // Read-only codec capability snapshot for the web UI encoder tabs. Mirrors
+    // what Nova is advertised: post-probe modes are 2 (SDR) or 3 (HDR), so a
+    // mode >= 2 means the codec passed validation on this host.
+    {
+      const auto codec_state = video::advertised_codec_capability_state();
+      output_tree["encoder_codec_support"] = nlohmann::json {
+        {"ready", video::advertised_codec_capability_state_ready()},
+        {"encoder", video::active_encoder_name()},
+        {"hevc_supported", codec_state.hevc_mode >= 2},
+        {"av1_supported", codec_state.av1_mode >= 2},
+        {"hevc_hdr", codec_state.hevc_mode == 3},
+        {"av1_hdr", codec_state.av1_mode == 3},
+      };
+    }
 #ifdef _WIN32
     output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
 #endif

@@ -560,6 +560,7 @@ const tabs = ref([
     options: {
       "vk_tune": 2,
       "vk_rc_mode": 2,
+      "vk_quality": "0",
     },
   },
   {

@@ -597,6 +597,7 @@ namespace config {
     {
       2,  // tune (low latency)
       2,  // rc_mode (CBR)
+      0,  // quality (driver default)
     },  // vk
 
     {},  // capture
@@ -1470,6 +1471,7 @@ namespace config {
 
     int_f(vars, "vk_tune", video.vk.tune);
     int_f(vars, "vk_rc_mode", video.vk.rc_mode);
+    int_between_f(vars, "vk_quality", video.vk.quality, {0, INT_MAX});
 
     string_f(vars, "capture", video.capture);
     string_f(vars, "encoder", video.encoder);
