@@ -352,6 +352,17 @@ namespace video {
     uint32_t flags;
   };
 
+  /**
+   * @brief Maps the configured Vulkan rate-control mode to FFmpeg's option value.
+   * @details Config value 0 means auto: FFmpeg's Vulkan auto sentinel is
+   *          FF_VK_RC_MODE_AUTO (0xFFFFFFFF), which does not fit in an int
+   *          option, so it is passed as the named "auto" constant instead of a
+   *          raw zero that would select the driver's default rate control. Other
+   *          values are VkVideoEncodeRateControlModeFlagBitsKHR and pass through
+   *          unchanged.
+   */
+  std::string vulkan_rc_mode_option(int rc_mode);
+
   bool wait_for_capture_display_release(
     const std::shared_ptr<platf::display_t> &display,
     const std::function<bool()> &running,

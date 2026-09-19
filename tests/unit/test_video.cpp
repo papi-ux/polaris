@@ -1046,3 +1046,15 @@ TEST(VideoDisplaySelectionTests, ActualRefreshWrapperDoesNotTurnMissingOrAmbiguo
   EXPECT_EQ(video::refresh_display_selection_for_tests(before, 0, "", {before[1], before[0]}), 1);
 #endif
 }
+
+TEST(VideoVulkanRcModeOptionTests, AutoMapsToNamedConstant) {
+  // FFmpeg's Vulkan auto sentinel is FF_VK_RC_MODE_AUTO (0xFFFFFFFF), which does not fit in an int option;
+  // a raw zero would select the driver's default rate control instead.
+  EXPECT_EQ(video::vulkan_rc_mode_option(0), "auto");
+}
+
+TEST(VideoVulkanRcModeOptionTests, ExplicitModesPassThroughAsDriverFlags) {
+  EXPECT_EQ(video::vulkan_rc_mode_option(1), "1");
+  EXPECT_EQ(video::vulkan_rc_mode_option(2), "2");
+  EXPECT_EQ(video::vulkan_rc_mode_option(4), "4");
+}
