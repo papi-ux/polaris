@@ -119,7 +119,7 @@ image bytes across different engine versions or compression implementations.
 
 ## NVIDIA physical lane
 
-The optional layer pins NVIDIA 610.57.04 and the official installer archive's
+The optional layer pins NVIDIA 615.71.09 and the official installer archive's
 SHA-256. Extraction occurs only inside a disposable build stage. It copies an
 explicit set of vendor graphics, CUDA, and codec userspace libraries, SONAME
 links, EGL/Vulkan configuration, license, and per-file hashes. Generic GLVND
